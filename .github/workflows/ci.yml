@@ -1,0 +1,63 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+
+jobs:
+  commit-messages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # The first push of a branch has no `before` (forty zeros): every commit it holds is checked.
+      # Not on `main`, nor on a pull request into it: it brings commits already judged as pull
+      # requests, squashed by GitHub with ` (#n)` added to the subject.
+      - name: Check the Angular commit convention
+        if: github.base_ref != 'main' && github.ref != 'refs/heads/main'
+        run: |
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          head="${{ github.event.pull_request.head.sha || github.sha }}"
+          if [ -z "${base//0/}" ]; then
+            tools/commit-message.sh --range "$head"
+          else
+            tools/commit-message.sh --range "$base..$head"
+          fi
+      # A pull request is squashed: its title becomes the commit subject.
+      - name: Check the title of the pull request
+        if: github.event_name == 'pull_request'
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          printf '%s\n' "$TITLE" > "$RUNNER_TEMP/title"
+          tools/commit-message.sh "$RUNNER_TEMP/title"
+
+  # No real agent, no real configuration: the suites run against a fake ACP agent and throwaway
+  # repositories (see AGENTS.md, Testing). Skipped until the Cargo workspace exists.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Is there a Cargo workspace yet
+        id: cargo
+        run: if [ -f Cargo.toml ]; then echo "present=true" >> "$GITHUB_OUTPUT"; fi
+      - if: steps.cargo.outputs.present == 'true'
+        run: rustup component add rustfmt clippy
+      - if: steps.cargo.outputs.present == 'true'
+        uses: Swatinem/rust-cache@v2
+      # The window links against fontconfig and freetype; GPUI loads Wayland and Vulkan at run
+      # time and opens no window here: its tests use GPUI's own test platform.
+      - name: Have the window's system libraries
+        if: steps.cargo.outputs.present == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
+      - if: steps.cargo.outputs.present == 'true'
+        run: cargo fmt --check
+      - if: steps.cargo.outputs.present == 'true'
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - if: steps.cargo.outputs.present == 'true'
+        run: cargo test --locked

@@ -1,0 +1,345 @@
+# Flottille: design
+
+Flottille runs coding agents for one person on their own machines. Each agent is a real process
+that Flottille owns, works in a place Flottille prepared (a set of git worktrees), and uses only
+the tools Flottille gives it. An agent can launch other agents: for the agent they are its
+sub-agents, for Flottille they are ordinary agents tied to a parent, which Flottille keeps
+informed and wakes when something happens to them.
+
+This document is the reference for what Flottille is and how it is built. It stands alone: the
+mechanisms it reuses from an earlier, larger project are written out in full in
+[`reference/hemera.md`](reference/hemera.md), the real multi-repository case it must handle is in
+[`reference/multi-repo-case.md`](reference/multi-repo-case.md), the way of handing work between
+agents that it must build in is in [`reference/orchestration.md`](reference/orchestration.md), and
+what is known about the window toolkit is in [`reference/gpui.md`](reference/gpui.md).
+
+## 1. What Flottille is, and what it is not
+
+**It is:**
+
+- A **daemon** that owns projects, workspaces (worktrees), agent processes, their conversations
+  and their tree, and everything they asked for.
+- A **command line** (`flottille …`) that drives all of it, with `--json` outputs and a `watch`
+  event stream (one JSON object per line). Other programs (a desktop shell, a status bar, a
+  script) integrate Flottille through these, never by reading its database.
+- A **local MCP server** with two doors: the tools of the agents Flottille runs, and a *pilot*
+  door through which an agent running outside Flottille (for example a coding agent in a
+  terminal) drives it: list projects, launch agents, talk to them, read their state.
+- A **window** (GPUI) that is one more client of the daemon: projects, workspaces, the tree of
+  agents, a live conversation, a reply box, the approvals waiting.
+
+**It is not (yet):** a planning tool. There is no specification workflow, no phases, no proof
+system, no remote judge. Those may come later; the first tranches must give something to use and
+try quickly. When in doubt, the smaller thing wins.
+
+**It is generic.** Nothing is tied to one machine, one desktop, one forge or one agent. Links open
+with the system's default handler, colours follow the system, paths come from XDG.
+
+## 2. Vocabulary
+
+| Word | Meaning |
+|---|---|
+| Project | A folder. Either a git repository itself, or a folder holding several independent repositories (and possibly being one itself). |
+| Repository | One git repository of a project, with its path relative to the project folder, its base branch rule and its remote. |
+| Workspace | The place one piece of work happens: one git worktree per repository it takes, on one branch name, in one folder, prepared by the project's recipe. |
+| Recipe | The project's ordered preparation steps for a new workspace: copy, link, run, plus the workspace's variables. |
+| Command catalogue | The project's named commands (`api:dev`, `test`, `lint`…), runnable by the user and by agents. |
+| Agent | One agent session: a provider (Claude Code first), a model, a role, a place, a conversation, a state. Survives process restarts; can be replaced. |
+| Lead | An agent that has children. Any agent can be one, within the limits. A user-started agent is a root. |
+| Child | An agent launched by another agent through Flottille's tools. Tied to its parent for life. |
+| Delivery | A message Flottille hands to an agent (a child's report, an approval result, a user message), stored before it is sent. |
+| Report | What a child returns to its parent when it is done, through the `report` tool. |
+| Approval request | A tool call the gate held for the user. The agent is answered at once; the result comes later as a delivery. |
+
+## 3. Architecture
+
+```
+            ┌───────────── window (GPUI) ─────────────┐
+            │  projects · workspaces · agent tree ·   │
+            │  live conversation · reply · approvals  │
+            └───────────────────┬─────────────────────┘
+                                │ socket protocol (JSON lines)
+ shell / bar / scripts ── flottille CLI (--json, watch) ──┐
+                                │                          │
+ outside agent ── flottille mcp (stdio, pilot door) ───────┤
+                                ▼                          │
+ ┌──────────────────────────── daemon ──────────────────────────────┐
+ │ store (SQLite) · projects · workspaces/git · gate · deliveries    │
+ │ sessions tree · sweeps · command runs · event bus                 │
+ │ MCP server (HTTP, 127.0.0.1, per-session bearer token) ◄──────┐   │
+ │ ACP client ──► adapter process ──► agent CLI (claude, …) ─────┘   │
+ └───────────────────────────────────────────────────────────────────┘
+```
+
+- **One daemon per user**, started on demand by the CLI or by a user service. It is the only
+  process that spawns agents, runs git, or writes the store. Socket in `$XDG_RUNTIME_DIR`,
+  state in `$XDG_STATE_HOME/flottille` (or `$XDG_DATA_HOME`), configuration in
+  `$XDG_CONFIG_HOME/flottille`. The folder is checked to be owned by the user.
+- **The socket protocol is the API.** JSON request/response plus a subscription for events.
+  It is written so that the same protocol can later travel over the network (see section 12):
+  every request is self-contained, identifiers are opaque strings, nothing depends on sharing a
+  file system with the client except paths the user typed.
+- **Store**: SQLite (bundled), one file. Agents' conversations (the ACP events), tool calls,
+  approvals, deliveries, sessions, projects, workspaces, steps, command runs.
+- **Events**: everything that changes emits an event on the bus; `flottille watch` prints them,
+  the window renders them. The event names and fields are a documented contract (`docs/events.md`,
+  written with the code). Every event has a sequence number and is stored: a client that drops
+  its connection resumes from the last number it saw (`flottille watch --after <n>`), which is
+  what a window reopening, a status bar restarting or, later, a phone on a flaky network need.
+- **Building blocks**: Rust 2024, tokio, `rusqlite` (bundled), `serde`/`serde_json`, `clap`,
+  `agent-client-protocol` (the official ACP crate) for the agent side, `rmcp` (the official MCP
+  crate) for the MCP server, GPUI Fast with gpui-kit for the window (see `reference/gpui.md`).
+  The user's own `git` binary, spawned without a shell, never a git library.
+
+## 4. Agents
+
+### 4.1 Running them over ACP
+
+Flottille is an ACP client. Each agent session is one adapter process speaking ACP on stdio:
+
+- **Claude Code** (tranche 1): the official adapter `@agentclientprotocol/claude-agent-acp`
+  (Node), pointed at the user's own `claude` binary with `CLAUDE_CODE_EXECUTABLE`. Flottille
+  installs a pinned version of the adapter into its own data folder (`npm install --prefix`) and
+  never uses `npx`. Node and the user's `claude`, signed in, are prerequisites.
+- **Codex** and **OpenCode** come later (`codex-acp` with the patch described in
+  `reference/hemera.md` §2, and `opencode acp`). Gemini CLI speaks ACP natively too.
+
+Handshake, session open order (resume, else load, else new), model/effort/mode options, event
+mapping, cancel, idle release of processes and death handling follow `reference/hemera.md` §1.
+
+Flottille runs the agent CLIs the user installed and signed in to; it provides no login of its
+own and never reads or copies credentials.
+
+### 4.2 Bare mode: the agent has only Flottille's tools
+
+Every agent runs in bare mode (`reference/hemera.md` §2): no built-in tools, no user or project
+settings, no skills, no plugins, no user MCP servers, only Flottille's MCP server. For Claude:
+`tools: []`, `settingSources: []`, `strictMcpConfig: true`, `allowedTools` = the exact names of
+the session's Flottille tools, a custom system prompt, and the two MCP timeouts raised.
+
+This is what makes the rest hold: with no shell and no native sub-agent tool, an agent **cannot**
+start another agent (no `Task`, no `claude --bg`, no background shell) except through
+`agent_launch`, and it cannot do anything the gate did not see. The agent's own permission
+prompts answer themselves: Flottille's tools are allowed, anything else is rejected.
+
+### 4.3 The tools an agent gets (tranche 1)
+
+Generic tools, as specified in `reference/hemera.md` §3 (arguments, limits, exact refusal texts):
+
+- files: `fs_read`, `fs_list`, `search`, `fs_write`, `fs_edit` (read-before-write fingerprints,
+  temp file + rename, all-or-nothing edits);
+- commands: `commands_list`, `commands_run` (catalogue command or one line, **never a shell**),
+  `commands_output`, `commands_stop`;
+
+Flottille's own tools:
+
+- `agent_launch {title, brief, model?, role?, workspace?: existing | new {name, repositories?} | parent's}`:
+  starts a child, answers at once with its id. Refused (never queued) above the caps.
+- `agent_send {agent, message}`: a message to one of the caller's children.
+- `agent_status {agent?}`: for one child or all of them: state, what it is doing now (thinking,
+  in a tool call, which command runs and for how long, waiting for approval #n, waiting on the
+  provider), time since its last sign of activity, context use, last few messages.
+- `agent_read {agent, after?}`: a page of the child's conversation.
+- `agent_stop {agent}`: stops the child and its own tree.
+- `report {text}`: the caller is done; its report goes to its parent at once and the session ends
+  (see 5.3). A root agent's report goes to the user.
+- `ask_user {question}`: a question to the user, answered later as a delivery (never blocks).
+
+The tool list of a session is fixed for its whole life (prompt cache, `reference/hemera.md` §7).
+
+### 4.4 Roles
+
+Two roles in tranche 1, both with the same tools:
+
+- **lead**: the role of an agent the user starts. Its instructions carry the orchestration
+  standard (`reference/orchestration.md`): when to launch a child, which model, one precise task
+  per child, the brief, how to read a report, the caps.
+- **worker**: the role of a child. Its instructions say: do the brief and only it, keep going
+  without waiting for answers, end with `report`.
+
+A worker may launch its own children (depth limit, 5.1). Roles are data (a template and a few
+flags), so more can be added without code changes.
+
+## 5. Parenting and waking (the core of Flottille)
+
+The failure Flottille exists to fix: a lead launches workers, loses track of them, and work sits
+still for hours because nobody knows what is happening. In Flottille a parent cannot lose its
+children: they are tied to it, Flottille tells it everything that matters, and wakes it when
+something happens or when nothing does.
+
+### 5.1 The tree
+
+- Every agent launched through `agent_launch` has a parent (its lineage, stable across
+  replacements) and a depth. Root agents are started by the user (window, CLI, pilot door).
+- **Caps**: children running at once per project (default 3, configurable 1 to 6), and depth
+  (default 2: a lead's worker may have workers, theirs may not). Above a cap, `agent_launch` is
+  refused with a sentence the agent can act on; it never queues silently.
+- **Stopping a parent stops its tree**, deepest first. Closing or archiving an agent closes its
+  children. Deleting a workspace that an agent uses is refused while it runs.
+- The user can open and talk to **any** agent in the tree; a user message is a delivery like any
+  other.
+
+### 5.2 Deliveries
+
+Exactly the mechanism of `reference/hemera.md` §5: stored before sent (idempotent id), targeted
+at a lineage, `between-turns` / `urgent` / `redirect`, pumped as one prompt when the agent is
+between turns, pinned as a note on the next tool result when it is mid-turn (with the 30 s
+fallback that cancels the turn and sends it as a prompt), given back when a turn fails, escaped so
+data can never forge a marker. No timers wake an agent: waking is always a delivery.
+
+### 5.3 What the parent is told
+
+| Event of a child | Delivery to the parent |
+|---|---|
+| calls `report` | `child-report`: the report text, the child's workspace and branch, its last commit per repository. Urgent. |
+| ends a turn without reporting | Flottille first sends the child one reminder ("end with `report`…"); a second turn without a report tells the parent `child-idle`, with the child's last message. |
+| fails (agent error, provider limit, replacement limit) | `child-failed`, with the reason and the last output lines. Urgent. |
+| is stuck (no sign of activity for 5 min in a turn, not waiting on the provider, no command of its own running) | `child-stuck`; Flottille replaces it once, and says so. |
+| has a call held for the user | `child-waiting`, with the request number and what it asks; the parent knows the child is not broken. |
+| sits idle with nothing queued while another launch waits for a slot | ended, and `child-ended` tells the parent. |
+
+### 5.4 When nothing happens
+
+A lead that is between turns, with children running and no delivery for a while (default 20 min,
+configurable), receives a `children-status` delivery: one line per child with what `agent_status`
+gives (for example "running `cargo test` for 12 min", "waiting for approval #3", "thinking, last
+tool call 40 s ago"). The lead decides whether that is normal (a long command) or not (a child
+going in circles), and acts with `agent_send`, `agent_stop` or a new launch. The interval doubles
+while nothing changes, up to a ceiling, so a quiet tree costs few wakes.
+
+### 5.5 Replacement and restarts
+
+Replacement on death, stuck, or a full context, the epoch that makes a replaced agent's late
+calls fail, the replacement limit (2 in 30 min, then the user is asked), and the rebuild at daemon
+start follow `reference/hemera.md` §5.
+
+## 6. Projects and workspaces
+
+### 6.1 Projects
+
+- `flottille project add <folder>` registers a folder. Repositories are detected: the folder
+  itself if it is one, and folders one or two levels down holding a `.git`. The user confirms or
+  edits the list.
+- Per repository: base branch **rule** (an ordered list, first one that exists on the remote
+  wins, default `[main]`; for example `[develop, main]`), remote (default `origin`), and its
+  dependencies on other repositories of the project (used to order preparation steps and,
+  later, merges).
+- Per project: branch prefix, workspaces root (default
+  `$XDG_DATA_HOME/flottille/workspaces/<project>`, or beside the project:
+  `<parent>/<project>-work/`), which repositories a workspace takes by default (**all**, or a
+  chosen set), variables, command catalogue, recipe, "never" list, children cap.
+- The project configuration is a TOML file Flottille owns (in its config folder), editable by
+  hand and from the window. Nothing is written into the user's repositories.
+
+### 6.2 Workspaces
+
+Creation, the up-to-date base per repository (fetch of one branch into its tracking ref, with
+freshness), `git worktree add`, preparation in the background with resume, failure capture and
+the git invocation rules follow `reference/hemera.md` §6. Additions over that model, all required
+by `reference/multi-repo-case.md`:
+
+- **Repository set**: all of the project's repositories by default; the project can say so
+  ("environment scope is not change scope").
+- **Root entries**: when the project folder is not itself a repository, its other top-level
+  entries (instruction files, shared folders) can be linked into the workspace folder by one
+  recipe step, never `.git` nor `.gitignore`.
+- **Ordered per repository**: `run` steps can be declared once "for each repository, in
+  dependency order" (leaves first), with `{repository}` in the template.
+- **Variables replace shell hooks**: workspace variables (templated, for example
+  `PACKAGE_STORE={workspace.path}/.store`, `COMPOSE_PROJECT_NAME=app-{workspace}`, a `PATH`
+  prefix) are injected into every command run in the workspace and into the agent's command
+  runs. No `.envrc`, no direnv.
+- **Copy of ignored files**: `copy` steps take globs (`.env`, `.env.*`), per repository, never
+  overwrite.
+- **Removal** refuses a worktree with uncommitted files **or commits not on any remote**
+  (`git log HEAD --not --remotes`), names them, and never forces.
+
+Agents are placed in a workspace (writable) or in the main checkout (read-only by default).
+
+## 7. The gate
+
+Every tool call goes through one gate, as in `reference/hemera.md` §4, minus the remote judge:
+grant checks, tool admitted for the role, arguments decoded, place rules, then the verdict:
+deny (the project's never list; deleting `.git`; for agents by default: `git push`, history
+rewrites, branch deletion, forge writes, publishing), ask (sensitive places such as `.env`
+files and credential folders, commands marked "ask before running", anything outside the place),
+or allow (reads, catalogue commands, writes in the place).
+
+An "ask" is answered to the agent at once ("request #n is waiting for the user…") and appears in
+the window, in `flottille approvals`, and in the event stream; the user's answer comes back as an
+`approval` delivery after the action was re-checked and performed. A tool call never waits for a
+human.
+
+Agent-run commands get an environment without forge tokens and with `git push` neutralised
+(`reference/hemera.md` §3).
+
+## 8. Instructions
+
+Built as in `reference/hemera.md` §7: a shared base, the role template, a cache boundary, the
+per-session part, then the project layer, frozen per session. The project layer holds, per
+repository and for the project folder: `CLAUDE.md` or `AGENTS.md` (the agent's own name first),
+**and the local files `CLAUDE.local.md` / `AGENTS.local.md` when present** (they hold rules the
+user keeps out of the repository).
+
+Later (not tranche 1), a project gains **references** (documents an agent reads with a tool:
+what skills hold today) and **procedures** (named multi-step actions with their own scoped
+authorizations: what slash commands hold today), see `reference/multi-repo-case.md`.
+
+## 9. The built-in orchestration standard
+
+`reference/orchestration.md` is today's manual way of running agents that hand work to each
+other. Flottille turns it into the default behaviour: the lead's instructions carry its rules
+(one precise task per child, lowest safe model, the brief's content, how to read a report, never
+merge without the checks), and Flottille itself provides what was done by hand: the run folder
+becomes the child's record, the report is a tool, waiting is deliveries, closing a child is
+`agent_stop`, the caps are enforced.
+
+## 10. The window
+
+GPUI Fast with gpui-kit. Tranche 1 screens:
+
+- left: projects, their workspaces, and the tree of agents (state badge, model, time since last
+  activity, a mark when an agent waits for the user);
+- centre: the selected agent's conversation, live (messages, thoughts collapsed, tool calls with
+  their result, plans), and a reply box;
+- a panel of approvals waiting, with allow once / allow for this agent's tree / deny;
+- starting an agent: project, workspace (new or existing), model, first message.
+
+Rules from `reference/gpui.md` apply from day one: a view per moving part, the reply field in its
+own view, the growing conversation as a list that does not rebuild what did not change.
+
+## 11. Desktop integration
+
+Through the CLI only: `flottille status --json` (counts of agents running, waiting for the user,
+failed), `flottille watch` (events), `flottille open <agent>` (focus the window on it). A desktop
+shell shows a badge or a notification from these. Nothing of any desktop lives in this
+repository.
+
+## 12. Later: remote
+
+Designed for, not built in tranche 1: the daemon's protocol over an authenticated network
+transport (for example on a private network such as Tailscale), a light client on a phone, and
+sending work to another machine running Flottille (its daemon owns the agents there; the tree
+spans machines through deliveries).
+
+## 13. Tranches
+
+1. **A usable core**: projects, multi-repository workspaces with recipes, Claude agents in bare
+   mode over ACP, the generic tools, the gate with approvals, the tree with deliveries, reports
+   and waking, the pilot door, the CLI and events, the window. Accepted when the user runs a
+   real piece of work on a multi-repository project: a lead launches two workers in their own
+   workspaces, one hits an approval, one gets stuck or fails, the lead is told each time without
+   anyone polling, and the user follows and answers everything in the window.
+2. **More agents**: Codex and OpenCode in bare mode.
+3. **Forges, tickets, pipelines**: GitHub and Bitbucket (pull requests, checks, pipelines),
+   issue trackers (GitHub issues, Jira read-only), linked to workspaces; procedures with scoped
+   authorizations (open the pull requests of a workspace, merge a stack in dependency order,
+   close a workspace).
+4. **Remote**: network transport, phone, other machines.
+
+## 14. Defaults taken, to confirm
+
+- Data in XDG folders; workspaces under the data folder unless the project says otherwise.
+- Children cap 3 per project, depth 2, quiet interval 20 min.
+- Claude adapter installed by Flottille at a pinned version; Node required.
+- No commit rights for agents unless the project grants them; push always refused for agents.
