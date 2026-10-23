@@ -16,8 +16,9 @@ the part you touch (`docs/reference/`). Those files are the specification; this 
 work.
 
 Flottille is generic: nothing in it is specific to one machine, one desktop, one forge or one
-agent. Paths come from XDG, links open with the system's default handler, colours follow the
-system.
+agent. Paths come from XDG, links open with the system's default handler, colours are
+Flottille's own unless the desktop provides a theme to follow (`docs/design.md` §10). The window
+is English only.
 
 ## Commands
 

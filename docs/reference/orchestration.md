@@ -12,7 +12,8 @@ request. An in-process sub-agent lives inside its parent: nobody can open or ans
 is short-lived, and a long one burns the quota. A session of its own is a main conversation: a
 one-hour cache, its own compaction, and the user can open it.
 
-> Flottille: every child is a full agent session the user can open and answer.
+> Flottille: every child is a full agent session the user can open and read. It belongs to its
+> parent: only the parent writes to it and answers what it asks.
 
 | Work | Where |
 |---|---|

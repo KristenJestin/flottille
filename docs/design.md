@@ -24,16 +24,23 @@ what is known about the window toolkit is in [`reference/gpui.md`](reference/gpu
   script) integrate Flottille through these, never by reading its database.
 - A **local MCP server** with two doors: the tools of the agents Flottille runs, and a *pilot*
   door through which an agent running outside Flottille (for example a coding agent in a
-  terminal) drives it: list projects, launch agents, talk to them, read their state.
-- A **window** (GPUI) that is one more client of the daemon: projects, workspaces, the tree of
-  agents, a live conversation, a reply box, the approvals waiting.
+  terminal) drives it: list projects, start root agents and talk to them, read every agent's
+  state and conversation.
+- A **window** (GPUI) that is one more client of the daemon: projects, the places where their
+  work happens, sessions with their tree of agents, a live conversation with the root agent, the
+  approvals that reach the user.
 
 **It is not (yet):** a planning tool. There is no specification workflow, no phases, no proof
 system, no remote judge. Those may come later; the first tranches must give something to use and
 try quickly. When in doubt, the smaller thing wins.
 
 **It is generic.** Nothing is tied to one machine, one desktop, one forge or one agent. Links open
-with the system's default handler, colours follow the system, paths come from XDG.
+with the system's default handler, colours are Flottille's own unless the desktop provides a
+theme to follow (§10), paths come from XDG.
+
+**The user talks to root agents only.** A child belongs to its parent: the parent reads it,
+writes to it and is written to by it. The user can read any agent of a tree, never write to a
+child, and a child never asks the user anything: what it needs goes to its parent (§5.1, §7).
 
 ## 2. Vocabulary
 
@@ -45,18 +52,21 @@ with the system's default handler, colours follow the system, paths come from XD
 | Recipe | The project's ordered preparation steps for a new workspace: copy, link, run, plus the workspace's variables. |
 | Command catalogue | The project's named commands (`api:dev`, `test`, `lint`…), runnable by the user and by agents. |
 | Agent | One agent session: a provider (Claude Code first), a model, a role, a place, a conversation, a state. Survives process restarts; can be replaced. |
-| Lead | An agent that has children. Any agent can be one, within the limits. A user-started agent is a root. |
-| Child | An agent launched by another agent through Flottille's tools. Tied to its parent for life. |
-| Delivery | A message Flottille hands to an agent (a child's report, an approval result, a user message), stored before it is sent. |
+| Root | An agent the user started. The only kind of agent the user writes to and the only one that can need the user. |
+| Lead | An agent that has children. Any agent can be one, within the limits. |
+| Child | An agent launched by another agent through Flottille's tools. Tied to its parent for life and belongs to it: only its parent writes to it; the user can read it. |
+| Place | Where an agent works: the project folder itself (`main`) or one of its workspaces. |
+| Session | A root agent and every agent it launched, shown as one conversation; it works in one place. |
+| Delivery | A message Flottille hands to an agent (a child's report, a child's question, an approval request or result, a user message to a root), stored before it is sent. |
 | Report | What a child returns to its parent when it is done, through the `report` tool. |
-| Approval request | A tool call the gate held for the user. The agent is answered at once; the result comes later as a delivery. |
+| Approval request | A tool call the gate held. A root's request is the user's; a child's request is held by its parent, which denies it or forwards it up (§7). The agent is answered at once; the result comes later as a delivery. |
 
 ## 3. Architecture
 
 ```
             ┌───────────── window (GPUI) ─────────────┐
-            │  projects · workspaces · agent tree ·   │
-            │  live conversation · reply · approvals  │
+            │  projects · places · sessions · agents  │
+            │  conversation · reply · approvals       │
             └───────────────────┬─────────────────────┘
                                 │ socket protocol (JSON lines)
  shell / bar / scripts ── flottille CLI (--json, watch) ──┐
@@ -143,13 +153,21 @@ Flottille's own tools:
 - `agent_stop {agent}`: stops the child and its own tree.
 - `report {text}`: the caller is done; its report goes to its parent at once and the session ends
   (see 5.3). A root agent's report goes to the user.
-- `ask_user {question}`: a question to the user, answered later as a delivery (never blocks).
+- `ask_user {question}` (a root only): a question to the user, answered later as a delivery
+  (never blocks).
+- `ask_parent {question}` (a child only, in place of `ask_user`): a question to its parent,
+  delivered as `child-question`; the parent answers with `agent_send`.
+- `approval_forward {request, why}` / `approval_deny {request, why}`: answer a request held for
+  the caller by one of its children (§7). Forwarding passes it to the caller's parent, or to the
+  user when the caller is a root. There is no tool to allow a request.
 
-The tool list of a session is fixed for its whole life (prompt cache, `reference/hemera.md` §7).
+The tool list of a session is fixed for its whole life (prompt cache, `reference/hemera.md` §7):
+whether an agent is a root or a child is known when it starts.
 
 ### 4.4 Roles
 
-Two roles in tranche 1, both with the same tools:
+Two roles in tranche 1, with the same tools except `ask_user` (a root's) and `ask_parent` (a
+child's):
 
 - **lead**: the role of an agent the user starts. Its instructions carry the orchestration
   standard (`reference/orchestration.md`): when to launch a child, which model, one precise task
@@ -176,8 +194,13 @@ something happens or when nothing does.
   refused with a sentence the agent can act on; it never queues silently.
 - **Stopping a parent stops its tree**, deepest first. Closing or archiving an agent closes its
   children. Deleting a workspace that an agent uses is refused while it runs.
-- The user can open and talk to **any** agent in the tree; a user message is a delivery like any
-  other.
+- **A child belongs to its parent.** The parent reads it (`agent_read`, `agent_status`), writes to
+  it (`agent_send`) and is written to by it (its report, its questions, its approval requests).
+  The user can open and read **any** agent in the tree, but writes to the root only: a user
+  message to a child is refused, from every client, and the user stops a child only by stopping
+  its root. A user message to a root is a delivery like any other.
+- A child never needs the user. When it waits on its parent (a question, a request held), it shows
+  as waiting on its parent; only a root shows as needing the user.
 
 ### 5.2 Deliveries
 
@@ -195,7 +218,8 @@ data can never forge a marker. No timers wake an agent: waking is always a deliv
 | ends a turn without reporting | Flottille first sends the child one reminder ("end with `report`…"); a second turn without a report tells the parent `child-idle`, with the child's last message. |
 | fails (agent error, provider limit, replacement limit) | `child-failed`, with the reason and the last output lines. Urgent. |
 | is stuck (no sign of activity for 5 min in a turn, not waiting on the provider, no command of its own running) | `child-stuck`; Flottille replaces it once, and says so. |
-| has a call held for the user | `child-waiting`, with the request number and what it asks; the parent knows the child is not broken. |
+| has a call held by the gate (an "ask") | `child-asks`, with the request number, the call and the reasons. Urgent. The parent answers with `approval_deny` or `approval_forward` (§7). |
+| calls `ask_parent` | `child-question`, with the question. The parent answers with `agent_send`. |
 | sits idle with nothing queued while another launch waits for a slot | ended, and `child-ended` tells the parent. |
 
 ### 5.4 When nothing happens
@@ -210,8 +234,9 @@ while nothing changes, up to a ceiling, so a quiet tree costs few wakes.
 ### 5.5 Replacement and restarts
 
 Replacement on death, stuck, or a full context, the epoch that makes a replaced agent's late
-calls fail, the replacement limit (2 in 30 min, then the user is asked), and the rebuild at daemon
-start follow `reference/hemera.md` §5.
+calls fail, the replacement limit (2 in 30 min; then a child fails and its parent gets
+`child-failed`, and a root asks the user), and the rebuild at daemon start follow
+`reference/hemera.md` §5.
 
 ## 6. Projects and workspaces
 
@@ -265,10 +290,22 @@ rewrites, branch deletion, forge writes, publishing), ask (sensitive places such
 files and credential folders, commands marked "ask before running", anything outside the place),
 or allow (reads, catalogue commands, writes in the place).
 
-An "ask" is answered to the agent at once ("request #n is waiting for the user…") and appears in
-the window, in `flottille approvals`, and in the event stream; the user's answer comes back as an
-`approval` delivery after the action was re-checked and performed. A tool call never waits for a
-human.
+An "ask" writes a numbered request (the frozen call, the reasons, the agent that asked) and is
+answered to the agent at once ("request #n is waiting…"). A tool call never waits for a human or
+an agent. Who holds the request depends on who asked:
+
+- **A root's request is the user's.** It appears in the window, in `flottille approvals`, and in
+  the event stream. The user answers deny, allow once, or allow for the root's tree (an exact
+  identity grant, never for a sensitive place).
+- **A child's request is held by its parent**, as a `child-asks` delivery. The parent denies it
+  (`approval_deny`) or forwards it with one sentence of why (`approval_forward`); forwarding
+  passes it to the parent's own parent, one level at a time, and from the root to the user, with
+  every reason given on the way. **No agent can allow a request**: the gate's "ask" always ends
+  with the user or with a refusal. A request held by an agent is not in `flottille approvals` and
+  the user cannot answer it until it is forwarded.
+
+An allowed request is re-checked and performed, and its result comes back to the agent that asked
+as an `approval` delivery; a denied one comes back as a refusal with the why.
 
 Agent-run commands get an environment without forge tokens and with `git push` neutralised
 (`reference/hemera.md` §3).
@@ -296,14 +333,25 @@ becomes the child's record, the report is a tool, waiting is deliveries, closing
 
 ## 10. The window
 
-GPUI Fast with gpui-kit. Tranche 1 screens:
+GPUI Fast with gpui-kit, English only (no translation layer). Tranche 1 screens:
 
-- left: projects, their workspaces, and the tree of agents (state badge, model, time since last
-  activity, a mark when an agent waits for the user);
-- centre: the selected agent's conversation, live (messages, thoughts collapsed, tool calls with
-  their result, plans), and a reply box;
-- a panel of approvals waiting, with allow once / allow for this agent's tree / deny;
-- starting an agent: project, workspace (new or existing), model, first message.
+- a top bar with search and a bell counting what waits for the user;
+- left: the tree project › place › session. `main` and the workspaces sit at the same level
+  under their project; sessions sit under their place, with a mark when running or when the
+  root needs the user; a folded level shows the strongest mark it holds;
+- a project page: its repositories, its places with their sessions, creating and removing a
+  workspace (with the preparation's progress and failure output), and the composer that starts
+  a session (place, agent, model, first message);
+- a session page: the root's conversation, live (messages, thoughts collapsed, tool calls with
+  their result, the children launched, reports, diffs), the approvals that reach the user, inline,
+  with deny / allow for the tree / allow once, and a composer that writes to the root; a rail
+  with the session's tree of agents, its workspace and facts. Selecting a child shows its
+  conversation read-only;
+- narrow and portrait windows: the rail, then the left tree, become drawers.
+
+Colours: Flottille's own palette, or, on an Omarchy desktop, the current Omarchy theme's colours
+followed live. Shapes, type and motion do not change with the theme. A state is drawn the same
+everywhere, by shape as well as colour.
 
 Rules from `reference/gpui.md` apply from day one: a view per moving part, the reply field in its
 own view, the growing conversation as a list that does not rebuild what did not change.
@@ -329,7 +377,8 @@ spans machines through deliveries).
    and waking, the pilot door, the CLI and events, the window. Accepted when the user runs a
    real piece of work on a multi-repository project: a lead launches two workers in their own
    workspaces, one hits an approval, one gets stuck or fails, the lead is told each time without
-   anyone polling, and the user follows and answers everything in the window.
+   anyone polling, and the user follows every agent in the window and answers what reaches them:
+   the root's messages and the requests forwarded up to it.
 2. **More agents**: Codex and OpenCode in bare mode.
 3. **Forges, tickets, pipelines**: GitHub and Bitbucket (pull requests, checks, pipelines),
    issue trackers (GitHub issues, Jira read-only), linked to workspaces; procedures with scoped
