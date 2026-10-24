@@ -772,7 +772,7 @@ pub fn fs_write(cx: &Context, args: Value) -> Outcome {
             if existed { "wrote" } else { "made" },
             path.shown
         )),
-        Err(error) => Outcome::Failed(format!("{}: {error}", path.shown)),
+        Err(outcome) => outcome,
     }
 }
 
@@ -839,7 +839,7 @@ pub fn fs_edit(cx: &Context, args: Value) -> Outcome {
             path.shown,
             args.edits.len()
         )),
-        Err(error) => Outcome::Failed(format!("{}: {error}", path.shown)),
+        Err(outcome) => outcome,
     }
 }
 
@@ -936,17 +936,33 @@ fn diff(before: &str, after: &str) -> String {
     format!("@@ line {} @@\n{shown}", start + 1)
 }
 
+/// Refuses unless the folder the file goes in is still inside the place on the disk: a folder
+/// swapped for a link since the path was resolved would take the write out of it.
+fn check_parent(place: &Place, parent: &Path, path: &Resolved) -> Result<(), Outcome> {
+    if place.holds(parent) {
+        return Ok(());
+    }
+    Err(Outcome::Refused(format!(
+        "refused: {}: its folder is no longer inside this agent's place (it changed while the \
+         call ran); nothing was written",
+        path.shown
+    )))
+}
+
 /// Writes the file through a temporary file renamed over it (which replaces a link rather than
-/// writing through it), keeping its mode; then the session knows it as written.
-fn write(cx: &Context, path: &Resolved, content: String) -> std::io::Result<usize> {
+/// writing through it), keeping its mode; then the session knows it as written. The folder is
+/// checked to be inside the place after it is made and again just before the rename.
+fn write(cx: &Context, path: &Resolved, content: String) -> Result<usize, Outcome> {
+    let failed = |error: std::io::Error| Outcome::Failed(format!("{}: {error}", path.shown));
     let parent = path.path.parent().unwrap_or(Path::new("/"));
-    std::fs::create_dir_all(parent)?;
+    std::fs::create_dir_all(parent).map_err(failed)?;
+    check_parent(cx.place, parent, path)?;
     let name = path
         .path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let id = flottille_core::agent::new_id()?;
+    let id = flottille_core::agent::new_id().map_err(failed)?;
     let temporary = parent.join(format!(".{name}.{id}.flottille"));
     let mode = std::fs::metadata(&path.path).ok().map(|m| m.permissions());
     let written = std::fs::write(&temporary, content.as_bytes())
@@ -954,22 +970,56 @@ fn write(cx: &Context, path: &Resolved, content: String) -> std::io::Result<usiz
             Some(mode) => std::fs::set_permissions(&temporary, mode),
             None => std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o644)),
         })
-        .and_then(|()| std::fs::rename(&temporary, &path.path));
-    if let Err(error) = written {
+        .map_err(failed)
+        .and_then(|()| check_parent(cx.place, parent, path))
+        .and_then(|()| std::fs::rename(&temporary, &path.path).map_err(failed));
+    if let Err(outcome) = written {
         let _ = std::fs::remove_file(&temporary);
-        return Err(error);
+        return Err(outcome);
     }
     let size = content.len();
     let sha = sha256(content.as_bytes());
     let kept = (size as u64 <= KEPT_BYTES).then_some(content);
-    cx.remember(&path.path, &sha, kept)
-        .map_err(|outcome| std::io::Error::other(outcome.text().to_owned()))?;
+    cx.remember(&path.path, &sha, kept)?;
     Ok(size)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_replaced_by_a_link_out_is_no_longer_inside() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("app");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::create_dir(dir.path().join("elsewhere")).unwrap();
+        let place = Place {
+            project: "app".into(),
+            workspace: None,
+            root: root.clone(),
+            repositories: vec![(".".into(), root.clone())],
+            branch: String::new(),
+            variables: Default::default(),
+            home: None,
+        };
+        let resolved = place.resolve(&root, "sub/new.txt");
+        let parent = resolved.path.parent().unwrap();
+        assert!(resolved.inside);
+        assert!(check_parent(&place, parent, &resolved).is_ok());
+
+        // Between the resolution and the write.
+        std::fs::remove_dir(root.join("sub")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("elsewhere"), root.join("sub")).unwrap();
+
+        let Err(Outcome::Refused(refusal)) = check_parent(&place, parent, &resolved) else {
+            panic!("a folder swapped for a link out must be refused");
+        };
+        assert!(
+            refusal.starts_with("refused: sub/new.txt: its folder is no longer inside"),
+            "{refusal}"
+        );
+    }
 
     #[test]
     fn overlapping_anchors_are_counted() {

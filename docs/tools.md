@@ -97,7 +97,16 @@ the agent, in the store (`session_files`), so it holds across restarts; the text
 - removed since: `refused: X was removed since this session read it; nothing was written`.
 
 A write goes to a temporary file `.<name>.<id>.flottille` beside the file, with the file's mode,
-renamed over it: a link is replaced, never written through.
+renamed over it: a link is replaced, never written through. The file's folder is checked to be
+inside the place on the disk after it is made and again just before the rename, so that a folder
+swapped for a link to the outside meanwhile is refused (`refused: X: its folder is no longer
+inside this agent's place …`, nothing written). A check is not a lock: a swap between the last
+check and the rename is not seen. The file's folder is checked to be
+inside the place on the disk after it is made and again just before the rename, so that a folder
+swapped for a link to the outside meanwhile is refused
+(`refused: X: its folder is no longer inside this agent's place …`, nothing written). A check is
+not a lock: a swap between it and the rename is not seen; closing it is the gate's (#6, writes
+under another path than the place's).
 
 ## Commands
 

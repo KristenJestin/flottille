@@ -130,6 +130,13 @@ impl Place {
         values
     }
 
+    /// Whether `path` is inside the place on the disk now, every link followed: `resolve` decides
+    /// at a moment, and a folder can be swapped for a link after it.
+    pub fn holds(&self, path: &Path) -> bool {
+        let real_root = std::fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
+        std::fs::canonicalize(path).is_ok_and(|real| real.starts_with(&real_root))
+    }
+
     /// How a path inside the place is shown.
     pub fn shown(&self, path: &Path) -> String {
         let real_root = std::fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());

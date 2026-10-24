@@ -285,12 +285,6 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    pub fn text(&self) -> &str {
-        match self {
-            Outcome::Done(text) | Outcome::Refused(text) | Outcome::Failed(text) => text,
-        }
-    }
-
     fn word(&self) -> &'static str {
         match self {
             Outcome::Done(_) => "ok",
