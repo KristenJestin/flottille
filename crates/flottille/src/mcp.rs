@@ -813,7 +813,7 @@ async fn played(
 }
 
 /// What the agent is shown of an outcome: its text under its limit, then the notes pinned for the
-/// agent. A failure is masked of the place's secrets too.
+/// agent, whole and counted in that limit. A failure is masked of the place's secrets too.
 fn shown(outcome: Outcome, notes: &[String], place: &Place) -> String {
     let (text, limit) = match outcome {
         Outcome::Done(text) => (text, RESULT_LIMIT),
@@ -827,7 +827,8 @@ fn shown(outcome: Outcome, notes: &[String], place: &Place) -> String {
         return cut(&text, limit);
     }
     let notes = notes.join("\n\n");
-    format!("{}\n\n{notes}", cut(&text, limit))
+    let room = limit.saturating_sub(notes.chars().count() + 2);
+    format!("{}\n\n{notes}", cut(&text, room))
 }
 
 async fn perform(
@@ -963,6 +964,30 @@ mod tests {
             variables: Default::default(),
             home: None,
         }
+    }
+
+    #[test]
+    fn pinned_notes_are_counted_in_the_limit_and_kept_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = place_in(dir.path());
+        let notes = vec!["note one ".repeat(40), "note two".to_owned()];
+
+        let shown = shown(Outcome::Done("é".repeat(50_000)), &notes, &place);
+
+        assert!(
+            shown.chars().count() <= RESULT_LIMIT,
+            "{}",
+            shown.chars().count()
+        );
+        assert!(shown.ends_with(&format!("\n\n{}\n\n{}", notes[0], notes[1])));
+        assert!(shown.contains("chars›"));
+        // Without notes, and with a short text, nothing changes.
+        assert_eq!(shown_of("short", &[], &place), "short");
+        assert_eq!(shown_of("short", &["n".into()], &place), "short\n\nn");
+    }
+
+    fn shown_of(text: &str, notes: &[String], place: &Place) -> String {
+        shown(Outcome::Done(text.into()), notes, place)
     }
 
     #[test]

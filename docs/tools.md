@@ -39,8 +39,9 @@ below.
 - **A result** is one text block, `isError` for a refusal or a failure. A normal result stays
   under 40,000 characters (`docs/reference/mcp.md` §4 rules 5 and 8: an agent in bare mode cannot
   read a result Claude Code saved to a file), a refusal or a failure under 2,000. A failure reads
-  `the call failed: …`. The notes pinned for the agent (the deliveries that reach it in a turn)
-  are appended to the next result, after a blank line.
+  `the call failed: …`, masked of the daemon's and the place's secrets. The notes pinned for the
+  agent (the deliveries that reach it in a turn) are appended to the result after a blank line,
+  whole and counted in its limit: it is the text that is cut short to make room for them.
 - **Every call is recorded** as an `agent.tool_served` event of the agent (`docs/events.md`):
   the tool, the key, the arguments with every text cut at 500 characters and masked, the outcome
   and the duration.
