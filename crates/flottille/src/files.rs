@@ -8,7 +8,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -137,8 +137,37 @@ pub fn reaches(place: &Place, tool: &str, args: &Value) -> Vec<Resolved> {
     }
 }
 
+fn not_regular(path: &Resolved) -> Outcome {
+    Outcome::Refused(format!(
+        "refused: {} is not a regular file (a pipe, a socket or a device): this tool reads files",
+        path.shown
+    ))
+}
+
+/// Opens a regular file to read. Opening a pipe waits until someone writes to it, which would hold
+/// the call's thread forever: it is opened without waiting, and refused (`InvalidInput`, which
+/// `failed` words).
+fn open_regular(path: &Path) -> std::io::Result<File> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)?;
+    if file.metadata()?.is_file() {
+        Ok(file)
+    } else {
+        Err(std::io::Error::from(ErrorKind::InvalidInput))
+    }
+}
+
+fn read_regular(path: &Path) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    open_regular(path)?.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 fn failed(path: &Resolved, error: std::io::Error) -> Outcome {
     match error.kind() {
+        ErrorKind::InvalidInput => not_regular(path),
         ErrorKind::NotFound => Outcome::Refused(format!("refused: {} does not exist", path.shown)),
         _ => Outcome::Failed(format!("{}: {error}", path.shown)),
     }
@@ -153,7 +182,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn sha256_file(path: &Path) -> std::io::Result<String> {
-    let mut file = File::open(path)?;
+    let mut file = open_regular(path)?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0; CHUNK];
     loop {
@@ -219,6 +248,9 @@ fn read_page(cx: &Context, path: &Resolved, offset: u64, length: u64) -> std::io
             path.shown
         )));
     }
+    if !metadata.is_file() {
+        return Ok(not_regular(path));
+    }
     let size = metadata.len();
     if offset > size {
         return Ok(Outcome::Refused(format!(
@@ -228,14 +260,14 @@ fn read_page(cx: &Context, path: &Resolved, offset: u64, length: u64) -> std::io
     }
     let sha = sha256_file(&path.path)?;
     let kept = (size <= KEPT_BYTES)
-        .then(|| std::fs::read(&path.path).ok())
+        .then(|| read_regular(&path.path).ok())
         .flatten()
         .and_then(|bytes| String::from_utf8(bytes).ok());
     if let Err(outcome) = cx.remember(&path.path, &sha, kept) {
         return Ok(outcome);
     }
 
-    let mut file = File::open(&path.path)?;
+    let mut file = open_regular(&path.path)?;
     // A few bytes more than the page: an offset inside a character skips its continuation bytes,
     // and a page that ends inside one ends before it.
     file.seek(SeekFrom::Start(offset))?;
@@ -501,7 +533,7 @@ pub fn search(cx: &Context, args: Value) -> Outcome {
             continue;
         }
         // Line by line: a file far larger than what one call scans is never read whole.
-        let Ok(file) = File::open(base.path.join(&relative)) else {
+        let Ok(file) = open_regular(&base.path.join(&relative)) else {
             continue;
         };
         let mut reader = BufReader::with_capacity(CHUNK, file);
@@ -772,12 +804,13 @@ pub fn fs_edit(cx: &Context, args: Value) -> Outcome {
                 path.shown
             ));
         }
+        Ok(metadata) if !metadata.is_file() && !metadata.is_dir() => return not_regular(&path),
         _ => {}
     }
     if let Err(refusal) = fresh(cx, &path) {
         return refusal;
     }
-    let mut text = match std::fs::read(&path.path).map(String::from_utf8) {
+    let mut text = match read_regular(&path.path).map(String::from_utf8) {
         Ok(Ok(text)) => text,
         Ok(Err(_)) => {
             return Outcome::Refused(format!(

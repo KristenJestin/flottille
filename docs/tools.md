@@ -80,6 +80,10 @@ Paths are shown relative to the place's top.
 | `fs_write` | `path`, `content`, `repository?`, `why?` | The whole file, made with its folders when new. |
 | `fs_edit` | `path`, `edits [1..50] {old, new}`, `repository?`, `why?` | Each `old` must appear exactly once (overlapping occurrences count) when its turn comes, else `refused: the anchor of edit N appears K time(s) in X; it must appear exactly once. Nothing was changed`. Edits apply in order, spliced (never as a pattern: `$&` is text), all or none. |
 
+**Only regular files are read.** `fs_read` and `fs_edit` refuse a pipe, a socket or a device
+(`refused: X is not a regular file …`), which would hold the call forever; `search` skips them.
+Files are opened without waiting, so that even one swapped for a pipe meanwhile is refused.
+
 **Optimistic writes, per session.** Reading a file (any page) or writing it keeps its SHA-256 for
 the agent, in the store (`session_files`), so it holds across restarts; the text of a file of
 256 KiB or less is also kept in memory, for the last 32 files of each agent, to show a diff. Before

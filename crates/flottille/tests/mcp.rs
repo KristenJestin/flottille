@@ -489,6 +489,40 @@ fn an_edit_whose_anchor_appears_twice_changes_nothing() {
 }
 
 #[test]
+fn a_pipe_is_refused_by_read_and_edit_and_skipped_by_search() {
+    let user = User::with_fake_agent();
+    let (mcp, folder) = session(&user);
+    std::fs::write(folder.join("plain.txt"), "needle\n").unwrap();
+    let made = std::process::Command::new("mkfifo")
+        .arg(folder.join("pipe"))
+        .status()
+        .unwrap();
+    assert!(made.success());
+    // A read of a pipe waits for a writer forever: the call, if it hangs, ends the test.
+    let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watchdog = finished.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(30));
+        if !watchdog.load(std::sync::atomic::Ordering::SeqCst) {
+            eprintln!("a call on a pipe never ended");
+            std::process::exit(101);
+        }
+    });
+
+    let read = refused(mcp.call("fs_read", json!({"path": "pipe"})));
+    let edit = refused(mcp.call(
+        "fs_edit",
+        json!({"path": "pipe", "edits": [{"old": "a", "new": "b"}]}),
+    ));
+    let found = ok(mcp.call("search", json!({"pattern": "needle"})));
+    finished.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    assert!(read.contains("pipe is not a regular file"), "{read}");
+    assert!(edit.contains("pipe is not a regular file"), "{edit}");
+    assert!(found.contains("plain.txt:1: needle"), "{found}");
+}
+
+#[test]
 fn dot_dot_notes_is_inside_and_dot_dot_slash_x_is_outside() {
     let user = User::with_fake_agent();
     let (mcp, folder) = session(&user);
