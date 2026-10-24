@@ -65,6 +65,24 @@ impl User {
         serde_json::from_slice(&output.stdout).unwrap()
     }
 
+    /// A command that reads `input` on its standard input, then ends it.
+    pub fn run_with_input(&self, args: &[&str], input: &str) -> Output {
+        let mut child = self
+            .command(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    }
+
     /// One request over the socket, to a daemon the first command starts: its result, or the
     /// code and the message of its error.
     pub fn call(&self, method: &str, params: Value) -> Result<Value, (String, String)> {

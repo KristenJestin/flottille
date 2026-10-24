@@ -1,5 +1,6 @@
 mod client;
 mod daemon;
+mod project_command;
 mod projects;
 
 use std::io::Write;
@@ -11,6 +12,7 @@ use flottille_core::protocol::WatchParams;
 use serde_json::Value;
 
 use crate::client::Client;
+use crate::project_command::ProjectAction;
 
 pub const VERSION: &str = env!("FLOTTILLE_VERSION");
 
@@ -33,6 +35,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Register projects and look after their configuration
+    Project {
+        #[command(subcommand)]
+        action: ProjectAction,
+    },
     /// Print the daemon's events, one JSON object per line
     Watch {
         /// Print the stored events numbered after this one first
@@ -50,7 +57,7 @@ enum DaemonAction {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(cli) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(error) => {
             eprintln!("flottille: {error}");
             ExitCode::FAILURE
@@ -58,7 +65,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let paths = Paths::from_env()?;
     match cli.command {
         Command::Daemon { action: None } => daemon::run(&paths)?,
@@ -80,6 +87,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 print_status(&status);
             }
         }
+        Command::Project { action } => return project_command::run(&paths, action),
         Command::Watch { after } => {
             let mut client = Client::connect_or_start(&paths)?;
             client.request("events.watch", serde_json::to_value(WatchParams { after })?)?;
@@ -87,13 +95,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             while let Some(event) = client.next_event()? {
                 // A closed pipe (`watch | head`) ends the watch quietly.
                 if writeln!(stdout, "{}", serde_json::to_string(&event)?).is_err() {
-                    return Ok(());
+                    return Ok(ExitCode::SUCCESS);
                 }
             }
             return Err("the daemon closed the connection".into());
         }
     }
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 fn print_status(status: &Value) {
