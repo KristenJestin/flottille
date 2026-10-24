@@ -69,7 +69,10 @@ in the background, one preparation at a time for a workspace. Each step goes `pe
 then `done`, `skipped` (its repository is not in the workspace) or `failed`, every change an event
 (`docs/events.md`). The first failure stops the preparation and keeps everything done before it;
 the step keeps what it was doing and the last 40 lines of its output (at most 8000 characters),
-masked for secrets. A workspace is `preparing`, `failed` or `ready`.
+masked for secrets (the values of variables whose name holds `TOKEN`, `SECRET`, `PASS`,
+`CREDENTIAL`, `KEY` or `AUTH`, the longest first; private key blocks; the `user:password` of a
+URL; JWTs and the tokens of the usual forges, registries and providers). A workspace is
+`preparing`, `failed` or `ready`.
 
 | Step | |
 |---|---|
