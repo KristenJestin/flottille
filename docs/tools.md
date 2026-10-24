@@ -184,17 +184,27 @@ the call reaches, the project's never list and Flottille's own folders, and answ
    - a write under a `.git` folder or file (`fs_write`, `fs_edit`, a link that leads there), and a
      command any of whose words (or an option's value after `=`, or a `NAME=value`'s value) names
      a path in one;
+   - a recursive deletion that names no `.git` but would take one: `rm` with `-r`, `-R` or
+     `--recursive`, and `find` with `-delete` (or `-exec rm -r`), when a target, resolved from the
+     folder the run starts in, is the place's folder, a repository's, or a folder above one
+     (`rm -rf .`, `rm -r ./`, `rm -R <repository>`, `find . -delete`). Deleting inside a
+     repository stays allowed (`rm -r target`), and so does a deletion of a nested folder that
+     holds a `.git` of its own: only the repositories the place lists are guarded;
    - git: `push`, `send-pack`, `http-push`, `subtree push`, `lfs push`; `-c` and `--config-env`
      before the subcommand; `merge`, `rebase`, `reset`, `switch`, `filter-branch`, `update-ref`;
-     `commit`, `cherry-pick`, `revert`, `am` (no project grants commits yet); `tag` but listing
-     (no argument, `-l`, `--list`); `checkout` but `checkout -- <paths>`; `branch -d`, `-D`,
-     `--delete`; `config` but its reads (`--get`, `--get-all`, `--get-regexp`, `--list`, `-l`,
-     `get`, `list`);
+     `commit`, `cherry-pick`, `revert`, `am`, `commit-tree` (no project grants commits yet);
+     `fast-import`, `update-index`; `symbolic-ref` that points a ref (`git symbolic-ref HEAD
+     refs/heads/other` switches the branch) or deletes one, where `symbolic-ref HEAD` (with
+     `--short`, `-q`) reads; `replace` but listing (`-l`, `--list`); `notes` but listing and
+     showing (no subcommand, `list`, `show`, `get-ref`); `tag` but listing (no argument, `-l`,
+     `--list`); `checkout` but `checkout -- <paths>`; `branch -d`, `-D`, `--delete`; `config` but
+     its reads (`--get`, `--get-all`, `--get-regexp`, `--list`, `-l`, `get`, `list`);
    - the forge command lines beyond their reads: for `gh`, `pr view/list/diff/checks/status`,
      `issue view/list`, `run view/list`; for `glab`, `mr view/list/diff`, `issue view/list`,
      `ci view/list/status`; for `bkt`, `pr view/list/diff`, `issue view/list`,
      `pipeline view/list`; for all, `repo view`, `auth status` and `api` with GET, no field, no
-     input and not `graphql`;
+     input and not `graphql`; `auth token` and `auth status` with `--show-token` (`-t`) are
+     refused, since they print a login;
    - publishing: `npm`, `pnpm`, `yarn`, `bun`, `cargo`, `poetry`, `flit`, `hatch`, `uv` with
      `publish` or `unpublish`, `twine upload`, `gem`, `dotnet` and `nuget` with `push`.
 
@@ -205,6 +215,12 @@ the call reaches, the project's never list and Flottille's own folders, and answ
    `ksh`, `mksh`, `ash`, `fish`) with `-c`, whose line is split as `commands_run` splits one and
    judged in turn: a line that cannot be split is refused. A shell running a script is not
    unwrapped: the script is not read.
+
+   **Known gaps**, which no command gate closes: a script written with `fs_write` and then run
+   (`./script.sh`, `sh script.sh`) is not read, so what it does is out of the gate's reach; a git
+   alias in the user's own configuration (`alias.<name> = push`) is run by git itself, and the
+   gate sees only the alias's name. For a push, the run's environment (above) is the only wall
+   left there.
 3. **Ask**: a sensitive place; a path outside the place, or one that cannot be resolved; a
    catalogue command marked `ask_before_running`, or whose program is a shell; a run when the
    project's configuration cannot be read. Sensitive places are `.env` and `.env.*` anywhere but
