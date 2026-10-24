@@ -164,6 +164,11 @@ under another path than the place's).
   `env` wrapper (and `sudo`, `npx`, `sh -c` and the other wrappers) and writes under `.git/` is
   the gate's, which reads the words of the command (`gate::Call::words`); until it comes,
   `git push` is not guaranteed to fail.
+- **A stop ends the run's process group, not every descendant.** `commands_stop`, a timeout of
+  the call's client and the daemon's stop signal the group the run was spawned in (`SIGTERM`,
+  then `SIGKILL` after 5 s), and what the run left in its group is killed when its own process
+  ends. A process that left the group (`setsid`, a daemon that forks and detaches) escapes all
+  of this and keeps running; Flottille neither sees nor stops it.
 - **Runs are records**: the store's `runs` (with the end of their output once ended), and the
   `run.started` and `run.ended` events. Each run's process group is recorded while it runs: a
   daemon started after a crash kills the groups a previous one left (only while their leader is
