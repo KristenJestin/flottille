@@ -8,5 +8,6 @@ pub mod project;
 pub mod protocol;
 pub mod registry;
 pub mod store;
+pub mod variables;
 
 pub use error::{Error, Result};
