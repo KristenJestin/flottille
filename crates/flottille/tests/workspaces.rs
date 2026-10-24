@@ -492,6 +492,45 @@ fn a_run_failing_stops_the_preparation_with_its_last_lines_kept() {
 }
 
 #[test]
+fn a_run_step_leaving_a_child_in_the_background_ends_with_its_own_process() {
+    let fixture = Fixture::new(false);
+    let pid = fixture.user.path("pid");
+    // The child holds the output pipe: the step must not wait for it, nor leave it running.
+    let script = fixture.script(
+        "background.sh",
+        "sleep 60 &\necho $! > \"$1\"\necho started\n",
+    );
+    fixture.configure(&format!(
+        "[[recipe]]\nrun = \"sh {} {}\"\nrepository = \"lib\"\n",
+        script.display(),
+        pid.display()
+    ));
+
+    fixture.create(json!({"repositories": ["lib"]})).unwrap();
+    let workspace = fixture.settled("login");
+
+    assert_eq!(workspace["state"], "ready", "{workspace}");
+    let pid = std::fs::read_to_string(&pid).unwrap().trim().to_owned();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while alive(&pid) {
+        assert!(
+            Instant::now() < deadline,
+            "the background child {pid} still runs"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Whether a process runs, a zombie waiting to be reaped counting as ended.
+fn alive(pid: &str) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        // The state follows the command name, which is in parentheses.
+        let state = stat.rsplit(')').next().unwrap_or("").trim_start();
+        !state.starts_with(['Z', 'X'])
+    })
+}
+
+#[test]
 fn prepare_resumes_from_the_failed_step_and_never_reruns_a_finished_run() {
     let fixture = Fixture::new(false);
     let record = fixture.user.path("record.txt");

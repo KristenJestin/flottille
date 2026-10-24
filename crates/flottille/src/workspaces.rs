@@ -6,7 +6,7 @@
 //! run steps are child processes awaited by tokio, copies and links run on the blocking pool.
 
 use std::collections::BTreeMap;
-use std::io::{ErrorKind, Read};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -22,6 +22,7 @@ use flottille_core::workspace::{
     Action, Base, Failure as StepFailure, State, Step, StepState, Workspace, Worktree,
 };
 use serde_json::{Value, json};
+use tokio::io::AsyncReadExt;
 use tokio::sync::oneshot;
 
 use crate::daemon::Daemon;
@@ -835,15 +836,40 @@ async fn run_line(
         .process_group(0)
         .kill_on_drop(true);
     let spawned = command.spawn();
-    // The command holds the pipe's writing end: dropped, the output ends with the process.
+    // The command holds the pipe's writing end: dropped, only the processes hold it.
     drop(command);
     let mut child = spawned.map_err(|error| format!("cannot run {}: {error}", words[0]))?;
-    let tail = tokio::task::spawn_blocking(move || read_tail(reader));
-    let status = child
-        .wait()
-        .await
-        .map_err(|error| format!("cannot wait for {}: {error}", words[0]))?;
-    let output = tail.await.unwrap_or_default();
+    let group = child.id();
+    let mut reader = tokio::net::unix::pipe::Receiver::from_owned_fd(reader.into())
+        .map_err(|error| format!("cannot read the output of {}: {error}", words[0]))?;
+    let mut output = Vec::new();
+    let mut buffer = [0; 8192];
+    let mut open = true;
+    let status = loop {
+        tokio::select! {
+            status = child.wait() => break status,
+            read = reader.read(&mut buffer), if open => match read {
+                Ok(0) | Err(_) => open = false,
+                Ok(read) => keep_tail(&mut output, &buffer[..read]),
+            },
+        }
+    };
+    // What it left in the background holds the pipe and would keep the step running: it ends
+    // with the step, and what is already in the pipe is read without waiting for it.
+    if let Some(group) = group {
+        // SAFETY: kill has no precondition; the group is the step's own (process_group(0)).
+        unsafe {
+            libc::kill(-(group as i32), libc::SIGKILL);
+        }
+    }
+    while let Ok(read) = reader.try_read(&mut buffer) {
+        if read == 0 {
+            break;
+        }
+        keep_tail(&mut output, &buffer[..read]);
+    }
+    let status = status.map_err(|error| format!("cannot wait for {}: {error}", words[0]))?;
+    let output = String::from_utf8_lossy(&output);
     if status.success() {
         return Ok(());
     }
@@ -858,23 +884,12 @@ async fn run_line(
     })
 }
 
-/// The output of a run, its last `RUN_OUTPUT` bytes.
-fn read_tail(mut reader: std::io::PipeReader) -> String {
-    let mut kept: Vec<u8> = Vec::new();
-    let mut buffer = [0; 8192];
-    while let Ok(read) = reader.read(&mut buffer) {
-        if read == 0 {
-            break;
-        }
-        kept.extend_from_slice(&buffer[..read]);
-        if kept.len() > 2 * RUN_OUTPUT {
-            kept.drain(..kept.len() - RUN_OUTPUT);
-        }
-    }
+/// Keeps the last `RUN_OUTPUT` bytes of a run's output.
+fn keep_tail(kept: &mut Vec<u8>, read: &[u8]) {
+    kept.extend_from_slice(read);
     if kept.len() > RUN_OUTPUT {
         kept.drain(..kept.len() - RUN_OUTPUT);
     }
-    String::from_utf8_lossy(&kept).into_owned()
 }
 
 /// The last lines of an output, cut to its last characters.
