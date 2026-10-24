@@ -926,23 +926,39 @@ fn last_lines(output: &str) -> String {
 
 async fn resume(daemon: Arc<Daemon>, asked: WorkspaceName) -> Answer {
     let workspace = find(&daemon, &asked)?;
-    if daemon.preparing.lock().unwrap().contains(&workspace.id) {
+    // Held from the start, as a removal does, so that none starts while the steps are checked.
+    if !daemon.preparing.lock().unwrap().insert(workspace.id) {
         return Err(being_prepared(&workspace));
     }
+    let resumed = resume_held(&daemon, &workspace).await;
+    let preparing = resumed
+        .as_ref()
+        .is_ok_and(|(workspace, _)| workspace.state() == State::Preparing);
+    if preparing {
+        tokio::spawn(prepare(daemon.clone(), workspace.id, None));
+    } else {
+        daemon.preparing.lock().unwrap().remove(&workspace.id);
+    }
+    let (workspace, resumed) = resumed?;
+    let mut answer = workspace.to_json();
+    answer["resumed"] = resumed;
+    Ok(answer)
+}
+
+/// The steps to do again put back to pending: the workspace as it is then, and `{redone, retried}`.
+async fn resume_held(
+    daemon: &Daemon,
+    workspace: &Workspace,
+) -> Result<(Workspace, Value), Failure> {
     let checked = workspace.clone();
     let redone = tokio::task::spawn_blocking(move || done_but_missing(&checked))
         .await
         .map_err(|error| Failure::new("unavailable", error.to_string()))?;
-    let resumed = reset(&daemon, &workspace, redone)?;
-    let workspace = daemon.read(|store| store.workspace_by_id(workspace.id))?;
-    if workspace.state() == State::Preparing
-        && daemon.preparing.lock().unwrap().insert(workspace.id)
-    {
-        tokio::spawn(prepare(daemon.clone(), workspace.id, None));
-    }
-    let mut answer = workspace.to_json();
-    answer["resumed"] = resumed;
-    Ok(answer)
+    let resumed = reset(daemon, workspace, redone)?;
+    Ok((
+        daemon.read(|store| store.workspace_by_id(workspace.id))?,
+        resumed,
+    ))
 }
 
 /// Puts back to pending the failed and running steps, and the `redone` ones: `{redone, retried}`.
