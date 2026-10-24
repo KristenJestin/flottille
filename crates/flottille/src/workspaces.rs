@@ -725,22 +725,34 @@ fn copy(source: &Path, target: &Path, globs: &[String]) -> Result<(), String> {
             }
         }
         let mut reader = std::fs::File::open(&from).map_err(failed)?;
-        // `create_new`: a file that appeared meanwhile is kept, never written over.
-        let mut writer = match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&to)
-        {
-            Ok(writer) => writer,
-            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(failed(error)),
-        };
-        std::io::copy(&mut reader, &mut writer).map_err(failed)?;
-        writer
-            .set_permissions(metadata.permissions())
-            .map_err(failed)?;
+        write_new(&to, &mut reader, metadata.permissions()).map_err(failed)?;
     }
     Ok(())
+}
+
+/// Writes what `reader` gives into `to`, unless something is there already (`create_new`: a file
+/// that appeared meanwhile is kept, never written over). Failing halfway, it removes what it
+/// wrote, so that resuming copies the file again instead of taking it as done.
+fn write_new(
+    to: &Path,
+    reader: &mut impl std::io::Read,
+    permissions: std::fs::Permissions,
+) -> std::io::Result<()> {
+    let mut writer = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(to)
+    {
+        Ok(writer) => writer,
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let written =
+        std::io::copy(reader, &mut writer).and_then(|_| writer.set_permissions(permissions));
+    if written.is_err() {
+        let _ = std::fs::remove_file(to);
+    }
+    written
 }
 
 /// Links `from` at `to`, unless something is there already.
@@ -1262,5 +1274,36 @@ fn depth(path: &str) -> usize {
     match path {
         "." => 0,
         path => path.split('/').count(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Gives a few bytes, then fails.
+    struct Failing(bool);
+
+    impl std::io::Read for Failing {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if std::mem::replace(&mut self.0, true) {
+                return Err(std::io::Error::other("the disk went away"));
+            }
+            buffer[..4].copy_from_slice(b"half");
+            Ok(4)
+        }
+    }
+
+    #[test]
+    fn a_copy_failing_halfway_leaves_no_partial_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let to = dir.path().join(".env");
+        let permissions = std::fs::metadata(dir.path()).unwrap().permissions();
+
+        let written = write_new(&to, &mut Failing(false), permissions);
+
+        assert!(written.is_err());
+        // Resuming must see it missing and copy it again, not take it as done.
+        assert!(std::fs::symlink_metadata(&to).is_err());
     }
 }
