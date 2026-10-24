@@ -192,6 +192,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "flottille-fake-agent"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
