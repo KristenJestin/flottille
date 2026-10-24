@@ -824,6 +824,45 @@ fn commands_stop_kills_after_the_grace_a_run_that_ignores_sigterm() {
 }
 
 #[test]
+fn a_daemon_that_stops_stops_its_runs_together_not_one_after_another() {
+    let user = User::with_fake_agent();
+    let (mcp, folder) = session(&user);
+    let watch = user.watch(&["--after", "0"]);
+    let runs: Vec<String> = [301, 302, 303]
+        .into_iter()
+        .map(|seconds| run_id(&ok(mcp.call("commands_run", stubborn(seconds)))))
+        .collect();
+    eventually("the shells", || {
+        [301, 302, 303]
+            .iter()
+            .all(|n| folder.join(format!("pid-{n}")).exists())
+    });
+
+    let asked = Instant::now();
+    let stop = user.run(&["daemon", "stop"]);
+    assert!(
+        stop.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+    let events = watch.until(|e| e["name"] == "daemon.stopping");
+
+    // Each takes the 5 s of grace: one after another would be 15 s.
+    assert!(
+        asked.elapsed() < Duration::from_secs(12),
+        "{:?}",
+        asked.elapsed()
+    );
+    for run in &runs {
+        let ended = events
+            .iter()
+            .find(|e| e["name"] == "run.ended" && e["data"]["run"] == run.as_str())
+            .unwrap_or_else(|| panic!("run {run} did not end before the daemon said it stops"));
+        assert_eq!(ended["data"]["state"], "interrupted");
+    }
+}
+
+#[test]
 fn a_retry_with_the_same_call_key_does_not_run_twice() {
     let user = User::with_fake_agent();
     let (mcp, folder) = session(&user);

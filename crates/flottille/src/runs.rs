@@ -830,7 +830,8 @@ pub fn settle_at_start(daemon: &Daemon) {
     }
 }
 
-/// The daemon stopping: every run is stopped, and marked interrupted.
+/// The daemon stopping: every run is stopped, and marked interrupted. All at once: each may take
+/// its whole grace, and the daemon would wait for their sum.
 pub async fn stop_all(daemon: &Daemon) {
     let ids: Vec<String> = daemon
         .mcp
@@ -841,9 +842,7 @@ pub async fn stop_all(daemon: &Daemon) {
         .keys()
         .cloned()
         .collect();
-    for id in ids {
-        stop(daemon, &id, RunState::Interrupted).await;
-    }
+    futures::future::join_all(ids.iter().map(|id| stop(daemon, id, RunState::Interrupted))).await;
 }
 
 #[cfg(test)]
