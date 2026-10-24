@@ -42,10 +42,9 @@ installed, Node or `claude` is not on `PATH`.
 ## How an agent runs
 
 - **The process**: `node <the adapter's program>` (the `bin` of its `package.json`), in the
-  agent's folder, in a process group of its own, with the daemon's environment, plus
-  `CLAUDE_CODE_EXECUTABLE` set to the user's `claude`, minus `CLAUDE_CODE_PROMPT_CACHE_TTL` and
-  `FORCE_PROMPT_CACHING_5M` (they would change the agent's prompt cache). Its stderr goes to the
-  daemon's log, masked; its stdout is the protocol.
+  agent's folder, in a process group of its own, with the daemon's environment less what it has
+  no business with (below), plus `CLAUDE_CODE_EXECUTABLE` set to the user's `claude`. Its stderr
+  goes to the daemon's log, masked; its stdout is the protocol.
 - **The handshake**: `initialize` with ACP v1, the client named `Flottille`, and no `fs` or
   `terminal` capability (the agent has no built-in file or terminal tool) nor `subagents` (no
   native sub-agent). It declares the `jetbrains.air` extension with `recommendedValue` (a
@@ -120,6 +119,30 @@ adapter passes to the Claude Agent SDK over its own defaults:
 
 The MCP servers of the session are Flottille's alone: one HTTP server named `flottille`. Until
 Flottille's MCP server exists, the entry points at nothing (`http://127.0.0.1:9/mcp`), unused.
+
+## The agent's environment
+
+The agent's process gets the daemon's environment less the variables below (`claude::withheld`),
+which are table-tested. The daemon's environment is the user's shell's, so it holds their
+secrets, and a Claude Code agent run in bare mode has no use for them. The list is a choice the
+maintainer can revise.
+
+- **Forge tokens and their configuration**: `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`,
+  `GITHUB_ENTERPRISE_TOKEN`, `GITLAB_TOKEN`, `GL_TOKEN`, `BITBUCKET_*`, `BKT_*`, `GH_CONFIG_DIR`,
+  `GLAB_CONFIG_DIR`.
+- **Any other variable whose name ends in** `_TOKEN`, `_SECRET`, `_PASSWORD` or `_API_KEY`,
+  **except the agent's own sign-in**: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+  `CLAUDE_CODE_OAUTH_TOKEN`.
+- **The user's Claude Code settings**, which would change the agent Flottille specifies:
+  `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `ANTHROPIC_DEFAULT_*_MODEL`, `CLAUDE_CODE_*`
+  (Flottille sets `CLAUDE_CODE_EXECUTABLE` itself, and the bare options carry the others it needs;
+  the prompt cache lifetime, `CLAUDE_CODE_PROMPT_CACHE_TTL`, is among them), `DISABLE_*`,
+  `MAX_THINKING_TOKENS`, `FORCE_PROMPT_CACHING_5M`.
+
+What stays: `ANTHROPIC_BASE_URL`, `CLAUDE_CONFIG_DIR` (the login lives there), proxy and
+certificate variables (`HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`…), and
+the rest of the user's environment (`PATH`, `HOME`, locale). This means that a sign-in through a
+cloud provider's own variables (`CLAUDE_CODE_USE_BEDROCK`, for one) does not reach the agent.
 
 ## The conversation
 

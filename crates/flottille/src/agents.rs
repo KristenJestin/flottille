@@ -281,6 +281,13 @@ async fn process(
     change(daemon, &agent.id, AgentState::Starting, None, None);
     let launch = claude::launch(&daemon.paths)?;
     let mut command = Command::new(&launch.program);
+    // The daemon's environment, less what the agent has no business with; what Flottille sets
+    // comes after, so that it is not among the removed.
+    for (name, _) in std::env::vars_os() {
+        if name.to_str().is_some_and(claude::withheld) {
+            command.env_remove(name);
+        }
+    }
     command
         .args(&launch.args)
         .envs(launch.env.iter().map(|(k, v)| (k, v)))
@@ -291,9 +298,6 @@ async fn process(
         // Its own process group: the adapter, the CLI it runs and their children go together.
         .process_group(0)
         .kill_on_drop(true);
-    for name in launch.scrubbed {
-        command.env_remove(name);
-    }
     let mut child = command
         .spawn()
         .map_err(|e| format!("cannot start {}: {e}", launch.program.display()))?;

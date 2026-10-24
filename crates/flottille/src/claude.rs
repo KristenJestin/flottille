@@ -25,9 +25,44 @@ pub const MCP_SERVER: &str = "flottille";
 /// A tool call waiting on the user sends nothing: both of Claude's limits must outlast the wait.
 const TOOL_WAIT_MS: &str = "600000";
 
-/// Variables of the daemon's own environment that would change the agent's prompt cache: never
-/// passed on.
-const SCRUBBED: [&str; 2] = ["CLAUDE_CODE_PROMPT_CACHE_TTL", "FORCE_PROMPT_CACHING_5M"];
+/// Whether a variable of the daemon's environment stays out of the agent's (`docs/agents.md`).
+/// The agent runs on the user's own sign-in and network, and on what Flottille sets: the daemon's
+/// secrets and the user's Claude Code settings (a model, a cache lifetime) are not its business.
+pub fn withheld(name: &str) -> bool {
+    // The agent's own sign-in, which the secret-looking names below would otherwise catch.
+    const SIGN_IN: [&str; 3] = [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    ];
+    const EXACT: [&str; 12] = [
+        // Forges: tokens and the folders of their command lines' configuration.
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_ENTERPRISE_TOKEN",
+        "GITHUB_ENTERPRISE_TOKEN",
+        "GITLAB_TOKEN",
+        "GL_TOKEN",
+        "GH_CONFIG_DIR",
+        "GLAB_CONFIG_DIR",
+        // The user's Claude Code settings.
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_SMALL_FAST_MODEL",
+        "MAX_THINKING_TOKENS",
+        "FORCE_PROMPT_CACHING_5M",
+    ];
+    if SIGN_IN.contains(&name) {
+        return false;
+    }
+    EXACT.contains(&name)
+        || ["BITBUCKET_", "BKT_", "CLAUDE_CODE_", "DISABLE_"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+        || (name.starts_with("ANTHROPIC_DEFAULT_") && name.ends_with("_MODEL"))
+        || ["_TOKEN", "_SECRET", "_PASSWORD", "_API_KEY"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
+}
 
 /// The names of the tools every agent has, in their fixed order (`docs/design.md` §4.3). The MCP
 /// server that serves them comes with the tools themselves; their names are frozen in each agent
@@ -157,7 +192,6 @@ pub struct Launch {
     pub program: PathBuf,
     pub args: Vec<OsString>,
     pub env: Vec<(&'static str, OsString)>,
-    pub scrubbed: &'static [&'static str],
 }
 
 /// The adapter run by Node, pointed at the user's `claude`; or, for tests and development, the
@@ -174,7 +208,6 @@ pub fn launch(paths: &Paths) -> Result<Launch, String> {
             program: program.into(),
             args: Vec::new(),
             env,
-            scrubbed: &SCRUBBED,
         });
     }
     let Some((version, script)) = installed_adapter(paths) else {
@@ -200,7 +233,6 @@ pub fn launch(paths: &Paths) -> Result<Launch, String> {
         program: node,
         args: vec![script.into_os_string()],
         env,
-        scrubbed: &SCRUBBED,
     })
 }
 
@@ -339,6 +371,56 @@ mod tests {
             .into_iter()
             .map(|t| t.strip_prefix("mcp__flottille__").unwrap().to_owned())
             .collect()
+    }
+
+    #[test]
+    fn the_agent_gets_its_sign_in_and_the_network_and_not_the_daemon_s_secrets_or_settings() {
+        for (name, gone) in [
+            // Forges.
+            ("GH_TOKEN", true),
+            ("GITHUB_TOKEN", true),
+            ("GH_ENTERPRISE_TOKEN", true),
+            ("GITHUB_ENTERPRISE_TOKEN", true),
+            ("GITLAB_TOKEN", true),
+            ("GL_TOKEN", true),
+            ("BITBUCKET_APP_PASSWORD", true),
+            ("BKT_USER", true),
+            ("GH_CONFIG_DIR", true),
+            ("GLAB_CONFIG_DIR", true),
+            // Any other secret by its name.
+            ("NPM_TOKEN", true),
+            ("DEPLOY_SECRET", true),
+            ("DB_PASSWORD", true),
+            ("OPENAI_API_KEY", true),
+            // The user's Claude Code settings.
+            ("ANTHROPIC_MODEL", true),
+            ("ANTHROPIC_SMALL_FAST_MODEL", true),
+            ("ANTHROPIC_DEFAULT_HAIKU_MODEL", true),
+            ("ANTHROPIC_DEFAULT_OPUS_MODEL", true),
+            ("CLAUDE_CODE_PROMPT_CACHE_TTL", true),
+            ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", true),
+            ("DISABLE_TELEMETRY", true),
+            ("MAX_THINKING_TOKENS", true),
+            ("FORCE_PROMPT_CACHING_5M", true),
+            // The agent's own sign-in.
+            ("ANTHROPIC_API_KEY", false),
+            ("ANTHROPIC_AUTH_TOKEN", false),
+            ("CLAUDE_CODE_OAUTH_TOKEN", false),
+            // Sign-in and network.
+            ("ANTHROPIC_BASE_URL", false),
+            ("CLAUDE_CONFIG_DIR", false),
+            ("HTTPS_PROXY", false),
+            ("https_proxy", false),
+            ("NO_PROXY", false),
+            ("SSL_CERT_FILE", false),
+            ("NODE_EXTRA_CA_CERTS", false),
+            // The rest of the user's environment.
+            ("PATH", false),
+            ("HOME", false),
+            ("LANG", false),
+        ] {
+            assert_eq!(withheld(name), gone, "{name}");
+        }
     }
 
     #[test]

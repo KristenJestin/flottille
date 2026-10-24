@@ -507,11 +507,10 @@ fn orphan_processes_are_killed_at_daemon_start() {
     }
 }
 
-#[test]
-fn the_adapter_is_started_with_node_and_pointed_at_the_user_s_claude() {
-    let user = User::new();
-    // The adapter as `npm install` leaves it, and a `node` that runs the fake agent in its place,
-    // writing down how it was started.
+/// The adapter as `npm install` leaves it, and a `node` that runs the fake agent in its place,
+/// writing down how it was started. The `bin` folder to put first in `PATH`, the folder of the
+/// package, and the file the arguments are written to (the environment goes beside it, `.env`).
+fn adapter_shim(user: &User) -> (PathBuf, PathBuf, PathBuf) {
     let package = user
         .path("data/flottille/adapters/claude/node_modules/@agentclientprotocol/claude-agent-acp");
     std::fs::create_dir_all(package.join("dist")).unwrap();
@@ -539,6 +538,13 @@ fn the_adapter_is_started_with_node_and_pointed_at_the_user_s_claude() {
         &bin.join("claude"),
         "#!/bin/sh\necho '2.1.300 (Claude Code)'\n",
     );
+    (bin, package, started)
+}
+
+#[test]
+fn the_adapter_is_started_with_node_and_pointed_at_the_user_s_claude() {
+    let user = User::new();
+    let (bin, package, started) = adapter_shim(&user);
     let fake_dir = user.path("fake");
     let user = user
         .with_env("PATH", &format!("{}:/usr/bin:/bin", bin.display()))
@@ -560,6 +566,42 @@ fn the_adapter_is_started_with_node_and_pointed_at_the_user_s_claude() {
     );
     assert!(!env.contains("CLAUDE_CODE_PROMPT_CACHE_TTL"), "{env}");
     assert!(!env.contains("FORCE_PROMPT_CACHING_5M"), "{env}");
+}
+
+#[test]
+fn the_adapter_gets_the_agent_s_sign_in_and_none_of_the_daemon_s_other_secrets() {
+    let user = User::new();
+    let (bin, _, started) = adapter_shim(&user);
+    let fake_dir = user.path("fake");
+    let user = user
+        .with_env("PATH", &format!("{}:/usr/bin:/bin", bin.display()))
+        .with_env("FLOTTILLE_FAKE_AGENT_DIR", fake_dir.to_str().unwrap())
+        .with_env("GH_TOKEN", "forge-secret-1")
+        .with_env("DEPLOY_PASSWORD", "forge-secret-2")
+        .with_env("ANTHROPIC_MODEL", "some-model")
+        .with_env("DISABLE_TELEMETRY", "1")
+        .with_env("ANTHROPIC_API_KEY", "sign-in-key")
+        .with_env("HTTPS_PROXY", "http://proxy.invalid:3128");
+    project(&user);
+
+    let (id, after) = run(&user, json!({"message": "hello"}));
+    events_until(&user, &id, after, "agent.turn_ended");
+
+    let env = std::fs::read_to_string(started.with_extension("env")).unwrap();
+    for gone in [
+        "GH_TOKEN=",
+        "DEPLOY_PASSWORD=",
+        "ANTHROPIC_MODEL=",
+        "DISABLE_TELEMETRY=",
+    ] {
+        assert!(!env.contains(gone), "{gone} reached the agent: {env}");
+    }
+    for kept in [
+        "ANTHROPIC_API_KEY=sign-in-key",
+        "HTTPS_PROXY=http://proxy.invalid:3128",
+    ] {
+        assert!(env.lines().any(|l| l == kept), "{kept} is missing: {env}");
+    }
 }
 
 fn write_script(path: &std::path::Path, text: &str) {
