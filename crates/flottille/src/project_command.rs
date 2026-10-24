@@ -173,7 +173,7 @@ pub fn run(paths: &Paths, action: ProjectAction) -> Result<ExitCode> {
 
 /// The daemon names a configuration file `projects/<name>.toml`; the user needs to know which
 /// file to open, so the folder it is in comes in front.
-fn in_full(paths: &Paths, message: &str) -> String {
+pub fn in_full(paths: &Paths, message: &str) -> String {
     match message.strip_prefix("projects/") {
         Some(rest) => format!("{}/{rest}", paths.projects().display()),
         None => message.to_owned(),
