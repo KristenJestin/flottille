@@ -173,3 +173,80 @@ repositories are never touched. `not-found` when there is no such file.
 changing nothing: `{"name", "folder", "new", "missing"}`, `new` the repositories detected and not
 configured, `missing` the ones configured and no longer there. `refused` when the folder no longer
 exists.
+
+### The workspace methods
+
+A workspace is one worktree per repository, on one branch, prepared by the project's recipe
+(`docs/workspaces.md`). It is named by its project and its name. A workspace in a result:
+
+```json
+{
+  "project": "app",
+  "name": "login",
+  "branch": "app/login",
+  "folder": "/work/app-work/login",
+  "project_folder": "/work/app",
+  "created_at": 1792843730808,
+  "state": "failed",
+  "variables": {"STORE": "{workspace.path}/.store"},
+  "repositories": [
+    {"path": "api", "base": {"branch": "develop", "remote": "origin", "ref": "refs/remotes/origin/develop",
+      "commit": "503144c9654d6762b17fd670ddc9f88aa39ecfaf", "fetched_now": true, "fetched_at": 1792843730790}}
+  ],
+  "steps": [
+    {"position": 0, "repository": "api", "kind": "worktree", "state": "done"},
+    {"position": 1, "repository": "api", "kind": "copy", "globs": [".env", ".env.*"], "state": "done"},
+    {"position": 2, "repository": null, "kind": "root_entries", "except": ["api"], "state": "done"},
+    {"position": 3, "repository": "api", "kind": "run", "line": "npm install", "state": "failed",
+      "failure": {"doing": "npm install (in api)", "output": "npm ERR! …"}}
+  ]
+}
+```
+
+`state` is `preparing`, `failed` or `ready`. `variables` are the project's as they were at
+creation, not yet filled. A base's `fetched_now` is false when the workspace was created offline;
+`fetched_at` (milliseconds since the Unix epoch) is when its tracking ref was last updated, `null`
+when unknown. A step's `kind` is `worktree`, `copy` (`globs`), `link` (`path`), `root_entries`
+(`except`: the top-level names of the project's repositories) or `run` (`line`, and `command` when
+it is a command of the catalogue); its `state` is `pending`, `running`, `done`, `skipped` or
+`failed`, and `failure` is there only on a failed step. `repository` is `null` for a step done in
+the workspace folder.
+
+Each method answers `not-found` when the project or the workspace does not exist;
+`workspace.create`, the only one that reads the project's file, answers `invalid-config` when it
+cannot be used.
+
+#### `workspace.create`
+
+`{"project", "name", "repositories"?, "branch"?, "offline"?}`. Fetches the base of each
+repository, writes the workspace, makes the worktrees and answers the workspace; the rest of the
+recipe goes on in the background. `repositories` is the project's default set when left out,
+`branch` is `<branch prefix>/<name>`, and `offline: true` fetches nothing.
+
+`refused`, with nothing written nor made, when the name is not one, a repository is not the
+project's, the branch is not one git accepts, the project has a workspace of that name, the folder
+exists, the branch exists in a repository, no branch of a base rule is on the remote, or **a fetch
+fails** (the message is git's reason). A worktree that cannot be made is not a refusal: the
+workspace is answered `failed`, with the step's failure.
+
+#### `workspace.list`
+
+`{"project"?}`. `{"workspaces": [...]}`, every workspace or the project's, by project then name.
+
+#### `workspace.show`
+
+`{"project", "name"}`. The workspace.
+
+#### `workspace.prepare`
+
+`{"project", "name"}`. Resumes the preparation (`docs/workspaces.md`) and answers the workspace
+with `"resumed": {"redone", "retried"}`: the done steps made again because their result is gone,
+and the failed or running steps tried again. A ready workspace whose results are all there is
+answered as it is, both counts 0. `refused` while it is being prepared or removed.
+
+#### `workspace.remove`
+
+`{"project", "name"}`. `{"removed": "<name>", "project": "<project>"}` once its worktrees, its
+folder and its record are gone. `refused`, with nothing touched, while it is being prepared, or
+when a worktree holds a changed or untracked file or a commit on no remote: the message names
+every one.
