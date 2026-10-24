@@ -542,7 +542,102 @@ fn refusal(call: &Call, layers: &[Vec<String>], reached: &[Resolved]) -> Option<
             path.shown
         ));
     }
+    if let Some(why) = deletion_refusal(call, layers) {
+        return Some(why);
+    }
     layers.iter().find_map(|layer| program_refusal(layer))
+}
+
+/// The refusal of a recursive deletion that would take a repository's `.git` with it: its target
+/// is the place's folder, a repository's, or a folder above one. The words of a line that name a
+/// `.git` are refused before; this is the deletion that names only the folder holding it.
+fn deletion_refusal(call: &Call, layers: &[Vec<String>]) -> Option<String> {
+    let folder = call.paths.first()?;
+    let place = &call.grant.place;
+    let mut guarded = vec![place.root.clone()];
+    guarded.extend(place.repositories.iter().map(|(_, folder)| folder.clone()));
+    let real: Vec<PathBuf> = guarded
+        .iter()
+        .filter_map(|folder| std::fs::canonicalize(folder).ok())
+        .collect();
+    guarded.extend(real);
+    for layer in layers {
+        for named in deleted(layer) {
+            let target = place.resolve(&folder.path, named);
+            if guarded
+                .iter()
+                .any(|folder| folder.starts_with(&target.path))
+            {
+                return Some(format!(
+                    "refused: {} would delete {}, which is the place's folder, a repository's or \
+                     a folder above one, and with it a .git folder, which agents never delete: \
+                     name what to delete inside it",
+                    shown_words(layer),
+                    target.shown
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// What a recursive deletion of a layer names: the operands of `rm -r`, the folders `find` walks
+/// when it deletes (`-delete`, or `-exec rm -r`). Nothing for any other program.
+fn deleted(layer: &[String]) -> Vec<&str> {
+    let args = &layer[1..];
+    match base(&layer[0]) {
+        "rm" if recursive(args) => {
+            let mut options = true;
+            let mut operands = Vec::new();
+            for word in args {
+                if options && word == "--" {
+                    options = false;
+                } else if !options || !word.starts_with('-') {
+                    operands.push(word.as_str());
+                }
+            }
+            operands
+        }
+        "find" if find_deletes(args) => {
+            let mut points: Vec<&str> = args
+                .iter()
+                .map(String::as_str)
+                .skip_while(|w| ["-H", "-L", "-P"].contains(w))
+                .take_while(|w| !w.starts_with('-') && !["(", "!", ")"].contains(w))
+                .collect();
+            if points.is_empty() {
+                points.push(".");
+            }
+            points
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Whether the options of an `rm` ask for a recursive deletion.
+fn recursive(args: &[String]) -> bool {
+    args.iter()
+        .take_while(|word| *word != "--")
+        .any(|word| match word.strip_prefix("--") {
+            Some(long) => long == "recursive",
+            None => word.starts_with('-') && word.contains(['r', 'R']),
+        })
+}
+
+/// Whether a `find` deletes what it walks: `-delete`, or an `-exec` of a recursive `rm`.
+fn find_deletes(args: &[String]) -> bool {
+    args.iter().any(|word| word == "-delete")
+        || args.iter().enumerate().any(|(at, word)| {
+            ["-exec", "-execdir", "-ok", "-okdir"].contains(&word.as_str()) && {
+                let command: Vec<String> = args[at + 1..]
+                    .iter()
+                    .take_while(|w| *w != ";" && *w != "+")
+                    .cloned()
+                    .collect();
+                command.first().is_some_and(|program| base(program) == "rm")
+                    && recursive(&command[1..])
+            }
+        })
 }
 
 /// Whether `entry` is the start of `words` at some position; its first word is a program, which
@@ -1453,6 +1548,77 @@ mod tests {
         assert_eq!(fixture.file("fs_write", ".gitignore"), Verdict::Allow);
         assert_eq!(fixture.run("rm -r target"), Verdict::Allow);
         assert_eq!(fixture.run("cat .gitignore"), Verdict::Allow);
+    }
+
+    #[test]
+    fn a_recursive_deletion_of_a_place_or_a_repository_is_denied() {
+        // Without the never list, which already refuses `rm -rf`: this is the guard on its own.
+        let mut fixture = Fixture::workspace();
+        for folder in ["a/src", "b/src", "docs"] {
+            std::fs::create_dir_all(fixture.root.join(folder)).unwrap();
+        }
+        fixture.grant.place.repositories = vec![
+            ("a".into(), fixture.root.join("a")),
+            ("b".into(), fixture.root.join("b")),
+        ];
+        let free = |line: &str| fixture.judge("commands_run", json!({"line": line}), Some(&[]));
+        for line in [
+            "rm -rf .",
+            "rm -rf ./",
+            "rm -r .",
+            "rm -R .",
+            "rm --recursive .",
+            "rm --recursive --force .",
+            "rm -fr .",
+            "rm -rv ./",
+            "rm -r src/..",
+            "rm -r a",
+            "rm -R a/",
+            "rm -r docs b",
+            "rm -r -- a",
+            "rm -r ..",
+            "rm -rf ../..",
+            "rm -rf /",
+            "rm -r src ./",
+            "find . -delete",
+            "find -delete",
+            "find a -delete",
+            "find . -name '*.o' -delete",
+            "find -L . -type f -delete",
+            "find . -exec rm -rf {} +",
+            "find a -execdir rm -r {} ';'",
+            "sudo rm -rf .",
+            "sh -c 'rm -rf .'",
+            "env -i rm -r a",
+            "xargs rm -r .",
+        ] {
+            let verdict = free(line);
+            assert!(denied(&verdict), "{line}: {verdict:?}");
+        }
+        let Verdict::Deny(why) = free("rm -rf .") else {
+            unreachable!()
+        };
+        assert!(why.contains(".git"), "{why}");
+        for line in [
+            "rm -r target",
+            "rm -rf docs",
+            "rm -r a/src",
+            "rm -r a/src b/src",
+            "rm -rf -- docs",
+            "rm src/a.rs",
+            "rm .",
+            "rm -f a",
+            "rm -- -r",
+            "find src -name '*.o' -delete",
+            "find a/src -delete",
+            "find . -name '*.o'",
+            "find . -exec cat {} +",
+            "find docs -exec rm -r {} ';'",
+            "find a -exec rm {} ';'",
+            "ls -R .",
+        ] {
+            assert_eq!(free(line), Verdict::Allow, "{line}");
+        }
     }
 
     #[test]
