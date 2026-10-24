@@ -349,6 +349,10 @@ impl Agent {
     }
 
     /// A `sleep` in this process's group, never waited for: it is meant to outlive this process.
+    #[expect(
+        clippy::zombie_processes,
+        reason = "the child is meant to outlive its parent"
+    )]
     fn start_child(&self) {
         let child = std::process::Command::new("sleep")
             .arg("600")
