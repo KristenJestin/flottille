@@ -101,13 +101,10 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
         )));
     }
     let taken = taken_repositories(&project, asked.repositories.as_deref())?;
-    let branch = match asked.branch {
-        Some(branch) => {
-            check_branch(&branch)?;
-            branch
-        }
-        None => format!("{}/{}", project.branch_prefix, asked.name),
-    };
+    let branch = asked
+        .branch
+        .unwrap_or_else(|| format!("{}/{}", project.branch_prefix, asked.name));
+    check_branch(&main_checkout(&project.folder, &taken[0]), &branch).await?;
     let folder = project.workspaces_root.join(&asked.name);
     if daemon
         .read(|store| store.workspace(&project.name, &asked.name))?
@@ -235,17 +232,13 @@ fn taken_repositories(project: &Project, asked: Option<&[String]>) -> Result<Vec
     Ok(taken)
 }
 
-fn check_branch(branch: &str) -> Result<(), Failure> {
-    let bad = branch.is_empty()
-        || branch.starts_with(['-', '/'])
-        || branch.ends_with(['/', '.'])
-        || branch.contains("..")
-        || branch.contains("//")
-        || branch.ends_with(".lock")
-        || branch
-            .chars()
-            .any(|c| c.is_whitespace() || c.is_control() || "~^:?*[\\".contains(c));
-    if bad {
+/// Asks git itself whether `branch` is a branch name, before anything is written.
+async fn check_branch(dir: &Path, branch: &str) -> Result<(), Failure> {
+    let checked = git::run(dir, &["check-ref-format", "--branch", branch], Class::Read)
+        .await
+        .map_err(Failure::refused)?;
+    // Git expands a shorthand like `@{-1}` into another name: not the one asked for.
+    if !checked.success || checked.stdout.trim_end() != branch {
         return Err(Failure::refused(format!(
             "{branch} is not a branch name git accepts"
         )));

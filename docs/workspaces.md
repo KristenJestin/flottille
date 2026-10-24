@@ -30,7 +30,8 @@ ignores them, as it does in the main checkout). A workspace that does not take t
 repository has a plain folder there.
 
 The name is 1 to 64 letters, digits, dots, dashes or underscores, starting with a letter or a
-digit. The branch is `<branch prefix>/<name>` unless `--branch` gives one. Creation is refused when
+digit. The branch is `<branch prefix>/<name>` unless `--branch` gives one; `git check-ref-format
+--branch` must accept it as it is. Creation is refused when
 the project has a workspace of that name, when the folder exists, or when the branch exists in one
 of the repositories.
 

@@ -329,6 +329,25 @@ fn offline_the_creation_proceeds_on_the_last_tracking_refs_and_says_their_age() 
 }
 
 #[test]
+fn a_branch_name_git_refuses_is_refused_before_anything_is_written() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+
+    for branch in ["release.lock/1", "login@{1}", "feature/.hidden"] {
+        let (code, message) = fixture.create(json!({"branch": branch})).unwrap_err();
+
+        assert_eq!(code, "refused");
+        assert_eq!(
+            message,
+            format!("{branch} is not a branch name git accepts")
+        );
+    }
+    assert!(!fixture.workspace("login").exists());
+    let listed = fixture.user.call("workspace.list", json!({})).unwrap();
+    assert_eq!(listed["workspaces"], json!([]));
+}
+
+#[test]
 fn a_copy_never_overwrites_a_file_already_there() {
     let fixture = Fixture::new(false);
     let api = fixture.folder.join("api");
