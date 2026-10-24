@@ -194,3 +194,127 @@ fn a_loaded_session_replays_its_history_and_a_resumed_one_does_not() {
     assert!(resumed.is_empty());
     assert!(answer.get("result").is_some(), "{answer}");
 }
+
+/// A server answering every MCP request with the same text: its URL, and the bodies it was sent.
+fn answering(text: &'static str) -> (String, mpsc::Receiver<Value>) {
+    let server = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/mcp", server.local_addr().unwrap());
+    let (seen, bodies) = mpsc::channel();
+    std::thread::spawn(move || {
+        for (n, stream) in server.incoming().enumerate() {
+            let mut stream = stream.unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap();
+                }
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            let _ = seen.send(serde_json::from_slice::<Value>(&body).unwrap());
+            let answer = json!({"jsonrpc": "2.0", "id": n + 1, "result": {"content": [{"type": "text", "text": text}]}})
+                .to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{answer}",
+                answer.len()
+            )
+            .unwrap();
+        }
+    });
+    (url, bodies)
+}
+
+fn prompt(fake: &mut Fake, id: u64, session: &Value, text: &str) -> (Vec<Value>, Value) {
+    fake.request(
+        id,
+        "session/prompt",
+        json!({"sessionId": session, "prompt": [{"type": "text", "text": text}]}),
+    )
+}
+
+#[test]
+fn a_turn_with_times_is_played_that_many_times_then_the_next_match_is() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        json!({"turns": [
+            {"when": "go", "times": 1, "do": [{"say": "first"}]},
+            {"when": "go", "do": [{"say": "after"}]}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let said = |updates: &[Value]| updates[0]["params"]["update"]["content"]["text"].clone();
+    let mut fake = Fake::start(dir.path());
+    fake.request(1, "initialize", json!({"protocolVersion": 1}));
+    let (_, opened) = fake.request(2, "session/new", json!({"cwd": "/", "mcpServers": []}));
+    let session = opened["result"]["sessionId"].clone();
+
+    let (first, _) = prompt(&mut fake, 3, &session, "go");
+    let (second, _) = prompt(&mut fake, 4, &session, "go");
+    drop(fake);
+    // Counted across processes.
+    let mut fake = Fake::start(dir.path());
+    fake.request(1, "initialize", json!({"protocolVersion": 1}));
+    let (_, opened) = fake.request(2, "session/new", json!({"cwd": "/", "mcpServers": []}));
+    let (third, _) = prompt(&mut fake, 3, &opened["result"]["sessionId"], "go");
+
+    assert_eq!(said(&first), "first");
+    assert_eq!(said(&second), "after");
+    assert_eq!(said(&third), "after");
+}
+
+#[test]
+fn a_kept_agent_id_and_the_prompt_s_request_fill_a_later_call() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        json!({"turns": [
+            {"when": "launch", "do": [{"mcp": {"tool": "agent_launch",
+                "arguments": {"title": "t", "brief": "b"}, "keep": "w1"}}]},
+            {"when": "asks", "do": [{"mcp": {"tool": "approval_answer",
+                "arguments": {"request_id": "{prompt:request}", "about": "{prompt:agent}",
+                    "to": "{kept:w1}"}}}]}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let (url, bodies) = answering("Started agent 0123456789ab: it works on t.");
+    let mut fake = Fake::start(dir.path());
+    fake.request(1, "initialize", json!({"protocolVersion": 1}));
+    let servers = json!([{"type": "http", "name": "flottille", "url": url, "headers": []}]);
+    let (_, opened) = fake.request(2, "session/new", json!({"cwd": "/", "mcpServers": servers}));
+    let session = opened["result"]["sessionId"].clone();
+
+    prompt(&mut fake, 3, &session, "launch");
+    prompt(
+        &mut fake,
+        4,
+        &session,
+        "[flottille:child-asks]\nYour child abcdef012345 asks for request #42.",
+    );
+
+    let calls: Vec<Value> = bodies
+        .try_iter()
+        .filter(|b| b["method"] == "tools/call")
+        .collect();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls[1]["params"]["arguments"],
+        json!({"request_id": 42, "about": "abcdef012345", "to": "0123456789ab"})
+    );
+    let recorded = received(dir.path());
+    assert!(
+        recorded
+            .iter()
+            .filter(|e| e.get("mcp").is_some())
+            .all(|e| e["session"] == session)
+    );
+}
