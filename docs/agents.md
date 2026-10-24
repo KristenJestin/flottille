@@ -74,7 +74,9 @@ installed, Node or `claude` is not on `PATH`.
   starting kills the process groups a previous one left behind (a crash), only when the process
   with that pid is still the one it started, then forgets them. An agent that was starting or
   working when its daemon went is idle again (`agent.released`, reason `restart`).
-- **Daemon stop**: every agent's process is let go.
+- **Daemon stop**: every agent's process is let go. One whose task has not finished within 4 s
+  (stuck while its agent opens a session, say) has its process group killed, so that the daemon
+  goes with nothing of its own running.
 
 ## Bare mode for Claude
 

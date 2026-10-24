@@ -441,6 +441,39 @@ fn a_child_left_by_an_adapter_that_died_does_not_outlive_it() {
 }
 
 #[test]
+fn a_daemon_stopping_does_not_leave_the_group_of_an_agent_that_would_not_stop() {
+    let user = User::with_fake_agent();
+    // Stuck while it opens its session, it never sees the order to stop.
+    user.fake_script(json!({"stall": true, "child": true}));
+    project(&user);
+    let daemon = {
+        let (id, after) = run(&user, json!({"message": "hello"}));
+        events_until(&user, &id, after, "agent.created");
+        user.status()["pid"].as_u64().unwrap()
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let child = loop {
+        if let Some(pid) = user.received().iter().find_map(|e| e["child"].as_u64()) {
+            break pid;
+        }
+        assert!(Instant::now() < deadline, "the fake agent did not start");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(alive(child));
+
+    user.run(&["daemon", "stop"]);
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while alive(daemon) || alive(child) {
+        assert!(
+            Instant::now() < deadline,
+            "the daemon ({daemon}) or the agent's child ({child}) still runs"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
 fn a_model_and_an_effort_are_set_and_checked_and_a_model_not_offered_fails() {
     let user = User::with_fake_agent();
     user.fake_script(json!({"models": ["fake-small", "fake-large"], "efforts": ["low", "high"]}));

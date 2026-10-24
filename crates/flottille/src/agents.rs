@@ -220,12 +220,31 @@ fn order(daemon: &Arc<Daemon>, id: &str, order: Order) -> Result<(), Failure> {
         .map_err(|_| Failure::refused(format!("agent {id} has stopped")))
 }
 
-/// Stops every agent's process, the daemon stopping: each is let go as an idle one is.
+/// Stops every agent's process, the daemon stopping: each is let go as an idle one is. A task that
+/// has not answered in time (stuck while its agent opens a session, say) is left no process: its
+/// group is killed, so that the daemon goes with nothing of its own running.
 pub async fn stop_all(daemon: &Daemon) {
     let tasks: Vec<_> = daemon.agents.tasks.lock().unwrap().drain().collect();
-    for (_, (sender, task)) in tasks {
+    let mut stuck = Vec::new();
+    for (_, (sender, mut task)) in tasks {
         let _ = sender.send(Order::Stop);
-        let _ = tokio::time::timeout(STOP_GRACE * 2, task).await;
+        if tokio::time::timeout(STOP_GRACE * 2, &mut task)
+            .await
+            .is_err()
+        {
+            stuck.push(task);
+        }
+    }
+    if !stuck.is_empty() {
+        // The rows of the tasks that finished are gone: those left are the stuck ones' processes,
+        // killed while their leader is alive (the task is aborted after, which kills it too).
+        let _ = daemon.read(|store| {
+            kill_orphans(store);
+            Ok(())
+        });
+        for task in stuck {
+            task.abort();
+        }
     }
 }
 
@@ -554,7 +573,7 @@ pub fn kill_orphans(store: &Store) {
     for (pid, started) in processes {
         if start_time(pid) == Some(started) {
             signal_group(pid, libc::SIGKILL);
-            eprintln!("flottille daemon: killed the agent process {pid} a previous daemon left");
+            eprintln!("flottille daemon: killed the agent process {pid} that was left running");
         }
         let _ = store.remove_process(pid);
     }

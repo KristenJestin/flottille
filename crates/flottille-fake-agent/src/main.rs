@@ -19,6 +19,8 @@
 //!   "load": true,
 //!   "resume": true,
 //!   "linger": false,
+//!   "child": false,
+//!   "stall": false,
 //!   "models": ["fake-small", "fake-large"],
 //!   "efforts": ["low", "high"],
 //!   "turns": [
@@ -30,6 +32,9 @@
 //! - `load`, `resume`: whether `initialize` offers `session/load` and `session/resume` (both by
 //!   default). A loaded session replays its history first; a resumed one does not.
 //! - `linger`: keep running once standard input closes, as an orphan would (false by default).
+//! - `child`: start a `sleep` in the process group at startup, recording its pid (`{"child": <pid>}`).
+//! - `stall`: never answer `session/new`, `session/load` or `session/resume`: an agent stuck while
+//!   it opens.
 //! - `models`, `efforts`: the values of the `model` and `thought_level` options, the first one
 //!   current; no effort option without `efforts`.
 //! - `turns`: a prompt plays the first turn whose `when` is in its text; a prompt matching none is
@@ -79,6 +84,9 @@ fn main() {
         options: HashMap::new(),
     };
     agent.record.write(json!({"started": true}));
+    if agent.script["child"] == true {
+        agent.start_child();
+    }
     let linger = agent.script["linger"] == true;
 
     // A reader thread so that a cancel or an answer to a permission request arrives while a turn
@@ -169,7 +177,16 @@ impl Agent {
     ) -> Result<Value, String> {
         let params = &request["params"];
         let session = params["sessionId"].as_str().unwrap_or_default().to_owned();
-        match request["method"].as_str().unwrap_or_default() {
+        let method = request["method"].as_str().unwrap_or_default();
+        if self.script["stall"] == true
+            && method.starts_with("session/")
+            && method != "session/prompt"
+        {
+            loop {
+                std::thread::sleep(Duration::from_secs(3600));
+            }
+        }
+        match method {
             "initialize" => {
                 let mut capabilities = json!({
                     "loadSession": self.script["load"] != false,
@@ -320,12 +337,7 @@ impl Agent {
                 }
                 return "cancelled".into();
             } else if step["child"] == true {
-                // Never waited for: it is meant to outlive this process.
-                let child = std::process::Command::new("sleep")
-                    .arg("600")
-                    .spawn()
-                    .expect("sleep starts");
-                self.record.write(json!({"child": child.id()}));
+                self.start_child();
             } else if let Some(code) = step["die"].as_i64() {
                 std::process::exit(code as i32);
             }
@@ -334,6 +346,15 @@ impl Agent {
             return "cancelled".into();
         }
         turn["stop"].as_str().unwrap_or("end_turn").to_owned()
+    }
+
+    /// A `sleep` in this process's group, never waited for: it is meant to outlive this process.
+    fn start_child(&self) {
+        let child = std::process::Command::new("sleep")
+            .arg("600")
+            .spawn()
+            .expect("sleep starts");
+        self.record.write(json!({"child": child.id()}));
     }
 
     fn ask_permission(
