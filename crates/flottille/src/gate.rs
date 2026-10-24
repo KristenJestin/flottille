@@ -646,6 +646,7 @@ fn git_refusal(args: &[String]) -> Option<String> {
             "branch"
         }
         "config" if !config_reads(rest) => "config",
+        "symbolic-ref" if symbolic_ref_writes(rest) => "history",
         _ => return None,
     };
     Some(match refused {
@@ -673,6 +674,31 @@ fn git_refusal(args: &[String]) -> Option<String> {
               --get-all, --get-regexp, --list)"
             .into(),
     })
+}
+
+/// Whether `git symbolic-ref` with these words points a ref somewhere (which switches the branch
+/// when the ref is `HEAD`) or deletes one: it reads with a single ref.
+fn symbolic_ref_writes(rest: &[String]) -> bool {
+    let mut refs = 0;
+    let mut options = true;
+    for word in rest {
+        let word = word.as_str();
+        if options && word == "--" {
+            options = false;
+        } else if options && word.starts_with("--") {
+            if word == "--delete" {
+                return true;
+            }
+        } else if options && word.starts_with('-') {
+            // `-m` only comes with a write.
+            if word.contains(['d', 'm']) {
+                return true;
+            }
+        } else {
+            refs += 1;
+        }
+    }
+    refs > 1
 }
 
 /// Whether `git config` with these words only reads.
@@ -1036,6 +1062,13 @@ mod tests {
             "git config --add remote.origin.pushurl somewhere",
             "git config --get user.name --add x",
             "git config set user.name someone",
+            "git symbolic-ref HEAD refs/heads/other",
+            "git symbolic-ref -m reason HEAD refs/heads/other",
+            "git symbolic-ref --short HEAD refs/heads/other",
+            "git symbolic-ref -d HEAD",
+            "git symbolic-ref --delete refs/remotes/origin/HEAD",
+            "git symbolic-ref -qd HEAD",
+            "env git symbolic-ref HEAD refs/heads/other",
         ] {
             assert!(
                 denied(&fixture.run(line)),
@@ -1067,6 +1100,10 @@ mod tests {
             "git config -l",
             "git config get user.name",
             "git config list",
+            "git symbolic-ref HEAD",
+            "git symbolic-ref --short HEAD",
+            "git symbolic-ref -q HEAD",
+            "git symbolic-ref -q --short HEAD",
             "git -C src status",
             "git fetch origin",
         ] {
