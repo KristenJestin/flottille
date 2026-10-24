@@ -136,9 +136,21 @@ renamed over it: a link is replaced, never written through.
     `BKT_TOKEN`;
   - `GH_CONFIG_DIR`, `GLAB_CONFIG_DIR` and `BKT_CONFIG_DIR` pointed at an empty folder
     (`$XDG_STATE_HOME/flottille/empty`), so that the forge command lines find no login;
-  - `git push` sent nowhere: `GIT_CONFIG_COUNT` incremented, with
+  - `git push` made to fail where the environment can: `GIT_CONFIG_COUNT` incremented, with
     `GIT_CONFIG_KEY_<n>=url./dev/null/flottille-refused-push/.pushInsteadOf` and an empty
     `GIT_CONFIG_VALUE_<n>`, which rewrites every push URL to a path that is no repository.
+- **A repository with a push URL** (`remote.<name>.pushurl`, which git does not rewrite with
+  `pushInsteadOf`) refuses the runs whose first word is `git`: Flottille reads the repository's
+  push URLs with `git config --get-regexp` when it spawns the run, and answers
+  `refused: this repository has a push URL (remote.<name>.pushurl) and git push is refused for
+  agents…` (never the URL, which may hold a password). Other programs run.
+- **What the environment cannot do belongs to the gate (#6).** The environment above stops the
+  common `git push` only: `git -c url.<x>.pushInsteadOf=<x> push`, `env -u GIT_CONFIG_COUNT git
+  push`, a `git config` write, a push URL added by a program that is not `git`, and any write
+  under `.git/` get past it. Refusing `git push` in every form, `git -c`, `git config` writes, the
+  `env` wrapper (and `sudo`, `npx`, `sh -c` and the other wrappers) and writes under `.git/` is
+  the gate's, which reads the words of the command (`gate::Call::words`); until it comes,
+  `git push` is not guaranteed to fail.
 - **Runs are records**: the store's `runs` (with the end of their output once ended), and the
   `run.started` and `run.ended` events. Each run's process group is recorded while it runs: a
   daemon started after a crash kills the groups a previous one left (only while their leader is

@@ -790,6 +790,34 @@ fn git_push_from_a_run_fails() {
 }
 
 #[test]
+fn a_repository_with_a_push_url_refuses_the_runs_of_git() {
+    let user = User::with_fake_agent();
+    let (mcp, folder) = session(&user);
+    std::fs::write(folder.join("more.txt"), "more\n").unwrap();
+    user.git(&folder, &["add", "."]);
+    user.git(&folder, &["commit", "--quiet", "-m", "more"]);
+    let remote = user.path("remotes/app.git");
+    let before = user.git_output(&remote, &["rev-parse", "main"]);
+    // git skips `pushInsteadOf` for a remote that has a push URL of its own.
+    user.git(
+        &folder,
+        &["config", "remote.origin.pushurl", remote.to_str().unwrap()],
+    );
+
+    let text = refused(mcp.call("commands_run", json!({"line": "git push origin main"})));
+
+    assert!(text.contains("remote.origin.pushurl"), "{text}");
+    assert!(text.contains("git push is refused for agents"), "{text}");
+    assert!(!text.contains(remote.to_str().unwrap()), "{text}");
+    assert_eq!(user.git_output(&remote, &["rev-parse", "main"]), before);
+    // Any run of git is refused there, whatever its arguments: they are the gate's to read (#6).
+    refused(mcp.call("commands_run", json!({"line": "git status"})));
+    // A program that is not git is not.
+    let answer = ok(mcp.call("commands_run", json!({"line": "true"})));
+    assert!(answer.contains("exited with code 0"), "{answer}");
+}
+
+#[test]
 fn gh_token_is_empty_in_a_run() {
     let user = User::with_fake_agent()
         .with_env("GH_TOKEN", "ghp_fakefakefakefakefakefakefake0001")

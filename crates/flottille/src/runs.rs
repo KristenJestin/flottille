@@ -3,7 +3,8 @@
 //!
 //! A run is a line split without a shell and spawned in a process group of its own, with the
 //! place's variables and an environment that keeps forges out of reach: no forge token, the forge
-//! command lines' configuration in an empty folder, and `git push` sent nowhere. The call waits
+//! command lines' configuration in an empty folder, and `git push` made to fail in the common case
+//! (the rest is the gate's, #6). The call waits
 //! for its end a while, then answers that it keeps going; its output is kept (its end), masked
 //! when shown or stored.
 
@@ -28,6 +29,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agents::{signal_group, start_time};
 use crate::daemon::Daemon;
 use crate::gate::{self, Verdict};
+use crate::git::{self, Class};
 use crate::mcp::{Outcome, arguments, masked};
 use crate::place::{Place, Resolved};
 use crate::projects;
@@ -293,6 +295,20 @@ pub async fn commands_run(
     {
         return Outcome::Done(describe(daemon, &going.run.id, None, None, true));
     }
+    // Read at the spawn: a push URL added since is seen.
+    if words[0] == "git" {
+        match push_url_remote(&folder.path).await {
+            Ok(None) => {}
+            Ok(Some(remote)) => {
+                return Outcome::Refused(format!(
+                    "refused: this repository has a push URL (remote.{remote}.pushurl) and git push \
+                     is refused for agents: Flottille cannot send a push URL nowhere, so no git \
+                     command runs here until the push URL is removed from the repository's configuration"
+                ));
+            }
+            Err(why) => return Outcome::Failed(why),
+        }
+    }
     let env = match environment(daemon, place, &repository) {
         Ok(env) => env,
         Err(why) => return Outcome::Failed(why),
@@ -331,6 +347,32 @@ pub async fn commands_run(
         }
     }
     Outcome::Done(describe(daemon, &id, None, None, true))
+}
+
+/// A remote of the repository in `folder` that has a push URL of its own, if any. Git skips
+/// `pushInsteadOf` for it, so the environment of a run cannot send its pushes nowhere; the URL
+/// itself is never shown, it may hold a password.
+async fn push_url_remote(folder: &Path) -> Result<Option<String>, String> {
+    let output = git::run(
+        folder,
+        &["config", "--get-regexp", r"^remote\..*\.pushurl$"],
+        Class::Read,
+    )
+    .await?;
+    if !output.success && !output.stderr.trim().is_empty() {
+        return Err(format!(
+            "cannot check the repository's push URLs: {}",
+            output.stderr.trim()
+        ));
+    }
+    Ok(output.stdout.lines().find_map(|line| {
+        let key = line.split_whitespace().next()?;
+        Some(
+            key.strip_prefix("remote.")?
+                .strip_suffix(".pushurl")?
+                .to_owned(),
+        )
+    }))
 }
 
 /// Ends when the run has ended.
@@ -375,8 +417,8 @@ fn environment(
     Ok(env)
 }
 
-/// No forge token, the forge command lines' configuration in `empty`, and every push sent to a
-/// path that is no remote (`url.<nowhere>.pushInsteadOf` of every URL).
+/// No forge token, the forge command lines' configuration in `empty`, and every push URL
+/// rewritten to a path that is no remote (`url.<nowhere>.pushInsteadOf` of every URL).
 fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path) {
     for name in FORGE_TOKENS {
         env.insert(name.into(), OsString::new());
