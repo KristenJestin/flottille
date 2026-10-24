@@ -153,8 +153,7 @@ fn the_exact_claude_code_options_are_sent() {
         "agent_stop",
         "report",
         "ask_user",
-        "approval_forward",
-        "approval_deny",
+        "approval_answer",
     ]
     .map(|tool| format!("mcp__flottille__{tool}"));
     let opened = &user.received_requests("session/new")[0]["params"];

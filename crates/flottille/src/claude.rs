@@ -29,10 +29,10 @@ const TOOL_WAIT_MS: &str = "600000";
 /// passed on.
 const SCRUBBED: [&str; 2] = ["CLAUDE_CODE_PROMPT_CACHE_TTL", "FORCE_PROMPT_CACHING_5M"];
 
-/// The tools of an agent the user starts, in their fixed order (`docs/design.md` §4.3). The MCP
+/// The names of the tools every agent has, in their fixed order (`docs/design.md` §4.3). The MCP
 /// server that serves them comes with the tools themselves; their names are frozen in each agent
 /// already, because the prompt cache depends on them.
-const ROOT_TOOLS: [&str; 18] = [
+const FILE_AND_COMMAND_TOOLS: [&str; 9] = [
     "fs_read",
     "fs_list",
     "search",
@@ -42,21 +42,30 @@ const ROOT_TOOLS: [&str; 18] = [
     "commands_run",
     "commands_output",
     "commands_stop",
+];
+const AGENT_TOOLS: [&str; 5] = [
     "agent_launch",
     "agent_send",
     "agent_status",
     "agent_read",
     "agent_stop",
-    "report",
-    "ask_user",
-    "approval_forward",
-    "approval_deny",
 ];
 
-/// The exact tool names a root agent is allowed, as Claude names them.
-pub fn root_tools() -> Vec<String> {
-    ROOT_TOOLS
-        .iter()
+/// The exact tool names an agent gets, as Claude names them: what it can do decides (`docs/design.md`
+/// §4.3, `docs/reference/mcp.md` §4 rule 9). A root asks the user, a child its parent; an agent at
+/// the depth limit cannot have children, so it has no `agent_*` tool and nobody's request to answer.
+pub fn tools(root: bool, at_depth_limit: bool) -> Vec<String> {
+    let mut names: Vec<&str> = FILE_AND_COMMAND_TOOLS.to_vec();
+    if !at_depth_limit {
+        names.extend(AGENT_TOOLS);
+    }
+    names.push("report");
+    names.push(if root { "ask_user" } else { "ask_parent" });
+    if !at_depth_limit {
+        names.push("approval_answer");
+    }
+    names
+        .into_iter()
         .map(|tool| format!("mcp__{MCP_SERVER}__{tool}"))
         .collect()
 }
@@ -324,6 +333,57 @@ fn first_version(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn short(tools: Vec<String>) -> Vec<String> {
+        tools
+            .into_iter()
+            .map(|t| t.strip_prefix("mcp__flottille__").unwrap().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_root_agent_gets_ask_user_the_agent_tools_and_approval_answer() {
+        let tools = short(tools(true, false));
+        assert_eq!(
+            tools,
+            [
+                "fs_read",
+                "fs_list",
+                "search",
+                "fs_write",
+                "fs_edit",
+                "commands_list",
+                "commands_run",
+                "commands_output",
+                "commands_stop",
+                "agent_launch",
+                "agent_send",
+                "agent_status",
+                "agent_read",
+                "agent_stop",
+                "report",
+                "ask_user",
+                "approval_answer",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_tools_follow_what_the_agent_can_do() {
+        let leaf = short(tools(false, true));
+        assert_eq!(leaf.len(), 11);
+        assert!(leaf.contains(&"ask_parent".to_owned()));
+        assert!(
+            !leaf
+                .iter()
+                .any(|t| t.starts_with("agent_") || t == "ask_user")
+        );
+        assert!(!leaf.contains(&"approval_answer".to_owned()));
+        let lead_child = short(tools(false, false));
+        assert!(lead_child.contains(&"ask_parent".to_owned()));
+        assert!(lead_child.contains(&"approval_answer".to_owned()));
+        assert!(!lead_child.contains(&"ask_user".to_owned()));
+    }
 
     #[test]
     fn a_version_is_the_first_number_of_three_parts() {

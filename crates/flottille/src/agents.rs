@@ -161,7 +161,8 @@ fn run(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
     // Refused now rather than failed later: the user can act on it before anything is written.
     claude::launch(&daemon.paths).map_err(Failure::refused)?;
     let now = now_ms();
-    let tools = claude::root_tools();
+    // Roots are the only agents until the tree comes: the tools of one that can have children.
+    let tools = claude::tools(true, false);
     let agent = Agent {
         id: new_id().map_err(|e| Failure::new("unavailable", e.to_string()))?,
         provider: "claude".into(),

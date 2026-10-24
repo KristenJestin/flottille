@@ -100,11 +100,14 @@ adapter passes to the Claude Agent SDK over its own defaults:
 
 - `tools: []`: no built-in tool at all, so no shell, no file tool, no native sub-agent.
 - `allowedTools`: the exact names of the agent's Flottille tools (never a wildcard), so that
-  Claude never asks for them. A root agent's are, in this order, `fs_read`, `fs_list`, `search`,
-  `fs_write`, `fs_edit`, `commands_list`, `commands_run`, `commands_output`, `commands_stop`,
-  `agent_launch`, `agent_send`, `agent_status`, `agent_read`, `agent_stop`, `report`,
-  `ask_user`, `approval_forward`, `approval_deny`, each prefixed `mcp__flottille__`. The list is
-  frozen in the agent when it is created (the prompt cache depends on it).
+  Claude never asks for them, each prefixed `mcp__flottille__`. The list depends on what the agent
+  can do (`docs/design.md` §4.3, `docs/reference/mcp.md` §4 rule 9). Every agent has `fs_read`,
+  `fs_list`, `search`, `fs_write`, `fs_edit`, `commands_list`, `commands_run`, `commands_output`,
+  `commands_stop` and `report`; one that can have children also `agent_launch`, `agent_send`,
+  `agent_status`, `agent_read`, `agent_stop` and `approval_answer`; a root `ask_user`, a child
+  `ask_parent`. Roots are the only agents until the tree comes, so today's agents get, in this
+  order, the first nine, the five `agent_*`, `report`, `ask_user`, `approval_answer` (17). The
+  list is frozen in the agent when it is created (the prompt cache depends on it).
 - `settingSources: []`: the adapter's own default loads the user's settings, hooks, plugins,
   skills and instruction files; this overrides it.
 - `strictMcpConfig`: only the MCP servers given with the session.
