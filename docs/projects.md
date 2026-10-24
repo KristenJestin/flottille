@@ -106,7 +106,10 @@ that long, in place of the project's `run_time_limit` (30 minutes unless the fil
 
 Paths are relative to the repository (or to the folder) and stay inside it. The recipe is
 snapshotted when a workspace is created, with the variables: editing the file later never
-changes the steps of a workspace that exists.
+changes the steps nor the variables of a workspace that exists. This is deliberate: a workspace
+is prepared, resumed and used by the recipe and the variables it was made with, so a change to
+the file cannot alter a preparation under way nor the environment of a piece of work already
+started. A workspace that should follow the new file is a new workspace.
 
 `crates/flottille-core/tests/fixtures/multi-repo-case.toml` describes the project of
 `docs/reference/multi-repo-case.md` (a folder that is a repository and holds six others, with
