@@ -12,6 +12,10 @@ pub struct Paths {
     pub runtime: PathBuf,
     /// `$XDG_STATE_HOME/flottille`: the store and the daemon's log.
     pub state: PathBuf,
+    /// `$XDG_CONFIG_HOME/flottille`: the configuration the user may edit by hand.
+    pub config: PathBuf,
+    /// `$XDG_DATA_HOME/flottille`: what Flottille makes for the user, such as workspaces.
+    pub data: PathBuf,
 }
 
 impl Paths {
@@ -32,19 +36,22 @@ impl Paths {
                     .into(),
             )
         })?;
-        let state = match absolute("XDG_STATE_HOME") {
-            Some(state) => state,
+        // The specification's fallback for every other base directory: a folder of the home.
+        let beside_home = |name: &str, fallback: &str| match absolute(name) {
+            Some(base) => Ok(base),
             None => absolute("HOME")
+                .map(|home| home.join(fallback))
                 .ok_or_else(|| {
-                    Error::Refused(
-                        "neither XDG_STATE_HOME nor HOME is set to an absolute path".into(),
-                    )
-                })?
-                .join(".local/state"),
+                    Error::Refused(format!(
+                        "neither {name} nor HOME is set to an absolute path"
+                    ))
+                }),
         };
         Ok(Paths {
             runtime: runtime.join("flottille"),
-            state: state.join("flottille"),
+            state: beside_home("XDG_STATE_HOME", ".local/state")?.join("flottille"),
+            config: beside_home("XDG_CONFIG_HOME", ".config")?.join("flottille"),
+            data: beside_home("XDG_DATA_HOME", ".local/share")?.join("flottille"),
         })
     }
 
@@ -62,6 +69,11 @@ impl Paths {
 
     pub fn log(&self) -> PathBuf {
         self.state.join("daemon.log")
+    }
+
+    /// One TOML file per project.
+    pub fn projects(&self) -> PathBuf {
+        self.config.join("projects")
     }
 }
 
@@ -124,6 +136,18 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(paths.state, Path::new("/h/.local/state/flottille"));
+    }
+
+    #[test]
+    fn the_configuration_and_the_data_come_from_xdg_or_the_home() {
+        let paths = Paths::from_vars(vars(&[
+            ("XDG_RUNTIME_DIR", "/run/u"),
+            ("XDG_CONFIG_HOME", "/c"),
+            ("HOME", "/h"),
+        ]))
+        .unwrap();
+        assert_eq!(paths.projects(), Path::new("/c/flottille/projects"));
+        assert_eq!(paths.data, Path::new("/h/.local/share/flottille"));
     }
 
     #[test]

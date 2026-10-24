@@ -1,0 +1,68 @@
+# The shape of docs/reference/multi-repo-case.md, with invented names: one folder that is a
+# repository itself and holds six others, two of them on `develop`, libraries used by their
+# consumers, and a test harness that compiles against none of them.
+folder = "/work/app"
+workspaces_root = "/work/app-work"
+default_repositories = "all"
+max_children = 3
+never = ["git push", "git reset --hard", "git stash", "npm publish"]
+
+[[repositories]]
+path = "."
+
+[[repositories]]
+path = "app-web"
+base = ["develop", "main"]
+depends_on = ["lib-app", "lib-core"]
+
+[[repositories]]
+path = "app-api"
+base = ["develop", "main"]
+depends_on = ["lib-api", "lib-core"]
+
+[[repositories]]
+path = "lib-core"
+
+[[repositories]]
+path = "lib-app"
+depends_on = ["lib-core"]
+
+[[repositories]]
+path = "lib-api"
+depends_on = ["lib-core"]
+
+[[repositories]]
+path = "e2e-tests"
+
+[variables]
+PACKAGE_STORE = "{workspace.path}/.store"
+COMPOSE_PROJECT_NAME = "app-{workspace}"
+E2E_WEB_DIR = "{workspace.path}/app-web"
+E2E_API_DIR = "{workspace.path}/app-api"
+
+[commands."api:dev"]
+line = "npm run start:dev"
+repository = "app-api"
+serve = true
+
+[commands."front:dev"]
+line = "npm run start"
+repository = "app-web"
+serve = true
+
+[commands.test]
+line = "npm test"
+repository = "app-api"
+check = true
+read_only = true
+
+[commands.lint]
+line = "npm run lint"
+repository = "app-web"
+check = true
+read_only = true
+
+[commands.generate-data]
+line = "npm run generate-data"
+repository = "app-api"
+ask_before_running = true

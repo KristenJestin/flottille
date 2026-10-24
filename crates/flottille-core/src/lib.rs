@@ -2,6 +2,7 @@
 
 pub mod error;
 pub mod paths;
+pub mod project;
 pub mod protocol;
 pub mod store;
 
