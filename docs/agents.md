@@ -71,9 +71,11 @@ installed, Node or `claude` is not on `PATH`.
 - **A death**: a process that ends without being let go fails the agent and is published
   (`agent.died`); nothing starts it again at this layer.
 - **Orphans**: each process's pid and start time are kept in the store while it runs. A daemon
-  starting kills the process groups a previous one left behind (a crash), only when the process
-  with that pid is still the one it started, then forgets them. An agent that was starting or
-  working when its daemon went is idle again (`agent.released`, reason `restart`).
+  starting kills the process groups a previous one left behind (a crash), only when the group's
+  leader is alive with the start time recorded: never a stranger that took the pid since, and not
+  the members of a group whose leader is gone (nothing says whose they are). Then it forgets all
+  the rows. An agent that was starting or working when its daemon went is idle again
+  (`agent.released`, reason `restart`).
 - **Daemon stop**: every agent's process is let go. One whose task has not finished within 4 s
   (stuck while its agent opens a session, say) has its process group killed, so that the daemon
   goes with nothing of its own running.
@@ -151,7 +153,10 @@ cloud provider's own variables (`CLAUDE_CODE_USE_BEDROCK`, for one) does not rea
 
 Every update the agent sends that Flottille keeps is an event of the agent (`docs/events.md`):
 stored, numbered, streamed, and read back by `agent.show`. Each carries `replay`: true while a
-`session/load` replays the history, which is then neither a sign of activity nor new. The agent's
+`session/load` replays the history, which is then neither a sign of activity nor new. Those
+events are stored all the same, even when the history they replay is already held: whether to
+drop the ones already held is for the tree work to decide (#7, `docs/reference/hemera.md`
+§8.7). The agent's
 `active_at` is the time of its last update outside a replay. Texts are cut at 64 KiB and say how
 much was cut (`‹+N chars›`); secrets of the daemon's environment are masked in everything kept.
 
