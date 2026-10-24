@@ -39,6 +39,7 @@ PACKAGE_STORE = "{workspace.path}/.store"
 COMPOSE_PROJECT_NAME = "app-{workspace}"
 E2E_WEB_DIR = "{workspace.path}/app-web"
 E2E_API_DIR = "{workspace.path}/app-api"
+PATH = "{workspace.path}/.bin"
 
 [commands."api:dev"]
 line = "npm run start:dev"
@@ -66,3 +67,17 @@ read_only = true
 line = "npm run generate-data"
 repository = "app-api"
 ask_before_running = true
+
+# Ignored files of each repository, from the main checkout, never over a file already there.
+[[recipe]]
+copy = [".env", ".env.*"]
+for_each_repository = true
+
+# The shared instructions and agent settings of the root folder, never `.git` nor `.gitignore`.
+[[recipe]]
+root_entries = true
+
+# Libraries before their consumers.
+[[recipe]]
+run = "npm install"
+for_each_repository = true

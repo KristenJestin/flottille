@@ -57,14 +57,52 @@ serve = true                          # keeps running
 check = false                         # tests, lint
 read_only = false                     # changes nothing
 ask_before_running = false            # held for approval each time an agent runs it
+
+[[recipe]]                            # the steps that prepare a new workspace, in order
+copy = [".env", ".env.*"]             # globs, copied from the main checkout, never over a file
+for_each_repository = true            # in each repository of the workspace, leaves first
+
+[[recipe]]
+root_entries = true                   # the project folder's other entries, linked
+
+[[recipe]]
+run = "npm install"                   # one line, its words templated, never run by a shell
+for_each_repository = true
 ```
 
 The repositories are put in dependency order (a repository after those it depends on; among those
 that are ready, the first of the file first) by `Project::in_dependency_order()`, which preparing
 a workspace and merging use.
 
-The templates of the variables are read when workspaces exist (`docs/design.md` §6.2): the
-configuration only checks that the names of the variables are those of environment variables.
+The variables are templates filled for each workspace (`docs/workspaces.md`): the configuration
+checks that their names are those of environment variables and that their templates name only
+`{workspace}`, `{workspace.path}`, `{project}`, `{branch}` and `{repository}` (`{{` and `}}` are a
+literal brace).
+
+## The recipe
+
+`[[recipe]]` lists the steps that prepare a new workspace, done in the order of the file
+(`docs/workspaces.md` says how they run). Each step holds exactly one of:
+
+| Key | The step |
+|---|---|
+| `copy = ["<glob>", …]` | Copies the files that match from the main checkout into the workspace, a folder with what it holds, **never over a file already there**: for ignored files such as `.env`. `*` and `?` match within one part of a path, and only a pattern starting with `.` matches a hidden name. A pattern that matches nothing copies nothing. |
+| `link = "<path>"` | Links one entry of the main checkout into the workspace, unless something is there already. |
+| `root_entries = true` | Links into the workspace folder every top-level entry of the project folder that is neither a repository (nor holds one), nor `.git`, nor `.gitignore`, nor already there. |
+| `run = "<line>"` | Runs one command line, without a shell (the same rules as the agents' commands: a line holding shell syntax is refused). Each word is a template. |
+| `command = "<name>"` | Runs a command of the catalogue. |
+
+And, for every kind but `root_entries`, where it is done:
+
+| Key | |
+|---|---|
+| `repository = "<path>"` | In that repository; a step whose repository the workspace does not take is skipped. |
+| `for_each_repository = true` | Once in each repository of the workspace, in dependency order (leaves first), `{repository}` being its path. |
+| neither | In the workspace folder, `{repository}` being `.`; a `command` runs where the catalogue says. |
+
+Paths are relative to the repository (or to the folder) and stay inside it. The recipe is
+snapshotted when a workspace is created, with the variables: editing the file later never
+changes the steps of a workspace that exists.
 
 `crates/flottille-core/tests/fixtures/multi-repo-case.toml` describes the project of
 `docs/reference/multi-repo-case.md` (a folder that is a repository and holds six others, with
