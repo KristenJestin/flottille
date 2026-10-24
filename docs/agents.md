@@ -62,8 +62,9 @@ installed, Node or `claude` is not on `PATH`.
   died during it. Prompts sent while a turn runs wait their turn.
 - **A cancel** sends `session/cancel` while a turn runs; the turn then ends `cancelled`.
 - **The agent's own permission prompts** (`session/request_permission`) are answered at once:
-  a tool of the agent's own list (`_meta.claudeCode.toolName`, else the call's title) is allowed
-  once, anything else is rejected. In bare mode they should almost never come.
+  a tool of the agent's own list, named by `_meta.claudeCode.toolName`, is allowed once; anything
+  else is rejected, a request with no tool name included (its title is never taken for one: the
+  model can shape it). In bare mode they should almost never come.
 - **Idle release**: a process with no turn running and nothing waiting for 5 minutes is let go
   (stopped: `SIGTERM` to its group, `SIGKILL` 2 s later); the next prompt starts it again and
   resumes or loads its session.

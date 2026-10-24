@@ -374,12 +374,13 @@ fn answer_permission(
     tools: &[String],
 ) -> (String, RequestPermissionOutcome, bool) {
     let call = serde_json::to_value(&request.tool_call).unwrap_or_default();
-    let tool = call["_meta"]["claudeCode"]["toolName"]
-        .as_str()
+    // Only the tool name the adapter states counts: a title is text the model can shape.
+    let named = call["_meta"]["claudeCode"]["toolName"].as_str();
+    let tool = named
         .or(call["title"].as_str())
         .unwrap_or_default()
         .to_owned();
-    let allowed = tools.contains(&tool);
+    let allowed = named.is_some_and(|name| tools.iter().any(|tool| tool == name));
     let kinds: &[PermissionOptionKind] = if allowed {
         &[PermissionOptionKind::AllowOnce]
     } else {

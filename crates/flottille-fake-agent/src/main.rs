@@ -44,6 +44,7 @@
 //! | `{"usage": {"used": 190000, "size": 200000}}` | a `usage_update` |
 //! | `{"compaction": true}` | a completed tool call carrying `_meta.jetbrains.air.contextCompaction`, as the Claude adapter reports a compaction |
 //! | `{"permission": {"tool": "Bash", "title": "ls"}}` | a `session/request_permission` for that tool, answer recorded |
+//! | `{"permission": {"title": "x", "untyped": true}}` | the same with no `_meta.claudeCode.toolName`: a request that has only a title |
 //! | `{"mcp": {"tool": "fs_list", "arguments": {}}}` | calls the tool on the session's first HTTP MCP server (initialize, then `tools/call`), as a tool call; the answer recorded |
 //! | `{"wait": 500}` | waits that many milliseconds; a cancel ends the turn `cancelled` |
 //! | `{"hang": true}` | goes silent until the turn is cancelled |
@@ -336,17 +337,23 @@ impl Agent {
         let id = format!("permission-{}", self.next_request);
         self.next_request += 1;
         let tool = asked["tool"].as_str().unwrap_or("Bash");
-        self.send(json!({"jsonrpc": "2.0", "id": id, "method": "session/request_permission",
+        let mut call = json!({"toolCallId": format!("call-{id}"),
+            "title": asked["title"].as_str().unwrap_or(tool)});
+        if asked["untyped"] != true {
+            call["_meta"] = json!({"claudeCode": {"toolName": tool}});
+        }
+        self.send(
+            json!({"jsonrpc": "2.0", "id": id, "method": "session/request_permission",
             "params": {
                 "sessionId": session,
-                "toolCall": {"toolCallId": format!("call-{id}"), "title": asked["title"].as_str().unwrap_or(tool),
-                    "_meta": {"claudeCode": {"toolName": tool}}},
+                "toolCall": call,
                 "options": [
                     {"optionId": "allow", "name": "Allow", "kind": "allow_once"},
                     {"optionId": "allow-always", "name": "Always allow", "kind": "allow_always"},
                     {"optionId": "reject", "name": "Reject", "kind": "reject_once"},
                 ],
-            }}));
+            }}),
+        );
         loop {
             match answered.recv_timeout(Duration::from_secs(30)) {
                 Ok(answer) if answer["id"] == id.as_str() => {

@@ -359,6 +359,33 @@ fn a_permission_request_for_a_tool_that_is_not_flottille_s_is_rejected() {
 }
 
 #[test]
+fn a_permission_request_with_only_a_title_shaped_like_a_flottille_tool_is_rejected() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [{"when": "ask", "do": [
+        {"permission": {"title": "mcp__flottille__fs_list", "untyped": true}}
+    ]}]}));
+    project(&user);
+    let (id, after) = run(&user, json!({"message": "ask"}));
+
+    let events = events_until(&user, &id, after, "agent.turn_ended");
+
+    let answers: Vec<Value> = user
+        .received()
+        .into_iter()
+        .filter_map(|e| e.get("permission").cloned())
+        .collect();
+    assert_eq!(
+        answers,
+        [json!({"outcome": {"outcome": "selected", "optionId": "reject"}})]
+    );
+    let answered = events
+        .iter()
+        .find(|e| e["name"] == "agent.permission_answered")
+        .unwrap();
+    assert_eq!(answered["data"]["allowed"], false);
+}
+
+#[test]
 fn a_death_is_detected_and_published() {
     let user = User::with_fake_agent();
     user.fake_script(json!({"turns": [{"when": "die", "do": [{"say": "Bye"}, {"die": 3}]}]}));
