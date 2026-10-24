@@ -109,7 +109,7 @@ git config core.hooksPath .githooks     # once per clone: the commit-msg and pre
 
 | Who | What |
 |---|---|
-| The maintainer | decides what is built, tries each tranche on their machine, and merges what they have not delegated |
+| The maintainer | decides what is built, tries each milestone on their machine, and merges what they have not delegated |
 | The lead agent | turns the maintainer's decisions into issues, launches the developing agents, reviews their work, keeps the tracker honest, and never hides a failure |
 | Developing agents | implement one issue each: the failing test first, then the code, the verification and a pull request; they never merge |
 | CI | `verify`, `commit-messages` and `shape` on every pull request |
@@ -119,8 +119,8 @@ git config core.hooksPath .githooks     # once per clone: the commit-msg and pre
 - **Issues are the tickets, and a ticket stands alone.** It holds the what, the where, the "how
   to verify" and the base branch, with no local path. If it lacks one of them, ask rather than
   guess.
-- The plan is cut into **tranches**, labels `tranche:1`, `tranche:2`…, beside `type:*` and
-  `area:*`. A tranche ends on something the maintainer can use, and they accept it on their
+- The plan is cut into **milestones** (GitHub milestones), beside the labels `type:*` and
+  `area:*`. A milestone ends on something the maintainer can use, and they accept it on their
   machine.
 - **`dev` is the integration branch** and the default branch: a branch starts from
   `origin/dev` and its pull request targets it. `main` holds released versions.

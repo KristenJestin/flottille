@@ -97,7 +97,7 @@ script, no environment file, no metadata file.
   commands, remove the worktrees, delete the local branches, refresh the main folder, remove the
   group's folder last.
 
-**What Flottille provides later** (tranche 3): these as **procedures** of the project, with the
+**What Flottille provides later** (milestone "Forges and tickets"): these as **procedures** of the project, with the
 authorization each run grants written in the procedure and shown before it runs, on top of
 forge and tracker support (Bitbucket and GitHub, Jira read-only).
 
