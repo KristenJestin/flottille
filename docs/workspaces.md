@@ -154,5 +154,6 @@ and that `git worktree list` no longer lists it, then forgets the workspace. Its
 Always the user's own `git`, spawned without a shell, with `-C <folder>` and `--end-of-options`
 before refs and paths, `GIT_TERMINAL_PROMPT=0` and `GCM_INTERACTIVE=never` so that nothing waits
 for a password. A call is cut after 30 s (status, rev-parse, log, the fetch) or 30 min (worktree
-add, remove, prune), killed with its process group and waited for. Git and the steps never run
-inside a store transaction, nor on the daemon's own thread.
+add, remove, prune), or as soon as it writes more than 32 MB on its output or its errors, killed
+with its process group and waited for. Git and the steps never run inside a store transaction,
+nor on the daemon's own thread.
