@@ -786,6 +786,43 @@ fn a_long_command_answers_after_its_timeout_with_it_keeps_going_and_stop_ends_it
     );
 }
 
+/// A run that ignores `SIGTERM`, as its group inherits the ignoring: only the kill ends it.
+fn stubborn(seconds: u32) -> Value {
+    json!({"line": format!("sh -c 'trap \"\" TERM; echo $$ > pid-{seconds}; sleep {seconds}'"),
+        "timeout": 1})
+}
+
+#[test]
+fn commands_stop_kills_after_the_grace_a_run_that_ignores_sigterm() {
+    let user = User::with_fake_agent();
+    let (mcp, folder) = session(&user);
+    let run = run_id(&ok(mcp.call("commands_run", stubborn(300))));
+    eventually("the shell's pid", || folder.join("pid-300").exists());
+    let pid: u64 = std::fs::read_to_string(folder.join("pid-300"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(alive(pid));
+
+    let asked = Instant::now();
+    let stopped = ok(mcp.call("commands_stop", json!({"run": run})));
+
+    // It answers once the run ended: not before the 5 s of grace, since the term was ignored.
+    assert!(
+        asked.elapsed() >= Duration::from_secs(4),
+        "{:?}",
+        asked.elapsed()
+    );
+    assert!(
+        asked.elapsed() < Duration::from_secs(15),
+        "{:?}",
+        asked.elapsed()
+    );
+    assert!(stopped.contains("was stopped"), "{stopped}");
+    assert!(!alive(pid));
+}
+
 #[test]
 fn a_retry_with_the_same_call_key_does_not_run_twice() {
     let user = User::with_fake_agent();
