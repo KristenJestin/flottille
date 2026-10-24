@@ -8,6 +8,7 @@ use serde_json::Value;
 
 use crate::agent::{Agent, AgentState, Choices};
 use crate::protocol::Event;
+use crate::run::{Run, RunState};
 use crate::workspace::{Action, Failure, Step, StepState, Workspace};
 use crate::{Error, Result};
 
@@ -93,7 +94,41 @@ const MIGRATIONS: &[&str] = &[
         agent   TEXT NOT NULL
     ) STRICT;
 ",
+    "
+    -- What each agent's session read (`docs/tools.md`): the fingerprint of every file it read or
+    -- wrote, so that it never writes over a change it has not seen, across restarts too.
+    CREATE TABLE session_files (
+        agent  TEXT NOT NULL REFERENCES agents (id) ON DELETE CASCADE,
+        path   TEXT NOT NULL,
+        sha256 TEXT NOT NULL,
+        PRIMARY KEY (agent, path)
+    ) STRICT;
+    -- The commands agents run, and the end of their output once they ended.
+    CREATE TABLE runs (
+        id         TEXT PRIMARY KEY,
+        agent      TEXT NOT NULL REFERENCES agents (id) ON DELETE CASCADE,
+        name       TEXT,
+        line       TEXT NOT NULL,
+        folder     TEXT NOT NULL,
+        state      TEXT NOT NULL,
+        exit_code  INTEGER,
+        signal     INTEGER,
+        started_at INTEGER NOT NULL,
+        ended_at   INTEGER,
+        output     TEXT NOT NULL
+    ) STRICT;
+    -- The process group of each run going on, as for the agents' processes: a daemon started
+    -- after a crash kills its own leftovers and never a process that took the pid since.
+    CREATE TABLE run_processes (
+        pid     INTEGER PRIMARY KEY,
+        started INTEGER NOT NULL,
+        run     TEXT NOT NULL
+    ) STRICT;
+",
 ];
+
+const RUN_COLUMNS: &str =
+    "id, agent, name, line, folder, state, exit_code, signal, started_at, ended_at, output";
 
 const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, state, state_reason, \
     created_at, updated_at, active_at, ended_at, chosen_model, chosen_effort, chosen_mode, \
@@ -509,6 +544,122 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The fingerprint of the file as the agent last read or wrote it.
+    pub fn file_read(&self, agent: &str, path: &str) -> Result<Option<String>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT sha256 FROM session_files WHERE agent = ?1 AND path = ?2",
+                params![agent, path],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn set_file_read(&self, agent: &str, path: &str, sha256: &str) -> Result<()> {
+        self.connection.execute(
+            "INSERT OR REPLACE INTO session_files (agent, path, sha256) VALUES (?1, ?2, ?3)",
+            params![agent, path, sha256],
+        )?;
+        Ok(())
+    }
+
+    /// Writes a new run with its event, in one transaction.
+    pub fn create_run(&mut self, run: &Run, event: (&str, Value)) -> Result<Event> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            &format!(
+                "INSERT INTO runs ({RUN_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, \
+                 ?10, ?11)"
+            ),
+            params![
+                run.id,
+                run.agent,
+                run.name,
+                run.line,
+                path_text(&run.folder)?,
+                run.state.as_str(),
+                run.exit_code,
+                run.signal,
+                run.started_at,
+                run.ended_at,
+                run.output,
+            ],
+        )?;
+        let event = append_event(&transaction, event.0, event.1)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    /// Ends a running run, with its output and its event, in one transaction; `None` when it had
+    /// already ended.
+    pub fn end_run(
+        &mut self,
+        id: &str,
+        state: RunState,
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+        output: &str,
+        event: (&str, Value),
+    ) -> Result<Option<Event>> {
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE runs SET state = ?2, exit_code = ?3, signal = ?4, output = ?5, ended_at = ?6 \
+             WHERE id = ?1 AND state = 'running'",
+            params![id, state.as_str(), exit_code, signal, output, now_ms()],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let event = append_event(&transaction, event.0, event.1)?;
+        transaction.commit()?;
+        Ok(Some(event))
+    }
+
+    pub fn run(&self, id: &str) -> Result<Option<Run>> {
+        let mut statement = self
+            .connection
+            .prepare_cached(&format!("SELECT {RUN_COLUMNS} FROM runs WHERE id = ?1"))?;
+        let run = statement
+            .query_row(params![id], run_row)
+            .optional()?
+            .transpose()?;
+        Ok(run)
+    }
+
+    /// The runs still marked running, the oldest first.
+    pub fn running_runs(&self) -> Result<Vec<Run>> {
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {RUN_COLUMNS} FROM runs WHERE state = 'running' ORDER BY started_at, id"
+        ))?;
+        let rows = statement.query_map([], run_row)?;
+        rows.map(|row| row?).collect()
+    }
+
+    /// A run's process group started: its leader's pid and start time.
+    pub fn add_run_process(&self, pid: u32, started: u64, run: &str) -> Result<()> {
+        self.connection.execute(
+            "INSERT OR REPLACE INTO run_processes (pid, started, run) VALUES (?1, ?2, ?3)",
+            params![pid, started, run],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_run_process(&self, pid: u32) -> Result<()> {
+        self.connection
+            .execute("DELETE FROM run_processes WHERE pid = ?1", params![pid])?;
+        Ok(())
+    }
+
+    /// Every run process recorded, each `(pid, start time)`.
+    pub fn run_processes(&self) -> Result<Vec<(u32, u64)>> {
+        let mut statement = self
+            .connection
+            .prepare_cached("SELECT pid, started FROM run_processes ORDER BY pid")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// At most `limit` events numbered after `after`, oldest first.
     pub fn events_after(&self, after: u64, limit: usize) -> Result<Vec<Event>> {
         let mut statement = self.connection.prepare_cached(
@@ -570,6 +721,29 @@ fn event_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Event>> {
             data,
         })
         .map_err(Error::from))
+}
+
+fn run_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Run>> {
+    let state: String = row.get(5)?;
+    let folder: String = row.get(4)?;
+    let Some(state) = RunState::parse(&state) else {
+        return Ok(Err(Error::Refused(format!(
+            "the store holds a run in an unknown state {state}"
+        ))));
+    };
+    Ok(Ok(Run {
+        id: row.get(0)?,
+        agent: row.get(1)?,
+        name: row.get(2)?,
+        line: row.get(3)?,
+        folder: folder.into(),
+        state,
+        exit_code: row.get(6)?,
+        signal: row.get(7)?,
+        started_at: row.get(8)?,
+        ended_at: row.get(9)?,
+        output: row.get(10)?,
+    }))
 }
 
 fn agent_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Agent>> {
@@ -1025,6 +1199,106 @@ mod tests {
         assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len());
         assert_eq!(store.workspaces(None).unwrap().len(), 1);
         assert!(store.agents().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_store_of_the_agents_schema_keeps_them_and_gains_the_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let old = Connection::open(&path).unwrap();
+        for migration in &MIGRATIONS[..3] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.pragma_update(None, "user_version", 3).unwrap();
+        drop(old);
+        let mut old = Store {
+            connection: Connection::open(&path).unwrap(),
+        };
+        old.create_agent(&an_agent(), ("agent.created", json!({})))
+            .unwrap();
+        drop(old);
+
+        let store = Store::open(&path).unwrap();
+
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len());
+        assert_eq!(store.agents().unwrap().len(), 1);
+        assert!(store.running_runs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_file_read_keeps_its_fingerprint_per_agent() {
+        let mut store = Store::open_in_memory().unwrap();
+        for id in ["a", "b"] {
+            let mut agent = an_agent();
+            agent.id = id.into();
+            store
+                .create_agent(&agent, ("agent.created", json!({})))
+                .unwrap();
+        }
+        store.set_file_read("a", "/w/f", "one").unwrap();
+        store.set_file_read("a", "/w/f", "two").unwrap();
+
+        assert_eq!(
+            store.file_read("a", "/w/f").unwrap().as_deref(),
+            Some("two")
+        );
+        assert_eq!(store.file_read("b", "/w/f").unwrap(), None);
+    }
+
+    #[test]
+    fn a_run_is_written_ended_once_and_read_back() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .create_agent(&an_agent(), ("agent.created", json!({})))
+            .unwrap();
+        let run = Run {
+            id: "r1".into(),
+            agent: an_agent().id,
+            name: Some("test".into()),
+            line: "cargo test".into(),
+            folder: "/w".into(),
+            state: RunState::Running,
+            exit_code: None,
+            signal: None,
+            started_at: 5,
+            ended_at: None,
+            output: String::new(),
+        };
+        store.create_run(&run, ("run.started", json!({}))).unwrap();
+        assert_eq!(store.run("r1").unwrap().unwrap(), run);
+        assert_eq!(store.running_runs().unwrap(), std::slice::from_ref(&run));
+
+        let ended = store
+            .end_run(
+                "r1",
+                RunState::Exited,
+                Some(0),
+                None,
+                "ok\n",
+                ("run.ended", json!({})),
+            )
+            .unwrap();
+        let again = store
+            .end_run(
+                "r1",
+                RunState::Stopped,
+                None,
+                None,
+                "",
+                ("run.ended", json!({})),
+            )
+            .unwrap();
+
+        assert!(ended.is_some() && again.is_none());
+        let read = store.run("r1").unwrap().unwrap();
+        assert_eq!((read.state, read.exit_code), (RunState::Exited, Some(0)));
+        assert_eq!(read.output, "ok\n");
+        assert!(read.ended_at.is_some());
+        assert!(store.running_runs().unwrap().is_empty());
+        store.add_run_process(4242, 7, "r1").unwrap();
+        assert_eq!(store.run_processes().unwrap(), [(4242, 7)]);
+        store.remove_run_process(4242).unwrap();
+        assert!(store.run_processes().unwrap().is_empty());
     }
 
     #[test]
