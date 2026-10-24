@@ -24,6 +24,7 @@ use tokio::task::JoinHandle;
 use crate::acp::{self, Exit};
 use crate::claude;
 use crate::daemon::Daemon;
+use crate::mcp;
 use crate::projects::{self, Failure};
 
 type Answer = Result<Value, Failure>;
@@ -299,6 +300,12 @@ async fn process(
 ) -> Result<bool, String> {
     change(daemon, &agent.id, AgentState::Starting, None, None);
     let launch = claude::launch(&daemon.paths)?;
+    // A token of this process's own, which revokes the last one.
+    let grant = mcp::grant_of(daemon, agent)?;
+    let token = daemon
+        .mcp
+        .mint(grant)
+        .map_err(|e| format!("cannot make the agent's token: {e}"))?;
     let mut command = Command::new(&launch.program);
     // The daemon's environment, less what the agent has no business with; what Flottille sets
     // comes after, so that it is not among the removed.
@@ -334,7 +341,21 @@ async fn process(
         pid,
         env: std::env::vars_os().collect(),
     });
-    let exit = acp::session(agent, &mut child, events, orders, turns, idle_release()).await;
+    let server = acp::Server {
+        url: daemon.mcp.url.clone(),
+        token,
+    };
+    let exit = acp::session(
+        agent,
+        &mut child,
+        events,
+        orders,
+        turns,
+        idle_release(),
+        server,
+    )
+    .await;
+    daemon.mcp.revoke(&agent.id);
     let goes_on = match exit {
         Ok(Exit::Released) => {
             stop(&mut child, pid).await;
@@ -544,7 +565,7 @@ async fn stop(child: &mut Child, pid: u32) {
     }
 }
 
-fn signal_group(pid: u32, signal: i32) {
+pub fn signal_group(pid: u32, signal: i32) {
     // SAFETY: killpg has no memory precondition; the group is the process's own (`process_group(0)`).
     unsafe {
         libc::killpg(pid as i32, signal);
@@ -553,7 +574,7 @@ fn signal_group(pid: u32, signal: i32) {
 
 /// When the process started, in clock ticks after boot (`/proc/<pid>/stat`, field 22): with its
 /// pid, what tells it from a process that took the pid since.
-fn start_time(pid: u32) -> Option<u64> {
+pub fn start_time(pid: u32) -> Option<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     // The command name, field 2, is in parentheses and may hold spaces.
     let rest = stat.rsplit_once(')')?.1;

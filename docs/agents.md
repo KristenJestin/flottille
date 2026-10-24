@@ -7,7 +7,8 @@ project setting, no skill, no plugin, no MCP server but Flottille's. It follows
 `docs/reference/hemera.md` §1 and §2.
 
 The tree of agents, the deliveries that wake them, their roles and their full instructions come
-later; so do Flottille's MCP server and its tools. This file says what runs today.
+later; so do the agent tools (`agent_*`, `report`, `ask_*`, `approval_answer`). Flottille's MCP
+server and the file and command tools are in `docs/tools.md`. This file says what runs today.
 
 ## Commands
 
@@ -122,8 +123,9 @@ adapter passes to the Claude Agent SDK over its own defaults:
   MCP time limits at 10 minutes, longer than a call held for the user.
 - `CLAUDE_CONFIG_DIR` stays where the user has it: the login lives there.
 
-The MCP servers of the session are Flottille's alone: one HTTP server named `flottille`. Until
-Flottille's MCP server exists, the entry points at nothing (`http://127.0.0.1:9/mcp`), unused.
+The MCP servers of the session are Flottille's alone: one HTTP server named `flottille`, the
+daemon's own (`docs/tools.md`), with the token of the agent's process in an `Authorization`
+header. Each start of the process mints a new token, which revokes the last; its end revokes it.
 
 ## The agent's environment
 

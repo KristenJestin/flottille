@@ -217,6 +217,20 @@ The agent asked its own permission for a tool, answered at once.
 | `tool` | The tool's name. |
 | `allowed` | True for one of the agent's Flottille tools, false for anything else. |
 
+#### `agent.tool_served`
+
+Flottille's MCP server answered one of the agent's tool calls (`docs/tools.md`). A sign of
+activity.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `tool` | The tool's name, without the `mcp__flottille__` prefix. |
+| `call_key` | The call's key (`claudecode/toolUseId`), `null` when the call had none. |
+| `arguments` | The arguments, every text cut at 500 characters and masked. |
+| `outcome` | `ok`, `refused` or `failed`. |
+| `duration_ms` | How long it took. |
+
 #### `agent.turn_ended`
 
 | Field | |
@@ -254,3 +268,26 @@ asked is not one it offers. Its process is stopped.
 |---|---|
 | `agent` | |
 | `reason` | A sentence, masked. |
+
+### The events of a run
+
+A command an agent ran with `commands_run` (`docs/tools.md`). Every event of a run has `agent`,
+the agent that started it, and `run`, its id.
+
+#### `run.started`
+
+| Field | |
+|---|---|
+| `agent`, `run` | |
+| `name` | The catalogue command, `null` for a line of the agent's. |
+| `line` | The line run. |
+| `folder` | Where it runs. |
+
+#### `run.ended`
+
+| Field | |
+|---|---|
+| `agent`, `run` | |
+| `state` | `exited` (by itself), `stopped` (`commands_stop`, or the call that started it stopped), `interrupted` (the daemon stopped, or the one that ran it is gone). |
+| `exit_code` | Its exit code, `null` when it did not exit by itself or a signal ended it. |
+| `signal` | The signal that ended it, `null` otherwise. |

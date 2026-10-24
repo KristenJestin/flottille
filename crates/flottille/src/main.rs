@@ -4,9 +4,14 @@ mod agents;
 mod claude;
 mod client;
 mod daemon;
+mod files;
+mod gate;
 mod git;
+mod mcp;
+mod place;
 mod project_command;
 mod projects;
+mod runs;
 mod workspace_command;
 mod workspaces;
 

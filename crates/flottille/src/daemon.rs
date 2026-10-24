@@ -12,7 +12,7 @@ use flottille_core::protocol::{Event, Message, Request, WatchParams};
 use flottille_core::store::Store;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, watch};
@@ -20,7 +20,9 @@ use tokio::task::JoinSet;
 
 use crate::VERSION;
 use crate::agents::{self, Live};
+use crate::mcp;
 use crate::projects::{self, Projects};
+use crate::runs;
 use crate::workspaces;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -79,6 +81,8 @@ pub struct Daemon {
     pub preparing: Mutex<HashSet<i64>>,
     /// The agents that have a task, and so maybe a process.
     pub agents: Live,
+    /// The agents' MCP server: its tokens, and what its tools keep (reads, runs).
+    pub mcp: mcp::Server,
     /// Becomes true when the daemon stops.
     stopping: watch::Sender<bool>,
 }
@@ -160,6 +164,8 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         _ => {}
     }
     let listener = UnixListener::bind(&socket)?;
+    // This machine only, on a port of the system's choosing.
+    let tools = TcpListener::bind(("127.0.0.1", 0)).await?;
     let (bus, _) = broadcast::channel(1024);
     let daemon = Arc::new(Daemon {
         paths: paths.clone(),
@@ -171,6 +177,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         projects: Mutex::new(projects),
         preparing: Mutex::new(HashSet::new()),
         agents: Live::default(),
+        mcp: mcp::Server::new(tools.local_addr()?.port()),
         stopping: watch::Sender::new(false),
     });
     let mut terminate = signal(SignalKind::terminate())?;
@@ -186,6 +193,12 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     );
     workspaces::resume_at_start(&daemon);
     agents::settle_at_start(&daemon);
+    runs::settle_at_start(&daemon);
+    tokio::spawn(mcp::serve(
+        daemon.clone(),
+        tools,
+        daemon.stopping.subscribe(),
+    ));
 
     let mut connections = JoinSet::new();
     let reason = loop {
@@ -206,6 +219,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     drop(listener);
     std::fs::remove_file(&socket)?;
     agents::stop_all(&daemon).await;
+    runs::stop_all(&daemon).await;
     daemon.emit("daemon.stopping", json!({"reason": reason}))?;
     daemon.events.lock().unwrap().bus = None;
     daemon.stopping.send_replace(true);
