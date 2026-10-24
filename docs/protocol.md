@@ -112,18 +112,17 @@ result is the object of its file with every default filled in:
   "name": "app",
   "folder": "/work/app",
   "branch_prefix": "app",
-  "workspaces_root": "/home/me/.local/share/flottille/workspaces/app",
+  "workspaces_root": "$XDG_DATA_HOME/flottille/workspaces/app",
   "default_repositories": "all",
   "max_children": 3,
   "never": [],
-  "repositories": [{"path": ".", "remote": "origin", "base": ["main"], "depends_on": []}],
-  "variables": {},
-  "commands": {}
+  "repositories": [{"path": ".", "remote": "origin", "base": ["main"], "depends_on": []}]
 }
 ```
 
-`default_repositories` is `"all"` or a list of repository paths; `variables` and `commands` are left
-out when empty. The files are the user's to edit: before it answers any `project.*` request, the
+`workspaces_root` is an absolute path in a real answer: `$XDG_DATA_HOME` stands for the user's data
+folder here. `default_repositories` is `"all"` or a list of repository paths; `variables` and
+`commands` are left out when empty. The files are the user's to edit: before it answers any `project.*` request, the
 daemon reads them again and announces what changed in them since the last such request as events
 (`docs/events.md`).
 
