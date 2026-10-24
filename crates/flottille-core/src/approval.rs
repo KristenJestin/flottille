@@ -119,19 +119,29 @@ impl Request {
     }
 }
 
-/// A message Flottille hands to an agent, stored before it is sent (`docs/design.md` §5.2). The
-/// gate stores the answers of requests; sending them is the deliveries' (#7).
+/// A message Flottille hands to an agent, stored before it is sent (`docs/design.md` §5.2,
+/// `docs/agents.md`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Delivery {
-    /// Stable: `approval-<number>` for a request's answer, so it is stored once.
+    /// The idempotency key: `approval-<number>` for a request's answer, so it is stored once.
     pub id: String,
+    /// The agent it is for: its lineage, which a replacement keeps.
     pub agent: String,
+    /// `^[a-z][a-z-]*$`: `user`, `brief`, `child-report`…
     pub kind: String,
+    /// Masked; escaped only when it is sent.
     pub body: String,
-    /// `queued` until it is sent.
+    /// `between-turns`, `urgent` or `redirect`.
+    pub urgency: String,
+    /// `queued`; `sending` while the prompt that holds it is played; `sent`; or `superseded`.
     pub state: String,
     pub created_at: u64,
+    pub sent_at: Option<u64>,
 }
+
+pub const BETWEEN_TURNS: &str = "between-turns";
+pub const URGENT: &str = "urgent";
+pub const REDIRECT: &str = "redirect";
 
 #[cfg(test)]
 mod tests {

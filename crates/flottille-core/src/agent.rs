@@ -13,8 +13,25 @@ pub struct Agent {
     pub id: String,
     /// The agent CLI behind the adapter: `claude`.
     pub provider: String,
-    /// `lead` for an agent the user starts.
+    /// `lead` for an agent the user starts, `worker` by default for a child (`docs/agents.md`).
     pub role: String,
+    /// The agent that launched it; `None` for a root, which the user started. An agent's id is
+    /// its lineage: it stays the same across its replacements.
+    pub parent: Option<String>,
+    /// 0 for a root, its parent's depth plus one for a child.
+    pub depth: u32,
+    /// Grows with each replacement: a call of an earlier session is refused.
+    pub epoch: u64,
+    /// What its parent named its task; `None` for a root.
+    pub title: Option<String>,
+    /// What a new session of it starts from: its parent's brief, or the user's first message.
+    pub brief: Option<String>,
+    /// When it called `report`.
+    pub reported_at: Option<u64>,
+    /// Turns it ended without reporting since its last delivery: 1 after the reminder.
+    pub quiet_turns: u32,
+    /// It asked its parent a question that has not been answered yet.
+    pub waiting_on_parent: bool,
     pub project: String,
     /// The workspace it works in; the project folder itself (`main`) when none.
     pub workspace: Option<String>,

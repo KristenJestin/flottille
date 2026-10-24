@@ -166,10 +166,12 @@ fn decide(daemon: &Arc<Daemon>, number: u64, decision: Decision) -> Answer {
     }
     let tree = tree_of(&request.agent);
     let decided = daemon.write(|store| {
-        Ok(match store.decide(number, decision, &tree)? {
-            Some((request, event)) => (Some(request), Some(event)),
-            None => (None, None),
-        })
+        Ok(
+            match store.decide(number, decision, &tree, approval::USER)? {
+                Some((request, event)) => (Some(request), Some(event)),
+                None => (None, None),
+            },
+        )
     })?;
     let Some(request) = decided else {
         // Decided meanwhile.

@@ -1,13 +1,14 @@
 //! The store: one SQLite file, its schema brought up to date by numbered migrations.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 
 use crate::agent::{Agent, AgentState, Choices};
-use crate::approval::{self, Decision, Delivery, Forward, Request, RequestState};
+use crate::approval::{Decision, Delivery, Forward, Request, RequestState};
 use crate::protocol::Event;
 use crate::run::{Run, RunState};
 use crate::workspace::{Action, Failure, Step, StepState, Workspace};
@@ -168,6 +169,33 @@ const MIGRATIONS: &[&str] = &[
         created_at INTEGER NOT NULL
     ) STRICT;
 ",
+    "
+    -- The tree (`docs/design.md` §5): an agent's id is its lineage, kept across replacements;
+    -- its parent is another agent's id, `NULL` for a root. `epoch` grows with each replacement.
+    ALTER TABLE agents ADD COLUMN parent TEXT REFERENCES agents (id);
+    ALTER TABLE agents ADD COLUMN depth INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE agents ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE agents ADD COLUMN title TEXT;
+    ALTER TABLE agents ADD COLUMN brief TEXT;
+    ALTER TABLE agents ADD COLUMN reported_at INTEGER;
+    ALTER TABLE agents ADD COLUMN quiet_turns INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE agents ADD COLUMN waiting_on_parent INTEGER NOT NULL DEFAULT 0;
+    CREATE INDEX agents_by_parent ON agents (parent);
+    -- Deliveries are sent now: how soon, and when. `sending` while the prompt holding one plays,
+    -- given back to `queued` when that turn fails.
+    ALTER TABLE deliveries ADD COLUMN urgency TEXT NOT NULL DEFAULT 'between-turns';
+    ALTER TABLE deliveries ADD COLUMN sent_at INTEGER;
+    CREATE INDEX deliveries_by_agent ON deliveries (agent, state);
+    -- Each replacement of an agent, for the replacement limit: those Flottille caused by
+    -- restarting do not count.
+    CREATE TABLE agent_replacements (
+        agent   TEXT NOT NULL REFERENCES agents (id) ON DELETE CASCADE,
+        at      INTEGER NOT NULL,
+        epoch   INTEGER NOT NULL,
+        reason  TEXT NOT NULL,
+        counted INTEGER NOT NULL
+    ) STRICT;
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -178,7 +206,10 @@ const RUN_COLUMNS: &str =
 
 const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, state, state_reason, \
     created_at, updated_at, active_at, ended_at, chosen_model, chosen_effort, chosen_mode, \
-    taken_model, taken_effort, taken_mode, native_id, agent_version, instructions, tools";
+    taken_model, taken_effort, taken_mode, native_id, agent_version, instructions, tools, parent, \
+    depth, epoch, title, brief, reported_at, quiet_turns, waiting_on_parent";
+
+const DELIVERY_COLUMNS: &str = "id, agent, kind, body, urgency, state, created_at, sent_at";
 
 /// What changes on an agent; what is left `None` stays as it is.
 #[derive(Clone, Debug, Default)]
@@ -189,6 +220,10 @@ pub struct AgentChange {
     pub native_id: Option<String>,
     pub agent_version: Option<String>,
     pub taken: Option<Choices>,
+    /// `Some(None)` forgets it.
+    pub reported_at: Option<Option<u64>>,
+    pub quiet_turns: Option<u32>,
+    pub waiting_on_parent: Option<bool>,
 }
 
 pub struct Store {
@@ -426,7 +461,8 @@ impl Store {
         transaction.execute(
             &format!(
                 "INSERT INTO agents ({AGENT_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, \
-                 ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)"
+                 ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, \
+                 ?25, ?26, ?27, ?28, ?29, ?30)"
             ),
             params![
                 agent.id,
@@ -451,6 +487,14 @@ impl Store {
                 agent.agent_version,
                 agent.instructions,
                 serde_json::to_string(&agent.tools)?,
+                agent.parent,
+                agent.depth,
+                agent.epoch,
+                agent.title,
+                agent.brief,
+                agent.reported_at,
+                agent.quiet_turns,
+                agent.waiting_on_parent,
             ],
         )?;
         let event = append_agent_event(&transaction, &agent.id, event.0, event.1)?;
@@ -512,6 +556,24 @@ impl Store {
             transaction.execute(
                 "UPDATE agents SET agent_version = ?2 WHERE id = ?1",
                 params![id, version],
+            )?;
+        }
+        if let Some(reported_at) = change.reported_at {
+            transaction.execute(
+                "UPDATE agents SET reported_at = ?2 WHERE id = ?1",
+                params![id, reported_at],
+            )?;
+        }
+        if let Some(quiet_turns) = change.quiet_turns {
+            transaction.execute(
+                "UPDATE agents SET quiet_turns = ?2 WHERE id = ?1",
+                params![id, quiet_turns],
+            )?;
+        }
+        if let Some(waiting) = change.waiting_on_parent {
+            transaction.execute(
+                "UPDATE agents SET waiting_on_parent = ?2 WHERE id = ?1",
+                params![id, waiting],
             )?;
         }
         if let Some(taken) = change.taken {
@@ -835,14 +897,15 @@ impl Store {
         Ok(Some((request, event)))
     }
 
-    /// The user's decision on a pending request they hold, with its `approval.decided` event and,
-    /// for `Decision::Tree`, the grant of its identity to `tree`; `None` when the request is not
-    /// pending or not the user's.
+    /// The decision on a pending request `by` holds (`approval::USER`, or an agent, which only
+    /// denies), with its `approval.decided` event and, for `Decision::Tree`, the grant of its
+    /// identity to `tree`; `None` when the request is not pending or not held by `by`.
     pub fn decide(
         &mut self,
         number: u64,
         decision: Decision,
         tree: &str,
+        by: &str,
     ) -> Result<Option<(Request, Event)>> {
         let transaction = self.connection.transaction()?;
         let now = now_ms();
@@ -853,13 +916,7 @@ impl Store {
         let changed = transaction.execute(
             "UPDATE approval_requests SET state = ?2, decision = ?3, decided_at = ?4 \
              WHERE number = ?1 AND state = 'pending' AND held_by = ?5",
-            params![
-                number,
-                state.as_str(),
-                decision.as_str(),
-                now,
-                approval::USER
-            ],
+            params![number, state.as_str(), decision.as_str(), now, by],
         )?;
         if changed == 0 {
             return Ok(None);
@@ -880,8 +937,7 @@ impl Store {
             &transaction,
             &agent,
             "approval.decided",
-            json!({"number": number, "agent": agent, "decision": decision.as_str(),
-                "by": approval::USER}),
+            json!({"number": number, "agent": agent, "decision": decision.as_str(), "by": by}),
         )?;
         transaction.commit()?;
         let request = self
@@ -910,8 +966,8 @@ impl Store {
         let transaction = self.connection.transaction()?;
         let id = format!("approval-{}", request.number);
         let stored = transaction.execute(
-            "INSERT OR IGNORE INTO deliveries (id, agent, kind, body, state, created_at) \
-             VALUES (?1, ?2, 'approval', ?3, 'queued', ?4)",
+            "INSERT OR IGNORE INTO deliveries (id, agent, kind, body, urgency, state, created_at) \
+             VALUES (?1, ?2, 'approval', ?3, 'urgent', 'queued', ?4)",
             params![id, request.agent, body, now_ms()],
         )?;
         if stored == 0 {
@@ -941,21 +997,235 @@ impl Store {
     }
 
     pub fn delivery(&self, id: &str) -> Result<Option<Delivery>> {
-        let mut statement = self.connection.prepare_cached(
-            "SELECT id, agent, kind, body, state, created_at FROM deliveries WHERE id = ?1",
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {DELIVERY_COLUMNS} FROM deliveries WHERE id = ?1"
+        ))?;
+        Ok(statement.query_row(params![id], delivery_row).optional()?)
+    }
+
+    /// Stores a delivery, queued, with its `delivery.queued` event; `None` when one of its id
+    /// was stored already.
+    pub fn deliver(&mut self, delivery: &Delivery) -> Result<Option<Event>> {
+        let transaction = self.connection.transaction()?;
+        let stored = transaction.execute(
+            "INSERT OR IGNORE INTO deliveries (id, agent, kind, body, urgency, state, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6)",
+            params![
+                delivery.id,
+                delivery.agent,
+                delivery.kind,
+                delivery.body,
+                delivery.urgency,
+                now_ms()
+            ],
         )?;
-        Ok(statement
-            .query_row(params![id], |row| {
-                Ok(Delivery {
-                    id: row.get(0)?,
-                    agent: row.get(1)?,
-                    kind: row.get(2)?,
-                    body: row.get(3)?,
-                    state: row.get(4)?,
-                    created_at: row.get(5)?,
-                })
-            })
-            .optional()?)
+        if stored == 0 {
+            return Ok(None);
+        }
+        let event = append_agent_event(
+            &transaction,
+            &delivery.agent,
+            "delivery.queued",
+            json!({"agent": delivery.agent, "delivery": delivery.id, "kind": delivery.kind,
+                "urgency": delivery.urgency}),
+        )?;
+        transaction.commit()?;
+        Ok(Some(event))
+    }
+
+    /// The agent's deliveries in one state, oldest first.
+    pub fn deliveries(&self, agent: &str, state: &str) -> Result<Vec<Delivery>> {
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {DELIVERY_COLUMNS} FROM deliveries WHERE agent = ?1 AND state = ?2 \
+             ORDER BY created_at, rowid"
+        ))?;
+        let rows = statement.query_map(params![agent, state], delivery_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The agent's last deliveries, the newest first, whatever their state.
+    pub fn last_deliveries(&self, agent: &str, limit: usize) -> Result<Vec<Delivery>> {
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {DELIVERY_COLUMNS} FROM deliveries WHERE agent = ?1 \
+             ORDER BY created_at DESC, rowid DESC LIMIT ?2"
+        ))?;
+        let rows = statement.query_map(params![agent, limit as u64], delivery_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Moves the agent's deliveries of these ids from `from` to `to` (`sending` or `sent`), with
+    /// a `delivery.sent` event saying `how` when they are sent; the ids moved. A delivery that
+    /// left `from` meanwhile is not moved.
+    pub fn move_deliveries(
+        &mut self,
+        agent: &str,
+        ids: &[String],
+        from: &str,
+        to: &str,
+        how: &str,
+    ) -> Result<(Vec<String>, Option<Event>)> {
+        let transaction = self.connection.transaction()?;
+        let now = now_ms();
+        let mut moved = Vec::new();
+        for id in ids {
+            let changed = transaction.execute(
+                "UPDATE deliveries SET state = ?3, sent_at = ?4 \
+                 WHERE id = ?1 AND agent = ?2 AND state = ?5",
+                params![id, agent, to, now, from],
+            )?;
+            if changed > 0 {
+                moved.push(id.clone());
+            }
+        }
+        let event = if moved.is_empty() {
+            None
+        } else {
+            Some(append_agent_event(
+                &transaction,
+                agent,
+                "delivery.sent",
+                json!({"agent": agent, "deliveries": moved, "how": how}),
+            )?)
+        };
+        transaction.commit()?;
+        Ok((moved, event))
+    }
+
+    /// The agent's deliveries `sending` become `sent`: the turn that held them ended.
+    pub fn deliveries_taken(&self, agent: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE deliveries SET state = 'sent' WHERE agent = ?1 AND state = 'sending'",
+            params![agent],
+        )?;
+        Ok(())
+    }
+
+    /// The agent's deliveries `sending` are queued again: the turn that held them failed. Their
+    /// `delivery.given_back` event, when there were some.
+    pub fn give_back(&mut self, agent: &str) -> Result<Option<Event>> {
+        let transaction = self.connection.transaction()?;
+        let ids: Vec<String> = {
+            let mut statement = transaction.prepare_cached(
+                "UPDATE deliveries SET state = 'queued', sent_at = NULL \
+                 WHERE agent = ?1 AND state = 'sending' RETURNING id",
+            )?;
+            statement
+                .query_map(params![agent], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        let event = if ids.is_empty() {
+            None
+        } else {
+            Some(append_agent_event(
+                &transaction,
+                agent,
+                "delivery.given_back",
+                json!({"agent": agent, "deliveries": ids}),
+            )?)
+        };
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    /// Every delivery of the agent not sent yet is superseded: it stopped. Their
+    /// `delivery.superseded` event, when there were some.
+    pub fn supersede(&mut self, agent: &str) -> Result<Option<Event>> {
+        let transaction = self.connection.transaction()?;
+        let ids: Vec<String> = {
+            let mut statement = transaction.prepare_cached(
+                "UPDATE deliveries SET state = 'superseded' \
+                 WHERE agent = ?1 AND state IN ('queued', 'sending') RETURNING id",
+            )?;
+            statement
+                .query_map(params![agent], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        let event = if ids.is_empty() {
+            None
+        } else {
+            Some(append_agent_event(
+                &transaction,
+                agent,
+                "delivery.superseded",
+                json!({"agent": agent, "deliveries": ids}),
+            )?)
+        };
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    /// The agents a parent launched, the oldest first.
+    pub fn children(&self, parent: &str) -> Result<Vec<Agent>> {
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {AGENT_COLUMNS} FROM agents WHERE parent = ?1 ORDER BY created_at, id"
+        ))?;
+        let rows = statement.query_map(params![parent], agent_row)?;
+        rows.map(|row| row?).collect()
+    }
+
+    /// The children of the project that have not ended: what its children cap counts.
+    pub fn live_children(&self, project: &str) -> Result<usize> {
+        let count: u64 = self.connection.query_row(
+            "SELECT count(*) FROM agents WHERE project = ?1 AND parent IS NOT NULL \
+             AND state NOT IN ('ended', 'failed')",
+            params![project],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    /// The replacements of the agent since `since` that count against its limit.
+    pub fn replacements_since(&self, agent: &str, since: u64) -> Result<usize> {
+        let count: u64 = self.connection.query_row(
+            "SELECT count(*) FROM agent_replacements WHERE agent = ?1 AND at >= ?2 AND counted",
+            params![agent, since],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    /// A new session of the agent replaces the one it had, with its `agent.replaced` event: its
+    /// epoch grows, its ACP session is forgotten (the next process opens a new one), and it
+    /// starts again. `counted` says the replacement counts against its limit.
+    pub fn replace_agent(
+        &mut self,
+        id: &str,
+        reason: &str,
+        counted: bool,
+    ) -> Result<(Agent, Option<Event>)> {
+        let transaction = self.connection.transaction()?;
+        let now = now_ms();
+        let changed = transaction.execute(
+            "UPDATE agents SET epoch = epoch + 1, native_id = NULL, state = 'starting', \
+             state_reason = ?2, reported_at = NULL, quiet_turns = 0, waiting_on_parent = 0, \
+             updated_at = ?3 WHERE id = ?1 AND state NOT IN ('ended', 'failed')",
+            params![id, reason, now],
+        )?;
+        let event = if changed == 0 {
+            None
+        } else {
+            let epoch: u64 = transaction.query_row(
+                "SELECT epoch FROM agents WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )?;
+            transaction.execute(
+                "INSERT INTO agent_replacements (agent, at, epoch, reason, counted) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, now, epoch, reason, counted],
+            )?;
+            Some(append_agent_event(
+                &transaction,
+                id,
+                "agent.replaced",
+                json!({"agent": id, "epoch": epoch, "reason": reason, "counted": counted}),
+            )?)
+        };
+        transaction.commit()?;
+        let agent = self
+            .agent(id)?
+            .ok_or_else(|| Error::Refused(format!("there is no agent {id}")))?;
+        Ok((agent, event))
     }
 
     /// At most `limit` events numbered after `after`, oldest first.
@@ -1092,6 +1362,19 @@ fn request_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Request>> {
     }))
 }
 
+fn delivery_row(row: &rusqlite::Row) -> rusqlite::Result<Delivery> {
+    Ok(Delivery {
+        id: row.get(0)?,
+        agent: row.get(1)?,
+        kind: row.get(2)?,
+        body: row.get(3)?,
+        urgency: row.get(4)?,
+        state: row.get(5)?,
+        created_at: row.get(6)?,
+        sent_at: row.get(7)?,
+    })
+}
+
 fn agent_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Agent>> {
     let text = |i| row.get::<_, Option<String>>(i);
     let state: String = row.get(6)?;
@@ -1133,14 +1416,32 @@ fn agent_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Agent>> {
         agent_version: text(19)?,
         instructions: row.get(20)?,
         tools,
+        parent: text(22)?,
+        depth: row.get(23)?,
+        epoch: row.get(24)?,
+        title: text(25)?,
+        brief: text(26)?,
+        reported_at: row.get(27)?,
+        quiet_turns: row.get(28)?,
+        waiting_on_parent: row.get(29)?,
     }))
 }
 
-/// Milliseconds since the Unix epoch.
+/// How far the clock was moved ahead, for tests only (`advance_clock`).
+static CLOCK_AHEAD_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Milliseconds since the Unix epoch, on the clock every time of Flottille is read from.
 pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)
+        + CLOCK_AHEAD_MS.load(Ordering::SeqCst)
+}
+
+/// Moves the clock of this process ahead, so that a test sees minutes pass without waiting for
+/// them: the daemon calls it only when `FLOTTILLE_TEST_CLOCK` is set (`docs/agents.md`).
+pub fn advance_clock(ms: u64) {
+    CLOCK_AHEAD_MS.fetch_add(ms, Ordering::SeqCst);
 }
 
 fn path_text(path: &Path) -> Result<&str> {
@@ -1173,6 +1474,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval;
     use crate::workspace::{Base, Worktree};
     use serde_json::json;
 
@@ -1387,6 +1689,18 @@ mod tests {
         assert_eq!(steps, 0);
     }
 
+    /// An agent written as a store of the agents' first schema (3) did.
+    fn insert_old_agent(path: &Path) {
+        let old = Connection::open(path).unwrap();
+        old.execute(
+            "INSERT INTO agents (id, provider, role, project, workspace, folder, state, \
+             created_at, updated_at, instructions, tools) VALUES ('0123456789ab', 'claude', \
+             'lead', 'app', NULL, '/work/app', 'idle', 1, 1, 'text', '[]')",
+            [],
+        )
+        .unwrap();
+    }
+
     fn an_agent() -> Agent {
         Agent {
             id: "0123456789ab".into(),
@@ -1410,6 +1724,14 @@ mod tests {
             agent_version: None,
             instructions: "shared\n\n__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__\n\nsession".into(),
             tools: vec!["mcp__flottille__fs_read".into()],
+            parent: None,
+            depth: 0,
+            epoch: 0,
+            title: None,
+            brief: Some("hello".into()),
+            reported_at: None,
+            quiet_turns: 0,
+            waiting_on_parent: false,
         }
     }
 
@@ -1557,12 +1879,7 @@ mod tests {
         }
         old.pragma_update(None, "user_version", 3).unwrap();
         drop(old);
-        let mut old = Store {
-            connection: Connection::open(&path).unwrap(),
-        };
-        old.create_agent(&an_agent(), ("agent.created", json!({})))
-            .unwrap();
-        drop(old);
+        insert_old_agent(&path);
 
         let store = Store::open(&path).unwrap();
 
@@ -1581,18 +1898,164 @@ mod tests {
         }
         old.pragma_update(None, "user_version", 4).unwrap();
         drop(old);
-        let mut old = Store {
-            connection: Connection::open(&path).unwrap(),
-        };
-        old.create_agent(&an_agent(), ("agent.created", json!({})))
-            .unwrap();
-        drop(old);
+        insert_old_agent(&path);
 
         let store = Store::open(&path).unwrap();
 
         assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len());
         assert_eq!(store.agents().unwrap().len(), 1);
         assert!(store.pending_requests(approval::USER).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_store_of_the_requests_schema_keeps_its_agents_and_deliveries_and_gains_the_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let old = Connection::open(&path).unwrap();
+        for migration in &MIGRATIONS[..5] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.pragma_update(None, "user_version", 5).unwrap();
+        drop(old);
+        insert_old_agent(&path);
+        Connection::open(&path)
+            .unwrap()
+            .execute(
+                "INSERT INTO deliveries (id, agent, kind, body, state, created_at) \
+                 VALUES ('approval-1', '0123456789ab', 'approval', 'done', 'queued', 1)",
+                [],
+            )
+            .unwrap();
+
+        let store = Store::open(&path).unwrap();
+
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len());
+        let agent = store.agent("0123456789ab").unwrap().unwrap();
+        assert_eq!((agent.parent, agent.depth, agent.epoch), (None, 0, 0));
+        let delivery = store.delivery("approval-1").unwrap().unwrap();
+        assert_eq!(delivery.urgency, approval::BETWEEN_TURNS);
+        assert_eq!(delivery.state, "queued");
+    }
+
+    fn a_delivery(id: &str, kind: &str) -> Delivery {
+        Delivery {
+            id: id.into(),
+            agent: "0123456789ab".into(),
+            kind: kind.into(),
+            body: "body".into(),
+            urgency: approval::BETWEEN_TURNS.into(),
+            state: "queued".into(),
+            created_at: 0,
+            sent_at: None,
+        }
+    }
+
+    #[test]
+    fn a_delivery_is_stored_once_sent_given_back_and_superseded() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .create_agent(&an_agent(), ("agent.created", json!({})))
+            .unwrap();
+        let agent = "0123456789ab";
+
+        let event = store.deliver(&a_delivery("d1", "user")).unwrap().unwrap();
+        assert_eq!(event.name, "delivery.queued");
+        assert!(store.deliver(&a_delivery("d1", "user")).unwrap().is_none());
+        store.deliver(&a_delivery("d2", "brief")).unwrap();
+        let queued: Vec<String> = store
+            .deliveries(agent, "queued")
+            .unwrap()
+            .into_iter()
+            .map(|d| d.id)
+            .collect();
+        assert_eq!(queued, ["d1", "d2"]);
+
+        let (moved, event) = store
+            .move_deliveries(agent, &queued, "queued", "sending", "prompt")
+            .unwrap();
+        assert_eq!(moved, ["d1", "d2"]);
+        assert_eq!(event.unwrap().name, "delivery.sent");
+        // Taken already: moving them again does nothing.
+        let (moved, event) = store
+            .move_deliveries(agent, &queued, "queued", "sending", "prompt")
+            .unwrap();
+        assert!(moved.is_empty() && event.is_none());
+
+        assert_eq!(
+            store.give_back(agent).unwrap().unwrap().name,
+            "delivery.given_back"
+        );
+        assert_eq!(store.deliveries(agent, "queued").unwrap().len(), 2);
+        store
+            .move_deliveries(agent, &["d1".into()], "queued", "sending", "prompt")
+            .unwrap();
+        store.deliveries_taken(agent).unwrap();
+        assert_eq!(store.delivery("d1").unwrap().unwrap().state, "sent");
+
+        assert_eq!(
+            store.supersede(agent).unwrap().unwrap().data["deliveries"],
+            json!(["d2"])
+        );
+        assert!(store.supersede(agent).unwrap().is_none());
+        assert_eq!(store.last_deliveries(agent, 1).unwrap()[0].id, "d2");
+    }
+
+    #[test]
+    fn a_replacement_bumps_the_epoch_forgets_the_session_and_is_counted() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut agent = an_agent();
+        agent.native_id = Some("session-1".into());
+        store
+            .create_agent(&agent, ("agent.created", json!({})))
+            .unwrap();
+
+        let (replaced, event) = store
+            .replace_agent(&agent.id, "its agent stopped", true)
+            .unwrap();
+        store
+            .replace_agent(&agent.id, "Flottille restarted", false)
+            .unwrap();
+
+        assert_eq!(replaced.epoch, 1);
+        assert_eq!(replaced.native_id, None);
+        assert_eq!(replaced.state, AgentState::Starting);
+        assert_eq!(event.unwrap().data["epoch"], 1);
+        assert_eq!(store.replacements_since(&agent.id, 0).unwrap(), 1);
+        assert_eq!(
+            store.replacements_since(&agent.id, now_ms() + 1).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn children_are_read_by_parent_and_the_live_ones_counted_per_project() {
+        let mut store = Store::open_in_memory().unwrap();
+        let lead = an_agent();
+        store
+            .create_agent(&lead, ("agent.created", json!({})))
+            .unwrap();
+        for (id, state) in [
+            ("child000001", AgentState::Working),
+            ("child000002", AgentState::Ended),
+        ] {
+            let child = Agent {
+                id: id.into(),
+                parent: Some(lead.id.clone()),
+                depth: 1,
+                state,
+                ..an_agent()
+            };
+            store
+                .create_agent(&child, ("agent.created", json!({})))
+                .unwrap();
+        }
+
+        let children = store.children(&lead.id).unwrap();
+
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].parent.as_deref(), Some(lead.id.as_str()));
+        assert_eq!(store.live_children("app").unwrap(), 1);
+        assert_eq!(store.live_children("other").unwrap(), 0);
     }
 
     fn a_request(key: Option<&str>) -> Request {
@@ -1657,7 +2120,7 @@ mod tests {
         assert!(store.pending_requests(approval::USER).unwrap().is_empty());
         assert!(
             store
-                .decide(request.number, Decision::Once, &agent.id)
+                .decide(request.number, Decision::Once, &agent.id, approval::USER)
                 .unwrap()
                 .is_none()
         );
@@ -1692,7 +2155,7 @@ mod tests {
         assert_eq!(store.pending_requests(approval::USER).unwrap().len(), 1);
         assert!(
             store
-                .decide(request.number, Decision::Once, &agent.id)
+                .decide(request.number, Decision::Once, &agent.id, approval::USER)
                 .unwrap()
                 .is_some()
         );
@@ -1710,7 +2173,7 @@ mod tests {
         let (denied, _) = store.ask(&a_request(None)).unwrap();
 
         let (decided, event) = store
-            .decide(once.number, Decision::Once, &agent.id)
+            .decide(once.number, Decision::Once, &agent.id, approval::USER)
             .unwrap()
             .unwrap();
         assert_eq!(decided.state, RequestState::Allowed);
@@ -1722,20 +2185,20 @@ mod tests {
         // Decided once: a second decision changes nothing.
         assert!(
             store
-                .decide(once.number, Decision::Deny, &agent.id)
+                .decide(once.number, Decision::Deny, &agent.id, approval::USER)
                 .unwrap()
                 .is_none()
         );
 
         store
-            .decide(tree.number, Decision::Tree, &agent.id)
+            .decide(tree.number, Decision::Tree, &agent.id, approval::USER)
             .unwrap()
             .unwrap();
         assert!(store.tree_granted(&agent.id, "fs_read .env").unwrap());
         assert!(!store.tree_granted("another0000", "fs_read .env").unwrap());
 
         let (denied, _) = store
-            .decide(denied.number, Decision::Deny, &agent.id)
+            .decide(denied.number, Decision::Deny, &agent.id, approval::USER)
             .unwrap()
             .unwrap();
         assert_eq!(denied.state, RequestState::Denied);
@@ -1751,7 +2214,7 @@ mod tests {
             .unwrap();
         let (request, _) = store.ask(&a_request(None)).unwrap();
         let (request, _) = store
-            .decide(request.number, Decision::Once, &agent.id)
+            .decide(request.number, Decision::Once, &agent.id, approval::USER)
             .unwrap()
             .unwrap();
         assert_eq!(

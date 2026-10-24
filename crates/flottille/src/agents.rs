@@ -187,6 +187,14 @@ fn run(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
         native_id: None,
         agent_version: None,
         tools,
+        parent: None,
+        depth: 0,
+        epoch: 0,
+        title: None,
+        brief: Some(asked.message.clone()),
+        reported_at: None,
+        quiet_turns: 0,
+        waiting_on_parent: false,
     };
     let after = daemon.read(Store::last_seq)?;
     daemon.write(|store| {
