@@ -180,14 +180,38 @@ fn list_names_the_file_and_the_key_of_a_configuration_it_cannot_use() {
     let output = user.run(&["project", "list"]);
 
     assert!(!output.status.success());
+    let file = user.project_file("bad");
     assert!(
-        stderr(&output).contains("projects/bad.toml: max_children: must be between 1 and 6, not 9"),
+        stderr(&output).contains(&format!(
+            "{}: max_children: must be between 1 and 6, not 9",
+            file.display()
+        )),
         "{}",
         stderr(&output)
     );
     assert!(
         stdout(&output).contains("app"),
         "the usable project is still listed"
+    );
+}
+
+#[test]
+fn show_of_a_configuration_it_cannot_use_names_the_file_by_its_path() {
+    let user = User::new();
+    user.write_project_file(
+        "bad",
+        "folder = \"/work/bad\"\nmax_children = 9\n[[repositories]]\npath = \".\"\n",
+    );
+
+    let output = user.run(&["project", "show", "bad"]);
+
+    assert!(!output.status.success());
+    assert_eq!(
+        stderr(&output).trim(),
+        format!(
+            "flottille: {}: max_children: must be between 1 and 6, not 9",
+            user.project_file("bad").display()
+        )
     );
 }
 

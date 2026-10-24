@@ -56,7 +56,11 @@ pub enum ProjectAction {
 /// difference: the output says what.
 pub fn run(paths: &Paths, action: ProjectAction) -> Result<ExitCode> {
     let mut client = Client::connect_or_start(paths)?;
-    let mut ask = |method: &str, params: Value| client.request(method, params);
+    let mut ask = |method: &str, params: Value| {
+        client
+            .request(method, params)
+            .map_err(|error| Box::<dyn std::error::Error>::from(in_full(paths, &error.to_string())))
+    };
     let name = |name: String| serde_json::to_value(ProjectName { name });
     let outcome = |ok: bool| {
         if ok {
@@ -123,9 +127,15 @@ pub fn run(paths: &Paths, action: ProjectAction) -> Result<ExitCode> {
             }
             for error in errors {
                 eprintln!(
-                    "{}: {}",
-                    error["file"].as_str().unwrap_or_default(),
-                    error["message"].as_str().unwrap_or_default()
+                    "{}",
+                    in_full(
+                        paths,
+                        &format!(
+                            "{}: {}",
+                            error["file"].as_str().unwrap_or_default(),
+                            error["message"].as_str().unwrap_or_default()
+                        )
+                    )
                 );
             }
             Ok(outcome(errors.is_empty()))
@@ -158,6 +168,15 @@ pub fn run(paths: &Paths, action: ProjectAction) -> Result<ExitCode> {
             }
             Ok(outcome(same))
         }
+    }
+}
+
+/// The daemon names a configuration file `projects/<name>.toml`; the user needs to know which
+/// file to open, so the folder it is in comes in front.
+fn in_full(paths: &Paths, message: &str) -> String {
+    match message.strip_prefix("projects/") {
+        Some(rest) => format!("{}/{rest}", paths.projects().display()),
+        None => message.to_owned(),
     }
 }
 
