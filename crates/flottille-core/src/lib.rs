@@ -1,5 +1,6 @@
 //! Flottille's domain and store, shared by the daemon and its clients.
 
+pub mod agent;
 pub mod command;
 pub mod detect;
 pub mod error;
