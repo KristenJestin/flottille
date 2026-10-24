@@ -778,6 +778,18 @@ fn forge_refusal(program: &str, args: &[String]) -> Option<String> {
             }
         }
     }
+    if words.first() == Some(&"auth")
+        && (words.get(1) == Some(&"token")
+            || args.iter().any(|w| {
+                w == "--show-token"
+                    || (w.starts_with('-') && !w.starts_with("--") && w.contains('t'))
+            }))
+    {
+        return Some(format!(
+            "refused: {program} auth prints a login token, and agents never see one: \
+             auth status says whether a login exists"
+        ));
+    }
     let read = match (program, words.as_slice()) {
         (_, ["api", ..]) => api_reads(args),
         ("gh", ["pr", "view" | "list" | "diff" | "checks" | "status"])
@@ -1204,6 +1216,15 @@ mod tests {
             "glab api -X DELETE projects/1",
             "bkt pr create",
             "env gh pr merge 1",
+            "gh auth status --show-token",
+            "gh auth status -t",
+            "gh auth status -ht",
+            "gh auth status --hostname github.com --show-token",
+            "gh auth token",
+            "gh auth token --hostname github.com",
+            "gh auth login",
+            "glab auth status --show-token",
+            "env gh auth token",
         ] {
             assert!(
                 denied(&fixture.run(line)),
@@ -1223,6 +1244,7 @@ mod tests {
             "gh run list",
             "gh repo view",
             "gh auth status",
+            "gh auth status --hostname github.com",
             "gh api repos/o/r/pulls",
             "gh api -X GET repos/o/r",
             "gh -R o/r pr view 1",
