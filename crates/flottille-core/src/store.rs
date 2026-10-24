@@ -4,9 +4,10 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, params};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::agent::{Agent, AgentState, Choices};
+use crate::approval::{self, Decision, Delivery, Forward, Request, RequestState};
 use crate::protocol::Event;
 use crate::run::{Run, RunState};
 use crate::workspace::{Action, Failure, Step, StepState, Workspace};
@@ -125,7 +126,52 @@ const MIGRATIONS: &[&str] = &[
         run     TEXT NOT NULL
     ) STRICT;
 ",
+    "
+    -- The calls the gate held (`docs/design.md` §7), numbered for the user across every agent.
+    -- The same call key of the same agent is the same request. `held_by` is 'user' or the id of
+    -- the agent that holds it.
+    CREATE TABLE approval_requests (
+        number     INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent      TEXT NOT NULL REFERENCES agents (id) ON DELETE CASCADE,
+        call_key   TEXT,
+        tool       TEXT NOT NULL,
+        arguments  TEXT NOT NULL,
+        shown      TEXT NOT NULL,
+        reasons    TEXT NOT NULL,
+        sensitive  INTEGER NOT NULL,
+        identity   TEXT NOT NULL,
+        held_by    TEXT NOT NULL,
+        forwards   TEXT NOT NULL,
+        state      TEXT NOT NULL,
+        decision   TEXT,
+        created_at INTEGER NOT NULL,
+        decided_at INTEGER,
+        UNIQUE (agent, call_key)
+    ) STRICT;
+    CREATE INDEX approval_requests_held ON approval_requests (held_by, state);
+    -- The calls the user allowed for a root's tree: an exact identity each.
+    CREATE TABLE approval_grants (
+        tree       TEXT NOT NULL,
+        identity   TEXT NOT NULL,
+        request    INTEGER NOT NULL REFERENCES approval_requests (number) ON DELETE CASCADE,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (tree, identity)
+    ) STRICT;
+    -- What Flottille hands to an agent, stored before it is sent, once for its id. The gate
+    -- stores the answers of the requests here; sending them comes with the tree.
+    CREATE TABLE deliveries (
+        id         TEXT PRIMARY KEY,
+        agent      TEXT NOT NULL REFERENCES agents (id) ON DELETE CASCADE,
+        kind       TEXT NOT NULL,
+        body       TEXT NOT NULL,
+        state      TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    ) STRICT;
+",
 ];
+
+const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
+    identity, held_by, forwards, state, decision, created_at, decided_at";
 
 const RUN_COLUMNS: &str =
     "id, agent, name, line, folder, state, exit_code, signal, started_at, ended_at, output";
@@ -660,6 +706,258 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Writes a request the gate held, with its `approval.requested` event, in one transaction:
+    /// its number, its state (pending) and when it was made are the store's. The same call key
+    /// of the same agent gives back the request it already made, with no event.
+    pub fn ask(&mut self, asked: &Request) -> Result<(Request, Option<Event>)> {
+        let transaction = self.connection.transaction()?;
+        if let Some(key) = &asked.call_key {
+            let number: Option<u64> = transaction
+                .query_row(
+                    "SELECT number FROM approval_requests WHERE agent = ?1 AND call_key = ?2",
+                    params![asked.agent, key],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(number) = number {
+                drop(transaction);
+                let request = self
+                    .request(number)?
+                    .ok_or_else(|| Error::Refused(format!("there is no request #{number}")))?;
+                return Ok((request, None));
+            }
+        }
+        let created_at = now_ms();
+        let number: u64 = transaction.query_row(
+            "INSERT INTO approval_requests (agent, call_key, tool, arguments, shown, reasons, \
+             sensitive, identity, held_by, forwards, state, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending', ?11) RETURNING number",
+            params![
+                asked.agent,
+                asked.call_key,
+                asked.tool,
+                serde_json::to_string(&asked.arguments)?,
+                serde_json::to_string(&asked.shown)?,
+                serde_json::to_string(&asked.reasons)?,
+                asked.sensitive,
+                asked.identity,
+                asked.held_by,
+                serde_json::to_string(&asked.forwards)?,
+                created_at,
+            ],
+            |row| row.get(0),
+        )?;
+        let request = Request {
+            number,
+            state: RequestState::Pending,
+            decision: None,
+            created_at,
+            decided_at: None,
+            ..asked.clone()
+        };
+        let event = append_agent_event(
+            &transaction,
+            &request.agent,
+            "approval.requested",
+            request.to_json(),
+        )?;
+        transaction.commit()?;
+        Ok((request, Some(event)))
+    }
+
+    pub fn request(&self, number: u64) -> Result<Option<Request>> {
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {REQUEST_COLUMNS} FROM approval_requests WHERE number = ?1"
+        ))?;
+        let request = statement
+            .query_row(params![number], request_row)
+            .optional()?
+            .transpose()?;
+        Ok(request)
+    }
+
+    /// The pending requests `held_by` holds (`approval::USER` for the user's), oldest first.
+    pub fn pending_requests(&self, held_by: &str) -> Result<Vec<Request>> {
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {REQUEST_COLUMNS} FROM approval_requests \
+             WHERE held_by = ?1 AND state = 'pending' ORDER BY number"
+        ))?;
+        let rows = statement.query_map(params![held_by], request_row)?;
+        rows.map(|row| row?).collect()
+    }
+
+    /// The agent `by`, which holds the pending request, passes it to `to` (its parent, or
+    /// `approval::USER`) with one sentence of why, and its `approval.forwarded` event; `None`
+    /// when the request is not pending or not held by `by`.
+    pub fn forward(
+        &mut self,
+        number: u64,
+        by: &str,
+        why: &str,
+        to: &str,
+    ) -> Result<Option<(Request, Event)>> {
+        let transaction = self.connection.transaction()?;
+        let forwards: Option<String> = transaction
+            .query_row(
+                "SELECT forwards FROM approval_requests \
+                 WHERE number = ?1 AND state = 'pending' AND held_by = ?2",
+                params![number, by],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(forwards) = forwards else {
+            return Ok(None);
+        };
+        let mut forwards: Vec<Forward> = serde_json::from_str(&forwards)?;
+        forwards.push(Forward {
+            by: by.to_owned(),
+            why: why.to_owned(),
+        });
+        transaction.execute(
+            "UPDATE approval_requests SET held_by = ?2, forwards = ?3 WHERE number = ?1",
+            params![number, to, serde_json::to_string(&forwards)?],
+        )?;
+        let agent: String = transaction.query_row(
+            "SELECT agent FROM approval_requests WHERE number = ?1",
+            params![number],
+            |row| row.get(0),
+        )?;
+        let event = append_agent_event(
+            &transaction,
+            &agent,
+            "approval.forwarded",
+            json!({"number": number, "agent": agent, "by": by, "why": why, "held_by": to}),
+        )?;
+        transaction.commit()?;
+        let request = self
+            .request(number)?
+            .ok_or_else(|| Error::Refused(format!("there is no request #{number}")))?;
+        Ok(Some((request, event)))
+    }
+
+    /// The user's decision on a pending request they hold, with its `approval.decided` event and,
+    /// for `Decision::Tree`, the grant of its identity to `tree`; `None` when the request is not
+    /// pending or not the user's.
+    pub fn decide(
+        &mut self,
+        number: u64,
+        decision: Decision,
+        tree: &str,
+    ) -> Result<Option<(Request, Event)>> {
+        let transaction = self.connection.transaction()?;
+        let now = now_ms();
+        let state = match decision {
+            Decision::Deny => RequestState::Denied,
+            Decision::Once | Decision::Tree => RequestState::Allowed,
+        };
+        let changed = transaction.execute(
+            "UPDATE approval_requests SET state = ?2, decision = ?3, decided_at = ?4 \
+             WHERE number = ?1 AND state = 'pending' AND held_by = ?5",
+            params![
+                number,
+                state.as_str(),
+                decision.as_str(),
+                now,
+                approval::USER
+            ],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let (agent, identity): (String, String) = transaction.query_row(
+            "SELECT agent, identity FROM approval_requests WHERE number = ?1",
+            params![number],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if decision == Decision::Tree {
+            transaction.execute(
+                "INSERT OR REPLACE INTO approval_grants (tree, identity, request, created_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![tree, identity, number, now],
+            )?;
+        }
+        let event = append_agent_event(
+            &transaction,
+            &agent,
+            "approval.decided",
+            json!({"number": number, "agent": agent, "decision": decision.as_str(),
+                "by": approval::USER}),
+        )?;
+        transaction.commit()?;
+        let request = self
+            .request(number)?
+            .ok_or_else(|| Error::Refused(format!("there is no request #{number}")))?;
+        Ok(Some((request, event)))
+    }
+
+    /// Whether the user allowed this exact call for the tree.
+    pub fn tree_granted(&self, tree: &str, identity: &str) -> Result<bool> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT count(*) FROM approval_grants WHERE tree = ?1 AND identity = ?2",
+        )?;
+        let count: u64 = statement.query_row(params![tree, identity], |row| row.get(0))?;
+        Ok(count > 0)
+    }
+
+    /// Stores the answer of a decided request as the `approval` delivery of the agent that asked,
+    /// with its `approval.settled` event; `None` when it was stored already.
+    pub fn settle(
+        &mut self,
+        request: &Request,
+        outcome: &str,
+        body: &str,
+    ) -> Result<Option<Event>> {
+        let transaction = self.connection.transaction()?;
+        let id = format!("approval-{}", request.number);
+        let stored = transaction.execute(
+            "INSERT OR IGNORE INTO deliveries (id, agent, kind, body, state, created_at) \
+             VALUES (?1, ?2, 'approval', ?3, 'queued', ?4)",
+            params![id, request.agent, body, now_ms()],
+        )?;
+        if stored == 0 {
+            return Ok(None);
+        }
+        let event = append_agent_event(
+            &transaction,
+            &request.agent,
+            "approval.settled",
+            json!({"number": request.number, "agent": request.agent, "outcome": outcome,
+                "delivery": id}),
+        )?;
+        transaction.commit()?;
+        Ok(Some(event))
+    }
+
+    /// The requests allowed whose answer was never stored: a daemon stopped while it performed
+    /// them.
+    pub fn unsettled_requests(&self) -> Result<Vec<Request>> {
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {REQUEST_COLUMNS} FROM approval_requests WHERE state = 'allowed' \
+             AND NOT EXISTS (SELECT 1 FROM deliveries WHERE id = 'approval-' || number) \
+             ORDER BY number"
+        ))?;
+        let rows = statement.query_map([], request_row)?;
+        rows.map(|row| row?).collect()
+    }
+
+    pub fn delivery(&self, id: &str) -> Result<Option<Delivery>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT id, agent, kind, body, state, created_at FROM deliveries WHERE id = ?1",
+        )?;
+        Ok(statement
+            .query_row(params![id], |row| {
+                Ok(Delivery {
+                    id: row.get(0)?,
+                    agent: row.get(1)?,
+                    kind: row.get(2)?,
+                    body: row.get(3)?,
+                    state: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
+            })
+            .optional()?)
+    }
+
     /// At most `limit` events numbered after `after`, oldest first.
     pub fn events_after(&self, after: u64, limit: usize) -> Result<Vec<Event>> {
         let mut statement = self.connection.prepare_cached(
@@ -743,6 +1041,54 @@ fn run_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Run>> {
         started_at: row.get(8)?,
         ended_at: row.get(9)?,
         output: row.get(10)?,
+    }))
+}
+
+fn request_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Request>> {
+    let json = |i| -> rusqlite::Result<Result<Value>> {
+        let text: String = row.get(i)?;
+        Ok(serde_json::from_str(&text).map_err(Error::from))
+    };
+    let (state, decision): (String, Option<String>) = (row.get(11)?, row.get(12)?);
+    let Some(state) = RequestState::parse(&state) else {
+        return Ok(Err(Error::Refused(format!(
+            "the store holds a request in an unknown state {state}"
+        ))));
+    };
+    let decision = decision.as_deref().map(Decision::parse);
+    if decision == Some(None) {
+        return Ok(Err(Error::Refused(
+            "the store holds a request with an unknown decision".into(),
+        )));
+    }
+    let parsed = (|| -> Result<(Value, Value, Vec<String>, Vec<Forward>)> {
+        Ok((
+            json(4)??,
+            json(5)??,
+            serde_json::from_value(json(6)??)?,
+            serde_json::from_value(json(10)??)?,
+        ))
+    })();
+    let (arguments, shown, reasons, forwards) = match parsed {
+        Ok(parsed) => parsed,
+        Err(error) => return Ok(Err(error)),
+    };
+    Ok(Ok(Request {
+        number: row.get(0)?,
+        agent: row.get(1)?,
+        call_key: row.get(2)?,
+        tool: row.get(3)?,
+        arguments,
+        shown,
+        reasons,
+        sensitive: row.get(7)?,
+        identity: row.get(8)?,
+        held_by: row.get(9)?,
+        forwards,
+        state,
+        decision: decision.flatten(),
+        created_at: row.get(13)?,
+        decided_at: row.get(14)?,
     }))
 }
 
@@ -1223,6 +1569,212 @@ mod tests {
         assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len());
         assert_eq!(store.agents().unwrap().len(), 1);
         assert!(store.running_runs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_store_of_the_runs_schema_keeps_them_and_gains_the_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let old = Connection::open(&path).unwrap();
+        for migration in &MIGRATIONS[..4] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.pragma_update(None, "user_version", 4).unwrap();
+        drop(old);
+        let mut old = Store {
+            connection: Connection::open(&path).unwrap(),
+        };
+        old.create_agent(&an_agent(), ("agent.created", json!({})))
+            .unwrap();
+        drop(old);
+
+        let store = Store::open(&path).unwrap();
+
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len());
+        assert_eq!(store.agents().unwrap().len(), 1);
+        assert!(store.pending_requests(approval::USER).unwrap().is_empty());
+    }
+
+    fn a_request(key: Option<&str>) -> Request {
+        Request {
+            number: 0,
+            agent: an_agent().id,
+            call_key: key.map(str::to_owned),
+            tool: "fs_read".into(),
+            arguments: json!({"path": ".env"}),
+            shown: json!({"path": ".env"}),
+            reasons: vec![".env is a sensitive place (.env)".into()],
+            sensitive: true,
+            identity: "fs_read .env".into(),
+            held_by: approval::USER.into(),
+            forwards: Vec::new(),
+            state: RequestState::Denied,
+            decision: Some(Decision::Once),
+            created_at: 0,
+            decided_at: None,
+        }
+    }
+
+    #[test]
+    fn a_request_is_numbered_and_the_same_call_key_gives_the_same_one() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .create_agent(&an_agent(), ("agent.created", json!({})))
+            .unwrap();
+
+        let (first, event) = store.ask(&a_request(Some("toolu_01"))).unwrap();
+        let (again, none) = store.ask(&a_request(Some("toolu_01"))).unwrap();
+        let (other, _) = store.ask(&a_request(Some("toolu_02"))).unwrap();
+        let (keyless, _) = store.ask(&a_request(None)).unwrap();
+        let (keyless_again, _) = store.ask(&a_request(None)).unwrap();
+
+        assert_eq!(first.state, RequestState::Pending);
+        assert_eq!(first.decision, None);
+        assert!(first.created_at > 0);
+        let event = event.unwrap();
+        assert_eq!(event.name, "approval.requested");
+        assert_eq!(event.data["number"], first.number);
+        assert!(event.data.get("arguments").is_none());
+        assert_eq!(again, first);
+        assert!(none.is_none());
+        assert_ne!(other.number, first.number);
+        assert_ne!(keyless.number, keyless_again.number);
+        assert_eq!(store.request(first.number).unwrap(), Some(first));
+        assert_eq!(store.pending_requests(approval::USER).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn a_request_held_by_an_agent_is_not_the_user_s_until_forwarded() {
+        let mut store = Store::open_in_memory().unwrap();
+        let agent = an_agent();
+        store
+            .create_agent(&agent, ("agent.created", json!({})))
+            .unwrap();
+        let mut asked = a_request(None);
+        asked.held_by = "parent0000ab".into();
+        let (request, _) = store.ask(&asked).unwrap();
+
+        assert!(store.pending_requests(approval::USER).unwrap().is_empty());
+        assert!(
+            store
+                .decide(request.number, Decision::Once, &agent.id)
+                .unwrap()
+                .is_none()
+        );
+        // Only its holder forwards it.
+        assert!(
+            store
+                .forward(request.number, "someone0000", "why", approval::USER)
+                .unwrap()
+                .is_none()
+        );
+
+        let (forwarded, event) = store
+            .forward(
+                request.number,
+                "parent0000ab",
+                "it needs the key",
+                approval::USER,
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(event.name, "approval.forwarded");
+        assert_eq!(event.data["held_by"], approval::USER);
+        assert_eq!(forwarded.held_by, approval::USER);
+        assert_eq!(
+            forwarded.forwards,
+            [Forward {
+                by: "parent0000ab".into(),
+                why: "it needs the key".into()
+            }]
+        );
+        assert_eq!(store.pending_requests(approval::USER).unwrap().len(), 1);
+        assert!(
+            store
+                .decide(request.number, Decision::Once, &agent.id)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_decision_is_taken_once_and_a_grant_for_the_tree_is_written() {
+        let mut store = Store::open_in_memory().unwrap();
+        let agent = an_agent();
+        store
+            .create_agent(&agent, ("agent.created", json!({})))
+            .unwrap();
+        let (once, _) = store.ask(&a_request(None)).unwrap();
+        let (tree, _) = store.ask(&a_request(None)).unwrap();
+        let (denied, _) = store.ask(&a_request(None)).unwrap();
+
+        let (decided, event) = store
+            .decide(once.number, Decision::Once, &agent.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(decided.state, RequestState::Allowed);
+        assert_eq!(decided.decision, Some(Decision::Once));
+        assert!(decided.decided_at.is_some());
+        assert_eq!(event.name, "approval.decided");
+        assert_eq!(event.data["decision"], "once");
+        assert!(!store.tree_granted(&agent.id, "fs_read .env").unwrap());
+        // Decided once: a second decision changes nothing.
+        assert!(
+            store
+                .decide(once.number, Decision::Deny, &agent.id)
+                .unwrap()
+                .is_none()
+        );
+
+        store
+            .decide(tree.number, Decision::Tree, &agent.id)
+            .unwrap()
+            .unwrap();
+        assert!(store.tree_granted(&agent.id, "fs_read .env").unwrap());
+        assert!(!store.tree_granted("another0000", "fs_read .env").unwrap());
+
+        let (denied, _) = store
+            .decide(denied.number, Decision::Deny, &agent.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(denied.state, RequestState::Denied);
+        assert!(store.pending_requests(approval::USER).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_settled_request_stores_its_delivery_once() {
+        let mut store = Store::open_in_memory().unwrap();
+        let agent = an_agent();
+        store
+            .create_agent(&agent, ("agent.created", json!({})))
+            .unwrap();
+        let (request, _) = store.ask(&a_request(None)).unwrap();
+        let (request, _) = store
+            .decide(request.number, Decision::Once, &agent.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store.unsettled_requests().unwrap(),
+            std::slice::from_ref(&request)
+        );
+
+        let event = store
+            .settle(&request, "done", "the result")
+            .unwrap()
+            .unwrap();
+        let again = store.settle(&request, "done", "another").unwrap();
+
+        assert_eq!(event.name, "approval.settled");
+        assert_eq!(event.data["outcome"], "done");
+        assert!(again.is_none());
+        let id = format!("approval-{}", request.number);
+        let delivery = store.delivery(&id).unwrap().unwrap();
+        assert_eq!(delivery.agent, agent.id);
+        assert_eq!(delivery.kind, "approval");
+        assert_eq!(delivery.body, "the result");
+        assert_eq!(delivery.state, "queued");
+        assert!(store.unsettled_requests().unwrap().is_empty());
     }
 
     #[test]
