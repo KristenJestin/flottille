@@ -159,6 +159,7 @@ fn confirm() -> Result<()> {
     std::io::stderr().flush()?;
     let mut answer = String::new();
     if std::io::stdin().lock().read_line(&mut answer)? == 0 {
+        eprintln!();
         return Err(
             "not registered: nothing to read an answer from, use --yes to register without asking"
                 .into(),
