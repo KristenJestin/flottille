@@ -27,6 +27,8 @@ const GIT_ENV: [(&str, &str); 6] = [
 /// A throwaway user: its own home and XDG folders, and the daemon it starts, stopped on drop.
 pub struct User {
     dir: TempDir,
+    /// More variables for every command, and so for the daemon the first one starts.
+    env: Vec<(String, String)>,
 }
 
 impl User {
@@ -41,7 +43,52 @@ impl User {
                 .create(dir.path().join(sub))
                 .unwrap();
         }
-        User { dir }
+        User {
+            dir,
+            env: Vec::new(),
+        }
+    }
+
+    /// A variable for every command of this user, and so for its daemon.
+    pub fn with_env(mut self, name: &str, value: &str) -> User {
+        self.env.push((name.to_owned(), value.to_owned()));
+        self
+    }
+
+    /// A user whose agents are the fake ACP agent (`crates/flottille-fake-agent`), its folder
+    /// `fake` in the user's folder.
+    pub fn with_fake_agent() -> User {
+        let user = User::new();
+        std::fs::create_dir(user.path("fake")).unwrap();
+        let fake = fake_agent();
+        let dir = user.path("fake");
+        user.with_env("FLOTTILLE_AGENT_COMMAND", fake.to_str().unwrap())
+            .with_env("FLOTTILLE_FAKE_AGENT_DIR", dir.to_str().unwrap())
+    }
+
+    /// The fake agent's script (`crates/flottille-fake-agent`).
+    pub fn fake_script(&self, script: Value) {
+        std::fs::write(self.path("fake/script.json"), script.to_string()).unwrap();
+    }
+
+    /// What the fake agent received and did, one entry per line of its record.
+    pub fn received(&self) -> Vec<Value> {
+        match std::fs::read_to_string(self.path("fake/received.jsonl")) {
+            Ok(text) => text
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// The requests of one method the fake agent received, oldest first.
+    pub fn received_requests(&self, method: &str) -> Vec<Value> {
+        self.received()
+            .into_iter()
+            .filter(|entry| entry["received"]["method"] == method)
+            .map(|entry| entry["received"].clone())
+            .collect()
     }
 
     pub fn path(&self, sub: &str) -> PathBuf {
@@ -57,6 +104,7 @@ impl User {
             .env("XDG_STATE_HOME", self.path("state"))
             .env("XDG_CONFIG_HOME", self.path("config"))
             .env("XDG_DATA_HOME", self.path("data"))
+            .envs(self.env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null());
         // The daemon runs git: never with the machine's settings.
         for (name, value) in GIT_ENV {
@@ -193,6 +241,19 @@ pub struct Watch {
 }
 
 impl Watch {
+    /// The events up to the first one `until` accepts, that one included.
+    pub fn until(&self, until: impl Fn(&Value) -> bool) -> Vec<Value> {
+        let mut seen = Vec::new();
+        loop {
+            let event = self.next_event();
+            let done = until(&event);
+            seen.push(event);
+            if done {
+                return seen;
+            }
+        }
+    }
+
     pub fn next_event(&self) -> Value {
         let line = self
             .lines
@@ -207,6 +268,18 @@ impl Drop for Watch {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// The fake agent's binary, built beside Flottille's by `cargo test` (or `cargo build`) at the
+/// workspace's root.
+pub fn fake_agent() -> PathBuf {
+    let path = Path::new(env!("CARGO_BIN_EXE_flottille")).with_file_name("flottille-fake-agent");
+    assert!(
+        path.exists(),
+        "{} is missing: run the tests from the workspace's root, or `cargo build -p flottille-fake-agent` first",
+        path.display()
+    );
+    path
 }
 
 pub fn mode(path: PathBuf) -> u32 {

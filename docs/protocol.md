@@ -81,8 +81,8 @@ No parameters. The result:
 ```
 
 `version` is the full version: the release and, for a build from a git checkout, its commit.
-`agents` counts the agents running, the root agents waiting for the user, and the agents that
-failed.
+`agents` counts the agents running (starting or in a turn), the root agents waiting for the user,
+and the agents that failed (`docs/agents.md`).
 
 ### `daemon.stop`
 
@@ -251,3 +251,67 @@ answered as it is, both counts 0. `refused` while it is being prepared or remove
 folder and its record are gone. `refused`, with nothing touched, while it is being prepared, or
 when a worktree holds a changed or untracked file or a commit on no remote: the message names
 every one.
+
+### The agent methods
+
+An agent is one agent session run over ACP (`docs/agents.md`), named by an opaque id. None of
+these methods waits on the agent: what it does comes as events (`docs/events.md`), and `after`,
+in the answers that start something, is the number to give `events.watch` to follow it from
+there. An agent in a result:
+
+```json
+{
+  "id": "3f9a1c0b7d2e",
+  "provider": "claude",
+  "role": "lead",
+  "project": "app",
+  "workspace": "login",
+  "folder": "/work/app-work/login",
+  "state": "idle",
+  "state_reason": null,
+  "created_at": 1792843730808,
+  "updated_at": 1792843741200,
+  "active_at": 1792843741190,
+  "ended_at": null,
+  "chosen": {"model": null, "effort": null, "mode": null},
+  "taken": {"model": "claude-haiku-4-5", "effort": null, "mode": "default"},
+  "native_id": "0f6c…",
+  "agent_version": "@agentclientprotocol/claude-agent-acp 0.95.0",
+  "instructions": "…\n\n__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__\n\n…",
+  "tools": ["mcp__flottille__fs_read", "…"]
+}
+```
+
+`workspace` is `null` for the project folder itself. `state` is `starting` (its process starts
+and its session opens), `working` (a turn runs), `idle` (between turns, its process running or
+released), or one of the final states, never left: `ended`, `failed` (`state_reason` says why).
+`chosen` is what the user asked, `null` for the agent's default; `taken` what the agent reported
+at the last start of its process. `active_at` is its last sign of activity, `null` before the
+first. `instructions` and `tools` are frozen when the agent is created.
+
+Each method answers `not-found` when the agent does not exist.
+
+#### `agent.run`
+
+`{"project", "workspace"?, "model"?, "effort"?, "mode"?, "message"}`. Creates an agent in the
+project folder or the workspace, and gives it its first message: `{"agent", "after"}`. `not-found`
+when the project or the workspace does not exist; `refused` when the workspace is not ready, the
+message is empty, or the adapter cannot run (not installed, Node or `claude` not on `PATH`: the
+message says what to do). A model, an effort or a mode the agent does not offer is known only once
+its session is open: the agent then fails (`agent.failed`), saying what it offers.
+
+#### `agent.send`
+
+`{"agent", "message"}`. Gives the agent a message, played after the turn that runs if one does,
+starting its process again when it was released: `{"agent", "after"}`. `refused` when the agent
+is in a final state or the message is empty.
+
+#### `agent.cancel`
+
+`{"agent"}`. Cancels the turn that runs: `{"agent", "cancelled"}`, `cancelled` false when no turn
+ran. The turn then ends `cancelled`.
+
+#### `agent.show`
+
+`{"agent", "after"?}`. `{"agent", "events"}`: the agent, and its events in order (at most 1000,
+those numbered after `after` when it is given).

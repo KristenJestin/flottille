@@ -151,7 +151,7 @@ fn list_shows_the_projects_and_says_when_there_are_none() {
     assert!(stdout(&user.run(&["project", "list"])).contains("No project is registered"));
     assert_eq!(
         stdout(&user.run(&["project", "list", "--json"])).trim(),
-        r#"{"errors":[],"projects":[]}"#
+        r#"{"projects":[],"errors":[]}"#
     );
     let app = registered(&user);
 

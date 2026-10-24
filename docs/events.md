@@ -126,3 +126,131 @@ The workspace's worktrees, folder and record are gone. Its branches are kept.
 | Field | |
 |---|---|
 | `project`, `workspace` | |
+
+### The events of an agent
+
+Every event of an agent has `agent`, its id (`docs/agents.md`), and is part of its conversation
+(`agent.show`). The events made from what the agent sends also have `replay`: true while a
+`session/load` replays its history, so that a client never takes it for new.
+
+#### `agent.created`
+
+An agent was written, before its process starts.
+
+| Field | |
+|---|---|
+| `agent` | Its id. |
+| `project` | Its project. |
+| `workspace` | Its workspace, `null` for the project folder. |
+| `folder` | Where it works. |
+| `provider` | `claude`. |
+| `model` | The model asked, `null` for the agent's default. |
+
+#### `agent.started`
+
+Its process runs and its session is open, its options set.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `pid` | The adapter's process id. |
+| `opened` | `new`, `resumed` or `loaded`. |
+| `native_id` | The ACP session id. |
+| `agent_version` | The adapter's name and version. |
+| `taken` | `{"model", "effort", "mode"}`: what the agent took. |
+
+#### `agent.prompted`
+
+A turn starts with this message.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `text` | The message. |
+
+#### `agent.user_message`, `agent.message`, `agent.thought`
+
+A piece of text of the user (seen in a replay), of the agent's reply, or of its thinking, as it
+streams: the pieces of one reply follow each other.
+
+| Field | |
+|---|---|
+| `agent`, `replay` | |
+| `text` | The piece, cut at 64 KiB (`‹+N chars›` says how much was left out). |
+
+#### `agent.tool_call`
+
+A tool call the agent makes, or a change of one (`update`).
+
+| Field | |
+|---|---|
+| `agent`, `replay` | |
+| `id` | The call's id. |
+| `update` | False when the call appears, true for a change of it. |
+| `title`, `kind`, `status`, `locations`, `content`, `raw_input`, `raw_output` | As the agent sent them, each only when it did; `status` is `pending`, `in_progress`, `completed` or `failed`. |
+
+#### `agent.compacted`
+
+The agent compacted its context.
+
+| Field | |
+|---|---|
+| `agent`, `replay` | |
+
+#### `agent.plan`, `agent.usage`, `agent.mode_changed`, `agent.options_changed`
+
+The agent's plan (`entries`), its context use (`used` and `size` in tokens, `cost`), its mode
+(`mode`), its options (`options`, as ACP gives them). Each with `agent` and `replay`.
+
+#### `agent.provider_wait`, `agent.provider_limit`
+
+The provider makes the agent wait, or refuses it for a limit (`message`, when it says one). Each
+with `agent` and `replay`.
+
+#### `agent.permission_answered`
+
+The agent asked its own permission for a tool, answered at once.
+
+| Field | |
+|---|---|
+| `agent`, `replay` | |
+| `tool` | The tool's name. |
+| `allowed` | True for one of the agent's Flottille tools, false for anything else. |
+
+#### `agent.turn_ended`
+
+| Field | |
+|---|---|
+| `agent` | |
+| `stop_reason` | `end_turn`, `max_tokens`, `max_turn_requests`, `refusal`, `cancelled`, or `interrupted` when its process died during the turn. |
+| `usage` | The turn's token counts when the agent gave them, else `null`. |
+
+#### `agent.released`
+
+Its process was let go; the next message starts it again.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `reason` | `idle` (no turn for the idle release time) or `restart` (the daemon that ran it is gone). |
+
+#### `agent.died`
+
+Its process ended by itself. The agent failed.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `code` | Its exit code, `null` when a signal ended it. |
+| `signal` | The signal, `null` otherwise. |
+| `during_turn` | Whether a turn was running. |
+
+#### `agent.failed`
+
+The agent cannot go on: its process could not start, its session could not open, an option it was
+asked is not one it offers. Its process is stopped.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `reason` | A sentence, masked. |

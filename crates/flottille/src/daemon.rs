@@ -19,6 +19,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinSet;
 
 use crate::VERSION;
+use crate::agents::{self, Live};
 use crate::projects::{self, Projects};
 use crate::workspaces;
 
@@ -34,6 +35,8 @@ pub fn run(paths: &Paths) -> Result<()> {
     ensure_private_dir(&paths.state)?;
     let _lock = take_lock(paths)?;
     let store = Store::open(&paths.database())?;
+    // Before anything starts an agent: what a daemon that died left running is its own to kill.
+    agents::kill_orphans(&store);
     let projects = Projects::open(paths)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -67,12 +70,15 @@ fn take_lock(paths: &Paths) -> Result<File> {
 }
 
 pub struct Daemon {
+    pub paths: Paths,
     started: Instant,
     events: Mutex<Events>,
     /// Taken before `events` when both are: the projects' methods emit under it.
     pub projects: Mutex<Projects>,
     /// The workspaces being prepared or removed: one at a time for each.
     pub preparing: Mutex<HashSet<i64>>,
+    /// The agents that have a task, and so maybe a process.
+    pub agents: Live,
     /// Becomes true when the daemon stops.
     stopping: watch::Sender<bool>,
 }
@@ -109,15 +115,15 @@ impl Daemon {
         read(&self.events.lock().unwrap().store)
     }
 
-    /// Writes the store, the change and its event in one transaction of `write`'s own, then
-    /// hands the event to the subscribers, under the same lock as `emit`.
-    pub fn write<T>(
+    /// Writes the store, the change and its event (when it has one) in one transaction of
+    /// `write`'s own, then hands the event to the subscribers, under the same lock as `emit`.
+    pub fn write<T, E: Into<Option<Event>>>(
         &self,
-        write: impl FnOnce(&mut Store) -> flottille_core::Result<(T, Event)>,
+        write: impl FnOnce(&mut Store) -> flottille_core::Result<(T, E)>,
     ) -> flottille_core::Result<T> {
         let mut events = self.events.lock().unwrap();
         let (value, event) = write(&mut events.store)?;
-        if let Some(bus) = &events.bus {
+        if let (Some(bus), Some(event)) = (&events.bus, event.into()) {
             let _ = bus.send(event);
         }
         Ok(value)
@@ -156,6 +162,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     let listener = UnixListener::bind(&socket)?;
     let (bus, _) = broadcast::channel(1024);
     let daemon = Arc::new(Daemon {
+        paths: paths.clone(),
         started: Instant::now(),
         events: Mutex::new(Events {
             store,
@@ -163,6 +170,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         }),
         projects: Mutex::new(projects),
         preparing: Mutex::new(HashSet::new()),
+        agents: Live::default(),
         stopping: watch::Sender::new(false),
     });
     let mut terminate = signal(SignalKind::terminate())?;
@@ -177,6 +185,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         socket.display()
     );
     workspaces::resume_at_start(&daemon);
+    agents::settle_at_start(&daemon);
 
     let mut connections = JoinSet::new();
     let reason = loop {
@@ -196,6 +205,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
 
     drop(listener);
     std::fs::remove_file(&socket)?;
+    agents::stop_all(&daemon).await;
     daemon.emit("daemon.stopping", json!({"reason": reason}))?;
     daemon.events.lock().unwrap().bus = None;
     daemon.stopping.send_replace(true);
@@ -238,11 +248,17 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                 continue;
             }
         };
-        // They run git and wait for it: answered by a task of their own, the connection goes on.
-        if request.method.starts_with("workspace.") {
+        // They run git, or wait on an agent's task: answered by a task of their own, the
+        // connection goes on.
+        if request.method.starts_with("workspace.") || request.method.starts_with("agent.") {
             let (daemon, out) = (daemon.clone(), out.clone());
             tokio::spawn(async move {
-                let answer = match workspaces::call(daemon, &request.method, request.params).await {
+                let answer = if request.method.starts_with("agent.") {
+                    agents::call(daemon, &request.method, request.params).await
+                } else {
+                    workspaces::call(daemon, &request.method, request.params).await
+                };
+                let answer = match answer {
                     Ok(result) => Message::result(request.id, result),
                     Err(failure) => Message::error(Some(request.id), failure.code, failure.message),
                 };
@@ -272,7 +288,13 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
 fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) {
     let id = request.id;
     match request.method.as_str() {
-        "daemon.status" => (Message::result(id, status(daemon)), None),
+        "daemon.status" => (
+            match status(daemon) {
+                Ok(status) => Message::result(id, status),
+                Err(error) => Message::error(Some(id), "unavailable", error.to_string()),
+            },
+            None,
+        ),
         "daemon.stop" => {
             daemon.stopping.send_replace(true);
             (Message::result(id, json!({"stopping": true})), None)
@@ -317,14 +339,21 @@ fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) 
     }
 }
 
-fn status(daemon: &Daemon) -> Value {
-    json!({
+fn status(daemon: &Daemon) -> flottille_core::Result<Value> {
+    use flottille_core::agent::AgentState;
+    let agents = daemon.read(Store::agents)?;
+    let count = |states: &[AgentState]| agents.iter().filter(|a| states.contains(&a.state)).count();
+    Ok(json!({
         "version": VERSION,
         "pid": std::process::id(),
         "uptime_s": daemon.started.elapsed().as_secs(),
-        // Filled as agents arrive.
-        "agents": {"running": 0, "waiting_for_user": 0, "failed": 0},
-    })
+        // Waiting for the user comes with the approvals.
+        "agents": {
+            "running": count(&[AgentState::Starting, AgentState::Working]),
+            "waiting_for_user": 0,
+            "failed": count(&[AgentState::Failed]),
+        },
+    }))
 }
 
 async fn forward(daemon: Arc<Daemon>, mut subscription: Subscription, out: mpsc::Sender<Message>) {
