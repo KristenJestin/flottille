@@ -20,6 +20,7 @@ use tokio::task::JoinSet;
 
 use crate::VERSION;
 use crate::agents::{self, Live};
+use crate::approvals;
 use crate::mcp;
 use crate::projects::{self, Projects};
 use crate::runs;
@@ -194,6 +195,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     workspaces::resume_at_start(&daemon);
     agents::settle_at_start(&daemon);
     runs::settle_at_start(&daemon);
+    approvals::settle_at_start(&daemon);
     tokio::spawn(mcp::serve(
         daemon.clone(),
         tools,
@@ -262,13 +264,18 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                 continue;
             }
         };
-        // They run git, or wait on an agent's task: answered by a task of their own, the
-        // connection goes on.
-        if request.method.starts_with("workspace.") || request.method.starts_with("agent.") {
+        // They run git, wait on an agent's task or start what an approval allows: answered by a
+        // task of their own, the connection goes on.
+        if ["workspace.", "agent.", "approval."]
+            .iter()
+            .any(|prefix| request.method.starts_with(prefix))
+        {
             let (daemon, out) = (daemon.clone(), out.clone());
             tokio::spawn(async move {
                 let answer = if request.method.starts_with("agent.") {
                     agents::call(daemon, &request.method, request.params).await
+                } else if request.method.starts_with("approval.") {
+                    approvals::call(daemon, &request.method, request.params).await
                 } else {
                     workspaces::call(daemon, &request.method, request.params).await
                 };
@@ -361,10 +368,9 @@ fn status(daemon: &Daemon) -> flottille_core::Result<Value> {
         "version": VERSION,
         "pid": std::process::id(),
         "uptime_s": daemon.started.elapsed().as_secs(),
-        // Waiting for the user comes with the approvals.
         "agents": {
             "running": count(&[AgentState::Starting, AgentState::Working]),
-            "waiting_for_user": 0,
+            "waiting_for_user": approvals::waiting_for_user(daemon)?,
             "failed": count(&[AgentState::Failed]),
         },
     }))

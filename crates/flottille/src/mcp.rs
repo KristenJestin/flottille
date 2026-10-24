@@ -39,6 +39,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::VERSION;
+use crate::approvals;
 use crate::claude;
 use crate::daemon::Daemon;
 use crate::files::{self, Context};
@@ -282,6 +283,8 @@ pub enum Outcome {
     Refused(String),
     /// It could not be done.
     Failed(String),
+    /// The gate held it for an answer: the waiting text.
+    Held(String),
 }
 
 impl Outcome {
@@ -290,6 +293,7 @@ impl Outcome {
             Outcome::Done(_) => "ok",
             Outcome::Refused(_) => "refused",
             Outcome::Failed(_) => "failed",
+            Outcome::Held(_) => "held",
         }
     }
 }
@@ -787,19 +791,23 @@ async fn played(
     let recorded = record_of(&args, &grant.place);
     let mut verdict = None;
     let outcome = if grant.tools.contains(&tool) {
-        let (paths, words) = reached(daemon, &grant.place, tool, &args);
-        let decided = gate::decide(&gate::Call {
-            grant,
-            tool,
-            args: &args,
-            words: &words,
-            paths: &paths,
-        });
-        let word = decided.word();
-        verdict = Some(word);
+        let (decided, identity) = judge(daemon, grant, tool, &args);
+        // A call the user allowed for the tree goes through, never one reaching a sensitive place.
+        let decided = match decided {
+            gate::Verdict::Ask(ask)
+                if !ask.sensitive && approvals::granted(daemon, &grant.agent, &identity) =>
+            {
+                gate::Verdict::Allow
+            }
+            decided => decided,
+        };
+        verdict = Some(decided.word());
         match decided {
-            gate::Verdict::Allow => perform(daemon, grant, tool, args, cancelled).await,
+            gate::Verdict::Allow => perform(daemon, grant, tool, args, cancelled, false).await,
             gate::Verdict::Deny(why) => Outcome::Refused(why),
+            gate::Verdict::Ask(ask) => {
+                approvals::ask(daemon, grant, tool, &args, key, ask, identity)
+            }
         }
     } else {
         Outcome::Refused(format!(
@@ -807,26 +815,100 @@ async fn played(
             grant.tools.join(", ")
         ))
     };
+    record(
+        daemon, grant, tool, key, recorded, verdict, &outcome, started, None,
+    );
+    let error = matches!(outcome, Outcome::Refused(_) | Outcome::Failed(_));
+    let notes = daemon.mcp.notes.take(&grant.agent);
+    (shown(outcome, &notes, &grant.place), error)
+}
+
+/// The gate's verdict on a call of one of the agent's tools, and the call's identity for a grant.
+pub fn judge(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> (gate::Verdict, String) {
+    let project = projects::load_project(daemon, &grant.place.project).ok();
+    let (paths, words, command) = reached(daemon, &grant.place, tool, args);
+    let command = command.as_deref().and_then(|name| {
+        let (name, command) = project.as_ref()?.commands.get_key_value(name)?;
+        Some((name.as_str(), command))
+    });
+    let paths_of = &daemon.paths;
+    let own = [
+        paths_of.data.clone(),
+        paths_of.config.clone(),
+        paths_of.state.clone(),
+        paths_of.runtime.clone(),
+    ];
+    let call = gate::Call {
+        grant,
+        tool,
+        args,
+        words: &words,
+        paths: &paths,
+        command,
+        never: project.as_ref().map(|project| project.never.as_slice()),
+        own: &own,
+    };
+    (gate::decide(&call), gate::identity(&call))
+}
+
+/// Performs a call the user allowed, recorded as the agent's: the request's answer.
+pub async fn performed(
+    daemon: &Arc<Daemon>,
+    grant: &Arc<Grant>,
+    tool: &str,
+    args: Value,
+    request: u64,
+) -> Outcome {
+    let started = Instant::now();
+    let recorded = record_of(&args, &grant.place);
+    let outcome = perform(daemon, grant, tool, args, CancellationToken::new(), true).await;
+    let verdict = Some("allow");
+    record(
+        daemon,
+        grant,
+        tool,
+        None,
+        recorded,
+        verdict,
+        &outcome,
+        started,
+        Some(request),
+    );
+    outcome
+}
+
+/// The call's `agent.tool_served` event.
+#[allow(clippy::too_many_arguments)]
+fn record(
+    daemon: &Daemon,
+    grant: &Grant,
+    tool: &str,
+    key: Option<&str>,
+    recorded: Value,
+    verdict: Option<&str>,
+    outcome: &Outcome,
+    started: Instant,
+    request: Option<u64>,
+) {
     let duration = started.elapsed().as_millis() as u64;
     let data = json!({"agent": grant.agent, "tool": tool, "call_key": key,
         "arguments": recorded, "gate": verdict, "outcome": outcome.word(),
-        "duration_ms": duration});
+        "duration_ms": duration, "request": request});
     if let Err(error) = daemon.write(|store| {
         let event = store.append_agent_event(&grant.agent, "agent.tool_served", data, true)?;
         Ok(((), Some(event)))
     }) {
         eprintln!("flottille daemon: agent {}: {error}", grant.agent);
     }
-    let error = !matches!(outcome, Outcome::Done(_));
-    let notes = daemon.mcp.notes.take(&grant.agent);
-    (shown(outcome, &notes, &grant.place), error)
 }
 
 /// What the agent is shown of an outcome: its text under its limit, then the notes pinned for the
-/// agent, whole and counted in that limit. A failure is masked of the place's secrets too.
+/// agent, whole and counted in that limit. A result and a failure are masked of the place's
+/// secrets too.
 fn shown(outcome: Outcome, notes: &[String], place: &Place) -> String {
     let (text, limit) = match outcome {
-        Outcome::Done(text) => (text, RESULT_LIMIT),
+        Outcome::Done(text) => (masked(&text, place), RESULT_LIMIT),
+        Outcome::Held(text) => (text, RESULT_LIMIT),
         Outcome::Refused(text) => (text, ERROR_LIMIT),
         Outcome::Failed(text) => (
             masked(&format!("the call failed: {text}"), place),
@@ -841,29 +923,32 @@ fn shown(outcome: Outcome, notes: &[String], place: &Place) -> String {
     format!("{}\n\n{notes}", cut(&text, room))
 }
 
-/// The paths a call reaches and, for a run, the words it would start, read from its arguments the
-/// way its tool will; what does not fit is left to the tool, which refuses it with its own
-/// sentence.
+/// The paths a call reaches and, for a run, the words it would start and the catalogue command
+/// it names, read from its arguments the way its tool will; what does not fit is left to the
+/// tool, which refuses it with its own sentence.
 fn reached(
     daemon: &Daemon,
     place: &Place,
     tool: &str,
     args: &Value,
-) -> (Vec<Resolved>, Vec<String>) {
+) -> (Vec<Resolved>, Vec<String>, Option<String>) {
     match tool {
         "fs_read" | "fs_list" | "search" | "fs_write" | "fs_edit" => {
-            (files::reaches(place, tool, args), Vec::new())
+            (files::reaches(place, tool, args), Vec::new(), None)
         }
         _ => runs::reaches(daemon, place, tool, args),
     }
 }
 
+/// Performs a call the gate let through; `approved` when the user allowed it, which lets its
+/// paths be outside the place.
 async fn perform(
     daemon: &Arc<Daemon>,
     grant: &Arc<Grant>,
     tool: &str,
     args: Value,
     cancelled: CancellationToken,
+    approved: bool,
 ) -> Outcome {
     match tool {
         "commands_list" => runs::commands_list(daemon, &grant.place, args),
@@ -880,6 +965,7 @@ async fn perform(
                     daemon: &daemon,
                     agent: &grant.agent,
                     place: &grant.place,
+                    approved,
                 };
                 match tool.as_str() {
                     "fs_read" => files::fs_read(&cx, args),
@@ -897,7 +983,7 @@ async fn perform(
 }
 
 /// The arguments as a call is recorded: every text cut and masked.
-fn record_of(args: &Value, place: &Place) -> Value {
+pub fn record_of(args: &Value, place: &Place) -> Value {
     fn walk(value: &Value, mask: &dyn Fn(&str) -> String) -> Value {
         match value {
             Value::String(text) => Value::String(mask(&cut(text, ARGUMENT_CHARS))),

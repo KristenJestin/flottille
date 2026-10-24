@@ -81,8 +81,8 @@ No parameters. The result:
 ```
 
 `version` is the full version: the release and, for a build from a git checkout, its commit.
-`agents` counts the agents running (starting or in a turn), the root agents waiting for the user,
-and the agents that failed (`docs/agents.md`).
+`agents` counts the agents running (starting or in a turn), the root agents waiting for the user
+(with a request the user holds, `approval.list`), and the agents that failed (`docs/agents.md`).
 
 ### `daemon.stop`
 
@@ -315,3 +315,48 @@ ran. The turn then ends `cancelled`.
 
 `{"agent", "after"?}`. `{"agent", "events"}`: the agent, and its events in order (at most 1000,
 those numbered after `after` when it is given).
+
+### The approval methods
+
+The requests of the gate (`docs/tools.md`, "The gate"). A request in a result:
+
+```json
+{
+  "number": 3,
+  "agent": "3f9a1c0b7d2e",
+  "call_key": "toolu_01",
+  "tool": "fs_read",
+  "call": {"path": ".env"},
+  "reasons": [".env is a sensitive place (.env)"],
+  "sensitive": true,
+  "held_by": "user",
+  "forwards": [],
+  "state": "pending",
+  "decision": null,
+  "created_at": 1792843730808,
+  "decided_at": null
+}
+```
+
+`call` is the call's arguments, every text cut at 500 characters and masked; the call itself is
+kept whole, to be performed, and never sent. `held_by` is `user` or the id of the agent that holds
+the request; `forwards` are the `{"by", "why"}` of each agent that passed it up. `state` is
+`pending`, `denied` or `allowed`; `decision` is `deny`, `once` or `tree` once it is decided.
+
+#### `approval.list`
+
+No parameters. `{"requests": [...]}`: the pending requests the user holds, oldest first. A request
+held by an agent is not there.
+
+#### `approval.approve`
+
+`{"number", "for_tree"?}`. Allows the request, once, or with `for_tree: true` for the root's tree
+(the same call goes through without asking from then on). Answered `{"request"}` once it is
+decided; the call is then checked again, performed in the background, and its answer stored for
+the agent (`approval.settled`). `not-found` when there is no such request; `refused` when it is
+held by an agent, already decided, or, with `for_tree`, reaches a sensitive place.
+
+#### `approval.deny`
+
+`{"number"}`. Denies the request: `{"request"}`, and the agent's answer is stored at once. The same
+errors as `approval.approve`.

@@ -50,15 +50,37 @@ fn agent(user: &User, params: Value) -> (String, String, String) {
     (id, url, authorization)
 }
 
-/// The agent's session in the project folder, through rmcp's client.
+/// A workspace `w` of `app`: its folder. The project folder is read-only for agents.
+fn workspace(user: &User) -> PathBuf {
+    let workspace = user
+        .call("workspace.create", json!({"project": "app", "name": "w"}))
+        .unwrap();
+    PathBuf::from(workspace["folder"].as_str().unwrap())
+}
+
+/// The session of an agent working in the workspace `w`, through rmcp's client, and its folder.
 fn session(user: &User) -> (Mcp, PathBuf) {
-    let folder = project(user);
-    let (_, url, authorization) = agent(user, json!({}));
+    project(user);
+    let folder = workspace(user);
+    let (_, url, authorization) = agent(user, json!({"workspace": "w"}));
     (Mcp::initialize(&url, &authorization), folder)
 }
 
 fn ok(answer: Answer) -> String {
     assert!(!answer.error, "an error: {}", answer.text);
+    answer.text
+}
+
+/// A call the gate held: answered at once, not as an error, with the waiting text.
+fn held(answer: Answer) -> String {
+    assert!(!answer.error, "an error: {}", answer.text);
+    assert!(
+        answer
+            .text
+            .starts_with("Waiting for the user's approval, request #"),
+        "{}",
+        answer.text
+    );
     answer.text
 }
 
@@ -227,7 +249,7 @@ fn a_session_sees_only_its_tools() {
     // Another agent's session is its own: what the first read and ran is not the second's.
     ok(mcp.call("fs_read", json!({"path": "README.md"})));
     let run = run_id(&ok(mcp.call("commands_run", json!({"line": "true"}))));
-    let (_, url, authorization) = agent(&user, json!({}));
+    let (_, url, authorization) = agent(&user, json!({"workspace": "w"}));
     let other = Mcp::initialize(&url, &authorization);
     let text = refused(other.call("fs_write", json!({"path": "README.md", "content": "x"})));
     assert!(text.contains("has not read it"), "{text}");
@@ -537,12 +559,11 @@ fn dot_dot_notes_is_inside_and_dot_dot_slash_x_is_outside() {
         folder.parent().unwrap().join("x").to_str().unwrap(),
         "link",
     ] {
-        let text = refused(mcp.call("fs_read", json!({"path": path})));
-        assert!(text.contains("outside"), "{path}: {text}");
+        // Outside the place, a call is held for the user.
+        let text = held(mcp.call("fs_read", json!({"path": path})));
         assert!(!text.contains("outside\n"), "never read: {text}");
     }
-    let text = refused(mcp.call("fs_write", json!({"path": "../y", "content": "y"})));
-    assert!(text.contains("outside"), "{text}");
+    held(mcp.call("fs_write", json!({"path": "../y", "content": "y"})));
     assert!(!folder.parent().unwrap().join("y").exists());
     let text = refused(mcp.call("fs_read", json!({"path": "README.md", "repository": "web"})));
     assert_eq!(text, "refused: the project has no repository web: it has .");
@@ -750,10 +771,12 @@ fn a_long_command_answers_after_its_timeout_with_it_keeps_going_and_stop_ends_it
     let (mcp, folder) = session(&user);
 
     let started = Instant::now();
-    let answer = ok(mcp.call(
-        "commands_run",
-        json!({"line": "sh -c 'sleep 300 & echo $! > child.pid; echo started; wait'", "timeout": 1}),
-    ));
+    std::fs::write(
+        folder.join("tree.sh"),
+        "sleep 300 & echo $! > child.pid; echo started; wait\n",
+    )
+    .unwrap();
+    let answer = ok(mcp.call("commands_run", json!({"line": "sh tree.sh", "timeout": 1})));
     assert!(started.elapsed() < Duration::from_secs(10));
     assert!(answer.contains("is running"), "{answer}");
     assert!(
@@ -787,16 +810,20 @@ fn a_long_command_answers_after_its_timeout_with_it_keeps_going_and_stop_ends_it
 }
 
 /// A run that ignores `SIGTERM`, as its group inherits the ignoring: only the kill ends it.
-fn stubborn(seconds: u32) -> Value {
-    json!({"line": format!("sh -c 'trap \"\" TERM; echo $$ > pid-{seconds}; sleep {seconds}'"),
-        "timeout": 1})
+fn stubborn(folder: &Path, seconds: u32) -> Value {
+    std::fs::write(
+        folder.join("stubborn.sh"),
+        "trap '' TERM; echo $$ > pid-$1; sleep $1\n",
+    )
+    .unwrap();
+    json!({"line": format!("sh stubborn.sh {seconds}"), "timeout": 1})
 }
 
 #[test]
 fn commands_stop_kills_after_the_grace_a_run_that_ignores_sigterm() {
     let user = User::with_fake_agent();
     let (mcp, folder) = session(&user);
-    let run = run_id(&ok(mcp.call("commands_run", stubborn(300))));
+    let run = run_id(&ok(mcp.call("commands_run", stubborn(&folder, 300))));
     eventually("the shell's pid", || folder.join("pid-300").exists());
     let pid: u64 = std::fs::read_to_string(folder.join("pid-300"))
         .unwrap()
@@ -830,7 +857,7 @@ fn a_daemon_that_stops_stops_its_runs_together_not_one_after_another() {
     let watch = user.watch(&["--after", "0"]);
     let runs: Vec<String> = [301, 302, 303]
         .into_iter()
-        .map(|seconds| run_id(&ok(mcp.call("commands_run", stubborn(seconds)))))
+        .map(|seconds| run_id(&ok(mcp.call("commands_run", stubborn(&folder, seconds)))))
         .collect();
     eventually("the shells", || {
         [301, 302, 303]
@@ -866,7 +893,12 @@ fn a_daemon_that_stops_stops_its_runs_together_not_one_after_another() {
 fn a_retry_with_the_same_call_key_does_not_run_twice() {
     let user = User::with_fake_agent();
     let (mcp, folder) = session(&user);
-    let line = json!({"line": "sh -c 'echo once >> count.txt; echo done'"});
+    std::fs::write(
+        folder.join("count.sh"),
+        "echo once >> count.txt; echo done\n",
+    )
+    .unwrap();
+    let line = json!({"line": "sh count.sh"});
 
     let first = ok(mcp.call_keyed("commands_run", line.clone(), "toolu_01"));
     let again = ok(mcp.call_keyed("commands_run", line.clone(), "toolu_01"));
@@ -883,7 +915,7 @@ fn a_retry_with_the_same_call_key_does_not_run_twice() {
 }
 
 #[test]
-fn git_push_from_a_run_fails() {
+fn git_push_is_refused_by_the_gate_and_fails_from_a_script_too() {
     let user = User::with_fake_agent();
     let (mcp, folder) = session(&user);
     std::fs::write(folder.join("more.txt"), "more\n").unwrap();
@@ -892,38 +924,39 @@ fn git_push_from_a_run_fails() {
     let remote = user.path("remotes/app.git");
     let before = user.git_output(&remote, &["rev-parse", "main"]);
 
-    let answer = ok(mcp.call("commands_run", json!({"line": "git push origin main"})));
+    let text = refused(mcp.call("commands_run", json!({"line": "git push origin HEAD:main"})));
+    assert!(text.contains("git push is refused for agents"), "{text}");
 
+    // The gate does not read a script: the run's environment still sends the push nowhere.
+    std::fs::write(folder.join("push.sh"), "git push origin HEAD:main\n").unwrap();
+    let answer = ok(mcp.call("commands_run", json!({"line": "sh push.sh"})));
     assert!(!answer.contains("exited with code 0"), "{answer}");
     assert!(answer.contains("exited with code"), "{answer}");
     assert_eq!(user.git_output(&remote, &["rev-parse", "main"]), before);
 }
 
 #[test]
-fn a_repository_with_a_push_url_refuses_the_runs_of_git() {
+fn a_repository_with_a_push_url_still_refuses_git_push_and_runs_the_rest_of_git() {
     let user = User::with_fake_agent();
     let (mcp, folder) = session(&user);
-    std::fs::write(folder.join("more.txt"), "more\n").unwrap();
-    user.git(&folder, &["add", "."]);
-    user.git(&folder, &["commit", "--quiet", "-m", "more"]);
     let remote = user.path("remotes/app.git");
     let before = user.git_output(&remote, &["rev-parse", "main"]);
-    // git skips `pushInsteadOf` for a remote that has a push URL of its own.
+    // git skips `pushInsteadOf` for a remote that has a push URL of its own: the gate's refusal
+    // is what stops it.
     user.git(
         &folder,
         &["config", "remote.origin.pushurl", remote.to_str().unwrap()],
     );
 
-    let text = refused(mcp.call("commands_run", json!({"line": "git push origin main"})));
-
-    assert!(text.contains("remote.origin.pushurl"), "{text}");
-    assert!(text.contains("git push is refused for agents"), "{text}");
-    assert!(!text.contains(remote.to_str().unwrap()), "{text}");
+    for line in [
+        "git push origin HEAD:main",
+        "git -c url.x.pushInsteadOf=y push origin HEAD:main",
+        "env -u GIT_CONFIG_COUNT git push origin HEAD:main",
+    ] {
+        refused(mcp.call("commands_run", json!({"line": line})));
+    }
     assert_eq!(user.git_output(&remote, &["rev-parse", "main"]), before);
-    // Any run of git is refused there, whatever its arguments: they are the gate's to read (#6).
-    refused(mcp.call("commands_run", json!({"line": "git status"})));
-    // A program that is not git is not.
-    let answer = ok(mcp.call("commands_run", json!({"line": "true"})));
+    let answer = ok(mcp.call("commands_run", json!({"line": "git status"})));
     assert!(answer.contains("exited with code 0"), "{answer}");
 }
 
@@ -990,12 +1023,11 @@ fn a_run_in_a_workspace_gets_its_variables() {
         answer.contains(&format!("{}/.store\napp-login", workspace.display())),
         "{answer}"
     );
-    // The place is the workspace: the main checkout is outside it.
-    let text = refused(mcp.call(
+    // The place is the workspace: the main checkout is outside it, and asked for.
+    held(mcp.call(
         "fs_read",
         json!({"path": folder.join("README.md").to_str().unwrap()}),
     ));
-    assert!(text.contains("outside"), "{text}");
 }
 
 // Records.
@@ -1004,7 +1036,8 @@ fn a_run_in_a_workspace_gets_its_variables() {
 fn every_call_is_recorded_with_its_arguments_masked() {
     let user = User::with_fake_agent();
     project(&user);
-    let (id, url, authorization) = agent(&user, json!({}));
+    workspace(&user);
+    let (id, url, authorization) = agent(&user, json!({"workspace": "w"}));
     let mcp = Mcp::initialize(&url, &authorization);
     ok(mcp.call("fs_read", json!({"path": "README.md"})));
     refused(mcp.call(
@@ -1081,14 +1114,16 @@ fn a_run_s_line_is_masked_in_its_record_its_event_and_its_answers() {
 fn every_call_goes_through_the_gate_commands_stop_and_output_included() {
     let user = User::with_fake_agent();
     project(&user);
-    let (id, url, authorization) = agent(&user, json!({}));
+    workspace(&user);
+    let (id, url, authorization) = agent(&user, json!({"workspace": "w"}));
     let mcp = Mcp::initialize(&url, &authorization);
     let answer = ok(mcp.call("commands_run", json!({"line": "sleep 300", "timeout": 1})));
     let run = run_id(&answer);
     ok(mcp.call("commands_output", json!({"run": run})));
     ok(mcp.call("commands_stop", json!({"run": run})));
     ok(mcp.call("commands_list", json!({})));
-    refused(mcp.call("fs_read", json!({"path": "/etc/hostname"})));
+    held(mcp.call("fs_read", json!({"path": "/etc/hostname"})));
+    refused(mcp.call("commands_run", json!({"line": "git push"})));
 
     let events = user.call("agent.show", json!({"agent": id})).unwrap()["events"]
         .as_array()
@@ -1113,7 +1148,8 @@ fn every_call_goes_through_the_gate_commands_stop_and_output_included() {
             row("commands_output", "allow", "ok"),
             row("commands_stop", "allow", "ok"),
             row("commands_list", "allow", "ok"),
-            row("fs_read", "deny", "refused"),
+            row("fs_read", "ask", "held"),
+            row("commands_run", "deny", "refused"),
         ]
     );
 }

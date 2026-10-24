@@ -228,9 +228,61 @@ activity.
 | `tool` | The tool's name, without the `mcp__flottille__` prefix. |
 | `call_key` | The call's key (`claudecode/toolUseId`), `null` when the call had none. |
 | `arguments` | The arguments, every text cut at 500 characters and masked. |
-| `gate` | The gate's verdict on the call (`allow` or `deny`), `null` for a call refused before it, because the agent has no such tool. |
-| `outcome` | `ok`, `refused` or `failed`. |
+| `gate` | The gate's verdict on the call (`allow`, `deny` or `ask`), `null` for a call refused before it, because the agent has no such tool. |
+| `outcome` | `ok`, `refused`, `failed`, or `held` for a call the gate held (`docs/tools.md`, "The gate"). |
 | `duration_ms` | How long it took. |
+| `request` | For a call the user allowed, performed once they did: the request's number; else `null`. |
+
+#### `approval.requested`
+
+The gate held one of the agent's calls: a request was written (`docs/tools.md`, "The gate").
+
+| Field | |
+|---|---|
+| `number` | The request's number, counted across every agent. |
+| `agent` | The agent that asked. |
+| `call_key` | The call's key, `null` when it had none. |
+| `tool` | |
+| `call` | The arguments, every text cut at 500 characters and masked. |
+| `reasons` | Why it was held, one sentence each, masked. |
+| `sensitive` | Whether it reaches a sensitive place: it is then never allowed for the tree. |
+| `held_by` | `user`, or the id of the agent that holds it. |
+| `forwards`, `state`, `decision`, `created_at`, `decided_at` | As in `approval.list` (`docs/protocol.md`). |
+
+#### `approval.forwarded`
+
+The agent that held the request passed it up, with one sentence of why.
+
+| Field | |
+|---|---|
+| `number` | |
+| `agent` | The agent that asked. |
+| `by` | The agent that forwarded it. |
+| `why` | Its sentence. |
+| `held_by` | Who holds it now: `user`, or the agent's parent. |
+
+#### `approval.decided`
+
+The user answered the request.
+
+| Field | |
+|---|---|
+| `number` | |
+| `agent` | The agent that asked. |
+| `decision` | `deny`, `once`, or `tree` (allowed for the root's tree). |
+| `by` | `user`. |
+
+#### `approval.settled`
+
+The request's answer was stored as the agent's `approval` delivery: at once for a denial, once
+it was performed for an allowed request.
+
+| Field | |
+|---|---|
+| `number` | |
+| `agent` | |
+| `outcome` | `done`, `failed`, `not_executed` (refused, or the situation changed), `refused` (denied by the user), or `interrupted` (a daemon stopped while it performed it). |
+| `delivery` | The delivery's id, `approval-<number>`. |
 
 #### `agent.turn_ended`
 

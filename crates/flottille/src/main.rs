@@ -1,6 +1,8 @@
 mod acp;
 mod agent_command;
 mod agents;
+mod approval_command;
+mod approvals;
 mod claude;
 mod client;
 mod daemon;
@@ -64,6 +66,21 @@ enum Command {
         #[command(subcommand)]
         action: AgentAction,
     },
+    /// The requests of your agents that wait for your answer
+    Approvals {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Allow a request: its call is checked again, performed, and its result handed to the agent
+    Approve {
+        number: u64,
+        /// Allow the same call, exactly, for the whole tree of the agent's root from now on
+        /// (never for a sensitive place)
+        #[arg(long)]
+        for_tree: bool,
+    },
+    /// Deny a request: the agent is told nothing was done
+    Deny { number: u64 },
     /// Whether Claude agents can run here: Node, claude, its login, the adapter
     Doctor {
         #[arg(long)]
@@ -120,6 +137,11 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Workspace { action } => return workspace_command::run(&paths, action),
         Command::Agent { action } => return agent_command::run(&paths, action),
         Command::Doctor { json } => return agent_command::doctor(&paths, json),
+        Command::Approvals { json } => approval_command::approvals(&paths, json)?,
+        Command::Approve { number, for_tree } => {
+            approval_command::approve(&paths, number, for_tree)?
+        }
+        Command::Deny { number } => approval_command::deny(&paths, number)?,
         Command::Watch { after } => {
             let mut client = Client::connect_or_start(&paths)?;
             client.request("events.watch", serde_json::to_value(WatchParams { after })?)?;
