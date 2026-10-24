@@ -647,6 +647,11 @@ fn git_refusal(args: &[String]) -> Option<String> {
         }
         "config" if !config_reads(rest) => "config",
         "symbolic-ref" if symbolic_ref_writes(rest) => "history",
+        // Plumbing that writes the history or the index without `commit` or `reset`.
+        "fast-import" | "update-index" => "history",
+        "commit-tree" => "commit",
+        "replace" if !replace_reads(rest) => "history",
+        "notes" if !notes_reads(rest) => "history",
         _ => return None,
     };
     Some(match refused {
@@ -654,8 +659,8 @@ fn git_refusal(args: &[String]) -> Option<String> {
                    say what is ready, and the user pushes it"
             .into(),
         "history" => format!(
-            "refused: git {command} moves a branch or rewrites its history, and agents never do: \
-             say what should be done, and the user does it"
+            "refused: git {command} moves a branch, rewrites its history or edits what git keeps, \
+             and agents never do: say what should be done, and the user does it"
         ),
         "commit" => format!(
             "refused: git {command} makes a commit, and this project does not let agents commit: \
@@ -699,6 +704,42 @@ fn symbolic_ref_writes(rest: &[String]) -> bool {
         }
     }
     refs > 1
+}
+
+/// Whether `git replace` with these words only lists.
+fn replace_reads(rest: &[String]) -> bool {
+    let any = |names: &[&str]| rest.iter().any(|w| names.contains(&w.as_str()));
+    rest.is_empty()
+        || any(&["-l", "--list"])
+            && !any(&[
+                "-d",
+                "--delete",
+                "-f",
+                "--force",
+                "-e",
+                "--edit",
+                "--graft",
+                "--convert-graft-file",
+            ])
+}
+
+/// Whether `git notes` with these words only reads: no subcommand (it lists), or one that reads.
+/// An option it does not know is taken for a write.
+fn notes_reads(rest: &[String]) -> bool {
+    let mut at = 0;
+    while let Some(word) = rest.get(at) {
+        let word = word.as_str();
+        if word == "--ref" {
+            at += 2;
+        } else if word.starts_with("--ref=") {
+            at += 1;
+        } else if word.starts_with('-') {
+            return false;
+        } else {
+            return ["list", "show", "get-ref"].contains(&word);
+        }
+    }
+    true
 }
 
 /// Whether `git config` with these words only reads.
@@ -1069,6 +1110,27 @@ mod tests {
             "git symbolic-ref --delete refs/remotes/origin/HEAD",
             "git symbolic-ref -qd HEAD",
             "env git symbolic-ref HEAD refs/heads/other",
+            "git fast-import",
+            "git fast-import --force",
+            "git commit-tree HEAD^{tree} -m change",
+            "git update-index --add --cacheinfo 100644,abc,a",
+            "git update-index --refresh",
+            "git update-ref refs/heads/main abc123",
+            "git replace abc123 def456",
+            "git replace -d abc123",
+            "git replace --graft abc123",
+            "git replace -l -d abc123",
+            "git notes add -m note",
+            "git notes append -m note",
+            "git notes edit",
+            "git notes remove HEAD",
+            "git notes copy a b",
+            "git notes merge topic",
+            "git notes prune",
+            "git notes --ref=review add -m note",
+            "git notes --ref review add -m note",
+            "git notes -m note",
+            "sh -c 'git fast-import'",
         ] {
             assert!(
                 denied(&fixture.run(line)),
@@ -1104,6 +1166,16 @@ mod tests {
             "git symbolic-ref --short HEAD",
             "git symbolic-ref -q HEAD",
             "git symbolic-ref -q --short HEAD",
+            "git replace",
+            "git replace -l",
+            "git replace --list 'abc*'",
+            "git replace -l --format=long",
+            "git notes",
+            "git notes list",
+            "git notes list HEAD",
+            "git notes show HEAD",
+            "git notes --ref=review show HEAD",
+            "git notes get-ref",
             "git -C src status",
             "git fetch origin",
         ] {
