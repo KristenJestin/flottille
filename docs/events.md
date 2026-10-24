@@ -280,7 +280,7 @@ the agent that started it, and `run`, its id.
 |---|---|
 | `agent`, `run` | |
 | `name` | The catalogue command, `null` for a line of the agent's. |
-| `line` | The line run. |
+| `line` | The line run, masked of secrets like a call's arguments. |
 | `folder` | Where it runs. |
 
 #### `run.ended`

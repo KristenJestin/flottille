@@ -28,7 +28,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agents::{signal_group, start_time};
 use crate::daemon::Daemon;
 use crate::gate::{self, Verdict};
-use crate::mcp::{Outcome, arguments};
+use crate::mcp::{Outcome, arguments, masked};
 use crate::place::Place;
 use crate::projects;
 
@@ -251,7 +251,8 @@ pub async fn commands_run(
         id: id.clone(),
         agent: agent.to_owned(),
         name,
-        line,
+        // What is stored, sent in `run.started` and shown is masked like a call's arguments.
+        line: masked(&line, place),
         folder: folder.path,
         state: RunState::Running,
         exit_code: None,

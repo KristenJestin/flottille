@@ -912,6 +912,33 @@ fn every_call_is_recorded_with_its_arguments_masked() {
     assert_eq!(ended["data"]["exit_code"], 0);
 }
 
+#[test]
+fn a_run_s_line_is_masked_in_its_record_its_event_and_its_answers() {
+    let user = User::with_fake_agent();
+    let (mcp, _) = session(&user);
+    let token = "ghp_fakefakefakefakefakefakefake0003";
+
+    let answer = ok(mcp.call("commands_run", json!({"line": format!("echo {token}")})));
+    let run = run_id(&answer);
+
+    let all = user
+        .watch(&["--after", "0"])
+        .until(|e| e["name"] == "run.ended" && e["data"]["run"] == run.as_str());
+    let started = all
+        .iter()
+        .find(|e| e["name"] == "run.started" && e["data"]["run"] == run.as_str())
+        .expect("run.started");
+    let line = started["data"]["line"].as_str().unwrap();
+    assert!(line.contains("[masked]") && !line.contains(token), "{line}");
+    assert!(!answer.contains(token), "{answer}");
+    // Once ended, the answer is read from the store.
+    let stored = ok(mcp.call("commands_output", json!({"run": run})));
+    assert!(
+        stored.contains("[masked]") && !stored.contains(token),
+        "{stored}"
+    );
+}
+
 // From an agent's session.
 
 #[test]
