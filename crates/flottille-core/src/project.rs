@@ -184,6 +184,32 @@ fn default_children_cap() -> i64 {
 }
 
 impl Project {
+    /// A project that takes everything by default: each repository with its remote `origin` and
+    /// the base rule `[main]`, nothing else configured. `name` must be valid and `folder`
+    /// absolute, `data` is Flottille's data folder.
+    pub fn new(name: &str, folder: PathBuf, repositories: Vec<String>, data: &Path) -> Project {
+        Project {
+            name: name.to_owned(),
+            folder,
+            branch_prefix: slug(name),
+            workspaces_root: data.join("workspaces").join(name),
+            default_repositories: RepositorySet::All,
+            max_children: DEFAULT_CHILDREN_CAP,
+            never: Vec::new(),
+            repositories: repositories
+                .into_iter()
+                .map(|path| Repository {
+                    path,
+                    remote: default_remote(),
+                    base: default_base(),
+                    depends_on: Vec::new(),
+                })
+                .collect(),
+            variables: BTreeMap::new(),
+            commands: BTreeMap::new(),
+        }
+    }
+
     /// Reads and checks the text of `projects/<name>.toml`. `data` is Flottille's data folder,
     /// where the default workspaces root lives. The first problem found is the one reported.
     pub fn parse(name: &str, text: &str, data: &Path) -> Result<Project, ConfigError> {
@@ -456,6 +482,10 @@ mod tests {
         Project::parse("app", text, Path::new(DATA))
     }
 
+    fn parse_as(name: &str, text: &str) -> Result<Project, ConfigError> {
+        Project::parse(name, text, Path::new(DATA))
+    }
+
     /// The message of the refusal of `text`, with its file.
     fn refusal(text: &str) -> String {
         parse(text).unwrap_err().to_string()
@@ -520,6 +550,23 @@ mod tests {
         assert!(project.commands["test"].check && project.commands["test"].read_only);
         assert!(project.commands["generate-data"].ask_before_running);
         assert_eq!(project.never[0], "git push");
+    }
+
+    #[test]
+    fn a_new_project_is_one_that_reads_back_the_same() {
+        let project = Project::new(
+            "Shop_2",
+            "/work/shop".into(),
+            vec![".".into(), "web".into()],
+            Path::new(DATA),
+        );
+
+        assert_eq!(project.branch_prefix, "shop-2");
+        assert_eq!(project.max_children, 3);
+        assert_eq!(
+            parse_as("Shop_2", &project.to_toml().unwrap()).unwrap(),
+            project
+        );
     }
 
     #[test]

@@ -50,6 +50,22 @@ pub struct WatchParams {
     pub after: Option<u64>,
 }
 
+/// The parameters of `project.detect` and `project.add`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProjectFolder {
+    /// Absolute: the daemon does not know where the client stands.
+    pub folder: String,
+    /// The project's name; a slug of the folder's name when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// The parameters of `project.show`, `project.remove` and `project.check`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProjectName {
+    pub name: String,
+}
+
 impl Message {
     pub fn result(id: String, result: Value) -> Message {
         Message {

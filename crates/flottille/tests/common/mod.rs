@@ -3,9 +3,10 @@
 // Each test file uses its own part of it.
 #![allow(dead_code)]
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-use std::path::PathBuf;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -64,6 +65,67 @@ impl User {
         serde_json::from_slice(&output.stdout).unwrap()
     }
 
+    /// One request over the socket, to a daemon the first command starts: its result, or the
+    /// code and the message of its error.
+    pub fn call(&self, method: &str, params: Value) -> Result<Value, (String, String)> {
+        self.status();
+        let mut stream = UnixStream::connect(self.path("runtime/flottille/daemon.sock")).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let request = serde_json::json!({"id": "1", "method": method, "params": params});
+        writeln!(stream, "{request}").unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        let answer: Value = serde_json::from_str(&line).unwrap();
+        match answer.get("error") {
+            Some(error) => Err((
+                error["code"].as_str().unwrap().to_owned(),
+                error["message"].as_str().unwrap().to_owned(),
+            )),
+            None => Ok(answer["result"].clone()),
+        }
+    }
+
+    /// A throwaway git repository in `path`, which is made with its parents.
+    pub fn git_init(&self, path: &Path) {
+        std::fs::create_dir_all(path).unwrap();
+        self.git(path, &["init", "--quiet", "--initial-branch=main"]);
+    }
+
+    /// The user's `git` in `dir`, with a throwaway identity and none of the machine's settings.
+    pub fn git(&self, dir: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("HOME", self.path("home"))
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Where the project's file is.
+    pub fn project_file(&self, name: &str) -> PathBuf {
+        self.path(&format!("config/flottille/projects/{name}.toml"))
+    }
+
+    /// A project's file written by hand, as a user would.
+    pub fn write_project_file(&self, name: &str, text: &str) {
+        std::fs::create_dir_all(self.project_file(name).parent().unwrap()).unwrap();
+        std::fs::write(self.project_file(name), text).unwrap();
+    }
+
     pub fn watch(&self, args: &[&str]) -> Watch {
         let mut child = self
             .command(&[&["watch"], args].concat())
@@ -116,4 +178,28 @@ impl Drop for Watch {
 
 pub fn mode(path: PathBuf) -> u32 {
     std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+/// Every file and folder under `folder` with its size and modification time: two snapshots are
+/// equal when nothing was written, changed or removed there.
+pub fn snapshot(folder: &Path) -> Vec<String> {
+    fn walk(folder: &Path, root: &Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(folder).unwrap() {
+            let path = entry.unwrap().path();
+            let metadata = std::fs::symlink_metadata(&path).unwrap();
+            out.push(format!(
+                "{} {} {:?}",
+                path.strip_prefix(root).unwrap().display(),
+                metadata.len(),
+                metadata.modified().unwrap()
+            ));
+            if metadata.is_dir() {
+                walk(&path, root, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(folder, folder, &mut out);
+    out.sort();
+    out
 }

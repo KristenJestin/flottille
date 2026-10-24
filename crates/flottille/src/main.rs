@@ -1,5 +1,6 @@
 mod client;
 mod daemon;
+mod projects;
 
 use std::io::Write;
 use std::process::ExitCode;
