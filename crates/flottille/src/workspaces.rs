@@ -1037,10 +1037,16 @@ async fn remove_held(daemon: &Daemon, workspace: &Workspace) -> Answer {
             if code.starts_with(['R', 'C']) {
                 entries.next();
             }
-            let file = dir.join(path);
-            if code == "?? " && made_by_flottille(workspace, &file) {
-                ours.push(file);
-                continue;
+            let file = dir.join(path).components().collect::<PathBuf>();
+            if code == "?? " {
+                // Another worktree standing in this one: checked, then removed, by itself.
+                if made.iter().any(|r| workspace.folder_of(&r.path) == file) {
+                    continue;
+                }
+                if made_link(workspace, &file) {
+                    ours.push(file);
+                    continue;
+                }
             }
             let shown = match worktree.path.as_str() {
                 "." => path.to_owned(),
@@ -1206,17 +1212,6 @@ fn outside_worktrees(workspace: &Workspace, made: &[PathBuf]) -> Result<Vec<Stri
 fn made_link(workspace: &Workspace, file: &Path) -> bool {
     std::fs::symlink_metadata(file).is_ok_and(|m| m.is_symlink())
         && std::fs::read_link(file).is_ok_and(|to| to.starts_with(&workspace.project_folder))
-}
-
-/// What Flottille put in a worktree that git sees as untracked: a link into the project folder
-/// (a `link` or `root_entries` step), or another worktree of the workspace standing in it.
-fn made_by_flottille(workspace: &Workspace, file: &Path) -> bool {
-    let file = file.components().collect::<PathBuf>();
-    let link = made_link(workspace, &file);
-    link || workspace
-        .repositories
-        .iter()
-        .any(|r| r.path != "." && workspace.folder_of(&r.path) == file)
 }
 
 fn depth(path: &str) -> usize {

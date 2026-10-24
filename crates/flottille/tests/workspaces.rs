@@ -738,6 +738,30 @@ fn removal_refuses_a_repository_folder_whose_git_is_gone() {
 }
 
 #[test]
+fn removal_succeeds_when_the_root_repository_does_not_ignore_the_others() {
+    let fixture = Fixture::new(true);
+    // The root's `git status` then shows each nested worktree as an untracked folder.
+    fixture
+        .user
+        .git(&fixture.folder, &["rm", "--quiet", ".gitignore"]);
+    fixture.user.git(
+        &fixture.folder,
+        &["commit", "--quiet", "-m", "ignore nothing"],
+    );
+    fixture
+        .user
+        .git(&fixture.folder, &["push", "--quiet", "origin", "main"]);
+    fixture.configure("");
+    fixture.create(json!({})).unwrap();
+    assert_eq!(fixture.settled("login")["state"], "ready");
+
+    let removed = fixture.remove("login");
+
+    assert_eq!(removed, Ok(json!({"removed": "login", "project": "app"})));
+    assert!(!fixture.workspace("login").exists());
+}
+
+#[test]
 fn the_command_line_creates_lists_shows_prepares_and_removes_a_workspace() {
     let fixture = Fixture::new(false);
     fixture.configure("");
