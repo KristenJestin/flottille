@@ -808,23 +808,26 @@ async fn played(
         eprintln!("flottille daemon: agent {}: {error}", grant.agent);
     }
     let error = !matches!(outcome, Outcome::Done(_));
-    let mut text = match outcome {
-        Outcome::Done(text) => cut(&text, RESULT_LIMIT),
-        Outcome::Refused(text) => cut(&text, ERROR_LIMIT),
-        Outcome::Failed(text) => cut(
-            &secrets::mask(
-                &format!("the call failed: {text}"),
-                &std::env::vars_os().collect(),
-            ),
+    let notes = daemon.mcp.notes.take(&grant.agent);
+    (shown(outcome, &notes, &grant.place), error)
+}
+
+/// What the agent is shown of an outcome: its text under its limit, then the notes pinned for the
+/// agent. A failure is masked of the place's secrets too.
+fn shown(outcome: Outcome, notes: &[String], place: &Place) -> String {
+    let (text, limit) = match outcome {
+        Outcome::Done(text) => (text, RESULT_LIMIT),
+        Outcome::Refused(text) => (text, ERROR_LIMIT),
+        Outcome::Failed(text) => (
+            masked(&format!("the call failed: {text}"), place),
             ERROR_LIMIT,
         ),
     };
-    let notes = daemon.mcp.notes.take(&grant.agent);
-    if !notes.is_empty() {
-        text.push_str("\n\n");
-        text.push_str(&notes.join("\n\n"));
+    if notes.is_empty() {
+        return cut(&text, limit);
     }
-    (text, error)
+    let notes = notes.join("\n\n");
+    format!("{}\n\n{notes}", cut(&text, limit))
 }
 
 async fn perform(
@@ -891,7 +894,7 @@ fn cut(text: &str, limit: usize) -> String {
         return text.to_owned();
     }
     let marker = format!("‹+{} chars›", count - limit + 16);
-    let keep = limit - 16;
+    let keep = limit.saturating_sub(16);
     let at = text
         .char_indices()
         .nth(keep)
@@ -948,6 +951,38 @@ mod tests {
         assert!(kept.chars().count() <= RESULT_LIMIT);
         assert!(kept.ends_with(&format!("‹+{} chars›", 50_000 - RESULT_LIMIT + 16)));
         assert_eq!(cut("short", 10), "short");
+    }
+
+    fn place_in(root: &std::path::Path) -> Place {
+        Place {
+            project: "app".into(),
+            workspace: None,
+            root: root.to_owned(),
+            repositories: vec![(".".into(), root.to_owned())],
+            branch: String::new(),
+            variables: Default::default(),
+            home: None,
+        }
+    }
+
+    #[test]
+    fn a_failure_is_masked_of_the_place_s_secrets_and_cut_under_its_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".env"), "DB_URL=hunter2-hunter2\n").unwrap();
+        let place = place_in(dir.path());
+
+        let shown = shown(
+            Outcome::Failed(format!("cannot open hunter2-hunter2 {}", "x".repeat(5_000))),
+            &[],
+            &place,
+        );
+
+        assert!(
+            shown.starts_with("the call failed: cannot open [masked] "),
+            "{shown}"
+        );
+        assert!(!shown.contains("hunter2"));
+        assert!(shown.chars().count() <= ERROR_LIMIT);
     }
 
     #[test]
