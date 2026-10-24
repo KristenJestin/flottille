@@ -3,6 +3,7 @@
 pub mod command;
 pub mod detect;
 pub mod error;
+pub mod glob;
 pub mod paths;
 pub mod project;
 pub mod protocol;
