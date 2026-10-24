@@ -1,7 +1,9 @@
 mod client;
 mod daemon;
+mod git;
 mod project_command;
 mod projects;
+mod workspaces;
 
 use std::io::Write;
 use std::process::ExitCode;

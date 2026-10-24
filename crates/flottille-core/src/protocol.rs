@@ -70,6 +70,40 @@ pub struct ProjectName {
     pub name: String,
 }
 
+/// The parameters of `workspace.create`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceCreate {
+    pub project: String,
+    pub name: String,
+    /// The repositories it takes; the project's default set when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repositories: Option<Vec<String>>,
+    /// `<branch prefix>/<name>` when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Fetch nothing: base the branches on the tracking refs as they are.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub offline: bool,
+}
+
+/// The parameters of `workspace.show`, `workspace.prepare` and `workspace.remove`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceName {
+    pub project: String,
+    pub name: String,
+}
+
+/// The parameters of `workspace.list`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceList {
+    /// Only this project's; every workspace when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+}
+
 impl Message {
     pub fn result(id: String, result: Value) -> Message {
         Message {

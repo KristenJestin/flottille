@@ -21,14 +21,14 @@ pub struct Failure {
 }
 
 impl Failure {
-    fn new(code: &'static str, message: impl Into<String>) -> Failure {
+    pub fn new(code: &'static str, message: impl Into<String>) -> Failure {
         Failure {
             code,
             message: message.into(),
         }
     }
 
-    fn refused(message: impl Into<String>) -> Failure {
+    pub fn refused(message: impl Into<String>) -> Failure {
         Failure::new("refused", message)
     }
 }
@@ -169,6 +169,11 @@ fn not_found(name: &str) -> Failure {
 
 fn load(projects: &Projects, name: &str) -> std::result::Result<Project, Failure> {
     projects.registry.load(name)?.ok_or_else(|| not_found(name))
+}
+
+/// The project as its file says now.
+pub fn load_project(daemon: &Daemon, name: &str) -> std::result::Result<Project, Failure> {
+    load(&daemon.projects.lock().unwrap(), name)
 }
 
 /// Reads the files and announces what changed in them since the last request: a project that
