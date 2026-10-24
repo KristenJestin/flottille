@@ -535,6 +535,12 @@ fn check_step(
             }
             for (index, glob) in globs.iter().enumerate() {
                 inside(format!("{key}.copy[{index}]"), glob)?;
+                if glob.split('/').any(|part| part == ".git") {
+                    return Err(format!(
+                        "{key}.copy[{index}]: \"{glob}\" can only match in .git, which a copy \
+                         never touches"
+                    ));
+                }
             }
         }
         StepKind::Link(path) => inside(format!("{key}.link"), path)?,
@@ -1207,6 +1213,22 @@ mod tests {
                 refusal(&text)
             );
         }
+    }
+
+    #[test]
+    fn a_copy_glob_that_can_only_match_git_is_refused() {
+        for glob in [".git", ".git/config", "sub/.git/*"] {
+            let text = format!("{TWO}\n[[recipe]]\ncopy = [\"{glob}\"]\n");
+            assert_eq!(
+                refusal(&text),
+                format!(
+                    "projects/app.toml: recipe[0].copy[0]: \"{glob}\" can only match in .git, \
+                     which a copy never touches"
+                )
+            );
+        }
+        let text = format!("{TWO}\n[[recipe]]\ncopy = [\".gi*\"]\n");
+        assert!(parse(&text).is_ok());
     }
 
     #[test]
