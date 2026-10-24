@@ -697,6 +697,47 @@ fn removal_succeeds_on_a_clean_pushed_workspace_and_leaves_git_worktree_list_cle
 }
 
 #[test]
+fn removal_refuses_a_file_outside_every_repository() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    fixture.create(json!({})).unwrap();
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    // Without the root repository the workspace folder is a plain folder no git status sees.
+    let notes = fixture.workspace("login").join("notes.txt");
+    std::fs::write(&notes, "kept\n").unwrap();
+
+    let (code, message) = fixture.remove("login").unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert!(message.contains("notes.txt is in no worktree"), "{message}");
+    assert!(notes.exists());
+    assert!(fixture.workspace("login").join("api/.git").exists());
+    assert!(fixture.show("login").is_ok());
+}
+
+#[test]
+fn removal_refuses_a_repository_folder_whose_git_is_gone() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    fixture.create(json!({})).unwrap();
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    let api = fixture.workspace("login").join("api");
+    std::fs::remove_file(api.join(".git")).unwrap();
+    std::fs::write(api.join("draft.txt"), "draft\n").unwrap();
+
+    let (code, message) = fixture.remove("login").unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert!(
+        message.contains("api/draft.txt is in no worktree"),
+        "{message}"
+    );
+    assert!(api.join("draft.txt").exists());
+    assert!(fixture.workspace("login").join("web/.git").exists());
+    assert!(fixture.show("login").is_ok());
+}
+
+#[test]
 fn the_command_line_creates_lists_shows_prepares_and_removes_a_workspace() {
     let fixture = Fixture::new(false);
     fixture.configure("");

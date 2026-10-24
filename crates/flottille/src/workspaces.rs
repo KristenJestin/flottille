@@ -1012,7 +1012,14 @@ async fn remove_held(daemon: &Daemon, workspace: &Workspace) -> Answer {
         .iter()
         .filter(|r| std::fs::symlink_metadata(workspace.folder_of(&r.path).join(".git")).is_ok())
         .collect();
-    let mut problems = Vec::new();
+    let mut problems = {
+        let made: Vec<PathBuf> = made.iter().map(|r| workspace.folder_of(&r.path)).collect();
+        let workspace = workspace.clone();
+        tokio::task::spawn_blocking(move || outside_worktrees(&workspace, &made))
+            .await
+            .map_err(|error| Failure::new("unavailable", error.to_string()))?
+            .map_err(Failure::refused)?
+    };
     let mut ours = Vec::new();
     for worktree in &made {
         let dir = workspace.folder_of(&worktree.path);
@@ -1152,12 +1159,60 @@ fn cannot_check(repository: &str, error: &str) -> Failure {
     ))
 }
 
+/// What the workspace folder holds outside the worktrees made, which no `git status` sees and the
+/// removal of the folder would take: everything but the links Flottille made and the folders
+/// holding nothing else (a parent of a worktree, an empty one), one problem each.
+fn outside_worktrees(workspace: &Workspace, made: &[PathBuf]) -> Result<Vec<String>, String> {
+    fn walk(
+        dir: &Path,
+        workspace: &Workspace,
+        made: &[PathBuf],
+        found: &mut Vec<PathBuf>,
+    ) -> Result<(), String> {
+        let cannot = |error: std::io::Error| format!("cannot read {}: {error}", dir.display());
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(cannot(error)),
+        };
+        for entry in entries {
+            let path = entry.map_err(cannot)?.path();
+            if made.contains(&path) || made_link(workspace, &path) {
+                continue;
+            }
+            if std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+                walk(&path, workspace, made, found)?;
+            } else {
+                found.push(path);
+            }
+        }
+        Ok(())
+    }
+    let mut found = Vec::new();
+    if !made.contains(&workspace.folder) {
+        walk(&workspace.folder, workspace, made, &mut found)?;
+    }
+    found.sort();
+    Ok(found
+        .iter()
+        .map(|path| {
+            let shown = path.strip_prefix(&workspace.folder).unwrap_or(path);
+            format!("{} is in no worktree", shown.display())
+        })
+        .collect())
+}
+
+/// A link into the project folder, made by a `link` or `root_entries` step.
+fn made_link(workspace: &Workspace, file: &Path) -> bool {
+    std::fs::symlink_metadata(file).is_ok_and(|m| m.is_symlink())
+        && std::fs::read_link(file).is_ok_and(|to| to.starts_with(&workspace.project_folder))
+}
+
 /// What Flottille put in a worktree that git sees as untracked: a link into the project folder
 /// (a `link` or `root_entries` step), or another worktree of the workspace standing in it.
 fn made_by_flottille(workspace: &Workspace, file: &Path) -> bool {
     let file = file.components().collect::<PathBuf>();
-    let link = std::fs::symlink_metadata(&file).is_ok_and(|m| m.is_symlink())
-        && std::fs::read_link(&file).is_ok_and(|to| to.starts_with(&workspace.project_folder));
+    let link = made_link(workspace, &file);
     link || workspace
         .repositories
         .iter()

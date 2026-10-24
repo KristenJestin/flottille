@@ -132,13 +132,17 @@ script of the repository and run the script.` The same rules will hold for the c
 
 ## Removal
 
-Refused while the workspace is being prepared. Then, for each worktree made, nothing is touched
-unless:
+Refused while the workspace is being prepared. Then nothing is touched unless:
 
-- `git status` shows no changed nor untracked file (`<file> holds work that is not committed`);
-  the links Flottille made and the worktrees standing inside the root one are not work;
-- `git log HEAD --not --remotes` shows no commit (`<repository> has commits on no remote: <hash>
-  <subject>, …`).
+- in each worktree made, `git status` shows no changed nor untracked file (`<file> holds work that
+  is not committed`); the links Flottille made and the worktrees standing inside the root one are
+  not work;
+- in each worktree made, `git log HEAD --not --remotes` shows no commit (`<repository> has commits
+  on no remote: <hash> <subject>, …`);
+- outside the worktrees made, the workspace folder holds nothing but the links Flottille made and
+  folders holding nothing else (`<path> is in no worktree`): no `git status` sees a file written in
+  the folder of a workspace that does not take the root repository, nor in a repository folder
+  whose `.git` is gone, and removing the folder would take it.
 
 Every problem is named in one refusal. Otherwise: the links Flottille made are removed, then each
 worktree, the deepest first, with `git worktree remove` (never `--force`), then `git worktree
