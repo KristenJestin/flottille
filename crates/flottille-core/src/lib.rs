@@ -10,5 +10,6 @@ pub mod registry;
 pub mod secrets;
 pub mod store;
 pub mod variables;
+pub mod workspace;
 
 pub use error::{Error, Result};
