@@ -228,6 +228,7 @@ activity.
 | `tool` | The tool's name, without the `mcp__flottille__` prefix. |
 | `call_key` | The call's key (`claudecode/toolUseId`), `null` when the call had none. |
 | `arguments` | The arguments, every text cut at 500 characters and masked. |
+| `gate` | The gate's verdict on the call (`allow` or `deny`), `null` for a call refused before it, because the agent has no such tool. |
 | `outcome` | `ok`, `refused` or `failed`. |
 | `duration_ms` | How long it took. |
 

@@ -48,9 +48,15 @@ below.
 
 ## The place and its paths
 
-The agent's place is its folder: a workspace, or the project folder (`main`). Until the gate
-(#6) comes, every call is allowed inside the place and refused outside it, with
-`refused: X is outside this agent's place: …`. A path is resolved this way:
+The agent's place is its folder: a workspace, or the project folder (`main`).
+
+**Every call is decided once**, by `gate::decide`, after the tool is known to be the agent's and
+before it is performed: `commands_output` and `commands_stop` as much as the file tools. It is
+given the agent's grant, the tool, the arguments, the words of the command a run would start and
+the paths the call reaches, and answers allow or deny with the sentence that says why (the gate of
+#6 adds ask). Until it comes, a call is allowed inside the place and refused outside it, with
+`refused: X is outside this agent's place: …`; the tools check that a path they resolve is inside
+again, whatever the gate says. A path is resolved this way:
 
 - relative to the place's top, or to a repository's folder when the call names `repository`
   (one of the project's repositories by its path, else

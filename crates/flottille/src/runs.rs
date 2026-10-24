@@ -29,7 +29,7 @@ use crate::agents::{signal_group, start_time};
 use crate::daemon::Daemon;
 use crate::gate::{self, Verdict};
 use crate::mcp::{Outcome, arguments, masked};
-use crate::place::Place;
+use crate::place::{Place, Resolved};
 use crate::projects;
 
 /// What the call waits for the end of a run, by default and at most, in seconds.
@@ -174,6 +174,79 @@ struct RunArguments {
     why: Option<String>,
 }
 
+/// What a call to `commands_run` asks, once its command is found and its line split.
+struct Request {
+    name: Option<String>,
+    line: String,
+    words: Vec<String>,
+    repository: String,
+    serve: bool,
+    /// Where it runs.
+    folder: Resolved,
+}
+
+fn request(daemon: &Daemon, place: &Place, args: RunArguments) -> Result<Request, Outcome> {
+    let (name, line, repository, serve) = match (args.command, args.line) {
+        (Some(name), None) => {
+            let project = match projects::load_project(daemon, &place.project) {
+                Ok(project) => project,
+                Err(failure) => return Err(Outcome::Failed(failure.message)),
+            };
+            let Some(command) = project.commands.get(&name) else {
+                return Err(Outcome::Refused(format!(
+                    "refused: the catalogue has no command {name}: list them with commands_list"
+                )));
+            };
+            let repository = args.repository.or(command.repository.clone());
+            (Some(name), command.line.clone(), repository, command.serve)
+        }
+        (None, Some(line)) => (None, line, args.repository, false),
+        _ => {
+            return Err(Outcome::Refused(
+                "refused: give exactly one of command (a catalogue command) and line".into(),
+            ));
+        }
+    };
+    let words = split_line(&line).map_err(Outcome::Refused)?;
+    let (repository, base) = match place.base(repository.as_deref()) {
+        Ok((repository, base)) => (repository.to_owned(), base.to_owned()),
+        Err(refusal) => return Err(Outcome::Refused(refusal)),
+    };
+    let folder = place.resolve(&base, ".");
+    Ok(Request {
+        name,
+        line,
+        words,
+        repository,
+        serve,
+        folder,
+    })
+}
+
+/// The folder a call to `commands_run` would run in and the words it would start, for the gate;
+/// nothing for a call that does not fit (the tool refuses it) and for any other tool.
+pub fn reaches(
+    daemon: &Daemon,
+    place: &Place,
+    tool: &str,
+    args: &Value,
+) -> (Vec<Resolved>, Vec<String>) {
+    if tool != "commands_run" {
+        return (Vec::new(), Vec::new());
+    }
+    let args = if args.is_null() {
+        json!({})
+    } else {
+        args.clone()
+    };
+    serde_json::from_value::<RunArguments>(args)
+        .ok()
+        .and_then(|args| request(daemon, place, args).ok())
+        .map_or_else(Default::default, |request| {
+            (vec![request.folder], request.words)
+        })
+}
+
 pub async fn commands_run(
     daemon: &Arc<Daemon>,
     agent: &str,
@@ -192,37 +265,18 @@ pub async fn commands_run(
              keeps going, read it with commands_output"
         ));
     }
-    let (name, line, repository, serve) = match (args.command, args.line) {
-        (Some(name), None) => {
-            let project = match projects::load_project(daemon, &place.project) {
-                Ok(project) => project,
-                Err(failure) => return Outcome::Failed(failure.message),
-            };
-            let Some(command) = project.commands.get(&name) else {
-                return Outcome::Refused(format!(
-                    "refused: the catalogue has no command {name}: list them with commands_list"
-                ));
-            };
-            let repository = args.repository.or(command.repository.clone());
-            (Some(name), command.line.clone(), repository, command.serve)
-        }
-        (None, Some(line)) => (None, line, args.repository, false),
-        _ => {
-            return Outcome::Refused(
-                "refused: give exactly one of command (a catalogue command) and line".into(),
-            );
-        }
+    let Request {
+        name,
+        line,
+        words,
+        repository,
+        serve,
+        folder,
+    } = match request(daemon, place, args) {
+        Ok(request) => request,
+        Err(refusal) => return refusal,
     };
-    let words = match split_line(&line) {
-        Ok(words) => words,
-        Err(sentence) => return Outcome::Refused(sentence),
-    };
-    let (repository, base) = match place.base(repository.as_deref()) {
-        Ok((repository, base)) => (repository.to_owned(), base.to_owned()),
-        Err(refusal) => return Outcome::Refused(refusal),
-    };
-    let folder = place.resolve(&base, ".");
-    if let Verdict::Refuse(why) = gate::decide(&[&folder]) {
+    if let Verdict::Deny(why) = gate::contained(std::slice::from_ref(&folder)) {
         return Outcome::Refused(why);
     }
     // A server already running for the agent is joined, not started twice.

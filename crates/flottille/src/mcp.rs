@@ -42,7 +42,8 @@ use crate::VERSION;
 use crate::claude;
 use crate::daemon::Daemon;
 use crate::files::{self, Context};
-use crate::place::Place;
+use crate::gate;
+use crate::place::{Place, Resolved};
 use crate::projects;
 use crate::runs;
 
@@ -790,8 +791,22 @@ async fn played(
 ) -> (String, bool) {
     let started = Instant::now();
     let recorded = record_of(&args, &grant.place);
+    let mut verdict = None;
     let outcome = if grant.tools.contains(&tool) {
-        perform(daemon, grant, tool, args, cancelled).await
+        let (paths, words) = reached(daemon, &grant.place, tool, &args);
+        let decided = gate::decide(&gate::Call {
+            grant,
+            tool,
+            args: &args,
+            words: &words,
+            paths: &paths,
+        });
+        let word = decided.word();
+        verdict = Some(word);
+        match decided {
+            gate::Verdict::Allow => perform(daemon, grant, tool, args, cancelled).await,
+            gate::Verdict::Deny(why) => Outcome::Refused(why),
+        }
     } else {
         Outcome::Refused(format!(
             "refused: this agent has no tool {tool}: its tools are {}",
@@ -800,7 +815,8 @@ async fn played(
     };
     let duration = started.elapsed().as_millis() as u64;
     let data = json!({"agent": grant.agent, "tool": tool, "call_key": key,
-        "arguments": recorded, "outcome": outcome.word(), "duration_ms": duration});
+        "arguments": recorded, "gate": verdict, "outcome": outcome.word(),
+        "duration_ms": duration});
     if let Err(error) = daemon.write(|store| {
         let event = store.append_agent_event(&grant.agent, "agent.tool_served", data, true)?;
         Ok(((), Some(event)))
@@ -829,6 +845,23 @@ fn shown(outcome: Outcome, notes: &[String], place: &Place) -> String {
     let notes = notes.join("\n\n");
     let room = limit.saturating_sub(notes.chars().count() + 2);
     format!("{}\n\n{notes}", cut(&text, room))
+}
+
+/// The paths a call reaches and, for a run, the words it would start, read from its arguments the
+/// way its tool will; what does not fit is left to the tool, which refuses it with its own
+/// sentence.
+fn reached(
+    daemon: &Daemon,
+    place: &Place,
+    tool: &str,
+    args: &Value,
+) -> (Vec<Resolved>, Vec<String>) {
+    match tool {
+        "fs_read" | "fs_list" | "search" | "fs_write" | "fs_edit" => {
+            (files::reaches(place, tool, args), Vec::new())
+        }
+        _ => runs::reaches(daemon, place, tool, args),
+    }
 }
 
 async fn perform(

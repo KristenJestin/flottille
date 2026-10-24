@@ -939,6 +939,47 @@ fn a_run_s_line_is_masked_in_its_record_its_event_and_its_answers() {
     );
 }
 
+#[test]
+fn every_call_goes_through_the_gate_commands_stop_and_output_included() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (id, url, authorization) = agent(&user, json!({}));
+    let mcp = Mcp::initialize(&url, &authorization);
+    let answer = ok(mcp.call("commands_run", json!({"line": "sleep 300", "timeout": 1})));
+    let run = run_id(&answer);
+    ok(mcp.call("commands_output", json!({"run": run})));
+    ok(mcp.call("commands_stop", json!({"run": run})));
+    ok(mcp.call("commands_list", json!({})));
+    refused(mcp.call("fs_read", json!({"path": "/etc/hostname"})));
+
+    let events = user.call("agent.show", json!({"agent": id})).unwrap()["events"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let verdicts: Vec<(String, String, String)> = events
+        .iter()
+        .filter(|e| e["name"] == "agent.tool_served")
+        .map(|e| {
+            let data = &e["data"];
+            let word = |field: &str| data[field].as_str().unwrap_or("-").to_owned();
+            (word("tool"), word("gate"), word("outcome"))
+        })
+        .collect();
+    let row = |tool: &str, gate: &str, outcome: &str| {
+        (tool.to_owned(), gate.to_owned(), outcome.to_owned())
+    };
+    assert_eq!(
+        verdicts,
+        [
+            row("commands_run", "allow", "ok"),
+            row("commands_output", "allow", "ok"),
+            row("commands_stop", "allow", "ok"),
+            row("commands_list", "allow", "ok"),
+            row("fs_read", "deny", "refused"),
+        ]
+    );
+}
+
 // From an agent's session.
 
 #[test]

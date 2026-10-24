@@ -83,9 +83,9 @@ impl Context<'_> {
     fn path(&self, repository: Option<&str>, named: &str) -> Result<Resolved, Outcome> {
         let (_, base) = self.place.base(repository).map_err(Outcome::Refused)?;
         let resolved = self.place.resolve(base, named);
-        match gate::decide(&[&resolved]) {
+        match gate::contained(std::slice::from_ref(&resolved)) {
             Verdict::Allow => Ok(resolved),
-            Verdict::Refuse(why) => Err(Outcome::Refused(why)),
+            Verdict::Deny(why) => Err(Outcome::Refused(why)),
         }
     }
 
@@ -106,6 +106,34 @@ impl Context<'_> {
             .map_err(|e| Outcome::Failed(e.to_string()))?;
         self.daemon.mcp.kept.keep(self.agent, path, text);
         Ok(())
+    }
+}
+
+/// The path a file tool's call names, resolved, for the gate: a call whose arguments do not fit
+/// reaches none, and its tool refuses it.
+pub fn reaches(place: &Place, tool: &str, args: &Value) -> Vec<Resolved> {
+    #[derive(Deserialize)]
+    struct Named {
+        repository: Option<String>,
+        path: Option<String>,
+    }
+    let args = if args.is_null() {
+        json!({})
+    } else {
+        args.clone()
+    };
+    let Ok(named) = serde_json::from_value::<Named>(args) else {
+        return Vec::new();
+    };
+    // A search starts at the top of its repository.
+    let path = if tool == "search" {
+        Some(".".to_owned())
+    } else {
+        named.path
+    };
+    match (place.base(named.repository.as_deref()), path) {
+        (Ok((_, base)), Some(path)) => vec![place.resolve(base, &path)],
+        _ => Vec::new(),
     }
 }
 
