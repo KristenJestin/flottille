@@ -210,6 +210,15 @@ impl Project {
         }
     }
 
+    /// The repositories, leaves first: each comes after those it depends on, and among those that
+    /// are ready the first of the file comes first. For preparing a workspace and, later, merging.
+    pub fn in_dependency_order(&self) -> Vec<&Repository> {
+        let (mut order, left) = dependency_order(&self.repositories);
+        // None are left for a project that was read from a file: a cycle is refused there.
+        order.extend(left);
+        order.into_iter().map(|i| &self.repositories[i]).collect()
+    }
+
     /// Reads and checks the text of `projects/<name>.toml`. `data` is Flottille's data folder,
     /// where the default workspaces root lives. The first problem found is the one reported.
     pub fn parse(name: &str, text: &str, data: &Path) -> Result<Project, ConfigError> {
@@ -329,7 +338,9 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
             }
         }
     }
-    if let Some((index, cycle)) = find_cycle(&file.repositories) {
+    let (_, left) = dependency_order(&file.repositories);
+    if !left.is_empty() {
+        let (index, cycle) = cycle_among(&file.repositories, &left);
         return Err(format!(
             "repositories[{index}].depends_on: cycle {}",
             cycle.join(" -> ")
@@ -420,40 +431,53 @@ fn valid_repository_path(path: &str) -> bool {
     path == "." || path.split('/').all(|part| !matches!(part, "" | "." | ".."))
 }
 
-/// A dependency cycle, with the index of the repository it was found from.
-fn find_cycle(repositories: &[Repository]) -> Option<(usize, Vec<&str>)> {
-    fn visit<'a>(
-        repositories: &'a [Repository],
-        at: usize,
-        trail: &mut Vec<usize>,
-        done: &mut [bool],
-    ) -> Option<Vec<&'a str>> {
-        if let Some(from) = trail.iter().position(|&seen| seen == at) {
-            let mut cycle: Vec<_> = trail[from..]
+/// The repositories in dependency order, as indexes: one comes after those it depends on, and of
+/// those that are ready the first of the file comes first. The second list holds, in file order,
+/// the ones that cannot be placed because they stand on a cycle or behind one: it is empty for
+/// repositories that passed the checks.
+fn dependency_order(repositories: &[Repository]) -> (Vec<usize>, Vec<usize>) {
+    let position = |path: &String| repositories.iter().position(|r| r.path == *path);
+    let mut placed = vec![false; repositories.len()];
+    let mut order = Vec::with_capacity(repositories.len());
+    while let Some(next) = (0..repositories.len()).find(|&index| {
+        !placed[index]
+            && repositories[index]
+                .depends_on
                 .iter()
-                .map(|&i| repositories[i].path.as_str())
-                .collect();
-            cycle.push(repositories[at].path.as_str());
-            return Some(cycle);
-        }
-        if done[at] {
-            return None;
-        }
-        trail.push(at);
-        for dependency in &repositories[at].depends_on {
-            let next = repositories.iter().position(|r| r.path == *dependency)?;
-            if let Some(cycle) = visit(repositories, next, trail, done) {
-                return Some(cycle);
-            }
-        }
-        trail.pop();
-        done[at] = true;
-        None
+                .filter_map(position)
+                .all(|dependency| placed[dependency])
+    }) {
+        placed[next] = true;
+        order.push(next);
     }
-    let mut done = vec![false; repositories.len()];
-    (0..repositories.len()).find_map(|index| {
-        visit(repositories, index, &mut Vec::new(), &mut done).map(|cycle| (index, cycle))
-    })
+    let left = (0..repositories.len()).filter(|&i| !placed[i]).collect();
+    (order, left)
+}
+
+/// A cycle among the repositories `dependency_order` could not place, with the index of the
+/// repository that closes it: `a -> b -> a`.
+fn cycle_among<'a>(repositories: &'a [Repository], left: &[usize]) -> (usize, Vec<&'a str>) {
+    let position = |path: &String| repositories.iter().position(|r| r.path == *path);
+    let mut trail = vec![left[0]];
+    loop {
+        let at = trail[trail.len() - 1];
+        // A repository is left because one of its dependencies is, so there is always a next.
+        let next = repositories[at]
+            .depends_on
+            .iter()
+            .filter_map(position)
+            .find(|dependency| left.contains(dependency))
+            .expect("a repository that was not placed depends on one that was not");
+        if let Some(from) = trail.iter().position(|&seen| seen == next) {
+            let names = trail[from..]
+                .iter()
+                .chain([&next])
+                .map(|&index| repositories[index].path.as_str())
+                .collect();
+            return (next, names);
+        }
+        trail.push(next);
+    }
 }
 
 /// What a name may be made of: it is a file name, a folder name and a word on the command line.
@@ -671,6 +695,79 @@ mod tests {
         assert!(
             message.starts_with("projects/app.toml: repositories[0].depends_on: cycle"),
             "{message}"
+        );
+    }
+
+    #[test]
+    fn repositories_come_in_dependency_order_leaves_first_ties_in_file_order() {
+        let text = include_str!("../tests/fixtures/multi-repo-case.toml");
+        let project = parse(text).unwrap();
+
+        let order: Vec<_> = project
+            .in_dependency_order()
+            .into_iter()
+            .map(|r| &r.path[..])
+            .collect();
+
+        // Each step takes the first repository of the file whose dependencies are all placed.
+        assert_eq!(
+            order,
+            [
+                ".",
+                "lib-core",
+                "lib-app",
+                "app-web",
+                "lib-api",
+                "app-api",
+                "e2e-tests"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_consumer_written_before_its_library_still_comes_after_it() {
+        let text = r#"
+            folder = "/work/app"
+            [[repositories]]
+            path = "consumer"
+            depends_on = ["library"]
+            [[repositories]]
+            path = "library"
+            [[repositories]]
+            path = "other"
+        "#;
+
+        let order: Vec<_> = parse(text)
+            .unwrap()
+            .in_dependency_order()
+            .into_iter()
+            .map(|r| r.path.clone())
+            .collect();
+
+        assert_eq!(order, ["library", "consumer", "other"]);
+    }
+
+    #[test]
+    fn a_longer_cycle_is_reported_once_from_the_repository_that_closes_it() {
+        let text = r#"
+            folder = "/work/app"
+            [[repositories]]
+            path = "x"
+            depends_on = ["a"]
+            [[repositories]]
+            path = "a"
+            depends_on = ["b"]
+            [[repositories]]
+            path = "b"
+            depends_on = ["c"]
+            [[repositories]]
+            path = "c"
+            depends_on = ["a"]
+        "#;
+
+        assert_eq!(
+            refusal(text),
+            "projects/app.toml: repositories[1].depends_on: cycle a -> b -> c -> a"
         );
     }
 

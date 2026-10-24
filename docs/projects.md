@@ -59,6 +59,10 @@ read_only = false                     # changes nothing
 ask_before_running = false            # held for approval each time an agent runs it
 ```
 
+The repositories are put in dependency order (a repository after those it depends on; among those
+that are ready, the first of the file first) by `Project::in_dependency_order()`, which preparing
+a workspace and merging use.
+
 The templates of the variables are read when workspaces exist (`docs/design.md` §6.2): the
 configuration only checks that the names of the variables are those of environment variables.
 
