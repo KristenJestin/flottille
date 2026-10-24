@@ -454,3 +454,24 @@ fn a_list_that_differs_from_the_detection_is_refused() {
         .unwrap();
     assert_eq!(repository_paths(&project), [".", "web"]);
 }
+
+#[test]
+fn a_file_that_cannot_be_read_is_reported_as_itself_not_as_a_name_taken() {
+    let user = User::new();
+    let app = user.path("work/app");
+    user.git_init(&app);
+    user.write_project_file(
+        "app",
+        "folder = \"/work/old\"\n[[repositories]]\npath = \".\"\n",
+    );
+    std::fs::set_permissions(
+        user.project_file("app"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o000),
+    )
+    .unwrap();
+
+    let (_, message) = user.call("project.add", folder(&app)).unwrap_err();
+
+    assert!(message.contains("ermission denied"), "{message}");
+    assert!(!message.contains("already exists"), "{message}");
+}

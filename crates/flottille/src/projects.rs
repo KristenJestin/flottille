@@ -267,7 +267,14 @@ fn plan(projects: &Projects, asked: ProjectFolder) -> std::result::Result<Plan, 
         )));
     }
 
-    if projects.registry.load(&name).is_err() || projects.known.contains_key(&name) {
+    // A file that cannot be used is a project all the same: its name is taken. A file that cannot
+    // be read is another matter, said as it is.
+    let taken = match projects.registry.load(&name) {
+        Ok(project) => project.is_some(),
+        Err(Error::Config(_)) => true,
+        Err(error) => return Err(error.into()),
+    };
+    if taken || projects.known.contains_key(&name) {
         return Err(Failure::refused(format!(
             "a project named {name} already exists"
         )));
