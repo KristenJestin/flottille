@@ -5,6 +5,8 @@ pub enum Error {
     Io(std::io::Error),
     Store(rusqlite::Error),
     Json(serde_json::Error),
+    /// A configuration file that cannot be used.
+    Config(crate::project::ConfigError),
     /// A refusal, said in a sentence the user can act on.
     Refused(String),
 }
@@ -17,6 +19,7 @@ impl fmt::Display for Error {
             Error::Io(error) => error.fmt(f),
             Error::Store(error) => write!(f, "store: {error}"),
             Error::Json(error) => write!(f, "json: {error}"),
+            Error::Config(error) => error.fmt(f),
             Error::Refused(sentence) => f.write_str(sentence),
         }
     }
