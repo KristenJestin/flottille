@@ -521,6 +521,27 @@ fn a_run_step_leaving_a_child_in_the_background_ends_with_its_own_process() {
     }
 }
 
+#[test]
+fn a_run_step_past_its_time_limit_is_stopped_and_fails() {
+    let fixture = Fixture::new(false);
+    let script = fixture.script("slow.sh", "echo started\nsleep 60\n");
+    fixture.configure(&format!(
+        "[[recipe]]\nrun = \"sh {}\"\nrepository = \"lib\"\ntime_limit = 1\n",
+        script.display()
+    ));
+
+    let started = Instant::now();
+    fixture.create(json!({"repositories": ["lib"]})).unwrap();
+    let workspace = fixture.settled("login");
+
+    assert!(started.elapsed() < Duration::from_secs(20));
+    assert_eq!(workspace["state"], "failed", "{workspace}");
+    assert_eq!(
+        workspace["steps"][1]["failure"]["output"],
+        "started\nit was stopped after 1 s"
+    );
+}
+
 /// Whether a process runs, a zombie waiting to be reaped counting as ended.
 fn alive(pid: &str) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {

@@ -77,7 +77,7 @@ masked for secrets. A workspace is `preparing`, `failed` or `ready`.
 | `copy` | Copies what the globs match in the main checkout's repository, a folder with what it holds, never over anything already there (`create_new`). A glob matching nothing copies nothing. |
 | `link` | A symbolic link to the main checkout's entry, unless something is there already. A missing entry fails the step. |
 | `root_entries` | A link to each top-level entry of the project folder that is neither a repository nor holds one, nor `.git` nor `.gitignore` (linking those makes git see the workspace folder as the root repository's checkout with every file deleted), nor holds the workspace, nor is there already. |
-| `run` | One line, split without a shell, its words filled, spawned in its repository's worktree (or the workspace folder) with the workspace's environment, in a process group of its own. It ends when its process does: what it left in the background is killed with the group. A non-zero exit fails the step with its output, or with `it ended with exit N` when it wrote nothing. |
+| `run` | One line, split without a shell, its words filled, spawned in its repository's worktree (or the workspace folder) with the workspace's environment, in a process group of its own. It ends when its process does: what it left in the background is killed with the group. Past its time limit (`time_limit`, or the project's `run_time_limit`, 30 min by default) the group is killed and the step fails with its last lines and `it was stopped after N s`. A non-zero exit fails the step with its output, or with `it ended with exit N` when it wrote nothing. |
 
 Copies and links are Flottille's own actions, done for the recipe the user wrote; they never go
 through the agents' gate.

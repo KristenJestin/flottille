@@ -10,6 +10,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use flottille_core::command::split_line;
 use flottille_core::glob;
@@ -420,6 +421,7 @@ fn snapshot(project: &Project, taken: &[String]) -> Vec<Step> {
 }
 
 fn action_of(project: &Project, step: &RecipeStep) -> Action {
+    let time_limit = step.time_limit.unwrap_or(project.run_time_limit);
     match step.kind() {
         StepKind::Copy(globs) => Action::Copy {
             globs: globs.to_vec(),
@@ -436,10 +438,12 @@ fn action_of(project: &Project, step: &RecipeStep) -> Action {
         StepKind::Run(line) => Action::Run {
             line: line.into(),
             command: None,
+            time_limit,
         },
         StepKind::Command(name) => Action::Run {
             line: project.commands[name].line.clone(),
             command: Some(name.into()),
+            time_limit,
         },
     }
 }
@@ -587,7 +591,9 @@ async fn run_step(workspace: &Workspace, step: &Step) -> Result<StepState, StepF
             .await
             .map_err(fail)?
         }
-        Action::Run { line, .. } => run_line(workspace, &place, line, &target)
+        Action::Run {
+            line, time_limit, ..
+        } => run_line(workspace, &place, line, &target, *time_limit)
             .await
             .map_err(fail)?,
     }
@@ -794,13 +800,14 @@ fn root_entries(folder: &Path, root: &Path, except: &[String]) -> Result<Vec<Str
     Ok(left)
 }
 
-/// Runs one line in `dir`, with the workspace's variables. The error is the last lines of its
-/// output, masked.
+/// Runs one line in `dir`, with the workspace's variables, for at most `time_limit` seconds. The
+/// error is the last lines of its output, masked.
 async fn run_line(
     workspace: &Workspace,
     repository: &str,
     line: &str,
     dir: &Path,
+    time_limit: u64,
 ) -> Result<(), String> {
     let names = Names {
         workspace: workspace.name.clone(),
@@ -845,13 +852,16 @@ async fn run_line(
     let mut output = Vec::new();
     let mut buffer = [0; 8192];
     let mut open = true;
+    let deadline = tokio::time::sleep(Duration::from_secs(time_limit));
+    tokio::pin!(deadline);
     let status = loop {
         tokio::select! {
-            status = child.wait() => break status,
+            status = child.wait() => break Some(status),
             read = reader.read(&mut buffer), if open => match read {
                 Ok(0) | Err(_) => open = false,
                 Ok(read) => keep_tail(&mut output, &buffer[..read]),
             },
+            () = &mut deadline => break None,
         }
     };
     // What it left in the background holds the pipe and would keep the step running: it ends
@@ -868,12 +878,22 @@ async fn run_line(
         }
         keep_tail(&mut output, &buffer[..read]);
     }
-    let status = status.map_err(|error| format!("cannot wait for {}: {error}", words[0]))?;
     let output = String::from_utf8_lossy(&output);
+    let kept = last_lines(&output);
+    let Some(status) = status else {
+        // Killed with its group: waited for until it has exited.
+        let _ = child.wait().await;
+        let stopped = format!("it was stopped after {time_limit} s");
+        return Err(if kept.is_empty() {
+            stopped
+        } else {
+            format!("{}\n{stopped}", secrets::mask(&kept, &env))
+        });
+    };
+    let status = status.map_err(|error| format!("cannot wait for {}: {error}", words[0]))?;
     if status.success() {
         return Ok(());
     }
-    let kept = last_lines(&output);
     Err(if kept.is_empty() {
         match status.code() {
             Some(code) => format!("it ended with exit {code}"),

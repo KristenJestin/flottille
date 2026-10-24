@@ -459,6 +459,7 @@ mod tests {
                     action: Action::Run {
                         line: "make".into(),
                         command: None,
+                        time_limit: 1800,
                     },
                     state: StepState::Pending,
                     failure: None,

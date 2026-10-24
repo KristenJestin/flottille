@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize, Serializer};
 /// Children running at once per project: the bounds of `max_children`.
 pub const CHILDREN_CAP: std::ops::RangeInclusive<u8> = 1..=6;
 const DEFAULT_CHILDREN_CAP: u8 = 3;
+/// Seconds a run step of the recipe may take unless the project or the step says otherwise.
+const DEFAULT_RUN_TIME_LIMIT: u64 = 30 * 60;
 
 /// A configuration that cannot be used, said with its file and, when there is one, its key.
 #[derive(Clone, Debug, PartialEq)]
@@ -112,6 +114,9 @@ pub struct RecipeStep {
     /// Done once in each repository of the workspace, in dependency order, leaves first.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub for_each_repository: bool,
+    /// Seconds a `run` or a `command` may take, in place of the project's `run_time_limit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_limit: Option<u64>,
 }
 
 /// What a recipe step does.
@@ -212,6 +217,8 @@ pub struct Project {
     pub default_repositories: RepositorySet,
     /// Children running at once, within `CHILDREN_CAP`.
     pub max_children: u8,
+    /// Seconds a run step of the recipe may take before it is stopped, unless the step says.
+    pub run_time_limit: u64,
     /// Programs with their leading arguments (`["git", "push"]`) that are refused to agents
     /// whatever else says; each entry is one word per element, never empty.
     pub never: Vec<Vec<String>>,
@@ -240,6 +247,8 @@ struct File {
     // Wide, so that a cap out of range is refused by the check, in its own words.
     #[serde(default = "default_children_cap")]
     max_children: i64,
+    #[serde(default = "default_run_time_limit")]
+    run_time_limit: u64,
     #[serde(default)]
     never: Vec<Vec<String>>,
     repositories: Vec<Repository>,
@@ -259,6 +268,10 @@ fn default_children_cap() -> i64 {
     DEFAULT_CHILDREN_CAP.into()
 }
 
+fn default_run_time_limit() -> u64 {
+    DEFAULT_RUN_TIME_LIMIT
+}
+
 impl Project {
     /// A project that takes everything by default: each repository with its remote `origin` and
     /// the base rule `[main]`, nothing else configured. `name` must be valid and `folder`
@@ -271,6 +284,7 @@ impl Project {
             workspaces_root: data.join("workspaces").join(name),
             default_repositories: RepositorySet::All,
             max_children: DEFAULT_CHILDREN_CAP,
+            run_time_limit: DEFAULT_RUN_TIME_LIMIT,
             never: Vec::new(),
             repositories: repositories
                 .into_iter()
@@ -381,6 +395,9 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
                 file.max_children
             )
         })?;
+    if file.run_time_limit == 0 {
+        return Err("run_time_limit: must be at least 1 second".into());
+    }
     for (index, entry) in file.never.iter().enumerate() {
         if entry.is_empty() {
             return Err(format!("never[{index}]: must not be empty"));
@@ -462,6 +479,7 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
         workspaces_root,
         default_repositories: file.default_repositories,
         max_children,
+        run_time_limit: file.run_time_limit,
         never: file.never,
         repositories: file.repositories,
         variables: file.variables,
@@ -492,6 +510,13 @@ fn check_step(
         if !known(path) {
             return Err(format!("{key}.repository: unknown repository \"{path}\""));
         }
+    }
+    match step.time_limit {
+        Some(_) if !matches!(kinds[0], StepKind::Run(_) | StepKind::Command(_)) => {
+            return Err(format!("{key}.time_limit: goes only with run or command"));
+        }
+        Some(0) => return Err(format!("{key}.time_limit: must be at least 1 second")),
+        _ => {}
     }
     let inside = |key: String, path: &str| {
         if path != "." && valid_repository_path(path) {
@@ -1103,6 +1128,35 @@ mod tests {
         assert_eq!(
             refusal(&off),
             "projects/app.toml: recipe[0].root_entries: must be true, or left out"
+        );
+    }
+
+    #[test]
+    fn run_steps_are_stopped_after_30_minutes_unless_the_file_says_otherwise() {
+        assert_eq!(parse(MINIMAL).unwrap().run_time_limit, 1800);
+        let text =
+            format!("run_time_limit = 600\n{TWO}\n[[recipe]]\nrun = \"make\"\ntime_limit = 7200\n");
+        let project = parse(&text).unwrap();
+        assert_eq!(project.run_time_limit, 600);
+        assert_eq!(project.recipe[0].time_limit, Some(7200));
+        assert_eq!(parse(&project.to_toml().unwrap()).unwrap(), project);
+    }
+
+    #[test]
+    fn a_time_limit_is_a_number_of_seconds_above_zero_on_a_run_or_a_command() {
+        assert_eq!(
+            refusal(&format!("run_time_limit = 0\n{TWO}")),
+            "projects/app.toml: run_time_limit: must be at least 1 second"
+        );
+        let zero = format!("{TWO}\n[[recipe]]\nrun = \"make\"\ntime_limit = 0\n");
+        assert_eq!(
+            refusal(&zero),
+            "projects/app.toml: recipe[0].time_limit: must be at least 1 second"
+        );
+        let copy = format!("{TWO}\n[[recipe]]\ncopy = [\".env\"]\ntime_limit = 60\n");
+        assert_eq!(
+            refusal(&copy),
+            "projects/app.toml: recipe[0].time_limit: goes only with run or command"
         );
     }
 

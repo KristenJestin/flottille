@@ -115,6 +115,7 @@ result is the object of its file with every default filled in:
   "workspaces_root": "$XDG_DATA_HOME/flottille/workspaces/app",
   "default_repositories": "all",
   "max_children": 3,
+  "run_time_limit": 1800,
   "never": [],
   "repositories": [{"path": ".", "remote": "origin", "base": ["main"], "depends_on": []}]
 }
@@ -197,7 +198,7 @@ A workspace is one worktree per repository, on one branch, prepared by the proje
     {"position": 0, "repository": "api", "kind": "worktree", "state": "done"},
     {"position": 1, "repository": "api", "kind": "copy", "globs": [".env", ".env.*"], "state": "done"},
     {"position": 2, "repository": null, "kind": "root_entries", "except": ["api"], "state": "done"},
-    {"position": 3, "repository": "api", "kind": "run", "line": "npm install", "state": "failed",
+    {"position": 3, "repository": "api", "kind": "run", "line": "npm install", "time_limit": 1800, "state": "failed",
       "failure": {"doing": "npm install (in api)", "output": "npm ERR! …"}}
   ]
 }
@@ -207,8 +208,8 @@ A workspace is one worktree per repository, on one branch, prepared by the proje
 creation, not yet filled. A base's `fetched_now` is false when the workspace was created offline;
 `fetched_at` (milliseconds since the Unix epoch) is when its tracking ref was last updated, `null`
 when unknown. A step's `kind` is `worktree`, `copy` (`globs`), `link` (`path`), `root_entries`
-(`except`: the top-level names of the project's repositories) or `run` (`line`, and `command` when
-it is a command of the catalogue); its `state` is `pending`, `running`, `done`, `skipped` or
+(`except`: the top-level names of the project's repositories) or `run` (`line`, `time_limit` in
+seconds, and `command` when it is a command of the catalogue); its `state` is `pending`, `running`, `done`, `skipped` or
 `failed`, and `failure` is there only on a failed step. `repository` is `null` for a step done in
 the workspace folder.
 

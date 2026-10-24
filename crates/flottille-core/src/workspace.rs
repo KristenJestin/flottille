@@ -84,11 +84,13 @@ pub enum Action {
     RootEntries {
         except: Vec<String>,
     },
-    /// A line, or the line of a command of the catalogue, which is then named.
+    /// A line, or the line of a command of the catalogue, which is then named; stopped after
+    /// `time_limit` seconds.
     Run {
         line: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command: Option<String>,
+        time_limit: u64,
     },
 }
 

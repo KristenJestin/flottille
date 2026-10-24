@@ -39,6 +39,7 @@ branch_prefix = "app"                 # default: a slug of the name
 workspaces_root = "/work/app-work"    # absolute; default: $XDG_DATA_HOME/flottille/workspaces/<name>
 default_repositories = "all"          # "all", or a list of the repositories a workspace takes
 max_children = 3                      # children running at once, 1 to 6
+run_time_limit = 1800                 # seconds a run step of the recipe may take; default 30 min
 never = [["git", "push"], ["rm", "-rf"]]   # programs with their leading arguments, one word per element, for the gate to refuse
 
 [[repositories]]                      # at least one
@@ -99,6 +100,9 @@ And, for every kind but `root_entries`, where it is done:
 | `repository = "<path>"` | In that repository; a step whose repository the workspace does not take is skipped. |
 | `for_each_repository = true` | Once in each repository of the workspace, in dependency order (leaves first), `{repository}` being its path. |
 | neither | In the workspace folder, `{repository}` being `.`; a `command` runs where the catalogue says. |
+
+A `run` or a `command` step may also say `time_limit = <seconds>` (at least 1): it is stopped after
+that long, in place of the project's `run_time_limit` (30 minutes unless the file says otherwise).
 
 Paths are relative to the repository (or to the folder) and stay inside it. The recipe is
 snapshotted when a workspace is created, with the variables: editing the file later never
