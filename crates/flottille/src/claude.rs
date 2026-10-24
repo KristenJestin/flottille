@@ -90,6 +90,9 @@ pub fn session_meta(instructions: &str, tools: &[String]) -> Value {
         "env": {
             "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
             "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
+            // Flottille's tools are all the agent has: they load upfront, with no search step
+            // (`docs/reference/mcp.md` §4 rule 7).
+            "ENABLE_TOOL_SEARCH": "false",
             "MCP_TOOL_TIMEOUT": TOOL_WAIT_MS,
             "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT": TOOL_WAIT_MS,
         },

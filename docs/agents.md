@@ -91,6 +91,7 @@ adapter passes to the Claude Agent SDK over its own defaults:
   "env": {
     "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
     "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
+    "ENABLE_TOOL_SEARCH": "false",
     "MCP_TOOL_TIMEOUT": "600000",
     "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT": "600000"
   }
@@ -109,8 +110,9 @@ adapter passes to the Claude Agent SDK over its own defaults:
 - `strictMcpConfig`: only the MCP servers given with the session.
 - `systemPrompt`: the agent's instructions, frozen when it is created, split at the cache
   boundary: Claude Code caches the part before it across sessions.
-- `env`: no auto memory, none of the user's claude.ai MCP servers, and both MCP time limits at
-  10 minutes, longer than a call held for the user.
+- `env`: no auto memory, none of the user's claude.ai MCP servers, no tool search (Flottille's
+  tools are all the agent has, so they load upfront; `docs/reference/mcp.md` §4 rule 7), and both
+  MCP time limits at 10 minutes, longer than a call held for the user.
 - `CLAUDE_CONFIG_DIR` stays where the user has it: the login lives there.
 
 The MCP servers of the session are Flottille's alone: one HTTP server named `flottille`. Until

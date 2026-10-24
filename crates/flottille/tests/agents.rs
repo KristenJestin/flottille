@@ -173,6 +173,7 @@ fn the_exact_claude_code_options_are_sent() {
             "env": {
                 "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
                 "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
+                "ENABLE_TOOL_SEARCH": "false",
                 "MCP_TOOL_TIMEOUT": "600000",
                 "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT": "600000"
             }
