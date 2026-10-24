@@ -417,6 +417,30 @@ fn a_death_is_detected_and_published() {
 }
 
 #[test]
+fn a_child_left_by_an_adapter_that_died_does_not_outlive_it() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [{"when": "die", "do": [{"child": true}, {"die": 3}]}]}));
+    project(&user);
+    let (id, after) = run(&user, json!({"message": "die now"}));
+
+    events_until(&user, &id, after, "agent.died");
+
+    let child = user
+        .received()
+        .iter()
+        .find_map(|e| e["child"].as_u64())
+        .expect("the fake agent started a child");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while alive(child) {
+        assert!(
+            Instant::now() < deadline,
+            "the child of the dead adapter still runs (pid {child})"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
 fn a_model_and_an_effort_are_set_and_checked_and_a_model_not_offered_fails() {
     let user = User::with_fake_agent();
     user.fake_script(json!({"models": ["fake-small", "fake-large"], "efforts": ["low", "high"]}));

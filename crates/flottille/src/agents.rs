@@ -333,6 +333,9 @@ async fn process(
             Ok(false)
         }
         Ok(Exit::Died(status)) => {
+            // The adapter is gone, not what it started: a `claude` left in its group would run on
+            // as an orphan, with its tools.
+            signal_group(pid, libc::SIGKILL);
             died(daemon, &agent.id, status, turns);
             Ok(false)
         }

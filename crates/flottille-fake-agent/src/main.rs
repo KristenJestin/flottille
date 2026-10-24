@@ -48,6 +48,7 @@
 //! | `{"mcp": {"tool": "fs_list", "arguments": {}}}` | calls the tool on the session's first HTTP MCP server (initialize, then `tools/call`), as a tool call; the answer recorded |
 //! | `{"wait": 500}` | waits that many milliseconds; a cancel ends the turn `cancelled` |
 //! | `{"hang": true}` | goes silent until the turn is cancelled |
+//! | `{"child": true}` | starts a `sleep` in its own process group, as the CLI the adapter runs would be, and records its pid (`{"child": <pid>}`) |
 //! | `{"die": 3}` | exits at once with that code |
 
 use std::collections::HashMap;
@@ -318,6 +319,13 @@ impl Agent {
                     std::thread::sleep(Duration::from_millis(10));
                 }
                 return "cancelled".into();
+            } else if step["child"] == true {
+                // Never waited for: it is meant to outlive this process.
+                let child = std::process::Command::new("sleep")
+                    .arg("600")
+                    .spawn()
+                    .expect("sleep starts");
+                self.record.write(json!({"child": child.id()}));
             } else if let Some(code) = step["die"].as_i64() {
                 std::process::exit(code as i32);
             }
