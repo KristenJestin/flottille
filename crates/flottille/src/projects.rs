@@ -102,7 +102,17 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> std::result::Result
             }))
         }
         "project.add" => {
-            let plan = plan(projects, serde_json::from_value(params)?)?;
+            let asked: ProjectFolder = serde_json::from_value(params)?;
+            let confirmed = asked.repositories.clone();
+            let plan = plan(projects, asked)?;
+            if let Some(confirmed) = confirmed
+                && confirmed != plan.repositories
+            {
+                return Err(Failure::refused(format!(
+                    "the repositories of {} changed since they were shown: run it again",
+                    plan.folder.display()
+                )));
+            }
             let project = Project::new(&plan.name, plan.folder, plan.repositories, &projects.data);
             projects.registry.create(&project)?;
             projects.known.insert(project.name.clone(), project.clone());

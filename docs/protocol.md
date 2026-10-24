@@ -154,9 +154,14 @@ has that name or that folder.
 
 #### `project.add`
 
-The same parameters and the same refusals as `project.detect`. Registers the folder: writes
-`projects/<name>.toml` with the repositories detected, each with the remote `origin` and the base
-rule `["main"]`, and answers the project. Nothing is written in the folder or its repositories.
+The same parameters and the same refusals as `project.detect`, and `repositories`: the list the
+user confirmed, as `project.detect` gave it. When it is there and the daemon's own detection now
+differs, the request is `refused` with a sentence saying the repositories changed since they were
+shown and to run it again; nothing is written. A client that shows no list leaves it out.
+
+Registers the folder: writes `projects/<name>.toml` with the repositories detected, each with the
+remote `origin` and the base rule `["main"]`, and answers the project. Nothing is written in the
+folder or its repositories.
 
 #### `project.remove`
 

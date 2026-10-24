@@ -79,7 +79,11 @@ pub fn run(paths: &Paths, action: ProjectAction) -> Result<ExitCode> {
                 .to_owned();
             let found = ask(
                 "project.detect",
-                serde_json::to_value(ProjectFolder { folder, name })?,
+                serde_json::to_value(ProjectFolder {
+                    folder,
+                    name,
+                    repositories: None,
+                })?,
             )?;
             let file = paths.projects().join(format!(
                 "{}.toml",
@@ -89,10 +93,14 @@ pub fn run(paths: &Paths, action: ProjectAction) -> Result<ExitCode> {
             if !yes {
                 confirm()?;
             }
-            // What was shown is what is registered, whatever the folder became meanwhile.
+            // What was shown is what is registered: the daemon refuses if the folder changed meanwhile.
             let project = ask(
                 "project.add",
-                serde_json::json!({"folder": found["folder"], "name": found["name"]}),
+                serde_json::json!({
+                    "folder": found["folder"],
+                    "name": found["name"],
+                    "repositories": found["repositories"],
+                }),
             )?;
             if json {
                 println!("{project}");

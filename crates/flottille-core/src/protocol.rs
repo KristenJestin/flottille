@@ -58,6 +58,10 @@ pub struct ProjectFolder {
     /// The project's name; a slug of the folder's name when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// `project.add` only: the repositories the user confirmed, as `project.detect` listed them.
+    /// The daemon refuses to register anything else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repositories: Option<Vec<String>>,
 }
 
 /// The parameters of `project.show`, `project.remove` and `project.check`.

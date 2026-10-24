@@ -421,3 +421,36 @@ fn a_project_already_there_when_the_daemon_starts_is_not_announced() {
 
     assert_eq!(watch.next_event()["name"], "project.removed");
 }
+
+#[test]
+fn a_list_that_differs_from_the_detection_is_refused() {
+    let user = User::new();
+    let app = user.path("work/app");
+    user.git_init(&app);
+    let shown = user.call("project.detect", folder(&app)).unwrap();
+    user.git_init(&app.join("web"));
+
+    for confirmed in [shown["repositories"].clone(), json!([".", "api"])] {
+        let (code, message) = user
+            .call(
+                "project.add",
+                json!({"folder": app, "repositories": confirmed}),
+            )
+            .unwrap_err();
+
+        assert_eq!(code, "refused");
+        assert!(
+            message.contains("changed since they were shown") && message.contains("run it again"),
+            "{message}"
+        );
+    }
+    assert!(!user.project_file("app").exists());
+
+    let project = user
+        .call(
+            "project.add",
+            json!({"folder": app, "repositories": [".", "web"]}),
+        )
+        .unwrap();
+    assert_eq!(repository_paths(&project), [".", "web"]);
+}
