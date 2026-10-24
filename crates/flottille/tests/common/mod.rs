@@ -71,11 +71,13 @@ impl User {
         std::fs::write(self.path("fake/script.json"), script.to_string()).unwrap();
     }
 
-    /// What the fake agent received and did, one entry per line of its record.
+    /// What the fake agent received and did, one entry per line of its record. A line it is
+    /// still writing is left for the next read.
     pub fn received(&self) -> Vec<Value> {
         match std::fs::read_to_string(self.path("fake/received.jsonl")) {
             Ok(text) => text
-                .lines()
+                .split_inclusive('\n')
+                .filter(|line| line.ends_with('\n'))
                 .map(|line| serde_json::from_str(line).unwrap())
                 .collect(),
             Err(_) => Vec::new(),
