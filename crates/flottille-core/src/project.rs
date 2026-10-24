@@ -141,9 +141,9 @@ pub struct Project {
     pub default_repositories: RepositorySet,
     /// Children running at once, within `CHILDREN_CAP`.
     pub max_children: u8,
-    /// Programs with their leading arguments (`git push`) that are refused to agents whatever
-    /// else says.
-    pub never: Vec<String>,
+    /// Programs with their leading arguments (`["git", "push"]`) that are refused to agents
+    /// whatever else says; each entry is one word per element, never empty.
+    pub never: Vec<Vec<String>>,
     /// At least one.
     pub repositories: Vec<Repository>,
     /// Name to templated value, handed to every command run in a workspace.
@@ -167,7 +167,7 @@ struct File {
     #[serde(default = "default_children_cap")]
     max_children: i64,
     #[serde(default)]
-    never: Vec<String>,
+    never: Vec<Vec<String>>,
     repositories: Vec<Repository>,
     #[serde(default)]
     variables: BTreeMap<String, String>,
@@ -295,8 +295,13 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
                 file.max_children
             )
         })?;
-    if let Some(index) = file.never.iter().position(|entry| entry.trim().is_empty()) {
-        return Err(format!("never[{index}]: must not be empty"));
+    for (index, entry) in file.never.iter().enumerate() {
+        if entry.is_empty() {
+            return Err(format!("never[{index}]: must not be empty"));
+        }
+        if entry.iter().any(|word| word.trim().is_empty()) {
+            return Err(format!("never[{index}]: must not hold an empty word"));
+        }
     }
 
     check_repositories(&file.repositories)?;
@@ -549,7 +554,7 @@ mod tests {
         assert!(project.commands["api:dev"].serve);
         assert!(project.commands["test"].check && project.commands["test"].read_only);
         assert!(project.commands["generate-data"].ask_before_running);
-        assert_eq!(project.never[0], "git push");
+        assert_eq!(project.never[0], ["git", "push"]);
     }
 
     #[test]
@@ -755,12 +760,21 @@ mod tests {
     }
 
     #[test]
-    fn a_never_entry_is_not_empty() {
-        let text = format!("never = [\"git push\", \" \"]\n{MINIMAL}");
+    fn a_never_entry_is_a_list_of_words_and_not_empty() {
+        let empty = format!("never = [[\"git\", \"push\"], []]\n{MINIMAL}");
         assert_eq!(
-            refusal(&text),
+            refusal(&empty),
             "projects/app.toml: never[1]: must not be empty"
         );
+        let blank = format!("never = [[\"git\", \"push\"], [\"rm\", \" \"]]\n{MINIMAL}");
+        assert_eq!(
+            refusal(&blank),
+            "projects/app.toml: never[1]: must not hold an empty word"
+        );
+        let words = format!("never = [[\"rm\", \"-rf\"]]\n{MINIMAL}");
+        assert_eq!(parse(&words).unwrap().never, [["rm", "-rf"]]);
+        let line = format!("never = [\"git push\"]\n{MINIMAL}");
+        assert!(refusal(&line).starts_with("projects/app.toml: never[0]: "));
     }
 
     #[test]

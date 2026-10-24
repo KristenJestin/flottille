@@ -199,7 +199,7 @@ fn show_prints_the_configuration_for_a_person_and_as_json() {
         "rich",
         &format!(
             r#"folder = "{folder}"
-never = ["git push"]
+never = [["git", "push"], ["rm", "-rf"]]
 [[repositories]]
 path = "."
 base = ["develop", "main"]
@@ -232,7 +232,7 @@ check = true
         "lib: remote origin, base main, after .",
         "STORE = {workspace.path}/.store",
         "api:dev: npm start (in lib; serve, check)",
-        "never: git push",
+        "never: git push, rm -rf",
     ] {
         assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
     }

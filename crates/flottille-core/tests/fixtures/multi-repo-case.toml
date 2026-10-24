@@ -5,7 +5,7 @@ folder = "/work/app"
 workspaces_root = "/work/app-work"
 default_repositories = "all"
 max_children = 3
-never = ["git push", "git reset --hard", "git stash", "npm publish"]
+never = [["git", "push"], ["git", "reset", "--hard"], ["git", "stash"], ["npm", "publish"]]
 
 [[repositories]]
 path = "."

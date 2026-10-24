@@ -255,7 +255,12 @@ fn show_text(project: &Value) -> String {
     ] {
         shown.push_str(&format!("  {label}: {value}\n"));
     }
-    let never = list_of(&project["never"]);
+    let never: Vec<String> = project["never"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|entry| list_of(entry).join(" "))
+        .collect();
     if !never.is_empty() {
         shown.push_str(&format!("  never: {}\n", never.join(", ")));
     }

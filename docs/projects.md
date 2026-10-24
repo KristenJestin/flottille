@@ -39,7 +39,7 @@ branch_prefix = "app"                 # default: a slug of the name
 workspaces_root = "/work/app-work"    # absolute; default: $XDG_DATA_HOME/flottille/workspaces/<name>
 default_repositories = "all"          # "all", or a list of the repositories a workspace takes
 max_children = 3                      # children running at once, 1 to 6
-never = ["git push", "npm publish"]   # programs with their leading arguments, for the gate to refuse
+never = [["git", "push"], ["rm", "-rf"]]   # programs with their leading arguments, one word per element, for the gate to refuse
 
 [[repositories]]                      # at least one
 path = "."                            # relative to the folder; "." is the folder itself
