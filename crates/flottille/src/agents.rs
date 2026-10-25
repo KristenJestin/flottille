@@ -133,6 +133,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         "agent.cancel" => {
             let asked: AgentName = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
+            refuse_child(daemon, &agent, "cancels its turn")?;
             let (answer, answered) = oneshot::channel();
             let task = daemon
                 .agents

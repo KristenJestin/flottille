@@ -878,6 +878,22 @@ fn big_reports_pinned_on_an_agent_read_page_keep_its_cursor_and_stay_under_40000
 }
 
 #[test]
+fn a_user_cannot_cancel_a_worker_s_turn() {
+    let user = user();
+    let (_, lead) = lead(&user);
+    let worker = launch(&lead, "busy", "HANG and work");
+    eventually("its turn", || state(&user, &worker) == "working");
+
+    let refusal = user
+        .call("agent.cancel", json!({"agent": worker}))
+        .unwrap_err();
+
+    assert_eq!(refusal.0, "refused");
+    assert!(refusal.1.contains("only its parent"), "{}", refusal.1);
+    assert_eq!(state(&user, &worker), "working");
+}
+
+#[test]
 fn a_daemon_restart_does_not_send_a_working_agent_its_prompt_again() {
     let user = user();
     let (_, lead) = lead(&user);
