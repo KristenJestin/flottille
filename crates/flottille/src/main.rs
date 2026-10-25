@@ -1,3 +1,7 @@
+mod acp;
+mod agent_command;
+mod agents;
+mod claude;
 mod client;
 mod daemon;
 mod git;
@@ -14,6 +18,7 @@ use flottille_core::paths::Paths;
 use flottille_core::protocol::WatchParams;
 use serde_json::Value;
 
+use crate::agent_command::AgentAction;
 use crate::client::Client;
 use crate::project_command::ProjectAction;
 use crate::workspace_command::WorkspaceAction;
@@ -48,6 +53,16 @@ enum Command {
     Workspace {
         #[command(subcommand)]
         action: WorkspaceAction,
+    },
+    /// Run a Claude agent and read it
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
+    },
+    /// Whether Claude agents can run here: Node, claude, its login, the adapter
+    Doctor {
+        #[arg(long)]
+        json: bool,
     },
     /// Print the daemon's events, one JSON object per line
     Watch {
@@ -98,6 +113,8 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         }
         Command::Project { action } => return project_command::run(&paths, action),
         Command::Workspace { action } => return workspace_command::run(&paths, action),
+        Command::Agent { action } => return agent_command::run(&paths, action),
+        Command::Doctor { json } => return agent_command::doctor(&paths, json),
         Command::Watch { after } => {
             let mut client = Client::connect_or_start(&paths)?;
             client.request("events.watch", serde_json::to_value(WatchParams { after })?)?;

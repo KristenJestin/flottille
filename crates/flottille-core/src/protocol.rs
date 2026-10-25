@@ -104,6 +104,43 @@ pub struct WorkspaceList {
     pub project: Option<String>,
 }
 
+/// The parameters of `agent.run`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentRun {
+    pub project: String,
+    /// The workspace it works in; the project folder itself when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    /// The agent's default when left out; never replaced by another.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// Its first message.
+    pub message: String,
+}
+
+/// The parameters of `agent.send`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSend {
+    pub agent: String,
+    pub message: String,
+}
+
+/// The parameters of `agent.show` and `agent.cancel`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentName {
+    pub agent: String,
+    /// `agent.show` only: its events numbered after this one; all of them when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<u64>,
+}
+
 impl Message {
     pub fn result(id: String, result: Value) -> Message {
         Message {
