@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use flottille_core::detect;
 use flottille_core::paths::Paths;
@@ -13,6 +14,7 @@ use flottille_core::{Error, Result};
 use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
+use crate::git::{self, Class};
 
 /// An error answer: a code of `docs/protocol.md` and a sentence.
 pub struct Failure {
@@ -154,6 +156,35 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> std::result::Result
             format!("unknown method `{method}`"),
         )),
     }
+}
+
+/// `project.show`: the project, and the branch each repository's checkout in the project folder
+/// is on (`null` when it is on none), read by git outside the projects' lock.
+pub async fn show(daemon: Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
+    let mut project = call(&daemon, "project.show", params)?;
+    let folder = PathBuf::from(project["folder"].as_str().unwrap_or_default());
+    for repository in project["repositories"].as_array_mut().into_iter().flatten() {
+        let checkout = match repository["path"].as_str().unwrap_or(".") {
+            "." => folder.clone(),
+            path => folder.join(path),
+        };
+        // A folder that is not its own repository yet: git would answer for the one around it.
+        if !checkout.join(".git").exists() {
+            repository["branch"] = Value::Null;
+            continue;
+        }
+        let head = git::run(
+            &checkout,
+            &["symbolic-ref", "--quiet", "--short", "HEAD"],
+            Class::Read,
+        )
+        .await;
+        repository["branch"] = match head {
+            Ok(head) if head.success => head.stdout.trim().into(),
+            _ => Value::Null,
+        };
+    }
+    Ok(project)
 }
 
 fn emit(daemon: &Daemon, name: &str, data: Value) -> std::result::Result<(), Failure> {

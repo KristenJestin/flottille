@@ -15,6 +15,7 @@ use flottille_core::protocol::{Event, Message, Request};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use serde_json::{Value, json};
 
+use crate::actions::Outcome;
 use crate::model::{self, Answers, Snapshot};
 
 type Result<T> = std::result::Result<T, String>;
@@ -29,6 +30,8 @@ pub enum Update {
     Snapshot(Snapshot),
     /// The connection broke, with why; the link is connecting again.
     Disconnected(String),
+    /// What came of something the window asked (`actions`).
+    Done(Outcome),
 }
 
 /// What the link has seen, readable from any thread: the number of the last event, and how many
@@ -49,13 +52,18 @@ const QUIET: Duration = Duration::from_millis(40);
 /// Starts the link's thread. It ends when the receiver is dropped.
 pub fn spawn(connect: Connect) -> (UnboundedReceiver<Update>, Arc<Seen>) {
     let (sender, receiver) = unbounded();
+    (receiver, spawn_into(connect, sender))
+}
+
+/// Starts the link's thread, sending its updates to `sender`.
+pub fn spawn_into(connect: Connect, sender: UnboundedSender<Update>) -> Arc<Seen> {
     let seen = Arc::new(Seen::default());
     let shared = seen.clone();
     std::thread::Builder::new()
         .name("flottille-link".into())
         .spawn(move || run(connect, sender, shared))
         .expect("a thread for the daemon's socket");
-    (receiver, seen)
+    seen
 }
 
 fn run(connect: Connect, updates: UnboundedSender<Update>, seen: Arc<Seen>) {
@@ -134,8 +142,8 @@ fn note(seen: &Seen, event: &Event) {
 fn matters(event: &Event) -> bool {
     let name = event.name.as_str();
     match name.split_once('.').map(|(subject, _)| subject) {
-        Some("project" | "approval" | "daemon") => true,
-        Some("workspace") => matches!(name, "workspace.created" | "workspace.removed"),
+        // A workspace's preparation shows on its card, step by step.
+        Some("project" | "approval" | "daemon" | "workspace") => true,
         Some("agent") => matches!(
             name,
             "agent.created"
@@ -250,7 +258,7 @@ fn needing_the_user(conn: &mut Conn) -> Result<HashSet<String>> {
 }
 
 /// One connection: requests answered in turn, events kept aside meanwhile.
-struct Conn {
+pub(crate) struct Conn {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
     next_id: u64,
@@ -261,7 +269,7 @@ struct Conn {
 }
 
 impl Conn {
-    fn new(stream: UnixStream) -> std::io::Result<Conn> {
+    pub(crate) fn new(stream: UnixStream) -> std::io::Result<Conn> {
         stream.set_read_timeout(None)?;
         Ok(Conn {
             reader: BufReader::new(stream.try_clone()?),
@@ -273,6 +281,34 @@ impl Conn {
     }
 
     fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+        self.ask(method, params)?
+            .map_err(|message| format!("{method}: {message}"))
+    }
+
+    /// The daemon's answer: its result, or the sentence of its error. The outer error is the
+    /// connection's.
+    fn ask(&mut self, method: &str, params: Value) -> Result<std::result::Result<Value, String>> {
+        self.ask_until(method, params, None)
+    }
+
+    /// [`Conn::ask`], waiting at most `bound`: past it the daemon is taken as silent, an error of
+    /// the connection, which is not to be used again (its late answer would come to the next
+    /// request).
+    pub(crate) fn ask_within(
+        &mut self,
+        method: &str,
+        params: Value,
+        bound: Duration,
+    ) -> Result<std::result::Result<Value, String>> {
+        self.ask_until(method, params, Some((Instant::now() + bound, bound)))
+    }
+
+    fn ask_until(
+        &mut self,
+        method: &str,
+        params: Value,
+        deadline: Option<(Instant, Duration)>,
+    ) -> Result<std::result::Result<Value, String>> {
         let id = self.next_id.to_string();
         self.next_id += 1;
         let params = match params {
@@ -293,7 +329,22 @@ impl Conn {
             .write_all(line.as_bytes())
             .map_err(|e| format!("the daemon's socket: {e}"))?;
         loop {
-            let message = self.read(None)?.ok_or("the daemon closed the connection")?;
+            let message = match deadline {
+                None => self.read(None)?.ok_or("the daemon closed the connection")?,
+                Some((at, bound)) => {
+                    let left = at.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Err(format!(
+                            "the daemon did not answer {method} within {}",
+                            spoken(bound)
+                        ));
+                    }
+                    match self.read(Some(left))? {
+                        Some(message) => message,
+                        None => continue,
+                    }
+                }
+            };
             if let Some(event) = message.event {
                 self.queued.insert(0, event);
                 continue;
@@ -302,15 +353,15 @@ impl Conn {
                 continue;
             }
             if let Some(error) = message.error {
-                return Err(format!("{method}: {}", error.message));
+                return Ok(Err(error.message));
             }
-            return Ok(message.result.unwrap_or(Value::Null));
+            return Ok(Ok(message.result.unwrap_or(Value::Null)));
         }
     }
 
     /// The next event, waiting at most `wait` (`None`: as long as it takes); `None` when none
     /// came in time.
-    fn next_event(&mut self, wait: Option<Duration>) -> Result<Option<Event>> {
+    pub(crate) fn next_event(&mut self, wait: Option<Duration>) -> Result<Option<Event>> {
         if let Some(event) = self.queued.pop() {
             return Ok(Some(event));
         }
@@ -354,6 +405,15 @@ impl Conn {
     }
 }
 
+/// A bound as a sentence says it.
+fn spoken(bound: Duration) -> String {
+    match bound.as_secs() {
+        0 => format!("{} ms", bound.as_millis()),
+        secs if secs < 120 => format!("{secs} s"),
+        secs => format!("{} min", secs / 60),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,7 +439,10 @@ mod tests {
         assert!(matters(&event("approval.requested", json!({}))));
         assert!(matters(&event("agent.turn_ended", json!({}))));
         assert!(matters(&event("workspace.created", json!({}))));
-        assert!(!matters(&event("workspace.step_done", json!({}))));
+        assert!(
+            matters(&event("workspace.step_done", json!({}))),
+            "a card shows the preparation"
+        );
     }
 
     #[test]

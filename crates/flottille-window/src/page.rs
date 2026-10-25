@@ -1,6 +1,6 @@
-//! The main area: the page of what is open. The project page (#12) and the session page (#13)
-//! plug in here; until then each shows its header, and the session page its rail of agents, which
-//! becomes a drawer from the right in a narrower window.
+//! The main area: the page of what is open. The project page is [`ProjectPage`]; the session page
+//! (#13) plugs in here, and until then shows its header and its rail of agents, which becomes a
+//! drawer from the right in a narrower window.
 
 use flottille_ui::{
     AgentState, Badge, Button, Drawer, Icon, ListRow, Pill, Side, StateIcon, Status, Type, icon,
@@ -9,11 +9,13 @@ use flottille_ui::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
-    SharedString, StatefulInteractiveElement, Styled, Subscription, Window, div, px,
+    SharedString, StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div, px,
 };
 
+use crate::composer::Composer;
 use crate::model::Place;
-use crate::shell::Layout;
+use crate::project::{NewWorkspace, ProjectPage};
+use crate::shell::{Layout, Shell};
 use crate::tree::place_name;
 
 /// Width of the session page's right rail.
@@ -24,8 +26,6 @@ pub enum Page {
     Empty,
     Project {
         name: String,
-        folder: String,
-        places: usize,
     },
     Session {
         id: String,
@@ -39,6 +39,9 @@ pub enum Page {
 pub struct MainArea {
     page: Page,
     layout: Layout,
+    shell: WeakEntity<Shell>,
+    /// The open project's page.
+    project: Option<Entity<ProjectPage>>,
     pill: Option<Entity<Pill>>,
     rail: Entity<Rail>,
     drawer: Entity<Drawer>,
@@ -47,12 +50,14 @@ pub struct MainArea {
 }
 
 impl MainArea {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(shell: WeakEntity<Shell>, cx: &mut Context<Self>) -> Self {
         let rail = cx.new(|_| Rail { lead: None });
         let drawer = cx.new(|_| Drawer::new("rail-drawer", Side::Right, px(RAIL), rail.clone()));
         Self {
             page: Page::Empty,
             layout: Layout::Wide,
+            shell,
+            project: None,
             pill: None,
             rail,
             drawer,
@@ -68,7 +73,35 @@ impl MainArea {
         &self.drawer
     }
 
-    pub fn show(&mut self, page: Page, cx: &mut Context<Self>) {
+    pub fn project_page(&self) -> Option<&Entity<ProjectPage>> {
+        self.project.as_ref()
+    }
+
+    /// Shows `page`; a project's page gets that project's composer and new workspace form.
+    pub fn show(
+        &mut self,
+        page: Page,
+        forms: Option<(Entity<Composer>, Entity<NewWorkspace>)>,
+        cx: &mut Context<Self>,
+    ) {
+        // Another project's page is a new one: its content enters, the old one is gone.
+        self.project = match (&page, forms) {
+            (Page::Project { name }, Some((composer, new_workspace))) => {
+                match self.project.take() {
+                    Some(open) if open.read(cx).name() == name => Some(open),
+                    _ => {
+                        let (shell, name) = (self.shell.clone(), name.clone());
+                        let narrow = self.layout == Layout::Narrow;
+                        Some(cx.new(|cx| {
+                            let mut page = ProjectPage::new(shell, name, composer, new_workspace);
+                            page.set_narrow(narrow, cx);
+                            page
+                        }))
+                    }
+                }
+            }
+            _ => None,
+        };
         self.pill = match &page {
             Page::Session { status, .. } => {
                 let status = status.clone();
@@ -102,6 +135,9 @@ impl MainArea {
             if layout == Layout::Wide {
                 self.drawer.update(cx, |drawer, cx| drawer.close(cx));
             }
+            if let Some(page) = &self.project {
+                page.update(cx, |page, cx| page.set_narrow(layout == Layout::Narrow, cx));
+            }
             cx.notify();
         }
     }
@@ -111,7 +147,6 @@ impl Render for MainArea {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let narrow = self.layout == Layout::Narrow;
-        let pad = if narrow { 16. } else { 28. };
         let root = div()
             .id("main")
             .size_full()
@@ -130,42 +165,7 @@ impl Render for MainArea {
                     .text_color(p.faint)
                     .child("No project yet: add one with flottille project add."),
             ),
-            Page::Project {
-                name,
-                folder,
-                places,
-            } => root.child(
-                div()
-                    .id("project-page")
-                    .size_full()
-                    .overflow_y_scroll()
-                    .child(
-                        div()
-                            .max_w(px(980.))
-                            .w_full()
-                            .mx_auto()
-                            .px(px(pad))
-                            .pt(px(36.))
-                            .flex()
-                            .flex_col()
-                            .gap(px(6.))
-                            .child(
-                                div()
-                                    .text_size(px(24.))
-                                    .line_height(px(29.))
-                                    .semibold()
-                                    .child(SharedString::from(name.clone())),
-                            )
-                            .child(mono_line(folder, p.faint))
-                            .child(mono_line(
-                                &match places {
-                                    1 => "1 place".to_owned(),
-                                    n => format!("{n} places"),
-                                },
-                                p.faint,
-                            )),
-                    ),
-            ),
+            Page::Project { .. } => root.children(self.project.clone()),
             Page::Session {
                 id,
                 title,
@@ -265,19 +265,6 @@ impl Render for MainArea {
             }
         }
     }
-}
-
-/// A mono line that never wraps: cut with an ellipsis when it is longer than its room.
-fn mono_line(text: &str, color: gpui_kit::Hsla) -> impl IntoElement {
-    div()
-        .w_full()
-        .min_w_0()
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .text_ellipsis()
-        .mono(12.)
-        .text_color(color)
-        .child(SharedString::from(text.to_owned()))
 }
 
 /// The session's rail: its agents (#13 fills it with the tree).

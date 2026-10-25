@@ -224,12 +224,97 @@ fn registered_projects_are_listed_and_shown() {
         .collect();
     assert_eq!(names, ["a-app", "b-app"]);
     assert_eq!(list["errors"], json!([]));
-    assert_eq!(shown, list["projects"][0]);
+    let mut listed = list["projects"][0].clone();
+    for (repository, shown) in listed["repositories"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .zip(shown["repositories"].as_array().unwrap())
+    {
+        repository["branch"] = shown["branch"].clone();
+    }
+    assert_eq!(
+        shown, listed,
+        "shown is listed, with each repository's branch"
+    );
     let (code, message) = user
         .call("project.show", json!({"name": "nope"}))
         .unwrap_err();
     assert_eq!(code, "not-found");
     assert!(message.contains("no project named nope"), "{message}");
+}
+
+#[test]
+fn a_shown_project_says_the_branch_each_repository_is_on() {
+    let user = User::new();
+    let app = user.path("work/app");
+    user.git_init(&app);
+    for name in ["lib", "tool"] {
+        let repository = app.join(name);
+        user.git_init(&repository);
+        std::fs::write(repository.join("README.md"), "made up\n").unwrap();
+        user.git(&repository, &["add", "README.md"]);
+        user.git(&repository, &["commit", "--quiet", "-m", "start"]);
+    }
+    user.git(
+        &app.join("lib"),
+        &["checkout", "--quiet", "-b", "feature/x"],
+    );
+    user.git(&app.join("tool"), &["checkout", "--quiet", "--detach"]);
+    add(&user, &app);
+
+    let shown = user.call("project.show", json!({"name": "app"})).unwrap();
+
+    let branches: Vec<(&str, &Value)> = shown["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|repository| (repository["path"].as_str().unwrap(), &repository["branch"]))
+        .collect();
+    assert_eq!(
+        branches,
+        [
+            (".", &json!("main")),
+            ("lib", &json!("feature/x")),
+            ("tool", &Value::Null),
+        ],
+        "a detached checkout is on no branch"
+    );
+    let listed = user.call("project.list", json!({})).unwrap();
+    assert!(
+        listed["projects"][0]["repositories"][0]
+            .get("branch")
+            .is_none(),
+        "a listing runs no git"
+    );
+}
+
+#[test]
+fn a_repository_folder_that_is_not_a_repository_yet_is_on_no_branch() {
+    let user = User::new();
+    let app = user.path("work/app");
+    user.git_init(&app);
+    std::fs::write(app.join("README.md"), "made up\n").unwrap();
+    user.git(&app, &["add", "README.md"]);
+    user.git(&app, &["commit", "--quiet", "-m", "start"]);
+    // Inside the project's repository, not cloned yet: git would answer for the parent.
+    std::fs::create_dir_all(app.join("lib")).unwrap();
+    user.write_project_file(
+        "app",
+        &format!(
+            "folder = \"{}\"\n[[repositories]]\npath = \".\"\n[[repositories]]\npath = \"lib\"\n",
+            app.display()
+        ),
+    );
+
+    let shown = user.call("project.show", json!({"name": "app"})).unwrap();
+
+    assert_eq!(shown["repositories"][0]["branch"], "main");
+    assert_eq!(
+        shown["repositories"][1]["branch"],
+        Value::Null,
+        "not the branch of the repository around it"
+    );
 }
 
 #[test]

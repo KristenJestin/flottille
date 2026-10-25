@@ -14,7 +14,11 @@ use flottille_ui::AgentState;
 use flottille_ui::omarchy::Environment;
 use flottille_ui::state::icon_id;
 use flottille_window::Shell;
+use flottille_window::actions::Changes;
+use flottille_window::composer::{Choice, Composer, PlaceChoice, Tab};
 use flottille_window::link::{self, Connect};
+use flottille_window::model::{Place, Preparation};
+use flottille_window::project::{NewWorkspace, PlaceCard, ProjectPage};
 use flottille_window::shell::{Layout, Selection};
 use flottille_window::tree::{place_id, project_id, session_id};
 use gpui_kit::test::TestWindowExt;
@@ -28,7 +32,9 @@ fn user() -> User {
     user.fake_script(json!({"turns": [
         {"when": "read the env", "do": [{"mcp": {"tool": "fs_read", "arguments": {"path": ".env"}}}]},
         {"when": "ask me", "do": [{"mcp": {"tool": "ask_user", "arguments": {"question": "Which database?"}}}]},
-        {"when": "work a while", "do": [{"wait": 4000}, {"say": "done"}]}
+        {"when": "work a while", "do": [{"wait": 4000}, {"say": "done"}]},
+        {"when": "work briefly", "do": [{"wait": 1000}, {"say": "done"}]},
+        {"when": "work long", "do": [{"wait": 30000}, {"say": "done"}]}
     ]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     user
@@ -130,9 +136,12 @@ fn until(
 ) {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
-        shell.update(cx, |shell, cx| shell.poll(cx));
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
         cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear(cx));
+        // A frame as the platform asks for one: `Window::draw` alone builds again every view an
+        // update touched, even one not notified.
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
         if check(cx) {
             return;
         }
@@ -253,7 +262,11 @@ fn a_session_that_starts_waiting_marks_its_row_its_folded_place_and_its_folded_p
     assert_eq!(shell.read_with(cx, |s, cx| s.top().read(cx).count()), 1);
     cx.update(|window, cx| window.render_frame(cx));
     let shown = cx.update(|window, _| window.find_all(icon_id(AgentState::NeedsYou)).len());
-    assert_eq!(shown, 3, "the row, the place and the project show the mark");
+    assert_eq!(
+        shown, 4,
+        "the row, the place and the project show the mark, and the session's row on the project \
+         page"
+    );
 }
 
 #[gpui_kit::test]
@@ -325,11 +338,25 @@ fn one_session_changing_state_redraws_its_row_and_not_the_others(cx: &mut TestAp
     until(&shell, cx, "the sessions are shown", |cx| {
         cx.update(|window, _| window.try_find(session_id(&busy)).is_some())
     });
+    // Atlas's page is open, its details read.
+    until(&shell, cx, "the page has its details", |cx| {
+        page_of(&shell, cx).read_with(cx, |page, _| page.chips()) == ["atlas · main"]
+    });
+    settle(cx);
     let renders = |id: &str, cx: &mut VisualTestContext| {
         shell.read_with(cx, |s, cx| s.session(id).unwrap().read(cx).renders())
     };
     let before: Vec<usize> = quiet.iter().map(|id| renders(id, cx)).collect();
     let busy_before = renders(&busy, cx);
+    let page = page_of(&shell, cx);
+    let composer = composer_of(&shell, "atlas", cx);
+    let page_and_composer = |cx: &mut VisualTestContext| {
+        (
+            page.read_with(cx, |p, _| p.renders()),
+            composer.read_with(cx, |c, _| c.renders()),
+        )
+    };
+    let page_and_composer_before = page_and_composer(cx);
 
     send(&user, &busy, "work a while");
     until(&shell, cx, "the session runs", |cx| {
@@ -342,6 +369,11 @@ fn one_session_changing_state_redraws_its_row_and_not_the_others(cx: &mut TestAp
     assert!(renders(&busy, cx) > busy_before, "its row is drawn again");
     let after: Vec<usize> = quiet.iter().map(|id| renders(id, cx)).collect();
     assert_eq!(after, before, "the other rows are not drawn again");
+    assert_eq!(
+        page_and_composer(cx),
+        page_and_composer_before,
+        "nor the project's page, nor its composer"
+    );
 }
 
 #[gpui_kit::test]
@@ -460,4 +492,675 @@ fn flottille_ui_advance(cx: &mut VisualTestContext) {
         cx.update(|window, cx| window.simulate_next_frame(cx));
         cx.run_until_parked();
     }
+}
+
+// The project page (#12).
+
+/// A recipe step for every new workspace of `project`: `sh <script>`, the script holding `body`.
+fn recipe(user: &User, project: &str, body: &str) {
+    let script = user.path(&format!("tools/{project}-recipe.sh"));
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(&script, body).unwrap();
+    let file = user.project_file(project);
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    text.push_str(&format!(
+        "\n[[recipe]]\nrun = \"sh {}\"\n",
+        script.display()
+    ));
+    std::fs::write(file, text).unwrap();
+}
+
+/// A recipe script that waits for `gate` to exist, then runs `then`: the test says when the
+/// preparation ends.
+fn gated(then: &str, gate: &std::path::Path) -> String {
+    format!(
+        "while [ ! -e '{}' ]; do sleep 0.05; done\n{then}\n",
+        gate.display()
+    )
+}
+
+fn page_of(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<ProjectPage> {
+    shell
+        .read_with(cx, |s, cx| s.main().read(cx).project_page().cloned())
+        .expect("a project's page is open")
+}
+
+fn card_of(
+    shell: &Entity<Shell>,
+    place: Option<&str>,
+    cx: &mut VisualTestContext,
+) -> Option<Entity<PlaceCard>> {
+    let page = shell.read_with(cx, |s, cx| s.main().read(cx).project_page().cloned())?;
+    page.read_with(cx, |page, cx| page.card(&place.map(str::to_owned), cx))
+}
+
+/// Lets the page's entrance and every other motion end, then draws.
+fn settle(cx: &mut VisualTestContext) {
+    for _ in 0..90 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    }
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+}
+
+/// Types `text` in the composer's field, given the focus by a click as a user would.
+fn type_task(text: &str, cx: &mut VisualTestContext) {
+    cx.update(|window, cx| window.click("composer-field", cx));
+    cx.simulate_input(text);
+}
+
+fn titles_in(card: &Entity<PlaceCard>, cx: &mut VisualTestContext) -> Vec<String> {
+    card.read_with(cx, |card, _| {
+        card.data()
+            .sessions
+            .iter()
+            .map(|s| s.title.clone())
+            .collect()
+    })
+}
+
+#[gpui_kit::test]
+fn the_page_lists_main_and_two_workspaces_with_their_sessions(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    workspace(&user, "atlas", "export-csv");
+    workspace(&user, "atlas", "login");
+    start(&user, "atlas", None, "Release notes for 2.4");
+    start(&user, "atlas", Some("export-csv"), "CSV export by tenant");
+    start(&user, "atlas", Some("login"), "Sessions expire too early");
+    start(&user, "atlas", Some("login"), "Review the refresh flow");
+    let login = PathBuf::from(
+        user.call(
+            "workspace.show",
+            json!({"project": "atlas", "name": "login"}),
+        )
+        .unwrap()["folder"]
+            .as_str()
+            .unwrap(),
+    );
+    std::fs::write(login.join("NOTES.md"), "one\ntwo\nthree\n").unwrap();
+    // More new files than the daemon reads: the card says "at least".
+    let generated = login.with_file_name("export-csv").join("generated");
+    std::fs::create_dir_all(&generated).unwrap();
+    for at in 0..1001 {
+        std::fs::write(generated.join(format!("{at}.txt")), "x\n").unwrap();
+    }
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+
+    until(&shell, cx, "the page shows the lines changed", |cx| {
+        card_of(&shell, Some("login"), cx).is_some_and(|card| {
+            card.read_with(cx, |c, _| c.changes())
+                == Some(Changes {
+                    added: 3,
+                    removed: 0,
+                    capped: false,
+                })
+        })
+    });
+    assert_eq!(
+        card_of(&shell, Some("export-csv"), cx).map(|card| card.read_with(cx, |c, _| c.changes())),
+        Some(Some(Changes {
+            added: 1000,
+            removed: 0,
+            capped: true
+        }))
+    );
+    let page = page_of(&shell, cx);
+    let places: Vec<Place> = page.read_with(cx, |page, cx| {
+        page.cards()
+            .iter()
+            .map(|card| card.read(cx).data().place.clone())
+            .collect()
+    });
+    assert_eq!(
+        places,
+        [None, Some("export-csv".into()), Some("login".into())],
+        "main first, then each workspace"
+    );
+    let cards = page.read_with(cx, |page, _| page.cards().to_vec());
+    assert_eq!(titles_in(&cards[0], cx), ["Release notes for 2.4"]);
+    assert_eq!(titles_in(&cards[1], cx), ["CSV export by tenant"]);
+    assert_eq!(
+        titles_in(&cards[2], cx),
+        ["Review the refresh flow", "Sessions expire too early"]
+    );
+    assert_eq!(
+        cards[1].read_with(cx, |c, _| c.data().meta.clone()),
+        "from main · atlas"
+    );
+    assert_eq!(
+        page.read_with(cx, |page, _| page.chips()),
+        ["atlas · main"],
+        "a chip per repository with its branch"
+    );
+    settle(cx);
+    cx.update(|window, _| {
+        for id in [
+            "place-card-main",
+            "place-card-export-csv",
+            "place-card-login",
+            "new-session-in-login",
+            "new-workspace-card",
+        ] {
+            assert!(window.try_find(id).is_some(), "{id} is not shown");
+        }
+        let (main, workspace) = (
+            window.find("place-card-main").bounds(),
+            window.find("place-card-export-csv").bounds(),
+        );
+        assert!(workspace.origin.x > main.origin.x, "two columns");
+        assert_eq!(workspace.origin.y, main.origin.y);
+    });
+
+    // "New session in login" points the composer there.
+    cx.update(|window, cx| window.click("new-session-in-login", cx));
+    let composer = composer_of(&shell, "atlas", cx);
+    assert_eq!(
+        composer.read_with(cx, |c, _| c.choice().clone()),
+        Choice::Workspace("login".into())
+    );
+}
+
+#[gpui_kit::test]
+fn starting_a_task_in_a_new_workspace_prepares_it_then_starts_the_session_in_it(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    let gate = user.path("gate");
+    recipe(&user, "atlas", &gated("echo prepared", &gate));
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    until(&shell, cx, "the page is shown", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).project_page().is_some())
+    });
+    settle(cx);
+
+    type_task("Fix the login\nwith a second line", cx);
+    cx.update(|window, cx| window.click("place-picker", cx));
+    cx.update(|window, cx| window.click("place-choice-new", cx));
+    cx.simulate_input("login-fix");
+    cx.simulate_keystrokes("enter");
+    let composer = composer_of(&shell, "atlas", cx);
+    assert!(composer.read_with(cx, |c, _| c.is_sending()));
+
+    until(
+        &shell,
+        cx,
+        "the workspace's card shows its preparation",
+        |cx| {
+            card_of(&shell, Some("login-fix"), cx).is_some_and(|card| {
+                matches!(
+                    card.read_with(cx, |c, _| c.data().preparation.clone()),
+                    Preparation::Preparing { .. }
+                )
+            })
+        },
+    );
+    assert!(
+        composer.read_with(cx, |c, _| c.is_sending()),
+        "it waits for the preparation"
+    );
+    assert_eq!(
+        user.call("agent.list", json!({})).unwrap()["agents"],
+        json!([]),
+        "nothing starts before the workspace is ready"
+    );
+    std::fs::write(&gate, "").unwrap();
+    until(&shell, cx, "the session's page opens", |cx| {
+        matches!(
+            shell.read_with(cx, |s, _| s.selected().cloned()),
+            Some(Selection::Session(_))
+        )
+    });
+    let Some(Selection::Session(id)) = shell.read_with(cx, |s, _| s.selected().cloned()) else {
+        unreachable!()
+    };
+    let agent = user.call("agent.status", json!({"agent": id})).unwrap();
+    assert_eq!(agent["agent"]["workspace"], "login-fix", "it started in it");
+    let workspace = user
+        .call(
+            "workspace.show",
+            json!({"project": "atlas", "name": "login-fix"}),
+        )
+        .unwrap();
+    assert_eq!(workspace["state"], "ready", "prepared before it started");
+    let first = user.call("agent.show", json!({"agent": id})).unwrap();
+    assert_eq!(first["agent"]["brief"], "Fix the login\nwith a second line");
+    assert!(
+        !composer.read_with(cx, |c, cx| c.is_sending()
+            || !c.field().read(cx).value().is_empty()),
+        "the field is emptied for the next task"
+    );
+}
+
+#[gpui_kit::test]
+fn a_failing_recipe_shows_its_output_on_the_card(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    recipe(
+        &user,
+        "atlas",
+        "echo 'npm ERR! made-up failure in the install'\nexit 3\n",
+    );
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    until(&shell, cx, "the page is shown", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).project_page().is_some())
+    });
+    settle(cx);
+
+    type_task("Try the broken recipe", cx);
+    cx.update(|window, cx| window.click("place-picker", cx));
+    cx.update(|window, cx| window.click("place-choice-new", cx));
+    cx.simulate_input("broken");
+    cx.update(|window, cx| window.click("send", cx));
+
+    let composer = composer_of(&shell, "atlas", cx);
+    until(&shell, cx, "the composer says no session started", |cx| {
+        composer.read_with(cx, |c, _| c.error().is_some())
+    });
+    let error = composer.read_with(cx, |c, _| c.error().unwrap().to_owned());
+    assert!(error.contains("no session started"), "{error}");
+    until(&shell, cx, "the card shows the failure", |cx| {
+        card_of(&shell, Some("broken"), cx).is_some_and(|card| {
+            matches!(
+                card.read_with(cx, |c, _| c.data().preparation.clone()),
+                Preparation::Failed { .. }
+            )
+        })
+    });
+    let page = page_of(&shell, cx);
+    let card = page.read_with(cx, |page, cx| {
+        page.card(&Some("broken".into()), cx).unwrap()
+    });
+    let Preparation::Failed { output, .. } =
+        card.read_with(cx, |c, _| c.data().preparation.clone())
+    else {
+        unreachable!()
+    };
+    assert!(
+        output.contains("npm ERR! made-up failure in the install"),
+        "{output}"
+    );
+    settle(cx);
+    assert!(cx.update(|window, _| window.try_find("failure-output-broken").is_some()));
+    let agents = user.call("agent.list", json!({})).unwrap();
+    assert_eq!(agents["agents"], json!([]), "no session started");
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(Selection::Project("atlas".into())),
+        "the page stays open"
+    );
+}
+
+#[gpui_kit::test]
+fn the_running_agents_tab_lists_a_waiting_session_first(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let waiting = start(&user, "atlas", None, "Sessions expire too early");
+    send(&user, &waiting, "read the env");
+    let at_rest = start(&user, "atlas", None, "Tidy the aliases");
+    let running = start(&user, "atlas", None, "CSV export by tenant");
+    send(&user, &running, "work long");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    until(&shell, cx, "one waits and one runs", |cx| {
+        mark_of(&shell, &waiting, cx) == Some(AgentState::NeedsYou)
+            && mark_of(&shell, &running, cx) == Some(AgentState::Running)
+    });
+    settle(cx);
+
+    cx.update(|window, cx| window.click("tab-running", cx));
+    let composer = composer_of(&shell, "atlas", cx);
+    assert_eq!(composer.read_with(cx, |c, _| c.tab()), Tab::Running);
+    let listed: Vec<String> = composer.read_with(cx, |c, cx| {
+        c.running(cx).iter().map(|s| s.id.clone()).collect()
+    });
+    assert_eq!(
+        listed,
+        [waiting.clone(), running.clone()],
+        "the waiting session first, though it is the older one; the one at rest not at all"
+    );
+    settle(cx);
+    cx.update(|window, _| {
+        let y = |id: &str| window.find(format!("running-{id}")).bounds().origin.y;
+        assert!(y(&waiting) < y(&running));
+        assert!(window.try_find(format!("running-{at_rest}")).is_none());
+        assert!(
+            window.try_find("composer-field").is_none(),
+            "the list replaces the field"
+        );
+    });
+    cx.update(|window, cx| window.click(format!("running-{waiting}"), cx));
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(Selection::Session(waiting))
+    );
+}
+
+#[gpui_kit::test]
+fn typing_in_the_composer_does_not_redraw_the_page(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    workspace(&user, "atlas", "login");
+    start(&user, "atlas", None, "Release notes for 2.4");
+    start(&user, "atlas", Some("login"), "Sessions expire too early");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    until(&shell, cx, "the page shows its cards", |cx| {
+        card_of(&shell, Some("login"), cx).is_some()
+    });
+    // A click gives the field the focus, and a first key puts the window in keyboard mode: GPUI
+    // draws the whole window again for each, once, which is not typing.
+    cx.update(|window, cx| window.click("composer-field", cx));
+    cx.simulate_keystrokes("right");
+    settle(cx);
+    let page = page_of(&shell, cx);
+    let composer = composer_of(&shell, "atlas", cx);
+    let cards = page.read_with(cx, |page, _| page.cards().to_vec());
+    let renders = |cx: &mut VisualTestContext| {
+        (
+            page.read_with(cx, |p, _| p.renders()),
+            cards
+                .iter()
+                .map(|c| c.read_with(cx, |c, _| c.renders()))
+                .collect::<Vec<_>>(),
+            composer.read_with(cx, |c, _| c.renders()),
+        )
+    };
+    let (page_before, cards_before, composer_before) = renders(cx);
+
+    // Each key is drawn as the platform draws it, when the update is flushed.
+    cx.simulate_input("Fix the timeout");
+    cx.simulate_keystrokes("shift-enter");
+    cx.simulate_input("and its test");
+
+    let field = composer.read_with(cx, |c, cx| c.field().read(cx).value().to_string());
+    assert_eq!(
+        field, "Fix the timeout\nand its test",
+        "Shift+Enter makes a new line"
+    );
+    assert!(
+        !composer.read_with(cx, |c, _| c.is_sending()),
+        "nothing was sent"
+    );
+    let (page_after, cards_after, composer_after) = renders(cx);
+    assert_eq!(page_after, page_before, "the page is not drawn again");
+    assert_eq!(cards_after, cards_before, "nor its cards");
+    assert_eq!(
+        composer_after,
+        composer_before + 1,
+        "the composer is drawn again once, when its send button wakes up, not once a letter"
+    );
+}
+
+fn composer_of(
+    shell: &Entity<Shell>,
+    project: &str,
+    cx: &mut VisualTestContext,
+) -> Entity<Composer> {
+    shell
+        .read_with(cx, |s, _| s.composer_of(project).cloned())
+        .unwrap_or_else(|| panic!("{project}'s page has a composer"))
+}
+
+fn field_of(composer: &Entity<Composer>, cx: &mut VisualTestContext) -> String {
+    composer.read_with(cx, |c, cx| c.field().read(cx).value().to_string())
+}
+
+/// Opens `project`'s page, as a click in the tree would, and lets its entrance end.
+fn open_project(shell: &Entity<Shell>, project: &str, cx: &mut VisualTestContext) {
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::Project(project.into()), window, cx)
+    });
+    until(shell, cx, "the project's page is shown", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .project_page()
+                .is_some_and(|page| page.read(cx).name() == project)
+        })
+    });
+    settle(cx);
+}
+
+/// Sends `task` from atlas's composer into a new workspace named `name`.
+fn send_in_new(task: &str, name: &str, cx: &mut VisualTestContext) {
+    type_task(task, cx);
+    cx.update(|window, cx| window.click("place-picker", cx));
+    cx.update(|window, cx| window.click("place-choice-new", cx));
+    cx.simulate_input(name);
+    cx.simulate_keystrokes("enter");
+}
+
+#[gpui_kit::test]
+fn a_session_started_after_switching_project_stays_with_its_project(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    project(&user, "borealis");
+    let gate = user.path("gate");
+    recipe(&user, "atlas", &gated("echo prepared", &gate));
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    send_in_new("Fix the login", "login-fix", cx);
+    let atlas = composer_of(&shell, "atlas", cx);
+    assert!(atlas.read_with(cx, |c, _| c.is_sending()));
+
+    open_project(&shell, "borealis", cx);
+    let borealis = composer_of(&shell, "borealis", cx);
+    assert!(
+        !borealis.read_with(cx, |c, _| c.is_sending()),
+        "another project's send is not this one's"
+    );
+    assert_eq!(field_of(&borealis, cx), "", "nor its draft");
+    type_task("A draft for borealis", cx);
+    std::fs::write(&gate, "").unwrap();
+    until(&shell, cx, "atlas's session started", |cx| {
+        !atlas.read_with(cx, |c, _| c.is_sending())
+    });
+
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(Selection::Project("borealis".into())),
+        "the user is not pulled away from the page they opened"
+    );
+    assert_eq!(field_of(&borealis, cx), "A draft for borealis");
+    assert!(borealis.read_with(cx, |c, _| c.error().is_none() && !c.is_sending()));
+    let agents = user.call("agent.list", json!({})).unwrap();
+    assert_eq!(agents["agents"][0]["workspace"], "login-fix");
+    assert_eq!(field_of(&atlas, cx), "", "atlas's field is emptied");
+    assert_eq!(
+        atlas.read_with(cx, |c, cx| (
+            c.name_field().read(cx).value().to_string(),
+            c.choice().clone()
+        )),
+        (String::new(), Choice::Main),
+        "and the new workspace's name with it"
+    );
+    open_project(&shell, "atlas", cx);
+    assert_eq!(
+        shell.read_with(cx, |s, cx| s
+            .main()
+            .read(cx)
+            .project_page()
+            .unwrap()
+            .read(cx)
+            .composer()
+            .clone()),
+        atlas,
+        "atlas's page shows atlas's composer"
+    );
+}
+
+#[gpui_kit::test]
+fn a_send_that_fails_after_switching_project_says_so_on_its_project(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    project(&user, "borealis");
+    let gate = user.path("gate");
+    recipe(
+        &user,
+        "atlas",
+        &gated("echo 'made-up failure'\nexit 3", &gate),
+    );
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    send_in_new("Try the broken recipe", "broken", cx);
+    let atlas = composer_of(&shell, "atlas", cx);
+
+    open_project(&shell, "borealis", cx);
+    let borealis = composer_of(&shell, "borealis", cx);
+    type_task("A draft for borealis", cx);
+    std::fs::write(&gate, "").unwrap();
+    until(&shell, cx, "atlas's send failed", |cx| {
+        atlas.read_with(cx, |c, _| c.error().is_some())
+    });
+
+    assert!(
+        borealis.read_with(cx, |c, _| c.error().is_none() && !c.is_sending()),
+        "the failure is not shown on another project"
+    );
+    assert_eq!(field_of(&borealis, cx), "A draft for borealis");
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(Selection::Project("borealis".into()))
+    );
+    open_project(&shell, "atlas", cx);
+    assert_eq!(
+        field_of(&atlas, cx),
+        "Try the broken recipe",
+        "atlas keeps its task, to send again"
+    );
+}
+
+#[gpui_kit::test]
+fn a_new_workspace_made_in_one_project_does_not_close_another_project_s_form(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    project(&user, "borealis");
+    workspace(&user, "borealis", "login");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let form_of = |project: &str, cx: &mut VisualTestContext| {
+        shell
+            .read_with(cx, |s, _| s.new_workspace_of(project).cloned())
+            .unwrap()
+    };
+    let create = |form: &Entity<NewWorkspace>, cx: &mut VisualTestContext| {
+        form.update_in(cx, |form, window, cx| form.open(window, cx));
+        cx.simulate_input("login");
+        cx.simulate_keystrokes("enter");
+    };
+    let atlas = form_of("atlas", cx);
+    create(&atlas, cx);
+    // Atlas's answer is not taken before borealis asks the same name.
+    open_project(&shell, "borealis", cx);
+    let borealis = form_of("borealis", cx);
+    create(&borealis, cx);
+    until(&shell, cx, "both were answered", |cx| {
+        atlas.read_with(cx, |f, _| f.creating().is_none())
+            && borealis.read_with(cx, |f, _| f.creating().is_none())
+    });
+
+    assert!(
+        !atlas.read_with(cx, |f, _| f.is_open()),
+        "atlas's workspace was made"
+    );
+    let (open, error) = borealis.read_with(cx, |f, _| (f.is_open(), f.error().map(str::to_owned)));
+    assert!(open, "borealis's form stays open");
+    assert!(
+        error.is_some_and(|e| e.contains("login")),
+        "and says why it was refused"
+    );
+}
+
+#[gpui_kit::test]
+fn a_turn_ending_in_another_project_does_not_ask_for_details(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    project(&user, "borealis");
+    let here = start(&user, "atlas", None, "Release notes for 2.4");
+    let there = start(&user, "borealis", None, "Tidy the aliases");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    until(&shell, cx, "the page has its details", |cx| {
+        page_of(&shell, cx).read_with(cx, |page, _| page.chips()) == ["atlas · main"]
+    });
+    let asked = |cx: &mut VisualTestContext| shell.read_with(cx, |s, _| s.details_asked());
+    let before = asked(cx);
+
+    let turn = |id: &str, cx: &mut VisualTestContext| {
+        send(&user, id, "work briefly");
+        until(&shell, cx, "the session runs", |cx| {
+            mark_of(&shell, id, cx) == Some(AgentState::Running)
+        });
+        until(&shell, cx, "its turn ended", |cx| {
+            mark_of(&shell, id, cx).is_none()
+        });
+    };
+    turn(&there, cx);
+    assert_eq!(
+        asked(cx),
+        before,
+        "borealis's work changes nothing on atlas's page"
+    );
+
+    turn(&here, cx);
+    assert!(
+        asked(cx) > before,
+        "atlas's own work may have changed its lines"
+    );
+}
+
+#[gpui_kit::test]
+fn a_chosen_workspace_that_stops_being_ready_cannot_take_the_task(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    workspace(&user, "atlas", "login");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    until(&shell, cx, "the page shows login", |cx| {
+        card_of(&shell, Some("login"), cx).is_some()
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("new-session-in-login", cx));
+    cx.simulate_input("Fix the timeout");
+    let composer = composer_of(&shell, "atlas", cx);
+    let places = |login_ready: bool| {
+        vec![
+            PlaceChoice {
+                workspace: None,
+                ready: true,
+            },
+            PlaceChoice {
+                workspace: Some("login".into()),
+                ready: login_ready,
+            },
+        ]
+    };
+
+    // What the next read says when login is prepared again.
+    composer.update(cx, |c, cx| c.set_places(places(false), cx));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.update(|window, cx| window.click("send", cx));
+    cx.simulate_keystrokes("enter");
+
+    assert!(
+        !composer.read_with(cx, |c, _| c.is_sending()),
+        "nothing is sent to it, nor to main in its place"
+    );
+    assert_eq!(
+        composer.read_with(cx, |c, _| (
+            c.choice().clone(),
+            c.blocked().map(str::to_owned)
+        )),
+        (
+            Choice::Workspace("login".into()),
+            Some("login is not ready: a session starts there once it is prepared".into())
+        )
+    );
+    composer.update(cx, |c, cx| c.set_places(places(true), cx));
+    assert_eq!(
+        composer.read_with(cx, |c, _| c.blocked().map(str::to_owned)),
+        None
+    );
 }

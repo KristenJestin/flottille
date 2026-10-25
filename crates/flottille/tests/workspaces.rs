@@ -157,6 +157,112 @@ fn step_states(workspace: &Value) -> Vec<String> {
 }
 
 #[test]
+fn a_shown_workspace_counts_the_lines_added_and_removed_in_each_repository() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    fixture.create(json!({})).unwrap();
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    let web = fixture.workspace("login").join("web");
+    let lib = fixture.workspace("login").join("lib");
+    // Committed on the workspace's branch, changed and not committed, and new and not tracked.
+    std::fs::remove_file(web.join("DEVELOP.md")).unwrap();
+    fixture.git(&web, &["commit", "--quiet", "-am", "drop develop's note"]);
+    std::fs::write(web.join("README.md"), "web\nmore\nlines\n").unwrap();
+    std::fs::write(web.join("NOTES.md"), "one\ntwo\nthree").unwrap();
+    std::fs::write(web.join(".env"), "IGNORED=1\nIGNORED=2\n").unwrap();
+    std::fs::remove_file(lib.join("README.md")).unwrap();
+
+    let shown = fixture.show("login").unwrap();
+
+    let changes: Vec<(&str, &Value)> = shown["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|repository| (repository["path"].as_str().unwrap(), &repository["changes"]))
+        .collect();
+    assert_eq!(
+        changes,
+        [
+            ("web", &json!({"added": 5, "removed": 1, "capped": false})),
+            ("api", &json!({"added": 0, "removed": 0, "capped": false})),
+            ("lib", &json!({"added": 0, "removed": 1, "capped": false})),
+        ],
+        "against the base, committed or not, new files counted, ignored ones not"
+    );
+    let listed = fixture.user.call("workspace.list", json!({})).unwrap();
+    assert!(
+        listed["workspaces"][0]["repositories"][0]
+            .get("changes")
+            .is_none(),
+        "a listing runs no git"
+    );
+}
+
+#[test]
+fn showing_a_workspace_does_not_write_its_index() {
+    use std::os::unix::fs::MetadataExt as _;
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    fixture.create(json!({})).unwrap();
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    let web = fixture.workspace("login").join("web");
+    let index = web.join(fixture.git(&web, &["rev-parse", "--git-path", "index"]));
+    let before = std::fs::metadata(&index).unwrap();
+    // The same content, a newer time: a refreshing git rewrites the index for it.
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(web.join("README.md"), "web\n").unwrap();
+
+    fixture.show("login").unwrap();
+
+    let after = std::fs::metadata(&index).unwrap();
+    assert_eq!(
+        (after.ino(), after.mtime(), after.mtime_nsec()),
+        (before.ino(), before.mtime(), before.mtime_nsec()),
+        "an agent's own git add or commit could fail on the index being rewritten"
+    );
+}
+
+#[test]
+fn the_new_files_of_a_workspace_are_read_without_following_links_up_to_a_limit() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    fixture.create(json!({})).unwrap();
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    let web = fixture.workspace("login").join("web");
+    let api = fixture.workspace("login").join("api");
+    let outside = fixture.user.path("outside.txt");
+    std::fs::write(&outside, "far\naway\n").unwrap();
+    std::os::unix::fs::symlink(&outside, web.join("LINK.md")).unwrap();
+    let fifo = web.join("pipe");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::write(web.join("NOTES.md"), "one\ntwo\n").unwrap();
+    // More new files than are read: the count says it stopped.
+    let many = api.join("generated");
+    std::fs::create_dir_all(&many).unwrap();
+    for at in 0..1001 {
+        std::fs::write(many.join(format!("{at}.txt")), "x\n").unwrap();
+    }
+
+    let shown = fixture.show("login").unwrap();
+
+    assert_eq!(
+        shown["repositories"][0]["changes"],
+        json!({"added": 2, "removed": 0, "capped": false}),
+        "a link and a pipe count no line, and the pipe is not waited on"
+    );
+    assert_eq!(
+        shown["repositories"][1]["changes"],
+        json!({"added": 1000, "removed": 0, "capped": true})
+    );
+}
+
+#[test]
 fn a_workspace_over_three_repositories_takes_develop_where_it_exists_and_main_elsewhere() {
     let fixture = Fixture::new(false);
     fixture.configure("");

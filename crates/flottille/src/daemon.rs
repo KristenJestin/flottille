@@ -298,6 +298,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
         if ["workspace.", "agent.", "approval.", "test."]
             .iter()
             .any(|prefix| request.method.starts_with(prefix))
+            || request.method == "project.show"
         {
             let (daemon, out) = (daemon.clone(), out.clone());
             tokio::spawn(async move {
@@ -307,6 +308,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     approvals::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("test.") {
                     sweep::call(daemon, &request.method, request.params).await
+                } else if request.method == "project.show" {
+                    projects::show(daemon, request.params).await
                 } else {
                     workspaces::call(daemon, &request.method, request.params).await
                 };

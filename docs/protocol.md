@@ -138,8 +138,10 @@ message starts with the key at fault). A file with an error does not hide the ot
 
 #### `project.show`
 
-`{"name"}`. The result is the project. `not-found` when there is none, `invalid-config` when its file
-cannot be used.
+`{"name"}`. The result is the project, each repository with `branch`: the branch its checkout in
+the project folder is on now, `null` when it is on none (a detached checkout, a folder git cannot
+read, or one that is not a repository of its own yet). `project.list` leaves it out: it runs no git. `not-found` when there is none,
+`invalid-config` when its file cannot be used.
 
 #### `project.detect`
 
@@ -237,7 +239,13 @@ workspace is answered `failed`, with the step's failure.
 
 #### `workspace.show`
 
-`{"project", "name"}`. The workspace.
+`{"project", "name"}`. The workspace, each repository with `changes`: `{"added", "removed",
+"capped"}`, the lines added and removed in its worktree since its base commit, whether its branch
+committed them or they are not committed yet, new files git does not ignore counted whole (a
+binary file, a link, anything but a regular file, or a file over 8 MiB counts no line). At most
+1000 new files and 16 MiB of them are read: past that the count stops and `capped` is `true`, the
+real count being higher. It writes nothing, not even git's index. `changes` is `null` when git
+cannot read the worktree (not made yet, or gone). `workspace.list` leaves it out: it runs no git.
 
 #### `workspace.prepare`
 

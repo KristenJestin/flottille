@@ -50,7 +50,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let workspaces = daemon.read(|store| store.workspaces(project.as_deref()))?;
             Ok(json!({"workspaces": workspaces.iter().map(Workspace::to_json).collect::<Vec<_>>()}))
         }
-        "workspace.show" => Ok(find(&daemon, &serde_json::from_value(params)?)?.to_json()),
+        "workspace.show" => show(&daemon, serde_json::from_value(params)?).await,
         "workspace.prepare" => resume(daemon, serde_json::from_value(params)?).await,
         "workspace.remove" => remove(daemon, serde_json::from_value(params)?).await,
         method => Err(Failure::new(
@@ -72,6 +72,110 @@ fn find(daemon: &Daemon, asked: &WorkspaceName) -> Result<Workspace, Failure> {
                 ),
             )
         })
+}
+
+/// `workspace.show`: the workspace, and the lines changed in each of its repositories.
+async fn show(daemon: &Daemon, asked: WorkspaceName) -> Answer {
+    let workspace = find(daemon, &asked)?;
+    let mut shown = workspace.to_json();
+    if let Some(repositories) = shown["repositories"].as_array_mut() {
+        for (repository, worktree) in repositories.iter_mut().zip(&workspace.repositories) {
+            repository["changes"] =
+                changes(&workspace.folder_of(&worktree.path), &worktree.base.commit)
+                    .await
+                    .unwrap_or(Value::Null);
+        }
+    }
+    Ok(shown)
+}
+
+/// A new file larger than this is not read to count its lines.
+const COUNTED_FILE: u64 = 8 * 1024 * 1024;
+/// How many new files, and how many of their bytes, are read at most: past them the count stops
+/// and says so (`capped`), rather than reading a dependency folder git does not ignore.
+const COUNTED_FILES: usize = 1000;
+const COUNTED_BYTES: u64 = 16 * 1024 * 1024;
+
+/// The lines added and removed in a worktree since its base commit: what its branch committed,
+/// what is changed and not committed, and the new files git does not ignore. A binary file counts
+/// no line. `None` when git cannot read the worktree (it is not made yet, or gone).
+async fn changes(folder: &Path, base: &str) -> Option<Value> {
+    // `diff-index`, not `diff`: `diff` refreshes the index and writes it, under the feet of an
+    // agent's own `git add` or `commit` in the same worktree.
+    let diff = git::run(
+        folder,
+        &["diff-index", "--numstat", base, "--"],
+        Class::Read,
+    )
+    .await
+    .ok()
+    .filter(|output| output.success)?;
+    let (mut added, mut removed) = (0u64, 0u64);
+    for line in diff.stdout.lines() {
+        let mut counts = line.split('\t');
+        // A binary file is `-\t-\t<path>`: no line to count.
+        if let (Some(Ok(plus)), Some(Ok(minus))) = (
+            counts.next().map(str::parse::<u64>),
+            counts.next().map(str::parse::<u64>),
+        ) {
+            added += plus;
+            removed += minus;
+        }
+    }
+    let new = git::run(
+        folder,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+        Class::Read,
+    )
+    .await
+    .ok()
+    .filter(|output| output.success)?;
+    let (mut files, mut bytes, mut capped) = (0usize, 0u64, false);
+    for path in new.stdout.split('\0').filter(|path| !path.is_empty()) {
+        if files == COUNTED_FILES {
+            capped = true;
+            break;
+        }
+        files += 1;
+        let Some(text) = new_file(&folder.join(path)).await else {
+            continue;
+        };
+        if bytes + text.len() as u64 > COUNTED_BYTES {
+            capped = true;
+            break;
+        }
+        bytes += text.len() as u64;
+        if text.contains(&0) {
+            continue;
+        }
+        let breaks = text.iter().filter(|&&byte| byte == b'\n').count() as u64;
+        added += breaks + u64::from(text.last().is_some_and(|&last| last != b'\n'));
+    }
+    Some(json!({"added": added, "removed": removed, "capped": capped}))
+}
+
+/// A new file's bytes, when it is a regular file of at most [`COUNTED_FILE`]. Opened once,
+/// never through a link (it may lead out of the worktree) and without waiting on a pipe; what is
+/// read is what was opened, checked after opening, so a file swapped for a link meanwhile is not
+/// followed.
+async fn new_file(path: &Path) -> Option<Vec<u8>> {
+    let mut file = tokio::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .await
+        .ok()?;
+    let metadata = file.metadata().await.ok()?;
+    if !metadata.is_file() || metadata.len() > COUNTED_FILE {
+        return None;
+    }
+    let mut text = Vec::with_capacity(metadata.len() as usize);
+    (&mut file)
+        .take(COUNTED_FILE + 1)
+        .read_to_end(&mut text)
+        .await
+        .ok()?;
+    (text.len() as u64 <= COUNTED_FILE).then_some(text)
 }
 
 /// What every event of a workspace starts with.
