@@ -1,12 +1,12 @@
-//! `flottille agent` and `flottille doctor`: a minimal way to run a Claude agent and read it, and
-//! what the machine needs for one (`docs/agents.md`).
+//! `flottille agent` and `flottille doctor`: starting a Claude agent, writing to it, reading it
+//! and stopping it, and what the machine needs for one (`docs/agents.md`, `docs/cli.md`).
 
 use std::io::Write;
 use std::process::ExitCode;
 
 use clap::Subcommand;
 use flottille_core::paths::Paths;
-use flottille_core::protocol::{AgentName, AgentRun, WatchParams};
+use flottille_core::protocol::{AgentName, AgentRun, AgentSend, WatchParams};
 use serde_json::Value;
 
 use crate::claude;
@@ -16,7 +16,58 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Subcommand)]
 pub enum AgentAction {
-    /// Start a Claude agent in a project with a first message, and print its reply
+    /// Start a root Claude agent in a project with a first message, and return at once
+    Start {
+        project: String,
+        message: String,
+        /// The workspace it works in (default: the project folder itself)
+        #[arg(long)]
+        workspace: Option<String>,
+        /// The model (default: the agent's own); never replaced by another
+        #[arg(long)]
+        model: Option<String>,
+        /// Its role: lead (default) or worker
+        #[arg(long)]
+        role: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Write to a root agent
+    Send {
+        agent: String,
+        message: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// A page of an agent's conversation: any agent of a tree
+    Read {
+        agent: String,
+        /// Read what follows this event number
+        #[arg(long, value_name = "N")]
+        after: Option<u64>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stop a root agent and its tree, the deepest first
+    Stop {
+        agent: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// The agents, of every project or of one
+    List {
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// The tree of an agent's root, each agent before its children, and what each does
+    Tree {
+        agent: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Start a root Claude agent as `start` does, and print its reply to the first message
     Run {
         project: String,
         message: String,
@@ -43,6 +94,119 @@ pub enum AgentAction {
 
 pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
     match action {
+        AgentAction::Start {
+            project,
+            message,
+            workspace,
+            model,
+            role,
+            json,
+        } => {
+            let started = Client::connect_or_start(paths)?.request(
+                "agent.start",
+                serde_json::to_value(AgentRun {
+                    project,
+                    workspace,
+                    model,
+                    effort: None,
+                    mode: None,
+                    role,
+                    message,
+                })?,
+            )?;
+            if json {
+                println!("{started}");
+            } else {
+                let agent = &started["agent"];
+                let id = text(agent, "id");
+                println!(
+                    "Started agent {id} ({}) in {}, {}.\nFollow it with `flottille agent read \
+                     {id}`, or `flottille watch --after {}`.",
+                    text(agent, "role"),
+                    text(agent, "project"),
+                    place(agent),
+                    started["after"]
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        AgentAction::Send {
+            agent,
+            message,
+            json,
+        } => {
+            let sent = Client::connect_or_start(paths)?.request(
+                "agent.send",
+                serde_json::to_value(AgentSend {
+                    agent: agent.clone(),
+                    message,
+                })?,
+            )?;
+            if json {
+                println!("{sent}");
+            } else {
+                println!(
+                    "Sent to agent {agent}: it plays after the turn that runs, if one does.\n\
+                     Read what follows with `flottille agent read {agent} --after {}`.",
+                    sent["after"]
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        AgentAction::Read { agent, after, json } => {
+            let page = Client::connect_or_start(paths)?.request(
+                "agent.read",
+                serde_json::to_value(AgentName {
+                    agent: agent.clone(),
+                    after,
+                })?,
+            )?;
+            if json {
+                println!("{page}");
+            } else {
+                print!("{}", read_text(&page));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        AgentAction::Stop { agent, json } => {
+            let stopped = Client::connect_or_start(paths)?.request(
+                "agent.stop",
+                serde_json::to_value(AgentName { agent, after: None })?,
+            )?;
+            if json {
+                println!("{stopped}");
+            } else {
+                let agent = &stopped["agent"];
+                println!(
+                    "Stopped agent {} and its tree; it is {} now. Its workspace stays.",
+                    text(agent, "id"),
+                    text(agent, "state")
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        AgentAction::List { project, json } => {
+            let listed = Client::connect_or_start(paths)?
+                .request("agent.list", serde_json::json!({"project": project}))?;
+            if json {
+                println!("{listed}");
+            } else {
+                print!("{}", list_text(&listed));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        AgentAction::Tree { agent, json } => {
+            let tree = Client::connect_or_start(paths)?.request(
+                "agent.tree",
+                serde_json::to_value(AgentName { agent, after: None })?,
+            )?;
+            if json {
+                println!("{tree}");
+            } else {
+                print!("{}", tree_text(&tree));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         AgentAction::Run {
             project,
             message,
@@ -57,6 +221,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                 model,
                 effort: None,
                 mode: None,
+                role: None,
                 message,
             },
             json,
@@ -90,7 +255,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
 /// Starts the agent, then follows its events until its first turn ends.
 fn run_agent(paths: &Paths, asked: AgentRun, json: bool) -> Result<ExitCode> {
     let mut client = Client::connect_or_start(paths)?;
-    let started = client.request("agent.run", serde_json::to_value(asked)?)?;
+    let started = client.request("agent.start", serde_json::to_value(asked)?)?;
     let agent = &started["agent"];
     let id = text(agent, "id").to_owned();
     if !json {
@@ -234,6 +399,86 @@ fn place(agent: &Value) -> String {
         Some(workspace) => format!("workspace {workspace}"),
         None => "main".into(),
     }
+}
+
+/// A page of a conversation, and how to read on.
+fn read_text(page: &Value) -> String {
+    let mut out = format!("The conversation of {}:\n", text(page, "name"));
+    let lines: Vec<&str> = page["lines"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    if lines.is_empty() {
+        out.push_str("(nothing after this point)\n");
+    }
+    for line in lines {
+        out.push_str(line);
+        out.push('\n');
+    }
+    let (id, after) = (text(page, "agent"), &page["after"]);
+    if page["more"] == true {
+        out.push_str(&format!(
+            "More follows: flottille agent read {id} --after {after}\n"
+        ));
+    } else {
+        out.push_str(&format!(
+            "That is all for now; later, read on with `flottille agent read {id} --after {after}`.\n"
+        ));
+    }
+    out
+}
+
+/// The agents in short, one line each.
+fn list_text(listed: &Value) -> String {
+    let agents = listed["agents"].as_array().map_or(&[][..], Vec::as_slice);
+    if agents.is_empty() {
+        return "No agent yet: `flottille agent start` starts one.\n".into();
+    }
+    agents
+        .iter()
+        .map(|agent| format!("{}\n", agent_line(agent, None)))
+        .collect()
+}
+
+/// An agent of a tree, each indented under its parent, with what it does.
+fn tree_text(tree: &Value) -> String {
+    tree["agents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|entry| format!("{}\n", agent_line(&entry["agent"], Some(entry))))
+        .collect()
+}
+
+fn agent_line(agent: &Value, entry: Option<&Value>) -> String {
+    let named = match agent["title"].as_str() {
+        Some(title) => format!("\"{title}\" (agent {})", text(agent, "id")),
+        None => format!("agent {}", text(agent, "id")),
+    };
+    let mut line = format!(
+        "{}{named}, {} in {}, {}",
+        "  ".repeat(agent["depth"].as_u64().unwrap_or(0) as usize),
+        text(agent, "role"),
+        text(agent, "project"),
+        place(agent),
+    );
+    match entry {
+        Some(entry) => {
+            line.push_str(&format!(": {}", text(entry, "doing")));
+            match entry["waiting_on"].as_str() {
+                Some("user") => line.push_str("; waits for the user"),
+                Some(on) => line.push_str(&format!("; waits for its {on}")),
+                None => {}
+            }
+            if entry["needs_user"] == true {
+                line.push_str("; a request waits for you (`flottille approvals`)");
+            }
+        }
+        None => line.push_str(&format!(": {}", text(agent, "state"))),
+    }
+    line
 }
 
 /// The agent, then its conversation: chunks joined, thoughts and tool calls in brief.

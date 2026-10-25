@@ -461,17 +461,24 @@ struct Read {
     after: Option<u64>,
 }
 
-fn read(daemon: &Daemon, caller: &Agent, args: Value) -> Done {
-    let asked: Read = arguments("agent_read", args)?;
-    let child = child_of(daemon, caller, &asked.agent_id)?;
-    let mut after = asked.after.unwrap_or(0);
+/// A page of an agent's conversation.
+pub struct Page {
+    /// Each line led by the number of its event.
+    pub lines: Vec<String>,
+    /// The number to read on after.
+    pub after: u64,
+    /// Whether the page stopped before the end of what is stored.
+    pub more: bool,
+}
+
+/// The agent's conversation after the event `after`, at most `READ_PAGE` characters of it.
+pub fn conversation(daemon: &Daemon, agent: &Agent, after: u64) -> flottille_core::Result<Page> {
+    let mut after = after;
     let mut lines: Vec<String> = Vec::new();
     let mut size = 0;
     let mut more = false;
     'pages: loop {
-        let events = daemon
-            .read(|store| store.agent_events(&child.id, after, 200))
-            .map_err(failed)?;
+        let events = daemon.read(|store| store.agent_events(&agent.id, after, 200))?;
         if events.is_empty() {
             break;
         }
@@ -488,6 +495,14 @@ fn read(daemon: &Daemon, caller: &Agent, args: Value) -> Done {
             after = event.seq;
         }
     }
+    Ok(Page { lines, after, more })
+}
+
+fn read(daemon: &Daemon, caller: &Agent, args: Value) -> Done {
+    let asked: Read = arguments("agent_read", args)?;
+    let child = child_of(daemon, caller, &asked.agent_id)?;
+    let Page { lines, after, more } =
+        conversation(daemon, &child, asked.after.unwrap_or(0)).map_err(failed)?;
     let mut text = format!("The conversation of {}:\n", named(&child));
     if lines.is_empty() {
         text.push_str("(nothing after this point)");
@@ -1072,6 +1087,27 @@ pub fn summary(agent: &Agent) -> Value {
         "active_at": agent.active_at,
         "ended_at": agent.ended_at,
     })
+}
+
+/// What `agent.status` gives of one agent: what it is and does, what it waits on, its last
+/// messages.
+pub fn status_of(daemon: &Daemon, agent: &Agent) -> Result<Value, Failure> {
+    let entry = tree(daemon, agent)?
+        .into_iter()
+        .find(|entry| entry["agent"]["id"] == agent.id.as_str())
+        .unwrap_or_default();
+    Ok(json!({
+        "agent": summary(agent),
+        "name": named(agent),
+        "line": line(daemon, agent),
+        "doing": entry["doing"],
+        "waiting_on": entry["waiting_on"],
+        "needs_user": entry["needs_user"],
+        "messages": last_messages(daemon, &agent.id)
+            .iter()
+            .map(|message| cut(message, MESSAGE_CHARS))
+            .collect::<Vec<_>>(),
+    }))
 }
 
 /// The agent's whole tree, from its root, each agent before its children: what it does, whom it

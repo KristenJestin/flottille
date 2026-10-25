@@ -303,14 +303,16 @@ it waits for its parent (`docs/agents.md`, "The tree").
 
 Each method answers `not-found` when the agent does not exist.
 
-#### `agent.run`
+#### `agent.start`
 
-`{"project", "workspace"?, "model"?, "effort"?, "mode"?, "message"}`. Creates an agent in the
-project folder or the workspace, and gives it its first message: `{"agent", "after"}`. `not-found`
-when the project or the workspace does not exist; `refused` when the workspace is not ready, the
-message is empty, or the adapter cannot run (not installed, Node or `claude` not on `PATH`: the
-message says what to do). A model, an effort or a mode the agent does not offer is known only once
-its session is open: the agent then fails (`agent.failed`), saying what it offers.
+`{"project", "workspace"?, "model"?, "effort"?, "mode"?, "role"?, "message"}`. Creates a root agent
+in the project folder or the workspace, and gives it its first message: `{"agent", "after"}`.
+`role` is `lead` (the default) or `worker`. `not-found` when the project or the workspace does
+not exist; `refused` when the workspace is not ready, the message is empty, the role is not one
+(the sentence lists them), or the adapter cannot run (not installed, Node or `claude` not on
+`PATH`: the message says what to do). A model, an effort or a mode the agent does not offer is
+known only once its session is open: the agent then fails (`agent.failed`), saying what it offers.
+`agent.run` is the name this method had before the pilot door: it is still answered, the same.
 
 #### `agent.send`
 
@@ -342,6 +344,23 @@ names its root).
 root whose own does, else `null`; `needs_user`, for the root, whether a request of its tree waits
 for the user.
 
+#### `agent.read`
+
+`{"agent", "after"?}`. A page of the agent's conversation, any agent of a tree: `{"agent", "name",
+"lines", "after", "more"}`. `lines` are what the agent was sent, what it said, its tool calls, its
+turns' ends and its reports, each led by `#<n>`, the number of its event, at most 30,000
+characters of them in all; `name` is the agent as another is told of it (its title and its id);
+`after` is the number to read on after, and `more` whether the page stopped before the end of what
+is stored. `agent_read` of the agents' tools gives the same page to a parent.
+
+#### `agent.status`
+
+`{"agent"}`. What one agent is and does, for a client that shows one agent: `{"agent", "name",
+"line", "doing", "waiting_on", "needs_user", "messages"}`. `agent` is the agent in short as in
+`agent.tree`, `line` a sentence of what it is and does with its last sign of activity and its
+context use, `doing`, `waiting_on` and `needs_user` as in `agent.tree`, and `messages` its last
+messages, the oldest first, each cut at 600 characters.
+
 #### `agent.list`
 
 `{"project"?}`. Every agent, or the project's, in short as in `agent.tree`: `{"agents"}`.
@@ -350,6 +369,16 @@ for the user.
 
 `{"agent", "after"?}`. `{"agent", "events"}`: the agent, and its events in order (at most 1000,
 those numbered after `after` when it is given).
+
+### `inbox.list`
+
+`{"after"?, "limit"?}`. What the root agents sent to the user: `{"entries": [...]}`, oldest first.
+An entry is `{"seq", "at", "kind", "agent", "project", "workspace", "text"}`, made from an event of
+a root agent (`docs/events.md`): `report` (`agent.reported`, `text` its report), `question`
+(`agent.asked` to the user, `text` its question) or `failure` (`agent.failed`, `text` its reason).
+A child's own go to its parent and are not here. Without `after`, the last `limit` entries (50 by
+default); with it, the first `limit` entries numbered after it. Nothing is marked read: the inbox
+is a view of the stored events.
 
 ### `test.advance`
 

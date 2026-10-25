@@ -10,6 +10,8 @@ mod deliveries;
 mod files;
 mod gate;
 mod git;
+mod inbox;
+mod inbox_command;
 mod mcp;
 mod place;
 mod project_command;
@@ -65,7 +67,7 @@ enum Command {
         #[command(subcommand)]
         action: WorkspaceAction,
     },
-    /// Run a Claude agent and read it
+    /// Start, write to, read and stop Claude agents
     Agent {
         #[command(subcommand)]
         action: AgentAction,
@@ -87,6 +89,17 @@ enum Command {
     Deny { number: u64 },
     /// Whether Claude agents can run here: Node, claude, its login, the adapter
     Doctor {
+        #[arg(long)]
+        json: bool,
+    },
+    /// What your root agents sent you: their reports, their questions, their failures
+    Inbox {
+        /// List what came after this event number
+        #[arg(long, value_name = "N")]
+        after: Option<u64>,
+        /// At most this many entries (default 50)
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
         #[arg(long)]
         json: bool,
     },
@@ -146,6 +159,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             approval_command::approve(&paths, number, for_tree)?
         }
         Command::Deny { number } => approval_command::deny(&paths, number)?,
+        Command::Inbox { after, limit, json } => inbox_command::inbox(&paths, after, limit, json)?,
         Command::Watch { after } => {
             let mut client = Client::connect_or_start(&paths)?;
             client.request("events.watch", serde_json::to_value(WatchParams { after })?)?;
@@ -188,6 +202,29 @@ fn duration(seconds: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `docs/cli.md` has a section, `### \`flottille <command>\``, for every command, and no
+    /// private path.
+    #[test]
+    fn every_command_has_its_section_in_the_cli_docs() {
+        use clap::CommandFactory;
+        let docs = include_str!("../../../docs/cli.md");
+        fn walk(command: &clap::Command, path: &str, docs: &str, missing: &mut Vec<String>) {
+            for sub in command.get_subcommands().filter(|c| c.get_name() != "help") {
+                let path = format!("{path} {}", sub.get_name());
+                if !docs.contains(&format!("### `{path}`"))
+                    && !docs.contains(&format!("### `{path} "))
+                {
+                    missing.push(path.clone());
+                }
+                walk(sub, &path, docs, missing);
+            }
+        }
+        let mut missing = Vec::new();
+        walk(&Cli::command(), "flottille", docs, &mut missing);
+        assert!(missing.is_empty(), "docs/cli.md misses {missing:?}");
+        assert!(!docs.contains("/home/"), "a private path is in docs/cli.md");
+    }
 
     #[test]
     fn durations_are_short() {

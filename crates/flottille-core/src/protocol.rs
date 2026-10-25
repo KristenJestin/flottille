@@ -104,7 +104,7 @@ pub struct WorkspaceList {
     pub project: Option<String>,
 }
 
-/// The parameters of `agent.run`.
+/// The parameters of `agent.start` (once `agent.run`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentRun {
@@ -119,6 +119,9 @@ pub struct AgentRun {
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    /// `lead` when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     /// Its first message.
     pub message: String,
 }
@@ -131,12 +134,14 @@ pub struct AgentSend {
     pub message: String,
 }
 
-/// The parameters of `agent.show` and `agent.cancel`.
+/// The parameters of `agent.show`, `agent.read`, `agent.status`, `agent.cancel`, `agent.stop` and
+/// `agent.tree`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentName {
     pub agent: String,
-    /// `agent.show` only: its events numbered after this one; all of them when left out.
+    /// `agent.show` and `agent.read` only: its events numbered after this one; all of them when left
+    /// out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after: Option<u64>,
 }

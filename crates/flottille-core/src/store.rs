@@ -1328,6 +1328,22 @@ impl Store {
         rows.map(|row| row?).collect()
     }
 
+    /// Every event numbered after `after` whose name is one of `names`, oldest first.
+    pub fn events_named(&self, names: &[&str], after: u64) -> Result<Vec<Event>> {
+        let marks = vec!["?"; names.len()].join(", ");
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT seq, at, name, data FROM events WHERE seq > ?1 AND name IN ({marks}) \
+             ORDER BY seq"
+        ))?;
+        let values = std::iter::once(rusqlite::types::Value::from(after as i64)).chain(
+            names
+                .iter()
+                .map(|name| rusqlite::types::Value::from((*name).to_owned())),
+        );
+        let rows = statement.query_map(rusqlite::params_from_iter(values), event_row)?;
+        rows.map(|row| row?).collect()
+    }
+
     /// The number of the last event, 0 when there is none.
     pub fn last_seq(&self) -> Result<u64> {
         let seq: Option<u64> = self
