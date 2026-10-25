@@ -35,6 +35,8 @@ pub struct Workspace {
     pub project: String,
     pub name: String,
     pub branch: String,
+    /// Its folder, opened in the user's editor.
+    pub folder: String,
     /// The base branches its repositories started from, each once, in order.
     pub bases: Vec<String>,
     pub repositories: Vec<String>,
@@ -100,6 +102,7 @@ impl Workspace {
             project: record.project.clone(),
             name: record.name.clone(),
             branch: record.branch.clone(),
+            folder: record.folder.display().to_string(),
             bases,
             repositories: record
                 .repositories

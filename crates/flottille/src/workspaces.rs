@@ -86,6 +86,12 @@ async fn show(daemon: &Daemon, asked: WorkspaceName) -> Answer {
                     .unwrap_or(Value::Null);
         }
     }
+    shown["ready_at"] = match shown["state"] == "ready" {
+        true => daemon
+            .read(|store| store.workspace_ready_at(workspace.id))?
+            .map_or(Value::Null, Value::from),
+        false => Value::Null,
+    };
     Ok(shown)
 }
 
@@ -584,7 +590,7 @@ async fn prepare_steps(
         else {
             daemon.write(|store| {
                 store
-                    .append_event("workspace.ready", Value::Object(about(&workspace)))
+                    .workspace_ready(id, Value::Object(about(&workspace)))
                     .map(|event| ((), event))
             })?;
             return Ok(());

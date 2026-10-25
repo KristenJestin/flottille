@@ -246,6 +246,9 @@ binary file, a link, anything but a regular file, or a file over 8 MiB counts no
 1000 new files and 16 MiB of them are read: past that the count stops and `capped` is `true`, the
 real count being higher. It writes nothing, not even git's index. `changes` is `null` when git
 cannot read the worktree (not made yet, or gone). `workspace.list` leaves it out: it runs no git.
+`ready_at` is when its last preparation ended, the time of its newest `workspace.ready` event
+(`docs/events.md`), kept with the workspace; `null` while it is not `ready`. `workspace.list`
+leaves it out too.
 
 #### `workspace.prepare`
 
@@ -355,7 +358,9 @@ names its root).
 `{"agent"}`. The whole tree of the agent's root, each agent before its children:
 `{"agents": [{"agent", "doing", "waiting_on", "needs_user"}]}`. `agent` is the agent in short
 (`id`, `role`, `title`, `project`, `workspace`, `parent`, `depth`, `epoch`, `state`,
-`state_reason`, `created_at`, `active_at`, `ended_at`, `waiting_on_answer`); `doing` a sentence of what it does
+`state_reason`, `created_at`, `active_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
+took at the last start of its process, else the one asked, `null` for the agent's default before it
+started); `doing` a sentence of what it does
 (`working`, `idle`, `running \`cargo test\` for 12 min`, `waiting for approval #3`, `failed: …`);
 `waiting_on` `parent` for a child whose request or question waits for its parent, `user` for a
 root whose own does, else `null`; `needs_user`, for the root, whether a request of its tree or its
@@ -394,8 +399,10 @@ listing leaves out. `refused` when `before` is not a root agent. The pilot door'
 
 #### `agent.show`
 
-`{"agent", "after"?}`. `{"agent", "events"}`: the agent, and its events in order (at most 1000,
-those numbered after `after` when it is given).
+`{"agent", "after"?, "before"?}`. `{"agent", "events", "more"}`: the agent, and a page of its
+events, oldest first: at most 1000, the first ones (those numbered after `after` when it is given),
+or with `before` the last ones numbered before it. `more` says whether events remain past the
+page: newer ones, or with `before` older ones.
 
 ### `inbox.list`
 
@@ -443,8 +450,10 @@ ended first; `decision` is `deny`, `once` or `tree` once it is decided.
 
 #### `approval.list`
 
-No parameters. `{"requests": [...]}`: the pending requests the user holds, oldest first. A request
-held by an agent is not there.
+`{"tree"?}`. `{"requests": [...]}`: the pending requests the user holds, oldest first. A request
+held by an agent is not there. With `tree`, an agent's id: every request an agent of its root's
+tree asked that reached the user, pending, decided or cancelled, oldest first (`not-found` when
+there is no such agent).
 
 #### `approval.approve`
 

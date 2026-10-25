@@ -115,7 +115,11 @@ pub fn ask(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Empty {}
+struct List {
+    /// A root, or any agent of its tree: every request of the tree that reached the user.
+    #[serde(default)]
+    tree: Option<String>,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -136,8 +140,17 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
     let params = if params.is_null() { json!({}) } else { params };
     match method {
         "approval.list" => {
-            let Empty {} = serde_json::from_value(params)?;
-            let requests = daemon.read(|store| store.pending_requests(approval::USER))?;
+            let List { tree } = serde_json::from_value(params)?;
+            let requests = match tree {
+                None => daemon.read(|store| store.pending_requests(approval::USER))?,
+                Some(agent) => {
+                    let found = daemon.read(|store| store.agent(&agent))?.ok_or_else(|| {
+                        Failure::new("not-found", format!("there is no agent {agent}"))
+                    })?;
+                    let ids = tree::ids(&daemon, &tree::root_of(&daemon, &found.id))?;
+                    daemon.read(|store| store.requests_reaching(approval::USER, &ids))?
+                }
+            };
             Ok(json!({"requests": requests.iter().map(Request::to_json).collect::<Vec<_>>()}))
         }
         "approval.approve" => {

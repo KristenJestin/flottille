@@ -897,6 +897,18 @@ pub fn fail_tree(daemon: &Arc<Daemon>, id: &str, reason: &str) {
     tell_parent(daemon, &agent, "child-failed", &text, approval::URGENT);
 }
 
+/// The ids of the agents of the tree under `root`, `root` first, ended ones too.
+pub fn ids(daemon: &Daemon, root: &str) -> Result<Vec<String>, Failure> {
+    let mut found = vec![root.to_owned()];
+    let mut at = 0;
+    while let Some(parent) = found.get(at).cloned() {
+        let children = daemon.read(|store| store.children(&parent))?;
+        found.extend(children.into_iter().map(|child| child.id));
+        at += 1;
+    }
+    Ok(found)
+}
+
 /// Every agent below this one that has not ended.
 fn descendants(daemon: &Daemon, id: &str) -> Vec<Agent> {
     let mut found = Vec::new();
@@ -1091,6 +1103,7 @@ pub fn summary(agent: &Agent) -> Value {
         "active_at": agent.active_at,
         "ended_at": agent.ended_at,
         "waiting_on_answer": agent.waiting_on_answer,
+        "model": agent.taken.model.as_ref().or(agent.chosen.model.as_ref()),
     })
 }
 

@@ -535,6 +535,33 @@ fn a_model_and_an_effort_are_set_and_checked_and_a_model_not_offered_fails() {
 }
 
 #[test]
+fn an_agent_in_short_says_the_model_it_took_else_the_one_asked() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"models": ["fake-small", "fake-large"]}));
+    project(&user);
+
+    let (asked, after) = run(&user, json!({"message": "hello", "model": "fake-large"}));
+    events_until(&user, &asked, after, "agent.turn_ended");
+    let (default, after) = run(&user, json!({"message": "hello"}));
+    events_until(&user, &default, after, "agent.turn_ended");
+
+    let listed = user.call("agent.list", json!({})).unwrap();
+    let model_of = |id: &str| {
+        listed["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == id)
+            .map(|a| a["model"].clone())
+            .unwrap()
+    };
+    assert_eq!(model_of(&asked), "fake-large");
+    assert_eq!(model_of(&default), "fake-small", "the model the agent took");
+    let tree = user.call("agent.tree", json!({"agent": asked})).unwrap();
+    assert_eq!(tree["agents"][0]["agent"]["model"], "fake-large");
+}
+
+#[test]
 fn an_agent_in_a_workspace_works_in_its_folder() {
     let user = User::with_fake_agent();
     project(&user);
@@ -663,4 +690,49 @@ fn agent_send_answers_with_the_id_of_the_delivery_it_stored() {
     assert_eq!(queued[0]["data"]["delivery"], sent["delivery"]);
     assert_eq!(queued[0]["data"]["kind"], "user");
     assert_eq!(queued[1]["data"]["delivery"], again["delivery"]);
+}
+
+#[test]
+fn agent_show_pages_from_either_end_and_says_when_more_remain() {
+    let user = User::with_fake_agent();
+    let says: Vec<Value> = (0..1100).map(|n| json!({"say": format!("{n} ")})).collect();
+    user.fake_script(json!({"turns": [{"when": "talk", "do": says}]}));
+    project(&user);
+    let (id, after) = run(&user, json!({"message": "talk"}));
+    events_until(&user, &id, after, "agent.turn_ended");
+    let page = |params: Value| {
+        let mut params = params;
+        params["agent"] = id.clone().into();
+        let shown = user.call("agent.show", params).unwrap();
+        let seqs: Vec<u64> = shown["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["seq"].as_u64().unwrap())
+            .collect();
+        (seqs, shown["more"].clone())
+    };
+
+    let (first, more) = page(json!({}));
+    assert_eq!(
+        (first.len(), more),
+        (1000, json!(true)),
+        "newer ones remain"
+    );
+    let (rest, more) = page(json!({"after": first.last()}));
+    assert_eq!(more, json!(false));
+    let all: Vec<u64> = first.iter().chain(&rest).copied().collect();
+    assert!(all.len() > 1100);
+    assert!(all.windows(2).all(|w| w[0] < w[1]), "oldest first");
+
+    let (last, more) = page(json!({"before": u64::MAX}));
+    assert_eq!(more, json!(true), "older ones remain");
+    assert_eq!(
+        last,
+        all[all.len() - 1000..],
+        "the newest page, oldest first"
+    );
+    let (earlier, more) = page(json!({"before": last[0]}));
+    assert_eq!(more, json!(false));
+    assert_eq!(earlier, all[..all.len() - 1000]);
 }

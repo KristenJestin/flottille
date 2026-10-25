@@ -200,6 +200,17 @@ const MIGRATIONS: &[&str] = &[
     -- A root's question waits for the user as a child's waits for its parent.
     ALTER TABLE agents RENAME COLUMN waiting_on_parent TO waiting_on_answer;
 ",
+    "
+    -- When a workspace's last preparation ended, kept with it rather than looked for among the
+    -- events: a store that has them takes it from its newest `workspace.ready` event.
+    ALTER TABLE workspaces ADD COLUMN ready_at INTEGER;
+    UPDATE workspaces SET ready_at = (
+        SELECT max(e.at) FROM events e WHERE e.name = 'workspace.ready'
+        AND json_extract(e.data, '$.project') = workspaces.project
+        AND json_extract(e.data, '$.workspace') = workspaces.name
+        AND e.at >= workspaces.created_at
+    );
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -450,6 +461,28 @@ impl Store {
         Ok(event)
     }
 
+    /// The workspace's preparation ended: when, kept with it, and its `workspace.ready` event, in
+    /// one transaction.
+    pub fn workspace_ready(&mut self, workspace: i64, data: Value) -> Result<Event> {
+        let transaction = self.connection.transaction()?;
+        let event = append_event(&transaction, "workspace.ready", data)?;
+        transaction.execute(
+            "UPDATE workspaces SET ready_at = ?2 WHERE id = ?1",
+            params![workspace, event.at],
+        )?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    /// When the workspace's last preparation ended, if one did.
+    pub fn workspace_ready_at(&self, workspace: i64) -> Result<Option<u64>> {
+        Ok(self.connection.query_row(
+            "SELECT ready_at FROM workspaces WHERE id = ?1",
+            params![workspace],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Forgets a workspace and its steps, with its event, in one transaction.
     pub fn remove_workspace(&mut self, workspace: i64, event: (&str, Value)) -> Result<Event> {
         let transaction = self.connection.transaction()?;
@@ -630,6 +663,25 @@ impl Store {
         )?;
         let rows = statement.query_map(params![agent, after, limit as u64], event_row)?;
         rows.map(|row| row?).collect()
+    }
+
+    /// At most `limit` events of the agent numbered before `before`, the last ones, oldest first.
+    pub fn agent_events_before(
+        &self,
+        agent: &str,
+        before: u64,
+        limit: usize,
+    ) -> Result<Vec<Event>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT e.seq, e.at, e.name, e.data FROM agent_events a JOIN events e ON e.seq = a.seq \
+             WHERE a.agent = ?1 AND a.seq < ?2 ORDER BY a.seq DESC LIMIT ?3",
+        )?;
+        // SQLite's integers are signed: a bound past them is every event.
+        let before = i64::try_from(before).unwrap_or(i64::MAX);
+        let rows = statement.query_map(params![agent, before, limit as u64], event_row)?;
+        let mut events = rows.map(|row| row?).collect::<Result<Vec<_>>>()?;
+        events.reverse();
+        Ok(events)
     }
 
     /// The agent's last events of that name, the newest first.
@@ -868,6 +920,20 @@ impl Store {
              WHERE held_by = ?1 AND state = 'pending' ORDER BY number"
         ))?;
         let rows = statement.query_map(params![held_by], request_row)?;
+        rows.map(|row| row?).collect()
+    }
+
+    /// The requests `held_by` holds or held, in any state, that one of `agents` asked, oldest
+    /// first: a request that reached the user stays held by them.
+    pub fn requests_reaching(&self, held_by: &str, agents: &[String]) -> Result<Vec<Request>> {
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {REQUEST_COLUMNS} FROM approval_requests WHERE held_by = ?1 \
+             AND agent IN (SELECT value FROM json_each(?2)) ORDER BY number"
+        ))?;
+        let rows = statement.query_map(
+            params![held_by, serde_json::to_string(agents)?],
+            request_row,
+        )?;
         rows.map(|row| row?).collect()
     }
 
@@ -1704,6 +1770,56 @@ mod tests {
         assert_eq!(store.workspaces(None).unwrap(), [read]);
         assert!(store.workspaces(Some("other")).unwrap().is_empty());
         assert_eq!(store.workspace("app", "other").unwrap(), None);
+    }
+
+    #[test]
+    fn a_workspace_keeps_when_its_preparation_ended() {
+        let mut store = Store::open_in_memory().unwrap();
+        let (id, _) = store
+            .create_workspace(&a_workspace(), ("workspace.created", json!({})))
+            .unwrap();
+        assert_eq!(store.workspace_ready_at(id).unwrap(), None);
+
+        let event = store
+            .workspace_ready(id, json!({"project": "app", "workspace": "login"}))
+            .unwrap();
+
+        assert_eq!(event.name, "workspace.ready");
+        assert_eq!(store.workspace_ready_at(id).unwrap(), Some(event.at));
+    }
+
+    #[test]
+    fn a_store_of_the_previous_schema_takes_when_each_workspace_was_ready_from_its_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let old = Connection::open(&path).unwrap();
+        let previous = MIGRATIONS.len() - 1;
+        for migration in &MIGRATIONS[..previous] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.pragma_update(None, "user_version", previous).unwrap();
+        old.execute_batch(
+            "INSERT INTO workspaces (project, name, branch, folder, project_folder, created_at, \
+             variables, repositories) VALUES ('app', 'login', 'app/login', '/w', '/p', 100, '{}', '[]'), \
+             ('app', 'docs', 'app/docs', '/d', '/p', 100, '{}', '[]');
+             INSERT INTO events (at, name, data) VALUES \
+             (50, 'workspace.ready', '{\"project\":\"app\",\"workspace\":\"login\"}'), \
+             (150, 'workspace.ready', '{\"project\":\"app\",\"workspace\":\"login\"}'), \
+             (160, 'workspace.ready', '{\"project\":\"other\",\"workspace\":\"login\"}');",
+        )
+        .unwrap();
+        drop(old);
+
+        let store = Store::open(&path).unwrap();
+
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len());
+        let id = |name: &str| store.workspace("app", name).unwrap().unwrap().id;
+        assert_eq!(store.workspace_ready_at(id("login")).unwrap(), Some(150));
+        assert_eq!(
+            store.workspace_ready_at(id("docs")).unwrap(),
+            None,
+            "never ready"
+        );
     }
 
     #[test]

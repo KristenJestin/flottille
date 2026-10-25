@@ -49,6 +49,26 @@ pub enum Command {
         project: String,
         name: String,
     },
+    /// A message to a session's root agent: the only agent the window writes to.
+    Reply {
+        session: String,
+        message: String,
+    },
+    /// The user's answer to a request they hold, given on the page of the session of `session`
+    /// (its root agent).
+    Answer {
+        session: String,
+        number: u64,
+        answer: Answer,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answer {
+    Deny,
+    Once,
+    /// Allowed for the root's tree.
+    Tree,
 }
 
 /// What one project page shows beyond the shell's read.
@@ -93,6 +113,19 @@ pub enum Outcome {
         project: String,
         name: String,
         why: String,
+    },
+    /// A message to the session's root was taken, or refused with why.
+    Replied {
+        session: String,
+        refused: Option<String>,
+    },
+    /// A request was decided as asked (`deny`, `once`, `tree`), or the answer refused with why:
+    /// for the page of `session` only.
+    Answered {
+        session: String,
+        number: u64,
+        decision: Option<String>,
+        refused: Option<String>,
     },
 }
 
@@ -279,6 +312,49 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             project,
             name,
         ),
+        Command::Reply { session, message } => match ask_alone(
+            connect,
+            "agent.send",
+            json!({"agent": session, "message": message}),
+            bounds.quick,
+        ) {
+            Ok(Ok(_)) => Outcome::Replied {
+                session,
+                refused: None,
+            },
+            Ok(Err(why)) | Err(why) => Outcome::Replied {
+                session,
+                refused: Some(why),
+            },
+        },
+        Command::Answer {
+            session,
+            number,
+            answer,
+        } => {
+            let (method, params) = match answer {
+                Answer::Deny => ("approval.deny", json!({"number": number})),
+                Answer::Once => ("approval.approve", json!({"number": number})),
+                Answer::Tree => (
+                    "approval.approve",
+                    json!({"number": number, "for_tree": true}),
+                ),
+            };
+            match ask_alone(connect, method, params, bounds.quick) {
+                Ok(Ok(answered)) => Outcome::Answered {
+                    session,
+                    number,
+                    decision: answered["request"]["decision"].as_str().map(str::to_owned),
+                    refused: None,
+                },
+                Ok(Err(why)) | Err(why) => Outcome::Answered {
+                    session,
+                    number,
+                    decision: None,
+                    refused: Some(why),
+                },
+            }
+        }
         Command::RemoveWorkspace { project, name } => workspace_outcome(
             ask_alone(
                 connect,

@@ -199,6 +199,42 @@ fn a_shown_workspace_counts_the_lines_added_and_removed_in_each_repository() {
 }
 
 #[test]
+fn a_shown_workspace_says_when_its_preparation_ended() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    fixture.create(json!({})).unwrap();
+    assert_eq!(fixture.settled("login")["state"], "ready");
+
+    let shown = fixture.show("login").unwrap();
+
+    let watch = fixture.user.watch(&["--after", "0"]);
+    let ready = loop {
+        let event = watch.next_event();
+        if event["name"] == "workspace.ready" {
+            break event;
+        }
+    };
+    assert_eq!(shown["ready_at"], ready["at"], "when it was ready");
+    assert!(shown["ready_at"].as_u64().unwrap() >= shown["created_at"].as_u64().unwrap());
+    let listed = fixture.user.call("workspace.list", json!({})).unwrap();
+    assert!(
+        listed["workspaces"][0].get("ready_at").is_none(),
+        "the listing reads no events"
+    );
+}
+
+#[test]
+fn a_workspace_never_prepared_has_no_end_of_preparation() {
+    let fixture = Fixture::new(false);
+    let script = fixture.script("fail.sh", "exit 3\n");
+    fixture.configure(&format!("[[recipe]]\nrun = \"sh {}\"\n", script.display()));
+    fixture.create(json!({})).unwrap();
+    assert_eq!(fixture.settled("login")["state"], "failed");
+
+    assert_eq!(fixture.show("login").unwrap()["ready_at"], json!(null));
+}
+
+#[test]
 fn showing_a_workspace_does_not_write_its_index() {
     use std::os::unix::fs::MetadataExt as _;
     let fixture = Fixture::new(false);

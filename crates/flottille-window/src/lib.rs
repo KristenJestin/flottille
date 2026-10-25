@@ -4,10 +4,14 @@
 
 pub mod actions;
 pub mod composer;
+pub mod conversation;
 pub mod link;
 pub mod model;
+pub mod open;
 pub mod page;
 pub mod project;
+pub mod session;
+pub mod session_link;
 pub mod shell;
 pub mod tree;
 
