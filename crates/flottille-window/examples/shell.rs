@@ -3,12 +3,12 @@
 //! compositor.
 //!
 //! ```text
-//! cargo run -p flottille-window --example shell [--features frames] -- [--session <id>] [--tree] [--rail] [--running]
+//! cargo run -p flottille-window --example shell [--features frames] -- [--session <id> [--agent <id>]] [--tree] [--rail] [--running]
 //! ```
 //!
-//! `--session` opens a session's page, `--tree` the left drawer (in a narrow window), `--rail` the
-//! session page's drawer (in a window narrower than three columns), `--running` the project page's
-//! "Running agents" tab. The daemon is found on
+//! `--session` opens a session's page (`--agent` then reads one of its sub-agents), `--tree` the
+//! left drawer (in a narrow window), `--rail` the session page's drawer (in a window narrower than
+//! three columns), `--running` the project page's "Running agents" tab. The daemon is found on
 //! `$XDG_RUNTIME_DIR/flottille/daemon.sock`; it is not started.
 
 use std::os::unix::net::UnixStream;
@@ -23,12 +23,13 @@ use flottille_window::shell::Selection;
 use gpui_kit::{AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
 
 fn main() {
-    let mut session = None;
+    let (mut session, mut agent) = (None, None);
     let (mut tree, mut rail, mut running) = (false, false, false);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--session" => session = Some(args.next().expect("a session id")),
+            "--agent" => agent = Some(args.next().expect("an agent id")),
             "--tree" => tree = true,
             "--rail" => rail = true,
             "--running" => running = true,
@@ -79,6 +80,20 @@ fn main() {
                     })
                 })
                 .ok();
+            // A sub-agent read once the page knows its tree.
+            if let Some(agent) = agent {
+                cx.background_executor()
+                    .timer(Duration::from_millis(1500))
+                    .await;
+                window
+                    .update(cx, |_, _, cx| {
+                        let page = shell.read(cx).main().read(cx).session_page().cloned();
+                        if let Some(page) = page {
+                            page.update(cx, |page, cx| page.select(&agent, cx));
+                        }
+                    })
+                    .ok();
+            }
         })
         .detach();
     });
