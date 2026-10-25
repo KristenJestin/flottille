@@ -86,7 +86,22 @@ async fn show(daemon: &Daemon, asked: WorkspaceName) -> Answer {
                     .unwrap_or(Value::Null);
         }
     }
+    shown["ready_at"] = match shown["state"] == "ready" {
+        true => ready_at(daemon, &workspace)?.map_or(Value::Null, Value::from),
+        false => Value::Null,
+    };
     Ok(shown)
+}
+
+/// When the workspace's last preparation ended: its newest `workspace.ready` event, which is its
+/// own and not an earlier workspace's of the same name, since it is ready.
+fn ready_at(daemon: &Daemon, workspace: &Workspace) -> Result<Option<u64>, Failure> {
+    let event = daemon.read(|store| {
+        store.last_workspace_event("workspace.ready", &workspace.project, &workspace.name)
+    })?;
+    Ok(event
+        .filter(|event| event.at >= workspace.created_at)
+        .map(|event| event.at))
 }
 
 /// A new file larger than this is not read to count its lines.

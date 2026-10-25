@@ -1348,6 +1348,25 @@ impl Store {
         rows.map(|row| row?).collect()
     }
 
+    /// The newest event of that name about a workspace, found from the end: the events are
+    /// read back from the last one until it comes.
+    pub fn last_workspace_event(
+        &self,
+        name: &str,
+        project: &str,
+        workspace: &str,
+    ) -> Result<Option<Event>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT seq, at, name, data FROM events WHERE name = ?1 \
+             AND json_extract(data, '$.project') = ?2 AND json_extract(data, '$.workspace') = ?3 \
+             ORDER BY seq DESC LIMIT 1",
+        )?;
+        statement
+            .query_row(params![name, project, workspace], event_row)
+            .optional()?
+            .transpose()
+    }
+
     /// The number of the last event, 0 when there is none.
     pub fn last_seq(&self) -> Result<u64> {
         let seq: Option<u64> = self

@@ -246,6 +246,8 @@ binary file, a link, anything but a regular file, or a file over 8 MiB counts no
 1000 new files and 16 MiB of them are read: past that the count stops and `capped` is `true`, the
 real count being higher. It writes nothing, not even git's index. `changes` is `null` when git
 cannot read the worktree (not made yet, or gone). `workspace.list` leaves it out: it runs no git.
+`ready_at` is when its last preparation ended, the time of its newest `workspace.ready` event
+(`docs/events.md`), `null` while it is not `ready`; `workspace.list` leaves it out too.
 
 #### `workspace.prepare`
 
