@@ -1460,6 +1460,8 @@ fn selecting_a_worker_shows_its_conversation_with_no_composer_and_nothing_can_se
         rail_ids(&page, cx).contains(&worker_id)
     });
     settle(cx);
+    // The lead's field has the focus when the worker is selected.
+    cx.update(|window, cx| window.click("reply-field", cx));
 
     cx.update(|window, cx| window.click(format!("rail-row-{worker_id}"), cx));
     until(&shell, cx, "the worker's brief is shown", |cx| {
@@ -1488,14 +1490,27 @@ fn selecting_a_worker_shows_its_conversation_with_no_composer_and_nothing_can_se
         s.reply_of(&lead).map(|r| r.read(cx).session().to_owned())
     });
     assert_eq!(to.as_deref(), Some(lead.as_str()));
+    // Typed while the worker is read, Enter pressed, and everything that follows run.
     cx.simulate_input("are you there?");
     cx.simulate_keystrokes("enter");
-    std::thread::sleep(Duration::from_millis(300));
+    let deadline = Instant::now() + Duration::from_millis(500);
+    until(&shell, cx, "half a second has passed", |_| {
+        Instant::now() > deadline
+    });
+    let reply = shell
+        .read_with(cx, |s, _| s.reply_of(&lead).cloned())
+        .unwrap();
+    assert!(
+        !reply.read_with(cx, |r, _| r.is_sending()),
+        "nothing was sent"
+    );
+    let delivered = user.call("agent.show", json!({"agent": lead})).unwrap();
     let prompts = user.received_requests("session/prompt");
     assert!(
         !prompts
             .iter()
-            .any(|p| p.to_string().contains("are you there?")),
+            .any(|p| p.to_string().contains("are you there?"))
+            && !delivered.to_string().contains("are you there?"),
         "nothing typed reached an agent"
     );
 
