@@ -94,6 +94,11 @@ impl Client {
         }
     }
 
+    /// The connection itself, for a client that speaks the protocol on its own (the window).
+    pub fn into_stream(self) -> UnixStream {
+        self.writer
+    }
+
     /// Sends a request and returns its result; events arriving meanwhile are not for a request.
     pub fn request(&mut self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id.to_string();

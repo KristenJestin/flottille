@@ -114,6 +114,9 @@ enum Command {
         #[command(subcommand)]
         agent: BridgeAgent,
     },
+    /// Open the window: your projects, where their work happens, their sessions, and what waits
+    /// for you
+    Window,
     /// Print the daemon's events, one JSON object per line
     Watch {
         /// Print the stored events numbered after this one first
@@ -181,6 +184,14 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Bridge {
             agent: BridgeAgent::Claude,
         } => return bridge::run(&paths),
+        Command::Window => {
+            let paths = paths.clone();
+            flottille_window::run(std::sync::Arc::new(move || {
+                Client::connect_or_start(&paths)
+                    .map(Client::into_stream)
+                    .map_err(|error| std::io::Error::other(error.to_string()))
+            }));
+        }
         Command::Watch { after } => {
             let mut client = Client::connect_or_start(&paths)?;
             client.request("events.watch", serde_json::to_value(WatchParams { after })?)?;
