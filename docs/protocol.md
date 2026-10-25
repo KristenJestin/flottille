@@ -247,7 +247,8 @@ binary file, a link, anything but a regular file, or a file over 8 MiB counts no
 real count being higher. It writes nothing, not even git's index. `changes` is `null` when git
 cannot read the worktree (not made yet, or gone). `workspace.list` leaves it out: it runs no git.
 `ready_at` is when its last preparation ended, the time of its newest `workspace.ready` event
-(`docs/events.md`), `null` while it is not `ready`; `workspace.list` leaves it out too.
+(`docs/events.md`), kept with the workspace; `null` while it is not `ready`. `workspace.list`
+leaves it out too.
 
 #### `workspace.prepare`
 

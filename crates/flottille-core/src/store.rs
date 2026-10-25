@@ -200,6 +200,17 @@ const MIGRATIONS: &[&str] = &[
     -- A root's question waits for the user as a child's waits for its parent.
     ALTER TABLE agents RENAME COLUMN waiting_on_parent TO waiting_on_answer;
 ",
+    "
+    -- When a workspace's last preparation ended, kept with it rather than looked for among the
+    -- events: a store that has them takes it from its newest `workspace.ready` event.
+    ALTER TABLE workspaces ADD COLUMN ready_at INTEGER;
+    UPDATE workspaces SET ready_at = (
+        SELECT max(e.at) FROM events e WHERE e.name = 'workspace.ready'
+        AND json_extract(e.data, '$.project') = workspaces.project
+        AND json_extract(e.data, '$.workspace') = workspaces.name
+        AND e.at >= workspaces.created_at
+    );
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -448,6 +459,28 @@ impl Store {
         let event = append_event(&transaction, event.0, event.1)?;
         transaction.commit()?;
         Ok(event)
+    }
+
+    /// The workspace's preparation ended: when, kept with it, and its `workspace.ready` event, in
+    /// one transaction.
+    pub fn workspace_ready(&mut self, workspace: i64, data: Value) -> Result<Event> {
+        let transaction = self.connection.transaction()?;
+        let event = append_event(&transaction, "workspace.ready", data)?;
+        transaction.execute(
+            "UPDATE workspaces SET ready_at = ?2 WHERE id = ?1",
+            params![workspace, event.at],
+        )?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    /// When the workspace's last preparation ended, if one did.
+    pub fn workspace_ready_at(&self, workspace: i64) -> Result<Option<u64>> {
+        Ok(self.connection.query_row(
+            "SELECT ready_at FROM workspaces WHERE id = ?1",
+            params![workspace],
+            |row| row.get(0),
+        )?)
     }
 
     /// Forgets a workspace and its steps, with its event, in one transaction.
@@ -1348,25 +1381,6 @@ impl Store {
         rows.map(|row| row?).collect()
     }
 
-    /// The newest event of that name about a workspace, found from the end: the events are
-    /// read back from the last one until it comes.
-    pub fn last_workspace_event(
-        &self,
-        name: &str,
-        project: &str,
-        workspace: &str,
-    ) -> Result<Option<Event>> {
-        let mut statement = self.connection.prepare_cached(
-            "SELECT seq, at, name, data FROM events WHERE name = ?1 \
-             AND json_extract(data, '$.project') = ?2 AND json_extract(data, '$.workspace') = ?3 \
-             ORDER BY seq DESC LIMIT 1",
-        )?;
-        statement
-            .query_row(params![name, project, workspace], event_row)
-            .optional()?
-            .transpose()
-    }
-
     /// The number of the last event, 0 when there is none.
     pub fn last_seq(&self) -> Result<u64> {
         let seq: Option<u64> = self
@@ -1723,6 +1737,56 @@ mod tests {
         assert_eq!(store.workspaces(None).unwrap(), [read]);
         assert!(store.workspaces(Some("other")).unwrap().is_empty());
         assert_eq!(store.workspace("app", "other").unwrap(), None);
+    }
+
+    #[test]
+    fn a_workspace_keeps_when_its_preparation_ended() {
+        let mut store = Store::open_in_memory().unwrap();
+        let (id, _) = store
+            .create_workspace(&a_workspace(), ("workspace.created", json!({})))
+            .unwrap();
+        assert_eq!(store.workspace_ready_at(id).unwrap(), None);
+
+        let event = store
+            .workspace_ready(id, json!({"project": "app", "workspace": "login"}))
+            .unwrap();
+
+        assert_eq!(event.name, "workspace.ready");
+        assert_eq!(store.workspace_ready_at(id).unwrap(), Some(event.at));
+    }
+
+    #[test]
+    fn a_store_of_the_previous_schema_takes_when_each_workspace_was_ready_from_its_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let old = Connection::open(&path).unwrap();
+        let previous = MIGRATIONS.len() - 1;
+        for migration in &MIGRATIONS[..previous] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.pragma_update(None, "user_version", previous).unwrap();
+        old.execute_batch(
+            "INSERT INTO workspaces (project, name, branch, folder, project_folder, created_at, \
+             variables, repositories) VALUES ('app', 'login', 'app/login', '/w', '/p', 100, '{}', '[]'), \
+             ('app', 'docs', 'app/docs', '/d', '/p', 100, '{}', '[]');
+             INSERT INTO events (at, name, data) VALUES \
+             (50, 'workspace.ready', '{\"project\":\"app\",\"workspace\":\"login\"}'), \
+             (150, 'workspace.ready', '{\"project\":\"app\",\"workspace\":\"login\"}'), \
+             (160, 'workspace.ready', '{\"project\":\"other\",\"workspace\":\"login\"}');",
+        )
+        .unwrap();
+        drop(old);
+
+        let store = Store::open(&path).unwrap();
+
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len());
+        let id = |name: &str| store.workspace("app", name).unwrap().unwrap().id;
+        assert_eq!(store.workspace_ready_at(id("login")).unwrap(), Some(150));
+        assert_eq!(
+            store.workspace_ready_at(id("docs")).unwrap(),
+            None,
+            "never ready"
+        );
     }
 
     #[test]
