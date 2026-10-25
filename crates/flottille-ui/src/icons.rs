@@ -3,7 +3,7 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::{SharedString, Styled, Svg, px, svg};
 
-gpui_kit::assets::icon_assets!(pub Icons, [Folder, GitBranch, Book, ChevronDown, Plus, Search, Bell, ExternalLink, Network, Menu]);
+gpui_kit::assets::icon_assets!(pub Icons, [Folder, GitBranch, Book, ChevronDown, Plus, Search, Bell, ExternalLink, Network, Menu, ArrowUp, ChevronsUpDown]);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
@@ -17,10 +17,14 @@ pub enum Icon {
     OpenInEditor,
     Agents,
     Menu,
+    /// The composer's send button.
+    Send,
+    /// A picker's button: it opens a list to choose from.
+    Choose,
 }
 
 impl Icon {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 12] = [
         Self::Folder,
         Self::Branch,
         Self::Repository,
@@ -31,6 +35,8 @@ impl Icon {
         Self::OpenInEditor,
         Self::Agents,
         Self::Menu,
+        Self::Send,
+        Self::Choose,
     ];
 
     pub fn path(self) -> SharedString {
@@ -45,6 +51,8 @@ impl Icon {
             Self::OpenInEditor => IconName::ExternalLink,
             Self::Agents => IconName::Network,
             Self::Menu => IconName::Menu,
+            Self::Send => IconName::ArrowUp,
+            Self::Choose => IconName::ChevronsUpDown,
         }
         .path()
     }

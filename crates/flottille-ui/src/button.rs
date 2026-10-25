@@ -22,6 +22,8 @@ pub enum ButtonKind {
     Quiet,
     /// A 28 px square holding one icon.
     Icon,
+    /// A 30 px round primary holding one icon: the composer's send.
+    Round,
 }
 
 type OnClick = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
@@ -35,6 +37,7 @@ pub struct Button {
     tooltip: Option<SharedString>,
     badge: Option<Badge>,
     full_width: bool,
+    disabled: bool,
     on_click: Option<OnClick>,
 }
 
@@ -48,6 +51,7 @@ impl Button {
             tooltip: None,
             badge: None,
             full_width: false,
+            disabled: false,
             on_click: None,
         }
     }
@@ -70,6 +74,20 @@ impl Button {
         button.icon = Some(glyph);
         button.tooltip = Some(tooltip.into());
         button
+    }
+
+    /// A round primary holding one icon; `tooltip` says what it does.
+    pub fn round(id: impl Into<ElementId>, glyph: Icon, tooltip: impl Into<SharedString>) -> Self {
+        let mut button = Self::new(id, ButtonKind::Round);
+        button.icon = Some(glyph);
+        button.tooltip = Some(tooltip.into());
+        button
+    }
+
+    /// Faded, and a click does nothing.
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
     }
 
     pub fn label(mut self, label: impl Into<SharedString>) -> Self {
@@ -109,13 +127,13 @@ impl RenderOnce for Button {
         let p = palette(cx);
         let (state, now) = feel(&self.id, window, cx);
         let (fill, ink, hover_ink, border, height) = match self.kind {
-            ButtonKind::Primary => (Some(p.acc), p.on_acc, p.on_acc, None, 30.),
+            ButtonKind::Primary | ButtonKind::Round => (Some(p.acc), p.on_acc, p.on_acc, None, 30.),
             ButtonKind::Secondary => (None, p.mute, p.text, Some(p.line2), 28.),
             ButtonKind::Quiet => (None, p.mute, p.text, None, 30.),
             ButtonKind::Icon => (None, p.mute, p.text, None, 28.),
         };
         let hover_bg = match self.kind {
-            ButtonKind::Primary => mix(p.acc, p.on_acc, 0.08),
+            ButtonKind::Primary | ButtonKind::Round => mix(p.acc, p.on_acc, 0.08),
             _ => p.hover,
         };
         let background = match fill {
@@ -161,12 +179,16 @@ impl RenderOnce for Button {
                     .bottom(inset)
                     .left(inset)
                     .right(inset)
-                    .rounded(radius::BUTTON)
+                    .when(self.kind == ButtonKind::Round, |d| d.rounded_full())
+                    .when(self.kind != ButtonKind::Round, |d| {
+                        d.rounded(radius::BUTTON)
+                    })
                     .bg(background)
                     .when_some(border, |d, border| d.border_1().border_color(border)),
             );
         button = match self.kind {
             ButtonKind::Icon => button.w(px(28.)),
+            ButtonKind::Round => button.w(px(30.)),
             _ => button.px(px(if self.kind == ButtonKind::Secondary {
                 10.
             } else {
@@ -177,10 +199,10 @@ impl RenderOnce for Button {
             button = button.w_full();
         }
         if let Some(glyph) = self.icon {
-            let size = if self.kind == ButtonKind::Icon {
-                15.
-            } else {
-                13.
+            let size = match self.kind {
+                ButtonKind::Icon => 15.,
+                ButtonKind::Round => 14.,
+                _ => 13.,
             };
             button = button.child(icon(glyph).size(px(size)).text_color(ink_now).relative());
         }
@@ -193,7 +215,9 @@ impl RenderOnce for Button {
         if let Some(text) = tooltip {
             button = button.tooltip(move |_, cx| Tooltip::view(text.clone(), cx));
         }
-        if let Some(on_click) = self.on_click {
+        if self.disabled {
+            button = button.opacity(0.35);
+        } else if let Some(on_click) = self.on_click {
             button = button.on_click(on_click);
         }
         wire(button, state, true).test_support()
