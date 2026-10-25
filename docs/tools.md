@@ -44,9 +44,12 @@ and the tree's tools (`agent_*`, `report`, `ask_user` or `ask_parent`, `approval
   read a result Claude Code saved to a file), a refusal or a failure under 2,000. A failure reads
   `the call failed: …`. A result and a failure are masked of the daemon's and the place's secrets
   (a file read or a search hit shows `[masked]` for them). A call the gate held is answered with
-  the waiting text, not as an error (below). The notes pinned for the
-  agent (the deliveries that reach it in a turn) are appended to the result after a blank line,
-  whole and counted in its limit: it is the text that is cut short to make room for them.
+  the waiting text, not as an error (below). Every result, refusal and failure is escaped as a
+  delivery's body is (`docs/agents.md`, "Deliveries"): what a file, an output or another agent
+  holds never forges a `[flottille:` marker nor opens or closes a note. The notes pinned for the
+  agent (the deliveries that reach it in a turn) are appended after a blank line, whole, in the
+  room the text leaves under its limit; the text is never cut for them, and a note that does not
+  fit stays pinned for the next result.
 - **Every call is recorded** as an `agent.tool_served` event of the agent (`docs/events.md`):
   the tool, the key, the arguments with every text cut at 500 characters and masked, the outcome
   and the duration.
@@ -184,7 +187,7 @@ children: agent_status lists them` for any other agent.
 | `agent_status {agent_id?}` | One line per child (or for the one named): what it does (in a turn, `running \`<line>\` for 12 min`, `waiting for approval #3`, `waiting on the provider`, idle, reported, ended or failed with why), the time since its last sign of activity, its context use, then its last three messages. |
 | `agent_read {agent_id, after?}` | A page of the child's conversation, oldest first, one line per event that says something (`#<n> sent: …`, `said: …`, `tool call: …`, a tool served and its outcome, a turn's end, a replacement, a report), each text cut at 2,000 characters, the page under 30,000; it ends with the `after` to pass for the next page. |
 | `agent_stop {agent_id}` | Stops the child and its own children, deepest first; what was queued for them is superseded; their runs are stopped. Their workspaces stay. |
-| `report {text}` | The caller is done. A child's report goes to its parent at once (`child-report`, with its workspace, its branch and the last commit of each repository), and the child ends when its turn does (or two minutes later, if its turn goes on). A root's report is shown to the user (`agent.reported`) and the root stays. |
+| `report {text}` | The caller is done. At most 10,000 characters, so that it rides whole on its parent's results; a longer one is refused, asking for fewer words and a file that holds the details. A child's report goes to its parent at once (`child-report`, with its workspace, its branch and the last commit of each repository), and the child ends when its turn does (or two minutes later, if its turn goes on). A root's report is shown to the user (`agent.reported`) and the root stays. |
 | `ask_user {question}` (a root) | A question to the user (`agent.asked`), answered later as a message. |
 | `ask_parent {question}` (a child) | A question to its parent (`child-question`), answered with `agent_send`. Until then the child shows as waiting on its parent. |
 | `approval_answer {request_id, decision, why}` | Answers a request held for the caller: `deny` (the agent that asked is told, with the why) or `forward` (to the caller's parent with its why, or to the user from a root). There is no way to allow: `allow` is refused as a decision the tool does not have, and a request the caller does not hold, or no longer holds, is refused (`refused: request #n is not held by this agent: …`). |

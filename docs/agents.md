@@ -76,7 +76,10 @@ installed, Node or `claude` is not on `PATH`.
   leader is alive with the start time recorded: never a stranger that took the pid since, and not
   the members of a group whose leader is gone (nothing says whose they are). Then it forgets all
   the rows. An agent that was starting or working when its daemon went is idle again
-  (`agent.released`, reason `restart`).
+  (`agent.released`, reason `restart`). Its session is kept. A working agent's prompt was sent
+  and is in that session's history: its deliveries are taken as sent, never sent again, and it
+  is sent a `resume` saying its turn was cut. A starting agent's were not sent yet: they are
+  given back.
 - **Daemon stop**: every agent's process is let go. One whose task has not finished within 4 s
   (stuck while its agent opens a session, say) has its process group killed, so that the daemon
   goes with nothing of its own running.
@@ -178,10 +181,13 @@ workspace of the project, or a new one, made and prepared before it starts.
   `AGENTS.local.md`), read in the agent's place, else in the project's main checkout. The
   templates are in `crates/flottille/roles/`.
 - **Stopping** an agent stops its tree, deepest first: each ends (`agent.ended`, or
-  `agent.failed` when it is a failure that spreads), what was queued for it is superseded, its
-  process and its runs are stopped. Workspaces stay.
-- **A report** (`report`) of a child goes to its parent at once, and the child ends when its
-  turn does, or 2 minutes later if its turn goes on. A root's report is kept and the root stays.
+  `agent.failed` when it is a failure that spreads), what was queued for it is superseded, the
+  pending requests it made or held are cancelled (`approval.cancelled`: the user never sees them),
+  its process and its runs are stopped. Workspaces stay. Nothing is delivered to an agent that
+  ended.
+- **A report** (`report`, at most 10,000 characters) of a child goes to its parent at once, and
+  the child ends when its turn does, or 2 minutes later if its turn goes on. A root's report is
+  kept and the root stays.
 
 ### Deliveries
 
@@ -193,15 +199,19 @@ restart (`resume`). It is stored before it is sent, under an id that makes it id
 is the only thing that wakes an agent.
 
 - **As the agent reads it**: `[flottille:<kind>]` on a line, then the body. Bodies are data: a
-  `[flottille:` in one is written `\[flottille:` and a `<flottille-note` is written
-  `&lt;flottille-note`, so that no text forges a delivery. Bodies are masked of the daemon's
-  secrets.
+  `[flottille:` in one is written `\[flottille:`, and `<flottille-note` and `</flottille-note`
+  are written `&lt;flottille-note` and `&lt;/flottille-note`, so that no text forges a delivery
+  nor opens or closes a note. Every tool's result is escaped the same way (`docs/tools.md`).
+  Bodies are masked of the daemon's secrets.
 - **Between turns**, the agent's queued deliveries are sent together as one prompt: a `brief`
   first, then a `resume`, then the others in their order.
 - **During a turn**, an urgent one (`child-report`, `child-failed`, `child-asks`, `parent`,
   `approval`) is pinned as a note on the agent's next tool result:
-  `<flottille-note id="…">`, the delivery, `</flottille-note>`. A note not taken within 30 s
-  cancels the turn, and the delivery goes as the next prompt. The others wait for the turn's end.
+  `<flottille-note id="…">`, the delivery, `</flottille-note>`. A note rides only in the room its
+  result leaves under its limit, whole, in order; one that does not fit stays pinned for the next
+  result. A note not taken within 30 s cancels the turn, and the delivery goes as the next prompt;
+  a note whose delivery a prompt took meanwhile is dropped and cancels nothing. The others wait
+  for the turn's end.
 - **A turn that fails** gives back what it was sent: those deliveries are queued again.
 - States: `queued`, `sending` (in a prompt), `sent`, `superseded` (its agent ended first). Each
   move is an event (`delivery.*`, `docs/events.md`).
@@ -214,8 +224,9 @@ held), is reminded once (`reminder`); after a second such turn its parent is tol
 
 A session that cannot go on is replaced: its process dies, or it is stuck (below). The agent
 keeps its id; its epoch counts the sessions. The new session starts from scratch, without the
-old one's session id, and is sent its brief (a child) and a `resume` saying it starts again; what
-the old session was sent and had not finished is given back. The old session's token stays known,
+old one's session id, and is sent its brief (a root's first message is its brief) and a `resume`
+saying it starts again, once: the briefs and resumes of the old sessions not sent yet are
+superseded. What else the old session was sent and had not finished is given back. The old session's token stays known,
 so that its late calls are refused, saying it was replaced. The parent is told (`child-replaced`).
 Two replacements within 30 minutes are allowed: the third failure fails the agent and its tree.
 

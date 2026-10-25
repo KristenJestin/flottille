@@ -265,6 +265,18 @@ The agent that held the request passed it up, with one sentence of why.
 | `why` | Its sentence. |
 | `held_by` | Who holds it now: `user`, or the agent's parent. |
 
+#### `approval.cancelled`
+
+The request was never answered: the agent that asked, or the one that held it, ended. It is no
+longer pending, so the user never sees it.
+
+| Field | |
+|---|---|
+| `number` | |
+| `agent` | The agent that asked. |
+| `held_by` | Who held it: `user`, or an agent's id. |
+| `why` | Which agent ended, and how. |
+
 #### `approval.decided`
 
 The user answered the request, or the agent that held it denied it.

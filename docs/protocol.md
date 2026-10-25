@@ -322,7 +322,8 @@ its parent writes to it, and the sentence names its root.
 #### `agent.cancel`
 
 `{"agent"}`. Cancels the turn that runs: `{"agent", "cancelled"}`, `cancelled` false when no turn
-ran. The turn then ends `cancelled`.
+ran. The turn then ends `cancelled`. `refused` for a child: only its parent cancels its turns,
+and the sentence names its root.
 
 #### `agent.stop`
 
@@ -381,7 +382,8 @@ The requests of the gate (`docs/tools.md`, "The gate"). A request in a result:
 `call` is the call's arguments, every text cut at 500 characters and masked; the call itself is
 kept whole, to be performed, and never sent. `held_by` is `user` or the id of the agent that holds
 the request; `forwards` are the `{"by", "why"}` of each agent that passed it up. `state` is
-`pending`, `denied` or `allowed`; `decision` is `deny`, `once` or `tree` once it is decided.
+`pending`, `denied`, `allowed`, or `cancelled` when the agent that asked or the one that held it
+ended first; `decision` is `deny`, `once` or `tree` once it is decided.
 
 #### `approval.list`
 
