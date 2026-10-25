@@ -1,0 +1,22 @@
+[package]
+name = "flottille-window"
+description = "Flottille's window: a client of the daemon's socket"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["fast"]
+# GPUI Fast, the retained-mode fork; `--no-default-features` builds plain GPUI.
+fast = ["flottille-ui/fast"]
+# Prints the frames drawn each second on the standard error, to measure the window at rest: a
+# development build only (`--features frames`), never the shipped one.
+frames = ["gpui-kit/profiler"]
+
+[dependencies]
+flottille-core = { version = "0.1.0", path = "../flottille-core" }
+flottille-ui = { version = "0.1.0", path = "../flottille-ui", default-features = false }
+futures = { version = "0.3.32", default-features = false, features = ["std"] }
+gpui-kit = { version = "=0.8.0", default-features = false, features = ["assets"] }
+serde_json = "1.0.154"

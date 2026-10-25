@@ -144,21 +144,24 @@ impl User {
     }
 
     pub fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_flottille"));
-        command
-            .args(args)
-            .env("HOME", self.path("home"))
-            .env("XDG_RUNTIME_DIR", self.path("runtime"))
-            .env("XDG_STATE_HOME", self.path("state"))
-            .env("XDG_CONFIG_HOME", self.path("config"))
-            .env("XDG_DATA_HOME", self.path("data"))
-            .envs(self.env.iter().map(|(k, v)| (k, v)))
-            .stdin(Stdio::null());
-        // The daemon runs git: never with the machine's settings.
-        for (name, value) in GIT_ENV {
-            command.env(name, value);
+        command_of(self.dir.path(), &self.env, args)
+    }
+
+    /// Connects to this user's daemon as a client that starts it when nobody listens (the
+    /// command line's `connect_or_start`): `flottille status` starts it, then the socket is
+    /// opened. Usable from any thread, for as long as the user lives.
+    pub fn connector(&self) -> impl Fn() -> std::io::Result<UnixStream> + Send + Sync + 'static {
+        let dir = self.dir.path().to_owned();
+        let env = self.env.clone();
+        move || {
+            let output = command_of(&dir, &env, &["status", "--json"]).output()?;
+            if !output.status.success() {
+                return Err(std::io::Error::other(
+                    String::from_utf8_lossy(&output.stderr).into_owned(),
+                ));
+            }
+            UnixStream::connect(dir.join("runtime/flottille/daemon.sock"))
         }
-        command
     }
 
     pub fn run(&self, args: &[&str]) -> Output {
@@ -274,6 +277,25 @@ impl User {
         });
         Watch { child, lines }
     }
+}
+
+/// A command of the user whose folder is `dir`.
+fn command_of(dir: &Path, env: &[(String, String)], args: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_flottille"));
+    command
+        .args(args)
+        .env("HOME", dir.join("home"))
+        .env("XDG_RUNTIME_DIR", dir.join("runtime"))
+        .env("XDG_STATE_HOME", dir.join("state"))
+        .env("XDG_CONFIG_HOME", dir.join("config"))
+        .env("XDG_DATA_HOME", dir.join("data"))
+        .envs(env.iter().map(|(k, v)| (k, v)))
+        .stdin(Stdio::null());
+    // The daemon runs git: never with the machine's settings.
+    for (name, value) in GIT_ENV {
+        command.env(name, value);
+    }
+    command
 }
 
 impl Drop for User {

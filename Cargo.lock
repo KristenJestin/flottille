@@ -1939,7 +1939,10 @@ dependencies = [
  "bytes",
  "clap",
  "flottille-core",
+ "flottille-ui",
+ "flottille-window",
  "futures",
+ "gpui-kit",
  "http",
  "http-body-util",
  "hyper",
@@ -1991,6 +1994,17 @@ dependencies = [
  "gpui-kit",
  "tempfile",
  "toml 1.1.8+spec-1.1.0",
+]
+
+[[package]]
+name = "flottille-window"
+version = "0.1.0"
+dependencies = [
+ "flottille-core",
+ "flottille-ui",
+ "futures",
+ "gpui-kit",
+ "serde_json",
 ]
 
 [[package]]
@@ -2556,6 +2570,7 @@ dependencies = [
  "gpui-pre-shared-string",
  "gpui-pre-sum-tree",
  "gpui-pre-util",
+ "hdrhistogram",
  "heapless",
  "image",
  "inventory",
@@ -2903,6 +2918,7 @@ dependencies = [
  "gpui-pre-shared-string",
  "gpui-pre-sum-tree",
  "gpui-pre-util",
+ "hdrhistogram",
  "heapless",
  "image",
  "inventory",
@@ -3488,6 +3504,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
 dependencies = [
  "hashbrown 0.17.1",
+]
+
+[[package]]
+name = "hdrhistogram"
+version = "7.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f49d1053f4708f0af3cf9fc5bffc7e68a914a3c45becb231c80068c9c3f78bea"
+dependencies = [
+ "byteorder",
+ "num-traits",
 ]
 
 [[package]]
