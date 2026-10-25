@@ -157,6 +157,48 @@ fn step_states(workspace: &Value) -> Vec<String> {
 }
 
 #[test]
+fn a_shown_workspace_counts_the_lines_added_and_removed_in_each_repository() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    fixture.create(json!({})).unwrap();
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    let web = fixture.workspace("login").join("web");
+    let lib = fixture.workspace("login").join("lib");
+    // Committed on the workspace's branch, changed and not committed, and new and not tracked.
+    std::fs::remove_file(web.join("DEVELOP.md")).unwrap();
+    fixture.git(&web, &["commit", "--quiet", "-am", "drop develop's note"]);
+    std::fs::write(web.join("README.md"), "web\nmore\nlines\n").unwrap();
+    std::fs::write(web.join("NOTES.md"), "one\ntwo\nthree").unwrap();
+    std::fs::write(web.join(".env"), "IGNORED=1\nIGNORED=2\n").unwrap();
+    std::fs::remove_file(lib.join("README.md")).unwrap();
+
+    let shown = fixture.show("login").unwrap();
+
+    let changes: Vec<(&str, &Value)> = shown["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|repository| (repository["path"].as_str().unwrap(), &repository["changes"]))
+        .collect();
+    assert_eq!(
+        changes,
+        [
+            ("web", &json!({"added": 5, "removed": 1})),
+            ("api", &json!({"added": 0, "removed": 0})),
+            ("lib", &json!({"added": 0, "removed": 1})),
+        ],
+        "against the base, committed or not, new files counted, ignored ones not"
+    );
+    let listed = fixture.user.call("workspace.list", json!({})).unwrap();
+    assert!(
+        listed["workspaces"][0]["repositories"][0]
+            .get("changes")
+            .is_none(),
+        "a listing runs no git"
+    );
+}
+
+#[test]
 fn a_workspace_over_three_repositories_takes_develop_where_it_exists_and_main_elsewhere() {
     let fixture = Fixture::new(false);
     fixture.configure("");

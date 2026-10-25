@@ -50,7 +50,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let workspaces = daemon.read(|store| store.workspaces(project.as_deref()))?;
             Ok(json!({"workspaces": workspaces.iter().map(Workspace::to_json).collect::<Vec<_>>()}))
         }
-        "workspace.show" => Ok(find(&daemon, &serde_json::from_value(params)?)?.to_json()),
+        "workspace.show" => show(&daemon, serde_json::from_value(params)?).await,
         "workspace.prepare" => resume(daemon, serde_json::from_value(params)?).await,
         "workspace.remove" => remove(daemon, serde_json::from_value(params)?).await,
         method => Err(Failure::new(
@@ -72,6 +72,73 @@ fn find(daemon: &Daemon, asked: &WorkspaceName) -> Result<Workspace, Failure> {
                 ),
             )
         })
+}
+
+/// `workspace.show`: the workspace, and the lines changed in each of its repositories.
+async fn show(daemon: &Daemon, asked: WorkspaceName) -> Answer {
+    let workspace = find(daemon, &asked)?;
+    let mut shown = workspace.to_json();
+    if let Some(repositories) = shown["repositories"].as_array_mut() {
+        for (repository, worktree) in repositories.iter_mut().zip(&workspace.repositories) {
+            repository["changes"] =
+                changes(&workspace.folder_of(&worktree.path), &worktree.base.commit)
+                    .await
+                    .unwrap_or(Value::Null);
+        }
+    }
+    Ok(shown)
+}
+
+/// A new file larger than this is not read to count its lines.
+const COUNTED_FILE: u64 = 8 * 1024 * 1024;
+
+/// The lines added and removed in a worktree since its base commit: what its branch committed,
+/// what is changed and not committed, and the new files git does not ignore. A binary file counts
+/// no line. `None` when git cannot read the worktree (it is not made yet, or gone).
+async fn changes(folder: &Path, base: &str) -> Option<Value> {
+    let diff = git::run(folder, &["diff", "--numstat", base, "--"], Class::Read)
+        .await
+        .ok()
+        .filter(|output| output.success)?;
+    let (mut added, mut removed) = (0u64, 0u64);
+    for line in diff.stdout.lines() {
+        let mut counts = line.split('\t');
+        // A binary file is `-\t-\t<path>`: no line to count.
+        if let (Some(Ok(plus)), Some(Ok(minus))) = (
+            counts.next().map(str::parse::<u64>),
+            counts.next().map(str::parse::<u64>),
+        ) {
+            added += plus;
+            removed += minus;
+        }
+    }
+    let new = git::run(
+        folder,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+        Class::Read,
+    )
+    .await
+    .ok()
+    .filter(|output| output.success)?;
+    for path in new.stdout.split('\0').filter(|path| !path.is_empty()) {
+        let path = folder.join(path);
+        // Never through a link: it may lead out of the worktree.
+        let Ok(metadata) = tokio::fs::symlink_metadata(&path).await else {
+            continue;
+        };
+        if !metadata.is_file() || metadata.len() > COUNTED_FILE {
+            continue;
+        }
+        let Ok(bytes) = tokio::fs::read(&path).await else {
+            continue;
+        };
+        if bytes.contains(&0) {
+            continue;
+        }
+        let breaks = bytes.iter().filter(|&&byte| byte == b'\n').count() as u64;
+        added += breaks + u64::from(bytes.last().is_some_and(|&last| last != b'\n'));
+    }
+    Some(json!({"added": added, "removed": removed}))
 }
 
 /// What every event of a workspace starts with.
