@@ -121,6 +121,43 @@ fn doctor_takes_an_api_key_for_a_login_and_never_prints_it() {
 }
 
 #[test]
+fn doctor_takes_claude_s_token_variables_for_a_login_and_never_prints_them() {
+    for name in ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN"] {
+        let user = user_with_bin().with_env(name, "invented-token-0123456789");
+        claude(&user, "2.1.295");
+
+        let (ok, report, text) = doctor(&user);
+
+        assert!(ok, "{report}");
+        assert_eq!(claude_of(&report)["login"]["api_key"], name);
+        assert_eq!(report["warnings"], serde_json::json!([]), "{report}");
+        assert!(!report.to_string().contains("invented"), "{report}");
+        assert!(!text.contains("invented"), "{text}");
+    }
+}
+
+#[test]
+fn a_login_the_daemon_cannot_see_is_a_warning_not_a_refusal() {
+    // Claude on PATH, with no login file and no variable: on macOS its login is in the Keychain.
+    let user = user_with_bin();
+    claude(&user, "2.1.295");
+
+    let (ok, report, text) = doctor(&user);
+
+    assert!(ok, "{report}");
+    let claude = claude_of(&report);
+    assert_eq!(claude["ready"], true, "{report}");
+    assert_eq!(claude["why"], Value::Null);
+    let warning = report["warnings"][0].as_str().unwrap();
+    assert!(
+        warning.contains("Claude") && warning.contains("sign in"),
+        "{warning}"
+    );
+    assert!(text.contains("Claude agents can run"), "{text}");
+    assert!(text.contains("warn Claude login"), "{text}");
+}
+
+#[test]
 fn doctor_says_what_is_missing() {
     let user = user_with_bin();
 
@@ -199,19 +236,26 @@ fn doctor_reports_claude_and_opencode_each_enabled_or_not_ready_or_not_by_login_
     assert_eq!(login["path"], file.to_str().unwrap());
     assert_eq!(login["api_key"], Value::Null);
 
-    // Neither: enabled and not ready, which fails the doctor; Claude still can run.
+    // Neither: OpenCode runs its free models without a sign-in, so it stays ready, with a
+    // warning.
     std::fs::remove_file(&file).unwrap();
     let (ok, report, text) = doctor(&user);
-    assert!(!ok, "{report}");
-    assert_eq!(report["providers"][1]["ready"], false);
+    assert!(ok, "{report}");
+    assert_eq!(report["providers"][1]["ready"], true);
+    let warnings = report["warnings"].to_string();
     assert!(
-        report["providers"][1]["why"]
-            .as_str()
-            .unwrap()
-            .contains("sign in"),
+        warnings.contains("OpenCode") && warnings.contains("sign in"),
         "{report}"
     );
     assert_eq!(claude_of(&report)["ready"], true);
+    assert!(text.contains("OpenCode agents can run"), "{text}");
+    assert!(text.contains("Claude agents can run"), "{text}");
+
+    // Not on PATH: not ready, which fails the doctor; Claude still can run.
+    std::fs::remove_file(user.path("bin/opencode")).unwrap();
+    let (ok, report, text) = doctor(&user);
+    assert!(!ok, "{report}");
+    assert_eq!(report["providers"][1]["ready"], false);
     assert!(text.contains("OpenCode agents cannot run"), "{text}");
     assert!(text.contains("Claude agents can run"), "{text}");
 

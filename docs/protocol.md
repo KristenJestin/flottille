@@ -423,7 +423,7 @@ when they name none:
       "enabled": true,
       "ready": true,
       "why": null,
-      "warning": null,
+      "warnings": [],
       "program": {"name": "claude", "present": true, "path": "/usr/bin/claude",
                   "version": "2.1.295", "checked": "2.1.295"},
       "login": {"present": true, "path": "/home/user/.claude/.credentials.json", "api_key": null},
@@ -439,7 +439,8 @@ when they name none:
 ```
 
 `why` is `null` when the provider's agents can run, else a clause after its name that says why
-not and what to do. `warning` names a version other than the one Flottille was checked against.
+not and what to do. `warnings` say what may stop its agents that the daemon cannot tell for
+sure: a version other than the one Flottille was checked against, no sign-in it can see.
 `login.api_key` is the name of the API key found set, never its value. `override` is the test
 program standing for the provider (`docs/agents.md`, "For tests and development"). `models` is
 `null` until a session of the provider's agent said them, and `efforts` of a model `null` until a

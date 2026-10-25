@@ -20,6 +20,14 @@ pub const BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
 /// A tool call waiting on the user sends nothing: both of Claude's limits must outlast the wait.
 const TOOL_WAIT_MS: &str = "600000";
 
+/// The agent's own sign-in, which counts as one for `flottille doctor` and passes to the agent,
+/// where the secret-looking names `withheld` refuses would otherwise catch it.
+const SIGN_IN: [&str; 3] = [
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_AUTH_TOKEN",
+];
+
 pub static PROVIDER: Provider = Provider {
     name: "claude",
     title: "Claude",
@@ -28,9 +36,9 @@ pub static PROVIDER: Provider = Provider {
     may_change: "its stream-json mode may have changed",
     install: "install Claude Code and sign in with it first",
     login_file,
-    api_keys: &["ANTHROPIC_API_KEY"],
-    sign_in: "run `claude` and sign in, or set ANTHROPIC_API_KEY; on macOS the login is in the \
-              Keychain and there is no file",
+    api_keys: &SIGN_IN,
+    sign_in: "run `claude` and sign in, or set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN; on \
+              macOS the login is in the Keychain, where Flottille does not look",
     withheld,
     tool_prefix: "mcp__flottille__",
     stated_tool,
@@ -46,12 +54,6 @@ pub static PROVIDER: Provider = Provider {
 /// The agent runs on the user's own sign-in and network, and on what Flottille sets: the daemon's
 /// secrets and the user's Claude Code settings (a model, a cache lifetime) are not its business.
 pub fn withheld(name: &str) -> bool {
-    // The agent's own sign-in, which the secret-looking names below would otherwise catch.
-    const SIGN_IN: [&str; 3] = [
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-    ];
     // The user's Claude Code settings.
     const SETTINGS: [&str; 4] = [
         "ANTHROPIC_MODEL",

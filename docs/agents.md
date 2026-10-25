@@ -30,24 +30,30 @@ For each provider enabled, **the user's own program**, on `PATH`, signed in by t
 an API key. Flottille installs nothing and provides no login of its own; an API key in the
 environment counts as a sign-in, and is never printed, logged or stored.
 
-For Claude, the user's `claude`, signed in or given `ANTHROPIC_API_KEY`. Nothing else is installed: the bridge that speaks ACP in front of it is Flottille's own binary
-(below). Flottille provides no login of its own and never reads, copies or prints the user's
-credentials: `flottille doctor` checks that the login file (`$CLAUDE_CONFIG_DIR/.credentials.json`,
-else `~/.claude/.credentials.json`) exists, without opening it, or that `ANTHROPIC_API_KEY` is set,
-without printing it. On macOS the login is in the Keychain and there is no file.
+For Claude, the user's `claude`, signed in or given `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`
+or `ANTHROPIC_AUTH_TOKEN`. Nothing else is installed: the bridge that speaks ACP in front of it is
+Flottille's own binary (below). Flottille provides no login of its own and never reads, copies or
+prints the user's credentials: `flottille doctor` checks that the login file
+(`$CLAUDE_CONFIG_DIR/.credentials.json`, else `~/.claude/.credentials.json`) exists, without
+opening it, or that one of those variables is set, without printing it. On macOS the login is in
+the Keychain and there is no file.
 
 `flottille doctor` reports `claude` with its path and version (`claude --version`, given 5 s),
 beside the version this Flottille was checked against (2.1.295): another version is a warning that
 names both, not a failure, since the stream-json mode the bridge speaks may have changed. It
-fails while `claude` is not on `PATH` or neither the login file nor the key is there.
+fails while `claude` is not on `PATH`. Neither the login file nor a variable there is a warning,
+not a failure: the login may be where Flottille does not look (the Keychain), and an agent that
+is not signed in at all fails at its first prompt, saying so ("The Claude bridge", below).
 
 For OpenCode, the user's `opencode`, signed in (`opencode auth login`; the login file,
 `$XDG_DATA_HOME/opencode/auth.json` else `~/.local/share/opencode/auth.json`, is checked for its
 presence only) or given the API key of one of the model providers it takes: `ANTHROPIC_API_KEY`,
 `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `GEMINI_API_KEY`,
 `GROQ_API_KEY`, `MISTRAL_API_KEY`, `DEEPSEEK_API_KEY`, `XAI_API_KEY`, `OPENCODE_API_KEY` (the list
-is a choice the maintainer can revise). Its version is checked against 1.19.0, the version whose
-bare mode was qualified ("Bare mode for OpenCode", below): another one is a warning.
+is a choice the maintainer can revise). Neither is a warning, not a failure: OpenCode offers
+some free models with no sign-in, and takes a cloud's credentials (`AWS_*` for Bedrock, say) that
+Flottille does not count. Its version is checked against 1.19.0, the version whose bare mode was
+qualified ("Bare mode for OpenCode", below): another one is a warning.
 
 An agent is refused at its start, with a sentence that says why and names the providers that
 are ready, while its provider is not enabled or not ready ("Providers", below).
@@ -69,8 +75,10 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   enabled = true
   ```
 
-- **Ready**: enabled, its program on `PATH`, and signed in (its login file is there or one of its
-  API keys is set). A test override (below) stands for the program and the sign-in.
+- **Ready**: enabled, and its program on `PATH`. A sign-in Flottille can see (its login file is
+  there or one of its API keys is set) is not needed: without one, `doctor` warns, and an agent
+  that is not signed in at all fails once its provider refuses it. A test override (below) stands for
+  the program.
 - **An agent's provider** is the one asked (`--provider`, `agent_start`'s and `agent_launch`'s
   `provider`), else the project's (`provider` in its file, `docs/projects.md`), else the first one
   enabled; a child's is its parent's unless it names another. It is kept in the agent and never

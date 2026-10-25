@@ -366,8 +366,7 @@ fn doctor_text(report: &Value) -> String {
                 format!("{} {title} login: {key} is set\n", mark(true))
             } else {
                 format!(
-                    "{} {title} login: no {}, and no API key\n",
-                    mark(false),
+                    "warn {title} login: no {}, and no API key\n",
                     text(login, "path")
                 )
             });

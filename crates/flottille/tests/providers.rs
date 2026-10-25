@@ -431,3 +431,15 @@ fn agent_show_list_and_tree_give_each_agent_s_provider_and_model() {
     assert_eq!(listed["agents"][0]["provider"], "opencode");
     assert_eq!(listed["agents"][0]["model"], "open/medium");
 }
+
+#[test]
+fn a_claude_agent_without_a_login_file_still_starts() {
+    // Signed in where the daemon cannot see it (the macOS Keychain, say): the start is not refused.
+    let user = User::with_fake_claude();
+    std::fs::remove_file(user.path("home/.claude/.credentials.json")).unwrap();
+    project(&user);
+
+    let started = id(&start(&user, json!({"message": "hello"})).unwrap());
+
+    eventually("the session", || agent(&user, &started)["state"] == "idle");
+}

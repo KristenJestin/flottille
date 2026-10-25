@@ -268,12 +268,8 @@ impl Check {
                 provider.program, provider.install
             ));
         }
-        if !self.login_present && self.api_key.is_none() {
-            return Some(format!(
-                "is not ready: it is not signed in ({})",
-                provider.sign_in
-            ));
-        }
+        // A missing login is never a refusal: the provider may be signed in where the daemon
+        // cannot look (the macOS Keychain, a cloud's own credentials), or need no sign-in.
         None
     }
 
@@ -281,16 +277,32 @@ impl Check {
         self.why_not().is_none()
     }
 
-    /// A warning when the program is not the version this Flottille was checked against.
-    pub fn warning(&self) -> Option<String> {
+    /// What may stop its agents that the daemon cannot tell for sure: a version other than the
+    /// one this Flottille was checked against, no sign-in it can see.
+    pub fn warnings(&self) -> Vec<String> {
         let provider = self.provider;
-        let version = self.version.as_deref()?;
-        (version != provider.checked).then(|| {
-            format!(
+        let mut warnings = Vec::new();
+        if let Some(version) = self.version.as_deref()
+            && version != provider.checked
+        {
+            warnings.push(format!(
                 "{} is {version}, and this Flottille was checked against {}: {}",
                 provider.program, provider.checked, provider.may_change
-            )
-        })
+            ));
+        }
+        if self.enabled
+            && self.overridden.is_none()
+            && self.program.is_some()
+            && !self.login_present
+            && self.api_key.is_none()
+        {
+            warnings.push(format!(
+                "{} is not signed in where Flottille can see it, and its agents fail if it is not \
+                 signed in at all: {}",
+                provider.title, provider.sign_in
+            ));
+        }
+        warnings
     }
 
     /// The provider as `flottille doctor` and `provider.list` report it.
@@ -335,7 +347,7 @@ pub fn doctor(paths: &Paths) -> Value {
         Err(error) => (Settings::default(), vec![error]),
     };
     let checks = checks(&settings, true);
-    warnings.extend(checks.iter().filter_map(Check::warning));
+    warnings.extend(checks.iter().flat_map(Check::warnings));
     let ready = checks.iter().any(|c| c.enabled) && checks.iter().all(|c| !c.enabled || c.ready());
     json!({
         "providers": checks.iter().map(Check::to_json).collect::<Vec<_>>(),
@@ -651,7 +663,7 @@ fn list(daemon: &Daemon, project: Option<&Project>) -> Result<Value, Failure> {
         .iter()
         .map(|check| {
             let mut entry = check.to_json();
-            entry["warning"] = json!(check.warning());
+            entry["warnings"] = json!(check.warnings());
             entry["models"] = json!(known_models(daemon, check));
             entry
         })

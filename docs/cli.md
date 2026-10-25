@@ -82,7 +82,8 @@ program, its version and its login (the login file checked for presence, never r
 key set, named, never printed), and whether its agents can run, with why not. Exit code 1 when no
 provider is enabled or an enabled one cannot run; a provider that is not enabled is not a
 failure. A program of another version than the one this Flottille was checked against is a
-warning that names both, not a failure. `--json` prints the report: `{"providers": [{"name",
+warning that names both, not a failure; so is a provider with no login file and no API key, which
+may be signed in where Flottille does not look (the macOS Keychain). `--json` prints the report: `{"providers": [{"name",
 "title", "enabled", "ready", "why", "program": {"name", "present", "path", "version", "checked"},
 "login": {"present", "path", "api_key"}, "override"}], "warnings", "ready"}` (`provider.list`,
 `docs/protocol.md`, gives the same with the models).
