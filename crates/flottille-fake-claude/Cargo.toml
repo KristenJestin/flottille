@@ -1,0 +1,11 @@
+[package]
+name = "flottille-fake-claude"
+description = "A scripted `claude` speaking stream-json, for the tests of Flottille's Claude bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+serde_json = "1.0.154"
