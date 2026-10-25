@@ -217,7 +217,7 @@ Follow it with `flottille agent read bd7ed8152969`, or `flottille watch --after 
 ### `flottille agent run <project> <message>`
 
 `start`, then follows the agent and prints its reply until its first turn ends: for trying an
-agent by hand. Same options as `start`, but `--role`. `--json` prints the agent once the turn
+agent by hand. Same options as `start`, except `--role`. `--json` prints the agent once the turn
 ended, as `agent show --json` does. (It is `start` followed by `watch`, nothing more.)
 
 ### `flottille agent send <agent> <message>`
@@ -274,8 +274,11 @@ Stopped agent bd7ed8152969 and its tree; it is ended now. Its workspace stays.
 
 ### `flottille agent list`
 
-The agents, in short, of every project or of `--project <name>`: id, role, place and state.
-`--json` prints `agent.list`: `{"agents": [...]}`.
+The agents, in short, of every project or of `--project <name>`: id, role, place and state. Every
+agent, ended ones and children included, oldest first: a plain listing of the daemon's
+`agent.list`. (The pilot door's `agents_list` and `agent_status` page through the root agents,
+newest first, with `agent.trees`; the command line has no equivalent, it reads `agent list` or
+`agent tree <agent>`.) `--json` prints `agent.list`: `{"agents": [...]}`.
 
 ```
 $ flottille agent list
@@ -310,7 +313,7 @@ What your **root** agents sent you, oldest first. An entry is one of:
 |---|---|---|
 | `report` | the root called `report`: it is done, and says what it did | `agent.reported` |
 | `question` | the root called `ask_user`: it asks you something and goes on without waiting; answer it with `flottille agent send` | `agent.asked` (`to` is `user`) |
-| `failure` | the root cannot go on: its process could not start, its session could not open, or it was replaced too often (twice in 30 minutes) | `agent.failed` |
+| `failure` | the root cannot go on: its process could not start, its session could not open, an option it was asked is not one it offers, it was replaced too often (twice in 30 minutes), or its new workspace could not be prepared (`docs/events.md` also lists "its parent failed", which only concerns a child) | `agent.failed` |
 
 A child's report, question or failure goes to its parent, never to the inbox. The requests a gate
 holds for you are not here: `flottille approvals` lists them.
@@ -380,10 +383,10 @@ The door serves these tools, always in this order. Agents are named by `agent_id
 | `workspace_create {project, name, repositories?, branch?, offline?}` | makes a workspace; its preparation goes on in the background |
 | `agent_start {project, message, workspace?, model?, role?}` | starts a root agent; answers at once with its id and an event number to follow it from |
 | `agent_send {agent_id, message}` | writes to a **root** agent; refused for a child, naming its root |
-| `agent_status {agent_id?}` | what an agent does now, its last messages; every root without `agent_id` |
+| `agent_status {agent_id?, ended?, before?}` | what an agent does now, its last messages; without `agent_id`, the **live** root agents, newest first, 20 at a time (`ended: true` adds the ended and failed ones; a page that does not hold them all ends with the call that reads on, with `before`) |
 | `agent_read {agent_id, after?}` | a page of the conversation of **any** agent of a tree, with how to read on |
 | `agent_stop {agent_id}` | stops a **root** agent and its tree; refused for a child, naming its root |
-| `agents_list {project?, agent_id?}` | the agents as trees, with what each does |
+| `agents_list {project?, agent_id?, ended?, before?}` | the agents as trees, with what each does: the live roots with their trees, newest first, 20 at a time and paged like `agent_status`; `agent_id` shows the one tree of that agent's root |
 | `approvals_list` | the requests that wait for the user |
 | `events_since {after, wait_seconds?}` | the events after a number, oldest first, with the number to ask next |
 
