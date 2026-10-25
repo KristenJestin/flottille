@@ -415,11 +415,7 @@ fn definition(name: &str) -> Option<&'static Definition> {
 /// The tool as a client lists it. `always_load` loads it upfront in Claude Code instead of
 /// through tool search: for the agents Flottille runs, which have nothing else.
 pub fn tool_of(definition: &Definition, always_load: bool) -> Tool {
-    let mut meta = Map::new();
-    if always_load {
-        meta.insert("anthropic/alwaysLoad".into(), true.into());
-    }
-    serde_json::from_value(json!({
+    let mut tool = json!({
         "name": definition.name,
         "title": definition.title,
         "description": definition.description,
@@ -431,10 +427,14 @@ pub fn tool_of(definition: &Definition, always_load: bool) -> Tool {
             "destructiveHint": definition.destructive,
             "openWorldHint": false,
         },
-        // In bare mode Flottille's tools are all the agent has: loaded upfront, never searched.
-        "_meta": meta,
-    }))
-    .expect("a tool definition is a tool")
+    });
+    // The agents Flottille runs have nothing but these tools: loaded upfront, never searched. The
+    // pilot door's tools are found through tool search by an agent that has others, and carry no
+    // `_meta`.
+    if always_load {
+        tool["_meta"] = json!({"anthropic/alwaysLoad": true});
+    }
+    serde_json::from_value(tool).expect("a tool definition is a tool")
 }
 
 /// What a token lets its bearer do: the agent's tools that exist, in its order, in its place.

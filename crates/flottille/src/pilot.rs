@@ -10,7 +10,9 @@
 use std::time::Duration;
 
 use flottille_core::paths::Paths;
-use flottille_core::protocol::{AgentName, AgentRun, AgentSend, WatchParams, WorkspaceCreate};
+use flottille_core::protocol::{
+    AgentName, AgentRun, AgentSend, AgentTrees, WatchParams, WorkspaceCreate,
+};
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
     Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig,
@@ -31,9 +33,11 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 /// The longest a call waits for an event: under Claude Code's two minutes, after which a call
 /// moves to a background task.
 const WAIT_MAX: u64 = 90;
-/// The events `events_since` gives at once, at most, and the room their lines take.
+/// The events `events_since` gives at once, at most.
 const EVENTS_PAGE: usize = 100;
-const EVENTS_ROOM: usize = 36_000;
+/// The room the body of a result takes once shown (escaped), what is left of `RESULT_LIMIT` being
+/// the line that says how to read on, which is never cut.
+const ROOM: usize = 36_000;
 /// What a line of an event keeps of each text of its data, and of its whole.
 const EVENT_TEXT: usize = 500;
 const EVENT_LINE: usize = 2_000;
@@ -56,7 +60,8 @@ launch sub-agents of its own.
 - agent_send writes to a root agent, which plays the message after the turn that runs. A \
 sub-agent belongs to its parent: agent_send and agent_stop refuse it, and name its root.
 - agent_status says what an agent does now; agent_read pages the conversation of any agent of \
-a tree; agents_list shows the trees.
+a tree; agents_list shows the trees. Both list the live root agents, newest first, a page at a \
+time: ended: true adds the ended ones, and a page says how to read on.
 - agent_stop stops a root agent and its whole tree.
 
 Following without polling: events_since {after, wait_seconds} returns the events after an \
@@ -163,14 +168,17 @@ const TOOLS: [Definition; 11] = [
         title: "Say what an agent does",
         description: "Says what one agent does now (in a turn, running a command, waiting for \
             an approval or for its parent, idle), how long since its last sign of activity, \
-            its context use and its last messages. Without agent_id: every root agent. For \
-            the conversation itself use agent_read.",
+            its context use and its last messages. Without agent_id: the live root agents, \
+            newest first, 20 at a time (ended adds the ended ones; the page says how to read \
+            on with before). For the conversation itself use agent_read.",
         read_only: true,
         idempotent: true,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "agent_id": {"type": "string", "description": "Every root agent when left out."}
+                "agent_id": {"type": "string", "description": "The live root agents when left out."},
+                "ended": {"type": "boolean", "description": "Also the root agents that ended or failed (without agent_id)."},
+                "before": {"type": "string", "description": "Read on after this root agent, the last of the page before (without agent_id)."}
             }, "additionalProperties": false})
         },
     },
@@ -210,15 +218,19 @@ const TOOLS: [Definition; 11] = [
         name: "agents_list",
         title: "List the agents as trees",
         description: "Lists the agents as trees, each root followed by the sub-agents it \
-            launched: id, title, role, project, and what it does now. All of them, one \
-            project's, or the tree of one agent's root. Use agent_status for detail.",
+            launched: id, title, role, project, and what it does now. The live roots, newest \
+            first, 20 at a time (ended adds the ended ones; the page says how to read on with \
+            before), one project's, or the tree of one agent's root. Use agent_status for \
+            detail.",
         read_only: true,
         idempotent: true,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
                 "project": {"type": "string", "description": "Only this project's."},
-                "agent_id": {"type": "string", "description": "Only the tree of this agent's root."}
+                "agent_id": {"type": "string", "description": "Only the tree of this agent's root."},
+                "ended": {"type": "boolean", "description": "Also the root agents that ended or failed."},
+                "before": {"type": "string", "description": "Read on after this root agent, the last of the page before."}
             }, "additionalProperties": false})
         },
     },
@@ -323,8 +335,18 @@ impl ServerHandler for Pilot {
     }
 }
 
+/// The characters a text takes once `shown`: escaped.
+fn weight(text: &str) -> usize {
+    deliveries::escape(text).chars().count()
+}
+
 /// What the caller reads of an outcome, and whether it is an error: escaped (what an agent said
 /// or a file held never forges a marker) and cut under its limit.
+///
+/// Nothing is masked of secrets again here: the daemon masks the texts it stores (an agent's
+/// messages, reports and questions, the arguments and reasons of a request, a failure's output;
+/// `docs/events.md`), and the door only shows what the daemon answers, so there is nothing
+/// unmasked left to leak.
 fn shown(outcome: Outcome) -> (String, bool) {
     let (text, limit, error) = match outcome {
         Outcome::Done(text) | Outcome::Held(text) => (text, RESULT_LIMIT, false),
@@ -338,11 +360,22 @@ fn refused(text: impl Into<String>) -> Outcome {
     Outcome::Refused(text.into())
 }
 
-/// A daemon's answer that is an error: its sentence when it is one to act on, a failure when the
-/// daemon could not be reached or could not do it.
+/// A daemon's answer that is an error: a refusal, with its sentence to act on, when the request
+/// was wrong or cannot be done as asked; a failure when the daemon could not be reached or could
+/// not do it.
 fn failure(error: Box<dyn std::error::Error>) -> Outcome {
     match error.downcast_ref::<DaemonError>() {
-        Some(DaemonError { code, message }) if code != "unavailable" => {
+        Some(DaemonError { code, message })
+            if matches!(
+                code.as_str(),
+                "refused"
+                    | "not-found"
+                    | "invalid-params"
+                    | "invalid-request"
+                    | "invalid-config"
+                    | "unknown-method"
+            ) =>
+        {
             Outcome::Refused(format!("refused: {message}"))
         }
         _ => Outcome::Failed(error.to_string()),
@@ -481,8 +514,35 @@ fn workspace_create(paths: &Paths, args: Value) -> Done {
     ))
 }
 
+/// What `agent_start` takes, its schema's fields and no other: the daemon's own `AgentRun` also
+/// has an effort and a mode, which an outside agent must not choose.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Start {
+    project: String,
+    message: String,
+    workspace: Option<String>,
+    model: Option<String>,
+    role: Option<String>,
+}
+
 fn agent_start(paths: &Paths, args: Value) -> Done {
-    let asked: AgentRun = arguments("agent_start", args)?;
+    let Start {
+        project,
+        message,
+        workspace,
+        model,
+        role,
+    } = arguments("agent_start", args)?;
+    let asked = AgentRun {
+        project,
+        workspace,
+        model,
+        effort: None,
+        mode: None,
+        role,
+        message,
+    };
     let started = ask(paths, "agent.start", &asked)?;
     let agent = &started["agent"];
     let id = text(agent, "id");
@@ -625,28 +685,138 @@ fn status_block(status: &Value) -> String {
     out
 }
 
+/// What a listing of root agents asked, to say it again with a cursor.
+struct Listing {
+    tool: &'static str,
+    project: Option<String>,
+    ended: bool,
+}
+
+impl Listing {
+    /// The call that reads on after a root, or from the newest.
+    fn call(&self, before: Option<&str>, ended: bool) -> String {
+        let mut parts = Vec::new();
+        if let Some(before) = before {
+            parts.push(format!("\"before\":{}", json!(before)));
+        }
+        if ended {
+            parts.push("\"ended\":true".to_owned());
+        }
+        if let Some(project) = &self.project {
+            parts.push(format!("\"project\":{}", json!(project)));
+        }
+        format!("{} {{{}}}", self.tool, parts.join(","))
+    }
+}
+
+/// A page of root agents (the answer of `agent.trees`), each as `show` says, newest first, as
+/// many as fit, and how to read on.
+fn roots_text(answer: &Value, listing: &Listing, show: fn(&Value) -> String) -> String {
+    let trees = answer["trees"].as_array().map_or(&[][..], Vec::as_slice);
+    let hidden = answer["hidden"].as_u64().unwrap_or(0);
+    let ended = if listing.ended || hidden == 0 {
+        String::new()
+    } else {
+        let (agents, them) = match hidden {
+            1 => ("agent is", "it"),
+            _ => ("agents are", "them"),
+        };
+        format!(
+            "{hidden} ended root {agents} not shown: {} lists {them}.",
+            listing.call(None, true)
+        )
+    };
+    if trees.is_empty() {
+        return if hidden > 0 && !listing.ended {
+            format!("No live root agent. {ended}")
+        } else {
+            "No agent yet: agent_start starts one.".into()
+        };
+    }
+    let mut out = String::new();
+    let mut size = 0;
+    let mut kept = 0;
+    for tree in trees {
+        let mut block = show(tree);
+        let mut weight = weight(&block);
+        if kept > 0 && size + weight > ROOM {
+            break;
+        }
+        if weight > ROOM {
+            // A tree alone larger than the room: escaping grows a text by a fifth at most.
+            block = cut(&block, ROOM / 6 * 5);
+            weight = self::weight(&block);
+        }
+        size += weight + 1;
+        out.push_str(&block);
+        out.push('\n');
+        kept += 1;
+    }
+    let last = trees[kept - 1]["status"]["agent"]["id"]
+        .as_str()
+        .unwrap_or_default();
+    if kept < trees.len() || answer["more"] == true {
+        if !ended.is_empty() {
+            out.push_str(&format!("\n{ended}"));
+        }
+        out.push_str(&format!(
+            "\nNewest first; more root agents follow: {}",
+            listing.call(Some(last), listing.ended)
+        ));
+    } else if ended.is_empty() {
+        out.push_str("\nThat is every root agent.");
+    } else {
+        out.push_str(&format!("\nThat is every live root agent. {ended}"));
+    }
+    out
+}
+
+/// A root's status, as `agent_status` shows it.
+fn status_of_tree(tree: &Value) -> String {
+    status_block(&tree["status"])
+}
+
+/// A tree of agents, a line each, deeper agents indented.
+fn tree_block(tree: &Value) -> String {
+    let mut lines = Vec::new();
+    for entry in tree["agents"].as_array().into_iter().flatten() {
+        let agent = &entry["agent"];
+        let named = match agent["title"].as_str() {
+            Some(title) => format!("\"{title}\" (agent {})", text(agent, "id")),
+            None => format!("agent {}", text(agent, "id")),
+        };
+        let mut line = format!(
+            "{}- {named}, {} in {}: {}",
+            "  ".repeat(agent["depth"].as_u64().unwrap_or(0) as usize),
+            text(agent, "role"),
+            place(agent),
+            text(entry, "doing")
+        );
+        if entry["needs_user"] == true {
+            line.push_str("; a request waits for the user");
+        }
+        lines.push(line);
+    }
+    lines.join("\n")
+}
+
 fn agent_status(paths: &Paths, args: Value) -> Done {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Status {
         agent_id: Option<String>,
+        #[serde(default)]
+        ended: bool,
+        before: Option<String>,
     }
     let asked: Status = arguments("agent_status", args)?;
-    let ids = match &asked.agent_id {
-        Some(id) => vec![id.clone()],
-        None => ask(paths, "agent.list", Value::Null)?["agents"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|agent| agent["parent"].is_null())
-            .filter_map(|agent| agent["id"].as_str().map(str::to_owned))
-            .collect(),
-    };
-    if ids.is_empty() {
-        return Ok("No agent yet: agent_start starts one.".into());
-    }
-    let mut blocks = Vec::new();
-    for id in ids {
+    if let Some(id) = &asked.agent_id {
+        if asked.ended || asked.before.is_some() {
+            return Err(refused(
+                "refused: ended and before page through the root agents, and agent_id names one \
+                 agent: leave agent_id out to list them, or leave ended and before out",
+            ));
+        }
         let status = ask(
             paths,
             "agent.status",
@@ -655,10 +825,37 @@ fn agent_status(paths: &Paths, args: Value) -> Done {
                 after: None,
             },
         )
-        .map_err(|outcome| unknown_agent(outcome, &id))?;
-        blocks.push(status_block(&status));
+        .map_err(|outcome| unknown_agent(outcome, id))?;
+        return Ok(status_block(&status));
     }
-    Ok(blocks.join("\n"))
+    let listing = Listing {
+        tool: "agent_status",
+        project: None,
+        ended: asked.ended,
+    };
+    let answer = trees(paths, &listing, asked.before)?;
+    Ok(roots_text(&answer, &listing, status_of_tree))
+}
+
+/// One round trip: a page of root agents with their trees.
+fn trees(
+    paths: &Paths,
+    listing: &Listing,
+    before: Option<String>,
+) -> std::result::Result<Value, Outcome> {
+    ask(
+        paths,
+        "agent.trees",
+        AgentTrees {
+            project: listing.project.clone(),
+            ended: listing.ended,
+            before: before.clone(),
+        },
+    )
+    .map_err(|outcome| match &before {
+        Some(id) => unknown_agent(outcome, id),
+        None => outcome,
+    })
 }
 
 fn agents_list(paths: &Paths, args: Value) -> Done {
@@ -667,23 +864,18 @@ fn agents_list(paths: &Paths, args: Value) -> Done {
     struct List {
         project: Option<String>,
         agent_id: Option<String>,
+        #[serde(default)]
+        ended: bool,
+        before: Option<String>,
     }
     let asked: List = arguments("agents_list", args)?;
-    let anchors = match &asked.agent_id {
-        Some(id) => vec![id.clone()],
-        None => ask(paths, "agent.list", json!({"project": asked.project}))?["agents"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|agent| agent["parent"].is_null())
-            .filter_map(|agent| agent["id"].as_str().map(str::to_owned))
-            .collect(),
-    };
-    if anchors.is_empty() {
-        return Ok("No agent yet: agent_start starts one.".into());
-    }
-    let mut out = String::new();
-    for id in anchors {
+    if let Some(id) = &asked.agent_id {
+        if asked.project.is_some() || asked.ended || asked.before.is_some() {
+            return Err(refused(
+                "refused: agent_id names the one tree to show: leave project, ended and before \
+                 out, or leave agent_id out to list the trees",
+            ));
+        }
         let tree = ask(
             paths,
             "agent.tree",
@@ -692,26 +884,19 @@ fn agents_list(paths: &Paths, args: Value) -> Done {
                 after: None,
             },
         )
-        .map_err(|outcome| unknown_agent(outcome, &id))?;
-        for entry in tree["agents"].as_array().into_iter().flatten() {
-            let agent = &entry["agent"];
-            let named = match agent["title"].as_str() {
-                Some(title) => format!("\"{title}\" (agent {})", text(agent, "id")),
-                None => format!("agent {}", text(agent, "id")),
-            };
-            out.push_str(&format!(
-                "{}- {named}, {} in {}: {}",
-                "  ".repeat(agent["depth"].as_u64().unwrap_or(0) as usize),
-                text(agent, "role"),
-                place(agent),
-                text(entry, "doing")
-            ));
-            if entry["needs_user"] == true {
-                out.push_str("; a request waits for the user");
-            }
-            out.push('\n');
-        }
+        .map_err(|outcome| unknown_agent(outcome, id))?;
+        return Ok(format!(
+            "{}\n\nagent_status says more of one agent, agent_read reads its conversation.",
+            tree_block(&tree)
+        ));
     }
+    let listing = Listing {
+        tool: "agents_list",
+        project: asked.project,
+        ended: asked.ended,
+    };
+    let answer = trees(paths, &listing, asked.before)?;
+    let mut out = roots_text(&answer, &listing, tree_block);
     out.push_str("\nagent_status says more of one agent, agent_read reads its conversation.");
     Ok(out)
 }
@@ -778,6 +963,14 @@ fn events_since(paths: &Paths, args: Value) -> Done {
         .as_u64()
         .unwrap_or(after);
 
+    if after > last {
+        return Err(refused(format!(
+            "refused: there is no event {after} yet, the last is #{last}: ask again with \
+             events_since {{\"after\": {last}, \"wait_seconds\": {WAIT_MAX}}} to wait for what \
+             comes next"
+        )));
+    }
+
     let mut events = Vec::new();
     if last > after {
         // Stored events: those up to the last one, not further.
@@ -818,11 +1011,14 @@ fn events_text(events: &[flottille_core::protocol::Event], after: u64, last: u64
     let mut more = false;
     for event in events {
         let line = event_line(event);
-        if size + line.len() > EVENTS_ROOM && !lines.is_empty() {
+        // What the caller will read is this line escaped (`shown`): measured so, since escaping
+        // makes a marker-dense text grow, and the cursor below must stay inside the limit.
+        let weight = weight(&line);
+        if size + weight > ROOM && !lines.is_empty() {
             more = true;
             break;
         }
-        size += line.len() + 1;
+        size += weight + 1;
         lines.push(line);
         cursor = event.seq;
     }
@@ -907,5 +1103,191 @@ mod tests {
         assert!(line.starts_with("#7 agent.message "));
         assert!(line.chars().count() < 700, "{}", line.chars().count());
         assert!(line.contains("‹+"));
+    }
+
+    #[test]
+    fn a_page_of_events_dense_in_markers_still_ends_with_its_cursor_once_shown() {
+        // What an agent said can be all markers: shown escaped, each grows, and the cursor line
+        // after them must still be there.
+        let dense = |seq: u64, marker: &str| flottille_core::protocol::Event {
+            seq,
+            at: 0,
+            name: "agent.message".into(),
+            data: json!({"text": marker.repeat(500 / marker.len())}),
+        };
+        for marker in ["<flottille-note", "[flottille:", "</flottille-note"] {
+            let events: Vec<_> = (1..=EVENTS_PAGE as u64).map(|n| dense(n, marker)).collect();
+            let (text, error) = shown(Outcome::Done(events_text(&events, 0, 500)));
+            assert!(!error);
+            assert!(
+                text.chars().count() <= RESULT_LIMIT,
+                "{marker}: {}",
+                text.chars().count()
+            );
+            let (_, rest) = text
+                .rsplit_once("More events follow: events_since {\"after\": ")
+                .unwrap_or_else(|| panic!("{marker}: the cursor was cut"));
+            let cursor: u64 = rest.trim_end_matches('}').parse().unwrap();
+            assert!(text.contains(&format!("#{cursor} ")), "{marker}");
+            assert!(!text.contains(&format!("#{} ", cursor + 1)), "{marker}");
+            // Escaped once, not twice.
+            assert!(!text.contains("\\\\[flottille:"), "{marker}");
+        }
+    }
+
+    #[test]
+    fn a_daemon_error_is_a_refusal_when_the_request_was_wrong_and_a_failure_when_it_could_not_be_done()
+     {
+        let error = |code: &str| -> Box<dyn std::error::Error> {
+            Box::new(DaemonError {
+                code: code.into(),
+                message: "a sentence".into(),
+            })
+        };
+        for code in [
+            "refused",
+            "not-found",
+            "invalid-params",
+            "invalid-request",
+            "invalid-config",
+            "unknown-method",
+        ] {
+            assert!(
+                matches!(failure(error(code)), Outcome::Refused(text) if text == "refused: a sentence"),
+                "{code}"
+            );
+        }
+        for code in ["unavailable", "something-new"] {
+            assert!(
+                matches!(failure(error(code)), Outcome::Failed(text) if text == "a sentence"),
+                "{code}"
+            );
+        }
+    }
+
+    /// What `agent.trees` answers for `count` roots, newest first, each with a tree of `size`.
+    fn trees_answer(count: u64, size: u64, more: bool) -> Value {
+        let trees: Vec<Value> = (0..count)
+            .map(|n| {
+                let agent = |k: u64| {
+                    json!({"id": format!("{:06x}{k:06x}", count - n), "role": "lead",
+                        "title": format!("title {n} {k} <flottille-note"), "project": "app",
+                        "workspace": null, "parent": null, "depth": u64::from(k > 0),
+                        "state": "idle"})
+                };
+                json!({
+                    "status": {
+                        "agent": agent(0), "name": format!("agent {:06x}000000", count - n),
+                        "line": format!("agent {:06x}000000, idle for 3 min", count - n),
+                        "doing": "idle",
+                        "waiting_on": null, "needs_user": false,
+                        "messages": ["m".repeat(600), "[flottille:x] ".repeat(40)],
+                    },
+                    "agents": (0..size).map(|k| json!({
+                        "agent": agent(k), "doing": "idle for 3 min", "waiting_on": null,
+                        "needs_user": false
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        json!({"trees": trees, "more": more, "hidden": 0})
+    }
+
+    fn listing(tool: &'static str) -> Listing {
+        Listing {
+            tool,
+            project: None,
+            ended: false,
+        }
+    }
+
+    #[test]
+    fn many_roots_are_shown_newest_first_under_the_limit_with_the_cursor_to_the_rest() {
+        // Trees of 40 agents do not fit 20 at a time; a status is short and the 20 do.
+        for (tool, show, cut_short) in [
+            ("agents_list", tree_block as fn(&Value) -> String, true),
+            ("agent_status", status_of_tree, false),
+        ] {
+            // The daemon's page is 20 roots, each with 40 agents: more than fits.
+            let answer = trees_answer(20, 40, true);
+            let (text, error) = shown(Outcome::Done(roots_text(&answer, &listing(tool), show)));
+            assert!(!error);
+            assert!(
+                text.chars().count() <= RESULT_LIMIT,
+                "{tool}: {}",
+                text.chars().count()
+            );
+            // The newest root is the first one, and the last one shown is the cursor's.
+            let ids: Vec<&str> = answer["trees"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["status"]["agent"]["id"].as_str().unwrap())
+                .collect();
+            assert!(
+                text.find(ids[0]).unwrap() < text.find(ids[1]).unwrap(),
+                "{tool}"
+            );
+            let (_, rest) = text
+                .rsplit_once(&format!("{tool} {{\"before\":\""))
+                .unwrap_or_else(|| panic!("{tool}: no cursor in {}", &text[text.len() - 300..]));
+            let before = &rest[..12];
+            let at = ids
+                .iter()
+                .position(|id| *id == before)
+                .expect("a root's id");
+            assert!(text.contains(ids[at]));
+            if cut_short {
+                assert!(at > 0 && at < ids.len() - 1, "{tool}: {at}");
+                assert!(
+                    !text.contains(ids[at + 1]),
+                    "{tool}: a root past the cursor"
+                );
+            } else {
+                assert_eq!(at, ids.len() - 1, "{tool}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_cursor_keeps_what_the_listing_asked() {
+        let answer = trees_answer(3, 1, true);
+        let asked = Listing {
+            tool: "agents_list",
+            project: Some("app".into()),
+            ended: true,
+        };
+        let text = roots_text(&answer, &asked, tree_block);
+        let last = answer["trees"][2]["status"]["agent"]["id"]
+            .as_str()
+            .unwrap();
+        assert!(
+            text.ends_with(&format!(
+                "agents_list {{\"before\":\"{last}\",\"ended\":true,\"project\":\"app\"}}"
+            )),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn live_roots_are_the_default_and_the_ended_ones_are_said() {
+        let mut answer = trees_answer(2, 1, false);
+        answer["hidden"] = json!(4);
+        let text = roots_text(&answer, &listing("agents_list"), tree_block);
+        assert!(text.contains("4 ended root agents are not shown"), "{text}");
+        assert!(text.contains("agents_list {\"ended\":true}"), "{text}");
+        let none = roots_text(
+            &json!({"trees": [], "more": false, "hidden": 4}),
+            &listing("agent_status"),
+            status_of_tree,
+        );
+        assert!(none.starts_with("No live root agent"), "{none}");
+        assert!(none.contains("agent_status {\"ended\":true}"), "{none}");
+        let nothing = roots_text(
+            &json!({"trees": [], "more": false, "hidden": 0}),
+            &listing("agent_status"),
+            status_of_tree,
+        );
+        assert!(nothing.starts_with("No agent yet"), "{nothing}");
     }
 }

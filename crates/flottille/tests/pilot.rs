@@ -206,7 +206,10 @@ fn a_pilot_starts_a_root_agent_sends_it_a_message_reads_its_conversation_sees_it
     // Stopping the root stops its tree, the child first.
     let stopped = ok(pilot.call("agent_stop", json!({"agent_id": root})));
     assert!(stopped.contains(&root), "{stopped}");
-    let tree = ok(pilot.call("agents_list", json!({})));
+    // The ended ones are left out of the default listing, and asked for by `ended`.
+    let live = ok(pilot.call("agents_list", json!({})));
+    assert!(live.starts_with("No live root agent."), "{live}");
+    let tree = ok(pilot.call("agents_list", json!({"ended": true})));
     let ended = tree.lines().filter(|l| l.contains("ended")).count();
     assert_eq!(ended, 2, "{tree}");
     let status = ok(pilot.call("agent_status", json!({"agent_id": child})));
@@ -293,7 +296,7 @@ fn the_door_lists_exactly_its_tools_in_their_order_on_both_revisions() {
                 assert!(hints[hint].is_boolean(), "{name} has no {hint}");
             }
             // The outside agent finds them through tool search: none is loaded upfront for it.
-            assert!(tool["_meta"]["anthropic/alwaysLoad"].is_null(), "{name}");
+            assert!(tool.get("_meta").is_none(), "{name}: {tool}");
             assert_eq!(
                 hints["readOnlyHint"],
                 [
@@ -603,4 +606,138 @@ fn a_root_s_report_and_question_and_failure_reach_the_inbox_and_the_door_reads_t
     assert_eq!(of(&asker)["kind"], "question");
     assert_eq!(of(&asker)["text"], "which database?");
     assert_eq!(of(&doomed)["kind"], "failure");
+}
+
+#[test]
+fn agent_start_refuses_an_argument_its_schema_does_not_have_and_starts_nothing() {
+    let user = user();
+    project(&user);
+    let pilot = Mcp::pilot(&user);
+
+    // The schema has project, message, workspace, model and role: a mode or an effort would
+    // reach the agent's session, and an unknown name is a mistake to say.
+    for extra in [
+        json!({"mode": "bypassPermissions"}),
+        json!({"effort": "max"}),
+        json!({"colour": "blue"}),
+    ] {
+        let mut arguments = json!({"project": "app", "workspace": "w", "message": "go"});
+        arguments
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let text = refused(pilot.call("agent_start", arguments));
+        let name = extra.as_object().unwrap().keys().next().unwrap().clone();
+        assert!(
+            text.contains("agent_start") && text.contains(&name),
+            "{text}"
+        );
+        assert!(text.chars().count() < 2_000, "{}", text.chars().count());
+    }
+    let listed = user.call("agent.list", Value::Null).unwrap();
+    assert_eq!(listed["agents"], json!([]), "an agent was started");
+    assert!(
+        user.received_requests("session/set_config_option")
+            .is_empty()
+            && user.received_requests("session/set_mode").is_empty()
+    );
+}
+
+#[test]
+fn events_since_an_event_number_that_does_not_exist_yet_is_refused_naming_the_last() {
+    let user = user();
+    project(&user);
+    let pilot = Mcp::pilot(&user);
+    start(&pilot, "just start");
+
+    let all = ok(pilot.call("events_since", json!({"after": 0})));
+    assert!(all.contains("That is all for now"), "{all}");
+    let last = cursor(&all);
+
+    // The agent goes on working: the last number is the daemon's now, at least the one read.
+    let ahead = refused(pilot.call("events_since", json!({"after": last + 1_000})));
+    let (_, named) = ahead.split_once("the last is #").expect("the last number");
+    let named: u64 = named
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(named >= last && named < last + 1_000, "{ahead}");
+    assert!(ahead.contains("events_since"), "{ahead}");
+    assert!(ahead.chars().count() < 2_000);
+    // That number itself is fine: it is the last, not past it.
+    ok(pilot.call("events_since", json!({"after": named})));
+}
+
+/// The first agent id of each of the lines of a listing, in order.
+fn roots_in(text: &str, ids: &[String]) -> Vec<String> {
+    let mut found: Vec<(usize, String)> = ids
+        .iter()
+        .filter_map(|id| text.find(id.as_str()).map(|at| (at, id.clone())))
+        .collect();
+    found.sort();
+    found.into_iter().map(|(_, id)| id).collect()
+}
+
+/// The cursor `before` a listing ends with.
+fn before(text: &str) -> String {
+    let (_, rest) = text
+        .rsplit_once("\"before\":\"")
+        .unwrap_or_else(|| panic!("no cursor in {text}"));
+    rest[..12].to_owned()
+}
+
+#[test]
+fn many_root_agents_are_listed_newest_first_the_live_ones_by_default_in_pages_with_a_cursor() {
+    let user = user();
+    project(&user);
+    let pilot = Mcp::pilot(&user);
+    // 23 roots, the two oldest stopped: 21 live, a page being 20.
+    let mut ids = Vec::new();
+    for n in 0..23 {
+        ids.push(start(&pilot, &format!("root number {n}")));
+        std::thread::sleep(Duration::from_millis(3));
+    }
+    ok(pilot.call("agent_stop", json!({"agent_id": ids[0]})));
+    ok(pilot.call("agent_stop", json!({"agent_id": ids[1]})));
+    let newest_first: Vec<String> = ids.iter().rev().cloned().collect();
+
+    for tool in ["agents_list", "agent_status"] {
+        // Live roots by default, newest first, the 20 newest.
+        let page = ok(pilot.call(tool, json!({})));
+        assert!(page.chars().count() <= 40_000, "{tool}");
+        assert_eq!(roots_in(&page, &ids), newest_first[..20], "{tool}: {page}");
+        assert!(
+            page.contains("2 ended root agents are not shown"),
+            "{tool}: {page}"
+        );
+        // The cursor reaches the one left.
+        let rest = ok(pilot.call(tool, json!({"before": before(&page)})));
+        assert_eq!(roots_in(&rest, &ids), [ids[2].clone()], "{tool}: {rest}");
+        assert!(!rest.contains("before"), "{tool}: {rest}");
+
+        // The ended ones too, on request: all 23, in two pages.
+        let first = ok(pilot.call(tool, json!({"ended": true})));
+        assert_eq!(
+            roots_in(&first, &ids),
+            newest_first[..20],
+            "{tool}: {first}"
+        );
+        let second = ok(pilot.call(tool, json!({"ended": true, "before": before(&first)})));
+        assert_eq!(
+            roots_in(&second, &ids),
+            newest_first[20..],
+            "{tool}: {second}"
+        );
+        assert!(second.contains("ended"), "{tool}: {second}");
+    }
+
+    // A cursor that is not a root is a sentence to act on.
+    let lost = refused(pilot.call("agents_list", json!({"before": "0123456789ab"})));
+    assert!(
+        lost.contains("0123456789ab") && lost.contains("agents_list"),
+        "{lost}"
+    );
+    assert!(lost.chars().count() < 2_000);
 }

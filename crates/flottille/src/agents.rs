@@ -14,7 +14,7 @@ use std::time::Duration;
 use flottille_core::agent::{Agent, AgentState, Choices, new_id};
 use flottille_core::approval;
 use flottille_core::project::Project;
-use flottille_core::protocol::{AgentName, AgentRun, AgentSend};
+use flottille_core::protocol::{AgentName, AgentRun, AgentSend, AgentTrees};
 use flottille_core::secrets;
 use flottille_core::store::{AgentChange, Store, now_ms};
 use flottille_core::workspace::State;
@@ -112,6 +112,13 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let asked: AgentName = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
             Ok(json!({"agents": tree::tree(daemon, &agent)?}))
+        }
+        "agent.trees" => {
+            let asked: AgentTrees = match params {
+                Value::Null => AgentTrees::default(),
+                params => serde_json::from_value(params)?,
+            };
+            Ok(tree::trees(daemon, &asked)?)
         }
         "agent.list" => {
             #[derive(serde::Deserialize)]

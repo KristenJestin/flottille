@@ -134,6 +134,20 @@ pub struct AgentSend {
     pub message: String,
 }
 
+/// The parameters of `agent.trees`: a page of root agents with their trees, newest first.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentTrees {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// Also the roots that ended or failed; the live ones only when left out.
+    #[serde(default)]
+    pub ended: bool,
+    /// Read on: only the roots created before this one (a root id, the last of the page before).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+}
+
 /// The parameters of `agent.show`, `agent.read`, `agent.status`, `agent.cancel`, `agent.stop` and
 /// `agent.tree`.
 #[derive(Clone, Debug, Serialize, Deserialize)]

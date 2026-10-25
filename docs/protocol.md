@@ -365,6 +365,16 @@ messages, the oldest first, each cut at 600 characters.
 
 `{"project"?}`. Every agent, or the project's, in short as in `agent.tree`: `{"agents"}`.
 
+#### `agent.trees`
+
+`{"project"?, "ended"?, "before"?}`. A page of **root** agents, newest first, each with its status
+(as `agent.status`) and its whole tree (as `agent.tree`), in one answer: `{"trees": [{"status",
+"agents"}], "more", "hidden"}`. The live roots only, unless `ended` is true. A page holds at most 20
+roots; `more` says whether roots follow, and `before` (the id of the last root of the page before)
+reads on after it, even if that root has ended since. `hidden` is how many ended roots a live-only
+listing leaves out. `refused` when `before` is not a root agent. The pilot door's `agents_list` and
+`agent_status` are built on it.
+
 #### `agent.show`
 
 `{"agent", "after"?}`. `{"agent", "events"}`: the agent, and its events in order (at most 1000,

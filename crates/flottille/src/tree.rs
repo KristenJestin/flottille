@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use flottille_core::agent::{Agent, AgentState, Choices};
 use flottille_core::approval::{self, Decision, Request};
+use flottille_core::protocol::AgentTrees;
 use flottille_core::secrets;
 use flottille_core::store::{AgentChange, Store, now_ms};
 use serde::Deserialize;
@@ -1096,7 +1097,12 @@ pub fn status_of(daemon: &Daemon, agent: &Agent) -> Result<Value, Failure> {
         .into_iter()
         .find(|entry| entry["agent"]["id"] == agent.id.as_str())
         .unwrap_or_default();
-    Ok(json!({
+    Ok(status_from(daemon, agent, &entry))
+}
+
+/// `status_of` for an agent whose entry of its tree is known.
+fn status_from(daemon: &Daemon, agent: &Agent, entry: &Value) -> Value {
+    json!({
         "agent": summary(agent),
         "name": named(agent),
         "line": line(daemon, agent),
@@ -1107,7 +1113,52 @@ pub fn status_of(daemon: &Daemon, agent: &Agent) -> Result<Value, Failure> {
             .iter()
             .map(|message| cut(message, MESSAGE_CHARS))
             .collect::<Vec<_>>(),
-    }))
+    })
+}
+
+/// The root agents a page of `agent.trees` holds at most.
+pub const TREES_PAGE: usize = 20;
+
+/// A page of root agents, newest first, each with its status and its whole tree, in one answer:
+/// the live ones, or all of them with `ended`; `before` reads on after the last root of the
+/// page before. `more` says whether roots follow, `hidden` how many ended roots a live-only
+/// listing leaves out.
+pub fn trees(daemon: &Daemon, asked: &AgentTrees) -> Result<Value, Failure> {
+    let mut roots: Vec<Agent> = daemon
+        .read(Store::agents)?
+        .into_iter()
+        .filter(|agent| agent.parent.is_none())
+        .filter(|agent| asked.project.as_ref().is_none_or(|p| &agent.project == p))
+        .collect();
+    // The store gives them oldest first.
+    roots.reverse();
+    if let Some(before) = &asked.before {
+        // Found among all of them, not the listed ones: a root that ended since the page before
+        // still marks the place.
+        let at = roots
+            .iter()
+            .position(|root| &root.id == before)
+            .ok_or_else(|| {
+                Failure::refused(format!("there is no agent {before} among the root agents"))
+            })?;
+        roots.drain(..=at);
+    }
+    let hidden = if asked.ended {
+        0
+    } else {
+        let all = roots.len();
+        roots.retain(|root| !root.state.is_final());
+        all - roots.len()
+    };
+    let more = roots.len() > TREES_PAGE;
+    roots.truncate(TREES_PAGE);
+    let mut trees = Vec::new();
+    for root in &roots {
+        let agents = tree(daemon, root)?;
+        let entry = agents.first().cloned().unwrap_or_default();
+        trees.push(json!({"status": status_from(daemon, root, &entry), "agents": agents}));
+    }
+    Ok(json!({"trees": trees, "more": more, "hidden": hidden}))
 }
 
 /// The agent's whole tree, from its root, each agent before its children: what it does, whom it
