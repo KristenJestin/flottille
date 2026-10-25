@@ -2,9 +2,12 @@
 //! reads the store, never runs an agent and never decides anything on its own: it shows what the
 //! daemon gives, as the daemon gives it.
 
+pub mod actions;
+pub mod composer;
 pub mod link;
 pub mod model;
 pub mod page;
+pub mod project;
 pub mod shell;
 pub mod tree;
 

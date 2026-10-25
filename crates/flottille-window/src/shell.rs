@@ -10,7 +10,7 @@ use flottille_ui::{
     AgentState, Badge, Button, Drawer, Icon, ListRow, Side, StateIcon, Status, Type, icon, palette,
 };
 use futures::StreamExt as _;
-use futures::channel::mpsc::UnboundedReceiver;
+use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Bounds, Context, ElementId, Entity, InteractiveElement, IntoElement,
@@ -18,9 +18,12 @@ use gpui_kit::{
     Task, WeakEntity, Window, canvas, div, point, px,
 };
 
+use crate::actions::{Actions, Command, Outcome};
+use crate::composer::{Choice, Composer, PlaceChoice, RunningSession};
 use crate::link::{self, Connect, Seen, Update};
-use crate::model::{BellItem, Place, Snapshot};
+use crate::model::{BellItem, Place, Preparation, Snapshot};
 use crate::page::{MainArea, Page};
+use crate::project::{NewWorkspace, PlaceData, ProjectData, SessionLine, repository_label};
 use crate::tree::{PlaceNode, ProjectNode, SessionRow, Sidebar};
 
 /// Below this width the session page's rail becomes a drawer from the right.
@@ -75,13 +78,16 @@ pub struct Shell {
     projects: HashMap<String, Entity<ProjectNode>>,
     places: HashMap<(String, Place), Entity<PlaceNode>>,
     sessions: HashMap<String, Entity<SessionRow>>,
+    composer: Entity<Composer>,
+    new_workspace: Entity<NewWorkspace>,
+    actions: Actions,
     /// The link's updates, until a task takes them.
     updates: Option<UnboundedReceiver<Update>>,
     _link: Task<()>,
     _clock: Task<()>,
 }
 
-fn now_ms() -> u64 {
+pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -93,10 +99,10 @@ impl Shell {
     pub fn new(connect: Connect, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut shell = Self::new_polled(connect, window, cx);
         if let Some(mut updates) = shell.updates.take() {
-            shell._link = cx.spawn(async move |this: WeakEntity<Shell>, cx| {
+            shell._link = cx.spawn_in(window, async move |this: WeakEntity<Shell>, cx| {
                 while let Some(update) = updates.next().await {
                     if this
-                        .update(cx, |shell, cx| shell.apply(update, cx))
+                        .update_in(cx, |shell, window, cx| shell.apply(update, window, cx))
                         .is_err()
                     {
                         break;
@@ -110,11 +116,19 @@ impl Shell {
     /// The shell, its updates taken only by [`Shell::poll`]: on GPUI's test platform, another
     /// thread may not wake the UI's tasks.
     pub fn new_polled(connect: Connect, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (updates, seen) = link::spawn(connect);
+        let (sender, updates) = unbounded();
+        let seen = link::spawn_into(connect.clone(), sender.clone());
+        let actions = Actions::spawn(connect, sender);
         let this = cx.entity().downgrade();
         let top = cx.new(|_| TopBar::new(this.clone()));
         let sidebar = cx.new(|_| Sidebar::new(this.clone()));
-        let main = cx.new(MainArea::new);
+        let composer = cx.new(|cx| Composer::new(this.clone(), window, cx));
+        let new_workspace = cx.new(|cx| NewWorkspace::new(this.clone(), window, cx));
+        let main = {
+            let (this, composer, new_workspace) =
+                (this.clone(), composer.clone(), new_workspace.clone());
+            cx.new(|cx| MainArea::new(this, composer, new_workspace, cx))
+        };
         let left = cx.new(|_| Drawer::new("tree-drawer", Side::Left, px(SIDEBAR), sidebar.clone()));
         let bell = cx.new(|_| BellList::new(this.clone()));
         let _clock = cx.spawn(async move |this: WeakEntity<Shell>, cx| {
@@ -141,6 +155,9 @@ impl Shell {
             projects: HashMap::new(),
             places: HashMap::new(),
             sessions: HashMap::new(),
+            composer,
+            new_workspace,
+            actions,
             updates: Some(updates),
             _link: Task::ready(()),
             _clock,
@@ -150,10 +167,29 @@ impl Shell {
     }
 
     /// Applies the updates the link sent since the last call.
-    pub fn poll(&mut self, cx: &mut Context<Self>) {
+    pub fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         while let Some(Ok(update)) = self.updates.as_mut().map(|u| u.try_recv()) {
-            self.apply(update, cx);
+            self.apply(update, window, cx);
         }
+    }
+
+    pub fn composer(&self) -> &Entity<Composer> {
+        &self.composer
+    }
+
+    pub fn new_workspace(&self) -> &Entity<NewWorkspace> {
+        &self.new_workspace
+    }
+
+    /// Asks the daemon, off the UI thread; the answer comes back as an update.
+    pub fn perform(&self, command: Command) {
+        self.actions.send(command);
+    }
+
+    /// "New session in …": the composer, set to start there.
+    pub fn compose_in(&mut self, choice: Choice, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer
+            .update(cx, |composer, cx| composer.choose(choice, window, cx));
     }
 
     /// What the window shows now, as the daemon last gave it.
@@ -212,14 +248,162 @@ impl Shell {
         cx.notify();
     }
 
-    fn apply(&mut self, update: Update, cx: &mut Context<Self>) {
+    fn apply(&mut self, update: Update, window: &mut Window, cx: &mut Context<Self>) {
         match update {
             Update::Disconnected(_) => self.set_online(false, cx),
             Update::Snapshot(snapshot) => {
                 self.set_online(true, cx);
                 self.show(snapshot, cx);
             }
+            Update::Done(outcome) => self.done(outcome, window, cx),
         }
+    }
+
+    /// What came of something asked of the daemon.
+    fn done(&mut self, outcome: Outcome, window: &mut Window, cx: &mut Context<Self>) {
+        match outcome {
+            Outcome::Details(details) => {
+                if let Some(page) = self.main.read(cx).project_page().cloned() {
+                    page.update(cx, |page, cx| page.set_details(&details, cx));
+                }
+            }
+            Outcome::Started { agent, .. } => {
+                self.composer
+                    .update(cx, |composer, cx| composer.started(window, cx));
+                self.open(Selection::Session(agent), window, cx);
+            }
+            Outcome::NotStarted { why, .. } => {
+                self.composer
+                    .update(cx, |composer, cx| composer.not_started(&why, cx));
+            }
+            Outcome::WorkspaceDone { project, name } => {
+                self.workspace_answered(&project, &name, None, window, cx)
+            }
+            Outcome::WorkspaceRefused { project, name, why } => {
+                self.workspace_answered(&project, &name, Some(&why), window, cx)
+            }
+        }
+    }
+
+    fn workspace_answered(
+        &mut self,
+        project: &str,
+        name: &str,
+        refused: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.new_workspace.read(cx).creating() == Some(name) {
+            self.new_workspace
+                .update(cx, |form, cx| form.answered(refused, window, cx));
+        } else if let Some(page) = self.main.read(cx).project_page().cloned()
+            && page.read(cx).name() == project
+            && let Some(card) = page.read(cx).card(&Some(name.to_owned()), cx)
+        {
+            card.update(cx, |card, cx| card.answered(refused, cx));
+        }
+    }
+
+    /// Brings the open project's page up to what the daemon last gave, and asks for its details
+    /// again.
+    fn refresh_project(&mut self, cx: &mut Context<Self>) {
+        let Some(page) = self.main.read(cx).project_page().cloned() else {
+            return;
+        };
+        let name = page.read(cx).name().to_owned();
+        let Some(project) = self.snapshot.projects.iter().find(|p| p.name == name) else {
+            return;
+        };
+        let line = |session: &crate::model::Session, cx: &App| {
+            self.sessions.get(&session.id).map(|row| SessionLine {
+                id: session.id.clone(),
+                title: session.title.clone(),
+                agents: session.agents,
+                mark: session.mark,
+                active_at: session.active_at,
+                status: row.read(cx).status(),
+            })
+        };
+        let labels: Vec<String> = project
+            .repositories
+            .iter()
+            .map(|path| repository_label(&name, path))
+            .collect();
+        let mut places = vec![PlaceData {
+            place: None,
+            meta: format!("the project folder · {}", labels.join(", ")),
+            preparation: Preparation::Ready,
+            sessions: self
+                .snapshot
+                .sessions_in(&name, &None)
+                .filter_map(|s| line(s, cx))
+                .collect(),
+        }];
+        let mut choices = vec![PlaceChoice {
+            workspace: None,
+            ready: true,
+        }];
+        for workspace in self
+            .snapshot
+            .workspaces
+            .iter()
+            .filter(|w| w.project == name)
+        {
+            let place = Some(workspace.name.clone());
+            let repositories: Vec<String> = workspace
+                .repositories
+                .iter()
+                .map(|path| repository_label(&name, path))
+                .collect();
+            places.push(PlaceData {
+                meta: format!(
+                    "from {} · {}",
+                    workspace.bases.join(", "),
+                    repositories.join(", ")
+                ),
+                preparation: workspace.preparation.clone(),
+                sessions: self
+                    .snapshot
+                    .sessions_in(&name, &place)
+                    .filter_map(|s| line(s, cx))
+                    .collect(),
+                place,
+            });
+            choices.push(PlaceChoice {
+                workspace: Some(workspace.name.clone()),
+                ready: workspace.preparation == Preparation::Ready,
+            });
+        }
+        let running: Vec<RunningSession> = self
+            .snapshot
+            .running_in(&name)
+            .into_iter()
+            .filter_map(|session| {
+                self.sessions.get(&session.id).map(|row| RunningSession {
+                    id: session.id.clone(),
+                    title: session.title.clone(),
+                    place: place_label(&session.place),
+                    agents: session.agents,
+                    waiting: session.mark == Some(AgentState::NeedsYou),
+                    status: row.read(cx).status(),
+                })
+            })
+            .collect();
+        let data = ProjectData {
+            name: name.clone(),
+            folder: project.folder.clone(),
+            repositories: project.repositories.clone(),
+            places,
+        };
+        page.update(cx, |page, cx| page.set(data, cx));
+        self.composer.update(cx, |composer, cx| {
+            composer.set_project(&name, cx);
+            composer.set_places(choices, cx);
+            composer.set_running(running, cx);
+        });
+        self.new_workspace
+            .update(cx, |form, cx| form.set_project(&name, cx));
+        self.actions.send(Command::Details(name));
     }
 
     fn set_online(&mut self, online: bool, cx: &mut Context<Self>) {
@@ -250,7 +434,14 @@ impl Shell {
                     let row = self.sessions.remove(&session.id).unwrap_or_else(|| {
                         let this = this.clone();
                         let id = session.id.clone();
-                        cx.new(|cx| SessionRow::new(id, this, cx))
+                        // A session opened before the tree showed it (one just started).
+                        let selected =
+                            self.selected == Some(Selection::Session(session.id.clone()));
+                        cx.new(|cx| {
+                            let mut row = SessionRow::new(id, this, cx);
+                            row.set_selected(selected, cx);
+                            row
+                        })
                     });
                     // GPUI Fast takes any update of an entity for a change: touch only what
                     // changed.
@@ -331,6 +522,7 @@ impl Shell {
                 if self.main.read(cx).page() != &page {
                     self.main.update(cx, |main, cx| main.show(page, cx));
                 }
+                self.refresh_project(cx);
             }
         }
     }
@@ -341,6 +533,9 @@ impl Shell {
             if row.read(cx).ago_changes(now) {
                 row.update(cx, |row, cx| row.tick(now, cx));
             }
+        }
+        if let Some(page) = self.main.read(cx).project_page().cloned() {
+            crate::project::ProjectPage::tick(&page, now, cx);
         }
     }
 
@@ -365,6 +560,7 @@ impl Shell {
         let page = self.page_of(&selection, cx);
         self.selected = Some(selection);
         self.main.update(cx, |main, cx| main.show(page, cx));
+        self.refresh_project(cx);
     }
 
     /// The page of what is selected, as the daemon last gave it.
@@ -374,8 +570,6 @@ impl Shell {
                 match self.snapshot.projects.iter().find(|p| &p.name == name) {
                     Some(project) => Page::Project {
                         name: project.name.clone(),
-                        folder: project.folder.clone(),
-                        places: 1 + project.workspaces.len(),
                     },
                     None => Page::Empty,
                 }
@@ -739,4 +933,8 @@ fn logo(color: gpui_kit::Hsla) -> gpui_kit::Canvas<()> {
             }
         },
     )
+}
+
+fn place_label(place: &Place) -> String {
+    crate::tree::place_name(place).to_owned()
 }

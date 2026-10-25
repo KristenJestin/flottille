@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use flottille_core::workspace::{StepState, Workspace as Record};
 use flottille_ui::AgentState;
 use serde_json::Value;
 
@@ -12,6 +13,8 @@ pub struct Snapshot {
     /// By name.
     pub projects: Vec<Project>,
     pub sessions: Vec<Session>,
+    /// By project, then name.
+    pub workspaces: Vec<Workspace>,
     /// Oldest first.
     pub bell: Vec<BellItem>,
 }
@@ -20,8 +23,92 @@ pub struct Snapshot {
 pub struct Project {
     pub name: String,
     pub folder: String,
+    /// Its repositories' paths, `.` for the folder itself.
+    pub repositories: Vec<String>,
     /// Its workspaces by name; `main`, the project folder, is always there and not listed.
     pub workspaces: Vec<String>,
+}
+
+/// A workspace as its card shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Workspace {
+    pub project: String,
+    pub name: String,
+    pub branch: String,
+    /// The base branches its repositories started from, each once, in order.
+    pub bases: Vec<String>,
+    pub repositories: Vec<String>,
+    pub preparation: Preparation,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Preparation {
+    /// `done` of `total` steps are over, and what the next one does.
+    Preparing {
+        done: usize,
+        total: usize,
+        doing: String,
+    },
+    /// What the failed step was doing, and its last lines, masked by the daemon.
+    Failed {
+        doing: String,
+        output: String,
+    },
+    Ready,
+}
+
+impl Workspace {
+    fn of(record: &Record) -> Workspace {
+        let mut bases: Vec<String> = Vec::new();
+        for worktree in &record.repositories {
+            if !bases.contains(&worktree.base.branch) {
+                bases.push(worktree.base.branch.clone());
+            }
+        }
+        let failed = record
+            .steps
+            .iter()
+            .find(|step| step.state == StepState::Failed);
+        let next = record
+            .steps
+            .iter()
+            .find(|step| matches!(step.state, StepState::Pending | StepState::Running));
+        let preparation = match (failed, next) {
+            (Some(step), _) => Preparation::Failed {
+                doing: step
+                    .failure
+                    .as_ref()
+                    .map_or_else(|| step.doing(), |failure| failure.doing.clone()),
+                output: step
+                    .failure
+                    .as_ref()
+                    .map(|failure| failure.output.clone())
+                    .unwrap_or_default(),
+            },
+            (None, Some(step)) => Preparation::Preparing {
+                done: record
+                    .steps
+                    .iter()
+                    .filter(|step| matches!(step.state, StepState::Done | StepState::Skipped))
+                    .count(),
+                total: record.steps.len(),
+                doing: step.doing(),
+            },
+            (None, None) => Preparation::Ready,
+        };
+        Workspace {
+            project: record.project.clone(),
+            name: record.name.clone(),
+            branch: record.branch.clone(),
+            bases,
+            repositories: record
+                .repositories
+                .iter()
+                .map(|worktree| worktree.path.clone())
+                .collect(),
+            preparation,
+        }
+    }
 }
 
 /// Where a session works: `None` for the project folder (`main`), else a workspace.
@@ -37,6 +124,8 @@ pub struct Session {
     pub title: String,
     /// `Running` or `NeedsYou`; `None` for a session at rest.
     pub mark: Option<AgentState>,
+    /// How many agents its tree holds, the root included.
+    pub agents: usize,
     /// The last sign of activity of its tree, in milliseconds since the Unix epoch.
     pub active_at: u64,
     pub created_at: u64,
@@ -165,7 +254,7 @@ impl Snapshot {
         }
         bell.sort_by_key(|item| item.at);
 
-        let mut trees: HashMap<&str, (bool, u64)> = HashMap::new();
+        let mut trees: HashMap<&str, (bool, u64, usize)> = HashMap::new();
         for agent in agents {
             let root = root_of(&parents, agent["id"].as_str().unwrap_or_default());
             let busy = matches!(agent["state"].as_str(), Some("starting" | "working"));
@@ -175,13 +264,14 @@ impl Snapshot {
             let entry = trees.entry(root).or_default();
             entry.0 |= busy;
             entry.1 = entry.1.max(active);
+            entry.2 += 1;
         }
         let mut sessions: Vec<Session> = agents
             .iter()
             .filter(|agent| agent["parent"].is_null())
             .map(|agent| {
                 let id = text(agent, "id");
-                let (busy, active_at) = trees.get(id.as_str()).copied().unwrap_or_default();
+                let (busy, active_at, size) = trees.get(id.as_str()).copied().unwrap_or_default();
                 let mark = if answers.needs_user.contains(&id) {
                     Some(AgentState::NeedsYou)
                 } else if busy {
@@ -199,6 +289,7 @@ impl Snapshot {
                     project: text(agent, "project"),
                     place: agent["workspace"].as_str().map(str::to_owned),
                     mark,
+                    agents: size.max(1),
                     active_at,
                     created_at: number(agent, "created_at"),
                     id,
@@ -220,15 +311,26 @@ impl Snapshot {
                 workspaces.sort();
                 Project {
                     folder: text(project, "folder"),
+                    repositories: list(project, "repositories")
+                        .iter()
+                        .map(|repository| text(repository, "path"))
+                        .collect(),
                     name,
                     workspaces,
                 }
             })
             .collect();
         projects.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut workspaces: Vec<Workspace> = list(answers.workspaces, "workspaces")
+            .iter()
+            .filter_map(|w| serde_json::from_value::<Record>(w.clone()).ok())
+            .map(|record| Workspace::of(&record))
+            .collect();
+        workspaces.sort_by(|a, b| (&a.project, &a.name).cmp(&(&b.project, &b.name)));
         Snapshot {
             projects,
             sessions,
+            workspaces,
             bell,
         }
     }
@@ -246,6 +348,24 @@ impl Snapshot {
 
     pub fn session(&self, id: &str) -> Option<&Session> {
         self.sessions.iter().find(|s| s.id == id)
+    }
+
+    pub fn workspace(&self, project: &str, name: &str) -> Option<&Workspace> {
+        self.workspaces
+            .iter()
+            .find(|w| w.project == project && w.name == name)
+    }
+
+    /// The project's sessions that run or wait for the user: those waiting first, then the
+    /// newest.
+    pub fn running_in<'a>(&'a self, project: &str) -> Vec<&'a Session> {
+        let mut running: Vec<&Session> = self
+            .sessions
+            .iter()
+            .filter(|s| s.project == project && s.mark.is_some())
+            .collect();
+        running.sort_by_key(|s| s.mark != Some(AgentState::NeedsYou));
+        running
     }
 }
 
@@ -331,6 +451,84 @@ mod tests {
         );
         assert_eq!(snapshot.sessions[0].title, "agent r2");
         assert_eq!(snapshot.projects[0].workspaces, ["login"]);
+    }
+
+    fn workspace_json(steps: Value) -> Value {
+        json!({"project": "app", "name": "login", "branch": "app/login",
+            "folder": "/work/app-work/login", "project_folder": "/work/app", "created_at": 1,
+            "variables": {}, "state": "preparing",
+            "repositories": [
+                {"path": "api", "base": {"branch": "develop", "remote": "origin",
+                    "ref": "refs/remotes/origin/develop", "commit": "abc", "fetched_now": true,
+                    "fetched_at": null}},
+                {"path": "web", "base": {"branch": "develop", "remote": "origin",
+                    "ref": "refs/remotes/origin/develop", "commit": "def", "fetched_now": true,
+                    "fetched_at": null}}],
+            "steps": steps})
+    }
+
+    fn preparation_of(steps: Value) -> Workspace {
+        let snapshot = Snapshot::build(Answers {
+            projects: &json!({"projects": []}),
+            workspaces: &json!({"workspaces": [workspace_json(steps)]}),
+            agents: &json!({"agents": []}),
+            approvals: &json!({"requests": []}),
+            needs_user: &HashSet::new(),
+            questions: &HashMap::new(),
+            briefs: &HashMap::new(),
+        });
+        snapshot.workspaces[0].clone()
+    }
+
+    #[test]
+    fn a_workspace_says_how_far_its_preparation_is_or_what_failed() {
+        let preparing = preparation_of(json!([
+            {"position": 0, "repository": "api", "kind": "worktree", "state": "done"},
+            {"position": 1, "repository": "api", "kind": "run", "line": "npm install",
+                "time_limit": 60, "state": "running"}]));
+        assert_eq!(preparing.bases, ["develop"], "each base once");
+        assert_eq!(preparing.repositories, ["api", "web"]);
+        assert_eq!(
+            preparing.preparation,
+            Preparation::Preparing {
+                done: 1,
+                total: 2,
+                doing: "npm install (in api)".into()
+            }
+        );
+        let failed = preparation_of(json!([
+            {"position": 0, "repository": "api", "kind": "run", "line": "npm install",
+                "time_limit": 60, "state": "failed",
+                "failure": {"doing": "npm install (in api)", "output": "npm ERR! made up"}}]));
+        assert_eq!(
+            failed.preparation,
+            Preparation::Failed {
+                doing: "npm install (in api)".into(),
+                output: "npm ERR! made up".into()
+            }
+        );
+    }
+
+    #[test]
+    fn the_running_sessions_put_those_waiting_for_the_user_first() {
+        let mut older = agent("r1", None, "idle", None);
+        older["created_at"] = json!(1);
+        let snapshot = build(
+            json!({"agents": [older, agent("r2", None, "working", None),
+                agent("r3", None, "idle", None)]}),
+            json!({"requests": []}),
+            &["r1"],
+        );
+        let ids: Vec<&str> = snapshot
+            .running_in("app")
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            ["r1", "r2"],
+            "waiting first though older, at rest left out"
+        );
     }
 
     #[test]

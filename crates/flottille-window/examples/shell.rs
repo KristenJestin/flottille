@@ -3,11 +3,12 @@
 //! compositor.
 //!
 //! ```text
-//! cargo run -p flottille-window --example shell [--features frames] -- [--session <id>] [--tree] [--rail]
+//! cargo run -p flottille-window --example shell [--features frames] -- [--session <id>] [--tree] [--rail] [--running]
 //! ```
 //!
 //! `--session` opens a session's page, `--tree` the left drawer (in a narrow window), `--rail` the
-//! session page's drawer (in a window narrower than three columns). The daemon is found on
+//! session page's drawer (in a window narrower than three columns), `--running` the project page's
+//! "Running agents" tab. The daemon is found on
 //! `$XDG_RUNTIME_DIR/flottille/daemon.sock`; it is not started.
 
 use std::os::unix::net::UnixStream;
@@ -17,18 +18,20 @@ use std::time::Duration;
 use flottille_core::paths::Paths;
 use flottille_ui::Icons;
 use flottille_window::Shell;
+use flottille_window::composer::Tab;
 use flottille_window::shell::Selection;
 use gpui_kit::{AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
 
 fn main() {
     let mut session = None;
-    let (mut tree, mut rail) = (false, false);
+    let (mut tree, mut rail, mut running) = (false, false, false);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--session" => session = Some(args.next().expect("a session id")),
             "--tree" => tree = true,
             "--rail" => rail = true,
+            "--running" => running = true,
             other => panic!("unknown argument {other}"),
         }
     }
@@ -60,6 +63,10 @@ fn main() {
                         }
                         if tree {
                             shell.open_tree(cx);
+                        }
+                        if running {
+                            let composer = shell.composer().clone();
+                            composer.update(cx, |c, cx| c.select_tab(Tab::Running, cx));
                         }
                         if rail {
                             let drawer = shell.main().read(cx).drawer().clone();
