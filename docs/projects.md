@@ -41,6 +41,8 @@ default_repositories = "all"          # "all", or a list of the repositories a w
 max_children = 3                      # children running at once, 1 to 6
 run_time_limit = 1800                 # seconds a run step of the recipe may take; default 30 min
 never = [["git", "push"], ["rm", "-rf"]]   # programs with their leading arguments, one word per element, for the gate to refuse
+provider = "claude"                   # the provider of its agents that name none; default: the first one enabled
+model = "sonnet"                      # the model of its agents on that provider that name none; default: the provider's
 
 [[repositories]]                      # at least one
 path = "."                            # relative to the folder; "." is the folder itself
@@ -74,6 +76,11 @@ for_each_repository = true
 The repositories are put in dependency order (a repository after those it depends on; among those
 that are ready, the first of the file first) by `Project::in_dependency_order()`, which preparing
 a workspace and merging use.
+
+`provider` must be one Flottille knows (`claude`, `opencode`) and `model` must not be empty; which
+providers are enabled is the user's, in `$XDG_CONFIG_HOME/flottille/providers.toml`, beside the
+projects (`docs/agents.md`, "Providers"). An agent keeps the provider and model it started with:
+editing them changes the agents started later only.
 
 The variables are templates filled for each workspace (`docs/workspaces.md`): the configuration
 checks that their names are those of environment variables and that their templates name only

@@ -9,9 +9,9 @@ use flottille_core::protocol::{AgentName, AgentRun, AgentSend};
 use serde_json::Value;
 
 use crate::chat;
-use crate::claude;
 use crate::client::Client;
 use crate::follow::{Turn, follow};
+use crate::providers;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -24,9 +24,15 @@ pub enum AgentAction {
         /// The workspace it works in (default: the project folder itself)
         #[arg(long)]
         workspace: Option<String>,
-        /// The model (default: the agent's own); never replaced by another
+        /// The provider it runs on, for life (default: the project's)
+        #[arg(long)]
+        provider: Option<String>,
+        /// The model (default: the project's, else the provider's); never replaced by another
         #[arg(long)]
         model: Option<String>,
+        /// The model's effort (default: its own)
+        #[arg(long)]
+        effort: Option<String>,
         /// Its role: lead (default) or worker
         #[arg(long)]
         role: Option<String>,
@@ -81,9 +87,15 @@ pub enum AgentAction {
         /// The workspace it works in (default: the project folder itself)
         #[arg(long)]
         workspace: Option<String>,
-        /// The model (default: the agent's own); never replaced by another
+        /// The provider it runs on, for life (default: the project's)
+        #[arg(long)]
+        provider: Option<String>,
+        /// The model (default: the project's, else the provider's); never replaced by another
         #[arg(long)]
         model: Option<String>,
+        /// The model's effort (default: its own)
+        #[arg(long)]
+        effort: Option<String>,
         /// Print the agent, as `agent show --json` does, once its turn ended
         #[arg(long)]
         json: bool,
@@ -102,7 +114,9 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
             project,
             message,
             workspace,
+            provider,
             model,
+            effort,
             role,
             json,
         } => {
@@ -111,8 +125,9 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                 serde_json::to_value(AgentRun {
                     project,
                     workspace,
+                    provider,
                     model,
-                    effort: None,
+                    effort,
                     mode: None,
                     role,
                     message,
@@ -231,15 +246,18 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
             project,
             message,
             workspace,
+            provider,
             model,
+            effort,
             json,
         } => run_agent(
             paths,
             AgentRun {
                 project,
                 workspace,
+                provider,
                 model,
-                effort: None,
+                effort,
                 mode: None,
                 role: None,
                 message,
@@ -296,8 +314,8 @@ fn shown_agent(client: &mut Client, agent: &str) -> Result<Value> {
     Ok(shown["agent"].clone())
 }
 
-pub fn doctor(json: bool) -> Result<ExitCode> {
-    let report = claude::doctor();
+pub fn doctor(paths: &Paths, json: bool) -> Result<ExitCode> {
+    let report = providers::doctor(paths);
     if json {
         println!("{report}");
     } else {
@@ -310,43 +328,60 @@ pub fn doctor(json: bool) -> Result<ExitCode> {
     })
 }
 
+/// Each provider, what it was checked for, and whether its agents can run.
 fn doctor_text(report: &Value) -> String {
     let mark = |ok: bool| if ok { "ok  " } else { "MISSING" };
-    let claude = &report["claude"];
-    let mut shown = if claude["present"] == true {
-        format!(
-            "{} claude: {} ({})\n",
-            mark(true),
-            claude["version"].as_str().unwrap_or("version unknown"),
-            text(claude, "path")
-        )
-    } else {
-        format!(
-            "{} claude: not on PATH; install Claude Code and sign in with it\n",
-            mark(false)
-        )
-    };
-    let login = &report["login"];
-    shown.push_str(&if login["present"] == true {
-        format!("{} Claude login: {}\n", mark(true), text(login, "path"))
-    } else if login["api_key"] == true {
-        format!("{} Claude login: ANTHROPIC_API_KEY is set\n", mark(true))
-    } else {
-        format!(
-            "{} Claude login: no {}, and no ANTHROPIC_API_KEY; run `claude` and sign in (on macOS \
-             the login is in the Keychain and there is no file)\n",
-            mark(false),
-            text(login, "path")
-        )
-    });
+    let mut shown = String::new();
+    for provider in report["providers"].as_array().into_iter().flatten() {
+        let title = text(provider, "title");
+        if provider["enabled"] != true {
+            shown.push_str(&format!(
+                "{title} agents cannot run: {} {}\n",
+                text(provider, "name"),
+                text(provider, "why")
+            ));
+            continue;
+        }
+        if let Some(command) = provider["override"].as_str() {
+            shown.push_str(&format!(
+                "warn {title}: its agents run {command} (FLOTTILLE_AGENT_COMMAND, for tests)\n"
+            ));
+        } else {
+            let program = &provider["program"];
+            shown.push_str(&if program["present"] == true {
+                format!(
+                    "{} {}: {} ({})\n",
+                    mark(true),
+                    text(program, "name"),
+                    program["version"].as_str().unwrap_or("version unknown"),
+                    text(program, "path")
+                )
+            } else {
+                format!("{} {}: not on PATH\n", mark(false), text(program, "name"))
+            });
+            let login = &provider["login"];
+            shown.push_str(&if login["present"] == true {
+                format!("{} {title} login: {}\n", mark(true), text(login, "path"))
+            } else if let Some(key) = login["api_key"].as_str() {
+                format!("{} {title} login: {key} is set\n", mark(true))
+            } else {
+                format!(
+                    "warn {title} login: no {}, and no API key\n",
+                    text(login, "path")
+                )
+            });
+        }
+        shown.push_str(&match provider["why"].as_str() {
+            None => format!("{title} agents can run.\n"),
+            Some(why) => format!(
+                "{title} agents cannot run: {} {why}\n",
+                text(provider, "name")
+            ),
+        });
+    }
     for warning in report["warnings"].as_array().into_iter().flatten() {
         shown.push_str(&format!("warn {}\n", warning.as_str().unwrap_or_default()));
     }
-    shown.push_str(if report["ready"] == true {
-        "Claude agents can run.\n"
-    } else {
-        "Claude agents cannot run until what is missing is there.\n"
-    });
     shown
 }
 
@@ -418,12 +453,16 @@ fn agent_line(agent: &Value, entry: Option<&Value>) -> String {
         None => format!("agent {}", text(agent, "id")),
     };
     let mut line = format!(
-        "{}{named}, {} in {}, {}",
+        "{}{named}, {} in {}, {}, on {}",
         "  ".repeat(agent["depth"].as_u64().unwrap_or(0) as usize),
         text(agent, "role"),
         text(agent, "project"),
         place(agent),
+        text(agent, "provider"),
     );
+    if let Some(model) = agent["model"].as_str() {
+        line.push_str(&format!(" ({model})"));
+    }
     match entry {
         Some(entry) => {
             line.push_str(&format!(": {}", text(entry, "doing")));
@@ -445,7 +484,7 @@ fn agent_line(agent: &Value, entry: Option<&Value>) -> String {
 fn show_text(shown: &Value) -> String {
     let agent = &shown["agent"];
     let mut out = format!(
-        "Agent {}: {}{}\n  project: {}, in {}\n  folder: {}\n  model: {}\n",
+        "Agent {}: {}{}\n  project: {}, in {}\n  folder: {}\n  provider: {}\n  model: {}\n",
         text(agent, "id"),
         text(agent, "state"),
         agent["state_reason"]
@@ -455,6 +494,7 @@ fn show_text(shown: &Value) -> String {
         text(agent, "project"),
         place(agent),
         text(agent, "folder"),
+        text(agent, "provider"),
         agent["taken"]["model"]
             .as_str()
             .or(agent["chosen"]["model"].as_str())

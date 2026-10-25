@@ -219,6 +219,13 @@ pub struct Project {
     pub max_children: u8,
     /// Seconds a run step of the recipe may take before it is stopped, unless the step says.
     pub run_time_limit: u64,
+    /// The provider of the agents started without one; the first enabled one when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// The model of the agents started on the project's provider without one; the provider's
+    /// own default when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// Programs with their leading arguments (`["git", "push"]`) that are refused to agents
     /// whatever else says; each entry is one word per element, never empty.
     pub never: Vec<Vec<String>>,
@@ -249,6 +256,8 @@ struct File {
     max_children: i64,
     #[serde(default = "default_run_time_limit")]
     run_time_limit: u64,
+    provider: Option<String>,
+    model: Option<String>,
     #[serde(default)]
     never: Vec<Vec<String>>,
     repositories: Vec<Repository>,
@@ -285,6 +294,8 @@ impl Project {
             default_repositories: RepositorySet::All,
             max_children: DEFAULT_CHILDREN_CAP,
             run_time_limit: DEFAULT_RUN_TIME_LIMIT,
+            provider: None,
+            model: None,
             never: Vec::new(),
             repositories: repositories
                 .into_iter()
@@ -398,6 +409,21 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
     if file.run_time_limit == 0 {
         return Err("run_time_limit: must be at least 1 second".into());
     }
+    if let Some(provider) = &file.provider
+        && !crate::provider::known(provider)
+    {
+        return Err(format!(
+            "provider: unknown provider \"{provider}\": the providers are {}",
+            crate::provider::NAMES.join(", ")
+        ));
+    }
+    if file
+        .model
+        .as_ref()
+        .is_some_and(|model| model.trim().is_empty())
+    {
+        return Err("model: must not be empty".into());
+    }
     for (index, entry) in file.never.iter().enumerate() {
         if entry.is_empty() {
             return Err(format!("never[{index}]: must not be empty"));
@@ -480,6 +506,8 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
         default_repositories: file.default_repositories,
         max_children,
         run_time_limit: file.run_time_limit,
+        provider: file.provider,
+        model: file.model,
         never: file.never,
         repositories: file.repositories,
         variables: file.variables,
@@ -728,6 +756,22 @@ mod tests {
         assert_eq!(repository.remote, "origin");
         assert_eq!(repository.base, ["main"]);
         assert!(repository.depends_on.is_empty());
+    }
+
+    #[test]
+    fn a_project_may_set_the_provider_and_the_model_of_its_agents() {
+        let project = parse(&format!(
+            "provider = \"opencode\"\nmodel = \"m\"\n{MINIMAL}"
+        ))
+        .unwrap();
+        assert_eq!(project.provider.as_deref(), Some("opencode"));
+        assert_eq!(project.model.as_deref(), Some("m"));
+        assert_eq!(parse(MINIMAL).unwrap().provider, None);
+        assert_eq!(
+            refusal(&format!("provider = \"codex\"\n{MINIMAL}")),
+            "projects/app.toml: provider: unknown provider \"codex\": the providers are claude, \
+             opencode"
+        );
     }
 
     #[test]

@@ -25,6 +25,7 @@ use crate::deliveries;
 use crate::inbox;
 use crate::mcp;
 use crate::projects::{self, Projects};
+use crate::providers;
 use crate::runs;
 use crate::sweep;
 use crate::workspaces;
@@ -293,9 +294,9 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                 continue;
             }
         };
-        // They run git, wait on an agent's task or start what an approval allows: answered by a
-        // task of their own, the connection goes on.
-        if ["workspace.", "agent.", "approval.", "test."]
+        // They run git or a provider's `--version`, wait on an agent's task or start what an
+        // approval allows: answered by a task of their own, the connection goes on.
+        if ["workspace.", "agent.", "approval.", "test.", "provider."]
             .iter()
             .any(|prefix| request.method.starts_with(prefix))
             || request.method == "project.show"
@@ -306,6 +307,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     agents::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("approval.") {
                     approvals::call(daemon, &request.method, request.params).await
+                } else if request.method.starts_with("provider.") {
+                    providers::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("test.") {
                     sweep::call(daemon, &request.method, request.params).await
                 } else if request.method == "project.show" {

@@ -25,6 +25,11 @@ const MARK: &str = "[flottille:";
 const NOTE: &str = "<flottille-note";
 const NOTE_END: &str = "</flottille-note";
 
+/// Whether a prompt starts as every delivery rendered does, with its marker.
+pub fn is_delivery(text: &str) -> bool {
+    text.starts_with(MARK)
+}
+
 /// The text as data: a marker in it can never be read as one, nor open or close a note.
 pub fn escape(text: &str) -> String {
     text.replace(MARK, "\\[flottille:")

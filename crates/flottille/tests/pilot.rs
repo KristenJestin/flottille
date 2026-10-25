@@ -614,11 +614,10 @@ fn agent_start_refuses_an_argument_its_schema_does_not_have_and_starts_nothing()
     project(&user);
     let pilot = Mcp::pilot(&user);
 
-    // The schema has project, message, workspace, model and role: a mode or an effort would
+    // The schema has project, message, workspace, provider, model, effort and role: a mode would
     // reach the agent's session, and an unknown name is a mistake to say.
     for extra in [
         json!({"mode": "bypassPermissions"}),
-        json!({"effort": "max"}),
         json!({"colour": "blue"}),
     ] {
         let mut arguments = json!({"project": "app", "workspace": "w", "message": "go"});
@@ -740,4 +739,36 @@ fn many_root_agents_are_listed_newest_first_the_live_ones_by_default_in_pages_wi
         "{lost}"
     );
     assert!(lost.chars().count() < 2_000);
+}
+
+#[test]
+fn the_pilot_door_starts_an_agent_on_the_provider_model_and_effort_it_names() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"models": ["fake-small", "fake-large"], "efforts": ["low", "high"]}));
+    project(&user);
+    let pilot = Mcp::pilot(&user);
+
+    let text = ok(pilot.call(
+        "agent_start",
+        json!({"project": "app", "message": "go", "provider": "claude", "model": "fake-large",
+            "effort": "high"}),
+    ));
+    let id = agent_id(&text).unwrap();
+    let mut shown = Value::Null;
+    eventually("the session", || {
+        shown = user.call("agent.show", json!({"agent": id})).unwrap()["agent"].clone();
+        shown["state"] == "idle"
+    });
+    assert_eq!(shown["provider"], "claude");
+    assert_eq!(shown["taken"]["model"], "fake-large");
+    assert_eq!(shown["taken"]["effort"], "high");
+
+    let text = refused(pilot.call(
+        "agent_start",
+        json!({"project": "app", "message": "go", "provider": "codex"}),
+    ));
+    assert!(
+        text.contains("the providers are claude, opencode"),
+        "{text}"
+    );
 }

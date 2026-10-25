@@ -9,6 +9,7 @@ pub mod glob;
 pub mod paths;
 pub mod project;
 pub mod protocol;
+pub mod provider;
 pub mod registry;
 pub mod run;
 pub mod secrets;

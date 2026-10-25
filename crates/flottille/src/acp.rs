@@ -1,6 +1,6 @@
-//! The ACP client side of one agent process, the Claude bridge (`docs/agents.md`): start it, shake
-//! hands, open the session (resume, else load, else new), set the options, then play the prompts
-//! it is given until it is released, stopped, or dies.
+//! The ACP client side of one agent process, its provider's ACP agent (`docs/agents.md`): start
+//! it, shake hands, open the session (resume, else load, else new), set the options, then play the
+//! prompts it is given until it is released, stopped, or dies.
 //!
 //! Built on the official `agent-client-protocol` crate, over the process's stdio. Its callbacks
 //! run in its dispatch loop, in the order messages arrive: an update is stored before the answer
@@ -32,7 +32,22 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::VERSION;
 use crate::agents::{Order, Turns};
-use crate::claude;
+use crate::deliveries;
+use crate::providers::{self, MCP_SERVER, Provider};
+
+/// A prompt as it may be sent: only one that starts with a delivery's marker. An agent may read a
+/// prompt starting otherwise as its own: OpenCode runs one whose text starts with `/` as a command,
+/// and a command can run a shell outside the gate (`docs/agents.md`, "Bare mode for OpenCode").
+fn prompt_text(text: String) -> Result<String, String> {
+    if deliveries::is_delivery(&text) {
+        Ok(text)
+    } else {
+        Err(
+            "Flottille refused to send a prompt that does not start with a delivery's marker"
+                .into(),
+        )
+    }
+}
 
 /// A text kept in an event is cut here.
 const TEXT_LIMIT: usize = 64 * 1024;
@@ -53,6 +68,9 @@ pub enum Exit {
 pub trait Events: Send + Sync + 'static {
     /// An event of the agent's conversation; `activity` when it is a sign of activity.
     fn conversation(&self, name: &str, data: Value, activity: bool);
+    /// What the session offers in its config options: once it is open, and once the choices
+    /// are set. `fresh` when it is a new session none was set on yet: its model is the default.
+    fn offered(&self, options: &Value, fresh: bool);
     /// The session is open: how, its id, the agent's version, and what the agent took.
     fn opened(&self, opened: &str, native_id: &str, agent_version: &str, taken: Choices);
     /// The next prompt, taken from what was delivered, when there is one.
@@ -69,8 +87,10 @@ pub struct Server {
 
 /// Runs the session over the process's stdio until it ends. An error is a failure of the
 /// session itself (a refused option, an ACP error): the caller stops the process.
+#[allow(clippy::too_many_arguments)]
 pub async fn session(
     agent: &Agent,
+    provider: &'static Provider,
     child: &mut Child,
     events: Arc<dyn Events>,
     orders: &mut UnboundedReceiver<Order>,
@@ -117,7 +137,7 @@ pub async fn session(
         )
         .on_receive_request(
             async move |request: RequestPermissionRequest, responder, _cx| {
-                let (tool, outcome, allowed) = answer_permission(&request, &tools);
+                let (tool, outcome, allowed) = answer_permission(&request, &tools, provider);
                 answers.conversation(
                     "agent.permission_answered",
                     json!({"tool": tool, "allowed": allowed, "replay": false}),
@@ -129,7 +149,7 @@ pub async fn session(
         )
         .connect_with(transport, async |cx: ConnectionTo<AcpAgent>| {
             Ok(drive(
-                cx, agent, child, &events, &replay, orders, turns, idle, &server,
+                cx, agent, provider, child, &events, &replay, orders, turns, idle, &server,
             )
             .await)
         })
@@ -151,6 +171,7 @@ type Turn<'a> =
 async fn drive(
     cx: ConnectionTo<AcpAgent>,
     agent: &Agent,
+    provider: &Provider,
     child: &mut Child,
     events: &Arc<dyn Events>,
     replay: &AtomicBool,
@@ -183,7 +204,7 @@ async fn drive(
         initialized["agentInfo"]["version"].as_str().unwrap_or("?")
     );
 
-    let meta = claude::session_meta(&agent.instructions, &agent.tools)
+    let meta = (provider.session_meta)(&agent.instructions, &agent.tools)
         .as_object()
         .cloned();
     let servers = vec![mcp_server(server)];
@@ -238,6 +259,7 @@ async fn drive(
         }
     };
 
+    events.offered(&options, opened == "new");
     // The user's choices, in this order, each checked: a model is never silently replaced.
     let mut options = options;
     let chosen = [
@@ -249,7 +271,7 @@ async fn drive(
         let Some(value) = value else { continue };
         let option = find_option(&options, category)
             .ok_or_else(|| format!("the agent has no {word} option: it cannot take {value}"))?;
-        let offered = option_values(&option);
+        let offered = providers::values(&option);
         if !offered.iter().any(|v| v == value) {
             return Err(format!(
                 "the agent does not offer the {word} {value}: it offers {}",
@@ -274,6 +296,9 @@ async fn drive(
                 taken.unwrap_or_default()
             ));
         }
+    }
+    if chosen.iter().any(|(_, _, value)| value.is_some()) {
+        events.offered(&options, false);
     }
     // A value named `default` stands for the agent's recommended one, when it names it.
     let current = |category| {
@@ -307,6 +332,7 @@ async fn drive(
         if turn.is_none()
             && let Some(text) = turns.queued.pop_front()
         {
+            let text = prompt_text(text)?;
             events.turn_started(&text);
             turns.running = true;
             let request = PromptRequest::new(
@@ -360,7 +386,7 @@ async fn drive(
 /// Flottille's MCP server, the session's only one, with the process's token in a header (which
 /// keeps it out of the prompt cache's way).
 fn mcp_server(server: &Server) -> McpServer {
-    let mut http = McpServerHttp::new(claude::MCP_SERVER, server.url.clone());
+    let mut http = McpServerHttp::new(MCP_SERVER, server.url.clone());
     http.headers = vec![HttpHeader::new(
         "Authorization",
         format!("Bearer {}", server.token),
@@ -376,31 +402,16 @@ fn find_option(options: &Value, category: &str) -> Option<Value> {
         .cloned()
 }
 
-/// The values a select option offers, in order, groups flattened.
-fn option_values(option: &Value) -> Vec<String> {
-    fn collect(values: &Value, out: &mut Vec<String>) {
-        for value in values.as_array().into_iter().flatten() {
-            if let Some(id) = value["value"].as_str() {
-                out.push(id.to_owned());
-            } else {
-                collect(&value["options"], out);
-            }
-        }
-    }
-    let mut out = Vec::new();
-    collect(&option["options"], &mut out);
-    out
-}
-
 /// The agent's own permission prompt, answered at once: one of the session's own tools is
 /// allowed, anything else rejected. The tool's name, the outcome, and whether it was allowed.
 fn answer_permission(
     request: &RequestPermissionRequest,
     tools: &[String],
+    provider: &Provider,
 ) -> (String, RequestPermissionOutcome, bool) {
     let call = serde_json::to_value(&request.tool_call).unwrap_or_default();
     // Only the tool name the agent states counts: a title is text the model can shape.
-    let named = call["_meta"]["claudeCode"]["toolName"].as_str();
+    let named = (provider.stated_tool)(&call);
     let tool = named
         .or(call["title"].as_str())
         .unwrap_or_default()
@@ -513,6 +524,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_prompt_not_starting_with_flottille_s_marker_is_never_sent() {
+        for text in [
+            "/init",
+            " /review src",
+            "\n/compact",
+            "@README.md",
+            "!`id`",
+            "",
+            "hello",
+        ] {
+            assert!(prompt_text(text.to_owned()).is_err(), "{text:?}");
+        }
+        let delivery = "[flottille:brief]\n/init and @README.md and !`id`".to_owned();
+        assert_eq!(prompt_text(delivery.clone()), Ok(delivery));
+    }
+
+    #[test]
     fn updates_become_events_and_a_compaction_is_its_own() {
         let message = json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "hi"}});
         assert_eq!(event_of(&message).unwrap().0, "agent.message");
@@ -541,12 +569,5 @@ mod tests {
         let kept = cut(&text);
         assert!(kept.ends_with(&format!("‹+{} chars›", TEXT_LIMIT / 2)));
         assert_eq!(cut("short"), "short");
-    }
-
-    #[test]
-    fn grouped_option_values_are_flattened() {
-        let option =
-            json!({"options": [{"value": "a"}, {"group": "g", "options": [{"value": "b"}]}]});
-        assert_eq!(option_values(&option), ["a", "b"]);
     }
 }

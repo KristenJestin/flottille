@@ -305,7 +305,8 @@ there. An agent in a result:
 `workspace` is `null` for the project folder itself. `state` is `starting` (its process starts
 and its session opens), `working` (a turn runs), `idle` (between turns, its process running or
 released), or one of the final states, never left: `ended`, `failed` (`state_reason` says why).
-`chosen` is what the user asked, `null` for the agent's default; `taken` what the agent reported
+`provider` is the provider it runs on, for life (`docs/agents.md`, "Providers"). `chosen` is what
+was asked, or the project's default model, `null` for the agent's default; `taken` what the agent reported
 at the last start of its process. `active_at` is its last sign of activity, `null` before the
 first. `instructions` and `tools` are frozen when the agent is created. `parent` is the agent that
 launched it (`null` for a root), `depth` its depth in the tree, `epoch` the number of its session
@@ -318,16 +319,19 @@ Each method answers `not-found` when the agent does not exist.
 
 #### `agent.start`
 
-`{"project", "workspace"?, "model"?, "effort"?, "mode"?, "role"?, "message"}`. Creates a root agent
-in the project folder or the workspace, and gives it its first message: `{"agent", "after"}`.
-`role` is `lead` (the default) or `worker`. `model` and `effort` are values of the session's
-options, as `claude` lists them (`docs/agents.md`, "The Claude bridge"). `not-found` when the
-project or the workspace does not exist; `refused` when the workspace is not ready, the message is
-empty, the role is not one (the sentence lists them), a `mode` is given (Flottille's gate decides
-every tool call, and a permission mode of Claude Code's could only loosen it), or the agent cannot
-run (`claude` not on `PATH`: the message says what to do). A model or an effort the agent does
-not offer is known only once its session is open: the agent then fails (`agent.failed`), saying
-what it offers.
+`{"project", "workspace"?, "provider"?, "model"?, "effort"?, "mode"?, "role"?, "message"}`. Creates
+a root agent in the project folder or the workspace, and gives it its first message: `{"agent",
+"after"}`. `role` is `lead` (the default) or `worker`. `provider` is the project's, else the first
+one enabled, when left out; `model` the project's when the provider is the project's, else the
+provider's default; `model` and `effort` are values of the session's options, as the provider
+lists them (`provider.list`). `not-found` when the project or the workspace does not exist;
+`refused` when the workspace is not ready, the message is empty, the role is not one (the sentence
+lists them), a `mode` is given (Flottille's gate decides every tool call, and a permission mode of
+the agent's could only loosen it), the provider does not exist, is not enabled or not ready (the
+sentence says why, and names the ready ones), or the provider's models are known and the model or
+the effort is not among them (the sentence names those it offers). While they are not known yet,
+a model or an effort the agent does not offer is known only once its session is open: the agent
+then fails (`agent.failed`), saying what it offers.
 `agent.run` is the name this method had before the pilot door: it is still answered, the same.
 
 #### `agent.send`
@@ -357,7 +361,7 @@ names its root).
 
 `{"agent"}`. The whole tree of the agent's root, each agent before its children:
 `{"agents": [{"agent", "doing", "waiting_on", "needs_user"}]}`. `agent` is the agent in short
-(`id`, `role`, `title`, `project`, `workspace`, `parent`, `depth`, `epoch`, `state`,
+(`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `depth`, `epoch`, `state`,
 `state_reason`, `created_at`, `active_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
 took at the last start of its process, else the one asked, `null` for the agent's default before it
 started); `doing` a sentence of what it does
@@ -403,6 +407,48 @@ listing leaves out. `refused` when `before` is not a root agent. The pilot door'
 events, oldest first: at most 1000, the first ones (those numbered after `after` when it is given),
 or with `before` the last ones numbered before it. `more` says whether events remain past the
 page: newer ones, or with `before` older ones.
+
+### `provider.list`
+
+`{"project"?}`. Every provider, in order, as `flottille doctor --json` reports it, with what it
+offers (`docs/agents.md`, "Providers"), and, for a project, the provider and model its agents get
+when they name none:
+
+```json
+{
+  "providers": [
+    {
+      "name": "claude",
+      "title": "Claude",
+      "enabled": true,
+      "ready": true,
+      "why": null,
+      "warnings": [],
+      "program": {"name": "claude", "present": true, "path": "/usr/bin/claude",
+                  "version": "2.1.295", "checked": "2.1.295"},
+      "login": {"present": true, "path": "/home/user/.claude/.credentials.json", "api_key": null},
+      "override": null,
+      "models": [{"id": "sonnet", "efforts": ["low", "medium", "high"], "default": true}, {"id": "opus", "efforts": null}]
+    },
+    {"name": "opencode", "title": "OpenCode", "enabled": false, "ready": false,
+     "why": "is not enabled (`enabled = true` under [opencode] in providers.toml enables it)", "…": "…",
+     "models": null}
+  ],
+  "project": {"name": "app", "provider": "claude", "model": "sonnet"}
+}
+```
+
+`why` is `null` when the provider's agents can run, else a clause after its name that says why
+not and what to do. `warnings` say what may stop its agents that the daemon cannot tell for
+sure: a version other than the one Flottille was checked against, no sign-in it can see.
+`login.api_key` is the name of the API key found set, never its value. `override` is the test
+program standing for the provider (`docs/agents.md`, "For tests and development"). `models` is
+`null` until a session of the provider's agent said them, and `efforts` of a model `null` until a
+session had that model; `default` is there, `true`, on the model a new session takes when none
+is asked, once one said it. `project` is there only when one is named; its `provider` is `null` when
+none is enabled, its `model` `null` when the project names none. `not-found` when the project
+does not exist; `invalid-config` when `providers.toml` cannot be read (the sentence names the key
+at fault).
 
 ### `inbox.list`
 

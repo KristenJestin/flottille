@@ -112,7 +112,10 @@ pub struct AgentRun {
     /// The workspace it works in; the project folder itself when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
-    /// The agent's default when left out; never replaced by another.
+    /// The provider it runs on, for life; the project's when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// The project's, else the provider's default, when left out; never replaced by another.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -40,13 +40,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::VERSION;
 use crate::approvals;
-use crate::claude;
 use crate::daemon::Daemon;
 use crate::deliveries;
 use crate::files::{self, Context};
 use crate::gate;
 use crate::place::{Place, Resolved};
 use crate::projects;
+use crate::providers::{self, Provider};
 use crate::runs;
 use crate::tree;
 
@@ -257,8 +257,9 @@ const SERVED: [Definition; 18] = [
             agent_id. It works on its own: you are told when it reports, asks, fails, is stuck or \
             idles, so never poll. The brief is all it knows: the task and only it, what to read, \
             the checks, the deliverable. workspace: an existing workspace's name, {\"new\": \
-            {\"name\"}} for a new one, or left out for your own place. Refused above the \
-            project's children cap or the depth limit.",
+            {\"name\"}} for a new one, or left out for your own place. provider: yours when left \
+            out; a refusal names the ready ones and their models. Refused above the project's \
+            children cap or the depth limit.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -266,7 +267,9 @@ const SERVED: [Definition; 18] = [
             json!({"type": "object", "properties": {
                 "title": {"type": "string", "description": "The task in a few words: how you and the user will name this child."},
                 "brief": {"type": "string", "description": "Everything the child needs to know."},
-                "model": {"type": "string", "description": "The model; your agent's default when left out."},
+                "provider": {"type": "string", "description": "The provider it runs on: yours when left out."},
+                "model": {"type": "string", "description": "The model; the provider's default when left out."},
+                "effort": {"type": "string", "description": "The model's effort; its default when left out."},
                 "role": {"type": "string", "enum": ["worker", "lead"], "description": "worker by default."},
                 "workspace": {"description": "Where it works: your place when left out.", "anyOf": [
                     {"type": "string", "description": "An existing workspace of the project."},
@@ -645,19 +648,19 @@ fn base64url(bytes: &[u8]) -> String {
     out
 }
 
-/// The agent's tools that this server serves, in the agent's order.
-fn served(tools: &[String]) -> Vec<&'static str> {
-    let prefix = format!("mcp__{}__", claude::MCP_SERVER);
+/// The agent's tools that this server serves, in the agent's order: the agent holds them as its
+/// provider names them.
+fn served(provider: &Provider, tools: &[String]) -> Vec<&'static str> {
     tools
         .iter()
-        .filter_map(|tool| definition(tool.strip_prefix(&prefix)?))
+        .filter_map(|tool| definition(provider.tool_of(tool)?))
         .map(|definition| definition.name)
         .collect()
 }
 
 /// The grant of an agent's process: its tools that are served, in its order, and its place.
 pub fn grant_of(daemon: &Daemon, agent: &Agent) -> Result<Grant, String> {
-    let tools = served(&agent.tools);
+    let tools = served(providers::of(agent)?, &agent.tools);
     let project = projects::load_project(daemon, &agent.project).map_err(|f| f.message)?;
     let place = match &agent.workspace {
         Some(name) => {
@@ -886,8 +889,9 @@ async fn call(
     key: Option<String>,
     cancelled: CancellationToken,
 ) -> (String, bool) {
-    let tool = name
-        .strip_prefix(&format!("mcp__{}__", claude::MCP_SERVER))
+    let tool = providers::PROVIDERS
+        .iter()
+        .find_map(|provider| provider.tool_of(name))
         .unwrap_or(name)
         .to_owned();
     let Some(key) = key else {
@@ -1201,6 +1205,7 @@ pub fn cut(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::claude;
 
     #[test]
     fn base64url_has_no_padding_and_no_plus_or_slash() {
@@ -1219,8 +1224,8 @@ mod tests {
             assert_eq!(tool["inputSchema"]["type"], "object");
             let name = format!("mcp__flottille__{}", definition.name);
             assert!(
-                claude::tools(true, false).contains(&name)
-                    || claude::tools(false, false).contains(&name),
+                claude::PROVIDER.tools(true, false).contains(&name)
+                    || claude::PROVIDER.tools(false, false).contains(&name),
                 "{} is a tool agents get",
                 definition.name
             );
@@ -1229,12 +1234,12 @@ mod tests {
 
     #[test]
     fn a_grant_holds_the_agent_s_served_tools_in_its_own_order() {
-        let mut leaf = claude::tools(false, true);
-        assert_eq!(served(&leaf).len(), 11);
+        let mut leaf = claude::PROVIDER.tools(false, true);
+        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 11);
         leaf.reverse();
         leaf.retain(|tool| !tool.ends_with("__search"));
         leaf.push("fs_read".into());
-        let served = served(&leaf);
+        let served = served(&claude::PROVIDER, &leaf);
         assert_eq!(served.first(), Some(&"ask_parent"));
         assert_eq!(served.last(), Some(&"fs_read"));
         assert!(!served.contains(&"search"));

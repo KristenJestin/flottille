@@ -1,8 +1,8 @@
 # Agents
 
-An agent is one agent session, run over ACP (`docs/design.md` §4): a process of Flottille's own
-Claude bridge, in front of the user's `claude`, that Flottille starts, talks to on its stdio, and
-owns. It works in a place (the project folder
+An agent is one agent session, run over ACP (`docs/design.md` §4): a process of its provider
+(Flottille's own Claude bridge in front of the user's `claude`, or the user's `opencode acp`;
+"Providers", below) that Flottille starts, talks to on its stdio, and owns. It works in a place (the project folder
 itself, `main`, or one of its workspaces) and runs in bare mode: no built-in tool, no user or
 project setting, no skill, no plugin, no MCP server but Flottille's. It follows
 `docs/reference/hemera.md` §1 and §2.
@@ -14,9 +14,9 @@ woken only by deliveries. Flottille's MCP server and its tools are in `docs/tool
 
 | Command | |
 |---|---|
-| `flottille agent run <project> [--workspace <name>] [--model <model>] <message>` | Starts a Claude agent with a first message and prints its reply as it comes, until the turn ends. Fails when the agent fails or its process dies. `--json` prints the agent instead, once the turn ended. |
-| `flottille agent show <agent> [--json]` | The agent and its conversation. |
-| `flottille doctor [--json]` | Whether Claude agents can run here. Fails when they cannot. |
+| `flottille agent run <project> [--workspace <name>] [--provider <provider>] [--model <model>] [--effort <effort>] <message>` | Starts an agent with a first message and prints its reply as it comes, until the turn ends. Fails when the agent fails or its process dies. `--json` prints the agent instead, once the turn ended. |
+| `flottille agent show <agent> [--json]` | The agent (its provider and model among the rest) and its conversation. |
+| `flottille doctor [--json]` | Each provider: enabled or not, whether its agents can run here and why not. Fails when no provider is enabled or an enabled one cannot run. |
 
 `agent run` starts a root and follows its first turn; `agent send --follow` and `agent chat` write
 to a root and follow the turn of their message; `agent start`, `send`, `read`, `stop`, `list` and
@@ -26,25 +26,114 @@ Flottille: all of them are in `docs/cli.md`. The protocol has the rest (`agent.c
 
 ## What the machine needs
 
-Only **the user's own `claude`**, on `PATH`, signed in by the user or given `ANTHROPIC_API_KEY`.
-Nothing else is installed: the bridge that speaks ACP in front of it is Flottille's own binary
-(below). Flottille provides no login of its own and never reads, copies or prints the user's
-credentials: `flottille doctor` checks that the login file (`$CLAUDE_CONFIG_DIR/.credentials.json`,
-else `~/.claude/.credentials.json`) exists, without opening it, or that `ANTHROPIC_API_KEY` is set,
-without printing it. On macOS the login is in the Keychain and there is no file.
+For each provider enabled, **the user's own program**, on `PATH`, signed in by the user or given
+an API key. Flottille installs nothing and provides no login of its own; an API key in the
+environment counts as a sign-in, and is never printed, logged or stored.
+
+For Claude, the user's `claude`, signed in or given `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`
+or `ANTHROPIC_AUTH_TOKEN`. Nothing else is installed: the bridge that speaks ACP in front of it is
+Flottille's own binary (below). Flottille provides no login of its own and never reads, copies or
+prints the user's credentials: `flottille doctor` checks that the login file
+(`$CLAUDE_CONFIG_DIR/.credentials.json`, else `~/.claude/.credentials.json`) exists, without
+opening it, or that one of those variables is set, without printing it. On macOS the login is in
+the Keychain and there is no file.
 
 `flottille doctor` reports `claude` with its path and version (`claude --version`, given 5 s),
 beside the version this Flottille was checked against (2.1.295): another version is a warning that
 names both, not a failure, since the stream-json mode the bridge speaks may have changed. It
-fails while `claude` is not on `PATH` or neither the login file nor the key is there. `agent.run`
-is refused with a sentence saying what to do while `claude` is not on `PATH`.
+fails while `claude` is not on `PATH`. Neither the login file nor a variable there is a warning,
+not a failure: the login may be where Flottille does not look (the Keychain), and an agent that
+is not signed in at all fails at its first prompt, saying so ("The Claude bridge", below).
+
+For OpenCode, the user's `opencode`, signed in (`opencode auth login`; the login file,
+`$XDG_DATA_HOME/opencode/auth.json` else `~/.local/share/opencode/auth.json`, is checked for its
+presence only) or given the API key of one of the model providers it takes: `ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `GEMINI_API_KEY`,
+`GROQ_API_KEY`, `MISTRAL_API_KEY`, `DEEPSEEK_API_KEY`, `XAI_API_KEY`, `OPENCODE_API_KEY` (the list
+is a choice the maintainer can revise). Neither is a warning, not a failure: OpenCode offers
+some free models with no sign-in, and takes a cloud's credentials (`AWS_*` for Bedrock, say) that
+Flottille does not count. Its version is checked against 1.19.0, the version whose bare mode was
+qualified ("Bare mode for OpenCode", below): another one is refused, its agents with it, since
+the bare mode rests on what that version reads and on two variables it keeps for its own tests
+(`OPENCODE_TEST_HOME`, `OPENCODE_TEST_MANAGED_CONFIG_DIR`), which another version may drop. The
+user may run another version at their own risk with `allow_unqualified_version = true` under
+`[opencode]` in `providers.toml`: it is then a warning that names both versions. An `opencode`
+that does not say its version is refused the same way.
+
+An agent is refused at its start, with a sentence that says why and names the providers that
+are ready, while its provider is not enabled or not ready ("Providers", below).
+
+## Providers
+
+A provider is what an agent runs on: `claude` and `opencode`, in this order. Each is a module of
+the daemon (`claude.rs`, `opencode.rs`) that says how its agent starts, its bare environment and
+configuration, how it is checked ready, how it names Flottille's tools and how its models and
+efforts are read; the tree, the deliveries, the gate and the store know nothing of them.
+
+- **Enabled**: `$XDG_CONFIG_HOME/flottille/providers.toml`, one table per provider, each with
+  `enabled`, and OpenCode's with `allow_unqualified_version` (above; `false` by default, and
+  refused under `[claude]`, whose version is only ever a warning). Without the file, or without a
+  provider's table, Claude is enabled and OpenCode is not. A provider it does not know, another
+  key, or a value of the wrong type is refused, naming the key at fault:
+
+  ```toml
+  [opencode]
+  enabled = true
+  ```
+
+- **Ready**: enabled, its program on `PATH`, and, for OpenCode, its version the qualified one or
+  allowed (above). The version is asked (`--version`, given 5 s, off the daemon's thread) by
+  `doctor`, `provider.list` and each start of an agent's process, and kept while the program's
+  file does not change: an agent's start is refused at once when it is known, else the agent
+  fails when its process would start. A sign-in Flottille can see (its login file is
+  there or one of its API keys is set) is not needed: without one, `doctor` warns, and an agent
+  that is not signed in at all fails once its provider refuses it. A test override (below) stands for
+  the program.
+- **An agent's provider** is the one asked (`--provider`, `agent_start`'s and `agent_launch`'s
+  `provider`), else the project's (`provider` in its file, `docs/projects.md`), else the first one
+  enabled; a child's is its parent's unless it names another. It is kept in the agent and never
+  changes: a replacement runs on the same provider. It is checked again at each start of the
+  agent's process, a replacement's included: an agent whose provider is no longer enabled or
+  ready fails (`agent.failed`, with the sentence a start would be refused with), and is not
+  started again.
+- **Its model** is the one asked, else the project's (`model` in its file, for the project's own
+  provider only), else the provider's default: the model a new session has before any is set,
+  marked `"default": true` among the models once a session said it. Its effort is the one asked,
+  else the model's default.
+- **The models**: what a session of the provider's agent offers in its config options (the
+  `model` option's values, and the `thought_level` option's for the model the session has), kept
+  by the daemon per provider (`provider_models` in the store), and learned again from every
+  session that opens. They are kept with the program they came from (its path and modification
+  time) and the names of the provider's API keys set (never their values): another version of
+  the program, or another set of keys in the daemon's environment, forgets them. They stay
+  approximate: what the provider offers also depends on what neither says, its sign-in file
+  (signing in or out with `opencode auth login`), OpenCode's model catalogue (fetched from
+  `models.dev`, `core/src/models-dev.ts`) and its own state, and such a change shows only at the
+  next session.
+  No agent is ever run just to list them: until a first session said them, they are `null`, an
+  agent may ask any model and effort, and one its session does not offer fails the agent
+  ("The options", below). Once they are known, a model or an effort they do not hold is refused
+  at once, naming those the provider offers. The efforts of a model are `null` until a session
+  had that model. An effort asked without a model is checked against the default model's
+  efforts, when they are known; until then it is taken, and a session that does not offer it
+  fails the agent.
+- **Refusals** name what is available: `there is no provider codex: the providers are claude,
+  opencode`; `provider opencode is not enabled (…); the ready providers are claude`; `provider
+  opencode is not ready: `opencode` is not on PATH (…); no provider is ready: see `flottille
+  doctor``; `provider claude offers no model x: it offers a, b`; `provider claude's model a
+  offers no effort max: it offers low, high`; `provider claude's default model a offers no
+  effort max: it offers low, high`.
+- **The method** `provider.list` (`docs/protocol.md`) gives every provider as `doctor` does, with
+  its models and, for a project, its default provider and model.
 
 ## How an agent runs
 
-- **The process**: `flottille bridge claude` (the daemon's own binary, "The Claude bridge",
-  below), in the agent's folder, in a process group of its own, with the daemon's environment
-  less what it has no business with (below). The `claude` it starts is in the same group. Its
-  stderr, and `claude`'s, go to the daemon's log, masked; its stdout is the protocol.
+- **The process**: the provider's. For Claude, `flottille bridge claude` (the daemon's own
+  binary, "The Claude bridge", below); the `claude` it starts is in the same group. For OpenCode,
+  `opencode acp`, with its bare environment ("Bare mode for OpenCode", below). It runs in the
+  agent's folder, in a process group of its own, with the daemon's environment less what it has
+  no business with (below). Its stderr goes to the daemon's log, masked; its stdout is the
+  protocol.
 - **The handshake**: `initialize` with ACP v1, the client named `Flottille`, and no `fs` or
   `terminal` capability (the agent has no built-in file or terminal tool) nor `subagents` (no
   native sub-agent). It declares the `jetbrains.air` extension with `recommendedValue` (a
@@ -62,9 +151,11 @@ is refused with a sentence saying what to do while `claude` is not on `PATH`.
   died during it. Prompts sent while a turn runs wait their turn.
 - **A cancel** sends `session/cancel` while a turn runs; the turn then ends `cancelled`.
 - **The agent's own permission prompts** (`session/request_permission`) are answered at once:
-  a tool of the agent's own list, named by `_meta.claudeCode.toolName`, is allowed once; anything
-  else is rejected, a request with no tool name included (its title is never taken for one: the
-  model can shape it). In bare mode they should almost never come.
+  a tool of the agent's own list, named by the provider's own field (Claude:
+  `_meta.claudeCode.toolName`), is allowed once; anything else is rejected, a request with no tool
+  name included (its title is never taken for one: the model can shape it). OpenCode names the
+  tool in the title only, so each of its requests is rejected. In bare mode they should almost
+  never come.
 - **Idle release**: a process with no turn running and nothing waiting for 5 minutes is let go
   (stopped: `SIGTERM` to its group, `SIGKILL` 2 s later); the next prompt starts it again and
   resumes or loads its session.
@@ -128,6 +219,126 @@ bridge sets on `claude` ("The Claude bridge", below):
 The MCP servers of the session are Flottille's alone: one HTTP server named `flottille`, the
 daemon's own (`docs/tools.md`), with the token of the agent's process in an `Authorization`
 header. Each start of the process mints a new token, which revokes the last; its end revokes it.
+
+## Bare mode for OpenCode
+
+OpenCode takes its configuration from variables and files, not from the session: its bare mode
+is the environment the daemon starts `opencode acp` with (`opencode::bare`, table-tested), and
+nothing in `_meta`. It was qualified against OpenCode 1.19.0 by reading its source (tag `v1.19.0`;
+the places below are under `packages/`), without running an agent: the run that proves it comes
+after.
+
+| Variable | Value | What it shuts |
+|---|---|---|
+| `XDG_CONFIG_HOME` | `<data>/agents/opencode/config` | The user's `opencode.json`, agents, commands, plugins, `AGENTS.md`: OpenCode's global folder is `$XDG_CONFIG_HOME/opencode` (`opencode/src/config/config.ts`, the global files first; `core/src/instruction-context.ts:58` its `AGENTS.md`). |
+| `XDG_STATE_HOME`, `XDG_CACHE_HOME` | `<data>/agents/opencode/state`, `…/cache` | Its state (`model.json`, the models used last, which pick a new session's default model: `opencode/src/provider/provider.ts:2035`) and its cache (the model catalogue, packages: `core/src/global.ts:11-14`), which stay the user's and which Flottille's runs would write. |
+| `OPENCODE_TEST_HOME` | `<data>/agents/opencode/home` | The home it reads `~/.opencode`, `~/.claude/CLAUDE.md` and skills from (`core/src/global.ts:19`). |
+| `OPENCODE_TEST_MANAGED_CONFIG_DIR` | `<data>/agents/opencode/managed` | The machine's managed settings, `/etc/opencode`, which come after every other file (`opencode/src/config/managed.ts:32`). |
+| `OPENCODE_DB` | `<data>/agents/opencode/opencode.db` | Its sessions, kept apart from the user's; with them a signed-in OpenCode account, whose organisation settings would be merged (`core/src/database/database.ts:44`). |
+| `OPENCODE_DISABLE_PROJECT_CONFIG` | `1` | The project's `opencode.json`, `.opencode/` and `AGENTS.md` (`opencode/src/config/paths.ts:27`, `core/src/instruction-context.ts:48`). |
+| `OPENCODE_DISABLE_CLAUDE_CODE` | `1` | `CLAUDE.md` files and Claude Code skills (`opencode/src/effect/runtime-flags.ts:22-29`, `opencode/src/session/instruction.ts:62-66`). |
+| `OPENCODE_DISABLE_EXTERNAL_SKILLS` | `1` | Skills from outside its folder (`opencode/src/effect/runtime-flags.ts:20`). |
+| `OPENCODE_PURE` | `1` | External plugins (`opencode/src/plugin/index.ts:181`). |
+| `OPENCODE_DISABLE_AUTOUPDATE`, `OPENCODE_DISABLE_LSP_DOWNLOAD` | `1` | Nothing installed or updated behind the user's back (`opencode/src/cli/upgrade.ts:23`). |
+| `OPENCODE_SERVER_PASSWORD` | 32 random hexadecimal digits, new for each process | The HTTP server `opencode acp` runs for itself, which has shell and terminal routes and is open to anyone on the machine without a password (`opencode/src/cli/cmd/serve.ts:15`). |
+| `OPENCODE_CONFIG_CONTENT` | below | Merged after every file it reads (`core/src/flag/flag.ts:22`, `opencode/src/config/config.ts`). |
+
+```json
+{
+  "default_agent": "flottille",
+  "agent": {
+    "flottille": {
+      "mode": "primary",
+      "prompt": "{file:<runtime>/opencode/<agent>.md}",
+      "permission": {
+        "*": "deny", "doom_loop": "allow",
+        "bash": "deny", "read": "deny", "…": "deny", "external_directory": "deny",
+        "flottille_fs_read": "allow", "…": "allow"
+      }
+    },
+    "build": {"disable": true}, "plan": {"disable": true},
+    "general": {"disable": true}, "explore": {"disable": true}
+  },
+  "share": "disabled",
+  "autoupdate": false,
+  "snapshot": false,
+  "experimental": {"mcp_timeout": 600000}
+}
+```
+
+- **No built-in tool**: OpenCode's tools (shell, read, glob, grep, edit, write, task, webfetch,
+  todo, websearch, skill, patch, lsp, plan…; `opencode/src/tool/registry.ts:209-245`) are left
+  out of what the model is sent when the last permission rule that matches them denies them for
+  every pattern (`opencode/src/permission/index.ts:204`): `"*": "deny"` does it for all of them,
+  MCP resource tools included, and each permission OpenCode names for one of its tools is denied
+  again by name after it (`bash`, `read`, `glob`, `grep`, `list`, `edit`, `write`, `apply_patch`,
+  `task`, `webfetch`, `websearch`, `codesearch`, `todowrite`, `todoread`, `skill`, `question`,
+  `plan_enter`, `plan_exit`, `lsp`, `execute`, `external_directory`; any key is accepted, in its
+  order: `core/src/v1/config/permission.ts`). The agent's rules come last
+  (`opencode/src/agent/agent.ts:138, 277-293`), so nothing of the user's can loosen them. MCP
+  tools go through the same rules, named `<server>_<tool>` (`opencode/src/mcp/catalog.ts:119`):
+  only the agent's own tools are allowed, each by name (`flottille_fs_read` and so on for an
+  OpenCode agent), so that another server named like Flottille's is not.
+- **Repeated calls**: OpenCode asks the `doom_loop` permission before a third identical tool
+  call in a row (`opencode/src/session/processor.ts:356-379`; `ask` by default,
+  `opencode/src/agent/agent.ts:121`), which `"*": "deny"` would turn into a failed call:
+  `doom_loop` is allowed, and Flottille's gate judges the call itself.
+- **No sub-agent**: the `task` tool is denied, and the agents that ship with OpenCode are
+  disabled; `flottille` is the only one.
+- **No command**: OpenCode's ACP agent takes a prompt whose text, its text blocks joined and
+  trimmed, starts with `/` for one of its commands (`opencode/src/acp/service.ts:519-560,
+  826-837`), and a command's template runs `` !`…` `` in a shell, outside the gate, with its
+  arguments substituted, and attaches the files `@path` names (`opencode/src/session/prompt.ts:157-190,
+  1372-1406`). Every prompt Flottille sends is deliveries, and starts with a delivery's marker
+  (`[flottille:<kind>]`, "Deliveries", below): the daemon refuses to send any other, whatever the
+  provider (`acp::prompt_text`), so that no prompt is ever read as a command. Inside a prompt
+  that is not a command, `@` and `` !`…` `` are text: OpenCode expands them only in a command's
+  template and in the `task` tool's prompt, which is denied (`opencode/src/tool/task.ts:201`).
+- **Its instructions**: the agent's prompt replaces the provider's own system prompt
+  (`opencode/src/session/llm/request.ts:60`); no `AGENTS.md`/`CLAUDE.md` of the user's or the
+  project's is read (above). OpenCode replaces `{env:…}` and `{file:…}` in the configuration's text
+  (`opencode/src/config/variable.ts:34`): the instructions are never in it, only the path of the
+  file they are written to (mode `0600`, under the runtime folder, removed with the agent), and a
+  runtime folder whose path holds `{`, `}`, `"`, `\` or a control character is refused.
+- **MCP**: Flottille's server is given with the session, its `Authorization` header honoured
+  (`opencode/src/acp/service.ts:1070`). A call carries no call key, so a retried call is played
+  again (the daemon logs it once). The SDK's default MCP time limit is raised to 10 minutes.
+- **Permission prompts** name the tool in the title only (`opencode/src/acp/permission.ts`): they
+  are all rejected.
+- **Usage**: OpenCode sends `usage_update` with the context used, its size and the cost
+  (`opencode/src/acp/usage.ts:210`); a provider error ends the prompt with an ACP error
+  (`opencode/src/acp/service.ts:839-890`), not with the `sessionFailure` extension.
+- **Models**: the `model` option's values are `<provider>/<model>`; the effort option lists the
+  variants of the current model only (`opencode/src/acp/config-option.ts`).
+- **No package installed**: at every start OpenCode installs its plugin package,
+  `@opencode-ai/plugin`, from npm into each configuration folder it can write to
+  (`opencode/src/config/config.ts:440-470`), and has no switch to stop it. It skips a folder it
+  cannot write to (`core/src/npm.ts:147-152`), and the `.gitignore` it would write there too
+  (`opencode/src/config/config.ts:309-326`): its configuration folder,
+  `<data>/agents/opencode/config/opencode`, is left empty and made read-only (mode `0500`) before
+  each start. Its home's `.opencode`, which would be another, is never made.
+- **What it keeps**: its configuration, state and cache folders, home, managed folder and
+  database are in `<data>/agents/opencode`. Its data folder (`$XDG_DATA_HOME/opencode`) stays the
+  user's, since the login is there: OpenCode writes its log there (`core/src/global.ts:23`), and
+  the outputs of tools it cuts, which none of the agent's tools are.
+- **An organisation's sign-in is full control.** A login of type `wellknown` in `auth.json` (an
+  organisation's OpenCode server, `opencode auth login <url>`) makes OpenCode fetch that server's
+  configuration at every start and merge it before every other one
+  (`opencode/src/config/config.ts:370-410`). Flottille's comes after it, merged with `mergeDeep`
+  (remeda): a key Flottille sets takes Flottille's value, a key it does not set stays, and the
+  lists of `instructions` are joined (`opencode/src/config/config.ts:42-52`). What Flottille wins:
+  `default_agent`, its agent's prompt, the disabled agents, and its rules above, as far as they
+  go: the remote's own rules for the agent `flottille` keep their place, so a rule of the remote's
+  on one of OpenCode's tools followed by a pattern of its own that matches that tool
+  (`{"*": …, "bash": …, "b*": "allow"}`) still allows it; a remote rule that comes after `*`
+  without naming a tool Flottille lists allows what it matches. What it cannot undo, since their
+  names are the remote's: its `mcp` servers (a `local` one is a program the remote names, started
+  on the user's machine outside the gate), its `plugin`s (code OpenCode loads), its
+  `instructions` (added to the agent's), its `provider` settings (where the prompts go). Such a
+  sign-in therefore gives that organisation's server full control of Flottille's OpenCode agents,
+  a shell included. Flottille cannot tell: knowing it would mean reading `auth.json`, which it
+  never opens, so `flottille doctor` does not warn of it. A user signed in that way should sign
+  in to OpenCode another way (an API key) to run its agents under Flottille.
 
 ## The Claude bridge
 
@@ -207,10 +418,13 @@ bridge runs one session.
 
 ## The agent's environment
 
-The agent's process gets the daemon's environment less the variables below (`claude::withheld`),
-which are table-tested. The daemon's environment is the user's shell's, so it holds their
-secrets, and a Claude Code agent run in bare mode has no use for them. The list is a choice the
-maintainer can revise.
+The agent's process gets the daemon's environment less the variables its provider withholds
+(`claude::withheld`, `opencode::withheld`), which are table-tested. The daemon's environment is
+the user's shell's, so it holds their secrets, and an agent run in bare mode has no use for them.
+The lists are a choice the maintainer can revise. Each provider lets through its own sign-in
+only: a key of one provider never reaches another's agent.
+
+For Claude:
 
 - **Forge tokens and their configuration**: `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`,
   `GITHUB_ENTERPRISE_TOKEN`, `GITLAB_TOKEN`, `GL_TOKEN`, `BITBUCKET_*`, `BKT_*`, `GH_CONFIG_DIR`,
@@ -228,6 +442,12 @@ What stays: `ANTHROPIC_BASE_URL`, `CLAUDE_CONFIG_DIR` (the login lives there), p
 certificate variables (`HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`…), and
 the rest of the user's environment (`PATH`, `HOME`, locale). This means that a sign-in through a
 cloud provider's own variables (`CLAUDE_CODE_USE_BEDROCK`, for one) does not reach the agent.
+
+For OpenCode: the same forge tokens and secret-looking names, except the API keys it takes
+(above), every `OPENCODE_*` variable of the user's (`OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`,
+`OPENCODE_PERMISSION`…), which would undo its bare mode (Flottille sets the ones it needs), and
+every `OTEL_*` one, which would send OpenCode's traces to the user's collector, its headers with
+them (`core/src/observability/otlp.ts`).
 
 ## The conversation
 
@@ -326,8 +546,11 @@ Every 5 seconds, the daemon looks at what only time decides:
 
 ## For tests and development
 
-- `FLOTTILLE_AGENT_COMMAND`: a program the daemon runs in place of the Claude bridge, with no
-  argument. The tests run the fake ACP agent this way (`crates/flottille-fake-agent`, whose
+- `FLOTTILLE_AGENT_COMMAND`: a program the daemon runs in place of every provider's, with no
+  argument; `FLOTTILLE_AGENT_COMMAND_CLAUDE` and `FLOTTILLE_AGENT_COMMAND_OPENCODE`, in place of
+  one provider's (the tests run two fake agents standing for two providers this way). The
+  provider's bare environment is still set; the program stands for the provider's program and
+  sign-in, so the provider is ready when it is enabled, and its version is never asked. The tests run the fake ACP agent this way (`crates/flottille-fake-agent`, whose
   script format is documented in its source). The bridge itself is tested in front of a fake
   `claude` (`crates/flottille-fake-claude`), first in `PATH`.
 - `FLOTTILLE_BRIDGE_NO_RESUME`: set (to anything), the bridge does not offer `session/resume`, so

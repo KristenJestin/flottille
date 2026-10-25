@@ -68,6 +68,43 @@ impl User {
             .with_env("FLOTTILLE_FAKE_AGENT_DIR", dir.to_str().unwrap())
     }
 
+    /// A user with two providers, Claude and OpenCode, both enabled, each standing on a fake ACP
+    /// agent of its own: the per-provider test overrides name a link to the fake agent in the
+    /// folders `fake-claude` and `fake-opencode`, which the fake agent takes for its own folder.
+    pub fn with_fake_providers() -> User {
+        let mut user = User::new();
+        for provider in ["claude", "opencode"] {
+            let dir = user.path(&format!("fake-{provider}"));
+            std::fs::create_dir(&dir).unwrap();
+            std::os::unix::fs::symlink(fake_agent(), dir.join("agent")).unwrap();
+            let name = format!("FLOTTILLE_AGENT_COMMAND_{}", provider.to_uppercase());
+            user = user.with_env(&name, dir.join("agent").to_str().unwrap());
+        }
+        user.write_providers("[opencode]\nenabled = true\n");
+        user
+    }
+
+    /// The user's `providers.toml`.
+    pub fn write_providers(&self, text: &str) {
+        let file = self.path("config/flottille/providers.toml");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, text).unwrap();
+    }
+
+    /// The script of the fake agent standing for that provider (`with_fake_providers`).
+    pub fn provider_script(&self, provider: &str, script: Value) {
+        std::fs::write(
+            self.path(&format!("fake-{provider}/script.json")),
+            script.to_string(),
+        )
+        .unwrap();
+    }
+
+    /// What the fake agent standing for that provider received and did.
+    pub fn provider_received(&self, provider: &str) -> Vec<Value> {
+        records(&self.path(&format!("fake-{provider}/received.jsonl")))
+    }
+
     /// A user whose agents run through Flottille's Claude bridge in front of the fake `claude`
     /// (`crates/flottille-fake-claude`): `bin/claude` first in `PATH`, its folder `claude`.
     pub fn with_fake_claude() -> User {
@@ -75,6 +112,9 @@ impl User {
         std::fs::create_dir(user.path("claude")).unwrap();
         std::fs::create_dir(user.path("bin")).unwrap();
         std::os::unix::fs::symlink(fake_claude(), user.path("bin/claude")).unwrap();
+        // Signed in: Claude is ready only then, and only the file's presence is ever checked.
+        std::fs::create_dir_all(user.path("home/.claude")).unwrap();
+        std::fs::write(user.path("home/.claude/.credentials.json"), "{}").unwrap();
         // The test's own PATH after it, without `/usr/bin` forced in: a run on a PATH without
         // `node` shows that nothing needs it.
         let path = format!(
@@ -120,14 +160,7 @@ impl User {
     /// What the fake agent received and did, one entry per line of its record. A line it is
     /// still writing is left for the next read.
     pub fn received(&self) -> Vec<Value> {
-        match std::fs::read_to_string(self.path("fake/received.jsonl")) {
-            Ok(text) => text
-                .split_inclusive('\n')
-                .filter(|line| line.ends_with('\n'))
-                .map(|line| serde_json::from_str(line).unwrap())
-                .collect(),
-            Err(_) => Vec::new(),
-        }
+        records(&self.path("fake/received.jsonl"))
     }
 
     /// The requests of one method the fake agent received, oldest first.
@@ -282,6 +315,19 @@ impl User {
             }
         });
         Watch { child, lines }
+    }
+}
+
+/// The records of a fake agent, one per line. A line it is still writing is left for the next
+/// read.
+fn records(file: &Path) -> Vec<Value> {
+    match std::fs::read_to_string(file) {
+        Ok(text) => text
+            .split_inclusive('\n')
+            .filter(|line| line.ends_with('\n'))
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect(),
+        Err(_) => Vec::new(),
     }
 }
 
