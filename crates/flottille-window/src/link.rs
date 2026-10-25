@@ -4,7 +4,7 @@
 //! reads everything again, which the events alone cannot rebuild. The UI only ever receives parsed
 //! [`Update`]s; it never waits on the socket.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
@@ -15,7 +15,7 @@ use flottille_core::protocol::{Event, Message, Request};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use serde_json::{Value, json};
 
-use crate::model::{Answers, OpenQuestion, Snapshot, is_final};
+use crate::model::{Answers, Snapshot};
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -45,8 +45,6 @@ const FIRST_RETRY: Duration = Duration::from_millis(100);
 const LAST_RETRY: Duration = Duration::from_secs(5);
 /// Events that come together are read in one go before the shell is read again.
 const QUIET: Duration = Duration::from_millis(40);
-/// The inbox entries looked at for a root's open question.
-const INBOX: u64 = 100;
 
 /// Starts the link's thread. It ends when the receiver is dropped.
 pub fn spawn(connect: Connect) -> (UnboundedReceiver<Update>, Arc<Seen>) {
@@ -149,10 +147,8 @@ fn matters(event: &Event) -> bool {
                 | "agent.replaced"
                 | "agent.failed"
                 | "agent.ended"
-                | "agent.asked"
                 | "agent.reported"
         ),
-        Some("delivery") => name == "delivery.queued" && event.data["kind"] == "user",
         _ => false,
     }
 }
@@ -168,57 +164,21 @@ fn read(conn: &mut Conn, briefs: &mut HashMap<String, String>, seen: &Seen) -> R
     let workspaces = conn.request("workspace.list", json!({}))?;
     let agents = conn.request("agent.list", json!({}))?;
     let approvals = conn.request("approval.list", json!({}))?;
-    let inbox = conn.request("inbox.list", json!({"limit": INBOX}))?;
-    let roots: Vec<(String, bool)> = agents["agents"]
+    let needs_user = needing_the_user(conn)?;
+    let roots: Vec<&str> = agents["agents"]
         .as_array()
         .into_iter()
         .flatten()
         .filter(|agent| agent["parent"].is_null())
-        .map(|agent| {
-            (
-                agent["id"].as_str().unwrap_or_default().to_owned(),
-                is_final(agent["state"].as_str().unwrap_or_default()),
-            )
-        })
+        .filter_map(|agent| agent["id"].as_str())
         .collect();
     // A root's first message is its brief and never changes: read once.
     let now = seen.last_seq.load(Ordering::Relaxed);
-    for (id, _) in &roots {
+    for id in roots {
         if !briefs.contains_key(id) {
             let shown = conn.request("agent.show", json!({"agent": id, "after": now}))?;
             let brief = shown["agent"]["brief"].as_str().unwrap_or_default();
-            briefs.insert(id.clone(), brief.to_owned());
-        }
-    }
-    let mut last_questions: HashMap<String, OpenQuestion> = HashMap::new();
-    for entry in inbox["entries"].as_array().into_iter().flatten() {
-        if entry["kind"] == "question" {
-            let question = OpenQuestion {
-                seq: entry["seq"].as_u64().unwrap_or(0),
-                at: entry["at"].as_u64().unwrap_or(0),
-                agent: entry["agent"].as_str().unwrap_or_default().to_owned(),
-                text: entry["text"].as_str().unwrap_or_default().to_owned(),
-            };
-            last_questions.insert(question.agent.clone(), question);
-        }
-    }
-    let mut questions = Vec::new();
-    for (id, ended) in &roots {
-        let Some(question) = last_questions.remove(id) else {
-            continue;
-        };
-        if *ended {
-            continue;
-        }
-        // Open until the user writes to the root.
-        let since = conn.request("agent.show", json!({"agent": id, "after": question.seq}))?;
-        let answered = since["events"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|event| event["name"] == "delivery.queued" && event["data"]["kind"] == "user");
-        if !answered {
-            questions.push(question);
+            briefs.insert(id.to_owned(), brief.to_owned());
         }
     }
     Ok(Snapshot::build(Answers {
@@ -226,9 +186,40 @@ fn read(conn: &mut Conn, briefs: &mut HashMap<String, String>, seen: &Seen) -> R
         workspaces: &workspaces,
         agents: &agents,
         approvals: &approvals,
-        questions: &questions,
+        needs_user: &needs_user,
         briefs,
     }))
+}
+
+/// The roots the daemon says need the user, as `agent.trees` gives them (the live roots, a page
+/// of them at a time): the window does not decide this itself.
+fn needing_the_user(conn: &mut Conn) -> Result<HashSet<String>> {
+    let mut found = HashSet::new();
+    let mut before: Option<String> = None;
+    loop {
+        let page = conn.request("agent.trees", json!({"before": before}))?;
+        let trees = page["trees"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        for tree in trees {
+            if tree["status"]["needs_user"] == true {
+                found.insert(
+                    tree["status"]["agent"]["id"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                );
+            }
+        }
+        before = trees
+            .last()
+            .and_then(|tree| tree["status"]["agent"]["id"].as_str())
+            .map(str::to_owned);
+        if page["more"] != true || before.is_none() {
+            return Ok(found);
+        }
+    }
 }
 
 /// One connection: requests answered in turn, events kept aside meanwhile.
@@ -357,7 +348,7 @@ mod tests {
             "delivery.queued",
             json!({"kind": "brief"})
         )));
-        assert!(matters(&event("delivery.queued", json!({"kind": "user"}))));
+        assert!(!matters(&event("delivery.queued", json!({"kind": "user"}))));
         assert!(matters(&event("approval.requested", json!({}))));
         assert!(matters(&event("agent.turn_ended", json!({}))));
         assert!(matters(&event("workspace.created", json!({}))));

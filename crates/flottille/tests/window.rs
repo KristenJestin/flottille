@@ -22,13 +22,12 @@ use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
 
 /// A user whose fake agent answers "ok", reads `.env` when asked to (a call the gate holds for
-/// the user), works a few seconds, or asks the user a question.
+/// the user), and works a few seconds when asked to.
 fn user() -> User {
     let user = User::with_fake_agent();
     user.fake_script(json!({"turns": [
         {"when": "read the env", "do": [{"mcp": {"tool": "fs_read", "arguments": {"path": ".env"}}}]},
-        {"when": "work a while", "do": [{"wait": 4000}, {"say": "done"}]},
-        {"when": "ask me", "do": [{"mcp": {"tool": "ask_user", "arguments": {"question": "Which base branch?"}}}]}
+        {"when": "work a while", "do": [{"wait": 4000}, {"say": "done"}]}
     ]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     user
@@ -280,36 +279,6 @@ fn choosing_an_item_of_the_bell_opens_its_session(cx: &mut TestAppContext) {
         !shell.read_with(cx, |s, _| s.bell_open()),
         "a choice closes the list"
     );
-}
-
-#[gpui_kit::test]
-fn a_question_of_a_root_waits_for_the_user_until_the_user_writes_to_it(cx: &mut TestAppContext) {
-    let user = user();
-    project(&user, "atlas");
-    let id = start(&user, "atlas", None, "Prepare the release");
-    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    until(&shell, cx, "the session is shown", |cx| {
-        shell.read_with(cx, |s, _| s.session(&id).is_some())
-    });
-
-    send(&user, &id, "ask me");
-    until(&shell, cx, "the question rings the bell", |cx| {
-        shell.read_with(cx, |s, cx| s.top().read(cx).count()) == 1
-    });
-    assert_eq!(mark_of(&shell, &id, cx), Some(AgentState::NeedsYou));
-    let item = shell.read_with(cx, |s, _| s.snapshot().bell[0].clone());
-    assert_eq!(
-        (item.label.as_str(), item.detail.as_str()),
-        ("Question", "Which base branch?")
-    );
-
-    send(&user, &id, "Take main.");
-    until(&shell, cx, "the answer clears it", |cx| {
-        shell.read_with(cx, |s, cx| s.top().read(cx).count()) == 0
-    });
-    until(&shell, cx, "the session is at rest", |cx| {
-        mark_of(&shell, &id, cx).is_none()
-    });
 }
 
 #[gpui_kit::test]

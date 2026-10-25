@@ -369,11 +369,11 @@ work happens (`main`, the project folder, and its workspaces), the sessions in e
 bell counting what waits for you. It starts the daemon like any command when nobody listens, and
 when the daemon goes away it connects again and catches up with the events it missed.
 
-What waits for you, counted by the bell, marking its session `NEEDS YOU` and opened by choosing it:
-each request you hold (`flottille approvals`), and each question a live root asked you
-(`flottille inbox`) that no message of yours to that root followed yet. A session is marked running
-while an agent of its tree starts or works; otherwise it shows how long ago its tree was last
-active.
+The bell counts and lists the requests you hold (`flottille approvals`); choosing one opens its
+session. A session is marked `NEEDS YOU` when the daemon says its root needs you, as
+`flottille status` does: the window decides none of this, it shows the daemon's state. A root's
+question stays in `flottille inbox`. A session is marked running while an agent of its tree starts
+or works; otherwise it shows how long ago its tree was last active.
 
 Below 1240 pixels wide, the session page's rail of agents becomes a drawer from the right; below
 860, the tree of projects becomes a drawer from the left, opened by the menu button of the top bar.

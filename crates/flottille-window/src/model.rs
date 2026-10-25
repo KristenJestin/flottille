@@ -45,22 +45,13 @@ pub struct Session {
 /// One thing that waits for the user. Choosing it opens its session.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BellItem {
-    /// `request-<n>` or `question-<seq>`.
+    /// `request-<n>`.
     pub key: String,
     /// The root agent of the session it belongs to.
     pub session: String,
     pub label: String,
     pub detail: String,
     pub at: u64,
-}
-
-/// A root's question to the user that no message of the user's followed yet.
-#[derive(Clone, Debug, PartialEq)]
-pub struct OpenQuestion {
-    pub seq: u64,
-    pub at: u64,
-    pub agent: String,
-    pub text: String,
 }
 
 /// What the daemon answered, the raw results of each method.
@@ -73,7 +64,8 @@ pub struct Answers<'a> {
     pub agents: &'a Value,
     /// `approval.list`
     pub approvals: &'a Value,
-    pub questions: &'a [OpenQuestion],
+    /// The roots whose `needs_user` the daemon says is true (`agent.trees`).
+    pub needs_user: &'a HashSet<String>,
     /// Each root's first message, by id.
     pub briefs: &'a HashMap<String, String>,
 }
@@ -88,11 +80,6 @@ fn number(value: &Value, key: &str) -> u64 {
 
 fn list<'a>(value: &'a Value, key: &str) -> &'a [Value] {
     value[key].as_array().map(Vec::as_slice).unwrap_or_default()
-}
-
-/// Whether an agent's state is one of the final ones, never left.
-pub fn is_final(state: &str) -> bool {
-    matches!(state, "ended" | "failed")
 }
 
 /// The title a session is shown with: the first line of its first message.
@@ -118,13 +105,14 @@ fn root_of<'a>(parents: &HashMap<&'a str, Option<&'a str>>, mut id: &'a str) -> 
 }
 
 impl Snapshot {
-    /// The rule of what the window shows (written down in the pull request of #11):
+    /// What waits for the user is the daemon's to say, as `flottille status` shows it:
     ///
     /// - a session is a root agent and its tree, in its root's place;
     /// - the bell lists every request the user holds (`approval.list`), which opens the session of
-    ///   the root of the agent that asked, and every open question of a live root to the user;
-    /// - a session needs the user (`NEEDS YOU`) when an item of the bell is its own; otherwise it
-    ///   is running when an agent of its tree starts or works; otherwise it shows no mark.
+    ///   the root of the agent that asked;
+    /// - a session needs the user (`NEEDS YOU`) when the daemon says its root `needs_user`;
+    ///   otherwise it is running when an agent of its tree starts or works; otherwise it shows no
+    ///   mark.
     pub fn build(answers: Answers) -> Snapshot {
         let agents = list(answers.agents, "agents");
         let parents: HashMap<&str, Option<&str>> = agents
@@ -153,24 +141,7 @@ impl Snapshot {
                 at: number(request, "created_at"),
             });
         }
-        let live_roots: HashSet<&str> = agents
-            .iter()
-            .filter(|agent| agent["parent"].is_null() && !is_final(&text(agent, "state")))
-            .filter_map(|agent| agent["id"].as_str())
-            .collect();
-        for question in answers.questions {
-            if live_roots.contains(question.agent.as_str()) {
-                bell.push(BellItem {
-                    key: format!("question-{}", question.seq),
-                    session: question.agent.clone(),
-                    label: "Question".into(),
-                    detail: title_of(&question.text),
-                    at: question.at,
-                });
-            }
-        }
         bell.sort_by_key(|item| item.at);
-        let waiting: HashSet<&str> = bell.iter().map(|item| item.session.as_str()).collect();
 
         let mut trees: HashMap<&str, (bool, u64)> = HashMap::new();
         for agent in agents {
@@ -189,7 +160,7 @@ impl Snapshot {
             .map(|agent| {
                 let id = text(agent, "id");
                 let (busy, active_at) = trees.get(id.as_str()).copied().unwrap_or_default();
-                let mark = if waiting.contains(id.as_str()) {
+                let mark = if answers.needs_user.contains(&id) {
                     Some(AgentState::NeedsYou)
                 } else if busy {
                     Some(AgentState::Running)
@@ -278,13 +249,13 @@ mod tests {
             "workspace": workspace, "created_at": 10, "active_at": 20})
     }
 
-    fn build(agents: Value, approvals: Value, questions: &[OpenQuestion]) -> Snapshot {
+    fn build(agents: Value, approvals: Value, needs_user: &[&str]) -> Snapshot {
         Snapshot::build(Answers {
             projects: &json!({"projects": [{"name": "app", "folder": "/work/app"}]}),
             workspaces: &json!({"workspaces": [{"project": "app", "name": "login"}]}),
             agents: &agents,
             approvals: &approvals,
-            questions,
+            needs_user: &needs_user.iter().map(|id| id.to_string()).collect(),
             briefs: &HashMap::from([("r1".into(), "\n  Fix the login\nmore".into())]),
         })
     }
@@ -296,7 +267,7 @@ mod tests {
                 agent("c1", Some("r1"), "idle", Some("login"))]}),
             json!({"requests": [{"number": 3, "agent": "c1", "tool": "fs_read",
                 "reasons": [".env is a sensitive place (.env)"], "created_at": 30}]}),
-            &[],
+            &["r1"],
         );
         assert_eq!(snapshot.sessions.len(), 1, "a child is not a session");
         assert_eq!(snapshot.sessions[0].mark, Some(AgentState::NeedsYou));
@@ -319,27 +290,13 @@ mod tests {
     }
 
     #[test]
-    fn an_open_question_of_a_live_root_needs_the_user() {
-        let question = OpenQuestion {
-            seq: 9,
-            at: 40,
-            agent: "r1".into(),
-            text: "Which base?".into(),
-        };
-        let live = build(
-            json!({"agents": [agent("r1", None, "idle", None)]}),
-            json!({"requests": []}),
-            std::slice::from_ref(&question),
-        );
-        assert_eq!(live.sessions[0].mark, Some(AgentState::NeedsYou));
-        assert_eq!(live.bell[0].key, "question-9");
-        let ended = build(
-            json!({"agents": [agent("r1", None, "ended", None)]}),
-            json!({"requests": []}),
-            &[question],
-        );
-        assert_eq!(ended.sessions[0].mark, None);
-        assert!(ended.bell.is_empty());
+    fn a_session_needs_the_user_when_the_daemon_says_its_root_does() {
+        let agents = json!({"agents": [agent("r1", None, "idle", None)]});
+        let said = build(agents.clone(), json!({"requests": []}), &["r1"]);
+        assert_eq!(said.sessions[0].mark, Some(AgentState::NeedsYou));
+        assert!(said.bell.is_empty(), "the bell lists the requests only");
+        let not_said = build(agents, json!({"requests": []}), &[]);
+        assert_eq!(not_said.sessions[0].mark, None);
     }
 
     #[test]
