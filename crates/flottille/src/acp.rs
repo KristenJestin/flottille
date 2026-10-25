@@ -16,11 +16,12 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ClientCapabilities, ContentBlock, Implementation, InitializeRequest,
-    LoadSessionRequest, McpServer, McpServerHttp, NewSessionRequest, PermissionOptionKind,
-    PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome,
-    SessionConfigOptionValue, SessionNotification, SetSessionConfigOptionRequest, TextContent,
+    CancelNotification, ClientCapabilities, ContentBlock, HttpHeader, Implementation,
+    InitializeRequest, LoadSessionRequest, McpServer, McpServerHttp, NewSessionRequest,
+    PermissionOptionKind, PromptRequest, PromptResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
+    SelectedPermissionOutcome, SessionConfigOptionValue, SessionNotification,
+    SetSessionConfigOptionRequest, TextContent,
 };
 use agent_client_protocol::{Agent as AcpAgent, Client, ConnectionTo, Lines};
 use flottille_core::agent::{Agent, Choices};
@@ -56,6 +57,12 @@ pub trait Events: Send + Sync + 'static {
     fn turn_ended(&self, stop_reason: &str, usage: Value);
 }
 
+/// Flottille's MCP server as the agent's session gets it: its address and the process's token.
+pub struct Server {
+    pub url: String,
+    pub token: String,
+}
+
 /// Runs the session over the process's stdio until it ends. An error is a failure of the
 /// session itself (a refused option, an ACP error): the caller stops the process.
 pub async fn session(
@@ -65,6 +72,7 @@ pub async fn session(
     orders: &mut UnboundedReceiver<Order>,
     turns: &mut Turns,
     idle: Duration,
+    server: Server,
 ) -> Result<Exit, String> {
     let stdin = child.stdin.take().ok_or("the process has no stdin")?;
     let stdout = child.stdout.take().ok_or("the process has no stdout")?;
@@ -116,7 +124,10 @@ pub async fn session(
             agent_client_protocol::on_receive_request!(),
         )
         .connect_with(transport, async |cx: ConnectionTo<AcpAgent>| {
-            Ok(drive(cx, agent, child, &events, &replay, orders, turns, idle).await)
+            Ok(drive(
+                cx, agent, child, &events, &replay, orders, turns, idle, &server,
+            )
+            .await)
         })
         .await;
     match result {
@@ -142,6 +153,7 @@ async fn drive(
     orders: &mut UnboundedReceiver<Order>,
     turns: &mut Turns,
     idle: Duration,
+    server: &Server,
 ) -> Result<Exit, String> {
     let acp = |error: agent_client_protocol::Error| error.to_string();
     let capabilities = ClientCapabilities::new().meta(
@@ -170,7 +182,7 @@ async fn drive(
     let meta = claude::session_meta(&agent.instructions, &agent.tools)
         .as_object()
         .cloned();
-    let servers = vec![placeholder_server()];
+    let servers = vec![mcp_server(server)];
     let folder: &Path = &agent.folder;
     let (opened, native_id, options) = match &agent.native_id {
         Some(native) if resumes => {
@@ -333,14 +345,15 @@ async fn drive(
     }
 }
 
-/// Flottille's MCP server, as every agent gets it. The server and its per-session token come with
-/// the tools; until then the entry is there, unused, so that the session's MCP set is already
-/// Flottille's alone.
-fn placeholder_server() -> McpServer {
-    McpServer::Http(McpServerHttp::new(
-        claude::MCP_SERVER,
-        "http://127.0.0.1:9/mcp",
-    ))
+/// Flottille's MCP server, the session's only one, with the process's token in a header (which
+/// keeps it out of the prompt cache's way).
+fn mcp_server(server: &Server) -> McpServer {
+    let mut http = McpServerHttp::new(claude::MCP_SERVER, server.url.clone());
+    http.headers = vec![HttpHeader::new(
+        "Authorization",
+        format!("Bearer {}", server.token),
+    )];
+    McpServer::Http(http)
 }
 
 fn find_option(options: &Value, category: &str) -> Option<Value> {

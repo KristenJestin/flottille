@@ -31,15 +31,29 @@ const TOKEN_PREFIXES: [&str; 14] = [
 /// named like secrets, private key blocks, the password of a URL, and anything shaped like a known
 /// kind of token or a JWT.
 pub fn mask(text: &str, env: &BTreeMap<OsString, OsString>) -> String {
-    let mut values: Vec<&str> = env
+    mask_also(text, env, &[])
+}
+
+/// `mask`, and every one of `values` masked too: the values of the files holding secrets of the
+/// place a command ran in (`file_values`).
+pub fn mask_also(text: &str, env: &BTreeMap<OsString, OsString>, values: &[String]) -> String {
+    let mut values: Vec<&str> = values
         .iter()
-        .filter_map(|(name, value)| Some((name.to_str()?, value.to_str()?)))
-        .filter(|(name, value)| {
-            let upper = name.to_ascii_uppercase();
-            // A short value is too likely to be an ordinary word.
-            value.len() >= 6 && SECRET_NAMES.iter().any(|part| upper.contains(part))
-        })
-        .map(|(_, value)| value)
+        .map(String::as_str)
+        .filter(|value| value.len() >= 6)
+        .chain(
+            env.iter()
+                .filter_map(|(name, value)| Some((name.to_str()?, value.to_str()?)))
+                .filter(|(name, value)| {
+                    let upper = name.to_ascii_uppercase();
+                    // A short value is too likely to be an ordinary word; git's `GIT_CONFIG_KEY_<n>` names
+                    // a setting, its value is in `GIT_CONFIG_VALUE_<n>`.
+                    value.len() >= 6
+                        && SECRET_NAMES.iter().any(|part| upper.contains(part))
+                        && !upper.starts_with("GIT_CONFIG_KEY_")
+                })
+                .map(|(_, value)| value),
+        )
         .collect();
     // The longest first: a secret holding a shorter one is masked whole.
     values.sort_by_key(|value| std::cmp::Reverse(value.len()));
@@ -48,6 +62,33 @@ pub fn mask(text: &str, env: &BTreeMap<OsString, OsString>) -> String {
         masked = masked.replace(value, MASK);
     }
     mask_tokens(&mask_private_keys(&masked))
+}
+
+/// Whether a file of that name holds secrets as `KEY=VALUE` lines: `.env`, `.env.local`…
+pub fn secret_file(name: &str) -> bool {
+    name == ".env" || name.starts_with(".env.")
+}
+
+/// The values of the `KEY=VALUE` lines of a file holding secrets, every one of them: whatever its
+/// key, a value of such a file is not for a command's output to show. Comments, an `export` in
+/// front and the quotes around a value are left out.
+pub fn file_values(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let line = line.strip_prefix("export ").unwrap_or(line);
+            if line.starts_with('#') {
+                return None;
+            }
+            let (_, value) = line.split_once('=')?;
+            let value = value.trim();
+            let value = [('"', '"'), ('\'', '\'')]
+                .iter()
+                .find_map(|(open, close)| value.strip_prefix(*open)?.strip_suffix(*close))
+                .unwrap_or(value);
+            (!value.is_empty()).then(|| value.to_owned())
+        })
+        .collect()
 }
 
 /// Each `-----BEGIN … PRIVATE KEY-----` block, to its end line or, cut short, to the end.
@@ -184,6 +225,22 @@ mod tests {
     }
 
     #[test]
+    fn a_git_setting_s_name_is_not_a_secret() {
+        let env = BTreeMap::from([
+            (
+                "GIT_CONFIG_KEY_0".into(),
+                "url.nowhere.pushInsteadOf".into(),
+            ),
+            ("GIT_CONFIG_VALUE_0".into(), "".into()),
+        ]);
+
+        assert_eq!(
+            mask("GIT_CONFIG_KEY_0=url.nowhere.pushInsteadOf", &env),
+            "GIT_CONFIG_KEY_0=url.nowhere.pushInsteadOf"
+        );
+    }
+
+    #[test]
     fn a_longer_secret_holding_a_shorter_one_is_masked_whole() {
         let env = BTreeMap::from([
             ("A_TOKEN".into(), "abcdef".into()),
@@ -234,6 +291,25 @@ mod tests {
         for (text, masked) in table {
             assert_eq!(mask(text, &env), masked, "{text}");
         }
+    }
+
+    #[test]
+    fn the_values_of_a_secret_file_are_masked_whatever_their_key() {
+        let file = "# the database\nDATABASE_URL=postgres://app@db/app\nexport \
+                    SIGNING=\"0123456789abcdef\"\nSHORT=ab\nEMPTY=\n";
+        let values = file_values(file);
+        assert_eq!(values, ["postgres://app@db/app", "0123456789abcdef", "ab"]);
+
+        assert_eq!(
+            mask_also(
+                "url postgres://app@db/app key 0123456789abcdef ab",
+                &BTreeMap::new(),
+                &values
+            ),
+            "url [masked] key [masked] ab"
+        );
+        assert!(secret_file(".env") && secret_file(".env.local"));
+        assert!(!secret_file("env") && !secret_file(".envrc"));
     }
 
     #[test]
