@@ -6,6 +6,7 @@ mod approvals;
 mod claude;
 mod client;
 mod daemon;
+mod deliveries;
 mod files;
 mod gate;
 mod git;
@@ -13,7 +14,10 @@ mod mcp;
 mod place;
 mod project_command;
 mod projects;
+mod roles;
 mod runs;
+mod sweep;
+mod tree;
 mod workspace_command;
 mod workspaces;
 

@@ -239,10 +239,19 @@ fn a_session_sees_only_its_tools() {
             "commands_run",
             "commands_output",
             "commands_stop",
+            "agent_launch",
+            "agent_send",
+            "agent_status",
+            "agent_read",
+            "agent_stop",
+            "report",
+            "ask_user",
+            "approval_answer",
         ]
     );
-    let text = refused(mcp.call("agent_launch", json!({"title": "x", "brief": "y"})));
-    assert!(text.contains("has no tool agent_launch"), "{text}");
+    // A root asks the user, never a parent.
+    let text = refused(mcp.call("ask_parent", json!({"question": "x"})));
+    assert!(text.contains("has no tool ask_parent"), "{text}");
     let text = refused(mcp.call("shell", json!({})));
     assert!(text.contains("has no tool shell"), "{text}");
 
@@ -353,7 +362,7 @@ fn a_2026_07_28_client_with_server_discover_lists_and_calls_the_tools() {
     let (_, url, authorization) = agent(&user, json!({}));
 
     let mcp = Mcp::discover(&url, &authorization);
-    assert_eq!(mcp.names().len(), 9);
+    assert_eq!(mcp.names().len(), 17);
     assert!(ok(mcp.call("fs_list", json!({"path": "."}))).contains("README.md"));
 
     let meta = json!({

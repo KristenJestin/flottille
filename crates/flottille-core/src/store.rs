@@ -628,6 +628,25 @@ impl Store {
         rows.map(|row| row?).collect()
     }
 
+    /// The agent's last events of that name, the newest first.
+    pub fn last_agent_events(&self, agent: &str, name: &str, limit: usize) -> Result<Vec<Event>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT e.seq, e.at, e.name, e.data FROM agent_events a JOIN events e ON e.seq = a.seq \
+             WHERE a.agent = ?1 AND e.name = ?2 ORDER BY a.seq DESC LIMIT ?3",
+        )?;
+        let rows = statement.query_map(params![agent, name, limit as u64], event_row)?;
+        rows.map(|row| row?).collect()
+    }
+
+    /// When the last of the agent's runs ended, if one did.
+    pub fn last_run_end(&self, agent: &str) -> Result<Option<u64>> {
+        Ok(self.connection.query_row(
+            "SELECT max(ended_at) FROM runs WHERE agent = ?1",
+            params![agent],
+            |row| row.get(0),
+        )?)
+    }
+
     /// An adapter process started for the agent: its pid and its start time.
     pub fn add_process(&self, pid: u32, started: u64, agent: &str) -> Result<()> {
         self.connection.execute(
@@ -845,6 +864,16 @@ impl Store {
              WHERE held_by = ?1 AND state = 'pending' ORDER BY number"
         ))?;
         let rows = statement.query_map(params![held_by], request_row)?;
+        rows.map(|row| row?).collect()
+    }
+
+    /// The pending requests the agent's calls made, whoever holds them, oldest first.
+    pub fn pending_requests_of(&self, agent: &str) -> Result<Vec<Request>> {
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {REQUEST_COLUMNS} FROM approval_requests \
+             WHERE agent = ?1 AND state = 'pending' ORDER BY number"
+        ))?;
+        let rows = statement.query_map(params![agent], request_row)?;
         rows.map(|row| row?).collect()
     }
 

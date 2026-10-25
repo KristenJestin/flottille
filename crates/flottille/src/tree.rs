@@ -1,0 +1,1104 @@
+//! The tree (`docs/design.md` §5, `docs/agents.md` "The tree"): agents launched by agents, the
+//! tools that launch, read, write to and stop them, and what their parent is told.
+//!
+//! A child belongs to its parent: only its parent writes to it and answers what it asks, and the
+//! parent is told everything that matters as deliveries (`deliveries`). Stopping an agent stops
+//! its tree, deepest first.
+
+use std::sync::Arc;
+
+use flottille_core::agent::{Agent, AgentState, Choices};
+use flottille_core::approval::{self, Decision, Request};
+use flottille_core::secrets;
+use flottille_core::store::{AgentChange, Store, now_ms};
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+use crate::agents::{self, DEPTH_LIMIT, New, Order};
+use crate::approvals;
+use crate::daemon::Daemon;
+use crate::deliveries;
+use crate::git::{self, Class};
+use crate::mcp::{Grant, Outcome, arguments};
+use crate::projects::{self, Failure};
+use crate::roles;
+use crate::workspaces;
+
+/// The tree's tools, served with the others.
+pub const TOOLS: [&str; 9] = [
+    "agent_launch",
+    "agent_send",
+    "agent_status",
+    "agent_read",
+    "agent_stop",
+    "report",
+    "ask_user",
+    "ask_parent",
+    "approval_answer",
+];
+
+/// What `agent_read` shows of a conversation at once, at most, in characters: under the result
+/// limit, with room for the notes pinned on it.
+const READ_PAGE: usize = 30_000;
+/// What a line of a conversation keeps of a text.
+const LINE_CHARS: usize = 2_000;
+/// The last messages `agent_status` and a parent's deliveries show of a child.
+const LAST_MESSAGES: usize = 3;
+const MESSAGE_CHARS: usize = 600;
+/// A reported child still in its turn this long after is stopped.
+const REPORT_GRACE_MS: u64 = 2 * 60 * 1000;
+
+pub async fn call(daemon: &Arc<Daemon>, grant: &Arc<Grant>, tool: &str, args: Value) -> Outcome {
+    let caller = match daemon.read(|store| store.agent(&grant.agent)) {
+        Ok(Some(caller)) => caller,
+        Ok(None) => return Outcome::Failed(format!("there is no agent {}", grant.agent)),
+        Err(error) => return Outcome::Failed(error.to_string()),
+    };
+    let done = match tool {
+        "agent_launch" => launch(daemon, &caller, args).await,
+        "agent_send" => send(daemon, &caller, args),
+        "agent_status" => status(daemon, &caller, args),
+        "agent_read" => read(daemon, &caller, args),
+        "agent_stop" => stop(daemon, &caller, args),
+        "report" => report(daemon, grant, &caller, args).await,
+        "ask_user" | "ask_parent" => ask(daemon, &caller, tool, args),
+        "approval_answer" => answer(daemon, &caller, args),
+        other => Err(Outcome::Failed(format!("{other} is not served"))),
+    };
+    done.unwrap_or_else(|outcome| outcome)
+}
+
+type Done = Result<Outcome, Outcome>;
+
+fn refused(text: impl Into<String>) -> Outcome {
+    Outcome::Refused(text.into())
+}
+
+fn failed(error: impl std::fmt::Display) -> Outcome {
+    Outcome::Failed(error.to_string())
+}
+
+/// How an agent is named to another: its title and its id.
+pub fn named(agent: &Agent) -> String {
+    match &agent.title {
+        Some(title) => format!("\"{title}\" (agent {})", agent.id),
+        None => format!("agent {}", agent.id),
+    }
+}
+
+/// One of the caller's children, or the refusal.
+fn child_of(daemon: &Daemon, caller: &Agent, id: &str) -> Result<Agent, Outcome> {
+    match daemon.read(|store| store.agent(id)) {
+        Ok(Some(agent)) if agent.parent.as_deref() == Some(caller.id.as_str()) => Ok(agent),
+        Ok(_) => Err(refused(format!(
+            "refused: {id} is not one of your children: agent_status lists them"
+        ))),
+        Err(error) => Err(failed(error)),
+    }
+}
+
+// Launching.
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Launch {
+    title: String,
+    brief: String,
+    model: Option<String>,
+    role: Option<String>,
+    workspace: Option<WorkspaceChoice>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WorkspaceChoice {
+    Existing(String),
+    New { new: NewWorkspace },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewWorkspace {
+    name: String,
+    repositories: Option<Vec<String>>,
+}
+
+async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
+    let asked: Launch = arguments("agent_launch", args)?;
+    if caller.depth + 1 > DEPTH_LIMIT {
+        return Err(refused(format!(
+            "refused: this agent is at the depth limit ({DEPTH_LIMIT}): it cannot launch \
+             children; do the work yourself"
+        )));
+    }
+    if asked.title.trim().is_empty() || asked.brief.trim().is_empty() {
+        return Err(refused(
+            "refused: a child needs a title and a brief: the brief is all it will know",
+        ));
+    }
+    let role = roles::role(asked.role.as_deref().unwrap_or(roles::WORKER)).ok_or_else(|| {
+        refused(format!(
+            "refused: there is no role {}: the roles are lead and worker",
+            asked.role.as_deref().unwrap_or_default()
+        ))
+    })?;
+    let project = projects::load_project(daemon, &caller.project).map_err(|f| failed(f.message))?;
+    refuse_above_cap(daemon, &project.name, project.max_children)?;
+    let (workspace, preparing) = match asked.workspace {
+        None => (caller.workspace.clone(), false),
+        Some(WorkspaceChoice::Existing(name)) => (Some(name), false),
+        Some(WorkspaceChoice::New { new }) => {
+            let created = workspaces::call(
+                daemon.clone(),
+                "workspace.create",
+                json!({"project": project.name, "name": new.name,
+                    "repositories": new.repositories}),
+            )
+            .await
+            .map_err(|f| {
+                refused(format!(
+                    "refused: the workspace cannot be made: {}",
+                    f.message
+                ))
+            })?;
+            let name = created["name"].as_str().unwrap_or(&new.name).to_owned();
+            (Some(name), true)
+        }
+    };
+    let created = {
+        // Checked again, and taken, at once: a launch made meanwhile counts.
+        let _launching = daemon.launching.lock().unwrap();
+        refuse_above_cap(daemon, &project.name, project.max_children)?;
+        agents::create(
+            daemon,
+            &project,
+            New {
+                workspace: workspace.clone(),
+                preparing,
+                role,
+                parent: Some((caller.id.clone(), caller.depth)),
+                title: Some(asked.title.trim().to_owned()),
+                brief: asked.brief.clone(),
+                chosen: Choices {
+                    model: asked.model,
+                    ..Choices::default()
+                },
+            },
+        )
+    };
+    let child = created.map_err(|f| refused(format!("refused: {}", f.message)))?;
+    if preparing {
+        tokio::spawn(brief_once_ready(daemon.clone(), child.clone()));
+    } else {
+        brief(daemon, &child);
+    }
+    let place = workspace.map_or("your own place".to_owned(), |w| format!("workspace {w}"));
+    Ok(Outcome::Done(format!(
+        "Launched {} in {place}. It works on its own: you are told when it reports, asks, \
+         fails, is stuck or goes idle, so do not poll it. Go on with your own work, or end your \
+         turn.",
+        named(&child)
+    )))
+}
+
+fn refuse_above_cap(daemon: &Daemon, project: &str, cap: u8) -> Result<(), Outcome> {
+    let running = daemon
+        .read(|store| store.live_children(project))
+        .map_err(failed)?;
+    if running >= usize::from(cap) {
+        return Err(refused(format!(
+            "refused: {running} children already run in project {project}, its cap: do the work \
+             yourself, or wait for one of them to end (agent_stop ends one of yours)"
+        )));
+    }
+    Ok(())
+}
+
+fn brief(daemon: &Arc<Daemon>, child: &Agent) {
+    deliveries::deliver(
+        daemon,
+        &child.id,
+        "brief",
+        Some(format!("brief-{}-0", child.id)),
+        child.brief.as_deref().unwrap_or_default(),
+        approval::BETWEEN_TURNS,
+    );
+}
+
+/// The brief of a child whose new workspace is being prepared, once it is ready; a workspace
+/// that fails fails the child.
+async fn brief_once_ready(daemon: Arc<Daemon>, child: Agent) {
+    let name = child.workspace.clone().unwrap_or_default();
+    loop {
+        let workspace = daemon.read(|store| store.workspace(&child.project, &name));
+        match workspace.ok().flatten().map(|w| w.state()) {
+            Some(flottille_core::workspace::State::Ready) => return brief(&daemon, &child),
+            Some(flottille_core::workspace::State::Preparing) => {}
+            _ => {
+                return fail_tree(
+                    &daemon,
+                    &child.id,
+                    &format!(
+                        "its workspace {name} could not be prepared: see `flottille workspace \
+                         show {} {name}`",
+                        child.project
+                    ),
+                );
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+// Writing, reading, stopping.
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Send {
+    agent_id: String,
+    message: String,
+}
+
+fn send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
+    let asked: Send = arguments("agent_send", args)?;
+    let child = child_of(daemon, caller, &asked.agent_id)?;
+    if child.state.is_final() {
+        return Err(refused(format!(
+            "refused: {} has {}: launch a new child whose brief names what it left",
+            named(&child),
+            child.state.as_str()
+        )));
+    }
+    if asked.message.trim().is_empty() {
+        return Err(refused("refused: the message is empty"));
+    }
+    deliveries::deliver(
+        daemon,
+        &child.id,
+        "parent",
+        None,
+        &asked.message,
+        approval::URGENT,
+    );
+    Ok(Outcome::Done(format!(
+        "Sent to {}: it reaches it on its next tool result, or as a new turn.",
+        named(&child)
+    )))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Status {
+    agent_id: Option<String>,
+}
+
+fn status(daemon: &Daemon, caller: &Agent, args: Value) -> Done {
+    let asked: Status = arguments("agent_status", args)?;
+    let children = match asked.agent_id {
+        Some(id) => vec![child_of(daemon, caller, &id)?],
+        None => daemon
+            .read(|store| store.children(&caller.id))
+            .map_err(failed)?,
+    };
+    if children.is_empty() {
+        return Ok(Outcome::Done("You have no children.".into()));
+    }
+    let blocks: Vec<String> = children
+        .iter()
+        .map(|child| {
+            let mut block = format!("- {}", line(daemon, child));
+            for message in last_messages(daemon, &child.id) {
+                block.push_str(&format!("\n  > {}", cut(&message, MESSAGE_CHARS)));
+            }
+            block
+        })
+        .collect();
+    Ok(Outcome::Done(blocks.join("\n")))
+}
+
+/// One line of what a child is and does, as `agent_status` and `children-status` give it.
+pub fn line(daemon: &Daemon, agent: &Agent) -> String {
+    let now = now_ms();
+    let mut parts = vec![format!("{}, {}", named(agent), doing(daemon, agent))];
+    if !agent.state.is_final() {
+        let last = agent.active_at.unwrap_or(agent.created_at);
+        parts.push(format!(
+            "last sign of activity {} ago",
+            ago(now.saturating_sub(last))
+        ));
+        if let Some(usage) = daemon
+            .read(|store| store.last_agent_events(&agent.id, "agent.usage", 1))
+            .ok()
+            .and_then(|events| events.into_iter().next())
+            && let (Some(used), Some(size)) = (
+                usage.data["used"].as_u64(),
+                usage.data["size"].as_u64().filter(|s| *s > 0),
+            )
+        {
+            parts.push(format!("context {}% used", used * 100 / size));
+        }
+    }
+    parts.join("; ")
+}
+
+/// What the agent does now, in a few words.
+pub fn doing(daemon: &Daemon, agent: &Agent) -> String {
+    let now = now_ms();
+    match agent.state {
+        AgentState::Ended | AgentState::Failed => {
+            let reason = agent
+                .state_reason
+                .as_deref()
+                .map(|r| format!(": {r}"))
+                .unwrap_or_default();
+            return format!("{}{reason}", agent.state.as_str());
+        }
+        AgentState::Starting => return "starting".into(),
+        _ => {}
+    }
+    if let Some(request) = daemon
+        .read(|store| store.pending_requests_of(&agent.id))
+        .ok()
+        .and_then(|requests| requests.into_iter().next())
+    {
+        return format!("waiting for approval #{}", request.number);
+    }
+    if let Some(run) = daemon
+        .read(Store::running_runs)
+        .ok()
+        .and_then(|runs| runs.into_iter().find(|run| run.agent == agent.id))
+    {
+        let line = secrets::mask(&run.line, &std::env::vars_os().collect());
+        return format!(
+            "running `{}` for {}",
+            cut(&line, 200),
+            ago(now.saturating_sub(run.started_at))
+        );
+    }
+    if daemon.waiting_provider.lock().unwrap().contains(&agent.id) {
+        return "waiting on the provider".into();
+    }
+    match agent.state {
+        AgentState::Working => "in a turn".into(),
+        _ if agent.reported_at.is_some() => "reported".into(),
+        _ if agent.waiting_on_parent => "waiting for its parent's answer".into(),
+        _ => format!("idle for {}", ago(now.saturating_sub(agent.updated_at))),
+    }
+}
+
+/// A duration as a person says it.
+fn ago(ms: u64) -> String {
+    let seconds = ms / 1000;
+    if seconds < 90 {
+        format!("{seconds} s")
+    } else if seconds < 90 * 60 {
+        format!("{} min", seconds / 60)
+    } else {
+        format!("{} h", seconds / 3600)
+    }
+}
+
+fn cut(text: &str, limit: usize) -> String {
+    let count = text.chars().count();
+    if count <= limit {
+        return text.to_owned();
+    }
+    let kept: String = text.chars().take(limit).collect();
+    format!("{kept}‹+{} chars›", count - limit)
+}
+
+/// The agent's last messages, each whole (its pieces joined), the oldest first.
+fn last_messages(daemon: &Daemon, agent: &str) -> Vec<String> {
+    let events = daemon
+        .read(|store| store.last_agent_events(agent, "agent.message", 200))
+        .unwrap_or_default();
+    // Pieces of one message follow each other: a gap in the numbers starts another.
+    let mut messages: Vec<(u64, String)> = Vec::new();
+    for event in events.iter().rev() {
+        let text = event.data["text"].as_str().unwrap_or_default();
+        match messages.last_mut() {
+            Some((last, message)) if event.seq == *last + 1 => {
+                message.push_str(text);
+                *last = event.seq;
+            }
+            _ => messages.push((event.seq, text.to_owned())),
+        }
+    }
+    let skip = messages.len().saturating_sub(LAST_MESSAGES);
+    messages.into_iter().skip(skip).map(|(_, m)| m).collect()
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Read {
+    agent_id: String,
+    after: Option<u64>,
+}
+
+fn read(daemon: &Daemon, caller: &Agent, args: Value) -> Done {
+    let asked: Read = arguments("agent_read", args)?;
+    let child = child_of(daemon, caller, &asked.agent_id)?;
+    let mut after = asked.after.unwrap_or(0);
+    let mut lines: Vec<String> = Vec::new();
+    let mut size = 0;
+    let mut more = false;
+    'pages: loop {
+        let events = daemon
+            .read(|store| store.agent_events(&child.id, after, 200))
+            .map_err(failed)?;
+        if events.is_empty() {
+            break;
+        }
+        for event in events {
+            if let Some(line) = conversation_line(&event.name, &event.data) {
+                let line = format!("#{} {line}", event.seq);
+                if size + line.len() > READ_PAGE && !lines.is_empty() {
+                    more = true;
+                    break 'pages;
+                }
+                size += line.len() + 1;
+                lines.push(line);
+            }
+            after = event.seq;
+        }
+    }
+    let mut text = format!("The conversation of {}:\n", named(&child));
+    if lines.is_empty() {
+        text.push_str("(nothing after this point)");
+    } else {
+        text.push_str(&lines.join("\n"));
+    }
+    if more {
+        text.push_str(&format!(
+            "\n\nMore follows: agent_read {{\"agent_id\": \"{}\", \"after\": {after}}}",
+            child.id
+        ));
+    } else {
+        text.push_str(&format!(
+            "\n\nThat is all for now; later, read on with after {after}."
+        ));
+    }
+    Ok(Outcome::Done(text))
+}
+
+/// A line of a conversation, for an event that is one.
+fn conversation_line(name: &str, data: &Value) -> Option<String> {
+    let text = |field: &str| cut(data[field].as_str().unwrap_or_default(), LINE_CHARS);
+    Some(match name {
+        "agent.prompted" => format!("sent: {}", text("text")),
+        "agent.message" => format!("said: {}", text("text")),
+        "agent.tool_call" if data["update"] != true => {
+            format!("tool call: {}", text("title"))
+        }
+        "agent.tool_served" => format!(
+            "{} ({})",
+            data["tool"].as_str().unwrap_or_default(),
+            data["outcome"].as_str().unwrap_or_default()
+        ),
+        "agent.turn_ended" => format!(
+            "turn ended ({})",
+            data["stop_reason"].as_str().unwrap_or_default()
+        ),
+        "agent.replaced" => format!("its session was replaced: {}", text("reason")),
+        "agent.reported" => format!("reported: {}", text("text")),
+        _ => return None,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StopChild {
+    agent_id: String,
+}
+
+fn stop(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
+    let asked: StopChild = arguments("agent_stop", args)?;
+    let child = child_of(daemon, caller, &asked.agent_id)?;
+    if child.state.is_final() {
+        return Ok(Outcome::Done(format!(
+            "{} has {} already.",
+            named(&child),
+            child.state.as_str()
+        )));
+    }
+    stop_tree(daemon, &child.id, "stopped by its parent");
+    Ok(Outcome::Done(format!(
+        "Stopped {} and its own children. Its workspace stays.",
+        named(&child)
+    )))
+}
+
+// Reporting and asking.
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Report {
+    text: String,
+}
+
+async fn report(daemon: &Arc<Daemon>, grant: &Grant, caller: &Agent, args: Value) -> Done {
+    let asked: Report = arguments("report", args)?;
+    if asked.text.trim().is_empty() {
+        return Err(refused("refused: the report is empty"));
+    }
+    if caller.reported_at.is_some() && caller.parent.is_some() {
+        return Err(refused(
+            "refused: you reported already: your session ends with this turn, end it now",
+        ));
+    }
+    let env = std::env::vars_os().collect();
+    let text = secrets::mask(&asked.text, &env);
+    daemon
+        .write(|store| {
+            let (_, event) = store.change_agent(
+                &caller.id,
+                AgentChange {
+                    reported_at: caller.parent.is_some().then_some(Some(now_ms())),
+                    ..AgentChange::default()
+                },
+                Some(("agent.reported", json!({"agent": caller.id, "text": text}))),
+            )?;
+            Ok(((), event))
+        })
+        .map_err(failed)?;
+    if caller.parent.is_none() {
+        return Ok(Outcome::Done("Your report was shown to the user.".into()));
+    }
+    let mut body = format!("reported:\n\n{text}\n\n");
+    body.push_str(&format!(
+        "It worked in {}.",
+        caller
+            .workspace
+            .as_ref()
+            .map_or("the project folder".to_owned(), |w| format!(
+                "workspace {w}, branch {}",
+                grant.place.branch
+            ))
+    ));
+    for (path, folder) in &grant.place.repositories {
+        if let Ok(commit) = git::output(
+            folder,
+            &["log", "-1", "--format=%h %s", "--end-of-options", "HEAD"],
+            Class::Read,
+        )
+        .await
+        {
+            body.push_str(&format!(
+                "\nLast commit in {path}: {}",
+                secrets::mask(commit.trim(), &env)
+            ));
+        }
+    }
+    tell_parent(daemon, caller, "child-report", &body, approval::URGENT);
+    Ok(Outcome::Done(
+        "Your report went to your parent. Your session ends with this turn: end it now.".into(),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Question {
+    question: String,
+}
+
+fn ask(daemon: &Arc<Daemon>, caller: &Agent, tool: &str, args: Value) -> Done {
+    let asked: Question = arguments(tool, args)?;
+    if asked.question.trim().is_empty() {
+        return Err(refused("refused: the question is empty"));
+    }
+    let question = secrets::mask(&asked.question, &std::env::vars_os().collect());
+    let to = if caller.parent.is_some() {
+        "parent"
+    } else {
+        "user"
+    };
+    daemon
+        .write(|store| {
+            let (_, event) = store.change_agent(
+                &caller.id,
+                AgentChange {
+                    waiting_on_parent: caller.parent.is_some().then_some(true),
+                    ..AgentChange::default()
+                },
+                Some((
+                    "agent.asked",
+                    json!({"agent": caller.id, "question": question, "to": to}),
+                )),
+            )?;
+            Ok(((), event))
+        })
+        .map_err(failed)?;
+    if caller.parent.is_none() {
+        return Ok(Outcome::Done(
+            "Your question was given to the user; the answer comes later as a message. Go on \
+             with what does not depend on it, or end your turn saying what you wait for."
+                .into(),
+        ));
+    }
+    tell_parent(
+        daemon,
+        caller,
+        "child-question",
+        &format!(
+            "asks:\n\n{question}\n\nAnswer with agent_send {{\"agent_id\": \"{}\", \"message\": \
+             \"…\"}}.",
+            caller.id
+        ),
+        approval::BETWEEN_TURNS,
+    );
+    Ok(Outcome::Done(
+        "Your question went to your parent; its answer comes later as [flottille:parent]. Go on \
+         with what does not depend on it, or end your turn saying what you wait for."
+            .into(),
+    ))
+}
+
+// Requests.
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Answer {
+    request_id: u64,
+    decision: Choice,
+    why: String,
+}
+
+#[derive(Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum Choice {
+    Forward,
+    Deny,
+}
+
+fn answer(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
+    let asked: Answer = arguments("approval_answer", args)?;
+    let number = asked.request_id;
+    let request = daemon
+        .read(|store| store.request(number))
+        .map_err(failed)?
+        .filter(|r| r.held_by == caller.id && r.state == approval::RequestState::Pending)
+        .ok_or_else(|| {
+            refused(format!(
+                "refused: request #{number} is not held by this agent: you answer only the \
+                 pending requests that reach you as [flottille:child-asks]"
+            ))
+        })?;
+    let why = asked.why.trim();
+    if why.is_empty() {
+        return Err(refused(
+            "refused: say why in one sentence: it goes with your answer",
+        ));
+    }
+    let why = secrets::mask(why, &std::env::vars_os().collect());
+    if asked.decision == Choice::Deny {
+        let tree = root_of(daemon, &request.agent);
+        let decided = daemon
+            .write(|store| {
+                Ok(
+                    match store.decide(number, Decision::Deny, &tree, &caller.id)? {
+                        Some((request, event)) => (Some(request), Some(event)),
+                        None => (None, None),
+                    },
+                )
+            })
+            .map_err(failed)?
+            .ok_or_else(|| refused(format!("refused: request #{number} was answered meanwhile")))?;
+        approvals::store_answer(
+            daemon,
+            &decided,
+            "refused",
+            &format!(
+                "Request #{number} ({}) was refused by {}: {why}. Nothing was done.",
+                decided.tool,
+                if decided.agent == caller.id {
+                    "you".to_owned()
+                } else {
+                    named(caller)
+                }
+            ),
+        );
+        return Ok(Outcome::Done(format!(
+            "Request #{number} is refused; the agent that asked is told why."
+        )));
+    }
+    let to = caller
+        .parent
+        .clone()
+        .unwrap_or_else(|| approval::USER.to_owned());
+    let forwarded = daemon
+        .write(|store| {
+            Ok(match store.forward(number, &caller.id, &why, &to)? {
+                Some((request, event)) => (Some(request), Some(event)),
+                None => (None, None),
+            })
+        })
+        .map_err(failed)?
+        .ok_or_else(|| refused(format!("refused: request #{number} was answered meanwhile")))?;
+    if caller.parent.is_none() {
+        return Ok(Outcome::Done(format!(
+            "Request #{number} went to the user, with your why. Its answer comes to the agent \
+             that asked."
+        )));
+    }
+    asks_parent(daemon, &forwarded);
+    Ok(Outcome::Done(format!(
+        "Request #{number} went to your parent, with your why. You cannot answer it any more."
+    )))
+}
+
+/// Tells the agent that holds the request, a parent, that it is held for it (`child-asks`).
+pub fn asks_parent(daemon: &Arc<Daemon>, request: &Request) {
+    let Ok(Some(holder)) = daemon.read(|store| store.agent(&request.held_by)) else {
+        return;
+    };
+    let Ok(Some(asker)) = daemon.read(|store| store.agent(&request.agent)) else {
+        return;
+    };
+    let mut body = format!(
+        "Request #{} of {}: a call held by the gate, which has not happened.\nThe call: {} {}\n\
+         Held because: {}.",
+        request.number,
+        named(&asker),
+        request.tool,
+        request.shown,
+        request.reasons.join("; ")
+    );
+    for forward in &request.forwards {
+        let by = daemon
+            .read(|store| store.agent(&forward.by))
+            .ok()
+            .flatten()
+            .map_or_else(|| forward.by.clone(), |a| named(&a));
+        body.push_str(&format!("\nForwarded by {by}: {}", forward.why));
+    }
+    body.push_str(&format!(
+        "\n\nAnswer with approval_answer {{\"request_id\": {}, \"decision\": \"forward\" or \
+         \"deny\", \"why\": \"…\"}}. You cannot allow it: forward it when {} should decide.",
+        request.number,
+        if holder.parent.is_some() {
+            "your parent"
+        } else {
+            "the user"
+        }
+    ));
+    deliveries::deliver(
+        daemon,
+        &holder.id,
+        "child-asks",
+        Some(format!("asks-{}-{}", request.number, holder.id)),
+        &body,
+        approval::URGENT,
+    );
+}
+
+// What the parent is told, and ends.
+
+/// A delivery to the agent's parent about it: `text` follows its name. Nothing for a root.
+pub fn tell_parent(daemon: &Arc<Daemon>, child: &Agent, kind: &str, text: &str, urgency: &str) {
+    let Some(parent) = &child.parent else {
+        return;
+    };
+    deliveries::deliver(
+        daemon,
+        parent,
+        kind,
+        None,
+        &format!("Your child {} {text}", named(child)),
+        urgency,
+    );
+}
+
+/// The agent and its tree end, deepest first: each stops, and what was queued for it is
+/// superseded.
+pub fn stop_tree(daemon: &Arc<Daemon>, id: &str, reason: &str) {
+    let mut tree = descendants(daemon, id);
+    tree.sort_by_key(|agent| std::cmp::Reverse(agent.depth));
+    for agent in &tree {
+        end(daemon, &agent.id, AgentState::Ended, "its parent stopped");
+    }
+    end(daemon, id, AgentState::Ended, reason);
+}
+
+/// The agent fails: its tree ends, and its parent is told, with its last messages.
+pub fn fail_tree(daemon: &Arc<Daemon>, id: &str, reason: &str) {
+    let mut tree = descendants(daemon, id);
+    tree.sort_by_key(|agent| std::cmp::Reverse(agent.depth));
+    for agent in &tree {
+        end(daemon, &agent.id, AgentState::Ended, "its parent failed");
+    }
+    let reason = secrets::mask(reason, &std::env::vars_os().collect());
+    if !end(daemon, id, AgentState::Failed, &reason) {
+        return;
+    }
+    let Ok(Some(agent)) = daemon.read(|store| store.agent(id)) else {
+        return;
+    };
+    let mut text = format!("failed: {reason}.");
+    let messages = last_messages(daemon, id);
+    if !messages.is_empty() {
+        text.push_str("\nIts last messages:");
+        for message in messages {
+            text.push_str(&format!("\n> {}", cut(&message, MESSAGE_CHARS)));
+        }
+    }
+    tell_parent(daemon, &agent, "child-failed", &text, approval::URGENT);
+}
+
+/// Every agent below this one that has not ended.
+fn descendants(daemon: &Daemon, id: &str) -> Vec<Agent> {
+    let mut found = Vec::new();
+    let mut parents = vec![id.to_owned()];
+    while let Some(parent) = parents.pop() {
+        for child in daemon
+            .read(|store| store.children(&parent))
+            .unwrap_or_default()
+        {
+            parents.push(child.id.clone());
+            if !child.state.is_final() {
+                found.push(child);
+            }
+        }
+    }
+    found
+}
+
+/// Ends one agent: its state, its queued deliveries, its process and its runs. Whether it was
+/// still going.
+fn end(daemon: &Arc<Daemon>, id: &str, state: AgentState, reason: &str) -> bool {
+    let Ok(Some(agent)) = daemon.read(|store| store.agent(id)) else {
+        return false;
+    };
+    if agent.state.is_final() {
+        return false;
+    }
+    let event = if state == AgentState::Failed {
+        "agent.failed"
+    } else {
+        "agent.ended"
+    };
+    agents::change(
+        daemon,
+        id,
+        state,
+        Some(reason.to_owned()),
+        Some((event, json!({"reason": reason}))),
+    );
+    let _ = daemon.write(|store| Ok(((), store.supersede(id)?)));
+    deliveries::forget(daemon, id);
+    agents::tell(daemon, id, Order::Stop);
+    let (daemon, id) = (daemon.clone(), id.to_owned());
+    tokio::spawn(async move { crate::runs::stop_runs_of(&daemon, &id).await });
+    true
+}
+
+/// What follows the end of an agent's turn, for a child: a reported child ends; one that ended
+/// its turn without reporting, with nothing to wait for, is reminded once, then its parent is
+/// told it went idle.
+pub fn after_turn(daemon: &Arc<Daemon>, id: &str, stop_reason: &str) {
+    let Ok(Some(agent)) = daemon.read(|store| store.agent(id)) else {
+        return;
+    };
+    if agent.state.is_final() || agent.parent.is_none() {
+        return;
+    }
+    if agent.reported_at.is_some() {
+        stop_tree(daemon, id, "it reported");
+        return;
+    }
+    // A cancelled turn is followed by what cancelled it.
+    if stop_reason != "end_turn" {
+        return;
+    }
+    let queued = daemon
+        .read(|store| store.deliveries(id, "queued"))
+        .unwrap_or_default();
+    let asking = daemon
+        .read(|store| store.pending_requests_of(id))
+        .is_ok_and(|requests| !requests.is_empty());
+    if !queued.is_empty() || asking || agent.waiting_on_parent {
+        return;
+    }
+    let quiet = |turns| {
+        let _ = daemon.write(|store| {
+            let (_, event) = store.change_agent(
+                id,
+                AgentChange {
+                    quiet_turns: Some(turns),
+                    ..AgentChange::default()
+                },
+                None,
+            )?;
+            Ok(((), event))
+        });
+    };
+    match agent.quiet_turns {
+        0 => {
+            quiet(1);
+            deliveries::deliver(
+                daemon,
+                id,
+                "reminder",
+                Some(format!("reminder-{id}-{}", now_ms())),
+                "End with report: your report is the only thing you return to your parent. If \
+                 what you need is held for approval or asked of your parent and nothing else can \
+                 be done, report what is missing.",
+                approval::BETWEEN_TURNS,
+            );
+        }
+        1 => {
+            quiet(2);
+            let last = last_messages(daemon, id)
+                .pop()
+                .map(|m| format!(" Its last message:\n\n{}", cut(&m, MESSAGE_CHARS)))
+                .unwrap_or_default();
+            tell_parent(
+                daemon,
+                &agent,
+                "child-idle",
+                &format!(
+                    "ended two turns without reporting, even after a reminder, and waits.{last}"
+                ),
+                approval::BETWEEN_TURNS,
+            );
+        }
+        _ => {}
+    }
+}
+
+/// A child whose conversation was compacted gets its brief again: what it knew of its task was
+/// in the part that went (`docs/reference/hemera.md` §5 "Activity signals").
+pub fn compacted(daemon: &Arc<Daemon>, id: &str) {
+    let Ok(Some(agent)) = daemon.read(|store| store.agent(id)) else {
+        return;
+    };
+    if agent.parent.is_none() {
+        return;
+    }
+    if let Some(brief) = &agent.brief {
+        deliveries::deliver(
+            daemon,
+            id,
+            "brief",
+            Some(format!("brief-{id}-{}-c{}", agent.epoch, now_ms())),
+            &format!("Your conversation was compacted. Your brief, again:\n\n{brief}"),
+            approval::BETWEEN_TURNS,
+        );
+    }
+}
+
+/// A child reported, and its turn has not ended long after: it is stopped.
+pub fn end_late_reporters(daemon: &Arc<Daemon>) {
+    let late = now_ms().saturating_sub(REPORT_GRACE_MS);
+    for agent in daemon.read(Store::agents).unwrap_or_default() {
+        if !agent.state.is_final()
+            && agent.parent.is_some()
+            && agent.reported_at.is_some_and(|at| at < late)
+        {
+            stop_tree(daemon, &agent.id, "it reported");
+        }
+    }
+}
+
+// The tree as the user's clients read it.
+
+/// The root of the agent's tree.
+pub fn root_of(daemon: &Daemon, id: &str) -> String {
+    let mut id = id.to_owned();
+    for _ in 0..=DEPTH_LIMIT + 8 {
+        match daemon.read(|store| store.agent(&id)).ok().flatten() {
+            Some(Agent {
+                parent: Some(parent),
+                ..
+            }) => id = parent,
+            _ => break,
+        }
+    }
+    id
+}
+
+/// An agent as a list shows it: without its instructions and its brief.
+pub fn summary(agent: &Agent) -> Value {
+    json!({
+        "id": agent.id,
+        "role": agent.role,
+        "title": agent.title,
+        "project": agent.project,
+        "workspace": agent.workspace,
+        "parent": agent.parent,
+        "depth": agent.depth,
+        "epoch": agent.epoch,
+        "state": agent.state,
+        "state_reason": agent.state_reason,
+        "created_at": agent.created_at,
+        "active_at": agent.active_at,
+        "ended_at": agent.ended_at,
+    })
+}
+
+/// The agent's whole tree, from its root, each agent before its children: what it does, whom it
+/// waits on (a child on its parent, never on the user), and for the root, whether a request of
+/// its tree waits for the user.
+pub fn tree(daemon: &Daemon, agent: &Agent) -> Result<Vec<Value>, Failure> {
+    let root = root_of(daemon, &agent.id);
+    let user_requests = daemon.read(|store| store.pending_requests(approval::USER))?;
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        let Some(agent) = daemon.read(|store| store.agent(&id))? else {
+            continue;
+        };
+        let asking = !daemon
+            .read(|store| store.pending_requests_of(&agent.id))?
+            .is_empty();
+        let waiting_on = match (&agent.parent, asking || agent.waiting_on_parent) {
+            (_, false) => Value::Null,
+            (Some(_), true) => "parent".into(),
+            (None, true) => "user".into(),
+        };
+        let needs_user = agent.parent.is_none()
+            && user_requests
+                .iter()
+                .any(|request| root_of(daemon, &request.agent) == agent.id);
+        out.push(json!({
+            "agent": summary(&agent),
+            "doing": doing(daemon, &agent),
+            "waiting_on": waiting_on,
+            "needs_user": needs_user,
+        }));
+        let children = daemon.read(|store| store.children(&agent.id))?;
+        stack.extend(children.into_iter().rev().map(|child| child.id));
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_duration_is_said_in_its_unit() {
+        assert_eq!(ago(40_000), "40 s");
+        assert_eq!(ago(12 * 60_000), "12 min");
+        assert_eq!(ago(3 * 3_600_000), "3 h");
+    }
+
+    #[test]
+    fn a_conversation_line_keeps_what_a_parent_reads() {
+        assert_eq!(
+            conversation_line("agent.message", &json!({"text": "done"})).as_deref(),
+            Some("said: done")
+        );
+        assert_eq!(
+            conversation_line(
+                "agent.tool_served",
+                &json!({"tool": "fs_read", "outcome": "ok"})
+            )
+            .as_deref(),
+            Some("fs_read (ok)")
+        );
+        assert!(conversation_line("agent.thought", &json!({"text": "hm"})).is_none());
+        assert!(
+            conversation_line("agent.tool_call", &json!({"update": true, "title": "x"})).is_none()
+        );
+    }
+}

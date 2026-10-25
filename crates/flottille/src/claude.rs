@@ -105,23 +105,6 @@ pub fn tools(root: bool, at_depth_limit: bool) -> Vec<String> {
         .collect()
 }
 
-/// The system prompt of a new agent: a shared part, the boundary, the part of this session.
-/// Frozen in the agent; the full layering (roles, the project's instruction files) comes with the
-/// roles.
-pub fn instructions(project: &str, place: &str, folder: &Path) -> String {
-    let shared = "You are an agent run by Flottille. Flottille's tools are your only tools: a tool \
-        you do not have is work your role does not do; say so, and do not look for a way around \
-        it. Every call goes through one gate: a refusal is an answer, do not retry it nor reach \
-        the same effect another way. A call held for approval has not happened: go on with what \
-        does not depend on it, or end your turn saying what you wait for. Never invent: say what \
-        you observed, and \"not verified\" when you did not check.";
-    let session = format!(
-        "You work for the project {project}, in {place}: the folder {}.",
-        folder.display()
-    );
-    format!("{shared}\n\n{BOUNDARY}\n\n{session}")
-}
-
 /// `_meta` of `session/new`, `session/load` and `session/resume`: the bare mode.
 pub fn session_meta(instructions: &str, tools: &[String]) -> Value {
     json!({"claudeCode": {"options": {
@@ -483,7 +466,7 @@ mod tests {
 
     #[test]
     fn the_system_prompt_keeps_the_cache_boundary_apart() {
-        let text = instructions("zebra", "main", Path::new("/work/zebra"));
+        let text = format!("shared\n\n{BOUNDARY}\n\nthe project zebra");
         let prompt = system_prompt(&text);
         assert_eq!(prompt[1], BOUNDARY);
         assert!(prompt[2].as_str().unwrap().contains("zebra"));

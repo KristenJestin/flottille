@@ -21,9 +21,11 @@ use tokio::task::JoinSet;
 use crate::VERSION;
 use crate::agents::{self, Live};
 use crate::approvals;
+use crate::deliveries;
 use crate::mcp;
 use crate::projects::{self, Projects};
 use crate::runs;
+use crate::sweep;
 use crate::workspaces;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -84,6 +86,12 @@ pub struct Daemon {
     pub agents: Live,
     /// The agents' MCP server: its tokens, and what its tools keep (reads, runs).
     pub mcp: mcp::Server,
+    /// The deliveries pinned as notes on agents' next tool results.
+    pub notes: deliveries::Notes,
+    /// The agents waiting on their provider (overloaded, rate-limited): not stuck.
+    pub waiting_provider: Mutex<HashSet<String>>,
+    /// Held while a launch checks the children cap and takes its slot.
+    pub launching: Mutex<()>,
     /// Becomes true when the daemon stops.
     stopping: watch::Sender<bool>,
 }
@@ -179,6 +187,9 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         preparing: Mutex::new(HashSet::new()),
         agents: Live::default(),
         mcp: mcp::Server::new(tools.local_addr()?.port()),
+        notes: deliveries::Notes::default(),
+        waiting_provider: Mutex::new(HashSet::new()),
+        launching: Mutex::new(()),
         stopping: watch::Sender::new(false),
     });
     let mut terminate = signal(SignalKind::terminate())?;
@@ -201,6 +212,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         tools,
         daemon.stopping.subscribe(),
     ));
+    tokio::spawn(sweep::run(daemon.clone(), daemon.stopping.subscribe()));
 
     let mut connections = JoinSet::new();
     let reason = loop {
@@ -266,7 +278,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
         };
         // They run git, wait on an agent's task or start what an approval allows: answered by a
         // task of their own, the connection goes on.
-        if ["workspace.", "agent.", "approval."]
+        if ["workspace.", "agent.", "approval.", "test."]
             .iter()
             .any(|prefix| request.method.starts_with(prefix))
         {
@@ -276,6 +288,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     agents::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("approval.") {
                     approvals::call(daemon, &request.method, request.params).await
+                } else if request.method.starts_with("test.") {
+                    sweep::call(daemon, &request.method, request.params).await
                 } else {
                     workspaces::call(daemon, &request.method, request.params).await
                 };

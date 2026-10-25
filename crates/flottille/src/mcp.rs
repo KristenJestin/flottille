@@ -42,11 +42,13 @@ use crate::VERSION;
 use crate::approvals;
 use crate::claude;
 use crate::daemon::Daemon;
+use crate::deliveries;
 use crate::files::{self, Context};
 use crate::gate;
 use crate::place::{Place, Resolved};
 use crate::projects;
 use crate::runs;
+use crate::tree;
 
 /// The path the server is reached at; any path is served.
 pub const PATH: &str = "/mcp";
@@ -77,10 +79,13 @@ struct Definition {
     schema: fn() -> Value,
 }
 
+/// What a call of a session that was replaced is answered.
+const REPLACED: &str = "refused: this session has been replaced: a new session of this agent goes \
+    on with its work; stop here";
+
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
-/// the order frozen in the agent. The agent tools (`agent_*`, `report`, `ask_*`,
-/// `approval_answer`) come with the tree.
-const SERVED: [Definition; 9] = [
+/// the order frozen in the agent.
+const SERVED: [Definition; 18] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -244,6 +249,162 @@ const SERVED: [Definition; 9] = [
             }, "required": ["run"], "additionalProperties": false})
         },
     },
+    Definition {
+        name: "agent_launch",
+        title: "Launch a child agent",
+        description: "Starts a child agent on one precise task and answers at once with its \
+            agent_id. It works on its own: you are told when it reports, asks, fails, is stuck or \
+            idles, so never poll. The brief is all it knows: the task and only it, what to read, \
+            the checks, the deliverable. workspace: an existing workspace's name, {\"new\": \
+            {\"name\"}} for a new one, or left out for your own place. Refused above the \
+            project's children cap or the depth limit.",
+        read_only: false,
+        idempotent: false,
+        destructive: false,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "title": {"type": "string", "description": "The task in a few words: how you and the user will name this child."},
+                "brief": {"type": "string", "description": "Everything the child needs to know."},
+                "model": {"type": "string", "description": "The model; your agent's default when left out."},
+                "role": {"type": "string", "enum": ["worker", "lead"], "description": "worker by default."},
+                "workspace": {"description": "Where it works: your place when left out.", "anyOf": [
+                    {"type": "string", "description": "An existing workspace of the project."},
+                    {"type": "object", "properties": {"new": {"type": "object", "properties": {
+                        "name": {"type": "string"},
+                        "repositories": {"type": "array", "items": {"type": "string"}}
+                    }, "required": ["name"], "additionalProperties": false}},
+                     "required": ["new"], "additionalProperties": false}
+                ]}
+            }, "required": ["title", "brief"], "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "agent_send",
+        title: "Write to a child",
+        description: "Writes to one of your children. It reaches it at once: on its next tool \
+            result when it is in a turn, as a new turn otherwise. Use it to answer a child's \
+            question, to steer it, or for a small follow-up.",
+        read_only: false,
+        idempotent: false,
+        destructive: false,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "agent_id": {"type": "string", "description": "The child's id, as agent_launch gave it."},
+                "message": {"type": "string"}
+            }, "required": ["agent_id", "message"], "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "agent_status",
+        title: "See how children are doing",
+        description: "The state of one of your children, or of all of them without agent_id: \
+            what it does now (thinking, which command runs and for how long, waiting for \
+            approval #n, waiting on the provider), the time since its last sign of activity, \
+            its context use and its last messages.",
+        read_only: true,
+        idempotent: true,
+        destructive: false,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "agent_id": {"type": "string"}
+            }, "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "agent_read",
+        title: "Read a child's conversation",
+        description: "A page of one of your children's conversation, oldest first: what it was \
+            sent, its messages and its tool calls. The page ends with the after to pass for the \
+            next one. Read the lines that matter rather than whole transcripts.",
+        read_only: true,
+        idempotent: true,
+        destructive: false,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "agent_id": {"type": "string"},
+                "after": {"type": "integer", "minimum": 0, "description": "The number a previous page ended with."}
+            }, "required": ["agent_id"], "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "agent_stop",
+        title: "Stop a child",
+        description: "Stops one of your children with its own children, deepest first; what was \
+            queued for them is dropped. Use it once its report is acted on, or to end a child \
+            going in circles. Its workspace stays.",
+        read_only: false,
+        idempotent: true,
+        destructive: true,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "agent_id": {"type": "string"}
+            }, "required": ["agent_id"], "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "report",
+        title: "Report and end",
+        description: "Says you are done: your report goes at once to your parent (to the user for \
+            a root), and a child's session ends with this turn. Give the result, each point done \
+            or skipped and why, what was not verified, open questions. Call it once, as your \
+            last action.",
+        read_only: false,
+        idempotent: false,
+        destructive: false,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "text": {"type": "string"}
+            }, "required": ["text"], "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "ask_user",
+        title: "Ask the user",
+        description: "Puts a question to the user. It does not wait: the answer comes later as a \
+            message. Go on with what does not depend on it, or end your turn saying what you \
+            wait for.",
+        read_only: false,
+        idempotent: false,
+        destructive: false,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "question": {"type": "string"}
+            }, "required": ["question"], "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "ask_parent",
+        title: "Ask your parent",
+        description: "Puts a question to the agent that launched you. It does not wait: the \
+            answer comes later as [flottille:parent]. Go on with what does not depend on it, or \
+            end your turn saying what you wait for.",
+        read_only: false,
+        idempotent: false,
+        destructive: false,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "question": {"type": "string"}
+            }, "required": ["question"], "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "approval_answer",
+        title: "Answer a child's request",
+        description: "Answers a request held for you by one of your children's calls \
+            ([flottille:child-asks]): deny it, or forward it to your own parent (to the user when \
+            you are the root) when it should decide. No agent can allow a request. why is one \
+            sentence, passed on with it.",
+        read_only: false,
+        idempotent: false,
+        destructive: false,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "request_id": {"type": "integer", "minimum": 1, "description": "The request's number, #n."},
+                "decision": {"type": "string", "enum": ["forward", "deny"]},
+                "why": {"type": "string", "description": "One sentence."}
+            }, "required": ["request_id", "decision", "why"], "additionalProperties": false})
+        },
+    },
 ];
 
 fn definition(name: &str) -> Option<&'static Definition> {
@@ -272,6 +433,8 @@ fn tool_of(definition: &Definition) -> Tool {
 /// What a token lets its bearer do: the agent's tools that exist, in its order, in its place.
 pub struct Grant {
     pub agent: String,
+    /// The agent's epoch when its process started: a call made after a replacement is refused.
+    pub epoch: u64,
     pub tools: Vec<&'static str>,
     pub place: Place,
 }
@@ -320,7 +483,6 @@ pub struct Server {
     port: u16,
     tokens: Mutex<Tokens>,
     keyed: Mutex<Keyed>,
-    pub notes: Notes,
     pub kept: files::Kept,
     pub runs: runs::Live,
     refusals: Mutex<VecDeque<Instant>>,
@@ -335,6 +497,9 @@ struct Tokens {
     by_agent: HashMap<String, String>,
     /// Digests revoked, with the agent each served.
     revoked: VecDeque<(String, String)>,
+    /// The grants of replaced sessions, still known so that their calls are told why they are
+    /// refused.
+    retired: VecDeque<(String, Arc<Grant>)>,
 }
 
 /// A call's answer: its text, and whether it is an error.
@@ -347,33 +512,6 @@ struct Keyed {
     order: VecDeque<(String, String)>,
 }
 
-/// Notes pinned for an agent, appended to its next tool result (the deliveries of `#7` use them
-/// to reach an agent in a turn).
-#[derive(Default)]
-pub struct Notes {
-    pinned: Mutex<HashMap<String, Vec<String>>>,
-}
-
-impl Notes {
-    #[allow(dead_code)]
-    pub fn pin(&self, agent: &str, note: String) {
-        self.pinned
-            .lock()
-            .unwrap()
-            .entry(agent.to_owned())
-            .or_default()
-            .push(note);
-    }
-
-    fn take(&self, agent: &str) -> Vec<String> {
-        self.pinned
-            .lock()
-            .unwrap()
-            .remove(agent)
-            .unwrap_or_default()
-    }
-}
-
 impl Server {
     pub fn new(port: u16) -> Server {
         Server {
@@ -381,7 +519,6 @@ impl Server {
             port,
             tokens: Mutex::default(),
             keyed: Mutex::default(),
-            notes: Notes::default(),
             kept: files::Kept::default(),
             runs: runs::Live::default(),
             refusals: Mutex::default(),
@@ -402,6 +539,20 @@ impl Server {
         }
         tokens.grants.insert(digest, Arc::new(grant));
         Ok(token)
+    }
+
+    /// The agent's session was replaced: its token is still known, and every call it makes is
+    /// refused with the reason.
+    pub fn retire(&self, agent: &str) {
+        let mut tokens = self.tokens.lock().unwrap();
+        if let Some(old) = tokens.by_agent.remove(agent)
+            && let Some(grant) = tokens.grants.remove(&old)
+        {
+            tokens.retired.push_back((old, grant));
+            if tokens.retired.len() > REVOKED_KEPT {
+                tokens.retired.pop_front();
+            }
+        }
     }
 
     /// The agent's token no longer works: its process is gone.
@@ -428,6 +579,9 @@ impl Server {
         let digest = files::sha256(token.as_bytes());
         let tokens = self.tokens.lock().unwrap();
         if let Some(grant) = tokens.grants.get(&digest) {
+            return Ok(grant.clone());
+        }
+        if let Some((_, grant)) = tokens.retired.iter().find(|(old, _)| *old == digest) {
             return Ok(grant.clone());
         }
         Err(tokens
@@ -540,6 +694,7 @@ pub fn grant_of(daemon: &Daemon, agent: &Agent) -> Result<Grant, String> {
     };
     Ok(Grant {
         agent: agent.id.clone(),
+        epoch: agent.epoch,
         tools,
         place,
     })
@@ -790,7 +945,14 @@ async fn played(
     let started = Instant::now();
     let recorded = record_of(&args, &grant.place);
     let mut verdict = None;
-    let outcome = if grant.tools.contains(&tool) {
+    let replaced = daemon
+        .read(|store| store.agent(&grant.agent))
+        .ok()
+        .flatten()
+        .is_some_and(|agent| agent.epoch != grant.epoch);
+    let outcome = if replaced {
+        Outcome::Refused(REPLACED.into())
+    } else if grant.tools.contains(&tool) {
         let (decided, identity) = judge(daemon, grant, tool, &args);
         // A call the user allowed for the tree goes through, never one reaching a sensitive place.
         let decided = match decided {
@@ -819,7 +981,11 @@ async fn played(
         daemon, grant, tool, key, recorded, verdict, &outcome, started, None,
     );
     let error = matches!(outcome, Outcome::Refused(_) | Outcome::Failed(_));
-    let notes = daemon.mcp.notes.take(&grant.agent);
+    let notes = if replaced {
+        Vec::new()
+    } else {
+        deliveries::take_notes(daemon, &grant.agent)
+    };
     (shown(outcome, &notes, &grant.place), error)
 }
 
@@ -957,6 +1123,7 @@ async fn perform(
         }
         "commands_output" => runs::commands_output(daemon, &grant.agent, args),
         "commands_stop" => runs::commands_stop(daemon, &grant.agent, args).await,
+        tool if tree::TOOLS.contains(&tool) => tree::call(daemon, grant, tool, args).await,
         _ => {
             // The file tools read and write the disk: off the daemon's thread.
             let (daemon, grant, tool) = (daemon.clone(), grant.clone(), tool.to_owned());
@@ -1035,9 +1202,10 @@ mod tests {
             assert!(description.len() < 1000, "{}", definition.name);
             assert_eq!(tool["_meta"]["anthropic/alwaysLoad"], true);
             assert_eq!(tool["inputSchema"]["type"], "object");
+            let name = format!("mcp__flottille__{}", definition.name);
             assert!(
-                claude::tools(true, false)
-                    .contains(&format!("mcp__flottille__{}", definition.name)),
+                claude::tools(true, false).contains(&name)
+                    || claude::tools(false, false).contains(&name),
                 "{} is a tool agents get",
                 definition.name
             );
@@ -1047,15 +1215,15 @@ mod tests {
     #[test]
     fn a_grant_holds_the_agent_s_served_tools_in_its_own_order() {
         let mut leaf = claude::tools(false, true);
-        assert_eq!(served(&leaf).len(), 9);
+        assert_eq!(served(&leaf).len(), 11);
         leaf.reverse();
         leaf.retain(|tool| !tool.ends_with("__search"));
         leaf.push("fs_read".into());
         let served = served(&leaf);
-        assert_eq!(served.first(), Some(&"commands_stop"));
+        assert_eq!(served.first(), Some(&"ask_parent"));
         assert_eq!(served.last(), Some(&"fs_read"));
         assert!(!served.contains(&"search"));
-        assert_eq!(served.len(), 8);
+        assert_eq!(served.len(), 10);
     }
 
     #[test]
@@ -1121,14 +1289,5 @@ mod tests {
         );
         assert!(!shown.contains("hunter2"));
         assert!(shown.chars().count() <= ERROR_LIMIT);
-    }
-
-    #[test]
-    fn pinned_notes_are_taken_once() {
-        let notes = Notes::default();
-        notes.pin("a", "first".into());
-        notes.pin("a", "second".into());
-        assert_eq!(notes.take("a"), ["first", "second"]);
-        assert!(notes.take("a").is_empty());
     }
 }

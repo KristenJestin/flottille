@@ -1,8 +1,9 @@
 //! The `agent.*` methods (`docs/protocol.md`) and the life of each agent (`docs/agents.md`).
 //!
-//! An agent is owned by one task of its own, which starts its adapter process when a prompt comes,
-//! keeps it while it works, lets it go after the idle release time, and notices when it dies. The
-//! methods only write the store and hand the task its orders: none of them waits on the agent.
+//! An agent is owned by one task of its own, which starts its adapter process when a delivery
+//! comes, keeps it while it works, lets it go after the idle release time, notices when it dies
+//! and replaces its session then. The methods only write the store and hand the task its orders:
+//! none of them waits on the agent. Every prompt an agent gets is a delivery (`deliveries`).
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::OsString;
@@ -11,6 +12,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flottille_core::agent::{Agent, AgentState, Choices, new_id};
+use flottille_core::approval;
+use flottille_core::project::Project;
 use flottille_core::protocol::{AgentName, AgentRun, AgentSend};
 use flottille_core::secrets;
 use flottille_core::store::{AgentChange, Store, now_ms};
@@ -24,8 +27,11 @@ use tokio::task::JoinHandle;
 use crate::acp::{self, Exit};
 use crate::claude;
 use crate::daemon::Daemon;
+use crate::deliveries;
 use crate::mcp;
 use crate::projects::{self, Failure};
+use crate::roles::{self, Role};
+use crate::tree;
 
 type Answer = Result<Value, Failure>;
 
@@ -37,15 +43,25 @@ const STOP_GRACE: Duration = Duration::from_secs(2);
 /// The events `agent.show` gives at once.
 const PAGE: usize = 1000;
 
+/// A depth an agent may have, at most: a root is at 0, so a lead's worker may have workers and
+/// theirs may not (`docs/design.md` §5.1).
+pub const DEPTH_LIMIT: u32 = 2;
+/// Replacements an agent may have in this time before it fails instead (`docs/design.md` §5.5).
+const REPLACEMENTS_MAX: usize = 2;
+const REPLACEMENT_WINDOW_MS: u64 = 30 * 60 * 1000;
+
 /// What an agent's task is asked.
 pub enum Order {
-    Prompt(String),
+    /// Something was delivered: pump it when no turn runs.
+    Ring,
     /// Answered whether a turn was running.
     Cancel(oneshot::Sender<bool>),
     Stop,
+    /// Its session is let go and a new one replaces it, for this reason. The parent was told.
+    Replace(String),
 }
 
-/// The prompts waiting for the agent, kept across its processes, and whether one is being played.
+/// The prompt taken for the agent, kept across its processes, and whether one is being played.
 pub struct Turns {
     pub queued: VecDeque<String>,
     pub running: bool,
@@ -68,11 +84,51 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         "agent.send" => {
             let asked: AgentSend = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
+            refuse_child(daemon, &agent, "writes to it")?;
             refuse_final(&agent)?;
             refuse_empty(&asked.message)?;
             let after = daemon.read(Store::last_seq)?;
-            order(daemon, &agent.id, Order::Prompt(asked.message))?;
+            deliveries::deliver(
+                daemon,
+                &agent.id,
+                "user",
+                None,
+                &asked.message,
+                approval::BETWEEN_TURNS,
+            );
             Ok(json!({"agent": agent.to_json(), "after": after}))
+        }
+        "agent.stop" => {
+            let asked: AgentName = serde_json::from_value(params)?;
+            let agent = find(daemon, &asked.agent)?;
+            refuse_child(daemon, &agent, "stops it")?;
+            refuse_final(&agent)?;
+            tree::stop_tree(daemon, &agent.id, "stopped by the user");
+            let agent = find(daemon, &agent.id)?;
+            Ok(json!({"agent": agent.to_json()}))
+        }
+        "agent.tree" => {
+            let asked: AgentName = serde_json::from_value(params)?;
+            let agent = find(daemon, &asked.agent)?;
+            Ok(json!({"agents": tree::tree(daemon, &agent)?}))
+        }
+        "agent.list" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct List {
+                #[serde(default)]
+                project: Option<String>,
+            }
+            let List { project } = match params {
+                Value::Null => List { project: None },
+                params => serde_json::from_value(params)?,
+            };
+            let agents = daemon.read(Store::agents)?;
+            Ok(json!({"agents": agents
+                .iter()
+                .filter(|a| project.as_ref().is_none_or(|p| &a.project == p))
+                .map(tree::summary)
+                .collect::<Vec<_>>()}))
         }
         "agent.cancel" => {
             let asked: AgentName = serde_json::from_value(params)?;
@@ -110,6 +166,19 @@ fn find(daemon: &Daemon, id: &str) -> Result<Agent, Failure> {
         .ok_or_else(|| Failure::new("not-found", format!("there is no agent {id}")))
 }
 
+/// A child belongs to its parent: only its parent writes to it, and it stops with its root.
+fn refuse_child(daemon: &Daemon, agent: &Agent, does: &str) -> Result<(), Failure> {
+    let Some(parent) = &agent.parent else {
+        return Ok(());
+    };
+    let root = tree::root_of(daemon, &agent.id);
+    Err(Failure::refused(format!(
+        "agent {} is a child of agent {parent}: only its parent {does}; the user writes to and \
+         stops its root, agent {root}",
+        agent.id
+    )))
+}
+
 fn refuse_final(agent: &Agent) -> Result<(), Failure> {
     if agent.state.is_final() {
         return Err(Failure::refused(format!(
@@ -136,8 +205,65 @@ fn refuse_empty(message: &str) -> Result<(), Failure> {
 fn run(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
     let project = projects::load_project(daemon, &asked.project)?;
     refuse_empty(&asked.message)?;
-    let (place, folder) = match &asked.workspace {
-        None => ("main".to_owned(), project.folder.clone()),
+    let after = daemon.read(Store::last_seq)?;
+    let agent = create(
+        daemon,
+        &project,
+        New {
+            workspace: asked.workspace,
+            preparing: false,
+            role: roles::role(roles::LEAD).expect("the lead role"),
+            parent: None,
+            title: None,
+            brief: asked.message.clone(),
+            chosen: Choices {
+                model: asked.model,
+                effort: asked.effort,
+                mode: asked.mode,
+            },
+        },
+    )?;
+    deliveries::deliver(
+        daemon,
+        &agent.id,
+        "user",
+        None,
+        &asked.message,
+        approval::BETWEEN_TURNS,
+    );
+    Ok(json!({"agent": agent.to_json(), "after": after}))
+}
+
+/// What a new agent is made of.
+pub struct New {
+    pub workspace: Option<String>,
+    /// Its workspace may still be preparing: the agent is sent nothing until it is ready.
+    pub preparing: bool,
+    pub role: &'static Role,
+    /// Its parent, with the parent's depth; `None` for a root.
+    pub parent: Option<(String, u32)>,
+    pub title: Option<String>,
+    pub brief: String,
+    pub chosen: Choices,
+}
+
+/// Writes a new agent, its instructions and tools frozen in it; nothing is sent to it yet.
+pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, Failure> {
+    let (place, folder, repositories) = match &new.workspace {
+        None => {
+            let repositories: Vec<_> = project
+                .repositories
+                .iter()
+                .map(|r| {
+                    let folder = match r.path.as_str() {
+                        "." => project.folder.clone(),
+                        path => project.folder.join(path),
+                    };
+                    (r.path.clone(), folder.clone(), folder)
+                })
+                .collect();
+            ("main".to_owned(), project.folder.clone(), repositories)
+        }
         Some(name) => {
             let workspace = daemon
                 .read(|store| store.workspace(&project.name, name))?
@@ -147,30 +273,54 @@ fn run(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
                         format!("project {} has no workspace named {name}", project.name),
                     )
                 })?;
-            if workspace.state() != State::Ready {
+            if workspace.state() != State::Ready
+                && !(new.preparing && workspace.state() == State::Preparing)
+            {
                 return Err(Failure::refused(format!(
                     "workspace {name} is not ready ({}): see `flottille workspace show {} {name}`",
-                    serde_json::to_value(workspace.state())?
-                        .as_str()
+                    serde_json::to_value(workspace.state())
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_owned))
                         .unwrap_or_default(),
                     project.name
                 )));
             }
-            (format!("workspace {name}"), workspace.folder)
+            let repositories: Vec<_> = workspace
+                .repositories
+                .iter()
+                .map(|r| {
+                    let original = project.folder.join(&r.path);
+                    (r.path.clone(), workspace.folder_of(&r.path), original)
+                })
+                .collect();
+            (format!("workspace {name}"), workspace.folder, repositories)
         }
     };
     // Refused now rather than failed later: the user can act on it before anything is written.
     claude::launch(&daemon.paths).map_err(Failure::refused)?;
     let now = now_ms();
-    // Roots are the only agents until the tree comes: the tools of one that can have children.
-    let tools = claude::tools(true, false);
+    let depth = new.parent.as_ref().map_or(0, |(_, depth)| depth + 1);
+    let at_depth_limit = depth >= DEPTH_LIMIT;
+    let tools = claude::tools(new.parent.is_none(), at_depth_limit);
+    let files = roles::project_files(&project.folder, &repositories);
+    let instructions = roles::instructions(
+        new.role,
+        &roles::Session {
+            project: &project.name,
+            place: &place,
+            folder: &folder,
+            title: new.title.as_deref(),
+            at_depth_limit,
+        },
+        &files,
+    );
     let agent = Agent {
         id: new_id().map_err(|e| Failure::new("unavailable", e.to_string()))?,
         provider: "claude".into(),
-        role: "lead".into(),
+        role: new.role.name.into(),
         project: project.name.clone(),
-        workspace: asked.workspace.clone(),
-        instructions: claude::instructions(&project.name, &place, &folder),
+        workspace: new.workspace.clone(),
+        instructions,
         folder,
         state: AgentState::Starting,
         state_reason: None,
@@ -178,42 +328,67 @@ fn run(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
         updated_at: now,
         active_at: None,
         ended_at: None,
-        chosen: Choices {
-            model: asked.model,
-            effort: asked.effort,
-            mode: asked.mode,
-        },
+        chosen: new.chosen,
         taken: Choices::default(),
         native_id: None,
         agent_version: None,
         tools,
-        parent: None,
-        depth: 0,
+        parent: new.parent.map(|(parent, _)| parent),
+        depth,
         epoch: 0,
-        title: None,
-        brief: Some(asked.message.clone()),
+        title: new.title,
+        brief: Some(new.brief),
         reported_at: None,
         quiet_turns: 0,
         waiting_on_parent: false,
     };
-    let after = daemon.read(Store::last_seq)?;
     daemon.write(|store| {
         let event = store.create_agent(
             &agent,
             (
                 "agent.created",
                 json!({"agent": agent.id, "project": agent.project, "workspace": agent.workspace,
-                    "folder": agent.folder, "provider": agent.provider, "model": agent.chosen.model}),
+                    "folder": agent.folder, "provider": agent.provider, "model": agent.chosen.model,
+                    "role": agent.role, "parent": agent.parent, "depth": agent.depth,
+                    "title": agent.title}),
             ),
         )?;
         Ok(((), event))
     })?;
-    order(daemon, &agent.id, Order::Prompt(asked.message))?;
-    Ok(json!({"agent": agent.to_json(), "after": after}))
+    Ok(agent)
+}
+
+/// Asks the agent's turn to stop, when one runs.
+pub fn cancel(daemon: &Daemon, id: &str) {
+    let task = daemon
+        .agents
+        .tasks
+        .lock()
+        .unwrap()
+        .get(id)
+        .map(|(sender, _)| sender.clone());
+    if let Some(task) = task {
+        let (answer, _) = oneshot::channel();
+        let _ = task.send(Order::Cancel(answer));
+    }
+}
+
+/// Hands an order to the agent's task, if it has one: an agent without a task has no process.
+pub fn tell(daemon: &Daemon, id: &str, order: Order) {
+    let task = daemon
+        .agents
+        .tasks
+        .lock()
+        .unwrap()
+        .get(id)
+        .map(|(sender, _)| sender.clone());
+    if let Some(task) = task {
+        let _ = task.send(order);
+    }
 }
 
 /// Hands an order to the agent's task, starting the task when it has none.
-fn order(daemon: &Arc<Daemon>, id: &str, order: Order) -> Result<(), Failure> {
+pub fn order(daemon: &Arc<Daemon>, id: &str, order: Order) {
     let mut tasks = daemon.agents.tasks.lock().unwrap();
     let sender = match tasks.get(id) {
         Some((sender, _)) if !sender.is_closed() => sender.clone(),
@@ -224,9 +399,7 @@ fn order(daemon: &Arc<Daemon>, id: &str, order: Order) -> Result<(), Failure> {
             sender
         }
     };
-    sender
-        .send(order)
-        .map_err(|_| Failure::refused(format!("agent {id} has stopped")))
+    let _ = sender.send(order);
 }
 
 /// Stops every agent's process, the daemon stopping: each is let go as an idle one is. A task that
@@ -272,13 +445,22 @@ async fn agent_task(daemon: Arc<Daemon>, id: String, mut orders: mpsc::Unbounded
     };
     loop {
         if turns.queued.is_empty() {
-            match orders.recv().await {
-                None | Some(Order::Stop) => return,
-                Some(Order::Cancel(answer)) => {
-                    let _ = answer.send(false);
-                    continue;
-                }
-                Some(Order::Prompt(text)) => turns.queued.push_back(text),
+            match deliveries::pump(&daemon, &id) {
+                Some(text) => turns.queued.push_back(text),
+                None => match orders.recv().await {
+                    None | Some(Order::Stop) => return,
+                    Some(Order::Cancel(answer)) => {
+                        let _ = answer.send(false);
+                        continue;
+                    }
+                    Some(Order::Ring) => continue,
+                    Some(Order::Replace(reason)) => {
+                        if !replace(&daemon, &id, &reason, true, false) {
+                            return;
+                        }
+                        continue;
+                    }
+                },
             }
         }
         let Ok(Some(agent)) = daemon.read(|store| store.agent(&id)) else {
@@ -363,7 +545,10 @@ async fn process(
         server,
     )
     .await;
-    daemon.mcp.revoke(&agent.id);
+    if !matches!(exit, Ok(Exit::Died(_) | Exit::Replace(_))) {
+        daemon.mcp.revoke(&agent.id);
+    }
+    daemon.waiting_provider.lock().unwrap().remove(&agent.id);
     let goes_on = match exit {
         Ok(Exit::Released) => {
             stop(&mut child, pid).await;
@@ -384,8 +569,15 @@ async fn process(
             // The adapter is gone, not what it started: a `claude` left in its group would run on
             // as an orphan, with its tools.
             signal_group(pid, libc::SIGKILL);
-            died(daemon, &agent.id, status, turns);
-            Ok(false)
+            daemon.mcp.retire(&agent.id);
+            Ok(died(daemon, &agent.id, status, turns))
+        }
+        Ok(Exit::Replace(reason)) => {
+            stop(&mut child, pid).await;
+            daemon.mcp.retire(&agent.id);
+            turns.running = false;
+            turns.queued.clear();
+            Ok(replace(daemon, &agent.id, &reason, true, false))
         }
         Err(reason) => {
             stop(&mut child, pid).await;
@@ -396,9 +588,11 @@ async fn process(
     goes_on
 }
 
-fn died(daemon: &Daemon, id: &str, status: ExitStatus, turns: &mut Turns) {
+/// The process died: published, then the agent's session is replaced. Whether it goes on.
+fn died(daemon: &Arc<Daemon>, id: &str, status: ExitStatus, turns: &mut Turns) -> bool {
     use std::os::unix::process::ExitStatusExt;
     let during_turn = std::mem::replace(&mut turns.running, false);
+    turns.queued.clear();
     if during_turn {
         record(
             daemon,
@@ -413,31 +607,86 @@ fn died(daemon: &Daemon, id: &str, status: ExitStatus, turns: &mut Turns) {
         (_, Some(signal)) => format!("its process died (signal {signal})"),
         _ => "its process died".to_owned(),
     };
-    change(
+    record(
         daemon,
         id,
-        AgentState::Failed,
-        Some(reason),
-        Some((
-            "agent.died",
-            json!({"code": status.code(), "signal": status.signal(), "during_turn": during_turn}),
-        )),
+        "agent.died",
+        json!({"code": status.code(), "signal": status.signal(), "during_turn": during_turn}),
+        false,
     );
+    replace(daemon, id, &reason, true, true)
 }
 
-fn fail(daemon: &Daemon, id: &str, reason: &str) {
+/// A new session replaces the agent's (`docs/reference/hemera.md` §5 "Replacement"): what its
+/// last turn did not take is given back, its brief is delivered again with a word on why, and its
+/// parent is told when `tell` (a stuck agent's was told already). Past the replacement limit it
+/// fails instead. Whether it goes on.
+pub fn replace(daemon: &Arc<Daemon>, id: &str, reason: &str, counted: bool, tell: bool) -> bool {
     let reason = secrets::mask(reason, &std::env::vars_os().collect());
-    change(
+    let since = now_ms().saturating_sub(REPLACEMENT_WINDOW_MS);
+    let replaced = daemon
+        .read(|store| store.replacements_since(id, since))
+        .unwrap_or(0);
+    if counted && replaced >= REPLACEMENTS_MAX {
+        tree::fail_tree(
+            daemon,
+            id,
+            &format!("it keeps failing: {reason}, after {replaced} replacements in 30 minutes"),
+        );
+        return false;
+    }
+    let _ = daemon.write(|store| Ok(((), store.give_back(id)?)));
+    let agent = match daemon.write(|store| store.replace_agent(id, &reason, counted)) {
+        Ok(agent) if !agent.state.is_final() => agent,
+        Ok(_) => return false,
+        Err(error) => {
+            eprintln!("flottille daemon: agent {id}: {error}");
+            return false;
+        }
+    };
+    if let Some(brief) = &agent.brief {
+        deliveries::deliver(
+            daemon,
+            id,
+            "brief",
+            Some(format!("brief-{id}-{}", agent.epoch)),
+            brief,
+            approval::BETWEEN_TURNS,
+        );
+    }
+    deliveries::deliver(
         daemon,
         id,
-        AgentState::Failed,
-        Some(reason.clone()),
-        Some(("agent.failed", json!({"reason": reason}))),
+        "resume",
+        Some(format!("resume-{id}-{}", agent.epoch)),
+        &format!(
+            "A previous session of yours stopped: {reason}. You start again from your brief: \
+             check the real state of your place first, what it did may be there already."
+        ),
+        approval::BETWEEN_TURNS,
     );
+    if tell {
+        tree::tell_parent(
+            daemon,
+            &agent,
+            "child-replaced",
+            &format!(
+                "its session was replaced: {reason}. A new session starts again from its brief."
+            ),
+            approval::BETWEEN_TURNS,
+        );
+    }
+    true
+}
+
+/// The agent failed: it and its tree end, and its parent is told.
+fn fail(daemon: &Arc<Daemon>, id: &str, reason: &str) {
+    let _ = daemon.write(|store| Ok(((), store.give_back(id)?)));
+    tree::fail_tree(daemon, id, reason);
 }
 
 /// Changes the agent's state, with its event when one is given.
-fn change(
+pub fn change(
     daemon: &Daemon,
     id: &str,
     state: AgentState,
@@ -465,7 +714,7 @@ fn change(
     }
 }
 
-fn record(daemon: &Daemon, id: &str, name: &str, mut data: Value, activity: bool) {
+pub fn record(daemon: &Daemon, id: &str, name: &str, mut data: Value, activity: bool) {
     data["agent"] = id.into();
     if let Err(error) = daemon.write(|store| {
         let event = store.append_agent_event(id, name, data, activity)?;
@@ -486,6 +735,19 @@ struct Recorder {
 
 impl acp::Events for Recorder {
     fn conversation(&self, name: &str, data: Value, activity: bool) {
+        // The history a load replays is held already, as it happened: never recorded twice
+        // (`docs/reference/hemera.md` §8.7).
+        if data["replay"] == true {
+            return;
+        }
+        {
+            let mut waiting = self.daemon.waiting_provider.lock().unwrap();
+            if name == "agent.provider_wait" {
+                waiting.insert(self.agent.clone());
+            } else if activity {
+                waiting.remove(&self.agent);
+            }
+        }
         record(
             &self.daemon,
             &self.agent,
@@ -493,6 +755,13 @@ impl acp::Events for Recorder {
             mask(data, &self.env),
             activity,
         );
+        if name == "agent.compacted" {
+            tree::compacted(&self.daemon, &self.agent);
+        }
+    }
+
+    fn pump(&self) -> Option<String> {
+        deliveries::pump(&self.daemon, &self.agent)
     }
 
     fn opened(&self, opened: &str, native_id: &str, agent_version: &str, taken: Choices) {
@@ -528,6 +797,9 @@ impl acp::Events for Recorder {
     }
 
     fn turn_ended(&self, stop_reason: &str, usage: Value) {
+        let _ = self
+            .daemon
+            .read(|store| store.deliveries_taken(&self.agent));
         change(
             &self.daemon,
             &self.agent,
@@ -538,6 +810,7 @@ impl acp::Events for Recorder {
                 json!({"stop_reason": stop_reason, "usage": usage}),
             )),
         );
+        tree::after_turn(&self.daemon, &self.agent, stop_reason);
     }
 }
 
@@ -608,8 +881,11 @@ pub fn kill_orphans(store: &Store) {
     }
 }
 
-/// At daemon start: an agent that was starting or working has lost its process and its turn.
-pub fn settle_at_start(daemon: &Daemon) {
+/// At daemon start: an agent that was starting or working has lost its process and its turn. Its
+/// session is kept (the next process resumes it, which keeps what it knew); what its lost turn
+/// held is given back, a working one is told its turn was cut, and every agent with something
+/// queued is rung.
+pub fn settle_at_start(daemon: &Arc<Daemon>) {
     let agents = match daemon.read(Store::agents) {
         Ok(agents) => agents,
         Err(error) => {
@@ -626,6 +902,25 @@ pub fn settle_at_start(daemon: &Daemon) {
                 None,
                 Some(("agent.released", json!({"reason": "restart"}))),
             );
+            let _ = daemon.write(|store| Ok(((), store.give_back(&agent.id)?)));
+            if agent.state == AgentState::Working {
+                deliveries::deliver(
+                    daemon,
+                    &agent.id,
+                    "resume",
+                    None,
+                    "Flottille restarted while you worked, and your last turn was cut: check the \
+                     real state of your place, then go on.",
+                    approval::BETWEEN_TURNS,
+                );
+            }
+        }
+        if !agent.state.is_final()
+            && daemon
+                .read(|store| store.deliveries(&agent.id, "queued"))
+                .is_ok_and(|queued| !queued.is_empty())
+        {
+            deliveries::ring(daemon, &agent.id);
         }
     }
 }
