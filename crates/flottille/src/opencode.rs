@@ -7,7 +7,7 @@
 //! the place in OpenCode's source that shows it, is in `docs/agents.md`.
 
 use std::io::{Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use flottille_core::agent::Agent;
@@ -69,7 +69,11 @@ pub fn withheld(name: &str) -> bool {
     if API_KEYS.contains(&name) {
         return false;
     }
-    name.starts_with("OPENCODE_") || providers::secret_or_forge(name)
+    // `OTEL_*` would send its traces, and the headers their sign-in, to the user's collector.
+    ["OPENCODE_", "OTEL_"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+        || providers::secret_or_forge(name)
 }
 
 /// OpenCode names a permission's tool in the request's title only, which the model can shape:
@@ -94,8 +98,8 @@ fn login_file() -> Option<PathBuf> {
     Some(data.join("opencode/auth.json"))
 }
 
-/// Everything Flottille keeps for OpenCode: its own configuration folder, an empty home and an
-/// empty folder of managed settings, and the database of its sessions.
+/// Everything Flottille keeps for OpenCode: its own configuration, state and cache folders, an
+/// empty home and an empty folder of managed settings, and the database of its sessions.
 fn folder(paths: &Paths) -> PathBuf {
     paths.data.join("agents/opencode")
 }
@@ -108,9 +112,15 @@ fn instructions_file(paths: &Paths, agent: &str) -> PathBuf {
 /// The bare environment, the agent's instructions written where it names them.
 fn env(paths: &Paths, agent: &Agent) -> Result<Env, String> {
     let root = folder(paths);
-    for sub in ["config", "home", "managed"] {
+    for sub in ["config", "state", "cache", "home", "managed"] {
         ensure_private_dir(&root.join(sub)).map_err(|e| e.to_string())?;
     }
+    // OpenCode installs its plugin package from npm into each configuration folder it can write
+    // to, at every start (`docs/agents.md`): its own is left empty and read-only.
+    let config = root.join("config/opencode");
+    std::fs::create_dir_all(&config)
+        .and_then(|()| std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o500)))
+        .map_err(|e| format!("cannot make OpenCode's configuration folder: {e}"))?;
     let file = instructions_file(paths, &agent.id);
     ensure_private_dir(file.parent().expect("a folder")).map_err(|e| e.to_string())?;
     let text = agent
@@ -145,6 +155,10 @@ fn bare(
         // Its configuration folder: the user's `opencode.json`, agents, commands, plugins and
         // `AGENTS.md` stay in theirs.
         ("XDG_CONFIG_HOME".into(), path("config")),
+        // Its state (the models used last, which pick the default one) and its cache (the
+        // catalogue of models, packages): Flottille's runs write none of the user's.
+        ("XDG_STATE_HOME".into(), path("state")),
+        ("XDG_CACHE_HOME".into(), path("cache")),
         // The home it looks in for `~/.opencode`, `~/.claude/CLAUDE.md` and skills.
         ("OPENCODE_TEST_HOME".into(), path("home")),
         // The machine's managed settings (`/etc/opencode`), which would come after Flottille's.
@@ -291,6 +305,8 @@ mod tests {
         let data = "/home/u/.local/share/flottille/agents/opencode";
         let expected: Vec<(String, String)> = [
             ("XDG_CONFIG_HOME", format!("{data}/config")),
+            ("XDG_STATE_HOME", format!("{data}/state")),
+            ("XDG_CACHE_HOME", format!("{data}/cache")),
             ("OPENCODE_TEST_HOME", format!("{data}/home")),
             (
                 "OPENCODE_TEST_MANAGED_CONFIG_DIR",
@@ -449,6 +465,9 @@ mod tests {
             ("DB_PASSWORD", true),
             ("ANTHROPIC_AUTH_TOKEN", true),
             ("CLAUDE_CODE_OAUTH_TOKEN", true),
+            ("OTEL_EXPORTER_OTLP_ENDPOINT", true),
+            ("OTEL_EXPORTER_OTLP_HEADERS", true),
+            ("OTEL_RESOURCE_ATTRIBUTES", true),
             ("HTTPS_PROXY", false),
             ("PATH", false),
             ("HOME", false),

@@ -611,6 +611,14 @@ fn opencode_of_the_qualified_version_runs() {
         .find(|entry| entry["started"] == true)
         .unwrap();
     assert_eq!(started["env"]["OPENCODE_DISABLE_PROJECT_CONFIG"], "1");
+    // Its state and cache are Flottille's, and its configuration folder cannot be written, so
+    // that it installs no package in it.
+    let own = user.path("data/flottille/agents/opencode");
+    for (name, sub) in [("XDG_STATE_HOME", "state"), ("XDG_CACHE_HOME", "cache")] {
+        assert_eq!(started["env"][name], own.join(sub).to_str().unwrap());
+        assert!(own.join(sub).is_dir(), "{sub}");
+    }
+    assert_eq!(common::mode(own.join("config/opencode")), 0o500);
 }
 
 #[test]

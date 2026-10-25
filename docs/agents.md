@@ -231,6 +231,7 @@ after.
 | Variable | Value | What it shuts |
 |---|---|---|
 | `XDG_CONFIG_HOME` | `<data>/agents/opencode/config` | The user's `opencode.json`, agents, commands, plugins, `AGENTS.md`: OpenCode's global folder is `$XDG_CONFIG_HOME/opencode` (`opencode/src/config/config.ts`, the global files first; `core/src/instruction-context.ts:58` its `AGENTS.md`). |
+| `XDG_STATE_HOME`, `XDG_CACHE_HOME` | `<data>/agents/opencode/state`, `…/cache` | Its state (`model.json`, the models used last, which pick a new session's default model: `opencode/src/provider/provider.ts:2035`) and its cache (the model catalogue, packages: `core/src/global.ts:11-14`), which stay the user's and which Flottille's runs would write. |
 | `OPENCODE_TEST_HOME` | `<data>/agents/opencode/home` | The home it reads `~/.opencode`, `~/.claude/CLAUDE.md` and skills from (`core/src/global.ts:19`). |
 | `OPENCODE_TEST_MANAGED_CONFIG_DIR` | `<data>/agents/opencode/managed` | The machine's managed settings, `/etc/opencode`, which come after every other file (`opencode/src/config/managed.ts:32`). |
 | `OPENCODE_DB` | `<data>/agents/opencode/opencode.db` | Its sessions, kept apart from the user's; with them a signed-in OpenCode account, whose organisation settings would be merged (`core/src/database/database.ts:44`). |
@@ -309,9 +310,17 @@ after.
   (`opencode/src/acp/service.ts:839-890`), not with the `sessionFailure` extension.
 - **Models**: the `model` option's values are `<provider>/<model>`; the effort option lists the
   variants of the current model only (`opencode/src/acp/config-option.ts`).
-- **What it keeps**: its configuration folder, home, managed folder and database are in
-  `<data>/agents/opencode`. Its data folder (`$XDG_DATA_HOME/opencode`) stays the user's, since the
-  login is there.
+- **No package installed**: at every start OpenCode installs its plugin package,
+  `@opencode-ai/plugin`, from npm into each configuration folder it can write to
+  (`opencode/src/config/config.ts:440-470`), and has no switch to stop it. It skips a folder it
+  cannot write to (`core/src/npm.ts:147-152`), and the `.gitignore` it would write there too
+  (`opencode/src/config/config.ts:309-326`): its configuration folder,
+  `<data>/agents/opencode/config/opencode`, is left empty and made read-only (mode `0500`) before
+  each start. Its home's `.opencode`, which would be another, is never made.
+- **What it keeps**: its configuration, state and cache folders, home, managed folder and
+  database are in `<data>/agents/opencode`. Its data folder (`$XDG_DATA_HOME/opencode`) stays the
+  user's, since the login is there: OpenCode writes its log there (`core/src/global.ts:23`), and
+  the outputs of tools it cuts, which none of the agent's tools are.
 - **An organisation's sign-in is full control.** A login of type `wellknown` in `auth.json` (an
   organisation's OpenCode server, `opencode auth login <url>`) makes OpenCode fetch that server's
   configuration at every start and merge it before every other one
@@ -435,8 +444,10 @@ the rest of the user's environment (`PATH`, `HOME`, locale). This means that a s
 cloud provider's own variables (`CLAUDE_CODE_USE_BEDROCK`, for one) does not reach the agent.
 
 For OpenCode: the same forge tokens and secret-looking names, except the API keys it takes
-(above), and every `OPENCODE_*` variable of the user's (`OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`,
-`OPENCODE_PERMISSION`…), which would undo its bare mode; Flottille sets the ones it needs.
+(above), every `OPENCODE_*` variable of the user's (`OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`,
+`OPENCODE_PERMISSION`…), which would undo its bare mode (Flottille sets the ones it needs), and
+every `OTEL_*` one, which would send OpenCode's traces to the user's collector, its headers with
+them (`core/src/observability/otlp.ts`).
 
 ## The conversation
 
