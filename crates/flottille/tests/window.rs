@@ -2116,3 +2116,32 @@ fn text_typed_while_a_reply_sends_is_kept(cx: &mut TestAppContext) {
     let prompts = user.received_requests("session/prompt");
     assert!(prompts.iter().any(|p| p.to_string().contains("first")));
 }
+
+#[gpui_kit::test]
+fn the_card_offers_allow_for_this_tree_only_when_the_place_is_not_sensitive(
+    cx: &mut TestAppContext,
+) {
+    let user = team_user();
+    let (lead, mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let sensitive = held_number(mcp.call("fs_read", json!({"path": ".env"})));
+    let outside = user.path("elsewhere/notes.txt");
+    let plain = held_number(mcp.call(
+        "fs_write",
+        json!({"path": outside, "content": "made-up notes"}),
+    ));
+    until(&shell, cx, "both cards are shown", |cx| {
+        cx.update(|window, _| {
+            window.try_find(format!("allow-once-{sensitive}")).is_some()
+                && window.try_find(format!("allow-once-{plain}")).is_some()
+        })
+    });
+
+    cx.update(|window, _| {
+        assert!(
+            window.try_find(format!("allow-tree-{sensitive}")).is_none(),
+            "never for a sensitive place"
+        );
+        assert!(window.try_find(format!("allow-tree-{plain}")).is_some());
+    });
+}

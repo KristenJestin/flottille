@@ -565,6 +565,7 @@ impl SessionPage {
         }
         Some(ApprovalCard {
             number,
+            sensitive: request.is_some_and(|r| r.sensitive),
             asked: request.map(Request::asked),
             why: request.map(|r| {
                 let mut why = r.reasons.join(" ");
@@ -991,6 +992,8 @@ pub struct SubAgent {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ApprovalCard {
     pub number: u64,
+    /// It reaches a sensitive place: it is never allowed for the tree.
+    pub sensitive: bool,
     pub asked: Option<String>,
     pub why: Option<String>,
     pub source: Option<String>,
@@ -1605,12 +1608,15 @@ impl Row {
                             }),
                     )
                     .action(button("deny", "Deny", Answer::Deny, false))
-                    .action(button(
-                        "allow-tree",
-                        "Allow for this tree",
-                        Answer::Tree,
-                        false,
-                    ))
+                    // The daemon never allows a sensitive place for the tree: not offered.
+                    .when(!card.sensitive, |c| {
+                        c.action(button(
+                            "allow-tree",
+                            "Allow for this tree",
+                            Answer::Tree,
+                            false,
+                        ))
+                    })
                     .action(button("allow-once", "Allow once", Answer::Once, true)),
             )
             .test_support()
@@ -2279,6 +2285,7 @@ mod tests {
     fn a_decided_card_folds_into_one_line() {
         let card = ApprovalCard {
             number: 4,
+            sensitive: false,
             asked: Some("Read .env".into()),
             why: None,
             source: None,
