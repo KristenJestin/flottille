@@ -2048,3 +2048,44 @@ fn a_long_conversation_shows_its_last_page_and_earlier_ones_on_demand(cx: &mut T
     });
     assert_eq!(listed, [child]);
 }
+
+#[gpui_kit::test]
+fn an_answer_given_on_one_session_s_page_is_not_applied_to_another(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, mcp, _) = lead_in_w(&user);
+    let other = start(&user, "app", None, "another task");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let number = held_number(mcp.call("fs_read", json!({"path": ".env"})));
+    until(&shell, cx, "the card is shown", |cx| {
+        cx.update(|window, _| window.try_find(format!("allow-once-{number}")).is_some())
+    });
+    settle(cx);
+
+    // Answered, then another session opened before the daemon's answer is taken.
+    cx.update(|window, cx| window.click(format!("allow-once-{number}"), cx));
+    cx.update(|window, cx| window.click(session_id(&other), cx));
+    eventually("the request is decided", || {
+        user.call("approval.list", json!({})).unwrap()["requests"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    });
+    until(&shell, cx, "the other session's page", |cx| {
+        session_page(&shell, cx).read_with(cx, |p, _| p.id() == other)
+    });
+    settle(cx);
+    let page = session_page(&shell, cx);
+    assert_eq!(
+        page.read_with(cx, |p, _| p.decision(number).map(str::to_owned)),
+        None
+    );
+
+    cx.update(|window, cx| window.click(session_id(&lead), cx));
+    until(&shell, cx, "the record on its own page", |cx| {
+        cx.update(|window, _| {
+            window
+                .try_find(format!("approval-record-{number}"))
+                .is_some()
+        })
+    });
+}

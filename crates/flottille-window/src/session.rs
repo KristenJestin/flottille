@@ -1179,10 +1179,17 @@ impl Row {
         self.error = None;
         let number = card.number;
         if let Some(page) = self.page.upgrade() {
-            let shell = page.read(cx).shell.clone();
+            let (shell, session) = {
+                let page = page.read(cx);
+                (page.shell.clone(), page.opened.id.clone())
+            };
             shell
                 .update(cx, |shell, _| {
-                    shell.perform(Command::Answer { number, answer })
+                    shell.perform(Command::Answer {
+                        session,
+                        number,
+                        answer,
+                    })
                 })
                 .ok();
         }

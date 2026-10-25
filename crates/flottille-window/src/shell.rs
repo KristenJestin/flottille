@@ -422,13 +422,17 @@ impl Shell {
                     reply.update(cx, |reply, cx| reply.replied(refused, window, cx));
                 }
             }
-            // A card answered on a page that is no longer open has nothing to fold.
+            // Only for its own session's page: a page opened since has nothing to fold, and the
+            // session's page, opened again, reads the decision from the daemon.
             Outcome::Answered {
+                session,
                 number,
                 decision,
                 refused,
             } => {
-                if let Some(page) = self.session_page.clone() {
+                if let Some(page) = self.session_page.clone()
+                    && page.read(cx).id() == session
+                {
                     page.update(cx, |page, cx| page.answered(number, decision, refused, cx));
                 }
             }

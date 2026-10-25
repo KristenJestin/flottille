@@ -54,8 +54,10 @@ pub enum Command {
         session: String,
         message: String,
     },
-    /// The user's answer to a request they hold.
+    /// The user's answer to a request they hold, given on the page of the session of `session`
+    /// (its root agent).
     Answer {
+        session: String,
         number: u64,
         answer: Answer,
     },
@@ -117,8 +119,10 @@ pub enum Outcome {
         session: String,
         refused: Option<String>,
     },
-    /// A request was decided as asked (`deny`, `once`, `tree`), or the answer refused with why.
+    /// A request was decided as asked (`deny`, `once`, `tree`), or the answer refused with why:
+    /// for the page of `session` only.
     Answered {
+        session: String,
         number: u64,
         decision: Option<String>,
         refused: Option<String>,
@@ -323,7 +327,11 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 refused: Some(why),
             },
         },
-        Command::Answer { number, answer } => {
+        Command::Answer {
+            session,
+            number,
+            answer,
+        } => {
             let (method, params) = match answer {
                 Answer::Deny => ("approval.deny", json!({"number": number})),
                 Answer::Once => ("approval.approve", json!({"number": number})),
@@ -334,11 +342,13 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             };
             match ask_alone(connect, method, params, bounds.quick) {
                 Ok(Ok(answered)) => Outcome::Answered {
+                    session,
                     number,
                     decision: answered["request"]["decision"].as_str().map(str::to_owned),
                     refused: None,
                 },
                 Ok(Err(why)) | Err(why) => Outcome::Answered {
+                    session,
                     number,
                     decision: None,
                     refused: Some(why),
