@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use flottille_core::agent::{Agent, AgentState, Choices};
+use flottille_core::agent::{Agent, AgentState};
 use flottille_core::approval::{self, Decision, Request};
 use flottille_core::protocol::AgentTrees;
 use flottille_core::secrets;
@@ -22,6 +22,7 @@ use crate::deliveries;
 use crate::git::{self, Class};
 use crate::mcp::{Grant, Outcome, arguments};
 use crate::projects::{self, Failure};
+use crate::providers;
 use crate::roles;
 use crate::workspaces;
 
@@ -107,7 +108,9 @@ fn child_of(daemon: &Daemon, caller: &Agent, id: &str) -> Result<Agent, Outcome>
 struct Launch {
     title: String,
     brief: String,
+    provider: Option<String>,
     model: Option<String>,
+    effort: Option<String>,
     role: Option<String>,
     workspace: Option<WorkspaceChoice>,
 }
@@ -146,6 +149,15 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
         ))
     })?;
     let project = projects::load_project(daemon, &caller.project).map_err(|f| failed(f.message))?;
+    // A child runs on its parent's provider unless it names another.
+    let provider = asked.provider.or_else(|| Some(caller.provider.clone()));
+    let asked_provider = providers::Asked {
+        provider: provider.clone(),
+        model: asked.model.clone(),
+        effort: asked.effort.clone(),
+    };
+    providers::choose(daemon, &project, asked_provider)
+        .map_err(|f| refused(format!("refused: {}", f.message)))?;
     // The slot is taken before anything is made: a launch refused leaves nothing behind.
     let _slot = Slot::take(daemon, &project.name, project.max_children)?;
     let (workspace, preparing) = match asked.workspace {
@@ -179,10 +191,9 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             parent: Some((caller.id.clone(), caller.depth)),
             title: Some(asked.title.trim().to_owned()),
             brief: asked.brief.clone(),
-            chosen: Choices {
-                model: asked.model,
-                ..Choices::default()
-            },
+            provider,
+            model: asked.model,
+            effort: asked.effort,
         },
     )
     .map_err(|f| refused(format!("refused: {}", f.message)))?;
@@ -1090,6 +1101,9 @@ pub fn root_of(daemon: &Daemon, id: &str) -> String {
 pub fn summary(agent: &Agent) -> Value {
     json!({
         "id": agent.id,
+        "provider": agent.provider,
+        // What it runs on: what it took at its last start, else what was asked.
+        "model": agent.taken.model.as_ref().or(agent.chosen.model.as_ref()),
         "role": agent.role,
         "title": agent.title,
         "project": agent.project,

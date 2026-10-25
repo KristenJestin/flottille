@@ -141,7 +141,9 @@ const TOOLS: [Definition; 11] = [
                 "project": {"type": "string"},
                 "message": {"type": "string", "description": "Its first message."},
                 "workspace": {"type": "string", "description": "A ready workspace of the project; the project folder itself when left out."},
-                "model": {"type": "string", "description": "The agent's default when left out."},
+                "provider": {"type": "string", "description": "The provider it runs on, for life; the project's when left out."},
+                "model": {"type": "string", "description": "The project's, else the provider's default, when left out."},
+                "effort": {"type": "string", "description": "The model's effort; its default when left out."},
                 "role": {"type": "string", "enum": ["lead", "worker"], "description": "lead when left out."}
             }, "required": ["project", "message"], "additionalProperties": false})
         },
@@ -515,14 +517,16 @@ fn workspace_create(paths: &Paths, args: Value) -> Done {
 }
 
 /// What `agent_start` takes, its schema's fields and no other: the daemon's own `AgentRun` also
-/// has an effort and a mode, which an outside agent must not choose.
+/// has a mode, which an outside agent must not choose.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Start {
     project: String,
     message: String,
     workspace: Option<String>,
+    provider: Option<String>,
     model: Option<String>,
+    effort: Option<String>,
     role: Option<String>,
 }
 
@@ -531,14 +535,17 @@ fn agent_start(paths: &Paths, args: Value) -> Done {
         project,
         message,
         workspace,
+        provider,
         model,
+        effort,
         role,
     } = arguments("agent_start", args)?;
     let asked = AgentRun {
         project,
         workspace,
+        provider,
         model,
-        effort: None,
+        effort,
         mode: None,
         role,
         message,

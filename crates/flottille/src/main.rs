@@ -16,11 +16,13 @@ mod git;
 mod inbox;
 mod inbox_command;
 mod mcp;
+mod opencode;
 mod pilot;
 mod place;
 mod program;
 mod project_command;
 mod projects;
+mod providers;
 mod roles;
 mod runs;
 mod sweep;
@@ -183,7 +185,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Project { action } => return project_command::run(&paths, action),
         Command::Workspace { action } => return workspace_command::run(&paths, action),
         Command::Agent { action } => return agent_command::run(&paths, action),
-        Command::Doctor { json } => return agent_command::doctor(json),
+        Command::Doctor { json } => return agent_command::doctor(&paths, json),
         Command::Approvals { json } => approval_command::approvals(&paths, json)?,
         Command::Approve { number, for_tree } => {
             approval_command::approve(&paths, number, for_tree)?

@@ -3,13 +3,16 @@
 //!
 //! # Its folder
 //!
-//! Everything goes through one folder, named by `FLOTTILLE_FAKE_AGENT_DIR`:
+//! Everything goes through one folder, named by `FLOTTILLE_FAKE_AGENT_DIR`, or, when it is not
+//! set, the folder of the path it was started by (a link to it in a folder of its own, for each
+//! provider a test stands it for):
 //!
 //! - `script.json`, written by the test (optional: without it, every prompt is answered `ok`);
 //! - `received.jsonl`, written by the agent: one JSON object per line, appended, for every message
 //!   it received (`{"pid", "received": <the JSON-RPC message as it came>}`), and for what it did
-//!   that a test checks (`{"pid", "started": true}`, `{"pid", "permission": <the client's
-//!   answer>}`, `{"pid", "mcp": {"status", "body"}}`);
+//!   that a test checks (`{"pid", "started": true, "env": {…}}`, `{"pid", "permission": <the
+//!   client's answer>}`, `{"pid", "mcp": {"status", "body"}}`); `env` holds the variables it was
+//!   started with whose names start with `OPENCODE_` or `XDG_`, a password's value as `set`;
 //! - `sessions/<id>.jsonl`, the history of each session, so that a new process can load it;
 //! - `played.json`, how many times each turn with `times` was played, across processes;
 //! - `kept.json`, the values `keep` kept, across processes.
@@ -80,9 +83,13 @@ use std::time::{Duration, Instant};
 use serde_json::{Map, Value, json};
 
 fn main() {
-    let dir = PathBuf::from(
-        std::env::var_os("FLOTTILLE_FAKE_AGENT_DIR").expect("FLOTTILLE_FAKE_AGENT_DIR is not set"),
-    );
+    let dir = match std::env::var_os("FLOTTILLE_FAKE_AGENT_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => PathBuf::from(std::env::args_os().next().expect("a program name"))
+            .parent()
+            .expect("FLOTTILLE_FAKE_AGENT_DIR is not set, and the program has no folder")
+            .to_owned(),
+    };
     let script = match std::fs::read_to_string(dir.join("script.json")) {
         Ok(text) => serde_json::from_str(&text).expect("script.json is not JSON"),
         Err(_) => json!({}),
@@ -95,7 +102,18 @@ fn main() {
         next_request: 0,
         options: HashMap::new(),
     };
-    agent.record.write(json!({"started": true}));
+    let env: Map<String, Value> = std::env::vars()
+        .filter(|(name, _)| name.starts_with("OPENCODE_") || name.starts_with("XDG_"))
+        .map(|(name, value)| {
+            let value = if name.ends_with("_PASSWORD") {
+                "set".to_owned()
+            } else {
+                value
+            };
+            (name, Value::String(value))
+        })
+        .collect();
+    agent.record.write(json!({"started": true, "env": env}));
     if agent.script["child"] == true {
         agent.start_child();
     }

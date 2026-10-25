@@ -26,6 +26,7 @@ use tokio::sync::mpsc;
 
 use crate::VERSION;
 use crate::claude;
+use crate::providers;
 
 /// The options of `_meta.claudeCode.options` the bridge takes; any other is refused.
 const OPTIONS: [&str; 6] = [
@@ -334,7 +335,7 @@ impl Bridge {
                 .ok_or_else(|| invalid("not a session id of the Claude bridge".into()))?
                 .to_owned()
         };
-        let program = claude::find_program("claude").ok_or_else(|| {
+        let program = providers::find_program("claude").ok_or_else(|| {
             (
                 INTERNAL,
                 "`claude` is not on PATH: install Claude Code and sign in with it first".into(),

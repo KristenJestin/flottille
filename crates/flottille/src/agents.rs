@@ -1,6 +1,6 @@
 //! The `agent.*` methods (`docs/protocol.md`) and the life of each agent (`docs/agents.md`).
 //!
-//! An agent is owned by one task of its own, which starts its process (the Claude bridge) when a
+//! An agent is owned by one task of its own, which starts its process (its provider's ACP agent) when a
 //! delivery comes, keeps it while it works, lets it go after the idle release time, notices when it dies
 //! and replaces its session then. The methods only write the store and hand the task its orders:
 //! none of them waits on the agent. Every prompt an agent gets is a delivery (`deliveries`).
@@ -25,11 +25,11 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::acp::{self, Exit};
-use crate::claude;
 use crate::daemon::Daemon;
 use crate::deliveries;
 use crate::mcp;
 use crate::projects::{self, Failure};
+use crate::providers::{self, Provider};
 use crate::roles::{self, Role};
 use crate::tree;
 
@@ -248,12 +248,12 @@ fn refuse_empty(message: &str) -> Result<(), Failure> {
 fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
     let project = projects::load_project(daemon, &asked.project)?;
     refuse_empty(&asked.message)?;
-    // Claude Code's permission modes decide which of its calls run unasked: in bare mode every
+    // An agent's own permission modes decide which of its calls run unasked: in bare mode every
     // call goes through Flottille's gate, which no mode may loosen.
     if let Some(mode) = &asked.mode {
         return Err(Failure::refused(format!(
             "an agent takes no mode ({mode} was asked): Flottille's gate decides every tool call, \
-             and a permission mode of Claude Code's could only loosen it"
+             and a permission mode of the agent's could only loosen it"
         )));
     }
     let role = roles::role(asked.role.as_deref().unwrap_or(roles::LEAD)).ok_or_else(|| {
@@ -274,11 +274,9 @@ fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
             parent: None,
             title: None,
             brief: asked.message.clone(),
-            chosen: Choices {
-                model: asked.model,
-                effort: asked.effort,
-                mode: asked.mode,
-            },
+            provider: asked.provider,
+            model: asked.model,
+            effort: asked.effort,
         },
     )?;
     // The root's brief is its first message: a replacement supersedes it by its id, as any
@@ -304,7 +302,11 @@ pub struct New {
     pub parent: Option<(String, u32)>,
     pub title: Option<String>,
     pub brief: String,
-    pub chosen: Choices,
+    /// Its provider, model and effort as asked: each checked, and the defaults taken for those
+    /// left out (`providers::choose`).
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 /// Writes a new agent, its instructions and tools frozen in it; nothing is sent to it yet.
@@ -357,11 +359,19 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         }
     };
     // Refused now rather than failed later: the user can act on it before anything is written.
-    claude::launch().map_err(Failure::refused)?;
+    let (provider, chosen) = providers::choose(
+        daemon,
+        project,
+        providers::Asked {
+            provider: new.provider,
+            model: new.model,
+            effort: new.effort,
+        },
+    )?;
     let now = now_ms();
     let depth = new.parent.as_ref().map_or(0, |(_, depth)| depth + 1);
     let at_depth_limit = depth >= DEPTH_LIMIT;
-    let tools = claude::tools(new.parent.is_none(), at_depth_limit);
+    let tools = provider.tools(new.parent.is_none(), at_depth_limit);
     let files = roles::project_files(&project.folder, &repositories);
     let instructions = roles::instructions(
         new.role,
@@ -376,7 +386,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
     );
     let agent = Agent {
         id: new_id().map_err(|e| Failure::new("unavailable", e.to_string()))?,
-        provider: "claude".into(),
+        provider: provider.name.into(),
         role: new.role.name.into(),
         project: project.name.clone(),
         workspace: new.workspace.clone(),
@@ -388,7 +398,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         updated_at: now,
         active_at: None,
         ended_at: None,
-        chosen: new.chosen,
+        chosen,
         taken: Choices::default(),
         native_id: None,
         agent_version: None,
@@ -502,9 +512,12 @@ async fn agent_task(daemon: Arc<Daemon>, id: String, orders: mpsc::UnboundedRece
     agent_life(daemon.clone(), id.clone(), orders).await;
     if let Ok(Some(agent)) = daemon.read(|store| store.agent(&id))
         && agent.state.is_final()
-        && let Some(native) = &agent.native_id
+        && let Ok(provider) = providers::of(&agent)
     {
-        claude::forget_history(&daemon.paths, native);
+        if let Some(native) = &agent.native_id {
+            (provider.forget_session)(&daemon.paths, native);
+        }
+        (provider.forget_agent)(&daemon.paths, &agent.id);
     }
 }
 
@@ -560,7 +573,8 @@ async fn process(
     turns: &mut Turns,
 ) -> Result<bool, String> {
     change(daemon, &agent.id, AgentState::Starting, None, None);
-    let launch = claude::launch()?;
+    let provider = providers::of(agent)?;
+    let launch = providers::launch(provider, &daemon.paths, agent)?;
     // A token of this process's own, which revokes the last one.
     let grant = mcp::grant_of(daemon, agent)?;
     let token = daemon
@@ -571,17 +585,19 @@ async fn process(
     // The daemon's environment, less what the agent has no business with; what Flottille sets
     // comes after, so that it is not among the removed.
     for (name, _) in std::env::vars_os() {
-        if name.to_str().is_some_and(claude::withheld) {
+        if name.to_str().is_some_and(provider.withheld) {
             command.env_remove(name);
         }
     }
     command
+        .envs(launch.env.iter().map(|(name, value)| (name, value)))
         .args(&launch.args)
         .current_dir(&agent.folder)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        // Its own process group: the bridge, the `claude` it runs and their children go together.
+        // Its own process group: the agent, what it runs (the bridge's `claude`) and their
+        // children go together.
         .process_group(0)
         .kill_on_drop(true);
     let mut child = command
@@ -591,15 +607,20 @@ async fn process(
     if let Some(started) = start_time(pid) {
         let _ = daemon.read(|store| store.add_process(pid, started, &agent.id));
     }
+    // What Flottille set (a password) is masked too, wherever the agent would say it.
+    let env: BTreeMap<OsString, OsString> = std::env::vars_os()
+        .chain(launch.env.iter().cloned())
+        .collect();
     if let Some(stderr) = child.stderr.take() {
-        tokio::spawn(log_stderr(agent.id.clone(), stderr));
+        tokio::spawn(log_stderr(agent.id.clone(), stderr, env.clone()));
     }
 
     let events = Arc::new(Recorder {
         daemon: daemon.clone(),
         agent: agent.id.clone(),
+        provider,
         pid,
-        env: std::env::vars_os().collect(),
+        env,
     });
     let server = acp::Server {
         url: daemon.mcp.url.clone(),
@@ -607,6 +628,7 @@ async fn process(
     };
     let exit = acp::session(
         agent,
+        provider,
         &mut child,
         events,
         orders,
@@ -636,8 +658,8 @@ async fn process(
             Ok(false)
         }
         Ok(Exit::Died(status)) => {
-            // The bridge is gone, not what it started: a `claude` left in its group would run on
-            // as an orphan, with its tools.
+            // The agent is gone, not what it started: a `claude` left in the bridge's group would
+            // run on as an orphan, with its tools.
             signal_group(pid, libc::SIGKILL);
             daemon.mcp.retire(&agent.id);
             Ok(died(daemon, &agent.id, status, turns))
@@ -655,7 +677,7 @@ async fn process(
         }
     };
     let _ = daemon.read(|store| store.remove_process(pid));
-    claude::forget_bridge(&daemon.paths, pid);
+    (provider.forget_process)(&daemon.paths, pid);
     goes_on
 }
 
@@ -719,7 +741,7 @@ pub fn replace(daemon: &Arc<Daemon>, id: &str, reason: &str, counted: bool, tell
         .read(|store| store.agent(id))
         .ok()
         .flatten()
-        .and_then(|agent| agent.native_id);
+        .and_then(|agent| Some((providers::of(&agent).ok()?, agent.native_id?)));
     let agent = match daemon.write(|store| store.replace_agent(id, &reason, counted)) {
         Ok(agent) if !agent.state.is_final() => agent,
         Ok(_) => return false,
@@ -729,8 +751,8 @@ pub fn replace(daemon: &Arc<Daemon>, id: &str, reason: &str, counted: bool, tell
         }
     };
     // No process runs here: the old session is over, and nothing will load it.
-    if let Some(native) = replaced {
-        claude::forget_history(&daemon.paths, &native);
+    if let Some((provider, native)) = replaced {
+        (provider.forget_session)(&daemon.paths, &native);
     }
     if let Some(brief) = &agent.brief {
         deliveries::deliver(
@@ -816,6 +838,7 @@ pub fn record(daemon: &Daemon, id: &str, name: &str, mut data: Value, activity: 
 struct Recorder {
     daemon: Arc<Daemon>,
     agent: String,
+    provider: &'static Provider,
     pid: u32,
     /// Secrets of the daemon's environment are masked out of what the agent says and does.
     env: BTreeMap<OsString, OsString>,
@@ -850,6 +873,10 @@ impl acp::Events for Recorder {
 
     fn pump(&self) -> Option<String> {
         deliveries::pump(&self.daemon, &self.agent)
+    }
+
+    fn offered(&self, options: &Value) {
+        providers::learn(&self.daemon, self.provider, options);
     }
 
     fn opened(&self, opened: &str, native_id: &str, agent_version: &str, taken: Choices) {
@@ -914,8 +941,11 @@ fn mask(value: Value, env: &BTreeMap<OsString, OsString>) -> Value {
     }
 }
 
-async fn log_stderr(agent: String, stderr: tokio::process::ChildStderr) {
-    let env = std::env::vars_os().collect();
+async fn log_stderr(
+    agent: String,
+    stderr: tokio::process::ChildStderr,
+    env: BTreeMap<OsString, OsString>,
+) {
     let mut lines = BufReader::new(stderr).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         eprintln!("agent {agent}: {}", secrets::mask(&line, &env));

@@ -2,15 +2,13 @@
 //! bridge, the bare options that leave the agent nothing but Flottille's tools, and what
 //! `flottille doctor` checks.
 
-use std::ffi::OsString;
-use std::io::Read;
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::path::PathBuf;
 
+use flottille_core::agent::Agent;
 use flottille_core::paths::Paths;
 use serde_json::{Value, json};
+
+use crate::providers::{self, Env, Program, Provider};
 
 /// The version of `claude` whose stream-json mode the bridge was checked against
 /// (`docs/reference/acp.md`).
@@ -19,11 +17,30 @@ pub const CLAUDE_VERSION: &str = "2.1.295";
 /// Claude Code caches the system prompt before this marker across sessions.
 pub const BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
 
-/// The name of Flottille's MCP server, which prefixes its tools for Claude.
-pub const MCP_SERVER: &str = "flottille";
-
 /// A tool call waiting on the user sends nothing: both of Claude's limits must outlast the wait.
 const TOOL_WAIT_MS: &str = "600000";
+
+pub static PROVIDER: Provider = Provider {
+    name: "claude",
+    title: "Claude",
+    program: "claude",
+    checked: CLAUDE_VERSION,
+    may_change: "its stream-json mode may have changed",
+    install: "install Claude Code and sign in with it first",
+    login_file,
+    api_keys: &["ANTHROPIC_API_KEY"],
+    sign_in: "run `claude` and sign in, or set ANTHROPIC_API_KEY; on macOS the login is in the \
+              Keychain and there is no file",
+    withheld,
+    tool_prefix: "mcp__flottille__",
+    stated_tool,
+    command,
+    env,
+    session_meta,
+    forget_process: forget_bridge,
+    forget_session: forget_history,
+    forget_agent,
+};
 
 /// Whether a variable of the daemon's environment stays out of the agent's (`docs/agents.md`).
 /// The agent runs on the user's own sign-in and network, and on what Flottille sets: the daemon's
@@ -35,17 +52,8 @@ pub fn withheld(name: &str) -> bool {
         "ANTHROPIC_AUTH_TOKEN",
         "CLAUDE_CODE_OAUTH_TOKEN",
     ];
-    const EXACT: [&str; 12] = [
-        // Forges: tokens and the folders of their command lines' configuration.
-        "GH_TOKEN",
-        "GITHUB_TOKEN",
-        "GH_ENTERPRISE_TOKEN",
-        "GITHUB_ENTERPRISE_TOKEN",
-        "GITLAB_TOKEN",
-        "GL_TOKEN",
-        "GH_CONFIG_DIR",
-        "GLAB_CONFIG_DIR",
-        // The user's Claude Code settings.
+    // The user's Claude Code settings.
+    const SETTINGS: [&str; 4] = [
         "ANTHROPIC_MODEL",
         "ANTHROPIC_SMALL_FAST_MODEL",
         "MAX_THINKING_TOKENS",
@@ -54,55 +62,17 @@ pub fn withheld(name: &str) -> bool {
     if SIGN_IN.contains(&name) {
         return false;
     }
-    EXACT.contains(&name)
-        || ["BITBUCKET_", "BKT_", "CLAUDE_CODE_", "DISABLE_"]
+    SETTINGS.contains(&name)
+        || ["CLAUDE_CODE_", "DISABLE_"]
             .iter()
             .any(|prefix| name.starts_with(prefix))
         || (name.starts_with("ANTHROPIC_DEFAULT_") && name.ends_with("_MODEL"))
-        || ["_TOKEN", "_SECRET", "_PASSWORD", "_API_KEY"]
-            .iter()
-            .any(|suffix| name.ends_with(suffix))
+        || providers::secret_or_forge(name)
 }
 
-/// The names of the tools every agent has, in their fixed order (`docs/design.md` §4.3). The MCP
-/// server that serves them comes with the tools themselves; their names are frozen in each agent
-/// already, because the prompt cache depends on them.
-const FILE_AND_COMMAND_TOOLS: [&str; 9] = [
-    "fs_read",
-    "fs_list",
-    "search",
-    "fs_write",
-    "fs_edit",
-    "commands_list",
-    "commands_run",
-    "commands_output",
-    "commands_stop",
-];
-const AGENT_TOOLS: [&str; 5] = [
-    "agent_launch",
-    "agent_send",
-    "agent_status",
-    "agent_read",
-    "agent_stop",
-];
-
-/// The exact tool names an agent gets, as Claude names them: what it can do decides (`docs/design.md`
-/// §4.3, `docs/reference/mcp.md` §4 rule 9). A root asks the user, a child its parent; an agent at
-/// the depth limit cannot have children, so it has no `agent_*` tool and nobody's request to answer.
-pub fn tools(root: bool, at_depth_limit: bool) -> Vec<String> {
-    let mut names: Vec<&str> = FILE_AND_COMMAND_TOOLS.to_vec();
-    if !at_depth_limit {
-        names.extend(AGENT_TOOLS);
-    }
-    names.push("report");
-    names.push(if root { "ask_user" } else { "ask_parent" });
-    if !at_depth_limit {
-        names.push("approval_answer");
-    }
-    names
-        .into_iter()
-        .map(|tool| format!("mcp__{MCP_SERVER}__{tool}"))
-        .collect()
+/// The tool a permission request names, as the bridge states it.
+fn stated_tool(call: &Value) -> Option<&str> {
+    call["_meta"]["claudeCode"]["toolName"].as_str()
 }
 
 /// `_meta` of `session/new`, `session/load` and `session/resume`: the bare mode, which the bridge
@@ -134,18 +104,6 @@ fn system_prompt(instructions: &str) -> Value {
         Some((before, after)) => json!([before, BOUNDARY, after]),
         None => json!(instructions),
     }
-}
-
-/// A program of that name in `PATH`, as a shell would find it, without one.
-pub fn find_program(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join(name))
-        .find(|candidate| {
-            std::fs::metadata(candidate)
-                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        })
 }
 
 /// Where each bridge writes the MCP configuration with its token, `<its pid>.mcp.json`.
@@ -194,62 +152,25 @@ pub fn forget_history(paths: &Paths, session: &str) {
     }
 }
 
-/// How the agent's process starts.
-pub struct Launch {
-    pub program: PathBuf,
-    pub args: Vec<OsString>,
-}
-
-/// Flottille's own bridge, `flottille bridge claude`, which drives the user's `claude`; or, for
-/// tests and development, the program `FLOTTILLE_AGENT_COMMAND` names in its place. A sentence the
-/// user can act on when something is missing.
-pub fn launch() -> Result<Launch, String> {
-    if let Some(program) = std::env::var_os("FLOTTILLE_AGENT_COMMAND") {
-        return Ok(Launch {
-            program: program.into(),
-            args: Vec::new(),
-        });
-    }
-    if find_program("claude").is_none() {
+/// Flottille's own bridge, `flottille bridge claude`, which drives the user's `claude`.
+fn command() -> Result<Program, String> {
+    if providers::find_program("claude").is_none() {
         return Err(
             "`claude` is not on PATH: install Claude Code and sign in with it first".into(),
         );
     }
     let program =
         std::env::current_exe().map_err(|e| format!("cannot find Flottille itself: {e}"))?;
-    Ok(Launch {
-        program,
-        args: vec!["bridge".into(), "claude".into()],
-    })
+    Ok((program, vec!["bridge".into(), "claude".into()]))
 }
 
-/// What `flottille doctor` reports: whether Claude agents can run on this machine.
-pub fn doctor() -> Value {
-    let mut warnings = Vec::new();
-    let claude = match find_program("claude") {
-        None => json!({"present": false, "checked": CLAUDE_VERSION}),
-        Some(path) => {
-            let version = version_of(&path);
-            if let Some(version) = version.as_deref().filter(|v| *v != CLAUDE_VERSION) {
-                warnings.push(format!(
-                    "claude is {version}, and this Flottille was checked against {CLAUDE_VERSION}: \
-                     its stream-json mode may have changed"
-                ));
-            }
-            json!({"present": true, "path": path, "version": version, "checked": CLAUDE_VERSION})
-        }
-    };
-    // Only its presence: the file is never opened, the key never read.
-    let login = login_file();
-    let api_key = std::env::var_os("ANTHROPIC_API_KEY").is_some_and(|key| !key.is_empty());
-    let login = json!({
-        "present": login.as_deref().is_some_and(|p| std::fs::symlink_metadata(p).is_ok()),
-        "path": login,
-        "api_key": api_key,
-    });
-    let ready = claude["present"] == true && (login["present"] == true || api_key);
-    json!({"claude": claude, "login": login, "warnings": warnings, "ready": ready})
+/// The bare mode is in the session's options: nothing to set on the process.
+fn env(_paths: &Paths, _agent: &Agent) -> Result<Env, String> {
+    Ok(Vec::new())
 }
+
+/// The bridge keeps nothing of an agent but its sessions' histories.
+fn forget_agent(_paths: &Paths, _agent: &str) {}
 
 /// Claude's login file: in `$CLAUDE_CONFIG_DIR`, or `~/.claude`.
 fn login_file() -> Option<PathBuf> {
@@ -260,76 +181,9 @@ fn login_file() -> Option<PathBuf> {
     Some(dir.join(".credentials.json"))
 }
 
-/// `<program> --version`, given 5 s: the first version number it prints.
-fn version_of(program: &Path) -> Option<String> {
-    let mut child = Command::new(program)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while child.try_wait().ok()?.is_none() {
-        if Instant::now() > deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let mut output = String::new();
-    child.stdout.take()?.read_to_string(&mut output).ok()?;
-    first_version(&output)
-}
-
-/// The first `N.N.N` of the text, with its pre-release part (`-beta.1`) when it has one.
-fn first_version(text: &str) -> Option<String> {
-    let bytes = text.as_bytes();
-    (0..bytes.len()).find_map(|start| {
-        if start > 0 && bytes[start - 1].is_ascii_digit() {
-            return None;
-        }
-        let mut end = start;
-        for part in 0..3 {
-            let digits = bytes[end..]
-                .iter()
-                .take_while(|b| b.is_ascii_digit())
-                .count();
-            if digits == 0 {
-                return None;
-            }
-            end += digits;
-            if part < 2 {
-                if bytes.get(end) != Some(&b'.') {
-                    return None;
-                }
-                end += 1;
-            }
-        }
-        if bytes.get(end) == Some(&b'-') {
-            let more = bytes[end + 1..]
-                .iter()
-                .take_while(|b| b.is_ascii_alphanumeric() || **b == b'.' || **b == b'-')
-                .count();
-            if more > 0 {
-                end += 1 + more;
-            }
-        }
-        Some(text[start..end].to_owned())
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn short(tools: Vec<String>) -> Vec<String> {
-        tools
-            .into_iter()
-            .map(|t| t.strip_prefix("mcp__flottille__").unwrap().to_owned())
-            .collect()
-    }
 
     #[test]
     fn the_agent_gets_its_sign_in_and_the_network_and_not_the_daemon_s_secrets_or_settings() {
@@ -379,64 +233,6 @@ mod tests {
         ] {
             assert_eq!(withheld(name), gone, "{name}");
         }
-    }
-
-    #[test]
-    fn a_root_agent_gets_ask_user_the_agent_tools_and_approval_answer() {
-        let tools = short(tools(true, false));
-        assert_eq!(
-            tools,
-            [
-                "fs_read",
-                "fs_list",
-                "search",
-                "fs_write",
-                "fs_edit",
-                "commands_list",
-                "commands_run",
-                "commands_output",
-                "commands_stop",
-                "agent_launch",
-                "agent_send",
-                "agent_status",
-                "agent_read",
-                "agent_stop",
-                "report",
-                "ask_user",
-                "approval_answer",
-            ]
-        );
-    }
-
-    #[test]
-    fn the_tools_follow_what_the_agent_can_do() {
-        let leaf = short(tools(false, true));
-        assert_eq!(leaf.len(), 11);
-        assert!(leaf.contains(&"ask_parent".to_owned()));
-        assert!(
-            !leaf
-                .iter()
-                .any(|t| t.starts_with("agent_") || t == "ask_user")
-        );
-        assert!(!leaf.contains(&"approval_answer".to_owned()));
-        let lead_child = short(tools(false, false));
-        assert!(lead_child.contains(&"ask_parent".to_owned()));
-        assert!(lead_child.contains(&"approval_answer".to_owned()));
-        assert!(!lead_child.contains(&"ask_user".to_owned()));
-    }
-
-    #[test]
-    fn a_version_is_the_first_number_of_three_parts() {
-        assert_eq!(first_version("v24.11.0\n").as_deref(), Some("24.11.0"));
-        assert_eq!(
-            first_version("2.1.300 (Claude Code)").as_deref(),
-            Some("2.1.300")
-        );
-        assert_eq!(
-            first_version("tool 1.2 then 3.4.5-beta.1 x").as_deref(),
-            Some("3.4.5-beta.1")
-        );
-        assert_eq!(first_version("no version"), None);
     }
 
     #[test]

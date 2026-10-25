@@ -497,13 +497,16 @@ fn a_model_and_an_effort_are_set_and_checked_and_a_model_not_offered_fails() {
     user.fake_script(json!({"models": ["fake-small", "fake-large"], "efforts": ["low", "high"]}));
     project(&user);
 
+    // Before any session of the provider its models are not known: a model it does not offer
+    // fails the agent once its session says so (once known, it is refused at start:
+    // `tests/providers.rs`).
+    let (missing, missing_after) = run(&user, json!({"message": "hello", "model": "fake-huge"}));
+    let failed = events_until(&user, &missing, missing_after, "agent.failed");
     let (id, after) = run(
         &user,
         json!({"message": "hello", "model": "fake-large", "effort": "high"}),
     );
     events_until(&user, &id, after, "agent.turn_ended");
-    let (missing, missing_after) = run(&user, json!({"message": "hello", "model": "fake-huge"}));
-    let failed = events_until(&user, &missing, missing_after, "agent.failed");
 
     let agent = &show(&user, &id)["agent"];
     assert_eq!(agent["chosen"]["model"], "fake-large");
