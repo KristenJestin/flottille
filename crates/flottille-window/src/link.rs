@@ -15,7 +15,7 @@ use flottille_core::protocol::{Event, Message, Request};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use serde_json::{Value, json};
 
-use crate::model::{Answers, Snapshot};
+use crate::model::{self, Answers, Snapshot};
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -148,6 +148,7 @@ fn matters(event: &Event) -> bool {
                 | "agent.failed"
                 | "agent.ended"
                 | "agent.reported"
+                | "agent.asked"
         ),
         _ => false,
     }
@@ -181,6 +182,7 @@ fn read(conn: &mut Conn, briefs: &mut HashMap<String, String>, seen: &Seen) -> R
             briefs.insert(id.to_owned(), brief.to_owned());
         }
     }
+    let questions = questions(conn, &agents)?;
     Ok(Snapshot::build(Answers {
         projects: &projects,
         workspaces: &workspaces,
@@ -188,7 +190,32 @@ fn read(conn: &mut Conn, briefs: &mut HashMap<String, String>, seen: &Seen) -> R
         approvals: &approvals,
         needs_user: &needs_user,
         briefs,
+        questions: &questions,
     }))
+}
+
+/// The last question of each root asking the user, from the inbox: read only while one asks.
+fn questions(conn: &mut Conn, agents: &Value) -> Result<HashMap<String, (String, u64)>> {
+    let asking: HashSet<&str> = agents["agents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|agent| model::asks_the_user(agent))
+        .filter_map(|agent| agent["id"].as_str())
+        .collect();
+    let mut found = HashMap::new();
+    if asking.is_empty() {
+        return Ok(found);
+    }
+    let inbox = conn.request("inbox.list", json!({}))?;
+    for entry in inbox["entries"].as_array().into_iter().flatten() {
+        let agent = entry["agent"].as_str().unwrap_or_default();
+        if entry["kind"] == "question" && asking.contains(agent) {
+            let text = entry["text"].as_str().unwrap_or_default().to_owned();
+            found.insert(agent.to_owned(), (text, entry["at"].as_u64().unwrap_or(0)));
+        }
+    }
+    Ok(found)
 }
 
 /// The roots the daemon says need the user, as `agent.trees` gives them (the live roots, a page

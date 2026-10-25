@@ -158,14 +158,18 @@ fn kinds_of(daemon: &Daemon, ids: &[String]) -> Vec<String> {
 }
 
 /// What an agent taking deliveries changes: a delivery other than the reminder starts its count
-/// of quiet turns again, and its parent's message answers its question.
+/// of quiet turns again, and a message of its parent (or, for a root, of the user) answers its
+/// question.
 fn took(daemon: &Daemon, agent: &str, kinds: &[String]) {
     let change = AgentChange {
         quiet_turns: kinds.iter().any(|k| k != "reminder").then_some(0),
-        waiting_on_parent: kinds.iter().any(|k| k == "parent").then_some(false),
+        waiting_on_answer: kinds
+            .iter()
+            .any(|k| k == "parent" || k == "user")
+            .then_some(false),
         ..AgentChange::default()
     };
-    if change.quiet_turns.is_some() || change.waiting_on_parent.is_some() {
+    if change.quiet_turns.is_some() || change.waiting_on_answer.is_some() {
         let _ = daemon.write(|store| {
             let (_, event) = store.change_agent(agent, change, None)?;
             Ok(((), event))

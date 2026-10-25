@@ -30,8 +30,8 @@ pub struct Agent {
     pub reported_at: Option<u64>,
     /// Turns it ended without reporting since its last delivery: 1 after the reminder.
     pub quiet_turns: u32,
-    /// It asked its parent a question that has not been answered yet.
-    pub waiting_on_parent: bool,
+    /// It asked a question not answered yet: a child its parent, a root the user.
+    pub waiting_on_answer: bool,
     pub project: String,
     /// The workspace it works in; the project folder itself (`main`) when none.
     pub workspace: Option<String>,

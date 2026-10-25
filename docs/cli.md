@@ -33,8 +33,8 @@ The daemon stopped.
 
 ### `flottille status`
 
-The daemon's version, uptime and counts of agents: running, waiting for you (a request you hold),
-failed. `--json` prints `daemon.status`.
+The daemon's version, uptime and counts of agents: running, waiting for you (a request you hold,
+or a root's question you have not answered), failed. `--json` prints `daemon.status`.
 
 ```
 $ flottille status
@@ -308,7 +308,7 @@ What your **root** agents sent you, oldest first. An entry is one of:
 | Kind | What it is | The event it comes from |
 |---|---|---|
 | `report` | the root called `report`: it is done, and says what it did | `agent.reported` |
-| `question` | the root called `ask_user`: it asks you something and goes on without waiting; answer it with `flottille agent send` | `agent.asked` (`to` is `user`) |
+| `question` | the root called `ask_user`: it asks you something and goes on without waiting; answer it with `flottille agent send`, which ends its wait for you | `agent.asked` (`to` is `user`) |
 | `failure` | the root cannot go on: its process could not start, its session could not open, an option it was asked is not one it offers, it was replaced too often (twice in 30 minutes), or its new workspace could not be prepared (`docs/events.md` also lists "its parent failed", which only concerns a child) | `agent.failed` |
 
 A child's report, question or failure goes to its parent, never to the inbox. The requests a gate
@@ -369,11 +369,11 @@ work happens (`main`, the project folder, and its workspaces), the sessions in e
 bell counting what waits for you. It starts the daemon like any command when nobody listens, and
 when the daemon goes away it connects again and catches up with the events it missed.
 
-The bell counts and lists the requests you hold (`flottille approvals`); choosing one opens its
-session. A session is marked `NEEDS YOU` when the daemon says its root needs you, as
-`flottille status` does: the window decides none of this, it shows the daemon's state. A root's
-question stays in `flottille inbox`. A session is marked running while an agent of its tree starts
-or works; otherwise it shows how long ago its tree was last active.
+The bell counts and lists the requests you hold (`flottille approvals`) and the roots' questions
+you have not answered yet; choosing one opens its session. A session is marked `NEEDS YOU` when the
+daemon says its root needs you, as `flottille status` does: the window decides none of this, it
+shows the daemon's state. A session is marked running while an agent of its tree starts or works;
+otherwise it shows how long ago its tree was last active.
 
 Below 1240 pixels wide, the session page's rail of agents becomes a drawer from the right; below
 860, the tree of projects becomes a drawer from the left, opened by the menu button of the top bar.

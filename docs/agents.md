@@ -294,6 +294,10 @@ A child that ends a turn without reporting, with nothing to wait for (no request
 held), is reminded once (`reminder`); after a second such turn its parent is told it went idle
 (`child-idle`). A delivery other than a reminder starts the count again.
 
+A question waits for its answer from the call (`ask_parent`, or a root's `ask_user`) until the one
+asked writes to the agent: a child then waits on its parent, a root on the user, who sees it in
+`flottille status` and under the window's bell (`waiting_on_answer`, `docs/protocol.md`).
+
 ### Replacement
 
 A session that cannot go on is replaced: its process dies, or it is stuck (below). The agent
