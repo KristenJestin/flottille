@@ -32,7 +32,22 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::VERSION;
 use crate::agents::{Order, Turns};
+use crate::deliveries;
 use crate::providers::{self, MCP_SERVER, Provider};
+
+/// A prompt as it may be sent: only one that starts with a delivery's marker. An agent may read a
+/// prompt starting otherwise as its own: OpenCode runs one whose text starts with `/` as a command,
+/// and a command can run a shell outside the gate (`docs/agents.md`, "Bare mode for OpenCode").
+fn prompt_text(text: String) -> Result<String, String> {
+    if deliveries::is_delivery(&text) {
+        Ok(text)
+    } else {
+        Err(
+            "Flottille refused to send a prompt that does not start with a delivery's marker"
+                .into(),
+        )
+    }
+}
 
 /// A text kept in an event is cut here.
 const TEXT_LIMIT: usize = 64 * 1024;
@@ -317,6 +332,7 @@ async fn drive(
         if turn.is_none()
             && let Some(text) = turns.queued.pop_front()
         {
+            let text = prompt_text(text)?;
             events.turn_started(&text);
             turns.running = true;
             let request = PromptRequest::new(
@@ -506,6 +522,23 @@ fn cut(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_prompt_not_starting_with_flottille_s_marker_is_never_sent() {
+        for text in [
+            "/init",
+            " /review src",
+            "\n/compact",
+            "@README.md",
+            "!`id`",
+            "",
+            "hello",
+        ] {
+            assert!(prompt_text(text.to_owned()).is_err(), "{text:?}");
+        }
+        let delivery = "[flottille:brief]\n/init and @README.md and !`id`".to_owned();
+        assert_eq!(prompt_text(delivery.clone()), Ok(delivery));
+    }
 
     #[test]
     fn updates_become_events_and_a_compaction_is_its_own() {

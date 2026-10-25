@@ -248,6 +248,15 @@ after.
   and Flottille's tools are named `flottille_fs_read` and so on for an OpenCode agent.
 - **No sub-agent**: the `task` tool is denied, and the agents that ship with OpenCode are
   disabled; `flottille` is the only one.
+- **No command**: OpenCode's ACP agent takes a prompt whose text, its text blocks joined and
+  trimmed, starts with `/` for one of its commands (`opencode/src/acp/service.ts:519-560,
+  826-837`), and a command's template runs `` !`…` `` in a shell, outside the gate, with its
+  arguments substituted, and attaches the files `@path` names (`opencode/src/session/prompt.ts:157-190,
+  1372-1406`). Every prompt Flottille sends is deliveries, and starts with a delivery's marker
+  (`[flottille:<kind>]`, "Deliveries", below): the daemon refuses to send any other, whatever the
+  provider (`acp::prompt_text`), so that no prompt is ever read as a command. Inside a prompt
+  that is not a command, `@` and `` !`…` `` are text: OpenCode expands them only in a command's
+  template and in the `task` tool's prompt, which is denied (`opencode/src/tool/task.ts:201`).
 - **Its instructions**: the agent's prompt replaces the provider's own system prompt
   (`opencode/src/session/llm/request.ts:60`); no `AGENTS.md`/`CLAUDE.md` of the user's or the
   project's is read (above). OpenCode replaces `{env:…}` and `{file:…}` in the configuration's text
