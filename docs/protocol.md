@@ -428,7 +428,7 @@ when they name none:
                   "version": "2.1.295", "checked": "2.1.295"},
       "login": {"present": true, "path": "/home/user/.claude/.credentials.json", "api_key": null},
       "override": null,
-      "models": [{"id": "sonnet", "efforts": ["low", "medium", "high"]}, {"id": "opus", "efforts": null}]
+      "models": [{"id": "sonnet", "efforts": ["low", "medium", "high"], "default": true}, {"id": "opus", "efforts": null}]
     },
     {"name": "opencode", "title": "OpenCode", "enabled": false, "ready": false,
      "why": "is not enabled (`enabled = true` under [opencode] in providers.toml enables it)", "…": "…",
@@ -444,7 +444,8 @@ sure: a version other than the one Flottille was checked against, no sign-in it 
 `login.api_key` is the name of the API key found set, never its value. `override` is the test
 program standing for the provider (`docs/agents.md`, "For tests and development"). `models` is
 `null` until a session of the provider's agent said them, and `efforts` of a model `null` until a
-session had that model. `project` is there only when one is named; its `provider` is `null` when
+session had that model; `default` is there, `true`, on the model a new session takes when none
+is asked, once one said it. `project` is there only when one is named; its `provider` is `null` when
 none is enabled, its `model` `null` when the project names none. `not-found` when the project
 does not exist; `invalid-config` when `providers.toml` cannot be read (the sentence names the key
 at fault).

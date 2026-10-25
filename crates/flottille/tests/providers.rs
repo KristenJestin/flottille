@@ -261,24 +261,57 @@ fn an_unknown_model_is_refused_naming_the_provider_s_models() {
     );
     assert!(message.contains("fake-small, fake-large"), "{message}");
 
-    // An effort is checked against the efforts the model was seen to offer.
+    // An effort is checked against the efforts the model was seen to offer: fake-small's are
+    // known, the session had it; fake-large's are not yet.
+    let listed = user.call("provider.list", Value::Null).unwrap();
+    assert_eq!(
+        listed["providers"][0]["models"][0],
+        json!({"id": "fake-small", "efforts": ["low", "high"], "default": true})
+    );
+    assert_eq!(listed["providers"][0]["models"][1]["efforts"], Value::Null);
     let (_, message) = start(
         &user,
         json!({"message": "hello", "model": "fake-small", "effort": "max"}),
     )
     .unwrap_err();
     assert!(
-        message.contains("fake-small offers no effort max"),
+        message.contains("claude's model fake-small offers no effort max"),
         "{message}"
     );
     assert!(message.contains("low, high"), "{message}");
     assert_eq!(agents(&user).len(), 1);
-    // A model it offers starts.
+    // An effort the model offers starts; on a model whose efforts are not known yet, any effort
+    // is taken, and the session says whether it offers it.
+    start(
+        &user,
+        json!({"message": "hello", "model": "fake-small", "effort": "high"}),
+    )
+    .unwrap();
     start(
         &user,
         json!({"message": "hello", "model": "fake-large", "effort": "high"}),
     )
     .unwrap();
+}
+
+#[test]
+fn an_effort_without_a_model_is_checked_against_the_default_model_s_efforts() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"models": ["fake-small", "fake-large"], "efforts": ["low", "high"]}));
+    project(&user);
+    // Not known before a session: taken.
+    let first = id(&start(&user, json!({"message": "hello", "effort": "high"})).unwrap());
+    eventually("the session", || agent(&user, &first)["state"] == "idle");
+
+    let (code, message) = start(&user, json!({"message": "hello", "effort": "max"})).unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert!(
+        message.contains("claude's default model fake-small offers no effort max"),
+        "{message}"
+    );
+    assert!(message.contains("low, high"), "{message}");
+    start(&user, json!({"message": "hello", "effort": "low"})).unwrap();
 }
 
 #[test]
@@ -337,7 +370,7 @@ fn the_providers_method_lists_every_provider_enabled_ready_and_why_its_models_an
     assert_eq!(
         listed["providers"][0]["models"],
         json!([
-            {"id": "fake-small", "efforts": ["low", "high"]},
+            {"id": "fake-small", "efforts": ["low", "high"], "default": true},
             {"id": "fake-large", "efforts": ["low", "high"]}
         ])
     );

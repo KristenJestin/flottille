@@ -97,8 +97,9 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   ready fails (`agent.failed`, with the sentence a start would be refused with), and is not
   started again.
 - **Its model** is the one asked, else the project's (`model` in its file, for the project's own
-  provider only), else the provider's default. Its effort is the one asked, else the model's
-  default.
+  provider only), else the provider's default: the model a new session has before any is set,
+  marked `"default": true` among the models once a session said it. Its effort is the one asked,
+  else the model's default.
 - **The models**: what a session of the provider's agent offers in its config options (the
   `model` option's values, and the `thought_level` option's for the model the session has), kept
   by the daemon per provider (`provider_models` in the store), and learned again from every
@@ -113,12 +114,15 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   agent may ask any model and effort, and one its session does not offer fails the agent
   ("The options", below). Once they are known, a model or an effort they do not hold is refused
   at once, naming those the provider offers. The efforts of a model are `null` until a session
-  had that model.
+  had that model. An effort asked without a model is checked against the default model's
+  efforts, when they are known; until then it is taken, and a session that does not offer it
+  fails the agent.
 - **Refusals** name what is available: `there is no provider codex: the providers are claude,
   opencode`; `provider opencode is not enabled (…); the ready providers are claude`; `provider
   opencode is not ready: `opencode` is not on PATH (…); no provider is ready: see `flottille
   doctor``; `provider claude offers no model x: it offers a, b`; `provider claude's model a
-  offers no effort max: it offers low, high`.
+  offers no effort max: it offers low, high`; `provider claude's default model a offers no
+  effort max: it offers low, high`.
 - **The method** `provider.list` (`docs/protocol.md`) gives every provider as `doctor` does, with
   its models and, for a project, its default provider and model.
 

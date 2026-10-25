@@ -524,7 +524,8 @@ fn models_version(check: &Check) -> Option<String> {
 }
 
 /// The models a provider's agents offered, each `{"id", "efforts"}` (`efforts` `null` until the
-/// model was seen chosen), when they were read from the version of the provider there is now.
+/// model was seen chosen) and `"default": true` on the one a new session takes, when they were
+/// read from the version of the provider there is now.
 fn known_models(daemon: &Daemon, check: &Check) -> Option<Vec<Value>> {
     let (version, models) = daemon
         .read(|store| store.provider_models(check.provider.name))
@@ -532,9 +533,10 @@ fn known_models(daemon: &Daemon, check: &Check) -> Option<Vec<Value>> {
     (version == models_version(check)).then(|| models.as_array().cloned().unwrap_or_default())
 }
 
-/// What a session of the provider's agent offers in its config options, kept: its models, and
-/// the efforts of the model it has now. What another version offered goes.
-pub fn learn(daemon: &Daemon, provider: &'static Provider, options: &Value) {
+/// What a session of the provider's agent offers in its config options, kept: its models, the
+/// efforts of the model it has now, and, `fresh` (a new session none was set on), that this
+/// model is the default. What another version offered goes.
+pub fn learn(daemon: &Daemon, provider: &'static Provider, options: &Value, fresh: bool) {
     let find = |category: &str| {
         options
             .as_array()
@@ -551,15 +553,22 @@ pub fn learn(daemon: &Daemon, provider: &'static Provider, options: &Value) {
     let models: Vec<Value> = values(model)
         .into_iter()
         .map(|id| {
+            let known = before.iter().find(|m| m["id"] == id.as_str());
             let efforts = if id == current {
                 json!(efforts)
             } else {
-                before
-                    .iter()
-                    .find(|m| m["id"] == id.as_str())
-                    .map_or(Value::Null, |m| m["efforts"].clone())
+                known.map_or(Value::Null, |m| m["efforts"].clone())
             };
-            json!({"id": id, "efforts": efforts})
+            let default = if fresh {
+                id == current
+            } else {
+                known.is_some_and(|m| m["default"] == true)
+            };
+            let mut model = json!({"id": id, "efforts": efforts});
+            if default {
+                model["default"] = true.into();
+            }
+            model
         })
         .collect();
     let version = models_version(&check);
@@ -653,31 +662,42 @@ pub fn choose(
         })
     });
     // What the provider offers is known once one of its sessions said it; until then a model or
-    // an effort it does not offer fails the agent when its session opens.
+    // an effort it does not offer fails the agent when its session opens. Without a model, an
+    // effort is the default model's, once a new session said which it is.
     let check = Check::of(provider, &settings, Version::Skip);
-    if let Some(models) = known_models(daemon, &check)
-        && let Some(model) = &model
-    {
+    if let Some(models) = known_models(daemon, &check) {
         let offered: Vec<&str> = models.iter().filter_map(|m| m["id"].as_str()).collect();
-        let Some(known) = models.iter().find(|m| m["id"] == model.as_str()) else {
-            return Err(Failure::refused(format!(
-                "provider {} offers no model {model}: it offers {}",
-                provider.name,
-                offered.join(", ")
-            )));
+        let target = match &model {
+            Some(model) => match models.iter().find(|m| m["id"] == model.as_str()) {
+                Some(known) => Some((known, format!("model {model}"))),
+                None => {
+                    return Err(Failure::refused(format!(
+                        "provider {} offers no model {model}: it offers {}",
+                        provider.name,
+                        offered.join(", ")
+                    )));
+                }
+            },
+            None => models
+                .iter()
+                .find(|m| m["default"] == true)
+                .and_then(|known| {
+                    Some((known, format!("default model {}", known["id"].as_str()?)))
+                }),
         };
-        if let (Some(effort), Some(efforts)) = (&asked.effort, known["efforts"].as_array())
+        if let (Some(effort), Some((known, named))) = (&asked.effort, target)
+            && let Some(efforts) = known["efforts"].as_array()
             && !efforts.iter().any(|e| e == effort.as_str())
         {
             let efforts: Vec<&str> = efforts.iter().filter_map(Value::as_str).collect();
             return Err(Failure::refused(if efforts.is_empty() {
                 format!(
-                    "provider {}'s model {model} has no effort to choose",
+                    "provider {}'s {named} has no effort to choose",
                     provider.name
                 )
             } else {
                 format!(
-                    "provider {}'s model {model} offers no effort {effort}: it offers {}",
+                    "provider {}'s {named} offers no effort {effort}: it offers {}",
                     provider.name,
                     efforts.join(", ")
                 )

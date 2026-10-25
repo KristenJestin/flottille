@@ -882,8 +882,8 @@ impl acp::Events for Recorder {
         deliveries::pump(&self.daemon, &self.agent)
     }
 
-    fn offered(&self, options: &Value) {
-        providers::learn(&self.daemon, self.provider, options);
+    fn offered(&self, options: &Value, fresh: bool) {
+        providers::learn(&self.daemon, self.provider, options, fresh);
     }
 
     fn opened(&self, opened: &str, native_id: &str, agent_version: &str, taken: Choices) {
