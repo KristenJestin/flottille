@@ -579,3 +579,27 @@ fn opencode_of_the_qualified_version_runs() {
         .unwrap();
     assert_eq!(started["env"]["OPENCODE_DISABLE_PROJECT_CONFIG"], "1");
 }
+
+#[test]
+fn the_models_are_forgotten_when_the_api_keys_set_change_and_learned_again_from_a_session() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"models": ["fake-small", "fake-large"]}));
+    project(&user);
+    let first = id(&start(&user, json!({"message": "hello"})).unwrap());
+    eventually("the session", || agent(&user, &first)["state"] == "idle");
+    let models = |user: &User| {
+        user.call("provider.list", Value::Null).unwrap()["providers"][0]["models"].clone()
+    };
+    assert!(models(&user).is_array());
+
+    // The daemon again, with an API key of Claude's set: what it offers may differ.
+    assert!(user.run(&["daemon", "stop"]).status.success());
+    let user = user.with_env("ANTHROPIC_API_KEY", "sk-ant-invented-0123456789");
+    assert_eq!(models(&user), Value::Null);
+
+    let second = id(&start(&user, json!({"message": "hello"})).unwrap());
+    eventually("the second session", || {
+        agent(&user, &second)["state"] == "idle"
+    });
+    assert_eq!(models(&user)[1]["id"], "fake-large");
+}

@@ -101,8 +101,14 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   default.
 - **The models**: what a session of the provider's agent offers in its config options (the
   `model` option's values, and the `thought_level` option's for the model the session has), kept
-  by the daemon per provider (`provider_models` in the store). They are kept with the program
-  they came from (its path and modification time): another version of the program forgets them.
+  by the daemon per provider (`provider_models` in the store), and learned again from every
+  session that opens. They are kept with the program they came from (its path and modification
+  time) and the names of the provider's API keys set (never their values): another version of
+  the program, or another set of keys in the daemon's environment, forgets them. They stay
+  approximate: what the provider offers also depends on what neither says, its sign-in file
+  (signing in or out with `opencode auth login`), OpenCode's model catalogue (fetched from
+  `models.dev`, `core/src/models-dev.ts`) and its own state, and such a change shows only at the
+  next session.
   No agent is ever run just to list them: until a first session said them, they are `null`, an
   agent may ask any model and effort, and one its session does not offer fails the agent
   ("The options", below). Once they are known, a model or an effort they do not hold is refused

@@ -239,6 +239,8 @@ pub struct Check {
     pub login_present: bool,
     /// The sign-in variable found set, by name.
     pub api_key: Option<&'static str>,
+    /// Every sign-in variable found set, by name, in the provider's order.
+    pub api_keys: Vec<&'static str>,
 }
 
 impl Check {
@@ -258,11 +260,13 @@ impl Check {
         let login_present = login
             .as_deref()
             .is_some_and(|p| std::fs::symlink_metadata(p).is_ok());
-        let api_key = provider
+        let api_keys: Vec<&'static str> = provider
             .api_keys
             .iter()
             .copied()
-            .find(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()));
+            .filter(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
+            .collect();
+        let api_key = api_keys.first().copied();
         Check {
             provider,
             enabled: settings.enabled(provider.name),
@@ -274,6 +278,7 @@ impl Check {
             login,
             login_present,
             api_key,
+            api_keys,
         }
     }
 
@@ -503,16 +508,19 @@ fn first_version(text: &str) -> Option<String> {
 // The models.
 
 /// What a provider's models are kept under: its program file, by path and modification time,
-/// which a new version replaces; none for a test override. Never `--version`: the daemon runs on
-/// one thread, and a program slow to answer would hold every client.
+/// which a new version replaces (a test override for a test's), and the names of its API keys
+/// set, which decide some of the models it offers; never their values. Never `--version`: the
+/// daemon runs on one thread, and a program slow to answer would hold every client.
 fn models_version(check: &Check) -> Option<String> {
-    if check.overridden.is_some() {
-        return None;
-    }
-    let program = check.program.as_ref()?;
-    let modified = std::fs::metadata(program).and_then(|m| m.modified()).ok()?;
-    let since = modified.duration_since(SystemTime::UNIX_EPOCH).ok()?;
-    Some(format!("{} {}", program.display(), since.as_nanos()))
+    let program = if check.overridden.is_some() {
+        "override".to_owned()
+    } else {
+        let program = check.program.as_ref()?;
+        let modified = std::fs::metadata(program).and_then(|m| m.modified()).ok()?;
+        let since = modified.duration_since(SystemTime::UNIX_EPOCH).ok()?;
+        format!("{} {}", program.display(), since.as_nanos())
+    };
+    Some(format!("{program}; keys {}", check.api_keys.join(",")))
 }
 
 /// The models a provider's agents offered, each `{"id", "efforts"}` (`efforts` `null` until the
