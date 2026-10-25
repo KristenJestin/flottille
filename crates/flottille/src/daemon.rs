@@ -1,5 +1,6 @@
 //! The daemon: one per user, behind a Unix socket speaking JSON lines (`docs/protocol.md`).
 
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{ErrorKind, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -19,6 +20,7 @@ use tokio::task::JoinSet;
 
 use crate::VERSION;
 use crate::projects::{self, Projects};
+use crate::workspaces;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -69,6 +71,8 @@ pub struct Daemon {
     events: Mutex<Events>,
     /// Taken before `events` when both are: the projects' methods emit under it.
     pub projects: Mutex<Projects>,
+    /// The workspaces being prepared or removed: one at a time for each.
+    pub preparing: Mutex<HashSet<i64>>,
     /// Becomes true when the daemon stops.
     stopping: watch::Sender<bool>,
 }
@@ -95,6 +99,28 @@ impl Daemon {
             let _ = bus.send(event.clone());
         }
         Ok(event)
+    }
+
+    /// Reads the store.
+    pub fn read<T>(
+        &self,
+        read: impl FnOnce(&Store) -> flottille_core::Result<T>,
+    ) -> flottille_core::Result<T> {
+        read(&self.events.lock().unwrap().store)
+    }
+
+    /// Writes the store, the change and its event in one transaction of `write`'s own, then
+    /// hands the event to the subscribers, under the same lock as `emit`.
+    pub fn write<T>(
+        &self,
+        write: impl FnOnce(&mut Store) -> flottille_core::Result<(T, Event)>,
+    ) -> flottille_core::Result<T> {
+        let mut events = self.events.lock().unwrap();
+        let (value, event) = write(&mut events.store)?;
+        if let Some(bus) = &events.bus {
+            let _ = bus.send(event);
+        }
+        Ok(value)
     }
 
     fn subscribe(&self, after: Option<u64>) -> Result<Subscription> {
@@ -136,6 +162,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
             bus: Some(bus),
         }),
         projects: Mutex::new(projects),
+        preparing: Mutex::new(HashSet::new()),
         stopping: watch::Sender::new(false),
     });
     let mut terminate = signal(SignalKind::terminate())?;
@@ -149,6 +176,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         "flottille daemon {VERSION} listening on {}",
         socket.display()
     );
+    workspaces::resume_at_start(&daemon);
 
     let mut connections = JoinSet::new();
     let reason = loop {
@@ -210,6 +238,18 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                 continue;
             }
         };
+        // They run git and wait for it: answered by a task of their own, the connection goes on.
+        if request.method.starts_with("workspace.") {
+            let (daemon, out) = (daemon.clone(), out.clone());
+            tokio::spawn(async move {
+                let answer = match workspaces::call(daemon, &request.method, request.params).await {
+                    Ok(result) => Message::result(request.id, result),
+                    Err(failure) => Message::error(Some(request.id), failure.code, failure.message),
+                };
+                let _ = out.send(answer).await;
+            });
+            continue;
+        }
         let (answer, subscription) = handle(&daemon, request);
         if out.send(answer).await.is_err() {
             break true;

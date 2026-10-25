@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize, Serializer};
 /// Children running at once per project: the bounds of `max_children`.
 pub const CHILDREN_CAP: std::ops::RangeInclusive<u8> = 1..=6;
 const DEFAULT_CHILDREN_CAP: u8 = 3;
+/// Seconds a run step of the recipe may take unless the project or the step says otherwise.
+const DEFAULT_RUN_TIME_LIMIT: u64 = 30 * 60;
 
 /// A configuration that cannot be used, said with its file and, when there is one, its key.
 #[derive(Clone, Debug, PartialEq)]
@@ -83,6 +85,80 @@ pub struct CatalogueCommand {
     pub ask_before_running: bool,
 }
 
+/// One step of the recipe that prepares a new workspace, as written: exactly one of `copy`,
+/// `link`, `root_entries`, `run` and `command`, done in one repository, in each, or in the
+/// workspace folder (`docs/projects.md`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecipeStep {
+    /// Globs of files to copy from the main checkout, never over a file already there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy: Option<Vec<String>>,
+    /// One entry of the main checkout, linked into the workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+    /// Every top-level entry of the project folder that is neither a repository nor `.git` nor
+    /// `.gitignore`, linked into the workspace folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_entries: Option<bool>,
+    /// One command line, its words templated, run without a shell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+    /// A command of the catalogue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Where the step is done; the workspace folder when left out (or, for a command, where the
+    /// catalogue says).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    /// Done once in each repository of the workspace, in dependency order, leaves first.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub for_each_repository: bool,
+    /// Seconds a `run` or a `command` may take, in place of the project's `run_time_limit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_limit: Option<u64>,
+}
+
+/// What a recipe step does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum StepKind<'a> {
+    Copy(&'a [String]),
+    Link(&'a str),
+    RootEntries,
+    Run(&'a str),
+    Command(&'a str),
+}
+
+impl RecipeStep {
+    /// What the step does. A step of a checked project holds exactly one kind.
+    pub fn kind(&self) -> StepKind<'_> {
+        self.kinds()
+            .into_iter()
+            .next()
+            .expect("a checked recipe step holds one kind")
+    }
+
+    fn kinds(&self) -> Vec<StepKind<'_>> {
+        let mut kinds = Vec::new();
+        if let Some(globs) = &self.copy {
+            kinds.push(StepKind::Copy(globs));
+        }
+        if let Some(path) = &self.link {
+            kinds.push(StepKind::Link(path));
+        }
+        if self.root_entries.is_some() {
+            kinds.push(StepKind::RootEntries);
+        }
+        if let Some(line) = &self.run {
+            kinds.push(StepKind::Run(line));
+        }
+        if let Some(name) = &self.command {
+            kinds.push(StepKind::Command(name));
+        }
+        kinds
+    }
+}
+
 /// The repositories a new workspace takes.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RepositorySet {
@@ -141,6 +217,8 @@ pub struct Project {
     pub default_repositories: RepositorySet,
     /// Children running at once, within `CHILDREN_CAP`.
     pub max_children: u8,
+    /// Seconds a run step of the recipe may take before it is stopped, unless the step says.
+    pub run_time_limit: u64,
     /// Programs with their leading arguments (`["git", "push"]`) that are refused to agents
     /// whatever else says; each entry is one word per element, never empty.
     pub never: Vec<Vec<String>>,
@@ -151,6 +229,9 @@ pub struct Project {
     pub variables: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub commands: BTreeMap<String, CatalogueCommand>,
+    /// The steps that prepare a new workspace, in order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recipe: Vec<RecipeStep>,
 }
 
 /// What `projects/<name>.toml` holds: the keys as written, before the defaults and the checks.
@@ -166,6 +247,8 @@ struct File {
     // Wide, so that a cap out of range is refused by the check, in its own words.
     #[serde(default = "default_children_cap")]
     max_children: i64,
+    #[serde(default = "default_run_time_limit")]
+    run_time_limit: u64,
     #[serde(default)]
     never: Vec<Vec<String>>,
     repositories: Vec<Repository>,
@@ -173,6 +256,8 @@ struct File {
     variables: BTreeMap<String, String>,
     #[serde(default)]
     commands: BTreeMap<String, CatalogueCommand>,
+    #[serde(default)]
+    recipe: Vec<RecipeStep>,
 }
 
 fn all_repositories() -> RepositorySet {
@@ -181,6 +266,10 @@ fn all_repositories() -> RepositorySet {
 
 fn default_children_cap() -> i64 {
     DEFAULT_CHILDREN_CAP.into()
+}
+
+fn default_run_time_limit() -> u64 {
+    DEFAULT_RUN_TIME_LIMIT
 }
 
 impl Project {
@@ -195,6 +284,7 @@ impl Project {
             workspaces_root: data.join("workspaces").join(name),
             default_repositories: RepositorySet::All,
             max_children: DEFAULT_CHILDREN_CAP,
+            run_time_limit: DEFAULT_RUN_TIME_LIMIT,
             never: Vec::new(),
             repositories: repositories
                 .into_iter()
@@ -207,6 +297,7 @@ impl Project {
                 .collect(),
             variables: BTreeMap::new(),
             commands: BTreeMap::new(),
+            recipe: Vec::new(),
         }
     }
 
@@ -304,6 +395,9 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
                 file.max_children
             )
         })?;
+    if file.run_time_limit == 0 {
+        return Err("run_time_limit: must be at least 1 second".into());
+    }
     for (index, entry) in file.never.iter().enumerate() {
         if entry.is_empty() {
             return Err(format!("never[{index}]: must not be empty"));
@@ -347,7 +441,7 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
         ));
     }
 
-    for variable in file.variables.keys() {
+    for (variable, value) in &file.variables {
         let mut chars = variable.chars();
         let start = chars
             .next()
@@ -358,6 +452,7 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
                  not starting with a digit"
             ));
         }
+        crate::variables::check(value).map_err(|error| format!("variables.{variable}: {error}"))?;
     }
     for (command, entry) in &file.commands {
         if command.is_empty() || command.contains(char::is_whitespace) {
@@ -373,6 +468,10 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
         }
     }
 
+    for (index, step) in file.recipe.iter().enumerate() {
+        check_step(&format!("recipe[{index}]"), step, &known, &file.commands)?;
+    }
+
     Ok(Project {
         name: name.to_owned(),
         folder: file.folder,
@@ -380,11 +479,96 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
         workspaces_root,
         default_repositories: file.default_repositories,
         max_children,
+        run_time_limit: file.run_time_limit,
         never: file.never,
         repositories: file.repositories,
         variables: file.variables,
         commands: file.commands,
+        recipe: file.recipe,
     })
+}
+
+/// One step of the recipe, `key` being `recipe[i]`.
+fn check_step(
+    key: &str,
+    step: &RecipeStep,
+    known: &dyn Fn(&str) -> bool,
+    commands: &BTreeMap<String, CatalogueCommand>,
+) -> Result<(), String> {
+    let kinds = step.kinds();
+    if kinds.len() != 1 {
+        return Err(format!(
+            "{key}: must hold exactly one of copy, link, root_entries, run, command"
+        ));
+    }
+    if let Some(path) = &step.repository {
+        if step.for_each_repository {
+            return Err(format!(
+                "{key}.for_each_repository: cannot go with repository"
+            ));
+        }
+        if !known(path) {
+            return Err(format!("{key}.repository: unknown repository \"{path}\""));
+        }
+    }
+    match step.time_limit {
+        Some(_) if !matches!(kinds[0], StepKind::Run(_) | StepKind::Command(_)) => {
+            return Err(format!("{key}.time_limit: goes only with run or command"));
+        }
+        Some(0) => return Err(format!("{key}.time_limit: must be at least 1 second")),
+        _ => {}
+    }
+    let inside = |key: String, path: &str| {
+        if path != "." && valid_repository_path(path) {
+            Ok(())
+        } else {
+            Err(format!(
+                "{key}: must be a path inside the repository like \".env\" or \"config/*.json\", \
+                 not \"{path}\""
+            ))
+        }
+    };
+    match kinds[0] {
+        StepKind::Copy(globs) => {
+            if globs.is_empty() {
+                return Err(format!("{key}.copy: must name at least one file"));
+            }
+            for (index, glob) in globs.iter().enumerate() {
+                inside(format!("{key}.copy[{index}]"), glob)?;
+                if glob.split('/').any(|part| part == ".git") {
+                    return Err(format!(
+                        "{key}.copy[{index}]: \"{glob}\" can only match in .git, which a copy \
+                         never touches"
+                    ));
+                }
+            }
+        }
+        StepKind::Link(path) => inside(format!("{key}.link"), path)?,
+        StepKind::RootEntries => {
+            if step.root_entries == Some(false) {
+                return Err(format!("{key}.root_entries: must be true, or left out"));
+            }
+            if step.repository.is_some() || step.for_each_repository {
+                return Err(format!(
+                    "{key}.root_entries: links the project folder's entries, takes no repository"
+                ));
+            }
+        }
+        StepKind::Run(line) => {
+            let refuse = |error: String| format!("{key}.run: {error}");
+            for word in crate::command::split_line(line).map_err(refuse)? {
+                crate::variables::check(&word).map_err(refuse)?;
+            }
+        }
+        StepKind::Command(name) => {
+            if !commands.contains_key(name) {
+                return Err(format!(
+                    "{key}.command: no command \"{name}\" in the catalogue"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// What each repository holds by itself: a path that is its own, a remote, a base rule.
@@ -579,6 +763,16 @@ mod tests {
         assert!(project.commands["test"].check && project.commands["test"].read_only);
         assert!(project.commands["generate-data"].ask_before_running);
         assert_eq!(project.never[0], ["git", "push"]);
+        let kinds: Vec<_> = project.recipe.iter().map(RecipeStep::kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                StepKind::Copy(&[".env".into(), ".env.*".into()]),
+                StepKind::RootEntries,
+                StepKind::Run("npm install"),
+            ]
+        );
+        assert!(project.recipe[2].for_each_repository);
     }
 
     #[test]
@@ -854,6 +1048,196 @@ mod tests {
     fn a_variable_is_named_like_an_environment_variable() {
         let text = format!("{MINIMAL}\n[variables]\n\"2X\" = \"v\"\n");
         assert!(refusal(&text).starts_with("projects/app.toml: variables.2X: must be a name"));
+    }
+
+    const TWO: &str = r#"
+        folder = "/work/app"
+        [[repositories]]
+        path = "."
+        [[repositories]]
+        path = "api"
+        [commands.install]
+        line = "npm install"
+        repository = "api"
+    "#;
+
+    #[test]
+    fn a_recipe_is_read_in_order_with_each_kind_of_step() {
+        let text = format!(
+            r#"{TWO}
+            [[recipe]]
+            copy = [".env", ".env.*"]
+            for_each_repository = true
+            [[recipe]]
+            link = "notes"
+            [[recipe]]
+            root_entries = true
+            [[recipe]]
+            run = "npm run build --prefix {{workspace.path}}/{{repository}}"
+            for_each_repository = true
+            [[recipe]]
+            command = "install"
+            "#
+        );
+
+        let project = parse(&text).unwrap();
+
+        let kinds: Vec<_> = project.recipe.iter().map(RecipeStep::kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                StepKind::Copy(&[".env".into(), ".env.*".into()]),
+                StepKind::Link("notes"),
+                StepKind::RootEntries,
+                StepKind::Run("npm run build --prefix {workspace.path}/{repository}"),
+                StepKind::Command("install"),
+            ]
+        );
+        assert!(project.recipe[0].for_each_repository);
+        assert_eq!(parse(&project.to_toml().unwrap()).unwrap(), project);
+    }
+
+    #[test]
+    fn a_recipe_step_holds_exactly_one_kind() {
+        let none = format!("{TWO}\n[[recipe]]\nrepository = \"api\"\n");
+        let two = format!("{TWO}\n[[recipe]]\nrun = \"make\"\nlink = \"x\"\n");
+        for text in [none, two] {
+            assert_eq!(
+                refusal(&text),
+                "projects/app.toml: recipe[0]: must hold exactly one of copy, link, \
+                 root_entries, run, command"
+            );
+        }
+    }
+
+    #[test]
+    fn a_recipe_step_names_a_repository_of_the_project_or_each_of_them() {
+        let unknown = format!("{TWO}\n[[recipe]]\nrun = \"make\"\nrepository = \"web\"\n");
+        assert_eq!(
+            refusal(&unknown),
+            r#"projects/app.toml: recipe[0].repository: unknown repository "web""#
+        );
+        let both = format!(
+            "{TWO}\n[[recipe]]\nrun = \"make\"\nrepository = \"api\"\nfor_each_repository = true\n"
+        );
+        assert_eq!(
+            refusal(&both),
+            "projects/app.toml: recipe[0].for_each_repository: cannot go with repository"
+        );
+        let root = format!("{TWO}\n[[recipe]]\nroot_entries = true\nrepository = \"api\"\n");
+        assert_eq!(
+            refusal(&root),
+            "projects/app.toml: recipe[0].root_entries: links the project folder's entries, \
+             takes no repository"
+        );
+        let off = format!("{TWO}\n[[recipe]]\nroot_entries = false\n");
+        assert_eq!(
+            refusal(&off),
+            "projects/app.toml: recipe[0].root_entries: must be true, or left out"
+        );
+    }
+
+    #[test]
+    fn run_steps_are_stopped_after_30_minutes_unless_the_file_says_otherwise() {
+        assert_eq!(parse(MINIMAL).unwrap().run_time_limit, 1800);
+        let text =
+            format!("run_time_limit = 600\n{TWO}\n[[recipe]]\nrun = \"make\"\ntime_limit = 7200\n");
+        let project = parse(&text).unwrap();
+        assert_eq!(project.run_time_limit, 600);
+        assert_eq!(project.recipe[0].time_limit, Some(7200));
+        assert_eq!(parse(&project.to_toml().unwrap()).unwrap(), project);
+    }
+
+    #[test]
+    fn a_time_limit_is_a_number_of_seconds_above_zero_on_a_run_or_a_command() {
+        assert_eq!(
+            refusal(&format!("run_time_limit = 0\n{TWO}")),
+            "projects/app.toml: run_time_limit: must be at least 1 second"
+        );
+        let zero = format!("{TWO}\n[[recipe]]\nrun = \"make\"\ntime_limit = 0\n");
+        assert_eq!(
+            refusal(&zero),
+            "projects/app.toml: recipe[0].time_limit: must be at least 1 second"
+        );
+        let copy = format!("{TWO}\n[[recipe]]\ncopy = [\".env\"]\ntime_limit = 60\n");
+        assert_eq!(
+            refusal(&copy),
+            "projects/app.toml: recipe[0].time_limit: goes only with run or command"
+        );
+    }
+
+    #[test]
+    fn a_run_step_with_shell_syntax_is_refused_with_its_key() {
+        let text = format!("{TWO}\n[[recipe]]\nrun = \"npm install && npm run build\"\n");
+        assert_eq!(
+            refusal(&text),
+            format!(
+                "projects/app.toml: recipe[0].run: {}",
+                crate::command::refusal("&&")
+            )
+        );
+    }
+
+    #[test]
+    fn a_template_name_flottille_does_not_fill_is_refused_with_its_key() {
+        let run = format!("{TWO}\n[[recipe]]\nrun = \"make {{home}}\"\n");
+        assert!(
+            refusal(&run).starts_with(
+                "projects/app.toml: recipe[0].run: “{home}” is not a name Flottille fills"
+            ),
+            "{}",
+            refusal(&run)
+        );
+        let variable = format!("{TWO}\n[variables]\nSTORE = \"{{workspace.root}}/s\"\n");
+        assert!(
+            refusal(&variable).starts_with(
+                "projects/app.toml: variables.STORE: “{workspace.root}” is not a name"
+            ),
+            "{}",
+            refusal(&variable)
+        );
+    }
+
+    #[test]
+    fn a_copy_or_a_link_stays_inside_its_repository() {
+        for (step, key) in [
+            ("copy = [\"../secret\"]", "recipe[0].copy[0]"),
+            ("copy = [\".env\", \"/etc/passwd\"]", "recipe[0].copy[1]"),
+            ("copy = []", "recipe[0].copy"),
+            ("link = \".\"", "recipe[0].link"),
+        ] {
+            let text = format!("{TWO}\n[[recipe]]\n{step}\n");
+            assert!(
+                refusal(&text).starts_with(&format!("projects/app.toml: {key}: ")),
+                "{step}: {}",
+                refusal(&text)
+            );
+        }
+    }
+
+    #[test]
+    fn a_copy_glob_that_can_only_match_git_is_refused() {
+        for glob in [".git", ".git/config", "sub/.git/*"] {
+            let text = format!("{TWO}\n[[recipe]]\ncopy = [\"{glob}\"]\n");
+            assert_eq!(
+                refusal(&text),
+                format!(
+                    "projects/app.toml: recipe[0].copy[0]: \"{glob}\" can only match in .git, \
+                     which a copy never touches"
+                )
+            );
+        }
+        let text = format!("{TWO}\n[[recipe]]\ncopy = [\".gi*\"]\n");
+        assert!(parse(&text).is_ok());
+    }
+
+    #[test]
+    fn a_command_step_names_a_command_of_the_catalogue() {
+        let text = format!("{TWO}\n[[recipe]]\ncommand = \"deploy\"\n");
+        assert_eq!(
+            refusal(&text),
+            r#"projects/app.toml: recipe[0].command: no command "deploy" in the catalogue"#
+        );
     }
 
     #[test]

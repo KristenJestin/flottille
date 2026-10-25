@@ -1,7 +1,10 @@
 mod client;
 mod daemon;
+mod git;
 mod project_command;
 mod projects;
+mod workspace_command;
+mod workspaces;
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -13,6 +16,7 @@ use serde_json::Value;
 
 use crate::client::Client;
 use crate::project_command::ProjectAction;
+use crate::workspace_command::WorkspaceAction;
 
 pub const VERSION: &str = env!("FLOTTILLE_VERSION");
 
@@ -39,6 +43,11 @@ enum Command {
     Project {
         #[command(subcommand)]
         action: ProjectAction,
+    },
+    /// Make, follow and remove the workspaces of a project
+    Workspace {
+        #[command(subcommand)]
+        action: WorkspaceAction,
     },
     /// Print the daemon's events, one JSON object per line
     Watch {
@@ -88,6 +97,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             }
         }
         Command::Project { action } => return project_command::run(&paths, action),
+        Command::Workspace { action } => return workspace_command::run(&paths, action),
         Command::Watch { after } => {
             let mut client = Client::connect_or_start(&paths)?;
             client.request("events.watch", serde_json::to_value(WatchParams { after })?)?;

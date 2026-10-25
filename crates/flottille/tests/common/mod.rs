@@ -14,6 +14,16 @@ use std::time::Duration;
 use serde_json::Value;
 use tempfile::TempDir;
 
+/// None of the machine's git settings, and a throwaway identity.
+const GIT_ENV: [(&str, &str); 6] = [
+    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    ("GIT_CONFIG_NOSYSTEM", "1"),
+    ("GIT_AUTHOR_NAME", "Test"),
+    ("GIT_AUTHOR_EMAIL", "test@example.invalid"),
+    ("GIT_COMMITTER_NAME", "Test"),
+    ("GIT_COMMITTER_EMAIL", "test@example.invalid"),
+];
+
 /// A throwaway user: its own home and XDG folders, and the daemon it starts, stopped on drop.
 pub struct User {
     dir: TempDir,
@@ -48,6 +58,10 @@ impl User {
             .env("XDG_CONFIG_HOME", self.path("config"))
             .env("XDG_DATA_HOME", self.path("data"))
             .stdin(Stdio::null());
+        // The daemon runs git: never with the machine's settings.
+        for (name, value) in GIT_ENV {
+            command.env(name, value);
+        }
         command
     }
 
@@ -113,17 +127,17 @@ impl User {
 
     /// The user's `git` in `dir`, with a throwaway identity and none of the machine's settings.
     pub fn git(&self, dir: &Path, args: &[&str]) {
+        self.git_output(dir, args);
+    }
+
+    /// The same, its standard output.
+    pub fn git_output(&self, dir: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
             .arg("-C")
             .arg(dir)
             .args(args)
             .env("HOME", self.path("home"))
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+            .envs(GIT_ENV)
             .output()
             .unwrap();
         assert!(
@@ -131,6 +145,7 @@ impl User {
             "git {args:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        String::from_utf8(output.stdout).unwrap()
     }
 
     /// Where the project's file is.
