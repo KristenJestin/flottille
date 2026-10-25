@@ -628,3 +628,39 @@ fn agent_show_prints_the_conversation() {
         serde_json::from_slice(&user.run(&["agent", "show", &id, "--json"]).stdout).unwrap();
     assert_eq!(json["agent"]["id"], id.as_str());
 }
+
+#[test]
+fn agent_send_answers_with_the_id_of_the_delivery_it_stored() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (agent, first) = run(&user, json!({"message": "hello"}));
+    events_until(&user, &agent, first, "agent.turn_ended");
+
+    let sent = user
+        .call("agent.send", json!({"agent": agent, "message": "again"}))
+        .unwrap();
+    let again = user
+        .call(
+            "agent.send",
+            json!({"agent": agent, "message": "and again"}),
+        )
+        .unwrap();
+
+    let after = sent["after"].as_u64().unwrap();
+    // Both are stored by the time their answers came.
+    let shown = user
+        .call("agent.show", json!({"agent": agent, "after": after}))
+        .unwrap();
+    let queued: Vec<&Value> = shown["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["name"] == "delivery.queued")
+        .collect();
+    assert_eq!(queued.len(), 2, "{queued:?}");
+    assert!(sent["delivery"].is_string(), "a delivery id: {sent}");
+    assert_ne!(sent["delivery"], again["delivery"], "one per message");
+    assert_eq!(queued[0]["data"]["delivery"], sent["delivery"]);
+    assert_eq!(queued[0]["data"]["kind"], "user");
+    assert_eq!(queued[1]["data"]["delivery"], again["delivery"]);
+}

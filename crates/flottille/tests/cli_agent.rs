@@ -4,7 +4,9 @@
 
 mod common;
 
-use std::process::Output;
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, ChildStdin, ExitStatus, Output, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use common::User;
@@ -22,7 +24,13 @@ fn user() -> User {
             {"mcp": {"tool": "ask_user", "arguments": {"question": "which database?"}}}]},
         {"when": "REPORT-NOW", "do": [
             {"mcp": {"tool": "report", "arguments": {"text": "all done, tests pass"}}}]},
-        {"when": "die-always", "do": [{"die": 4}]}
+        {"when": "die-always", "do": [{"die": 4}]},
+        {"when": "GREET", "do": [{"say": "hello from the fake"}]},
+        {"when": "SLOWLY", "do": [{"wait": 800}, {"say": "mine"}]},
+        {"when": "RECALL", "do": [{"recall": true}]},
+        {"when": "ASK-FILE", "do": [
+            {"mcp": {"tool": "fs_read", "arguments": {"path": ".env"}}},
+            {"say": "waiting for the user's answer"}]}
     ]}));
     user
 }
@@ -264,4 +272,459 @@ fn an_empty_inbox_says_so() {
     );
     let inbox = json_of(user.run(&["inbox", "--json"]));
     assert_eq!(inbox, json!({"entries": []}));
+}
+
+/// A command of the user that runs while the test talks to it: its standard input, and its
+/// standard output and error read line by line.
+struct Running {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    lines: Receiver<(bool, String)>,
+    out: String,
+    err: String,
+}
+
+impl Running {
+    fn start(user: &User, args: &[&str]) -> Running {
+        let mut child = user
+            .command(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let (sender, lines) = mpsc::channel();
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        for (is_error, pipe) in [
+            (false, Box::new(stdout) as Box<dyn std::io::Read + Send>),
+            (true, Box::new(stderr)),
+        ] {
+            let sender = sender.clone();
+            std::thread::spawn(move || {
+                for line in BufReader::new(pipe).lines() {
+                    let Ok(line) = line else { break };
+                    if sender.send((is_error, line)).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        let stdin = child.stdin.take();
+        Running {
+            child,
+            stdin,
+            lines,
+            out: String::new(),
+            err: String::new(),
+        }
+    }
+
+    fn type_line(&mut self, line: &str) {
+        let stdin = self.stdin.as_mut().expect("standard input is closed");
+        writeln!(stdin, "{line}").unwrap();
+        stdin.flush().unwrap();
+    }
+
+    /// Ctrl+D.
+    fn close_input(&mut self) {
+        self.stdin = None;
+    }
+
+    /// Ctrl+C: SIGINT to this process only.
+    fn interrupt(&self) {
+        // SAFETY: kill(2) on the pid of a child this test started and has not waited for.
+        let sent = unsafe { libc::kill(self.child.id() as i32, libc::SIGINT) };
+        assert_eq!(sent, 0);
+    }
+
+    fn take(&mut self, within: Duration) -> Option<()> {
+        match self.lines.recv_timeout(within) {
+            Ok((true, line)) => self.err.push_str(&format!("{line}\n")),
+            Ok((false, line)) => self.out.push_str(&format!("{line}\n")),
+            Err(RecvTimeoutError::Timeout) => return None,
+            Err(RecvTimeoutError::Disconnected) => return None,
+        }
+        Some(())
+    }
+
+    /// Reads until the standard output (or the error) holds `needle`.
+    fn wait_for(&mut self, needle: &str, on_error: bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let seen = if on_error { &self.err } else { &self.out };
+            if seen.contains(needle) {
+                return;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                self.take(left).is_some(),
+                "never saw {needle:?}; stdout {:?}, stderr {:?}",
+                self.out,
+                self.err
+            );
+        }
+    }
+
+    /// Waits for the command to end: how, what it printed, what it said.
+    fn finish(mut self) -> (ExitStatus, String, String) {
+        self.stdin = None;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let status = loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() > deadline {
+                let _ = self.child.kill();
+                panic!(
+                    "it never ended; stdout {:?}, stderr {:?}",
+                    self.out, self.err
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        while self.take(Duration::from_millis(200)).is_some() {}
+        (status, self.out, self.err)
+    }
+}
+
+fn agent_state(user: &User, agent: &str) -> String {
+    let shown = json_of(user.run(&["agent", "show", agent, "--json"]));
+    shown["agent"]["state"].as_str().unwrap().to_owned()
+}
+
+/// A root agent of project `app`, its first turn over.
+fn idle_agent(user: &User) -> String {
+    project(user);
+    let started = json_of(user.run(&["agent", "start", "app", "hello", "--json"]));
+    let agent = started["agent"]["id"].as_str().unwrap().to_owned();
+    eventually("the first turn to end", || {
+        agent_state(user, &agent) == "idle"
+    });
+    agent
+}
+
+/// Whether the fake agent was given a prompt holding this text.
+fn prompted_with(user: &User, text: &str) -> bool {
+    user.received_requests("session/prompt")
+        .iter()
+        .any(|request| request.to_string().contains(text))
+}
+
+/// A child of a root that launched one, and its root.
+fn child_and_root(user: &User) -> (String, String) {
+    project(user);
+    let root = json_of(user.run(&[
+        "agent",
+        "start",
+        "app",
+        "LEAD-LAUNCHES and wait",
+        "--workspace",
+        "w",
+        "--json",
+    ]))["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut child = String::new();
+    eventually("the child", || {
+        let tree = json_of(user.run(&["agent", "tree", &root, "--json"]));
+        match tree["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["agent"]["parent"] == root.as_str())
+        {
+            Some(found) => {
+                child = found["agent"]["id"].as_str().unwrap().to_owned();
+                true
+            }
+            None => false,
+        }
+    });
+    (child, root)
+}
+
+const REPLY: &str = "hello from the fake\n";
+
+#[test]
+fn send_follow_prints_the_reply_and_exits_when_the_turn_ends() {
+    let user = user();
+    let agent = idle_agent(&user);
+
+    let output = user.run(&["agent", "send", &agent, "GREET", "--follow"]);
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), REPLY);
+    assert_eq!(agent_state(&user, &agent), "idle", "the agent stays alive");
+}
+
+#[test]
+fn send_follow_prints_a_reply_as_agent_run_prints_it() {
+    let user = user();
+    project(&user);
+    let ran = user.run(&["agent", "run", "app", "GREET"]);
+    let ran = String::from_utf8(ran.stdout).unwrap();
+    let agent = ran
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .trim_end_matches(',')
+        .to_owned();
+    assert_eq!(ran.lines().last(), Some(REPLY.trim_end()), "{ran}");
+
+    let output = user.run(&["agent", "send", &agent, "GREET", "-f"]);
+
+    assert!(output.status.success());
+    let printed = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(printed, REPLY);
+    assert!(ran.ends_with(&printed));
+}
+
+#[test]
+fn send_follow_waits_for_the_turn_of_its_own_message_not_for_the_one_that_runs() {
+    let user = user();
+    project(&user);
+    let agent = json_of(user.run(&["agent", "start", "app", "HANG", "--json"]))["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    eventually("the turn to run", || prompted_with(&user, "HANG"));
+    let following = Running::start(&user, &["agent", "send", &agent, "GREET", "--follow"]);
+    eventually("the message to be queued", || {
+        let shown = json_of(user.run(&["agent", "show", &agent, "--json"]));
+        shown["events"].to_string().contains("\"kind\":\"user\"")
+    });
+
+    // The turn that hangs ends cancelled; the command is not about it.
+    user.call("agent.cancel", json!({"agent": agent})).unwrap();
+
+    let (status, out, _) = following.finish();
+    assert!(status.success());
+    assert_eq!(out, REPLY);
+}
+
+#[test]
+fn send_without_follow_returns_at_once_while_a_turn_runs() {
+    let user = user();
+    project(&user);
+    let agent = json_of(user.run(&["agent", "start", "app", "HANG", "--json"]))["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    eventually("the turn to run", || prompted_with(&user, "HANG"));
+
+    let output = user.run(&["agent", "send", &agent, "GREET"]);
+
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .starts_with("Sent to agent")
+    );
+}
+
+#[test]
+fn send_follow_with_json_prints_the_answer_with_the_agent_once_its_turn_ended() {
+    let user = user();
+    let agent = idle_agent(&user);
+
+    let output = user.run(&["agent", "send", &agent, "GREET", "--follow", "--json"]);
+
+    let printed = json_of(output);
+    assert_eq!(printed["agent"]["id"], agent.as_str());
+    assert_eq!(printed["agent"]["state"], "idle");
+    assert!(printed["after"].is_u64());
+}
+
+#[test]
+fn chat_sends_two_lines_in_a_row_to_the_same_agent_and_the_second_reply_shows_the_agent_kept_the_first()
+ {
+    let user = user();
+    let agent = idle_agent(&user);
+    let mut chat = Running::start(&user, &["agent", "chat", &agent]);
+
+    chat.type_line("teal is my colour");
+    chat.wait_for("ok\n", false);
+    chat.type_line("RECALL what I said");
+    chat.wait_for("earlier you said: ", false);
+    chat.close_input();
+
+    let (status, out, _) = chat.finish();
+    assert!(status.success());
+    assert!(out.contains("teal is my colour"), "{out}");
+    assert_eq!(
+        user.received_requests("session/new").len(),
+        1,
+        "one session for both lines"
+    );
+    assert_eq!(agent_state(&user, &agent), "idle");
+}
+
+#[test]
+fn chat_ctrl_c_during_a_turn_cancels_it_and_the_agent_stays_alive() {
+    let user = user();
+    let agent = idle_agent(&user);
+    let mut chat = Running::start(&user, &["agent", "chat", &agent]);
+
+    chat.type_line("HANG until I cancel");
+    eventually("the turn to run", || prompted_with(&user, "HANG until"));
+    chat.interrupt();
+    chat.wait_for("(the turn ended: cancelled)", false);
+
+    // Still in the chat: the next line is sent and answered.
+    chat.type_line("GREET");
+    chat.wait_for(REPLY.trim_end(), false);
+    chat.type_line("/exit");
+    let (status, _, _) = chat.finish();
+    assert!(status.success());
+    assert_eq!(agent_state(&user, &agent), "idle");
+}
+
+#[test]
+fn chat_ctrl_c_at_the_prompt_leaves_without_stopping_the_agent() {
+    let user = user();
+    let agent = idle_agent(&user);
+    let mut chat = Running::start(&user, &["agent", "chat", &agent]);
+    chat.type_line("GREET");
+    chat.wait_for(REPLY.trim_end(), false);
+
+    chat.interrupt();
+
+    let (status, _, _) = chat.finish();
+    assert!(status.success());
+    assert_eq!(agent_state(&user, &agent), "idle");
+}
+
+#[test]
+fn chat_ctrl_d_leaves_and_the_agent_stays_alive() {
+    let user = user();
+    let agent = idle_agent(&user);
+    let mut chat = Running::start(&user, &["agent", "chat", &agent]);
+    chat.type_line("GREET");
+    chat.wait_for(REPLY.trim_end(), false);
+
+    chat.close_input();
+
+    let (status, _, _) = chat.finish();
+    assert!(status.success());
+    assert_eq!(agent_state(&user, &agent), "idle");
+}
+
+#[test]
+fn chat_slash_exit_leaves_and_another_line_starting_with_a_slash_is_a_message() {
+    let user = user();
+    let agent = idle_agent(&user);
+    let mut chat = Running::start(&user, &["agent", "chat", &agent]);
+
+    chat.type_line("/etc/hosts looks odd");
+    chat.wait_for("ok\n", false);
+    chat.type_line("/exit");
+    chat.type_line("GREET after the exit");
+
+    let (status, out, _) = chat.finish();
+    assert!(status.success());
+    assert!(prompted_with(&user, "/etc/hosts looks odd"));
+    assert!(
+        !prompted_with(&user, "after the exit"),
+        "nothing is read after /exit: {out}"
+    );
+    assert_eq!(agent_state(&user, &agent), "idle");
+}
+
+#[test]
+fn send_follow_on_a_child_is_refused_naming_its_root_and_sends_nothing() {
+    let user = user();
+    let (child, root) = child_and_root(&user);
+
+    let output = user.run(&["agent", "send", &child, "GREET", "--follow"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let refused = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        refused.contains("only its parent") && refused.contains(&root),
+        "{refused}"
+    );
+    assert!(!prompted_with(&user, "GREET"), "nothing reached the child");
+}
+
+#[test]
+fn chat_on_a_child_is_refused_naming_its_root_before_it_reads_anything() {
+    let user = user();
+    let (child, root) = child_and_root(&user);
+
+    let output = user.run(&["agent", "chat", &child]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let refused = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        refused.contains("only its parent") && refused.contains(&root),
+        "{refused}"
+    );
+}
+
+#[test]
+fn chat_on_an_agent_that_ended_is_refused_with_the_daemon_s_sentence() {
+    let user = user();
+    let agent = idle_agent(&user);
+    user.run(&["agent", "stop", &agent]);
+
+    let output = user.run(&["agent", "chat", &agent]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let refused = String::from_utf8(output.stderr).unwrap();
+    assert!(refused.starts_with("flottille: "), "{refused}");
+    assert!(refused.contains("ended"), "{refused}");
+}
+
+#[test]
+fn chat_shows_a_request_waiting_for_the_user_with_the_commands_that_answer_it() {
+    let user = user();
+    let agent = idle_agent(&user);
+    let mut chat = Running::start(&user, &["agent", "chat", &agent]);
+
+    chat.type_line("ASK-FILE");
+    chat.wait_for("flottille approve 1", true);
+    chat.wait_for("waiting for the user's answer", false);
+
+    chat.type_line("/exit");
+    let (_, _, err) = chat.finish();
+    assert!(err.contains("flottille deny 1"), "{err}");
+    // The chat never answers it.
+    let waiting = json_of(user.run(&["approvals", "--json"]));
+    assert_eq!(waiting["requests"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn send_follow_with_an_empty_message_is_refused_and_follows_nothing() {
+    let user = user();
+    let agent = idle_agent(&user);
+
+    let output = user.run(&["agent", "send", &agent, "", "--follow"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let refused = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        refused.starts_with("flottille: ") && refused.contains("empty"),
+        "{refused}"
+    );
+}
+
+#[test]
+fn send_follow_prints_only_the_reply_to_its_own_message_when_another_client_writes_right_after() {
+    let user = user();
+    let agent = idle_agent(&user);
+    let following = Running::start(&user, &["agent", "send", &agent, "SLOWLY", "--follow"]);
+    eventually("the turn to run", || prompted_with(&user, "SLOWLY"));
+
+    // Another client writes to the same agent while that turn runs: its own turn follows.
+    user.call("agent.send", json!({"agent": agent, "message": "GREET"}))
+        .unwrap();
+
+    let (status, out, _) = following.finish();
+    assert!(status.success());
+    assert_eq!(out, "mine\n");
 }

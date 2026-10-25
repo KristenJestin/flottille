@@ -178,7 +178,8 @@ fn took(daemon: &Daemon, agent: &str, kinds: &[String]) {
 }
 
 /// Stores a delivery for the agent, masked, then rings it. The id is the idempotency key: a
-/// delivery of an id already stored is not stored again.
+/// delivery of an id already stored is not stored again. The id, or `None` when the delivery
+/// could not be stored.
 pub fn deliver(
     daemon: &Arc<Daemon>,
     agent: &str,
@@ -186,10 +187,10 @@ pub fn deliver(
     id: Option<String>,
     body: &str,
     urgency: &str,
-) {
+) -> Option<String> {
     let id = id.unwrap_or_else(|| format!("{kind}-{}", new_id().unwrap_or_default()));
     let delivery = Delivery {
-        id,
+        id: id.clone(),
         agent: agent.to_owned(),
         kind: kind.to_owned(),
         body: secrets::mask(body, &std::env::vars_os().collect()),
@@ -200,9 +201,10 @@ pub fn deliver(
     };
     if let Err(error) = daemon.write(|store| Ok(((), store.deliver(&delivery)?))) {
         eprintln!("flottille daemon: agent {agent}: a delivery cannot be stored: {error}");
-        return;
+        return None;
     }
     ring(daemon, agent);
+    Some(id)
 }
 
 /// Wakes the agent for what is queued: mid-turn, an urgent delivery is pinned as a note and a

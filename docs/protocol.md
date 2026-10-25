@@ -322,7 +322,11 @@ what it offers.
 #### `agent.send`
 
 `{"agent", "message"}`. Gives the agent a message (a `user` delivery), played after the turn that
-runs if one does, starting its process again when it was released: `{"agent", "after"}`.
+runs if one does, starting its process again when it was released: `{"agent", "after",
+"delivery"}`. `delivery` is the id of the delivery stored for the message: its `delivery.queued`
+event (numbered after `after`), then `delivery.sent` when a prompt takes it (`docs/events.md`), name
+it, so that a client follows the turn of its own message even when another client writes to the
+agent at the same time.
 `refused` when the agent is in a final state, the message is empty, or the agent is a child: only
 its parent writes to it, and the sentence names its root.
 
