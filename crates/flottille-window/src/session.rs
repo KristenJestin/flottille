@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::Duration;
 
 use flottille_ui::{
@@ -19,10 +20,10 @@ use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{InputEditorStyle, InputEvent, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AppContext as _, Bounds, Context, ElementId, Entity, Focusable as _, InteractiveElement,
-    IntoElement, ParentElement, PathBuilder, Pixels, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Task, TestSupportExt as _, WeakEntity,
-    Window, canvas, div, point, px,
+    AnyElement, AppContext as _, Bounds, Context, ElementId, Entity, Focusable as _, FollowMode,
+    InteractiveElement, IntoElement, ListAlignment, ListState, ParentElement, PathBuilder, Pixels,
+    Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
+    TestSupportExt as _, WeakEntity, Window, canvas, div, list, point, px,
 };
 
 use crate::actions::{Answer, Command};
@@ -101,6 +102,8 @@ pub struct SessionPage {
     opened: Opened,
     follow: Follow,
     layout: Layout,
+    /// The session's state, as the shell's tree draws it.
+    status: Entity<Status>,
     pill: Entity<Pill>,
     /// The agent whose conversation is shown: the root, or a sub-agent read.
     shown: String,
@@ -114,6 +117,12 @@ pub struct SessionPage {
     reply: Entity<Reply>,
     requests: HashMap<u64, Request>,
     decisions: HashMap<u64, String>,
+    /// How many pages of the shown agent's conversation are read, from its end.
+    pages: usize,
+    /// The shown agent's conversation was read by the current link.
+    read: bool,
+    /// How many times a conversation was read and its rows made again.
+    histories: usize,
     needs_you: bool,
     renders: usize,
     _status: Subscription,
@@ -147,6 +156,7 @@ impl SessionPage {
             shell,
             follow,
             layout,
+            status,
             pill,
             shown,
             link: None,
@@ -158,6 +168,9 @@ impl SessionPage {
             reply,
             requests: HashMap::new(),
             decisions: HashMap::new(),
+            pages: 1,
+            read: false,
+            histories: 0,
             needs_you,
             renders: 0,
             _status,
@@ -171,6 +184,11 @@ impl SessionPage {
         &self.opened.id
     }
 
+    /// The session's state, as the shell's tree draws it.
+    pub fn status(&self) -> &Entity<Status> {
+        &self.status
+    }
+
     /// The agent whose conversation is shown.
     pub fn shown(&self) -> &str {
         &self.shown
@@ -182,6 +200,19 @@ impl SessionPage {
 
     pub fn renders(&self) -> usize {
         self.renders
+    }
+
+    /// How many times a conversation was read and its rows made again.
+    pub fn histories(&self) -> usize {
+        self.histories
+    }
+
+    /// The decision the page knows of a request.
+    pub fn decision(&self, number: u64) -> Option<&str> {
+        self.decisions
+            .get(&number)
+            .or_else(|| self.requests.get(&number)?.decision.as_ref())
+            .map(String::as_str)
     }
 
     pub fn tree(&self) -> &[TreeAgent] {
@@ -248,6 +279,7 @@ impl SessionPage {
     /// A new link for the shown agent: the old one stops, and what it sends late is dropped.
     fn relink(&mut self) {
         self.link = None;
+        self.read = false;
         self.link = Some(session_link::spawn(
             self.follow.connect.clone(),
             self.follow.updates.clone(),
@@ -257,7 +289,15 @@ impl SessionPage {
                 project: self.opened.project.clone(),
                 workspace: self.opened.place.clone(),
             },
+            self.pages,
         ));
+    }
+
+    /// Reads one more page of the shown agent's conversation, before those shown.
+    pub fn show_earlier(&mut self, cx: &mut Context<Self>) {
+        self.pages += 1;
+        self.relink();
+        cx.notify();
     }
 
     /// Shows an agent's conversation: the root's, with the composer, or a sub-agent's, read only.
@@ -267,6 +307,7 @@ impl SessionPage {
             return;
         }
         self.shown = agent.to_owned();
+        self.pages = 1;
         let parent = self.parent_of(agent).map(|p| self.name(&p));
         let (page, name) = (cx.entity().downgrade(), self.name(agent));
         let shown = self.shown.clone();
@@ -292,34 +333,54 @@ impl SessionPage {
         }
         match update {
             SessionUpdate::Tree(tree) => self.set_tree(tree, cx),
-            SessionUpdate::History { events, first } => {
+            SessionUpdate::History { events, earlier } => {
+                self.histories += 1;
+                self.read = true;
                 for event in &events {
                     self.note_usage(event, cx);
+                    self.note_decision(event);
                 }
+                let root = self.shown == self.opened.id;
+                // The requests another agent of the tree asked are not in this one's events:
+                // each is placed at the time it was asked.
+                let placed = match root {
+                    true => self
+                        .requests
+                        .values()
+                        .map(|r| (r.created_at, r.number))
+                        .collect(),
+                    false => Vec::new(),
+                };
+                let launched_before = earlier && self.has_children();
+                let follow = self.pages == 1;
                 let (conversation, this) = (self.conversation.clone(), &*self);
                 conversation.update(cx, |view, cx| {
-                    if first {
-                        view.clear(cx);
-                    }
-                    for event in &events {
-                        let changes = view.model.apply(event);
-                        view.changed(&changes, this, cx);
-                    }
+                    let read = Read {
+                        events: &events,
+                        earlier,
+                        placed,
+                        launched_before,
+                        follow,
+                    };
+                    view.rebuild(read, this, cx)
                 });
                 self.refresh_conversation(cx);
             }
+            // One row added or drawn again: nothing else is looked at.
             SessionUpdate::Live(event) => {
                 self.note_usage(&event, cx);
+                self.note_decision(&event);
                 let (conversation, this) = (self.conversation.clone(), &*self);
                 conversation.update(cx, |view, cx| {
                     let changes = view.model.apply(&event);
                     view.changed(&changes, this, cx);
                 });
-                self.refresh_conversation(cx);
             }
             SessionUpdate::Requests(requests) => {
                 self.requests = requests.into_iter().map(|r| (r.number, r)).collect();
-                self.refresh_conversation(cx);
+                if self.read {
+                    self.refresh_conversation(cx);
+                }
             }
             SessionUpdate::Decided { number, decision } => {
                 self.decisions.insert(number, decision);
@@ -342,11 +403,29 @@ impl SessionPage {
         if let Some(decision) = decision {
             self.decisions.insert(number, decision);
         }
-        let row = self.conversation.read(cx).approval_row(number);
+        let row = self.conversation.read(cx).approval_row(number, cx);
         if let Some(row) = row {
             row.update(cx, |row, cx| row.answered(refused, cx));
         }
         self.refresh_conversation(cx);
+    }
+
+    /// A decision on a request, read from the shown agent's events.
+    fn note_decision(&mut self, event: &flottille_core::protocol::Event) {
+        let decision = match event.name.as_str() {
+            "approval.decided" => event.data["decision"].as_str(),
+            "approval.cancelled" => Some("cancelled"),
+            _ => None,
+        };
+        if let (Some(decision), Some(number)) = (decision, event.data["number"].as_u64()) {
+            self.decisions.insert(number, decision.to_owned());
+        }
+    }
+
+    fn has_children(&self) -> bool {
+        self.tree
+            .iter()
+            .any(|a| a.parent.as_deref() == Some(&self.shown))
     }
 
     fn note_usage(&self, event: &flottille_core::protocol::Event, cx: &mut Context<Self>) {
@@ -407,13 +486,13 @@ impl SessionPage {
     }
 
     /// Brings the rows that show the tree or the requests up to what the page knows: the
-    /// sub-agents list, the requests' cards and their records.
+    /// sub-agents list, the requests' cards and their records. Only those rows are looked at.
     fn refresh_conversation(&self, cx: &mut Context<Self>) {
+        if !self.read {
+            return;
+        }
         let conversation = self.conversation.clone();
-        let has_children = self
-            .tree
-            .iter()
-            .any(|a| a.parent.as_deref() == Some(&self.shown));
+        let has_children = self.has_children();
         let root = self.shown == self.opened.id;
         let mut numbers: Vec<u64> = self.requests.keys().copied().collect();
         numbers.sort();
@@ -424,14 +503,21 @@ impl SessionPage {
             }
             if root {
                 for number in numbers {
-                    let changes = view.model.add_approval(number);
-                    view.changed(&changes, self, cx);
+                    if !view.model.has_approval(number) {
+                        let changes = view.model.add_approval(number);
+                        view.changed(&changes, self, cx);
+                    }
                 }
             }
-            for row in view.rows.clone() {
-                let kind = row.read(cx).block.clone();
+            for at in view.specials.clone() {
+                let row = view.rows[at].clone();
+                view.touched += 1;
+                let kind = match *row.read(cx).block {
+                    Block::Approval { number } => Some(number),
+                    _ => None,
+                };
                 match kind {
-                    Block::SubAgents => {
+                    None => {
                         let lines = self.sub_agents();
                         if row.read(cx).sub_agents != lines {
                             row.update(cx, |row, cx| {
@@ -440,7 +526,7 @@ impl SessionPage {
                             });
                         }
                     }
-                    Block::Approval { number } => {
+                    Some(number) => {
                         let card = self.card(number);
                         if row.read(cx).card != card {
                             row.update(cx, |row, cx| {
@@ -449,7 +535,6 @@ impl SessionPage {
                             });
                         }
                     }
-                    _ => {}
                 }
             }
         });
@@ -474,7 +559,7 @@ impl SessionPage {
 
     fn card(&self, number: u64) -> Option<ApprovalCard> {
         let request = self.requests.get(&number);
-        let decision = self.decisions.get(&number).cloned();
+        let decision = self.decision(number).map(str::to_owned);
         if request.is_none() && decision.is_none() {
             return None;
         }
@@ -651,13 +736,35 @@ impl SessionPage {
     }
 }
 
-/// The conversation: one row view per block, in a column that scrolls.
+/// What a link read of the shown agent's conversation, to make its rows again.
+struct Read<'a> {
+    events: &'a [flottille_core::protocol::Event],
+    /// Older events were left out.
+    earlier: bool,
+    /// The requests that reached the user, each `(when it was asked, its number)`.
+    placed: Vec<(u64, u64)>,
+    /// The shown agent has children, launched before the events read.
+    launched_before: bool,
+    /// Its end is shown.
+    follow: bool,
+}
+
+/// The conversation: one row view per block, in a list that lays out and draws only the rows in
+/// view, and follows its end unless the user scrolled up to read.
 pub struct ConversationView {
     page: WeakEntity<SessionPage>,
     id: String,
     model: Conversation,
     rows: Vec<Entity<Row>>,
-    scroll: ScrollHandle,
+    /// The rows that show what the tree or the requests say (the sub-agents list, the requests),
+    /// brought up to date when those change.
+    specials: Vec<usize>,
+    /// Older events than those read remain.
+    earlier: bool,
+    /// How many times a row was looked at or changed, for the cost of an update.
+    touched: usize,
+    /// The list's items: "Show earlier" first when older events remain, then the rows.
+    list: ListState,
     renders: usize,
 }
 
@@ -668,9 +775,23 @@ impl ConversationView {
             id: id.to_owned(),
             model: Conversation::new(me, parent),
             rows: Vec::new(),
-            scroll: ScrollHandle::new(),
+            specials: Vec::new(),
+            earlier: false,
+            touched: 0,
+            list: Self::list(),
             renders: 0,
         }
+    }
+
+    fn list() -> ListState {
+        let list = ListState::new(0, ListAlignment::Top, px(600.));
+        list.set_follow_mode(FollowMode::Tail);
+        list
+    }
+
+    /// The list's item of a row.
+    fn item(&self, at: usize) -> usize {
+        at + usize::from(self.earlier)
     }
 
     pub fn rows(&self) -> &[Entity<Row>] {
@@ -685,49 +806,137 @@ impl ConversationView {
         self.model.blocks()
     }
 
-    fn clear(&mut self, cx: &mut Context<Self>) {
+    /// How many times a row was looked at or changed so far.
+    pub fn touched(&self) -> usize {
+        self.touched
+    }
+
+    /// Whether older events than those shown remain.
+    pub fn has_earlier(&self) -> bool {
+        self.earlier
+    }
+
+    /// Makes the rows again from what a link read: the events are folded first, then each
+    /// block gets its row.
+    fn rebuild(&mut self, read: Read, page: &SessionPage, cx: &mut Context<Self>) {
         self.model = self.model.restarted();
+        self.model.place_approvals(read.placed);
+        for event in read.events {
+            self.model.apply(event);
+        }
+        if read.launched_before {
+            self.model.prepend_sub_agents();
+        }
+        self.earlier = read.earlier;
         self.rows.clear();
+        self.specials.clear();
+        for at in 0..self.model.blocks().len() {
+            self.add_row(at, page, cx);
+        }
+        let items = self.item(self.rows.len());
+        match read.follow {
+            true => {
+                self.list = Self::list();
+                self.list.reset(items);
+                self.list.scroll_to_end();
+            }
+            // Earlier pages read: the rows shown before stay where they were, below them.
+            false => self.list.reset(items),
+        }
         cx.notify();
     }
 
-    fn approval_row(&self, number: u64) -> Option<Entity<Row>> {
-        self.rows
+    fn add_row(&mut self, at: usize, page: &SessionPage, cx: &mut Context<Self>) {
+        let block = self.model.blocks()[at].clone();
+        if matches!(block, Block::SubAgents | Block::Approval { .. }) {
+            self.specials.push(at);
+        }
+        let me = self.model.me().to_owned();
+        let row = Row::view(at, block, me, page, self.page.clone(), cx);
+        self.rows.push(row);
+        self.touched += 1;
+    }
+
+    fn approval_row(&self, number: u64, cx: &gpui_kit::App) -> Option<Entity<Row>> {
+        self.specials
             .iter()
-            .zip(self.model.blocks())
-            .find(|(_, block)| **block == Block::Approval { number })
-            .map(|(row, _)| row.clone())
+            .map(|at| &self.rows[*at])
+            .find(|row| *row.read(cx).block == Block::Approval { number })
+            .cloned()
     }
 
     /// Adds a row for each block added, and draws again each row whose block changed.
     fn changed(&mut self, changes: &[Change], page: &SessionPage, cx: &mut Context<Self>) {
         let mut added = false;
         for change in changes {
-            match *change {
+            match change {
                 Change::Added => {
-                    let at = self.rows.len();
-                    let block = self.model.blocks()[at].clone();
-                    let me = self.model.me().to_owned();
-                    let row = Row::view(at, block, me, page, self.page.clone(), cx);
-                    self.rows.push(row);
+                    let item = self.item(self.rows.len());
+                    self.add_row(self.rows.len(), page, cx);
+                    self.list.splice(item..item, 1);
                     added = true;
                 }
                 Change::Changed(at) => {
-                    let block = self.model.blocks()[at].clone();
-                    if let Some(row) = self.rows.get(at).cloned() {
+                    let block = self.model.blocks()[*at].clone();
+                    if let Some(row) = self.rows.get(*at).cloned() {
+                        self.touched += 1;
                         row.update(cx, |row, cx| row.set_block(block, cx));
+                        let item = self.item(*at);
+                        self.list.remeasure_items(item..item + 1);
+                    }
+                }
+                Change::Appended(at, piece) => {
+                    if let Some(row) = self.rows.get(*at).cloned() {
+                        self.touched += 1;
+                        row.update(cx, |row, cx| row.append(piece, cx));
+                        let item = self.item(*at);
+                        self.list.remeasure_items(item..item + 1);
                     }
                 }
             }
         }
         if added {
-            // Following the end, unless the user scrolled up to read.
-            let (offset, max) = (self.scroll.offset().y, self.scroll.max_offset().y);
-            if -offset >= max - px(24.) {
-                self.scroll.scroll_to_bottom();
-            }
             cx.notify();
         }
+    }
+
+    /// The list's item `ix`: "Show earlier", or a row, in the conversation's column.
+    fn render_item(&mut self, ix: usize, window: &mut Window, _: &mut Context<Self>) -> AnyElement {
+        let narrow = window.viewport_size().width < px(crate::shell::NARROW);
+        let column = div()
+            .max_w(px(780.))
+            .w_full()
+            .mx_auto()
+            .px(px(if narrow { 16. } else { 28. }))
+            .when(ix == 0, |d| d.pt(px(if narrow { 20. } else { 28. })))
+            .pb(px(if ix + 1 == self.item(self.rows.len()) {
+                20.
+            } else {
+                18.
+            }));
+        if self.earlier && ix == 0 {
+            let page = self.page.clone();
+            return column
+                .flex()
+                .justify_center()
+                .child(
+                    Button::quiet("show-earlier", "Show earlier").on_click(move |_, _, cx| {
+                        page.update(cx, |page, cx| page.show_earlier(cx)).ok();
+                    }),
+                )
+                .into_any_element();
+        }
+        let at = ix - usize::from(self.earlier);
+        let Some(row) = self.rows.get(at) else {
+            return div().into_any_element();
+        };
+        column
+            .child(enter(
+                ElementId::Name(format!("enter-row-{}-{at}", self.id).into()),
+                0,
+                row.clone(),
+            ))
+            .into_any_element()
     }
 }
 
@@ -736,34 +945,35 @@ impl Render for ConversationView {
         self.renders += 1;
         let p = palette(cx);
         let narrow = window.viewport_size().width < px(crate::shell::NARROW);
-        let empty = self.rows.is_empty();
+        let id = SharedString::from(format!("conversation-{}", self.id));
+        if self.rows.is_empty() && !self.earlier {
+            return div()
+                .id(id)
+                .size_full()
+                .child(
+                    div()
+                        .max_w(px(780.))
+                        .w_full()
+                        .mx_auto()
+                        .px(px(if narrow { 16. } else { 28. }))
+                        .pt(px(if narrow { 20. } else { 28. }))
+                        .text_color(p.faint)
+                        .child("Nothing said yet."),
+                )
+                .into_any_element();
+        }
         div()
-            .id(SharedString::from(format!("conversation-{}", self.id)))
+            .id(id)
             .size_full()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
             .child(
-                div()
-                    .max_w(px(780.))
-                    .w_full()
-                    .mx_auto()
-                    .px(px(if narrow { 16. } else { 28. }))
-                    .pt(px(if narrow { 20. } else { 28. }))
-                    .pb(px(20.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(18.))
-                    .when(empty, |d| {
-                        d.child(div().text_color(p.faint).child("Nothing said yet."))
-                    })
-                    .children(self.rows.iter().enumerate().map(|(at, row)| {
-                        enter(
-                            ElementId::Name(format!("enter-row-{}-{at}", self.id).into()),
-                            0,
-                            row.clone(),
-                        )
-                    })),
+                list(
+                    self.list.clone(),
+                    cx.processor(|this, ix, window, cx| this.render_item(ix, window, cx)),
+                )
+                .size_full(),
             )
+            .test_support()
+            .into_any_element()
     }
 }
 
@@ -816,7 +1026,8 @@ pub struct Row {
     /// The agent whose conversation it is, as the page names it.
     me: String,
     page: WeakEntity<SessionPage>,
-    block: Block,
+    /// Shared with nothing: a piece streamed is appended to it in place.
+    block: Rc<Block>,
     /// A thought unfolded.
     open: bool,
     thinking: Option<(Entity<PulsingLabel>, Entity<ThinkingTimer>)>,
@@ -852,9 +1063,9 @@ impl Row {
                 at,
                 me,
                 page: weak,
-                block: Block::Text {
+                block: Rc::new(Block::Text {
                     text: String::new(),
-                },
+                }),
                 open: false,
                 thinking: None,
                 calls: Vec::new(),
@@ -889,6 +1100,11 @@ impl Row {
 
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    /// The state each call's mark shows.
+    pub fn marks(&self, cx: &gpui_kit::App) -> Vec<AgentState> {
+        self.calls.iter().map(|(s, _)| s.read(cx).state()).collect()
     }
 
     fn set_block(&mut self, block: Block, cx: &mut Context<Self>) {
@@ -940,8 +1156,16 @@ impl Row {
             }
             _ => {}
         }
-        self.block = block;
+        self.block = Rc::new(block);
         cx.notify();
+    }
+
+    /// The reply or the thought it shows goes on with `piece`.
+    fn append(&mut self, piece: &str, cx: &mut Context<Self>) {
+        if let Block::Text { text } | Block::Thought { text, .. } = Rc::make_mut(&mut self.block) {
+            text.push_str(piece);
+            cx.notify();
+        }
     }
 
     fn answer(&mut self, answer: Answer, cx: &mut Context<Self>) {
@@ -977,6 +1201,7 @@ fn call_state(call: &Call) -> AgentState {
         CallState::Running => AgentState::Running,
         CallState::Done => AgentState::Completed,
         CallState::Failed => AgentState::Failed,
+        CallState::Interrupted => AgentState::Stopped,
     }
 }
 
@@ -985,7 +1210,9 @@ impl Render for Row {
         self.renders += 1;
         let p = palette(cx);
         let id = |part: &str| ElementId::Name(format!("row-{}-{part}", self.at).into());
-        match self.block.clone() {
+        // The row's own block, not a copy of it.
+        let block = self.block.clone();
+        match &*block {
             Block::Message { from, text } => div()
                 .id(id("message"))
                 .flex()
@@ -1008,9 +1235,9 @@ impl Render for Row {
                                 .mono(11.5)
                                 .text_color(p.faint)
                                 .mb(px(5.))
-                                .child(SharedString::from(from)),
+                                .child(SharedString::from(from.clone())),
                         )
-                        .child(SharedString::from(text)),
+                        .child(SharedString::from(text.clone())),
                 )
                 .test_support()
                 .into_any_element(),
@@ -1049,7 +1276,7 @@ impl Render for Row {
                                 .border_color(p.line)
                                 .text_size(px(13.))
                                 .text_color(p.mute)
-                                .child(SharedString::from(text))
+                                .child(SharedString::from(text.clone()))
                                 .test_support(),
                         )
                     })
@@ -1085,7 +1312,7 @@ impl Render for Row {
                             )
                             .child(SharedString::from(me)),
                     )
-                    .child(SharedString::from(text))
+                    .child(SharedString::from(text.clone()))
                     .test_support()
                     .into_any_element()
             }
@@ -1130,6 +1357,15 @@ impl Render for Row {
                                                             .medium()
                                                             .text_color(p.run)
                                                             .child("RUNNING"),
+                                                    )
+                                                })
+                                                .when(call.state == CallState::Interrupted, |d| {
+                                                    d.child(
+                                                        div()
+                                                            .mono(10.)
+                                                            .medium()
+                                                            .text_color(p.faint)
+                                                            .child("INTERRUPTED"),
                                                     )
                                                 }),
                                         )
@@ -1212,7 +1448,7 @@ impl Render for Row {
                                 .px(px(14.))
                                 .pt(px(10.))
                                 .pb(px(12.))
-                                .child(SharedString::from(text)),
+                                .child(SharedString::from(text.clone())),
                         ),
                 )
                 .test_support()
@@ -1223,8 +1459,8 @@ impl Render for Row {
                 .gap(px(8.))
                 .mono(12.)
                 .text_color(p.faint)
-                .child(div().flex_none().child(SharedString::from(kind)))
-                .child(div().min_w_0().child(SharedString::from(text)))
+                .child(div().flex_none().child(SharedString::from(kind.clone())))
+                .child(div().min_w_0().child(SharedString::from(text.clone())))
                 .test_support()
                 .into_any_element(),
             Block::Diff { path, lines } => {
@@ -1243,30 +1479,37 @@ impl Render for Row {
                                     .items_center()
                                     .gap(px(8.))
                                     .child(icon(Icon::Repository).text_color(p.faint))
-                                    .child(div().mono(12.5).child(SharedString::from(path))),
+                                    .child(
+                                        div().mono(12.5).child(SharedString::from(path.clone())),
+                                    ),
                             )
                             .meta(format!("+{added} −{removed}"))
-                            .child(div().py(px(6.)).mono(12.).children(lines.into_iter().map(
-                                |line| {
-                                    let (text, bg, ink) = match line {
-                                        DiffLine::Removed(text) => {
-                                            (format!("- {text}"), p.del, p.fail)
-                                        }
-                                        DiffLine::Added(text) => (format!("+ {text}"), p.add, p.ok),
-                                    };
-                                    div()
-                                        .px(px(14.))
-                                        .bg(bg)
-                                        .text_color(ink)
-                                        .whitespace_nowrap()
-                                        .child(SharedString::from(text))
-                                },
-                            ))),
+                            .child(
+                                div()
+                                    .py(px(6.))
+                                    .mono(12.)
+                                    .children(lines.iter().map(|line| {
+                                        let (text, bg, ink) = match line {
+                                            DiffLine::Removed(text) => {
+                                                (format!("- {text}"), p.del, p.fail)
+                                            }
+                                            DiffLine::Added(text) => {
+                                                (format!("+ {text}"), p.add, p.ok)
+                                            }
+                                        };
+                                        div()
+                                            .px(px(14.))
+                                            .bg(bg)
+                                            .text_color(ink)
+                                            .whitespace_nowrap()
+                                            .child(SharedString::from(text))
+                                    })),
+                            ),
                     )
                     .test_support()
                     .into_any_element()
             }
-            Block::Approval { number } => self.render_card(number, cx).into_any_element(),
+            Block::Approval { number } => self.render_card(*number, cx).into_any_element(),
         }
     }
 }
@@ -1490,9 +1733,10 @@ impl SessionRail {
         }
     }
 
-    fn set_place(&mut self, place: PlaceFacts, cx: &mut Context<Self>) {
-        if self.place.as_ref() != Some(&place) {
-            self.place = Some(place);
+    /// The place's facts; `None` when the daemon has none (the workspace was removed).
+    fn set_place(&mut self, place: Option<PlaceFacts>, cx: &mut Context<Self>) {
+        if self.place != place {
+            self.place = place;
             cx.notify();
         }
     }

@@ -1687,3 +1687,364 @@ fn the_editor_button_opens_the_place_s_folder_with_the_system_handler(cx: &mut T
 
     assert_eq!(*given.lock().unwrap(), [folder]);
 }
+
+fn row_ids(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Vec<gpui_kit::EntityId> {
+    page.read_with(cx, |p, cx| {
+        p.conversation()
+            .read(cx)
+            .rows()
+            .iter()
+            .map(|row| row.entity_id())
+            .collect()
+    })
+}
+
+#[gpui_kit::test]
+fn a_session_whose_workspace_is_removed_keeps_its_page_without_its_facts_and_reads_nothing_again(
+    cx: &mut TestAppContext,
+) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the workspace's facts", |cx| {
+        page.read_with(cx, |p, cx| {
+            p.rail()
+                .read(cx)
+                .place()
+                .is_some_and(|place| !place.repositories.is_empty())
+        })
+    });
+    let rows = row_ids(&page, cx);
+    assert_eq!(page.read_with(cx, |p, _| p.histories()), 1);
+
+    user.call("workspace.remove", json!({"project": "app", "name": "w"}))
+        .unwrap();
+    until(&shell, cx, "the facts are gone", |cx| {
+        page.read_with(cx, |p, cx| p.rail().read(cx).place().is_none())
+    });
+    // A turn ending reads the place again: the daemon does not know it any more.
+    send(&user, &lead, "still there?");
+    until(&shell, cx, "the lead answered", |cx| {
+        blocks(&page, cx).len() == rows.len() + 2
+    });
+    let deadline = Instant::now() + Duration::from_secs(1);
+    until(&shell, cx, "a second has passed", |_| {
+        Instant::now() > deadline
+    });
+
+    assert!(page.read_with(cx, |p, cx| p.rail().read(cx).place().is_none()));
+    assert_eq!(
+        page.read_with(cx, |p, _| p.histories()),
+        1,
+        "the conversation was read once"
+    );
+    assert_eq!(
+        row_ids(&page, cx)[..rows.len()],
+        rows[..],
+        "the rows already there were kept"
+    );
+}
+
+#[gpui_kit::test]
+fn a_card_appears_while_another_session_streams_without_pause(cx: &mut TestAppContext) {
+    let user = team_user();
+    let pieces: Vec<serde_json::Value> = (0..3000)
+        .flat_map(|n| [json!({"say": format!("{n} ")}), json!({"wait": 10})])
+        .collect();
+    user.fake_script(json!({"turns": [
+        {"when": "HANG", "do": [{"hang": true}]},
+        {"when": "STREAM", "do": pieces}
+    ]}));
+    let (lead, mcp, _) = lead_in_w(&user);
+    let streamer = user
+        .call(
+            "agent.run",
+            json!({"project": "app", "message": "STREAM for a while"}),
+        )
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    eventually("the other session streams", || {
+        user.call("agent.show", json!({"agent": streamer})).unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["name"] == "agent.message")
+            .count()
+            > 20
+    });
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+
+    let number = held_number(mcp.call("fs_read", json!({"path": ".env"})));
+    let asked = Instant::now();
+    until(&shell, cx, "the card is shown", |cx| {
+        cx.update(|window, _| window.try_find(format!("allow-once-{number}")).is_some())
+    });
+
+    let state =
+        user.call("agent.show", json!({"agent": streamer})).unwrap()["agent"]["state"].clone();
+    assert_eq!(state, "working", "the other session still streams");
+    assert!(
+        asked.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        asked.elapsed()
+    );
+}
+
+/// Events of the shown agent made up for the page, numbered from `seq`.
+fn made_up(seq: u64, name: &str, data: serde_json::Value) -> flottille_core::protocol::Event {
+    flottille_core::protocol::Event {
+        seq,
+        at: seq,
+        name: name.into(),
+        data,
+    }
+}
+
+/// Gives the page a conversation of `turns` messages and replies, as its link would.
+fn read_turns(page: &Entity<SessionPage>, turns: u64, cx: &mut VisualTestContext) {
+    let events = (0..turns)
+        .flat_map(|n| {
+            [
+                made_up(
+                    2 * n + 1,
+                    "agent.prompted",
+                    json!({"text": format!("[flottille:user]\nmessage {n}")}),
+                ),
+                made_up(
+                    2 * n + 2,
+                    "agent.message",
+                    json!({"text": format!("reply {n}")}),
+                ),
+            ]
+        })
+        .collect();
+    page.update(cx, |p, cx| {
+        let token = p.token().unwrap();
+        p.apply(
+            token,
+            flottille_window::session_link::SessionUpdate::History {
+                events,
+                earlier: false,
+            },
+            cx,
+        )
+    });
+}
+
+#[gpui_kit::test]
+fn a_streamed_piece_costs_one_row_however_long_the_conversation(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    settle(cx);
+    let mut costs = Vec::new();
+    for turns in [5, 500] {
+        read_turns(&page, turns, cx);
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let rows = row_ids(&page, cx).len();
+        assert_eq!(rows as u64, 2 * turns);
+        let touched = |cx: &mut VisualTestContext| {
+            page.read_with(cx, |p, cx| p.conversation().read(cx).touched())
+        };
+        let (before, started) = (touched(cx), Instant::now());
+        let mut drawn = Duration::ZERO;
+        for piece in 0..100 {
+            page.update(cx, |p, cx| {
+                let token = p.token().unwrap();
+                p.apply(
+                    token,
+                    flottille_window::session_link::SessionUpdate::Live(made_up(
+                        10_000 + piece,
+                        "agent.message",
+                        json!({"text": " more"}),
+                    )),
+                    cx,
+                )
+            });
+            let frame = Instant::now();
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            drawn += frame.elapsed();
+        }
+        let applied = started.elapsed() - drawn;
+        assert_eq!(
+            touched(cx) - before,
+            100,
+            "one row per piece, with {rows} rows"
+        );
+        costs.push((rows, applied / 100, drawn / 100));
+    }
+    for (rows, applied, drawn) in costs {
+        eprintln!("{rows} rows: {applied:?} to apply a piece, {drawn:?} to draw its frame");
+    }
+}
+
+#[gpui_kit::test]
+fn a_call_left_running_shows_interrupted_when_the_conversation_is_read(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    page.update(cx, |p, cx| {
+        let token = p.token().unwrap();
+        p.apply(
+            token,
+            flottille_window::session_link::SessionUpdate::History {
+                events: vec![
+                    made_up(1, "agent.thought", json!({"text": "Let me look"})),
+                    made_up(
+                        2,
+                        "agent.tool_call",
+                        json!({"id": "t", "title": "fs_read", "status": "in_progress"}),
+                    ),
+                    made_up(9, "agent.turn_ended", json!({"stop_reason": "cancelled"})),
+                ],
+                earlier: false,
+            },
+            cx,
+        )
+    });
+    settle(cx);
+
+    let blocks = blocks(&page, cx);
+    let Block::Steps { calls } = &blocks[1] else {
+        panic!("{blocks:?}");
+    };
+    assert_eq!(
+        calls[0].state,
+        flottille_window::conversation::CallState::Interrupted
+    );
+    assert!(matches!(blocks[0], Block::Thought { until: Some(_), .. }));
+    let marks = page.read_with(cx, |p, cx| {
+        p.conversation().read(cx).rows()[1].read(cx).marks(cx)
+    });
+    assert_eq!(marks, [AgentState::Stopped], "no spinner at rest");
+    cx.update(|window, _| assert!(window.try_find("step-1-0").is_some()));
+}
+
+#[gpui_kit::test]
+fn an_answered_request_keeps_its_record_when_the_page_is_opened_again(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, mcp, _) = lead_in_w(&user);
+    let (_worker_id, worker) = worker(&user, &mcp, "read the settings");
+    let forwarded = held_number(worker.call("fs_read", json!({"path": ".env"})));
+    let answer = mcp.call(
+        "approval_answer",
+        json!({"request_id": forwarded, "decision": "forward", "why": "it needs the name"}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    user.call("approval.deny", json!({"number": forwarded}))
+        .unwrap();
+    let own = held_number(mcp.call("fs_read", json!({"path": ".env"})));
+    user.call("approval.approve", json!({"number": own}))
+        .unwrap();
+
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    until(&shell, cx, "both records are shown", |cx| {
+        cx.update(|window, _| {
+            window
+                .try_find(format!("approval-record-{forwarded}"))
+                .is_some()
+                && window.try_find(format!("approval-record-{own}")).is_some()
+        })
+    });
+    let records = session_page(&shell, cx).read_with(cx, |p, cx| {
+        p.conversation()
+            .read(cx)
+            .rows()
+            .iter()
+            .filter_map(|row| row.read(cx).card().and_then(|c| c.record()))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        records,
+        [
+            "Denied · Read .env · read the settings",
+            "Allowed once · Read .env · lead"
+        ]
+    );
+}
+
+#[gpui_kit::test]
+fn a_long_conversation_shows_its_last_page_and_earlier_ones_on_demand(cx: &mut TestAppContext) {
+    let user = team_user();
+    let pieces: Vec<serde_json::Value> =
+        (0..1100).map(|n| json!({"say": format!("{n} ")})).collect();
+    user.fake_script(json!({"turns": [
+        {"when": "HANG", "do": [{"hang": true}]},
+        {"when": "talk", "do": pieces}
+    ]}));
+    let (lead, mcp, _) = lead_in_w(&user);
+    let (child, _worker) = worker(&user, &mcp, "build the form");
+    send(&user, &lead, "talk at length");
+    eventually("the long turn ends", || {
+        user.call("agent.show", json!({"agent": lead, "before": u64::MAX}))
+            .unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .last()
+            .is_some_and(|e| e["name"] == "agent.turn_ended")
+    });
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the sub-agents' list", |cx| {
+        blocks(&page, cx).contains(&Block::SubAgents)
+    });
+    settle(cx);
+
+    assert!(page.read_with(cx, |p, cx| p.conversation().read(cx).has_earlier()));
+    let shown = blocks(&page, cx);
+    assert_eq!(
+        shown[0],
+        Block::SubAgents,
+        "launched before the page read: first, not where the tree came"
+    );
+    assert!(
+        !shown.contains(&Block::Message {
+            from: "you".into(),
+            text: "lead the work".into()
+        }),
+        "the first message is on an earlier page"
+    );
+    assert!(matches!(shown.last(), Some(Block::Text { text }) if text.ends_with("1099 ")));
+
+    // Scrolled up to the start of what is shown, as a reader would.
+    let middle = cx.update(|window, _| {
+        window
+            .find(format!("conversation-{lead}"))
+            .bounds()
+            .center()
+    });
+    for _ in 0..20 {
+        cx.simulate_event(gpui_kit::ScrollWheelEvent {
+            position: middle,
+            delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(2000.))),
+            ..Default::default()
+        });
+        settle(cx);
+    }
+    cx.update(|window, cx| window.click("show-earlier", cx));
+    until(&shell, cx, "the earlier page", |cx| {
+        blocks(&page, cx)[0]
+            == Block::Message {
+                from: "you".into(),
+                text: "lead the work".into(),
+            }
+    });
+    settle(cx);
+    assert!(!page.read_with(cx, |p, cx| p.conversation().read(cx).has_earlier()));
+    let listed = page.read_with(cx, |p, cx| {
+        p.conversation()
+            .read(cx)
+            .rows()
+            .iter()
+            .flat_map(|row| row.read(cx).sub_agents().to_vec())
+            .map(|a| a.id)
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(listed, [child]);
+}

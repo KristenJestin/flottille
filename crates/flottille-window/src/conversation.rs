@@ -3,7 +3,7 @@
 //! sub-agents it launched, a report, a diff, a request that reached the user). Nothing here talks
 //! to the socket or draws: the page turns each change into one row drawn again or one row added.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use flottille_core::protocol::Event;
 use serde_json::Value;
@@ -64,6 +64,8 @@ pub enum CallState {
     Running,
     Done,
     Failed,
+    /// Still running when the turn or the agent ended: it will not end.
+    Interrupted,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -86,12 +88,14 @@ impl Call {
 }
 
 /// What applying an event changed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Change {
     /// A row was added at the end.
     Added,
     /// The row at this index shows something else.
     Changed(usize),
+    /// The text of the row at this index (a reply or a thought streaming) goes on with this.
+    Appended(usize, String),
 }
 
 /// The prefix Claude Code gives the tools of Flottille's MCP server.
@@ -115,6 +119,15 @@ pub struct Conversation {
     /// The arguments of each `fs_edit` call still running, for its diff once it is done: its
     /// updates do not repeat them.
     edits: HashMap<String, Value>,
+    /// The row of each tool call, by its id.
+    calls: HashMap<String, usize>,
+    /// The rows of steps with a call still running.
+    running: HashSet<usize>,
+    /// The requests that have a row.
+    approvals: HashSet<u64>,
+    /// Requests asked by another agent, each with when it was asked, the soonest first: each
+    /// gets its row before the first event that came after it.
+    pending_approvals: VecDeque<(u64, u64)>,
 }
 
 impl Conversation {
@@ -128,6 +141,10 @@ impl Conversation {
             launched: false,
             has_sub_agents: false,
             edits: HashMap::new(),
+            calls: HashMap::new(),
+            running: HashSet::new(),
+            approvals: HashSet::new(),
+            pending_approvals: VecDeque::new(),
         }
     }
 
@@ -161,12 +178,24 @@ impl Conversation {
 
     /// Adds the card of a request that reached the user, once.
     pub fn add_approval(&mut self, number: u64) -> Vec<Change> {
-        if self.blocks.contains(&Block::Approval { number }) {
+        if self.approvals.contains(&number) {
             return Vec::new();
         }
+        self.approvals.insert(number);
         let mut changes = self.close(None);
         changes.extend(self.push(Block::Approval { number }));
         changes
+    }
+
+    pub fn has_approval(&self, number: u64) -> bool {
+        self.approvals.contains(&number)
+    }
+
+    /// Requests that reached the user, each `(when it was asked, its number)`, to be placed
+    /// among the events read next: the events of another agent's request are not this one's.
+    pub fn place_approvals(&mut self, mut requests: Vec<(u64, u64)>) {
+        requests.sort();
+        self.pending_approvals = requests.into();
     }
 
     /// The list of sub-agents, when a child was launched and none is shown yet.
@@ -178,6 +207,19 @@ impl Conversation {
         self.close(None)
     }
 
+    /// The list of sub-agents first, before any row is drawn: launched before the events read.
+    pub fn prepend_sub_agents(&mut self) {
+        if self.has_sub_agents {
+            return;
+        }
+        self.has_sub_agents = true;
+        self.launched = false;
+        self.blocks.insert(0, Block::SubAgents);
+        let shift = |at: &mut usize| *at += 1;
+        self.calls.values_mut().for_each(shift);
+        self.running = self.running.iter().map(|at| at + 1).collect();
+    }
+
     /// Folds one event of the agent in. Events numbered at or before the last one applied are
     /// left out.
     pub fn apply(&mut self, event: &Event) -> Vec<Change> {
@@ -185,8 +227,21 @@ impl Conversation {
             return Vec::new();
         }
         self.last_seq = event.seq;
+        let mut changes = Vec::new();
+        while let Some(&(at, number)) = self.pending_approvals.front()
+            && at <= event.at
+        {
+            self.pending_approvals.pop_front();
+            changes.extend(self.add_approval(number));
+        }
+        changes.extend(self.fold(event));
+        changes
+    }
+
+    fn fold(&mut self, event: &Event) -> Vec<Change> {
         let data = &event.data;
         let text = |field: &str| data[field].as_str().unwrap_or_default().to_owned();
+        let last = self.blocks.len().saturating_sub(1);
         match event.name.as_str() {
             "agent.thought" => match self.blocks.last_mut() {
                 Some(Block::Thought {
@@ -194,8 +249,9 @@ impl Conversation {
                     until: None,
                     ..
                 }) => {
-                    thought.push_str(&text("text"));
-                    vec![Change::Changed(self.blocks.len() - 1)]
+                    let piece = text("text");
+                    thought.push_str(&piece);
+                    vec![Change::Appended(last, piece)]
                 }
                 _ => {
                     let mut changes = self.close(Some(event.at));
@@ -211,8 +267,9 @@ impl Conversation {
                 let mut changes = self.end_thought(event.at);
                 match self.blocks.last_mut() {
                     Some(Block::Text { text: said }) if changes.is_empty() => {
-                        said.push_str(&text("text"));
-                        changes.push(Change::Changed(self.blocks.len() - 1));
+                        let piece = text("text");
+                        said.push_str(&piece);
+                        changes.push(Change::Appended(last, piece));
                     }
                     _ => {
                         changes.extend(self.close(Some(event.at)));
@@ -234,7 +291,7 @@ impl Conversation {
                 let call = Call {
                     id: text("id"),
                     name,
-                    args: one_line(&data["raw_input"]),
+                    args: shown_args(&data["raw_input"]),
                     state: call_state(data["status"].as_str()),
                     since: event.at,
                     until: None,
@@ -243,12 +300,19 @@ impl Conversation {
                     until: (call.state != CallState::Running).then_some(event.at),
                     ..call
                 };
+                let running = call.state == CallState::Running;
+                let id = call.id.clone();
                 match self.blocks.last_mut() {
                     Some(Block::Steps { calls }) => {
                         calls.push(call);
                         changes.push(Change::Changed(self.blocks.len() - 1));
                     }
                     _ => changes.extend(self.push(Block::Steps { calls: vec![call] })),
+                }
+                let at = self.blocks.len() - 1;
+                self.calls.insert(id, at);
+                if running {
+                    self.running.insert(at);
                 }
                 changes
             }
@@ -273,9 +337,14 @@ impl Conversation {
                 let number = data["number"].as_u64().unwrap_or(0);
                 self.add_approval(number)
             }
-            "agent.turn_ended" => self.close(Some(event.at)),
+            "agent.turn_ended" | "agent.died" => {
+                let mut changes = self.close(Some(event.at));
+                changes.extend(self.interrupt(event.at));
+                changes
+            }
             "agent.failed" | "agent.ended" => {
                 let mut changes = self.close(Some(event.at));
+                changes.extend(self.interrupt(event.at));
                 let kind = event.name.trim_start_matches("agent.").to_owned();
                 changes.extend(self.push(Block::Notice {
                     kind,
@@ -315,41 +384,54 @@ impl Conversation {
         }
     }
 
+    /// The turn or the agent ended: the calls still running will not end.
+    fn interrupt(&mut self, at: u64) -> Vec<Change> {
+        let mut rows: Vec<usize> = self.running.drain().collect();
+        rows.sort();
+        for row in &rows {
+            if let Some(Block::Steps { calls }) = self.blocks.get_mut(*row) {
+                for call in calls.iter_mut().filter(|c| c.state == CallState::Running) {
+                    call.state = CallState::Interrupted;
+                    call.until = Some(at);
+                }
+            }
+        }
+        rows.into_iter().map(Change::Changed).collect()
+    }
+
     fn update_call(&mut self, event: &Event) -> Vec<Change> {
         let data = &event.data;
         let id = data["id"].as_str().unwrap_or_default();
-        let found = self
-            .blocks
-            .iter_mut()
-            .enumerate()
-            .rev()
-            .find_map(|(at, block)| {
-                let Block::Steps { calls } = block else {
-                    return None;
-                };
-                calls
-                    .iter_mut()
-                    .find(|call| call.id == id)
-                    .map(|call| (at, call))
-            });
-        let Some((at, call)) = found else {
+        let Some(&at) = self.calls.get(id) else {
+            return Vec::new();
+        };
+        let Some(Block::Steps { calls }) = self.blocks.get_mut(at) else {
+            return Vec::new();
+        };
+        let Some(call) = calls.iter_mut().find(|call| call.id == id) else {
             return Vec::new();
         };
         if let Some(title) = data["title"].as_str() {
             call.name = title.strip_prefix(PREFIX).unwrap_or(title).to_owned();
         }
         if !data["raw_input"].is_null() {
-            call.args = one_line(&data["raw_input"]);
+            call.args = shown_args(&data["raw_input"]);
             if call.name == "fs_edit" {
                 self.edits
                     .insert(call.id.clone(), data["raw_input"].clone());
             }
         }
-        if let Some(status) = data["status"].as_str() {
+        if let Some(status) = data["status"].as_str()
+            && call.state != CallState::Interrupted
+        {
             call.state = call_state(Some(status));
             if call.state != CallState::Running && call.until.is_none() {
                 call.until = Some(event.at);
             }
+        }
+        let call = call.clone();
+        if !calls.iter().any(|c| c.state == CallState::Running) {
+            self.running.remove(&at);
         }
         let mut changes = vec![Change::Changed(at)];
         let ended = call.state == CallState::Done && call.until == Some(event.at);
@@ -417,6 +499,19 @@ pub fn one_line(value: &Value) -> String {
     match value {
         Value::Null => String::new(),
         value => value.to_string(),
+    }
+}
+
+/// The longest a call's arguments are kept for its line: the line shows one line of them, and a
+/// file written whole would otherwise stay in memory once per call.
+const ARGS: usize = 300;
+
+/// A call's arguments on one line, cut for its line.
+fn shown_args(value: &Value) -> String {
+    let line = one_line(value);
+    match line.char_indices().nth(ARGS) {
+        Some((cut, _)) => format!("{}…", &line[..cut]),
+        None => line,
     }
 }
 
@@ -524,7 +619,8 @@ mod tests {
         );
         assert_eq!(
             c.apply(&event(3, "agent.message", json!({"text": "it."}))),
-            [Change::Changed(1)]
+            [Change::Appended(1, "it.".into())],
+            "the piece alone, to append in place"
         );
         assert_eq!(
             c.blocks(),
@@ -698,5 +794,106 @@ mod tests {
                 ]
             }
         );
+    }
+
+    fn running_call(seq: u64, id: &str) -> Event {
+        event(
+            seq,
+            "agent.tool_call",
+            json!({"id": id, "title": "fs_read", "status": "in_progress"}),
+        )
+    }
+
+    #[test]
+    fn a_call_left_running_when_the_turn_or_the_agent_ends_is_interrupted() {
+        for end in [
+            "agent.turn_ended",
+            "agent.died",
+            "agent.failed",
+            "agent.ended",
+        ] {
+            let mut c = root();
+            c.apply(&running_call(1, "a"));
+            c.apply(&event(2, "agent.thought", json!({"text": "Hm"})));
+            c.apply(&running_call(3, "b"));
+            c.apply(&event(
+                4,
+                "agent.tool_call",
+                json!({"id": "b", "update": true, "status": "completed"}),
+            ));
+
+            let changes = c.apply(&event(9, end, json!({"reason": "gone"})));
+
+            assert!(changes.contains(&Change::Changed(0)), "{end}: {changes:?}");
+            let Block::Steps { calls } = &c.blocks()[0] else {
+                panic!("{:?}", c.blocks());
+            };
+            assert_eq!(calls[0].state, CallState::Interrupted, "{end}");
+            assert_eq!(calls[0].duration_ms(), Some(800), "{end}");
+            assert!(
+                matches!(c.blocks()[1], Block::Thought { until: Some(_), .. }),
+                "{end}: the thought ended"
+            );
+            let Block::Steps { calls } = &c.blocks()[2] else {
+                panic!("{:?}", c.blocks());
+            };
+            assert_eq!(
+                calls[0].state,
+                CallState::Done,
+                "{end}: a call that ended stays so"
+            );
+            // A late update does not start it again.
+            c.apply(&event(
+                10,
+                "agent.tool_call",
+                json!({"id": "a", "update": true, "status": "in_progress"}),
+            ));
+            let Block::Steps { calls } = &c.blocks()[0] else {
+                panic!();
+            };
+            assert_eq!(calls[0].state, CallState::Interrupted, "{end}");
+        }
+    }
+
+    #[test]
+    fn a_request_another_agent_asked_is_placed_when_it_was_asked() {
+        let mut c = root();
+        c.place_approvals(vec![(450, 7), (50, 3)]);
+        c.apply(&event(1, "agent.message", json!({"text": "Reading."})));
+        c.apply(&event(4, "agent.message", json!({"text": " Done."})));
+        c.apply(&event(9, "agent.thought", json!({"text": "Next"})));
+        assert_eq!(
+            c.blocks(),
+            [
+                Block::Approval { number: 3 },
+                Block::Text {
+                    text: "Reading. Done.".into()
+                },
+                Block::Approval { number: 7 },
+                Block::Thought {
+                    text: "Next".into(),
+                    since: 900,
+                    until: None
+                },
+            ]
+        );
+        assert!(c.add_approval(7).is_empty(), "once");
+    }
+
+    #[test]
+    fn a_call_s_arguments_are_cut_for_its_line() {
+        let mut c = root();
+        let content = "x".repeat(5_000);
+        c.apply(&event(
+            1,
+            "agent.tool_call",
+            json!({"id": "w", "title": "fs_write", "status": "in_progress",
+                "raw_input": {"path": "a.txt", "content": content}}),
+        ));
+        let Block::Steps { calls } = &c.blocks()[0] else {
+            panic!();
+        };
+        assert_eq!(calls[0].args.chars().count(), ARGS + 1);
+        assert!(calls[0].args.ends_with('…'));
     }
 }

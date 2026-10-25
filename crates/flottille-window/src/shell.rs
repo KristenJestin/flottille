@@ -770,15 +770,30 @@ impl Shell {
                     None => Page::Empty,
                 }
             }
-            Selection::Session(id) => match (self.snapshot.session(id), self.sessions.get(id)) {
-                (Some(session), Some(row)) => Page::Session {
-                    id: id.clone(),
-                    title: session.title.clone(),
-                    place: session.place.clone(),
-                    status: row.read(cx).status(),
-                },
-                _ => Page::Empty,
-            },
+            Selection::Session(id) => {
+                let open = self
+                    .session_page
+                    .as_ref()
+                    .map(|page| page.read(cx))
+                    .filter(|page| page.id() == id);
+                match (self.snapshot.session(id), self.sessions.get(id), open) {
+                    (Some(session), Some(row), _) => Page::Session {
+                        id: id.clone(),
+                        title: session.title.clone(),
+                        place: session.place.clone(),
+                        status: row.read(cx).status(),
+                    },
+                    // A session whose workspace was removed has no row in the tree: its page,
+                    // open, stays open.
+                    (Some(session), None, Some(page)) => Page::Session {
+                        id: id.clone(),
+                        title: session.title.clone(),
+                        place: session.place.clone(),
+                        status: page.status().clone(),
+                    },
+                    _ => Page::Empty,
+                }
+            }
         }
     }
 
