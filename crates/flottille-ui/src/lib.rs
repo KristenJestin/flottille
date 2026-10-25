@@ -4,6 +4,7 @@
 //! and the same motion. A second, slightly different version of one of them is a defect.
 
 pub mod icons;
+pub mod motion;
 pub mod typography;
 
 use gpui_kit::App;
