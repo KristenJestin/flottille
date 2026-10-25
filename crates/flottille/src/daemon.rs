@@ -18,6 +18,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinSet;
 
 use crate::VERSION;
+use crate::projects::{self, Projects};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -31,10 +32,11 @@ pub fn run(paths: &Paths) -> Result<()> {
     ensure_private_dir(&paths.state)?;
     let _lock = take_lock(paths)?;
     let store = Store::open(&paths.database())?;
+    let projects = Projects::open(paths)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(serve(paths, store))
+    runtime.block_on(serve(paths, store, projects))
 }
 
 /// The lock is held for the daemon's whole life: the kernel lets go of it when the process ends,
@@ -62,9 +64,11 @@ fn take_lock(paths: &Paths) -> Result<File> {
     Ok(lock)
 }
 
-struct Daemon {
+pub struct Daemon {
     started: Instant,
     events: Mutex<Events>,
+    /// Taken before `events` when both are: the projects' methods emit under it.
+    pub projects: Mutex<Projects>,
     /// Becomes true when the daemon stops.
     stopping: watch::Sender<bool>,
 }
@@ -84,7 +88,7 @@ struct Subscription {
 impl Daemon {
     /// Stores the event and hands it to the subscribers under one lock, so that they see the
     /// events in the order of their numbers.
-    fn emit(&self, name: &str, data: Value) -> Result<Event> {
+    pub fn emit(&self, name: &str, data: Value) -> Result<Event> {
         let events = self.events.lock().unwrap();
         let event = events.store.append_event(name, data)?;
         if let Some(bus) = &events.bus {
@@ -116,7 +120,7 @@ impl Daemon {
     }
 }
 
-async fn serve(paths: &Paths, store: Store) -> Result<()> {
+async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     let socket = paths.socket();
     // Holding the lock, a socket already there is one a dead daemon left.
     match std::fs::remove_file(&socket) {
@@ -131,6 +135,7 @@ async fn serve(paths: &Paths, store: Store) -> Result<()> {
             store,
             bus: Some(bus),
         }),
+        projects: Mutex::new(projects),
         stopping: watch::Sender::new(false),
     });
     let mut terminate = signal(SignalKind::terminate())?;
@@ -254,6 +259,13 @@ fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) 
                 },
             }
         }
+        method if method.starts_with("project.") => (
+            match projects::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+            },
+            None,
+        ),
         method => (
             Message::error(
                 Some(id),

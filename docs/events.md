@@ -37,3 +37,34 @@ subscribers have this event.
 | Field | |
 |---|---|
 | `reason` | `request` (`flottille daemon stop`) or `signal` (`SIGTERM`, `SIGINT`). |
+
+### `project.added`
+
+A project was registered (`project.add`), or its file appeared in the configuration folder.
+
+| Field | |
+|---|---|
+| `name` | The project's name. |
+| `folder` | Its folder. |
+
+### `project.changed`
+
+The project's file was edited: the daemon noticed it at its next request about projects.
+
+| Field | |
+|---|---|
+| `name` | The project's name. |
+| `folder` | Its folder. |
+
+### `project.removed`
+
+The project was removed (`project.remove`), or its file is gone. Only Flottille's configuration is
+removed, never the folder.
+
+| Field | |
+|---|---|
+| `name` | The project's name. |
+
+A project already there when the daemon starts is not announced, and a file that cannot be used is
+neither a change nor a removal: the project it was stays as it was until the file is fixed or taken
+away.
