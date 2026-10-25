@@ -45,6 +45,8 @@ const LINE_CHARS: usize = 2_000;
 /// The last messages `agent_status` and a parent's deliveries show of a child.
 const LAST_MESSAGES: usize = 3;
 const MESSAGE_CHARS: usize = 600;
+/// What a report holds at most, in characters: it rides whole as a note on its parent's results.
+const REPORT_CHARS: usize = 10_000;
 /// A reported child still in its turn this long after is stopped.
 const REPORT_GRACE_MS: u64 = 2 * 60 * 1000;
 
@@ -540,6 +542,14 @@ async fn report(daemon: &Arc<Daemon>, grant: &Grant, caller: &Agent, args: Value
     let asked: Report = arguments("report", args)?;
     if asked.text.trim().is_empty() {
         return Err(refused("refused: the report is empty"));
+    }
+    let length = asked.text.chars().count();
+    if length > REPORT_CHARS {
+        return Err(refused(format!(
+            "refused: the report is {length} characters, over {REPORT_CHARS}: say what was done \
+             and what is left in fewer words, and put the details in a file of your place that \
+             the report names"
+        )));
     }
     if caller.reported_at.is_some() && caller.parent.is_some() {
         return Err(refused(
