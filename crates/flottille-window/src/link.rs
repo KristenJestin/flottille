@@ -51,8 +51,17 @@ pub struct Seen {
 
 const FIRST_RETRY: Duration = Duration::from_millis(100);
 const LAST_RETRY: Duration = Duration::from_secs(5);
-/// Events that come together are read in one go before the shell is read again.
+/// Events that come together are taken in one go before what they change is read again: once
+/// they pause this long, or this long after the first of them at most, so that an agent
+/// streaming without a pause does not hold the rest back.
 const QUIET: Duration = Duration::from_millis(40);
+const LONGEST: Duration = Duration::from_millis(250);
+
+/// How long to wait for more events, when what they change was first known to be stale at
+/// `since`; `None` (as long as it takes) when nothing is.
+pub(crate) fn quiet_wait(since: Option<Instant>) -> Option<Duration> {
+    since.map(|since| QUIET.min(LONGEST.saturating_sub(since.elapsed())))
+}
 
 /// Starts the link's thread. It ends when the receiver is dropped.
 pub fn spawn(connect: Connect) -> (UnboundedReceiver<Update>, Arc<Seen>) {
@@ -109,14 +118,17 @@ fn follow(
         seen.last_seq
             .store(started["after"].as_u64().unwrap_or(0), Ordering::Relaxed);
     }
-    let mut stale = true;
+    // When what the shell shows was first known to be stale.
+    let mut stale = Some(Instant::now());
     loop {
-        // Everything that came already, then a short quiet, before reading the shell again.
-        let wait = if stale { Some(QUIET) } else { None };
-        match conn.next_event(wait)? {
+        // Everything that came already, then a short quiet (or a short while at most), before
+        // reading the shell again.
+        match conn.next_event(quiet_wait(stale))? {
             Some(event) => {
                 note(seen, &event);
-                stale |= matters(&event);
+                if matters(&event) {
+                    stale.get_or_insert_with(Instant::now);
+                }
             }
             None => {
                 let snapshot = read(&mut conn, briefs, seen)?;
@@ -124,10 +136,12 @@ fn follow(
                     return Ok(());
                 }
                 // Events that came while it read are queued: they make it stale again.
-                stale = false;
+                stale = None;
                 while let Some(event) = conn.queued.pop() {
                     note(seen, &event);
-                    stale |= matters(&event);
+                    if matters(&event) {
+                        stale.get_or_insert_with(Instant::now);
+                    }
                 }
             }
         }
@@ -292,7 +306,11 @@ impl Conn {
 
     /// The daemon's answer: its result, or the sentence of its error. The outer error is the
     /// connection's.
-    fn ask(&mut self, method: &str, params: Value) -> Result<std::result::Result<Value, String>> {
+    pub(crate) fn ask(
+        &mut self,
+        method: &str,
+        params: Value,
+    ) -> Result<std::result::Result<Value, String>> {
         self.ask_until(method, params, None)
     }
 
