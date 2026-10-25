@@ -318,3 +318,25 @@ fn a_kept_agent_id_and_the_prompt_s_request_fill_a_later_call() {
             .all(|e| e["session"] == session)
     );
 }
+
+#[test]
+fn a_recall_step_says_what_the_user_said_earlier_in_the_session() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        json!({"turns": [{"when": "again", "do": [{"recall": true}]}]}).to_string(),
+    )
+    .unwrap();
+    let mut fake = Fake::start(dir.path());
+    fake.request(1, "initialize", json!({"protocolVersion": 1}));
+    let (_, opened) = fake.request(2, "session/new", json!({"cwd": "/", "mcpServers": []}));
+    let session = opened["result"]["sessionId"].clone();
+
+    prompt(&mut fake, 3, &session, "teal is my colour");
+    let (updates, _) = prompt(&mut fake, 4, &session, "again");
+
+    assert_eq!(
+        updates[0]["params"]["update"]["content"]["text"],
+        "earlier you said: teal is my colour"
+    );
+}

@@ -49,6 +49,7 @@
 //! | Step | What the agent does |
 //! |---|---|
 //! | `{"say": "text"}` | an `agent_message_chunk` |
+//! | `{"recall": true}` | an `agent_message_chunk` saying what the user said earlier in this session (`earlier you said: a | b`): the proof that a session kept its history |
 //! | `{"think": "text"}` | an `agent_thought_chunk` |
 //! | `{"usage": {"used": 190000, "size": 200000}}` | a `usage_update` |
 //! | `{"compaction": true}` | a completed tool call carrying `_meta.jetbrains.air.contextCompaction`, as the Claude adapter reports a compaction |
@@ -382,11 +383,10 @@ impl Agent {
                 return "cancelled".into();
             }
             if let Some(text) = step["say"].as_str() {
-                self.remember(session, json!({"agent": text}));
-                self.notify(
-                    session,
-                    json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}),
-                );
+                self.say(session, text);
+            } else if step["recall"] == true {
+                let said = self.said_by_the_user(session);
+                self.say(session, &format!("earlier you said: {}", said.join(" | ")));
             } else if let Some(text) = step["think"].as_str() {
                 self.notify(
                     session,
@@ -522,6 +522,26 @@ impl Agent {
             json!({"sessionUpdate": "tool_call_update", "toolCallId": call_id,
                 "status": if status == 200 { "completed" } else { "failed" }, "rawOutput": body}),
         );
+    }
+
+    fn say(&self, session: &str, text: &str) {
+        self.remember(session, json!({"agent": text}));
+        self.notify(
+            session,
+            json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}),
+        );
+    }
+
+    /// What the user said in the session before the prompt that runs, the oldest first.
+    fn said_by_the_user(&self, session: &str) -> Vec<String> {
+        let history = std::fs::read_to_string(self.history_file(session)).unwrap_or_default();
+        let mut said: Vec<String> = history
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter_map(|entry| entry["user"].as_str().map(str::to_owned))
+            .collect();
+        said.pop();
+        said
     }
 
     fn history_file(&self, session: &str) -> PathBuf {
