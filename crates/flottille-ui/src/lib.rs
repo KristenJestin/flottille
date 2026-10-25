@@ -7,6 +7,7 @@ pub mod color;
 pub mod icons;
 pub mod motion;
 pub mod omarchy;
+pub mod state;
 pub mod theme;
 pub mod typography;
 
@@ -14,6 +15,7 @@ use gpui_kit::App;
 
 pub use icons::{Icon, Icons, icon};
 pub use omarchy::Environment;
+pub use state::{AgentState, Pill, StateIcon, Status};
 pub use theme::{Palette, palette};
 pub use typography::Type;
 
