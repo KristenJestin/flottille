@@ -28,6 +28,7 @@
 //! | Step | What the fake does |
 //! |---|---|
 //! | `{"say": "text"}` | a `text_delta` stream event, then an `assistant` message with the text |
+//! | `{"stream": ["a", "b"]}` | a `text_delta` stream event for each part, then one `assistant` message with them all |
 //! | `{"think": "text"}` | the same with a `thinking_delta` and a thinking block |
 //! | `{"tool": {"id", "name", "input", "result"}}` | an `assistant` message with the `tool_use`, then a `user` message with its `tool_result` |
 //! | `{"permission": {"tool": "Bash", "input": {}}}` | a `can_use_tool` control request, the answer recorded |
@@ -260,6 +261,13 @@ impl Fake {
                 said.push_str(text);
                 self.delta(json!({"type": "text_delta", "text": text}));
                 self.assistant(json!({"type": "text", "text": text}));
+            } else if let Some(parts) = step["stream"].as_array() {
+                let parts: Vec<&str> = parts.iter().filter_map(Value::as_str).collect();
+                for part in &parts {
+                    self.delta(json!({"type": "text_delta", "text": part}));
+                }
+                said.push_str(&parts.concat());
+                self.assistant(json!({"type": "text", "text": parts.concat()}));
             } else if let Some(text) = step["think"].as_str() {
                 self.delta(json!({"type": "thinking_delta", "thinking": text}));
                 self.assistant(json!({"type": "thinking", "thinking": text, "signature": "x"}));

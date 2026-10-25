@@ -469,8 +469,19 @@ fn idle_release() -> Duration {
         .map_or(IDLE_RELEASE, Duration::from_millis)
 }
 
+/// The agent's task: its life, then, once it ended, its session's history goes.
+async fn agent_task(daemon: Arc<Daemon>, id: String, orders: mpsc::UnboundedReceiver<Order>) {
+    agent_life(daemon.clone(), id.clone(), orders).await;
+    if let Ok(Some(agent)) = daemon.read(|store| store.agent(&id))
+        && agent.state.is_final()
+        && let Some(native) = &agent.native_id
+    {
+        claude::forget_history(&daemon.paths, native);
+    }
+}
+
 /// The life of one agent: a process per stretch of work, until it stops or fails.
-async fn agent_task(daemon: Arc<Daemon>, id: String, mut orders: mpsc::UnboundedReceiver<Order>) {
+async fn agent_life(daemon: Arc<Daemon>, id: String, mut orders: mpsc::UnboundedReceiver<Order>) {
     let mut turns = Turns {
         queued: VecDeque::new(),
         running: false,
@@ -675,6 +686,11 @@ pub fn replace(daemon: &Arc<Daemon>, id: &str, reason: &str, counted: bool, tell
             store.supersede_like(id, &[&format!("brief-{id}-"), &format!("resume-{id}-")])?,
         ))
     });
+    let replaced = daemon
+        .read(|store| store.agent(id))
+        .ok()
+        .flatten()
+        .and_then(|agent| agent.native_id);
     let agent = match daemon.write(|store| store.replace_agent(id, &reason, counted)) {
         Ok(agent) if !agent.state.is_final() => agent,
         Ok(_) => return false,
@@ -683,6 +699,10 @@ pub fn replace(daemon: &Arc<Daemon>, id: &str, reason: &str, counted: bool, tell
             return false;
         }
     };
+    // No process runs here: the old session is over, and nothing will load it.
+    if let Some(native) = replaced {
+        claude::forget_history(&daemon.paths, &native);
+    }
     if let Some(brief) = &agent.brief {
         deliveries::deliver(
             daemon,

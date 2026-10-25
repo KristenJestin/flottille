@@ -376,6 +376,64 @@ fn through_the_bridge_a_provider_error_is_reported_and_the_agent_lives_on() {
     assert_eq!(show(&user, &id)["agent"]["state"], "idle");
 }
 
+/// The bridge's history of the agent's session, once its session is open.
+fn history(user: &User, agent: &str) -> PathBuf {
+    let native = show(user, agent)["agent"]["native_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    user.path(&format!("state/flottille/bridge/claude/{native}.jsonl"))
+}
+
+/// Whether `gone` comes true within 10 s.
+fn within_10_s(gone: impl Fn() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !gone() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    gone()
+}
+
+#[test]
+fn through_the_bridge_a_session_s_history_goes_with_its_replacement() {
+    let user = User::with_fake_claude();
+    user.claude_script(json!({"turns": [{"when": "boom", "do": [{"die": 3}]}]}));
+    project(&user);
+    let (id, after) = run(&user, "hello");
+    events_until(&user, &id, after, "agent.turn_ended");
+    let first = history(&user, &id);
+    assert!(first.exists());
+
+    // Given back, the message kills each new session too, until the agent fails.
+    let sent = user
+        .call("agent.send", json!({"agent": id, "message": "boom"}))
+        .unwrap();
+    let after = sent["after"].as_u64().unwrap();
+    events_until(&user, &id, after, "agent.replaced");
+    assert!(!first.exists(), "the replaced session's history is removed");
+    events_until(&user, &id, after, "agent.failed");
+
+    let folder = user.path("state/flottille/bridge/claude");
+    assert!(within_10_s(|| std::fs::read_dir(&folder)
+        .unwrap()
+        .next()
+        .is_none()));
+}
+
+#[test]
+fn through_the_bridge_a_session_s_history_goes_when_its_agent_ends() {
+    let user = User::with_fake_claude();
+    project(&user);
+    let (id, after) = run(&user, "hello");
+    events_until(&user, &id, after, "agent.turn_ended");
+    let history = history(&user, &id);
+    assert!(history.exists());
+
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+
+    assert!(within_10_s(|| !history.exists()));
+}
+
 #[test]
 fn an_agent_is_refused_while_claude_is_not_on_path() {
     let user = User::new();

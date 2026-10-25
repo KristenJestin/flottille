@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use flottille_core::paths::Paths;
 use serde_json::{Value, json};
 
 /// The version of `claude` whose stream-json mode the bridge was checked against
@@ -145,6 +146,28 @@ pub fn find_program(name: &str) -> Option<PathBuf> {
             std::fs::metadata(candidate)
                 .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         })
+}
+
+/// Where the bridge keeps each session's conversation, which a load replays.
+pub fn histories(paths: &Paths) -> PathBuf {
+    paths.state.join("bridge/claude")
+}
+
+/// The bridge's history of a session, which a session id of the bridge names.
+pub fn history(paths: &Paths, session: &str) -> Option<PathBuf> {
+    is_session_id(session).then(|| histories(paths).join(format!("{session}.jsonl")))
+}
+
+/// A session id that names a file: letters, digits and dashes only.
+pub fn is_session_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// The session is over (replaced, or its agent ended): its history goes, nothing will load it.
+pub fn forget_history(paths: &Paths, session: &str) {
+    if let Some(path) = history(paths, session) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// How the agent's process starts.

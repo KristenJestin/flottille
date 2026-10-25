@@ -184,7 +184,9 @@ bridge runs one session.
 - **Resume and load**: both start `claude` with `--resume`. A load first replays the session's
   history, the texts of its prompts, replies and thoughts, which the bridge keeps in
   `$XDG_STATE_HOME/flottille/bridge/claude/<session>.jsonl` (it never reads Claude Code's own
-  files).
+  files): one line per message, its secrets masked as the daemon masks what it keeps, only its
+  later half kept past 4 MiB. The daemon removes it when the session is replaced or its agent
+  ends.
 - **A death**: once the session is open, the end of `claude` ends the bridge with its exit code
   (128 and the signal for a signal), which the daemon sees as the agent's death.
 - **Its end**: its input closed or a `SIGTERM`, the bridge closes `claude`'s input, kills it if

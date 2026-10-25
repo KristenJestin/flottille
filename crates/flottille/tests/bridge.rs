@@ -528,6 +528,39 @@ fn a_resumed_session_runs_claude_with_resume_and_a_loaded_one_replays_its_histor
 }
 
 #[test]
+fn the_history_is_masked_and_kept_one_line_per_message() {
+    let user = User::with_fake_claude().with_env("ANTHROPIC_API_KEY", "invented-key-123");
+    user.claude_script(json!({"turns": [{"when": "hello", "do": [
+        {"stream": ["Hel", "lo, ", "invented-key-123"]},
+        {"think": "a greeting"}
+    ]}]}));
+    let mut bridge = Bridge::start(&user);
+    let session = bridge.open(&user, &[]);
+
+    bridge
+        .prompt(&session, "hello, my key is invented-key-123")
+        .0
+        .unwrap();
+
+    let history = std::fs::read_to_string(
+        user.path(&format!("state/flottille/bridge/claude/{session}.jsonl")),
+    )
+    .unwrap();
+    let lines: Vec<Value> = history
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            json!({"user": "hello, my key is [masked]"}),
+            json!({"agent": "Hello, [masked]"}),
+            json!({"thought": "a greeting"})
+        ]
+    );
+}
+
+#[test]
 fn a_session_claude_does_not_know_cannot_be_resumed() {
     let user = User::with_fake_claude();
     let mut bridge = Bridge::start(&user);

@@ -7,7 +7,8 @@
 //! One bridge runs one session. Once the session is open, the end of its `claude` is the end of
 //! the bridge, with the same exit code: the daemon sees the agent die.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::ExitStatusExt;
@@ -16,6 +17,7 @@ use std::process::{ExitCode, ExitStatus, Stdio};
 use std::time::Duration;
 
 use flottille_core::paths::{Paths, ensure_private_dir};
+use flottille_core::secrets;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
@@ -37,6 +39,9 @@ const OPTIONS: [&str; 6] = [
     "systemPrompt",
     "env",
 ];
+
+/// A history past this size keeps its later half: a load replays what fits.
+const HISTORY_CAP: u64 = 4 << 20;
 
 const NOT_FOUND: i64 = -32601;
 const INVALID: i64 = -32602;
@@ -68,7 +73,8 @@ pub fn run(paths: &Paths) -> Result<ExitCode, Box<dyn std::error::Error>> {
         .build()?;
     let bridge = Bridge {
         folder: paths.runtime.join("bridge"),
-        histories: paths.state.join("bridge/claude"),
+        paths: paths.clone(),
+        env: std::env::vars_os().collect(),
         offers_resume: std::env::var_os("FLOTTILLE_BRIDGE_NO_RESUME").is_none(),
         out: tokio::io::stdout(),
         claude: None,
@@ -87,8 +93,9 @@ pub fn run(paths: &Paths) -> Result<ExitCode, Box<dyn std::error::Error>> {
 struct Bridge {
     /// Where the MCP configuration with the session's token is written, out of the command line.
     folder: PathBuf,
-    /// Each session's conversation, replayed by `session/load`.
-    histories: PathBuf,
+    paths: Paths,
+    /// Its environment, whose secrets are masked out of the history.
+    env: BTreeMap<OsString, OsString>,
     offers_resume: bool,
     out: tokio::io::Stdout,
     claude: Option<Claude>,
@@ -313,7 +320,7 @@ impl Bridge {
         } else {
             params["sessionId"]
                 .as_str()
-                .filter(|id| is_session_id(id))
+                .filter(|id| claude::is_session_id(id))
                 .ok_or_else(|| invalid("not a session id of the Claude bridge".into()))?
                 .to_owned()
         };
@@ -325,7 +332,7 @@ impl Bridge {
         })?;
         let internal = |e: &dyn std::fmt::Display| (INTERNAL, e.to_string());
         ensure_private_dir(&self.folder).map_err(|e| internal(&e))?;
-        ensure_private_dir(&self.histories).map_err(|e| internal(&e))?;
+        ensure_private_dir(&claude::histories(&self.paths)).map_err(|e| internal(&e))?;
         let config = self.folder.join(format!("{}.mcp.json", std::process::id()));
         write_private(&config, &servers.to_string()).map_err(|e| internal(&e))?;
         let mut child = Command::new(&program)
@@ -356,7 +363,7 @@ impl Bridge {
                 }
             }
         });
-        let history = self.histories.join(format!("{session}.jsonl"));
+        let history = claude::history(&self.paths, &session).expect("a session id names a file");
         self.claude = Some(Claude {
             child,
             stdin: Some(stdin),
@@ -442,7 +449,7 @@ impl Bridge {
                 }
             }
         }
-        remember(&claude.history, json!({"user": text}));
+        remember(&claude.history, "user", &text, &self.env);
         let session = claude.session.clone();
         self.turn = Some(Turn {
             id: id.clone(),
@@ -642,10 +649,7 @@ impl Bridge {
         .await;
     }
 
-    async fn chunk(&mut self, kind: &str, key: &str, text: &str) {
-        if let Some(claude) = &self.claude {
-            remember(&claude.history, json!({key: text}));
-        }
+    async fn chunk(&mut self, kind: &str, text: &str) {
         self.update(json!({"sessionUpdate": kind, "content": {"type": "text", "text": text}}))
             .await;
     }
@@ -655,16 +659,16 @@ impl Bridge {
             return;
         }
         let delta = &event["delta"];
-        let (kind, key, text) = match delta["type"].as_str() {
-            Some("text_delta") => ("agent_message_chunk", "agent", &delta["text"]),
-            Some("thinking_delta") => ("agent_thought_chunk", "thought", &delta["thinking"]),
+        let (kind, text) = match delta["type"].as_str() {
+            Some("text_delta") => ("agent_message_chunk", &delta["text"]),
+            Some("thinking_delta") => ("agent_thought_chunk", &delta["thinking"]),
             _ => return,
         };
         let Some(text) = text.as_str() else { return };
         if let Some(turn) = &mut self.turn {
             turn.streamed = true;
         }
-        self.chunk(kind, key, text).await;
+        self.chunk(kind, text).await;
     }
 
     async fn assistant(&mut self, whole: &Value) {
@@ -679,15 +683,9 @@ impl Bridge {
         }
         let streamed = self.turn.as_ref().is_some_and(|t| t.streamed);
         for block in message["content"].as_array().into_iter().flatten() {
-            match block["type"].as_str() {
-                Some("text") if !streamed => {
-                    let text = block["text"].as_str().unwrap_or_default();
-                    self.chunk("agent_message_chunk", "agent", text).await;
-                }
-                Some("thinking") if !streamed => {
-                    let text = block["thinking"].as_str().unwrap_or_default();
-                    self.chunk("agent_thought_chunk", "thought", text).await;
-                }
+            let (kind, key, text) = match block["type"].as_str() {
+                Some("text") => ("agent_message_chunk", "agent", &block["text"]),
+                Some("thinking") => ("agent_thought_chunk", "thought", &block["thinking"]),
                 Some("tool_use") => {
                     let tool = block["name"].as_str().unwrap_or_default();
                     // The call's id is the tool use's, which `claude` hands Flottille's MCP server
@@ -698,8 +696,17 @@ impl Bridge {
                         "rawInput": block["input"], "_meta": {"claudeCode": {"toolName": tool}}}),
                     )
                     .await;
+                    continue;
                 }
-                _ => {}
+                _ => continue,
+            };
+            let text = text.as_str().unwrap_or_default();
+            // The history keeps the whole message, one line, never its stream's pieces.
+            if let Some(claude) = &self.claude {
+                remember(&claude.history, key, text, &self.env);
+            }
+            if !streamed {
+                self.chunk(kind, text).await;
             }
         }
         if let Some(turn) = &mut self.turn {
@@ -1007,16 +1014,41 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     file.write_all(text.as_bytes())
 }
 
-/// One entry of the session's history; a history that cannot be written only loses its replay.
-fn remember(history: &Path, entry: Value) {
-    if let Ok(mut file) = std::fs::OpenOptions::new()
+/// One message of the session's history, its secrets masked; a history that cannot be written
+/// only loses its replay.
+fn remember(history: &Path, key: &str, text: &str, env: &BTreeMap<OsString, OsString>) {
+    let entry = json!({key: secrets::mask(text, env)});
+    let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .mode(0o600)
         .open(history)
-    {
-        let _ = file.write_all(format!("{entry}\n").as_bytes());
+    else {
+        return;
+    };
+    let _ = file.write_all(format!("{entry}\n").as_bytes());
+    if file.metadata().is_ok_and(|m| m.len() > HISTORY_CAP) {
+        let _ = keep_later_half(history, HISTORY_CAP);
     }
+}
+
+/// The history cut to the lines of its last `cap / 2` bytes.
+fn keep_later_half(history: &Path, cap: u64) -> std::io::Result<()> {
+    let text = std::fs::read(history)?;
+    let from = text.len().saturating_sub((cap / 2) as usize);
+    let start = text[from..]
+        .iter()
+        .position(|b| *b == b'\n')
+        .map_or(text.len(), |at| from + at + 1);
+    let kept = history.with_extension("jsonl.kept");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&kept)?;
+    file.write_all(&text[start..])?;
+    std::fs::rename(kept, history)
 }
 
 /// A new session id, a random UUID as `claude --session-id` takes it.
@@ -1034,11 +1066,6 @@ fn new_session_id() -> std::io::Result<String> {
         &hex[16..20],
         &hex[20..]
     ))
-}
-
-/// A session id that names a file: letters, digits and dashes only.
-fn is_session_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 /// A process's end as an exit code: its own, or 128 and the signal that ended it.
@@ -1059,10 +1086,10 @@ mod tests {
         let id = new_session_id().unwrap();
         assert_eq!(id.len(), 36);
         assert_eq!(&id[14..15], "4");
-        assert!(is_session_id(&id));
+        assert!(claude::is_session_id(&id));
         assert_ne!(id, new_session_id().unwrap());
-        assert!(!is_session_id("../../etc"));
-        assert!(!is_session_id(""));
+        assert!(!claude::is_session_id("../../etc"));
+        assert!(!claude::is_session_id(""));
     }
 
     #[test]
@@ -1080,6 +1107,32 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_history_past_its_cap_keeps_its_later_whole_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = dir.path().join("s.jsonl");
+        for n in 0..50 {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&history)
+                .unwrap()
+                .write_all(format!("{}\n", json!({"agent": format!("line {n}")})).as_bytes())
+                .unwrap();
+        }
+
+        keep_later_half(&history, 200).unwrap();
+
+        let text = std::fs::read_to_string(&history).unwrap();
+        assert!(text.len() <= 100, "{}", text.len());
+        let lines: Vec<Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.last().unwrap()["agent"], "line 49");
+        assert!(lines.len() > 1);
     }
 
     #[test]
