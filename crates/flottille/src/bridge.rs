@@ -69,7 +69,7 @@ pub fn run(paths: &Paths) -> Result<ExitCode, Box<dyn std::error::Error>> {
         .enable_all()
         .build()?;
     let bridge = Bridge {
-        folder: paths.runtime.join("bridge"),
+        folder: claude::bridge_files(paths),
         paths: paths.clone(),
         env: std::env::vars_os().collect(),
         offers_resume: std::env::var_os("FLOTTILLE_BRIDGE_NO_RESUME").is_none(),

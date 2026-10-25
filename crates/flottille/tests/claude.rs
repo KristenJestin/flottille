@@ -3,6 +3,7 @@
 
 mod common;
 
+use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
 
 use common::User;
@@ -511,6 +512,56 @@ fn through_the_bridge_an_agent_runs_on_a_path_of_claude_and_git_alone() {
         user.claude_starts()[0]["env"]["PATH"],
         path.to_str().unwrap()
     );
+}
+
+/// The MCP configuration files of the bridges, with the token each holds.
+fn token_files(user: &User) -> Vec<PathBuf> {
+    match std::fs::read_dir(user.path("runtime/flottille/bridge")) {
+        Ok(entries) => entries.map(|e| e.unwrap().path()).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+#[test]
+fn through_the_bridge_the_token_file_of_a_killed_bridge_is_removed() {
+    let user = User::with_fake_claude();
+    user.claude_script(json!({"turns": [{"when": "long", "do": [{"hang": true}]}]}));
+    project(&user);
+    let (id, after) = run(&user, "a long task");
+    events_until(&user, &id, after, "agent.prompted");
+    let files = token_files(&user);
+    assert_eq!(files.len(), 1, "{files:?}");
+    let pid: i32 = files[0]
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .strip_suffix(".mcp.json")
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    // SAFETY: a signal to the bridge this test's daemon started.
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+
+    events_until(&user, &id, after, "agent.died");
+    assert!(within_10_s(|| !files[0].exists()));
+}
+
+#[test]
+fn a_token_file_a_bridge_left_is_removed_when_the_daemon_starts() {
+    let user = User::with_fake_claude();
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(user.path("runtime/flottille/bridge"))
+        .unwrap();
+    let left = user.path("runtime/flottille/bridge/4242.mcp.json");
+    std::fs::write(&left, "{}").unwrap();
+
+    user.status();
+
+    assert!(!left.exists());
 }
 
 #[test]

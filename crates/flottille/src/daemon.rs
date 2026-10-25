@@ -43,6 +43,7 @@ pub fn run(paths: &Paths) -> Result<()> {
     let store = Store::open(&paths.database())?;
     // Before anything starts an agent: what a daemon that died left running is its own to kill.
     agents::kill_orphans(&store);
+    crate::claude::forget_bridges(paths);
     let projects = Projects::open(paths)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

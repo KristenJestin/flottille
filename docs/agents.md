@@ -148,7 +148,8 @@ bridge runs one session.
 - **The MCP configuration** (`{"mcpServers": {"flottille": {"type": "http", "url", "headers"}}}`)
   is a file only the user can read, `$XDG_RUNTIME_DIR/flottille/bridge/<the bridge's pid>.mcp.json`,
   removed when the bridge ends: the token never shows on a command line, which other users can
-  read.
+  read. A bridge killed before it could remove it leaves it to the daemon, which removes it once
+  the bridge's process group is gone, and removes any left at its start.
 - **The system prompt**, split at the cache boundary, goes in Claude Code's own `initialize`
   control request (`systemPrompt: [before, boundary, after]`, `systemPromptSnapshot: true`), as
   the official Agent SDK sends it. The session opens once `claude` answered it; a `claude` that

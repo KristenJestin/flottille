@@ -635,6 +635,7 @@ async fn process(
         }
     };
     let _ = daemon.read(|store| store.remove_process(pid));
+    claude::forget_bridge(&daemon.paths, pid);
     goes_on
 }
 

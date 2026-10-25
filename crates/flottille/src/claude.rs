@@ -148,6 +148,30 @@ pub fn find_program(name: &str) -> Option<PathBuf> {
         })
 }
 
+/// Where each bridge writes the MCP configuration with its token, `<its pid>.mcp.json`.
+pub fn bridge_files(paths: &Paths) -> PathBuf {
+    paths.runtime.join("bridge")
+}
+
+/// The bridge of that pid is gone: its MCP configuration goes with it, even when it was killed
+/// before it could remove it.
+pub fn forget_bridge(paths: &Paths, pid: u32) {
+    let _ = std::fs::remove_file(bridge_files(paths).join(format!("{pid}.mcp.json")));
+}
+
+/// At daemon start: no bridge of a previous daemon runs any more (its group was killed), and its
+/// token was that daemon's. What they left goes.
+pub fn forget_bridges(paths: &Paths) {
+    let Ok(entries) = std::fs::read_dir(bridge_files(paths)) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().ends_with(".mcp.json") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Where the bridge keeps each session's conversation, which a load replays.
 pub fn histories(paths: &Paths) -> PathBuf {
     paths.state.join("bridge/claude")
