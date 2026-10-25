@@ -145,7 +145,8 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
         ))
     })?;
     let project = projects::load_project(daemon, &caller.project).map_err(|f| failed(f.message))?;
-    refuse_above_cap(daemon, &project.name, project.max_children)?;
+    // The slot is taken before anything is made: a launch refused leaves nothing behind.
+    let _slot = Slot::take(daemon, &project.name, project.max_children)?;
     let (workspace, preparing) = match asked.workspace {
         None => (caller.workspace.clone(), false),
         Some(WorkspaceChoice::Existing(name)) => (Some(name), false),
@@ -167,28 +168,23 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             (Some(name), true)
         }
     };
-    let created = {
-        // Checked again, and taken, at once: a launch made meanwhile counts.
-        let _launching = daemon.launching.lock().unwrap();
-        refuse_above_cap(daemon, &project.name, project.max_children)?;
-        agents::create(
-            daemon,
-            &project,
-            New {
-                workspace: workspace.clone(),
-                preparing,
-                role,
-                parent: Some((caller.id.clone(), caller.depth)),
-                title: Some(asked.title.trim().to_owned()),
-                brief: asked.brief.clone(),
-                chosen: Choices {
-                    model: asked.model,
-                    ..Choices::default()
-                },
+    let child = agents::create(
+        daemon,
+        &project,
+        New {
+            workspace: workspace.clone(),
+            preparing,
+            role,
+            parent: Some((caller.id.clone(), caller.depth)),
+            title: Some(asked.title.trim().to_owned()),
+            brief: asked.brief.clone(),
+            chosen: Choices {
+                model: asked.model,
+                ..Choices::default()
             },
-        )
-    };
-    let child = created.map_err(|f| refused(format!("refused: {}", f.message)))?;
+        },
+    )
+    .map_err(|f| refused(format!("refused: {}", f.message)))?;
     if preparing {
         tokio::spawn(brief_once_ready(daemon.clone(), child.clone()));
     } else {
@@ -203,17 +199,45 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     )))
 }
 
-fn refuse_above_cap(daemon: &Daemon, project: &str, cap: u8) -> Result<(), Outcome> {
-    let running = daemon
-        .read(|store| store.live_children(project))
-        .map_err(failed)?;
-    if running >= usize::from(cap) {
-        return Err(refused(format!(
-            "refused: {running} children already run in project {project}, its cap: do the work \
-             yourself, or wait for one of them to end (agent_stop ends one of yours)"
-        )));
+/// A slot of a project's children cap, taken by a launch until its child exists (and counts as a
+/// live child), or the launch fails.
+struct Slot<'a> {
+    daemon: &'a Daemon,
+    project: String,
+}
+
+impl<'a> Slot<'a> {
+    fn take(daemon: &'a Daemon, project: &str, cap: u8) -> Result<Slot<'a>, Outcome> {
+        let mut launching = daemon.launching.lock().unwrap();
+        let taken = launching.get(project).copied().unwrap_or(0);
+        let running = daemon
+            .read(|store| store.live_children(project))
+            .map_err(failed)?
+            + taken;
+        if running >= usize::from(cap) {
+            return Err(refused(format!(
+                "refused: {running} children already run in project {project}, its cap: do the \
+                 work yourself, or wait for one of them to end (agent_stop ends one of yours)"
+            )));
+        }
+        *launching.entry(project.to_owned()).or_default() += 1;
+        Ok(Slot {
+            daemon,
+            project: project.to_owned(),
+        })
     }
-    Ok(())
+}
+
+impl Drop for Slot<'_> {
+    fn drop(&mut self) {
+        let mut launching = self.daemon.launching.lock().unwrap();
+        if let Some(taken) = launching.get_mut(&self.project) {
+            *taken -= 1;
+            if *taken == 0 {
+                launching.remove(&self.project);
+            }
+        }
+    }
 }
 
 fn brief(daemon: &Arc<Daemon>, child: &Agent) {

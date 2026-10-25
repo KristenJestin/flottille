@@ -878,6 +878,56 @@ fn big_reports_pinned_on_an_agent_read_page_keep_its_cursor_and_stay_under_40000
 }
 
 #[test]
+fn two_launches_racing_for_the_last_slot_leave_no_workspace_of_the_refused_one() {
+    let user = user();
+    let (_, lead) = lead(&user);
+    launch(&lead, "a", "HANG one");
+    launch(&lead, "b", "HANG two");
+    let (url, authorization) = server(&user, |prompt| prompt.contains("You are the root"));
+
+    let answers: Vec<Answer> = std::thread::scope(|scope| {
+        let racers: Vec<_> = ["r1", "r2"]
+            .into_iter()
+            .map(|name| {
+                let (url, authorization) = (url.clone(), authorization.clone());
+                scope.spawn(move || {
+                    Mcp::initialize(&url, &authorization).call(
+                        "agent_launch",
+                        json!({"title": name, "brief": "HANG race",
+                            "workspace": {"new": {"name": name}}}),
+                    )
+                })
+            })
+            .collect();
+        racers.into_iter().map(|r| r.join().unwrap()).collect()
+    });
+
+    let launched = answers.iter().filter(|a| !a.error).count();
+    assert_eq!(
+        launched,
+        1,
+        "{:?}",
+        answers.iter().map(|a| &a.text).collect::<Vec<_>>()
+    );
+    let refusal = answers.iter().find(|a| a.error).unwrap();
+    assert!(
+        refusal.text.contains("3 children already run"),
+        "{}",
+        refusal.text
+    );
+    let listed = user
+        .call("workspace.list", json!({"project": "app"}))
+        .unwrap();
+    let names: Vec<&str> = listed["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names.len(), 2, "w and the launched one's: {names:?}");
+}
+
+#[test]
 fn a_user_cannot_cancel_a_worker_s_turn() {
     let user = user();
     let (_, lead) = lead(&user);

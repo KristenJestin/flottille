@@ -1,6 +1,6 @@
 //! The daemon: one per user, behind a Unix socket speaking JSON lines (`docs/protocol.md`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{ErrorKind, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -90,8 +90,8 @@ pub struct Daemon {
     pub notes: deliveries::Notes,
     /// The agents waiting on their provider (overloaded, rate-limited): not stuck.
     pub waiting_provider: Mutex<HashSet<String>>,
-    /// Held while a launch checks the children cap and takes its slot.
-    pub launching: Mutex<()>,
+    /// The slots launches took in each project's children cap, before their child exists.
+    pub launching: Mutex<HashMap<String, usize>>,
     /// Becomes true when the daemon stops.
     stopping: watch::Sender<bool>,
 }
@@ -189,7 +189,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         mcp: mcp::Server::new(tools.local_addr()?.port()),
         notes: deliveries::Notes::default(),
         waiting_provider: Mutex::new(HashSet::new()),
-        launching: Mutex::new(()),
+        launching: Mutex::new(HashMap::new()),
         stopping: watch::Sender::new(false),
     });
     let mut terminate = signal(SignalKind::terminate())?;
