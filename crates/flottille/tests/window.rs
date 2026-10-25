@@ -2089,3 +2089,30 @@ fn an_answer_given_on_one_session_s_page_is_not_applied_to_another(cx: &mut Test
         })
     });
 }
+
+#[gpui_kit::test]
+fn text_typed_while_a_reply_sends_is_kept(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    settle(cx);
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("first");
+    cx.simulate_keystrokes("enter");
+    let reply = shell
+        .read_with(cx, |s, _| s.reply_of(&lead).cloned())
+        .unwrap();
+    assert!(reply.read_with(cx, |r, _| r.is_sending()));
+
+    cx.simulate_input(" and then");
+    until(&shell, cx, "the daemon took the message", |cx| {
+        reply.read_with(cx, |r, _| !r.is_sending())
+    });
+
+    assert_eq!(
+        reply.read_with(cx, |r, cx| r.field().read(cx).value().to_string()),
+        "and then"
+    );
+    let prompts = user.received_requests("session/prompt");
+    assert!(prompts.iter().any(|p| p.to_string().contains("first")));
+}

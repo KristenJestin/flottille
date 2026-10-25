@@ -1951,6 +1951,8 @@ pub struct Reply {
     has_text: bool,
     focused: bool,
     sending: bool,
+    /// The field's text as it was sent, while it is: what is typed after it is kept.
+    sent: Option<String>,
     error: Option<SharedString>,
     renders: usize,
     _subscriptions: Vec<Subscription>,
@@ -2011,6 +2013,7 @@ impl Reply {
             has_text: false,
             focused: false,
             sending: false,
+            sent: None,
             error: None,
             renders: 0,
             _subscriptions: subscriptions,
@@ -2044,11 +2047,13 @@ impl Reply {
 
     /// Sends what the field holds to the root agent.
     pub fn send(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        let message = self.field.read(cx).value().trim().to_owned();
+        let typed = self.field.read(cx).value().to_string();
+        let message = typed.trim().to_owned();
         if self.sending || message.is_empty() {
             return;
         }
         self.sending = true;
+        self.sent = Some(typed);
         self.error = None;
         let command = Command::Reply {
             session: self.session.clone(),
@@ -2060,7 +2065,8 @@ impl Reply {
         cx.notify();
     }
 
-    /// What the daemon answered: the field is emptied, or keeps the message and says why.
+    /// What the daemon answered: what was sent leaves the field, and what was typed after it
+    /// stays; or the field keeps the message and says why.
     pub fn replied(
         &mut self,
         refused: Option<String>,
@@ -2068,12 +2074,18 @@ impl Reply {
         cx: &mut Context<Self>,
     ) {
         self.sending = false;
+        let sent = self.sent.take();
         match refused {
             None => {
                 self.error = None;
-                self.field
-                    .update(cx, |field, cx| field.set_value("", window, cx));
-                self.has_text = false;
+                let now = self.field.read(cx).value().to_string();
+                // A sent text changed meanwhile is left as it is: nothing typed is lost.
+                if let Some(rest) = sent.as_deref().and_then(|sent| now.strip_prefix(sent)) {
+                    let rest = rest.trim_start().to_owned();
+                    self.has_text = !rest.trim().is_empty();
+                    self.field
+                        .update(cx, |field, cx| field.set_value(rest, window, cx));
+                }
             }
             Some(why) => self.error = Some(why.into()),
         }
