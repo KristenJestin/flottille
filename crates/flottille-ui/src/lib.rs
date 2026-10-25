@@ -3,8 +3,10 @@
 //! Every screen of the window is built from these pieces, with the same tokens, the same states
 //! and the same motion. A second, slightly different version of one of them is a defect.
 
+pub mod button;
 pub mod color;
 pub mod icons;
+mod interact;
 pub mod motion;
 pub mod omarchy;
 pub mod reveal;
@@ -14,6 +16,7 @@ pub mod typography;
 
 use gpui_kit::App;
 
+pub use button::{Badge, Button, ButtonKind, Tooltip};
 pub use icons::{Icon, Icons, icon};
 pub use omarchy::Environment;
 pub use reveal::{Fold, PulsingLabel, enter};
