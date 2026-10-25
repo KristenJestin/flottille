@@ -4,7 +4,9 @@
 //! and the same motion. A second, slightly different version of one of them is a defect.
 
 pub mod button;
+pub mod card;
 pub mod color;
+pub mod drawer;
 pub mod icons;
 mod interact;
 pub mod motion;
@@ -18,6 +20,8 @@ pub mod typography;
 use gpui_kit::App;
 
 pub use button::{Badge, Button, ButtonKind, Tooltip};
+pub use card::Card;
+pub use drawer::{Drawer, Side};
 pub use icons::{Icon, Icons, icon};
 pub use omarchy::Environment;
 pub use reveal::{Fold, PulsingLabel, enter};
