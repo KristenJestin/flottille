@@ -68,6 +68,8 @@ pub struct Answers<'a> {
     pub needs_user: &'a HashSet<String>,
     /// Each root's first message, by id.
     pub briefs: &'a HashMap<String, String>,
+    /// The question each root asking the user asked last, by id: its text and when.
+    pub questions: &'a HashMap<String, (String, u64)>,
 }
 
 fn text(value: &Value, key: &str) -> String {
@@ -92,6 +94,13 @@ pub fn title_of(brief: &str) -> String {
         .to_owned()
 }
 
+/// A root of `agent.list` whose question waits for the user's answer, as the daemon keeps it.
+pub fn asks_the_user(agent: &Value) -> bool {
+    agent["parent"].is_null()
+        && agent["waiting_on_answer"] == true
+        && !matches!(agent["state"].as_str(), Some("ended" | "failed"))
+}
+
 /// The root of `id` in a tree of agents given by their parents.
 fn root_of<'a>(parents: &HashMap<&'a str, Option<&'a str>>, mut id: &'a str) -> &'a str {
     // A tree is at most a few levels deep; the bound only guards against a loop in bad data.
@@ -109,7 +118,8 @@ impl Snapshot {
     ///
     /// - a session is a root agent and its tree, in its root's place;
     /// - the bell lists every request the user holds (`approval.list`), which opens the session of
-    ///   the root of the agent that asked;
+    ///   the root of the agent that asked, and every root's question waiting for the user's answer
+    ///   (`waiting_on_answer`), which opens its session;
     /// - a session needs the user (`NEEDS YOU`) when the daemon says its root `needs_user`;
     ///   otherwise it is running when an agent of its tree starts or works; otherwise it shows no
     ///   mark.
@@ -139,6 +149,18 @@ impl Snapshot {
                     .unwrap_or_default()
                     .to_owned(),
                 at: number(request, "created_at"),
+            });
+        }
+        for root in agents.iter().filter(|agent| asks_the_user(agent)) {
+            let id = text(root, "id");
+            let (question, at) = answers.questions.get(&id).cloned().unwrap_or_default();
+            let title = title_of(answers.briefs.get(&id).map_or("", String::as_str));
+            bell.push(BellItem {
+                key: format!("question-{id}"),
+                label: format!("Question · {title}"),
+                detail: question,
+                at,
+                session: id,
             });
         }
         bell.sort_by_key(|item| item.at);
@@ -256,6 +278,7 @@ mod tests {
             agents: &agents,
             approvals: &approvals,
             needs_user: &needs_user.iter().map(|id| id.to_string()).collect(),
+            questions: &HashMap::new(),
             briefs: &HashMap::from([("r1".into(), "\n  Fix the login\nmore".into())]),
         })
     }
