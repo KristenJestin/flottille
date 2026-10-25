@@ -9,6 +9,7 @@ mod client;
 mod daemon;
 mod deliveries;
 mod files;
+mod follow;
 mod gate;
 mod git;
 mod inbox;

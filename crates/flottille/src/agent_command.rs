@@ -1,16 +1,16 @@
 //! `flottille agent` and `flottille doctor`: starting a Claude agent, writing to it, reading it
 //! and stopping it, and what the machine needs for one (`docs/agents.md`, `docs/cli.md`).
 
-use std::io::Write;
 use std::process::ExitCode;
 
 use clap::Subcommand;
 use flottille_core::paths::Paths;
-use flottille_core::protocol::{AgentName, AgentRun, AgentSend, WatchParams};
+use flottille_core::protocol::{AgentName, AgentRun, AgentSend};
 use serde_json::Value;
 
 use crate::claude;
 use crate::client::Client;
+use crate::follow::{Turn, follow};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -36,6 +36,10 @@ pub enum AgentAction {
     Send {
         agent: String,
         message: String,
+        /// Print the reply as it streams, until the turn that plays the message ends
+        #[arg(long, short)]
+        follow: bool,
+        /// Print the answer (with --follow, once the turn ended)
         #[arg(long)]
         json: bool,
     },
@@ -130,25 +134,40 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
         AgentAction::Send {
             agent,
             message,
+            follow: following,
             json,
         } => {
-            let sent = Client::connect_or_start(paths)?.request(
+            let mut client = Client::connect_or_start(paths)?;
+            let mut sent = client.request(
                 "agent.send",
                 serde_json::to_value(AgentSend {
                     agent: agent.clone(),
                     message,
                 })?,
             )?;
+            let mut code = ExitCode::SUCCESS;
+            if following {
+                code = follow(
+                    paths,
+                    &mut client,
+                    &agent,
+                    sent["after"].as_u64(),
+                    Turn::Sent,
+                    json,
+                )?;
+                // The agent as the turn left it.
+                sent["agent"] = shown_agent(&mut client, &agent)?;
+            }
             if json {
                 println!("{sent}");
-            } else {
+            } else if !following {
                 println!(
                     "Sent to agent {agent}: it plays after the turn that runs, if one does.\n\
                      Read what follows with `flottille agent read {agent} --after {}`.",
                     sent["after"]
                 );
             }
-            Ok(ExitCode::SUCCESS)
+            Ok(code)
         }
         AgentAction::Read { agent, after, json } => {
             let page = Client::connect_or_start(paths)?.request(
@@ -247,61 +266,30 @@ fn run_agent(paths: &Paths, asked: AgentRun, json: bool) -> Result<ExitCode> {
     if !json {
         println!("Agent {id}, {} in {}", text(agent, "project"), place(agent));
     }
-    let mut events = Client::connect_or_start(paths)?;
-    events.request(
-        "events.watch",
-        serde_json::to_value(WatchParams {
-            after: started["after"].as_u64(),
-        })?,
+    let code = follow(
+        paths,
+        &mut client,
+        &id,
+        started["after"].as_u64(),
+        Turn::First,
+        json,
     )?;
-    let mut stdout = std::io::stdout().lock();
-    let code = loop {
-        let event = events
-            .next_event()?
-            .ok_or("the daemon closed the connection")?;
-        if event.data["agent"] != id.as_str() {
-            continue;
-        }
-        match event.name.as_str() {
-            "agent.message" if !json && event.data["replay"] != true => {
-                write!(stdout, "{}", text(&event.data, "text"))?;
-                stdout.flush()?;
-            }
-            "agent.turn_ended" => {
-                let stop = text(&event.data, "stop_reason");
-                if !json {
-                    writeln!(stdout)?;
-                    if stop != "end_turn" {
-                        writeln!(stdout, "(the turn ended: {stop})")?;
-                    }
-                }
-                break ExitCode::SUCCESS;
-            }
-            "agent.failed" => {
-                eprintln!(
-                    "flottille: agent {id} failed: {}",
-                    text(&event.data, "reason")
-                );
-                break ExitCode::FAILURE;
-            }
-            // A death replaces the session, which goes on with the turn; the third fails it.
-            "agent.died" => {
-                eprintln!("flottille: the process of agent {id} died, its session is replaced");
-            }
-            _ => {}
-        }
-    };
     if json {
-        let shown = client.request(
-            "agent.show",
-            serde_json::to_value(AgentName {
-                agent: id,
-                after: None,
-            })?,
-        )?;
-        writeln!(stdout, "{}", shown["agent"])?;
+        println!("{}", shown_agent(&mut client, &id)?);
     }
     Ok(code)
+}
+
+/// The agent as `agent.show` gives it.
+fn shown_agent(client: &mut Client, agent: &str) -> Result<Value> {
+    let shown = client.request(
+        "agent.show",
+        serde_json::to_value(AgentName {
+            agent: agent.to_owned(),
+            after: None,
+        })?,
+    )?;
+    Ok(shown["agent"].clone())
 }
 
 pub fn doctor(json: bool) -> Result<ExitCode> {
@@ -358,11 +346,11 @@ fn doctor_text(report: &Value) -> String {
     shown
 }
 
-fn text<'a>(value: &'a Value, key: &str) -> &'a str {
+pub(crate) fn text<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or_default()
 }
 
-fn place(agent: &Value) -> String {
+pub(crate) fn place(agent: &Value) -> String {
     match agent["workspace"].as_str() {
         Some(workspace) => format!("workspace {workspace}"),
         None => "main".into(),
