@@ -168,7 +168,8 @@ bridge runs one session.
 - **A line of `claude`'s output** that is not JSON, or not UTF-8, is skipped.
 - **A turn** is one `user` message written to `claude`; its `result` ends it: first a
   `usage_update` (the context in use, as the last message or compaction said, the model's
-  context window, the cost in USD), then the prompt's answer with its usage and its stop reason:
+  context window, and the cost in USD of this `claude` process so far: it counts from zero again
+  in each process, after a release or a replacement, and is not the session's), then the prompt's answer with its usage and its stop reason:
   `cancelled` after a cancel, `refusal` or `max_tokens` as `claude` says, `max_turn_requests` for
   a result `error_max_turns`, `error_max_budget_usd` or `error_max_structured_output_retries`,
   `end_turn` otherwise. A result that is an error ends the turn `end_turn` too, after a
