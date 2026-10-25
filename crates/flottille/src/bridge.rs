@@ -161,6 +161,11 @@ enum Waiting {
         id: Value,
         effort: String,
     },
+    /// A model change, answered once the level it does not have went back to Claude Code's own.
+    Reset {
+        id: Value,
+        options: Value,
+    },
     Nothing,
 }
 
@@ -612,8 +617,15 @@ impl Bridge {
                 }
                 let options = config_options(claude);
                 if reset {
-                    self.control(effort_request("default"), Waiting::Nothing)
+                    return self
+                        .control(effort_request("default"), Waiting::Reset { id, options })
                         .await;
+                }
+                self.answer(id, json!({"configOptions": options})).await;
+            }
+            Waiting::Reset { id, options } => {
+                if let Some(error) = refused {
+                    return self.fail(id, (INVALID, error)).await;
                 }
                 self.answer(id, json!({"configOptions": options})).await;
             }
