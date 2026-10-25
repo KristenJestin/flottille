@@ -334,7 +334,7 @@ it has been replaced too often (`docs/agents.md`, "Replacement").
 The agent cannot go on: its process could not start, its session could not open, an option it was
 asked is not one it offers, it was replaced too often, its new workspace could not be prepared, or
 its parent failed. Its process is stopped, and so is its tree; what was queued for it is
-superseded.
+superseded. A root's failure is for the user to look at: `flottille inbox` lists it.
 
 | Field | |
 |---|---|
@@ -353,7 +353,8 @@ reported. Its process and its runs are stopped; what was queued for it is supers
 
 #### `agent.reported`
 
-The agent called `report` (`docs/tools.md`).
+The agent called `report` (`docs/tools.md`). A root's report is for the user: `flottille inbox`
+lists it (`docs/cli.md`), and a pilot sees it with `events_since`.
 
 | Field | |
 |---|---|
@@ -363,7 +364,8 @@ The agent called `report` (`docs/tools.md`).
 #### `agent.asked`
 
 The agent asked a question: a root of the user (`ask_user`), a child of its parent
-(`ask_parent`).
+(`ask_parent`). A root's question is for the user: `flottille inbox` lists it, and a pilot sees it
+with `events_since`.
 
 | Field | |
 |---|---|

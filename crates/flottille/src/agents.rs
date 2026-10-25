@@ -14,7 +14,7 @@ use std::time::Duration;
 use flottille_core::agent::{Agent, AgentState, Choices, new_id};
 use flottille_core::approval;
 use flottille_core::project::Project;
-use flottille_core::protocol::{AgentName, AgentRun, AgentSend};
+use flottille_core::protocol::{AgentName, AgentRun, AgentSend, AgentTrees};
 use flottille_core::secrets;
 use flottille_core::store::{AgentChange, Store, now_ms};
 use flottille_core::workspace::State;
@@ -80,7 +80,8 @@ pub struct Live {
 pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
     let daemon = &daemon;
     match method {
-        "agent.run" => run(daemon, serde_json::from_value(params)?),
+        // `agent.run` is the name it had before the pilot door; both stay.
+        "agent.start" | "agent.run" => start(daemon, serde_json::from_value(params)?),
         "agent.send" => {
             let asked: AgentSend = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
@@ -112,6 +113,13 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let agent = find(daemon, &asked.agent)?;
             Ok(json!({"agents": tree::tree(daemon, &agent)?}))
         }
+        "agent.trees" => {
+            let asked: AgentTrees = match params {
+                Value::Null => AgentTrees::default(),
+                params => serde_json::from_value(params)?,
+            };
+            Ok(tree::trees(daemon, &asked)?)
+        }
         "agent.list" => {
             #[derive(serde::Deserialize)]
             #[serde(deny_unknown_fields)]
@@ -129,6 +137,20 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 .filter(|a| project.as_ref().is_none_or(|p| &a.project == p))
                 .map(tree::summary)
                 .collect::<Vec<_>>()}))
+        }
+        "agent.read" => {
+            let asked: AgentName = serde_json::from_value(params)?;
+            let agent = find(daemon, &asked.agent)?;
+            let page = tree::conversation(daemon, &agent, asked.after.unwrap_or(0))?;
+            Ok(
+                json!({"agent": agent.id, "name": tree::named(&agent), "lines": page.lines,
+                "after": page.after, "more": page.more}),
+            )
+        }
+        "agent.status" => {
+            let asked: AgentName = serde_json::from_value(params)?;
+            let agent = find(daemon, &asked.agent)?;
+            Ok(tree::status_of(daemon, &agent)?)
         }
         "agent.cancel" => {
             let asked: AgentName = serde_json::from_value(params)?;
@@ -203,9 +225,16 @@ fn refuse_empty(message: &str) -> Result<(), Failure> {
     Ok(())
 }
 
-fn run(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
+fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
     let project = projects::load_project(daemon, &asked.project)?;
     refuse_empty(&asked.message)?;
+    let role = roles::role(asked.role.as_deref().unwrap_or(roles::LEAD)).ok_or_else(|| {
+        Failure::refused(format!(
+            "there is no role {}: the roles are {}",
+            asked.role.as_deref().unwrap_or_default(),
+            roles::ROLES.map(|role| role.name).join(", ")
+        ))
+    })?;
     let after = daemon.read(Store::last_seq)?;
     let agent = create(
         daemon,
@@ -213,7 +242,7 @@ fn run(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
         New {
             workspace: asked.workspace,
             preparing: false,
-            role: roles::role(roles::LEAD).expect("the lead role"),
+            role,
             parent: None,
             title: None,
             brief: asked.message.clone(),

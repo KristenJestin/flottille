@@ -22,6 +22,7 @@ use crate::VERSION;
 use crate::agents::{self, Live};
 use crate::approvals;
 use crate::deliveries;
+use crate::inbox;
 use crate::mcp;
 use crate::projects::{self, Projects};
 use crate::runs;
@@ -371,6 +372,13 @@ fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) 
                 },
             }
         }
+        method if method.starts_with("inbox.") => (
+            match inbox::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+            },
+            None,
+        ),
         method if method.starts_with("project.") => (
             match projects::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),

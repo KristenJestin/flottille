@@ -5,6 +5,8 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+use std::process::{Child, ChildStdin, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use rmcp::model::{CallToolRequestParams, ClientConfig, ProtocolVersion};
@@ -42,6 +44,8 @@ pub fn server_of(user: &User, opened: usize) -> (String, String) {
 pub struct Mcp {
     runtime: tokio::runtime::Runtime,
     client: Option<RunningService<RoleClient, ClientConfig>>,
+    /// `flottille mcp`, when the client talks to the pilot door over its standard streams.
+    child: Option<tokio::process::Child>,
 }
 
 /// What a tool call answered: its text, and whether it is an error.
@@ -90,6 +94,52 @@ impl Mcp {
         Mcp {
             runtime,
             client: Some(client),
+            child: None,
+        }
+    }
+
+    /// The pilot door (`flottille mcp`) of `user`, over its standard streams, with `initialize`:
+    /// protocol 2025-11-25.
+    pub fn pilot(user: &User) -> Mcp {
+        Mcp::over_stdio(user, ClientLifecycleMode::Initialize)
+    }
+
+    /// The same with `server/discover`: protocol 2026-07-28, stateless.
+    pub fn pilot_discover(user: &User) -> Mcp {
+        Mcp::over_stdio(
+            user,
+            ClientLifecycleMode::Discover {
+                preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+            },
+        )
+    }
+
+    fn over_stdio(user: &User, lifecycle: ClientLifecycleMode) -> Mcp {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut command = tokio::process::Command::from(user.command(&["mcp"]));
+        command
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let (child, client) = runtime.block_on(async {
+            let mut child = command.spawn().expect("flottille mcp starts");
+            let transport = (child.stdout.take().unwrap(), child.stdin.take().unwrap());
+            let mut info = ClientConfig::default();
+            info.protocol_version = ProtocolVersion::V_2025_11_25;
+            let client = info
+                .serve_with_lifecycle(transport, lifecycle)
+                .await
+                .expect("the client connects");
+            (child, client)
+        });
+        Mcp {
+            runtime,
+            client: Some(client),
+            child: Some(child),
         }
     }
 
@@ -240,4 +290,68 @@ fn unchunk(text: &str) -> String {
         rest = after[size..].trim_start_matches("\r\n");
     }
     out
+}
+
+/// The pilot door (`flottille mcp`) spoken to in raw JSON-RPC lines, for what a client library
+/// hides: the handshake of each protocol revision and the server's instructions.
+pub struct RawPilot {
+    child: Child,
+    stdin: ChildStdin,
+    lines: mpsc::Receiver<String>,
+}
+
+impl RawPilot {
+    pub fn start(user: &User) -> RawPilot {
+        let mut child = user
+            .command(&["mcp"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let (sender, lines) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if sender.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        RawPilot {
+            child,
+            stdin,
+            lines,
+        }
+    }
+
+    /// One request, and the answer carrying its id.
+    pub fn request(&mut self, id: u64, method: &str, params: Value) -> Value {
+        let message = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        writeln!(self.stdin, "{message}").unwrap();
+        loop {
+            let line = self
+                .lines
+                .recv_timeout(Duration::from_secs(30))
+                .unwrap_or_else(|_| panic!("no answer to {method}"));
+            let answer: Value = serde_json::from_str(&line).unwrap();
+            if answer["id"] == id {
+                return answer;
+            }
+        }
+    }
+
+    pub fn notify(&mut self, method: &str) {
+        let message = json!({"jsonrpc": "2.0", "method": method});
+        writeln!(self.stdin, "{message}").unwrap();
+    }
+}
+
+impl Drop for RawPilot {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
