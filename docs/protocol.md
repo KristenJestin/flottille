@@ -284,7 +284,7 @@ there. An agent in a result:
   "chosen": {"model": null, "effort": null, "mode": null},
   "taken": {"model": "claude-haiku-4-5", "effort": null, "mode": "default"},
   "native_id": "0f6c…",
-  "agent_version": "@agentclientprotocol/claude-agent-acp 0.95.0",
+  "agent_version": "flottille-claude-bridge 0.1.0",
   "instructions": "…\n\n__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__\n\n…",
   "tools": ["mcp__flottille__fs_read", "…"]
 }
@@ -309,9 +309,9 @@ Each method answers `not-found` when the agent does not exist.
 in the project folder or the workspace, and gives it its first message: `{"agent", "after"}`.
 `role` is `lead` (the default) or `worker`. `not-found` when the project or the workspace does
 not exist; `refused` when the workspace is not ready, the message is empty, the role is not one
-(the sentence lists them), or the adapter cannot run (not installed, Node or `claude` not on
-`PATH`: the message says what to do). A model, an effort or a mode the agent does not offer is
-known only once its session is open: the agent then fails (`agent.failed`), saying what it offers.
+(the sentence lists them), or the agent cannot run (`claude` not on `PATH`: the message says what
+to do). A model, an effort or a mode the agent does not offer is known only once its session is
+open: the agent then fails (`agent.failed`), saying what it offers.
 `agent.run` is the name this method had before the pilot door: it is still answered, the same.
 
 #### `agent.send`

@@ -77,7 +77,7 @@ child, and a child never asks the user anything: what it needs goes to its paren
  │ store (SQLite) · projects · workspaces/git · gate · deliveries    │
  │ sessions tree · sweeps · command runs · event bus                 │
  │ MCP server (HTTP, 127.0.0.1, per-session bearer token) ◄──────┐   │
- │ ACP client ──► adapter process ──► agent CLI (claude, …) ─────┘   │
+ │ ACP client ──► Claude bridge (ACP) ──► claude ────────────────┘   │
  └───────────────────────────────────────────────────────────────────┘
 ```
 
@@ -105,12 +105,14 @@ child, and a child never asks the user anything: what it needs goes to its paren
 
 ### 4.1 Running them over ACP
 
-Flottille is an ACP client. Each agent session is one adapter process speaking ACP on stdio:
+Flottille is an ACP client. Each agent session is one process speaking ACP on stdio:
 
-- **Claude Code** (tranche 1): the official adapter `@agentclientprotocol/claude-agent-acp`
-  (Node), pointed at the user's own `claude` binary with `CLAUDE_CODE_EXECUTABLE`. Flottille
-  installs a pinned version of the adapter into its own data folder (`npm install --prefix`) and
-  never uses `npx`. Node and the user's `claude`, signed in, are prerequisites.
+- **Claude Code** (tranche 1): Flottille's own bridge, `flottille bridge claude`, written in Rust
+  inside Flottille's binary. It speaks ACP to the daemon and drives the user's own `claude` in its
+  stream-json mode, at the version of `claude` Flottille was checked against (`flottille doctor`
+  warns on another). Nothing else is installed: the user's `claude`, signed in (or given
+  `ANTHROPIC_API_KEY`), is the only prerequisite. How the bridge maps ACP to `claude` is
+  in `docs/agents.md`.
 - **Codex** and **OpenCode** come later (`codex-acp` with the patch described in
   `reference/hemera.md` §2, and `opencode acp`). Gemini CLI speaks ACP natively too.
 
@@ -123,8 +125,8 @@ own and never reads or copies credentials.
 ### 4.2 Bare mode: the agent has only Flottille's tools
 
 Every agent runs in bare mode (`reference/hemera.md` §2): no built-in tools, no user or project
-settings, no skills, no plugins, no user MCP servers, only Flottille's MCP server. For Claude:
-`tools: []`, `settingSources: []`, `strictMcpConfig: true`, `allowedTools` = the exact names of
+settings, no skills, no plugins, no user MCP servers, only Flottille's MCP server. For Claude,
+set by the bridge on `claude` itself: `tools: []`, `settingSources: []`, `strictMcpConfig: true`, `allowedTools` = the exact names of
 the session's Flottille tools, a custom system prompt, and the two MCP timeouts raised.
 
 This is what makes the rest hold: with no shell and no native sub-agent tool, an agent **cannot**
@@ -390,5 +392,6 @@ spans machines through deliveries).
 
 - Data in XDG folders; workspaces under the data folder unless the project says otherwise.
 - Children cap 3 per project, depth 2, quiet interval 20 min.
-- Claude adapter installed by Flottille at a pinned version; Node required.
+- Claude reached through Flottille's own bridge; `claude` checked at a pinned version, another one
+  only warned about.
 - No commit rights for agents unless the project grants them; push always refused for agents.

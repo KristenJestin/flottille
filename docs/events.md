@@ -157,10 +157,10 @@ Its process runs and its session is open, its options set.
 | Field | |
 |---|---|
 | `agent` | |
-| `pid` | The adapter's process id. |
+| `pid` | The agent's process id (the Claude bridge's). |
 | `opened` | `new`, `resumed` or `loaded`. |
 | `native_id` | The ACP session id. |
-| `agent_version` | The adapter's name and version. |
+| `agent_version` | The agent's name and version, as its `initialize` gives them (`flottille-claude-bridge` and Flottille's version). |
 | `taken` | `{"model", "effort", "mode"}`: what the agent took. |
 
 #### `agent.prompted`

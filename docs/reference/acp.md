@@ -1,4 +1,4 @@
-# Reference: ACP and the adapters, as of October 2026
+# Reference: ACP, the adapters and Claude's stream-json mode, as of October 2026
 
 Checked on 2026-10-23 from the published packages, crates and repositories. Re-check versions
 when you start: these move every week.
@@ -28,24 +28,47 @@ when you start: these move every week.
 
 | Agent | How | Version seen |
 |---|---|---|
-| Claude Code | `@agentclientprotocol/claude-agent-acp` (TypeScript, on the official Claude Agent SDK; spawns the user's `claude`, override with `CLAUDE_CODE_EXECUTABLE`). The old `@zed-industries/*` names are deprecated. | 0.94.0 (Hemera measured 0.79.0) |
+| Claude Code | **Flottille's own bridge**, `flottille bridge claude` (Rust, inside Flottille's binary), below. The official adapter `@agentclientprotocol/claude-agent-acp` (TypeScript, on the official Claude Agent SDK) is not used. | `claude` 2.1.295 (the adapter was 0.95.0, on Agent SDK 0.3.309) |
 | Codex | `@agentclientprotocol/codex-acp` (TypeScript, drives `codex app-server`; `CODEX_PATH`, `CODEX_CONFIG`) | 2.2.2 (Hemera patched 1.12.0) |
 | OpenCode | native `opencode acp` | 1.19.0 |
 | Gemini CLI | native `gemini --acp` | 0.65.0 |
 
 Claude Code itself (2.1.295) has no native ACP mode; Codex (0.162.1) neither.
 
-## Locking Claude down through the adapter
+## Claude, through Flottille's own bridge
 
-The adapter passes `session/new` `_meta.claudeCode.options` almost wholesale as Agent SDK
-options (`tools`, `allowedTools`, `disallowedTools`, `settingSources`, `strictMcpConfig`,
-`systemPrompt`, `env`, `extraArgs`…). It controls `cwd`, `permissionMode` (via ACP modes),
-`canUseTool` (bridged to `session/request_permission`) and the executable itself.
+Claude Code has no ACP mode of its own. Flottille does not run the official adapter (it needs a
+JavaScript runtime behind a Rust program); its bridge speaks ACP to the daemon and drives the
+user's `claude` in the stream-json mode that the official Agent SDKs use. What the bridge sends
+and reads was taken from the TypeScript Agent SDK 0.3.309 (the one the adapter 0.95.0 runs on) and
+checked against `claude` 2.1.295; `flottille doctor` warns on another version. The mapping is in
+`docs/agents.md` ("The Claude bridge").
 
-**Trap**: the adapter's own default is `settingSources: ["user", "project", "local"]`, which
-loads the user's settings, hooks, plugins, skills and instruction files. Bare mode must pass
-`settingSources: []` explicitly (it overrides the default). The full bare option set is in
-`hemera.md` §2.
+- **Arguments**: `--output-format stream-json --verbose --input-format stream-json`, and, for bare
+  mode, `--tools=` (no built-in tool), `--setting-sources=` (no user, project or local settings:
+  Claude Code's default loads all three, with their hooks, plugins and skills), `--strict-mcp-config`
+  with `--mcp-config <file>`, `--allowedTools=<exact names>`, `--permission-prompt-tool=stdio`
+  (Claude's permission prompts come to the bridge as control requests),
+  `--include-partial-messages` (text and thinking as stream deltas), and `--session-id=<uuid>` or
+  `--resume=<id>`. The SDK writes a flag with a value as `--flag=value`.
+- **Control requests** on stdin and stdout (`{"type": "control_request", "request_id", "request":
+  {"subtype", …}}`, answered by `{"type": "control_response", "response": {"subtype": "success" |
+  "error", "request_id", "response" | "error"}}`), both ways. The bridge sends `initialize` (with
+  `systemPrompt`, a list of texts, and `systemPromptSnapshot`: this is the only way to keep the
+  cache boundary), `interrupt` and `set_model`; `claude` sends `can_use_tool` (`tool_name`,
+  `input`, `tool_use_id`), answered `{"behavior": "allow", "updatedInput"}` or `{"behavior":
+  "deny", "message"}`.
+- **Messages** from `claude`: `system` (`init`, `status`, `compact_boundary` with
+  `compact_metadata.post_tokens`, `api_retry`), `stream_event` (Anthropic stream events),
+  `assistant` and `user` (whole messages, with `tool_use` and `tool_result` blocks), `result` (the
+  end of a turn: `subtype`, `is_error`, `stop_reason`, `usage`, `modelUsage` with each model's
+  `contextWindow`, `total_cost_usd`). A prompt is a `user` message written to stdin.
+- **The Rust crate `claude-agent-sdk-rs`** (0.6.4, unofficial, MIT) was considered and not taken:
+  it cannot send the system prompt with its cache boundary (its `initialize` carries hooks only),
+  has no load with history, puts the MCP configuration with the token on the command line, pipes
+  `claude`'s stderr without reading it unless given a callback, and brings a dozen dependencies.
+  The crate named `claude-agent-sdk` names an Anthropic repository that does not exist; it is not
+  official either.
 
 ## Codex
 
