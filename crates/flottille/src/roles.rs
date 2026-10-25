@@ -8,6 +8,8 @@
 
 use std::path::{Path, PathBuf};
 
+use flottille_core::secrets;
+
 use crate::claude::BOUNDARY;
 
 pub struct Role {
@@ -114,6 +116,8 @@ pub fn project_files(
     repositories: &[(String, PathBuf, PathBuf)],
 ) -> Vec<File> {
     let mut files = Vec::new();
+    // Frozen in the agent's instructions, which its clients show: masked like anything else.
+    let env = std::env::vars_os().collect();
     let mut add = |prefix: &str, folders: &[&Path]| {
         for names in [
             ["CLAUDE.md", "AGENTS.md"],
@@ -130,7 +134,7 @@ pub fn project_files(
             {
                 files.push(File {
                     heading: format!("{prefix}{name}"),
-                    text,
+                    text: secrets::mask(&text, &env),
                 });
             }
         }
@@ -258,5 +262,20 @@ mod tests {
 
         let headings: Vec<&str> = files.iter().map(|f| f.heading.as_str()).collect();
         assert_eq!(headings, ["CLAUDE.md", "CLAUDE.local.md"]);
+    }
+
+    #[test]
+    fn a_local_file_holding_a_token_is_masked() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("CLAUDE.local.md"),
+            "deploy with token=ghp_abcdefghijklmnopqrstuvwxyz0123 please",
+        )
+        .unwrap();
+        let repositories = vec![(".".to_owned(), dir.path().to_owned(), dir.path().to_owned())];
+
+        let files = project_files(dir.path(), &repositories);
+
+        assert_eq!(files[0].text, "deploy with token=[masked] please");
     }
 }
