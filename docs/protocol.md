@@ -264,6 +264,14 @@ there. An agent in a result:
   "id": "3f9a1c0b7d2e",
   "provider": "claude",
   "role": "lead",
+  "parent": null,
+  "depth": 0,
+  "epoch": 0,
+  "title": null,
+  "brief": null,
+  "reported_at": null,
+  "quiet_turns": 0,
+  "waiting_on_parent": false,
   "project": "app",
   "workspace": "login",
   "folder": "/work/app-work/login",
@@ -287,7 +295,11 @@ and its session opens), `working` (a turn runs), `idle` (between turns, its proc
 released), or one of the final states, never left: `ended`, `failed` (`state_reason` says why).
 `chosen` is what the user asked, `null` for the agent's default; `taken` what the agent reported
 at the last start of its process. `active_at` is its last sign of activity, `null` before the
-first. `instructions` and `tools` are frozen when the agent is created.
+first. `instructions` and `tools` are frozen when the agent is created. `parent` is the agent that
+launched it (`null` for a root), `depth` its depth in the tree, `epoch` the number of its session
+(each replacement adds one), `title` and `brief` a child's task, `reported_at` when it reported,
+`quiet_turns` its turns ended without a report in a row, `waiting_on_parent` whether a question of
+it waits for its parent (`docs/agents.md`, "The tree").
 
 Each method answers `not-found` when the agent does not exist.
 
@@ -302,19 +314,48 @@ its session is open: the agent then fails (`agent.failed`), saying what it offer
 
 #### `agent.send`
 
-`{"agent", "message"}`. Gives the agent a message, played after the turn that runs if one does,
-starting its process again when it was released: `{"agent", "after"}`. `refused` when the agent
-is in a final state or the message is empty.
+`{"agent", "message"}`. Gives the agent a message (a `user` delivery), played after the turn that
+runs if one does, starting its process again when it was released: `{"agent", "after"}`.
+`refused` when the agent is in a final state, the message is empty, or the agent is a child: only
+its parent writes to it, and the sentence names its root.
 
 #### `agent.cancel`
 
 `{"agent"}`. Cancels the turn that runs: `{"agent", "cancelled"}`, `cancelled` false when no turn
-ran. The turn then ends `cancelled`.
+ran. The turn then ends `cancelled`. `refused` for a child: only its parent cancels its turns,
+and the sentence names its root.
+
+#### `agent.stop`
+
+`{"agent"}`. Stops a root and its tree, deepest first (`docs/agents.md`, "The tree"):
+`{"agent"}`, the root once ended. `refused` when it is in a final state, or a child (the sentence
+names its root).
+
+#### `agent.tree`
+
+`{"agent"}`. The whole tree of the agent's root, each agent before its children:
+`{"agents": [{"agent", "doing", "waiting_on", "needs_user"}]}`. `agent` is the agent in short
+(`id`, `role`, `title`, `project`, `workspace`, `parent`, `depth`, `epoch`, `state`,
+`state_reason`, `created_at`, `active_at`, `ended_at`); `doing` a sentence of what it does
+(`working`, `idle`, `running \`cargo test\` for 12 min`, `waiting for approval #3`, `failed: …`);
+`waiting_on` `parent` for a child whose request or question waits for its parent, `user` for a
+root whose own does, else `null`; `needs_user`, for the root, whether a request of its tree waits
+for the user.
+
+#### `agent.list`
+
+`{"project"?}`. Every agent, or the project's, in short as in `agent.tree`: `{"agents"}`.
 
 #### `agent.show`
 
 `{"agent", "after"?}`. `{"agent", "events"}`: the agent, and its events in order (at most 1000,
 those numbered after `after` when it is given).
+
+### `test.advance`
+
+`{"ms"}`. Only when the daemon runs with `FLOTTILLE_TEST_CLOCK` set (`docs/agents.md`, "For tests
+and development"); otherwise `unknown-method`. Moves the daemon's clock `ms` milliseconds ahead and
+runs the sweep at once: `{"now"}`, the clock's time.
 
 ### The approval methods
 
@@ -341,7 +382,8 @@ The requests of the gate (`docs/tools.md`, "The gate"). A request in a result:
 `call` is the call's arguments, every text cut at 500 characters and masked; the call itself is
 kept whole, to be performed, and never sent. `held_by` is `user` or the id of the agent that holds
 the request; `forwards` are the `{"by", "why"}` of each agent that passed it up. `state` is
-`pending`, `denied` or `allowed`; `decision` is `deny`, `once` or `tree` once it is decided.
+`pending`, `denied`, `allowed`, or `cancelled` when the agent that asked or the one that held it
+ended first; `decision` is `deny`, `once` or `tree` once it is decided.
 
 #### `approval.list`
 

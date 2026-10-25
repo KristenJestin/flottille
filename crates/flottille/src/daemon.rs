@@ -1,6 +1,6 @@
 //! The daemon: one per user, behind a Unix socket speaking JSON lines (`docs/protocol.md`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{ErrorKind, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -21,9 +21,11 @@ use tokio::task::JoinSet;
 use crate::VERSION;
 use crate::agents::{self, Live};
 use crate::approvals;
+use crate::deliveries;
 use crate::mcp;
 use crate::projects::{self, Projects};
 use crate::runs;
+use crate::sweep;
 use crate::workspaces;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -84,6 +86,12 @@ pub struct Daemon {
     pub agents: Live,
     /// The agents' MCP server: its tokens, and what its tools keep (reads, runs).
     pub mcp: mcp::Server,
+    /// The deliveries pinned as notes on agents' next tool results.
+    pub notes: deliveries::Notes,
+    /// The agents waiting on their provider (overloaded, rate-limited): not stuck.
+    pub waiting_provider: Mutex<HashSet<String>>,
+    /// The slots launches took in each project's children cap, before their child exists.
+    pub launching: Mutex<HashMap<String, usize>>,
     /// Becomes true when the daemon stops.
     stopping: watch::Sender<bool>,
 }
@@ -134,6 +142,21 @@ impl Daemon {
         Ok(value)
     }
 
+    /// Writes the store as `write` does, for a change with several events.
+    pub fn write_all<T>(
+        &self,
+        write: impl FnOnce(&mut Store) -> flottille_core::Result<(T, Vec<Event>)>,
+    ) -> flottille_core::Result<T> {
+        let mut events = self.events.lock().unwrap();
+        let (value, written) = write(&mut events.store)?;
+        if let Some(bus) = &events.bus {
+            for event in written {
+                let _ = bus.send(event);
+            }
+        }
+        Ok(value)
+    }
+
     fn subscribe(&self, after: Option<u64>) -> Result<Subscription> {
         let events = self.events.lock().unwrap();
         let bus = events.bus.as_ref().ok_or("the daemon is stopping")?;
@@ -179,6 +202,9 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         preparing: Mutex::new(HashSet::new()),
         agents: Live::default(),
         mcp: mcp::Server::new(tools.local_addr()?.port()),
+        notes: deliveries::Notes::default(),
+        waiting_provider: Mutex::new(HashSet::new()),
+        launching: Mutex::new(HashMap::new()),
         stopping: watch::Sender::new(false),
     });
     let mut terminate = signal(SignalKind::terminate())?;
@@ -201,6 +227,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         tools,
         daemon.stopping.subscribe(),
     ));
+    tokio::spawn(sweep::run(daemon.clone(), daemon.stopping.subscribe()));
 
     let mut connections = JoinSet::new();
     let reason = loop {
@@ -266,7 +293,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
         };
         // They run git, wait on an agent's task or start what an approval allows: answered by a
         // task of their own, the connection goes on.
-        if ["workspace.", "agent.", "approval."]
+        if ["workspace.", "agent.", "approval.", "test."]
             .iter()
             .any(|prefix| request.method.starts_with(prefix))
         {
@@ -276,6 +303,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     agents::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("approval.") {
                     approvals::call(daemon, &request.method, request.params).await
+                } else if request.method.starts_with("test.") {
+                    sweep::call(daemon, &request.method, request.params).await
                 } else {
                     workspaces::call(daemon, &request.method, request.params).await
                 };

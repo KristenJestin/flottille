@@ -4,8 +4,9 @@
 //! answer stored as the `approval` delivery of the agent that asked, which the deliveries (#7)
 //! send.
 //!
-//! Until the tree, every agent is a root: its requests are the user's. A child's request is held
-//! by its parent, which denies it or forwards it up; the user answers only what reaches them.
+//! A root's requests are the user's. A child's request is held by its parent, which is told
+//! (`child-asks`) and denies it or forwards it up (`approval_answer`, `tree`); the user answers
+//! only what reaches them.
 
 use std::sync::Arc;
 
@@ -15,9 +16,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
+use crate::deliveries;
 use crate::gate::{self, Verdict};
 use crate::mcp::{self, Grant, Outcome};
 use crate::projects::Failure;
+use crate::tree;
 
 type Answer = Result<Value, Failure>;
 
@@ -30,27 +33,38 @@ pub fn waiting(number: u64) -> String {
     )
 }
 
-/// Who holds an agent's requests: the user for a root, which every agent is until the tree.
-fn holder(_agent: &str) -> String {
-    approval::USER.to_owned()
+/// The text a child is answered with, at once, when its call is held for its parent.
+fn waiting_on_parent(number: u64) -> String {
+    format!(
+        "Waiting for approval, request #{number}: your parent decides whether it goes on to the \
+         user. This action has not happened; do not assume it did. Continue with work that does \
+         not depend on it, or end your turn saying you wait. The answer will be handed to you."
+    )
 }
 
-/// The root whose tree a grant is given to: the agent itself until the tree.
-fn tree_of(agent: &str) -> String {
-    agent.to_owned()
+/// Who holds an agent's requests: its parent, or the user for a root.
+fn holder(daemon: &Daemon, agent: &str) -> String {
+    daemon
+        .read(|store| store.agent(agent))
+        .ok()
+        .flatten()
+        .and_then(|agent| agent.parent)
+        .unwrap_or_else(|| approval::USER.to_owned())
 }
 
 /// Whether the user allowed this exact call for the agent's tree.
 pub fn granted(daemon: &Daemon, agent: &str, identity: &str) -> bool {
+    // The root is read first: the store's lock is not reentrant.
+    let root = tree::root_of(daemon, agent);
     daemon
-        .read(|store| store.tree_granted(&tree_of(agent), identity))
+        .read(|store| store.tree_granted(&root, identity))
         .unwrap_or(false)
 }
 
 /// Writes the request for a held call, or finds the one its call key already made, and answers
 /// the agent at once.
 pub fn ask(
-    daemon: &Daemon,
+    daemon: &Arc<Daemon>,
     grant: &Grant,
     tool: &str,
     args: &Value,
@@ -72,7 +86,7 @@ pub fn ask(
             .collect(),
         sensitive: ask.sensitive,
         identity,
-        held_by: holder(&grant.agent),
+        held_by: holder(daemon, &grant.agent),
         forwards: Vec::new(),
         state: RequestState::Pending,
         decision: None,
@@ -80,7 +94,11 @@ pub fn ask(
         decided_at: None,
     };
     match daemon.write(|store| store.ask(&asked)) {
-        Ok(request) => Outcome::Held(waiting(request.number)),
+        Ok(request) if request.held_by == approval::USER => Outcome::Held(waiting(request.number)),
+        Ok(request) => {
+            tree::asks_parent(daemon, &request);
+            Outcome::Held(waiting_on_parent(request.number))
+        }
         Err(error) => {
             eprintln!(
                 "flottille daemon: agent {}: a request cannot be written: {error}",
@@ -164,12 +182,14 @@ fn decide(daemon: &Arc<Daemon>, number: u64, decision: Decision) -> Answer {
              tree"
         )));
     }
-    let tree = tree_of(&request.agent);
+    let tree = tree::root_of(daemon, &request.agent);
     let decided = daemon.write(|store| {
-        Ok(match store.decide(number, decision, &tree)? {
-            Some((request, event)) => (Some(request), Some(event)),
-            None => (None, None),
-        })
+        Ok(
+            match store.decide(number, decision, &tree, approval::USER)? {
+                Some((request, event)) => (Some(request), Some(event)),
+                None => (None, None),
+            },
+        )
     })?;
     let Some(request) = decided else {
         // Decided meanwhile.
@@ -270,19 +290,21 @@ async fn performed(daemon: &Arc<Daemon>, request: &Request) -> (&'static str, St
     (word, mcp::masked(&body, &grant.place))
 }
 
-/// Stores the answer as the agent's `approval` delivery, once.
-fn store_answer(daemon: &Daemon, request: &Request, outcome: &str, body: &str) {
+/// Stores the answer as the agent's `approval` delivery, once, and rings the agent.
+pub fn store_answer(daemon: &Arc<Daemon>, request: &Request, outcome: &str, body: &str) {
     if let Err(error) = daemon.write(|store| Ok(((), store.settle(request, outcome, body)?))) {
         eprintln!(
             "flottille daemon: request #{}: its answer cannot be stored: {error}",
             request.number
         );
+        return;
     }
+    deliveries::ring(daemon, &request.agent);
 }
 
 /// At start: a request allowed whose answer was never stored was being performed by a daemon
 /// that stopped; the agent is told so, since nobody knows whether it took effect.
-pub fn settle_at_start(daemon: &Daemon) {
+pub fn settle_at_start(daemon: &Arc<Daemon>) {
     let unsettled = match daemon.read(Store::unsettled_requests) {
         Ok(unsettled) => unsettled,
         Err(error) => {
@@ -300,12 +322,13 @@ pub fn settle_at_start(daemon: &Daemon) {
     }
 }
 
-/// The agents waiting for the user: those with a request the user holds.
+/// The agents waiting for the user: the roots of the trees with a request the user holds (a child
+/// waits on its parent, never on the user).
 pub fn waiting_for_user(daemon: &Daemon) -> flottille_core::Result<usize> {
     let mut agents: Vec<String> = daemon
         .read(|store| store.pending_requests(approval::USER))?
         .into_iter()
-        .map(|request| request.agent)
+        .map(|request| tree::root_of(daemon, &request.agent))
         .collect();
     agents.sort();
     agents.dedup();

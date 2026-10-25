@@ -790,6 +790,21 @@ pub fn settle_at_start(daemon: &Daemon) {
     }
 }
 
+/// The agent stopped: every run it started that goes on is stopped with it.
+pub async fn stop_runs_of(daemon: &Daemon, agent: &str) {
+    let ids: Vec<String> = daemon
+        .mcp
+        .runs
+        .runs
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, going)| going.run.agent == agent)
+        .map(|(id, _)| id.clone())
+        .collect();
+    futures::future::join_all(ids.iter().map(|id| stop(daemon, id, RunState::Stopped))).await;
+}
+
 /// The daemon stopping: every run is stopped, and marked interrupted. All at once: each may take
 /// its whole grace, and the daemon would wait for their sum.
 pub async fn stop_all(daemon: &Daemon) {

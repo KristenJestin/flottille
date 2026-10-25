@@ -1039,6 +1039,7 @@ mod tests {
             std::fs::create_dir_all(base.join("home")).unwrap();
             let grant = Grant {
                 agent: "a1".into(),
+                epoch: 0,
                 tools: vec![
                     "fs_read",
                     "fs_list",

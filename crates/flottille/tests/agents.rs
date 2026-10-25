@@ -86,9 +86,20 @@ fn a_session_is_opened_and_a_prompt_gets_its_reply_recorded_as_events() {
         .trim_end_matches(',');
     let shown = show(&user, id);
     assert_eq!(shown["agent"]["state"], "idle");
-    let events = shown["events"].as_array().unwrap();
+    // The message was a delivery: stored, then sent.
+    let all = shown["events"].as_array().unwrap();
+    let deliveries: Vec<&str> = names(all)
+        .into_iter()
+        .filter(|n| n.starts_with("delivery."))
+        .collect();
+    assert_eq!(deliveries, ["delivery.queued", "delivery.sent"]);
+    let events: Vec<Value> = all
+        .iter()
+        .filter(|e| !e["name"].as_str().unwrap().starts_with("delivery."))
+        .cloned()
+        .collect();
     assert_eq!(
-        names(events),
+        names(&events),
         [
             "agent.created",
             "agent.started",
@@ -100,7 +111,7 @@ fn a_session_is_opened_and_a_prompt_gets_its_reply_recorded_as_events() {
         ]
     );
     assert_eq!(events[1]["data"]["opened"], "new");
-    assert_eq!(events[2]["data"]["text"], "hello");
+    assert_eq!(events[2]["data"]["text"], "[flottille:user]\nhello");
     assert_eq!(events[4]["data"]["text"], "Hello");
     assert_eq!(events[4]["data"]["replay"], false);
     assert_eq!(events[6]["data"]["stop_reason"], "end_turn");
@@ -239,7 +250,7 @@ fn a_second_prompt_after_the_idle_release_restarts_the_process_and_resumes_the_s
 }
 
 #[test]
-fn a_load_replays_history_flagged_replay_and_not_counted_as_activity() {
+fn a_load_replays_history_that_is_held_already_and_not_recorded_again() {
     let user = User::with_fake_agent().with_env("FLOTTILLE_IDLE_RELEASE_MS", "300");
     user.fake_script(json!({"resume": false, "turns": [
         {"when": "hello", "do": [{"say": "Hello!"}]},
@@ -265,24 +276,19 @@ fn a_load_replays_history_flagged_replay_and_not_counted_as_activity() {
         .find(|e| e["name"] == "agent.started")
         .unwrap();
     assert_eq!(started["data"]["opened"], "loaded");
-    let replayed: Vec<&Value> = second
-        .iter()
-        .take_while(|e| e["name"] != "agent.started")
-        .filter(|e| e["data"]["replay"] == true)
-        .collect();
-    assert_eq!(
-        names(&replayed.into_iter().cloned().collect::<Vec<_>>()),
-        ["agent.user_message", "agent.message"]
-    );
+    // The fake agent replayed its history; Flottille holds it already, as it happened.
     assert!(
-        second
-            .iter()
-            .filter(
-                |e| ["agent.user_message", "agent.message"].contains(&e["name"].as_str().unwrap())
-            )
-            .all(|e| e["data"]["replay"] == true),
-        "only the replay brings messages here: {second:?}"
+        !second.iter().any(|e| e["data"]["replay"] == true
+            || ["agent.user_message", "agent.message"].contains(&e["name"].as_str().unwrap())),
+        "{second:?}"
     );
+    let messages = show(&user, &id)["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["name"] == "agent.message")
+        .count();
+    assert_eq!(messages, 1, "Hello! once");
     assert_eq!(user.received_requests("session/load").len(), 1);
     assert_eq!(
         show(&user, &id)["agent"]["active_at"].as_u64().unwrap(),
@@ -392,11 +398,23 @@ fn a_death_is_detected_and_published() {
     project(&user);
     let (id, after) = run(&user, json!({"message": "die now"}));
 
-    let events = events_until(&user, &id, after, "agent.died");
+    // Each death replaces the session, which dies again: the third fails the agent.
+    let events = events_until(&user, &id, after, "agent.failed");
 
-    let died = events.last().unwrap();
-    assert_eq!(died["data"]["code"], 3);
-    assert_eq!(died["data"]["during_turn"], true);
+    let died: Vec<&Value> = events
+        .iter()
+        .filter(|e| e["name"] == "agent.died")
+        .collect();
+    assert_eq!(died.len(), 3);
+    assert_eq!(died[0]["data"]["code"], 3);
+    assert_eq!(died[0]["data"]["during_turn"], true);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["name"] == "agent.replaced")
+            .count(),
+        2
+    );
     let ended = events
         .iter()
         .find(|e| e["name"] == "agent.turn_ended")

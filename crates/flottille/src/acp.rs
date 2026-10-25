@@ -45,6 +45,8 @@ pub enum Exit {
     Stopped,
     /// The process ended by itself.
     Died(ExitStatus),
+    /// Its session is to be replaced, for this reason.
+    Replace(String),
 }
 
 /// What the session loop tells the agent's owner as it goes.
@@ -53,6 +55,8 @@ pub trait Events: Send + Sync + 'static {
     fn conversation(&self, name: &str, data: Value, activity: bool);
     /// The session is open: how, its id, the adapter's version, and what the agent took.
     fn opened(&self, opened: &str, native_id: &str, agent_version: &str, taken: Choices);
+    /// The next prompt, taken from what was delivered, when there is one.
+    fn pump(&self) -> Option<String>;
     fn turn_started(&self, text: &str);
     fn turn_ended(&self, stop_reason: &str, usage: Value);
 }
@@ -295,6 +299,12 @@ async fn drive(
     let mut turn: Option<Turn> = None;
     loop {
         if turn.is_none()
+            && turns.queued.is_empty()
+            && let Some(text) = events.pump()
+        {
+            turns.queued.push_back(text);
+        }
+        if turn.is_none()
             && let Some(text) = turns.queued.pop_front()
         {
             events.turn_started(&text);
@@ -325,7 +335,9 @@ async fn drive(
             }
             order = orders.recv() => match order {
                 None | Some(Order::Stop) => return Ok(Exit::Stopped),
-                Some(Order::Prompt(text)) => turns.queued.push_back(text),
+                Some(Order::Replace(reason)) => return Ok(Exit::Replace(reason)),
+                // What was delivered is pumped at the top of the loop, once no turn runs.
+                Some(Order::Ring) => {}
                 Some(Order::Cancel(answer)) => {
                     let running = turn.is_some();
                     if running {

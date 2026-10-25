@@ -2,9 +2,9 @@
 
 The tools of the agents Flottille runs, and the MCP server that serves them: the agent door of
 `docs/design.md` §1. It follows `docs/reference/hemera.md` §3, with the rules of
-`docs/reference/mcp.md` §4 where they differ. The agent tools (`agent_*`, `report`, `ask_user`,
-`ask_parent`, `approval_answer`) come with the tree; until then a session lists only the tools
-below.
+`docs/reference/mcp.md` §4 where they differ. A session lists the tools of its agent, which
+depend on what it can do (`docs/agents.md`): the file and command tools below for every agent,
+and the tree's tools (`agent_*`, `report`, `ask_user` or `ask_parent`, `approval_answer`).
 
 ## The server
 
@@ -21,7 +21,10 @@ below.
 - **Tokens**: each start of an agent's process mints a token for it (32 random bytes,
   base64url), handed to the adapter in the `Authorization: Bearer <token>` header of the
   session's MCP server. Only its SHA-256 digest is kept, in memory. Minting a token revokes the
-  agent's previous one, and the process's end revokes it. A request without a known token gets
+  agent's previous one, and the process's end revokes it. The token of a session that was
+  replaced (`docs/agents.md`) is kept instead, so that its late calls are told why: every one is
+  refused with `refused: this session has been replaced: a new session of this agent goes on with
+  its work; stop here`. A request without a known token gets
   401 with `{"error":"unauthorized"}`; the daemon's log says when a revoked token was used and
   whose it was, never the token, at most 20 lines a minute.
 - **Per request**: the server that answers holds the grant of the request's token, so that it
@@ -41,9 +44,12 @@ below.
   read a result Claude Code saved to a file), a refusal or a failure under 2,000. A failure reads
   `the call failed: …`. A result and a failure are masked of the daemon's and the place's secrets
   (a file read or a search hit shows `[masked]` for them). A call the gate held is answered with
-  the waiting text, not as an error (below). The notes pinned for the
-  agent (the deliveries that reach it in a turn) are appended to the result after a blank line,
-  whole and counted in its limit: it is the text that is cut short to make room for them.
+  the waiting text, not as an error (below). Every result, refusal and failure is escaped as a
+  delivery's body is (`docs/agents.md`, "Deliveries"): what a file, an output or another agent
+  holds never forges a `[flottille:` marker nor opens or closes a note. The notes pinned for the
+  agent (the deliveries that reach it in a turn) are appended after a blank line, whole, in the
+  room the text leaves under its limit; the text is never cut for them, and a note that does not
+  fit stays pinned for the next result.
 - **Every call is recorded** as an `agent.tool_served` event of the agent (`docs/events.md`):
   the tool, the key, the arguments with every text cut at 500 characters and masked, the outcome
   and the duration.
@@ -167,6 +173,28 @@ not a lock: a swap between it and the rename is not seen.
   the process it started) and marks their runs interrupted. A daemon that stops stops its runs,
   interrupted. When a run's own process ends, what it left in its group is killed with it.
 
+## The tree's tools
+
+The tools through which agents launch other agents and answer for them (`docs/design.md` §4.3,
+§5; `docs/agents.md` "The tree"). `agent_id` is the id `agent_launch` gave; the `agent_*` tools
+reach only the caller's own children, and are refused with `refused: <id> is not one of your
+children: agent_status lists them` for any other agent.
+
+| Tool | |
+|---|---|
+| `agent_launch {title, brief, model?, role?, workspace?}` | Starts a child on one task and answers at once with its id. `role` is `worker` (by default) or `lead`; `workspace` is an existing workspace's name, `{"new": {"name", "repositories"?}}` for a new one (made at once, the child's brief sent once it is prepared; a workspace that fails fails the child), or left out for the caller's own place. Refused, never queued, above the project's children cap (`refused: N children already run in project P, its cap: do the work yourself, or wait for one of them to end (agent_stop ends one of yours)`) and past the depth limit. |
+| `agent_send {agent_id, message}` | A message to a child, urgent: on its next tool result in a turn, a new turn otherwise. It answers the child's question. |
+| `agent_status {agent_id?}` | One line per child (or for the one named): what it does (in a turn, `running \`<line>\` for 12 min`, `waiting for approval #3`, `waiting on the provider`, idle, reported, ended or failed with why), the time since its last sign of activity, its context use, then its last three messages. |
+| `agent_read {agent_id, after?}` | A page of the child's conversation, oldest first, one line per event that says something (`#<n> sent: …`, `said: …`, `tool call: …`, a tool served and its outcome, a turn's end, a replacement, a report), each text cut at 2,000 characters, the page under 30,000; it ends with the `after` to pass for the next page. |
+| `agent_stop {agent_id}` | Stops the child and its own children, deepest first; what was queued for them is superseded; their runs are stopped. Their workspaces stay. |
+| `report {text}` | The caller is done. At most 10,000 characters, so that it rides whole on its parent's results; a longer one is refused, asking for fewer words and a file that holds the details. A child's report goes to its parent at once (`child-report`, with its workspace, its branch and the last commit of each repository), and the child ends when its turn does (or two minutes later, if its turn goes on). A root's report is shown to the user (`agent.reported`) and the root stays. |
+| `ask_user {question}` (a root) | A question to the user (`agent.asked`), answered later as a message. |
+| `ask_parent {question}` (a child) | A question to its parent (`child-question`), answered with `agent_send`. Until then the child shows as waiting on its parent. |
+| `approval_answer {request_id, decision, why}` | Answers a request held for the caller: `deny` (the agent that asked is told, with the why) or `forward` (to the caller's parent with its why, or to the user from a root). There is no way to allow: `allow` is refused as a decision the tool does not have, and a request the caller does not hold, or no longer holds, is refused (`refused: request #n is not held by this agent: …`). |
+
+They go through the gate like every call (it allows them). Their texts are masked of the
+daemon's secrets before anyone else reads them.
+
 ## The gate
 
 Every call goes through `gate::decide` once (`docs/design.md` §7), in the order of
@@ -237,17 +265,24 @@ The words of a line that name paths (every word but the program, an option's val
 `NAME=value`'s value) are resolved from the folder the run starts in, as a file tool's path is.
 
 **A held call** ("ask") is written as a request (`flottille approvals`, `docs/protocol.md`) and
-answered at once, not as an error, with:
+answered at once, not as an error; a root is answered:
 
 > Waiting for the user's approval, request #n. This action has not happened; do not assume it
 > did. Continue with work that does not depend on it, or end your turn saying you wait. The answer
 > will be handed to you when the user gives it.
 
+and a child, whose request goes to its parent:
+
+> Waiting for approval, request #n: your parent decides whether it goes on to the user. This
+> action has not happened; do not assume it did. Continue with work that does not depend on it,
+> or end your turn saying you wait. The answer will be handed to you.
+
 A request holds its number (counted across every agent), the call frozen whole (what is
 performed once it is allowed; it is shown cut and masked), the reasons, masked, whether it
 reaches a sensitive place, the agent that asked, and who holds it: the user for a root's request,
-the parent for a child's (which denies it or forwards it up with one sentence of why, #7). Until
-the tree, every agent is a root. The same call key (`claudecode/toolUseId`) of the same agent asked
+the parent for a child's, which is told at once (`child-asks`, urgent) and denies it or forwards
+it up with one sentence of why (`approval_answer`), one level at a time, every why kept in the
+request's `forwards`. The same call key (`claudecode/toolUseId`) of the same agent asked
 twice gives the same request. A request that cannot be written refuses the call: `refused: the
 request for the user could not be made, so nothing was done; say so and go on with what does not
 depend on it`.
@@ -267,13 +302,14 @@ time. A request held by an agent is not listed for the user and cannot be answer
 **An allowed request** is checked again (the gate on the frozen call: a refusal now, or a reason
 to ask that the request did not have, stops it), performed as the agent's call (recorded as its
 `agent.tool_served`, with the request's number), and its answer stored as the agent's `approval`
-delivery, masked, which the deliveries send (#7):
+delivery, urgent and masked, then sent to it (`docs/agents.md`):
 
 - `Request #n (tool) was approved by the user, and Flottille has now done it. Its result:` and
   the result;
 - `Request #n (tool) was approved by the user, but nothing was done: …` for a failure;
 - `Request #n (tool) was not executed: …` for a refusal, or when the situation changed;
 - `Request #n (tool) was refused by the user. Nothing was done.` for a denial;
+- `Request #n (tool) was refused by <agent>: <why>. Nothing was done.` for an agent's denial;
 - `Request #n (tool) was approved by the user, but Flottille stopped while it was doing it, and
   cannot tell whether it took effect: check before asking again.` when a daemon stopped while it
   performed it (said by the next one, at its start).

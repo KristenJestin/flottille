@@ -133,9 +133,9 @@ fn run_agent(paths: &Paths, asked: AgentRun, json: bool) -> Result<ExitCode> {
                 );
                 break ExitCode::FAILURE;
             }
+            // A death replaces the session, which goes on with the turn; the third fails it.
             "agent.died" => {
-                eprintln!("flottille: the process of agent {id} died");
-                break ExitCode::FAILURE;
+                eprintln!("flottille: the process of agent {id} died, its session is replaced");
             }
             _ => {}
         }

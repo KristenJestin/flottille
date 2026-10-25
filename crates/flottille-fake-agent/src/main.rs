@@ -10,7 +10,9 @@
 //!   it received (`{"pid", "received": <the JSON-RPC message as it came>}`), and for what it did
 //!   that a test checks (`{"pid", "started": true}`, `{"pid", "permission": <the client's
 //!   answer>}`, `{"pid", "mcp": {"status", "body"}}`);
-//! - `sessions/<id>.jsonl`, the history of each session, so that a new process can load it.
+//! - `sessions/<id>.jsonl`, the history of each session, so that a new process can load it;
+//! - `played.json`, how many times each turn with `times` was played, across processes;
+//! - `kept.json`, the values `keep` kept, across processes.
 //!
 //! # The script
 //!
@@ -38,7 +40,9 @@
 //! - `models`, `efforts`: the values of the `model` and `thought_level` options, the first one
 //!   current; no effort option without `efforts`.
 //! - `turns`: a prompt plays the first turn whose `when` is in its text; a prompt matching none is
-//!   answered `ok`. `stop` is the stop reason (`end_turn` by default).
+//!   answered `ok`. `stop` is the stop reason (`end_turn` by default). A turn with `"times": n`
+//!   is played n times at most, by every process of the folder together: after that it is skipped,
+//!   and the prompt plays the next turn that matches.
 //!
 //! The steps of a turn, in order:
 //!
@@ -51,6 +55,13 @@
 //! | `{"permission": {"tool": "Bash", "title": "ls"}}` | a `session/request_permission` for that tool, answer recorded |
 //! | `{"permission": {"title": "x", "untyped": true}}` | the same with no `_meta.claudeCode.toolName`: a request that has only a title |
 //! | `{"mcp": {"tool": "fs_list", "arguments": {}}}` | calls the tool on the session's first HTTP MCP server (initialize, then `tools/call`), as a tool call; the answer recorded |
+//! | `{"mcp": {"tool": "agent_launch", "arguments": {…}, "keep": "w1"}}` | the same, and keeps the first agent id (12 hexadecimal digits) of the answer's text under that name |
+//!
+//! In the texts of an `mcp` step's arguments, `{kept:w1}` is replaced by the value kept under
+//! `w1`, `{prompt:request}` by the first request number (`#3`) of the turn's prompt (a number
+//! when it is the whole text), and
+//! `{prompt:agent}` by the first agent id of the turn's prompt. Together they let a scripted lead
+//! launch a worker and write to it, or a parent answer the request its child's ask names.
 //! | `{"wait": 500}` | waits that many milliseconds; a cancel ends the turn `cancelled` |
 //! | `{"hang": true}` | goes silent until the turn is cancelled |
 //! | `{"child": true}` | starts a `sleep` in its own process group, as the CLI the adapter runs would be, and records its pid (`{"child": <pid>}`) |
@@ -143,7 +154,8 @@ impl Record {
             .append(true)
             .open(&self.0)
             .expect("cannot write received.jsonl");
-        writeln!(file, "{entry}").unwrap();
+        // One write: the agents of a tree share the file, and their lines must not mix.
+        file.write_all(format!("{entry}\n").as_bytes()).unwrap();
     }
 }
 
@@ -268,17 +280,90 @@ impl Agent {
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .find(|turn| {
+                    .enumerate()
+                    .find(|(index, turn)| {
                         turn["when"]
                             .as_str()
                             .is_some_and(|when| text.contains(when))
+                            && self.may_play(*index, turn)
                     })
-                    .cloned()
+                    .map(|(_, turn)| turn.clone())
                     .unwrap_or_else(|| json!({"do": [{"say": "ok"}]}));
-                let stop = self.play(&session, &turn, answered, cancelled);
+                let stop = self.play(&session, &text, &turn, answered, cancelled);
                 Ok(json!({"stopReason": stop}))
             }
             method => Err(format!("the fake agent does not know {method}")),
+        }
+    }
+
+    /// Whether the turn may be played once more, counting this time when it may.
+    fn may_play(&self, index: usize, turn: &Value) -> bool {
+        let Some(times) = turn["times"].as_u64() else {
+            return true;
+        };
+        let file = self.sessions.with_file_name("played.json");
+        let mut played: Map<String, Value> = std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        let count = played
+            .get(&index.to_string())
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if count >= times {
+            return false;
+        }
+        played.insert(index.to_string(), (count + 1).into());
+        std::fs::write(&file, Value::Object(played).to_string()).unwrap();
+        true
+    }
+
+    fn kept(&self) -> Map<String, Value> {
+        std::fs::read_to_string(self.sessions.with_file_name("kept.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    fn keep(&self, name: &str, value: &str) {
+        let mut kept = self.kept();
+        kept.insert(name.to_owned(), value.into());
+        std::fs::write(
+            self.sessions.with_file_name("kept.json"),
+            Value::Object(kept).to_string(),
+        )
+        .unwrap();
+    }
+
+    /// The value with its placeholders filled: kept values, and what the prompt names.
+    fn filled(&self, value: &Value, prompt: &str) -> Value {
+        match value {
+            // A number where a number is meant.
+            Value::String(text) if text == "{prompt:request}" => request_number(prompt)
+                .and_then(|n| n.parse::<u64>().ok())
+                .map_or_else(|| value.clone(), Value::from),
+            Value::String(text) => {
+                let mut text = text.clone();
+                for (name, kept) in self.kept() {
+                    text = text.replace(&format!("{{kept:{name}}}"), kept.as_str().unwrap_or(""));
+                }
+                if let Some(number) = request_number(prompt) {
+                    text = text.replace("{prompt:request}", &number);
+                }
+                if let Some(id) = agent_id(prompt) {
+                    text = text.replace("{prompt:agent}", &id);
+                }
+                Value::String(text)
+            }
+            Value::Array(items) => {
+                Value::Array(items.iter().map(|v| self.filled(v, prompt)).collect())
+            }
+            Value::Object(map) => Value::Object(
+                map.iter()
+                    .map(|(k, v)| (k.clone(), self.filled(v, prompt)))
+                    .collect(),
+            ),
+            other => other.clone(),
         }
     }
 
@@ -286,6 +371,7 @@ impl Agent {
     fn play(
         &mut self,
         session: &str,
+        prompt: &str,
         turn: &Value,
         answered: &Receiver<Value>,
         cancelled: &Mutex<bool>,
@@ -322,7 +408,8 @@ impl Agent {
                 let answer = self.ask_permission(session, asked, answered);
                 self.record.write(json!({"permission": answer}));
             } else if let Some(call) = step.get("mcp") {
-                self.call_mcp(session, call);
+                let call = self.filled(call, prompt);
+                self.call_mcp(session, &call);
             } else if let Some(ms) = step["wait"].as_u64() {
                 let deadline = Instant::now() + Duration::from_millis(ms);
                 while Instant::now() < deadline {
@@ -423,7 +510,13 @@ impl Agent {
             Err(error) => (0, json!({"error": error})),
         };
         self.record
-            .write(json!({"mcp": {"status": status, "body": body}}));
+            .write(json!({"mcp": {"status": status, "body": body}, "session": session}));
+        if let Some(name) = call["keep"].as_str() {
+            let text = body["result"]["content"][0]["text"].as_str().unwrap_or("");
+            if let Some(id) = agent_id(text) {
+                self.keep(name, &id);
+            }
+        }
         self.notify(
             session,
             json!({"sessionUpdate": "tool_call_update", "toolCallId": call_id,
@@ -502,6 +595,26 @@ impl Agent {
         }
         Value::Array(options)
     }
+}
+
+/// The first request number of the text: the digits after its first `#`.
+fn request_number(text: &str) -> Option<String> {
+    text.split('#').skip(1).find_map(|rest| {
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        (!digits.is_empty()).then_some(digits)
+    })
+}
+
+/// The first agent id of the text: a word of 12 lowercase hexadecimal digits.
+fn agent_id(text: &str) -> Option<String> {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|word| {
+            word.len() == 12
+                && word
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+        })
+        .map(str::to_owned)
 }
 
 /// An MCP tool call over streamable HTTP: `initialize`, `notifications/initialized`, then

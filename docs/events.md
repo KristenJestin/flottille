@@ -130,8 +130,8 @@ The workspace's worktrees, folder and record are gone. Its branches are kept.
 ### The events of an agent
 
 Every event of an agent has `agent`, its id (`docs/agents.md`), and is part of its conversation
-(`agent.show`). The events made from what the agent sends also have `replay`: true while a
-`session/load` replays its history, so that a client never takes it for new.
+(`agent.show`). The events made from what the agent sends also have `replay`, always false: what a
+`session/load` replays is not stored again (`docs/agents.md`, "The conversation").
 
 #### `agent.created`
 
@@ -145,6 +145,10 @@ An agent was written, before its process starts.
 | `folder` | Where it works. |
 | `provider` | `claude`. |
 | `model` | The model asked, `null` for the agent's default. |
+| `role` | `lead` or `worker`. |
+| `parent` | The agent that launched it, `null` for a root. |
+| `depth` | 0 for a root, its parent's plus one for a child. |
+| `title` | Its task's title, `null` for a root. |
 
 #### `agent.started`
 
@@ -261,16 +265,28 @@ The agent that held the request passed it up, with one sentence of why.
 | `why` | Its sentence. |
 | `held_by` | Who holds it now: `user`, or the agent's parent. |
 
+#### `approval.cancelled`
+
+The request was never answered: the agent that asked, or the one that held it, ended. It is no
+longer pending, so the user never sees it.
+
+| Field | |
+|---|---|
+| `number` | |
+| `agent` | The agent that asked. |
+| `held_by` | Who held it: `user`, or an agent's id. |
+| `why` | Which agent ended, and how. |
+
 #### `approval.decided`
 
-The user answered the request.
+The user answered the request, or the agent that held it denied it.
 
 | Field | |
 |---|---|
 | `number` | |
 | `agent` | The agent that asked. |
 | `decision` | `deny`, `once`, or `tree` (allowed for the root's tree). |
-| `by` | `user`. |
+| `by` | `user`, or the id of the agent that denied it (`approval_answer`). |
 
 #### `approval.settled`
 
@@ -303,7 +319,8 @@ Its process was let go; the next message starts it again.
 
 #### `agent.died`
 
-Its process ended by itself. The agent failed.
+Its process ended by itself. Its session is replaced (`agent.replaced`), or the agent fails when
+it has been replaced too often (`docs/agents.md`, "Replacement").
 
 | Field | |
 |---|---|
@@ -315,12 +332,88 @@ Its process ended by itself. The agent failed.
 #### `agent.failed`
 
 The agent cannot go on: its process could not start, its session could not open, an option it was
-asked is not one it offers. Its process is stopped.
+asked is not one it offers, it was replaced too often, its new workspace could not be prepared, or
+its parent failed. Its process is stopped, and so is its tree; what was queued for it is
+superseded.
 
 | Field | |
 |---|---|
 | `agent` | |
 | `reason` | A sentence, masked. |
+
+#### `agent.ended`
+
+The agent was stopped (by the user, its parent, or its parent's end), or it was a child that
+reported. Its process and its runs are stopped; what was queued for it is superseded.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `reason` | A sentence. |
+
+#### `agent.reported`
+
+The agent called `report` (`docs/tools.md`).
+
+| Field | |
+|---|---|
+| `agent` | |
+| `text` | Its report, masked. |
+
+#### `agent.asked`
+
+The agent asked a question: a root of the user (`ask_user`), a child of its parent
+(`ask_parent`).
+
+| Field | |
+|---|---|
+| `agent` | |
+| `question` | Masked. |
+| `to` | `user` or `parent`. |
+
+#### `agent.stuck`
+
+The sweep found the agent stuck in a turn (`docs/agents.md`, "The sweep"): its session is
+replaced.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `quiet_ms` | How long nothing showed. |
+
+#### `agent.replaced`
+
+A new session takes the agent's work on (`docs/agents.md`, "Replacement").
+
+| Field | |
+|---|---|
+| `agent` | |
+| `epoch` | The new session's number, counted from 0 for the first. |
+| `reason` | Why, a sentence. |
+| `counted` | Whether it counts against the limit of replacements. |
+
+#### `delivery.queued`
+
+A delivery was stored for the agent (`docs/agents.md`, "Deliveries"). One already stored under
+the same id is not stored again, and has no event.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `delivery` | Its id. |
+| `kind` | `user`, `brief`, `parent`, `child-report`… |
+| `urgency` | `between-turns`, `urgent` or `redirect`. |
+
+#### `delivery.sent`, `delivery.given_back`, `delivery.superseded`
+
+Deliveries were sent (`how`: `prompt`, or `note` on a tool result), given back to the queue
+(their turn failed), or superseded (their agent ended first).
+
+| Field | |
+|---|---|
+| `agent` | |
+| `deliveries` | Their ids. |
+| `how` | For `delivery.sent` only. |
 
 ### The events of a run
 
