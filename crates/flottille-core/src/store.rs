@@ -211,6 +211,17 @@ const MIGRATIONS: &[&str] = &[
         AND e.at >= workspaces.created_at
     );
 ",
+    "
+    -- What each provider's agents offered when their sessions opened (`docs/agents.md`,
+    -- \"Providers\"): its models, each with its efforts once one was seen chosen, as JSON, and the
+    -- version of the provider they were read from: another version starts over.
+    CREATE TABLE provider_models (
+        provider   TEXT PRIMARY KEY,
+        version    TEXT,
+        models     TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+    ) STRICT;
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -1336,6 +1347,36 @@ impl Store {
     }
 
     /// The replacements of the agent since `since` that count against its limit.
+    /// The models a provider's agents offered last, with the version they were read from.
+    pub fn provider_models(&self, provider: &str) -> Result<Option<(Option<String>, Value)>> {
+        let row: Option<(Option<String>, String)> = self
+            .connection
+            .query_row(
+                "SELECT version, models FROM provider_models WHERE provider = ?1",
+                params![provider],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        row.map(|(version, models)| Ok((version, serde_json::from_str(&models)?)))
+            .transpose()
+    }
+
+    /// Keeps what a provider's agent offered, in place of what was kept.
+    pub fn set_provider_models(
+        &self,
+        provider: &str,
+        version: Option<&str>,
+        models: &Value,
+    ) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO provider_models (provider, version, models, updated_at) \
+             VALUES (?1, ?2, ?3, ?4) ON CONFLICT (provider) DO UPDATE SET version = ?2, \
+             models = ?3, updated_at = ?4",
+            params![provider, version, models.to_string(), now_ms()],
+        )?;
+        Ok(())
+    }
+
     pub fn replacements_since(&self, agent: &str, since: u64) -> Result<usize> {
         let count: u64 = self.connection.query_row(
             "SELECT count(*) FROM agent_replacements WHERE agent = ?1 AND at >= ?2 AND counted",
@@ -2094,6 +2135,36 @@ mod tests {
         assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len());
         assert_eq!(store.workspaces(None).unwrap().len(), 1);
         assert!(store.agents().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_provider_s_models_are_kept_with_its_version_and_replaced_whole() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(store.provider_models("claude").unwrap(), None);
+
+        let models = json!([{"id": "small", "efforts": ["low"]}]);
+        store
+            .set_provider_models("claude", Some("2.1.295"), &models)
+            .unwrap();
+        store
+            .set_provider_models("opencode", None, &json!([]))
+            .unwrap();
+
+        assert_eq!(
+            store.provider_models("claude").unwrap(),
+            Some((Some("2.1.295".into()), models))
+        );
+        store
+            .set_provider_models("claude", Some("2.1.300"), &json!([]))
+            .unwrap();
+        assert_eq!(
+            store.provider_models("claude").unwrap(),
+            Some((Some("2.1.300".into()), json!([])))
+        );
+        assert_eq!(
+            store.provider_models("opencode").unwrap(),
+            Some((None, json!([])))
+        );
     }
 
     #[test]
