@@ -727,6 +727,37 @@ fn the_effort_is_an_option_of_the_model_set_on_claude() {
 }
 
 #[test]
+fn a_model_change_is_answered_once_claude_took_the_effort_reset() {
+    let user = User::with_fake_claude();
+    user.claude_script(json!({"slow_controls": 300}));
+    let mut bridge = Bridge::start(&user);
+    let (opened, _) = bridge.request("session/new", new_session(&user, &[]));
+    let session = opened.unwrap()["sessionId"].as_str().unwrap().to_owned();
+    let mut set = |id: &str, value: &str| {
+        bridge
+            .request(
+                "session/set_config_option",
+                json!({"sessionId": session, "configId": id, "value": value}),
+            )
+            .0
+            .unwrap()
+    };
+    set("effort", "high");
+
+    set("model", "haiku");
+
+    let resets: Vec<Value> = written(&user, "control_request")
+        .into_iter()
+        .filter(|m| m["request"]["subtype"] == "apply_flag_settings")
+        .map(|m| m["request"]["settings"].clone())
+        .collect();
+    assert_eq!(
+        resets,
+        [json!({"effortLevel": "high"}), json!({"effortLevel": null})]
+    );
+}
+
+#[test]
 fn the_stop_reason_follows_claude_s_result() {
     let user = User::with_fake_claude();
     user.claude_script(json!({"turns": [

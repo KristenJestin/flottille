@@ -22,6 +22,8 @@
 //! ```
 //!
 //! `models`, when given, replaces the models the answer to `initialize` lists (`MODELS`).
+//! `slow_controls`, when given, is how many milliseconds the fake waits before it reads each
+//! control request but `initialize`, as a busy Claude Code does.
 //!
 //! A prompt plays the first turn whose `when` is in its text; a prompt matching none is answered
 //! `ok`. A turn ends with a `result` message: `"stop_reason"` (`end_turn` by default), `"subtype"`
@@ -113,6 +115,7 @@ fn main() {
     let out = Arc::new(Mutex::new(std::io::stdout()));
     let reader = Reader {
         models: script.get("models").cloned().unwrap_or_else(models),
+        slow_controls: Duration::from_millis(script["slow_controls"].as_u64().unwrap_or(0)),
         record: record.clone(),
         out: out.clone(),
         interrupted: interrupted.clone(),
@@ -169,6 +172,7 @@ fn send(out: &Mutex<std::io::Stdout>, message: Value) {
 
 struct Reader {
     models: Value,
+    slow_controls: Duration,
     record: Record,
     out: Arc<Mutex<std::io::Stdout>>,
     interrupted: Arc<Mutex<bool>>,
@@ -181,6 +185,10 @@ impl Reader {
             let Ok(message) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
+            if message["type"] == "control_request" && message["request"]["subtype"] != "initialize"
+            {
+                std::thread::sleep(self.slow_controls);
+            }
             self.record.write(json!({"received": message}));
             match message["type"].as_str() {
                 Some("user") => {
