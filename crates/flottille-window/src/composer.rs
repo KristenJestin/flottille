@@ -73,8 +73,10 @@ pub struct Composer {
     places: Vec<PlaceChoice>,
     choice: Choice,
     menu: bool,
-    running: Vec<RunningSession>,
-    icons: HashMap<String, Entity<StateIcon>>,
+    /// The "Running agents" tab's list and count, views of their own: a session starting or
+    /// ending a turn redraws them, not the composer.
+    running: Entity<RunningList>,
+    count: Entity<RunningCount>,
     /// Where the session being started was asked to start, until the daemon answers.
     sending: Option<Target>,
     error: Option<SharedString>,
@@ -140,6 +142,14 @@ impl Composer {
                 _ => {}
             }),
         ];
+        let running = {
+            let shell = shell.clone();
+            cx.new(|_| RunningList {
+                shell,
+                sessions: Vec::new(),
+                icons: HashMap::new(),
+            })
+        };
         Self {
             shell,
             project,
@@ -154,8 +164,8 @@ impl Composer {
             places: Vec::new(),
             choice: Choice::Main,
             menu: false,
-            running: Vec::new(),
-            icons: HashMap::new(),
+            running,
+            count: cx.new(|_| RunningCount { agents: 0 }),
             sending: None,
             error: None,
             blocked: None,
@@ -206,8 +216,23 @@ impl Composer {
     }
 
     /// The sessions the "Running agents" tab lists, in order.
-    pub fn running(&self) -> &[RunningSession] {
-        &self.running
+    pub fn running(&self, cx: &gpui_kit::App) -> Vec<RunningSession> {
+        self.running.read(cx).sessions.clone()
+    }
+
+    /// The sessions of the "Running agents" tab, and the agents it counts: their views are
+    /// drawn again when they change, the composer is not.
+    pub fn set_running(&mut self, running: Vec<RunningSession>, cx: &mut Context<Self>) {
+        let agents = running.iter().map(|s| s.agents).sum();
+        if self.count.read(cx).agents != agents {
+            self.count.update(cx, |count, cx| {
+                count.agents = agents;
+                cx.notify();
+            });
+        }
+        if self.running.read(cx).sessions != running {
+            self.running.update(cx, |list, cx| list.set(running, cx));
+        }
     }
 
     pub fn set_places(&mut self, places: Vec<PlaceChoice>, cx: &mut Context<Self>) {
@@ -221,21 +246,6 @@ impl Composer {
             }
             self.places = places;
             self.set_blocked();
-            cx.notify();
-        }
-    }
-
-    pub fn set_running(&mut self, running: Vec<RunningSession>, cx: &mut Context<Self>) {
-        if self.running != running {
-            self.icons
-                .retain(|id, _| running.iter().any(|s| &s.id == id));
-            for session in &running {
-                let status = session.status.clone();
-                self.icons
-                    .entry(session.id.clone())
-                    .or_insert_with(|| cx.new(|cx| StateIcon::new(status, cx)));
-            }
-            self.running = running;
             cx.notify();
         }
     }
@@ -366,7 +376,6 @@ impl Composer {
         }
         let t = self.slide.value(now);
         let bounds = *self.tabs.borrow();
-        let agents: usize = self.running.iter().map(|s| s.agents).sum();
         // The highlight slides between the two tabs' places, measured as they were drawn.
         let pip = match bounds {
             [Some(row), Some(a), Some(b)] => {
@@ -386,40 +395,39 @@ impl Composer {
             _ => None,
         };
         let has_pip = pip.is_some();
-        let tab = |index: usize, tab: Tab, label: SharedString, count: Option<usize>| {
-            let selected = self.tab == tab;
-            let tabs = self.tabs.clone();
-            let id = match tab {
-                Tab::NewTask => "tab-task",
-                Tab::Running => "tab-running",
-            };
-            div()
-                .id(id)
-                .relative()
-                .h(px(26.))
-                .px(px(10.))
-                .rounded(px(7.))
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .text_size(px(12.5))
-                .text_color(if selected { p.text } else { p.faint })
-                .when(selected && !has_pip, |d| d.bg(p.sel))
-                .child(label)
-                .when_some(count, |d, n| {
-                    d.child(div().mono(11.).text_color(p.mute).child(n.to_string()))
-                })
-                .child(
-                    canvas(
-                        move |b: Bounds<Pixels>, _, _| tabs.borrow_mut()[index + 1] = Some(b),
-                        |_, _, _, _| {},
+        let tab =
+            |index: usize, tab: Tab, label: SharedString, count: Option<Entity<RunningCount>>| {
+                let selected = self.tab == tab;
+                let tabs = self.tabs.clone();
+                let id = match tab {
+                    Tab::NewTask => "tab-task",
+                    Tab::Running => "tab-running",
+                };
+                div()
+                    .id(id)
+                    .relative()
+                    .h(px(26.))
+                    .px(px(10.))
+                    .rounded(px(7.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(px(12.5))
+                    .text_color(if selected { p.text } else { p.faint })
+                    .when(selected && !has_pip, |d| d.bg(p.sel))
+                    .child(label)
+                    .children(count)
+                    .child(
+                        canvas(
+                            move |b: Bounds<Pixels>, _, _| tabs.borrow_mut()[index + 1] = Some(b),
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full(),
                     )
-                    .absolute()
-                    .size_full(),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.select_tab(tab, cx)))
-                .test_support()
-        };
+                    .on_click(cx.listener(move |this, _, _, cx| this.select_tab(tab, cx)))
+                    .test_support()
+            };
         div()
             .relative()
             .flex()
@@ -438,52 +446,12 @@ impl Composer {
             })
             .children(pip)
             .child(tab(0, Tab::NewTask, "New task".into(), None))
-            .child(tab(1, Tab::Running, "Running agents".into(), Some(agents)))
-    }
-
-    fn render_running(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = palette(cx);
-        let list = div().id("running-list").p(px(6.)).flex().flex_col();
-        if self.running.is_empty() {
-            return list.child(
-                div()
-                    .px(px(10.))
-                    .py(px(8.))
-                    .text_color(p.faint)
-                    .child("Nothing running in this project."),
-            );
-        }
-        list.children(self.running.iter().enumerate().map(|(index, session)| {
-            let shell = self.shell.clone();
-            let id = session.id.clone();
-            let (label, color) = if session.waiting {
-                ("needs you", p.wait)
-            } else {
-                ("running", p.faint)
-            };
-            enter(
-                ElementId::Name(format!("enter-running-{}", session.id).into()),
-                index,
-                ListRow::new(
-                    ElementId::Name(format!("running-{}", session.id).into()),
-                    SharedString::from(session.title.clone()),
-                )
-                .when_some(self.icons.get(&session.id).cloned(), |row, icon| {
-                    row.leading(icon)
-                })
-                .detail(SharedString::from(format!("· {}", session.place)))
-                .meta(SharedString::from(agents_label(session.agents)))
-                .trailing(div().mono(11.5).text_color(color).child(label))
-                .on_click(move |_, window, cx| {
-                    let session = id.clone();
-                    shell
-                        .update(cx, |shell, cx| {
-                            shell.open(Selection::Session(session), window, cx)
-                        })
-                        .ok();
-                }),
-            )
-        }))
+            .child(tab(
+                1,
+                Tab::Running,
+                "Running agents".into(),
+                Some(self.count.clone()),
+            ))
     }
 
     fn render_pickers(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -662,7 +630,7 @@ impl Render for Composer {
                 }))
                 .test_support()
                 .into_any_element(),
-            Tab::Running => self.render_running(cx).into_any_element(),
+            Tab::Running => self.running.clone().into_any_element(),
         };
         div()
             .id("composer")
@@ -738,5 +706,88 @@ impl Render for Composer {
                         }),
                 )
             })
+    }
+}
+
+/// The sessions of the "Running agents" tab.
+pub struct RunningList {
+    shell: WeakEntity<Shell>,
+    sessions: Vec<RunningSession>,
+    icons: HashMap<String, Entity<StateIcon>>,
+}
+
+impl RunningList {
+    fn set(&mut self, sessions: Vec<RunningSession>, cx: &mut Context<Self>) {
+        self.icons
+            .retain(|id, _| sessions.iter().any(|s| &s.id == id));
+        for session in &sessions {
+            let status = session.status.clone();
+            self.icons
+                .entry(session.id.clone())
+                .or_insert_with(|| cx.new(|cx| StateIcon::new(status, cx)));
+        }
+        self.sessions = sessions;
+        cx.notify();
+    }
+}
+
+impl Render for RunningList {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let list = div().id("running-list").p(px(6.)).flex().flex_col();
+        if self.sessions.is_empty() {
+            return list.child(
+                div()
+                    .px(px(10.))
+                    .py(px(8.))
+                    .text_color(p.faint)
+                    .child("Nothing running in this project."),
+            );
+        }
+        list.children(self.sessions.iter().enumerate().map(|(index, session)| {
+            let shell = self.shell.clone();
+            let id = session.id.clone();
+            let (label, color) = if session.waiting {
+                ("needs you", p.wait)
+            } else {
+                ("running", p.faint)
+            };
+            enter(
+                ElementId::Name(format!("enter-running-{}", session.id).into()),
+                index,
+                ListRow::new(
+                    ElementId::Name(format!("running-{}", session.id).into()),
+                    SharedString::from(session.title.clone()),
+                )
+                .when_some(self.icons.get(&session.id).cloned(), |row, icon| {
+                    row.leading(icon)
+                })
+                .detail(SharedString::from(format!("· {}", session.place)))
+                .meta(SharedString::from(agents_label(session.agents)))
+                .trailing(div().mono(11.5).text_color(color).child(label))
+                .on_click(move |_, window, cx| {
+                    let session = id.clone();
+                    shell
+                        .update(cx, |shell, cx| {
+                            shell.open(Selection::Session(session), window, cx)
+                        })
+                        .ok();
+                }),
+            )
+        }))
+    }
+}
+
+/// The agents the "Running agents" tab counts.
+pub struct RunningCount {
+    agents: usize,
+}
+
+impl Render for RunningCount {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .mono(11.)
+            .text_color(palette(cx).mute)
+            .child(self.agents.to_string())
     }
 }

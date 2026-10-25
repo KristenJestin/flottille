@@ -138,7 +138,10 @@ fn until(
     loop {
         shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
         cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear(cx));
+        // A frame as the platform asks for one: `Window::draw` alone builds again every view an
+        // update touched, even one not notified.
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
         if check(cx) {
             return;
         }
@@ -335,11 +338,25 @@ fn one_session_changing_state_redraws_its_row_and_not_the_others(cx: &mut TestAp
     until(&shell, cx, "the sessions are shown", |cx| {
         cx.update(|window, _| window.try_find(session_id(&busy)).is_some())
     });
+    // Atlas's page is open, its details read.
+    until(&shell, cx, "the page has its details", |cx| {
+        page_of(&shell, cx).read_with(cx, |page, _| page.chips()) == ["atlas · main"]
+    });
+    settle(cx);
     let renders = |id: &str, cx: &mut VisualTestContext| {
         shell.read_with(cx, |s, cx| s.session(id).unwrap().read(cx).renders())
     };
     let before: Vec<usize> = quiet.iter().map(|id| renders(id, cx)).collect();
     let busy_before = renders(&busy, cx);
+    let page = page_of(&shell, cx);
+    let composer = composer_of(&shell, "atlas", cx);
+    let page_and_composer = |cx: &mut VisualTestContext| {
+        (
+            page.read_with(cx, |p, _| p.renders()),
+            composer.read_with(cx, |c, _| c.renders()),
+        )
+    };
+    let page_and_composer_before = page_and_composer(cx);
 
     send(&user, &busy, "work a while");
     until(&shell, cx, "the session runs", |cx| {
@@ -352,6 +369,11 @@ fn one_session_changing_state_redraws_its_row_and_not_the_others(cx: &mut TestAp
     assert!(renders(&busy, cx) > busy_before, "its row is drawn again");
     let after: Vec<usize> = quiet.iter().map(|id| renders(id, cx)).collect();
     assert_eq!(after, before, "the other rows are not drawn again");
+    assert_eq!(
+        page_and_composer(cx),
+        page_and_composer_before,
+        "nor the project's page, nor its composer"
+    );
 }
 
 #[gpui_kit::test]
@@ -790,8 +812,8 @@ fn the_running_agents_tab_lists_a_waiting_session_first(cx: &mut TestAppContext)
     cx.update(|window, cx| window.click("tab-running", cx));
     let composer = composer_of(&shell, "atlas", cx);
     assert_eq!(composer.read_with(cx, |c, _| c.tab()), Tab::Running);
-    let listed: Vec<String> = composer.read_with(cx, |c, _| {
-        c.running().iter().map(|s| s.id.clone()).collect()
+    let listed: Vec<String> = composer.read_with(cx, |c, cx| {
+        c.running(cx).iter().map(|s| s.id.clone()).collect()
     });
     assert_eq!(
         listed,
