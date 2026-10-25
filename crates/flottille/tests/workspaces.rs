@@ -183,9 +183,9 @@ fn a_shown_workspace_counts_the_lines_added_and_removed_in_each_repository() {
     assert_eq!(
         changes,
         [
-            ("web", &json!({"added": 5, "removed": 1})),
-            ("api", &json!({"added": 0, "removed": 0})),
-            ("lib", &json!({"added": 0, "removed": 1})),
+            ("web", &json!({"added": 5, "removed": 1, "capped": false})),
+            ("api", &json!({"added": 0, "removed": 0, "capped": false})),
+            ("lib", &json!({"added": 0, "removed": 1, "capped": false})),
         ],
         "against the base, committed or not, new files counted, ignored ones not"
     );
@@ -219,6 +219,46 @@ fn showing_a_workspace_does_not_write_its_index() {
         (after.ino(), after.mtime(), after.mtime_nsec()),
         (before.ino(), before.mtime(), before.mtime_nsec()),
         "an agent's own git add or commit could fail on the index being rewritten"
+    );
+}
+
+#[test]
+fn the_new_files_of_a_workspace_are_read_without_following_links_up_to_a_limit() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    fixture.create(json!({})).unwrap();
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    let web = fixture.workspace("login").join("web");
+    let api = fixture.workspace("login").join("api");
+    let outside = fixture.user.path("outside.txt");
+    std::fs::write(&outside, "far\naway\n").unwrap();
+    std::os::unix::fs::symlink(&outside, web.join("LINK.md")).unwrap();
+    let fifo = web.join("pipe");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::write(web.join("NOTES.md"), "one\ntwo\n").unwrap();
+    // More new files than are read: the count says it stopped.
+    let many = api.join("generated");
+    std::fs::create_dir_all(&many).unwrap();
+    for at in 0..1001 {
+        std::fs::write(many.join(format!("{at}.txt")), "x\n").unwrap();
+    }
+
+    let shown = fixture.show("login").unwrap();
+
+    assert_eq!(
+        shown["repositories"][0]["changes"],
+        json!({"added": 2, "removed": 0, "capped": false}),
+        "a link and a pipe count no line, and the pipe is not waited on"
+    );
+    assert_eq!(
+        shown["repositories"][1]["changes"],
+        json!({"added": 1000, "removed": 0, "capped": true})
     );
 }
 

@@ -239,12 +239,13 @@ workspace is answered `failed`, with the step's failure.
 
 #### `workspace.show`
 
-`{"project", "name"}`. The workspace, each repository with `changes`: `{"added", "removed"}`, the
-lines added and removed in its worktree since its base commit, whether its branch committed them
-or they are not committed yet, new files git does not ignore counted whole (a binary file, a link
-or a file over 8 MiB counts no line). It writes nothing, not even git's index. `changes` is `null`
-when git cannot read the worktree (not made yet, or gone). `workspace.list` leaves it out: it runs
-no git.
+`{"project", "name"}`. The workspace, each repository with `changes`: `{"added", "removed",
+"capped"}`, the lines added and removed in its worktree since its base commit, whether its branch
+committed them or they are not committed yet, new files git does not ignore counted whole (a
+binary file, a link, anything but a regular file, or a file over 8 MiB counts no line). At most
+1000 new files and 16 MiB of them are read: past that the count stops and `capped` is `true`, the
+real count being higher. It writes nothing, not even git's index. `changes` is `null` when git
+cannot read the worktree (not made yet, or gone). `workspace.list` leaves it out: it runs no git.
 
 #### `workspace.prepare`
 

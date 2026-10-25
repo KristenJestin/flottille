@@ -91,6 +91,10 @@ async fn show(daemon: &Daemon, asked: WorkspaceName) -> Answer {
 
 /// A new file larger than this is not read to count its lines.
 const COUNTED_FILE: u64 = 8 * 1024 * 1024;
+/// How many new files, and how many of their bytes, are read at most: past them the count stops
+/// and says so (`capped`), rather than reading a dependency folder git does not ignore.
+const COUNTED_FILES: usize = 1000;
+const COUNTED_BYTES: u64 = 16 * 1024 * 1024;
 
 /// The lines added and removed in a worktree since its base commit: what its branch committed,
 /// what is changed and not committed, and the new files git does not ignore. A binary file counts
@@ -126,25 +130,52 @@ async fn changes(folder: &Path, base: &str) -> Option<Value> {
     .await
     .ok()
     .filter(|output| output.success)?;
+    let (mut files, mut bytes, mut capped) = (0usize, 0u64, false);
     for path in new.stdout.split('\0').filter(|path| !path.is_empty()) {
-        let path = folder.join(path);
-        // Never through a link: it may lead out of the worktree.
-        let Ok(metadata) = tokio::fs::symlink_metadata(&path).await else {
+        if files == COUNTED_FILES {
+            capped = true;
+            break;
+        }
+        files += 1;
+        let Some(text) = new_file(&folder.join(path)).await else {
             continue;
         };
-        if !metadata.is_file() || metadata.len() > COUNTED_FILE {
+        if bytes + text.len() as u64 > COUNTED_BYTES {
+            capped = true;
+            break;
+        }
+        bytes += text.len() as u64;
+        if text.contains(&0) {
             continue;
         }
-        let Ok(bytes) = tokio::fs::read(&path).await else {
-            continue;
-        };
-        if bytes.contains(&0) {
-            continue;
-        }
-        let breaks = bytes.iter().filter(|&&byte| byte == b'\n').count() as u64;
-        added += breaks + u64::from(bytes.last().is_some_and(|&last| last != b'\n'));
+        let breaks = text.iter().filter(|&&byte| byte == b'\n').count() as u64;
+        added += breaks + u64::from(text.last().is_some_and(|&last| last != b'\n'));
     }
-    Some(json!({"added": added, "removed": removed}))
+    Some(json!({"added": added, "removed": removed, "capped": capped}))
+}
+
+/// A new file's bytes, when it is a regular file of at most [`COUNTED_FILE`]. Opened once,
+/// never through a link (it may lead out of the worktree) and without waiting on a pipe; what is
+/// read is what was opened, checked after opening, so a file swapped for a link meanwhile is not
+/// followed.
+async fn new_file(path: &Path) -> Option<Vec<u8>> {
+    let mut file = tokio::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .await
+        .ok()?;
+    let metadata = file.metadata().await.ok()?;
+    if !metadata.is_file() || metadata.len() > COUNTED_FILE {
+        return None;
+    }
+    let mut text = Vec::with_capacity(metadata.len() as usize);
+    (&mut file)
+        .take(COUNTED_FILE + 1)
+        .read_to_end(&mut text)
+        .await
+        .ok()?;
+    (text.len() as u64 <= COUNTED_FILE).then_some(text)
 }
 
 /// What every event of a workspace starts with.
