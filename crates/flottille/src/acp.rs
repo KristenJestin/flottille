@@ -1,6 +1,6 @@
-//! The ACP client side of one adapter process (`docs/agents.md`): start it, shake hands, open the
-//! session (resume, else load, else new), set the options, then play the prompts it is given
-//! until it is released, stopped, or dies.
+//! The ACP client side of one agent process, the Claude bridge (`docs/agents.md`): start it, shake
+//! hands, open the session (resume, else load, else new), set the options, then play the prompts
+//! it is given until it is released, stopped, or dies.
 //!
 //! Built on the official `agent-client-protocol` crate, over the process's stdio. Its callbacks
 //! run in its dispatch loop, in the order messages arrive: an update is stored before the answer
@@ -53,7 +53,7 @@ pub enum Exit {
 pub trait Events: Send + Sync + 'static {
     /// An event of the agent's conversation; `activity` when it is a sign of activity.
     fn conversation(&self, name: &str, data: Value, activity: bool);
-    /// The session is open: how, its id, the adapter's version, and what the agent took.
+    /// The session is open: how, its id, the agent's version, and what the agent took.
     fn opened(&self, opened: &str, native_id: &str, agent_version: &str, taken: Choices);
     /// The next prompt, taken from what was delivered, when there is one.
     fn pump(&self) -> Option<String>;
@@ -399,7 +399,7 @@ fn answer_permission(
     tools: &[String],
 ) -> (String, RequestPermissionOutcome, bool) {
     let call = serde_json::to_value(&request.tool_call).unwrap_or_default();
-    // Only the tool name the adapter states counts: a title is text the model can shape.
+    // Only the tool name the agent states counts: a title is text the model can shape.
     let named = call["_meta"]["claudeCode"]["toolName"].as_str();
     let tool = named
         .or(call["title"].as_str())

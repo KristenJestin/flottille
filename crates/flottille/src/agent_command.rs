@@ -87,9 +87,6 @@ pub enum AgentAction {
         #[arg(long)]
         json: bool,
     },
-    /// Install the Claude adapter Flottille runs, at its pinned version, into Flottille's data
-    /// folder (with npm, never npx)
-    Install,
 }
 
 pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
@@ -238,17 +235,6 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        AgentAction::Install => {
-            println!(
-                "Installing {}@{} into {}",
-                claude::ADAPTER,
-                claude::ADAPTER_VERSION,
-                claude::adapter_prefix(paths).display()
-            );
-            claude::install(paths)?;
-            println!("Installed. `flottille doctor` says whether Claude agents can run.");
-            Ok(ExitCode::SUCCESS)
-        }
     }
 }
 
@@ -318,8 +304,8 @@ fn run_agent(paths: &Paths, asked: AgentRun, json: bool) -> Result<ExitCode> {
     Ok(code)
 }
 
-pub fn doctor(paths: &Paths, json: bool) -> Result<ExitCode> {
-    let report = claude::doctor(paths);
+pub fn doctor(json: bool) -> Result<ExitCode> {
+    let report = claude::doctor();
     if json {
         println!("{report}");
     } else {
@@ -334,54 +320,36 @@ pub fn doctor(paths: &Paths, json: bool) -> Result<ExitCode> {
 
 fn doctor_text(report: &Value) -> String {
     let mark = |ok: bool| if ok { "ok  " } else { "MISSING" };
-    let program = |name: &str, entry: &Value, missing: &str| {
-        if entry["present"] == true {
-            format!(
-                "{} {name}: {} ({})\n",
-                mark(true),
-                entry["version"].as_str().unwrap_or("version unknown"),
-                text(entry, "path")
-            )
-        } else {
-            format!("{} {name}: {missing}\n", mark(false))
-        }
+    let claude = &report["claude"];
+    let mut shown = if claude["present"] == true {
+        format!(
+            "{} claude: {} ({})\n",
+            mark(true),
+            claude["version"].as_str().unwrap_or("version unknown"),
+            text(claude, "path")
+        )
+    } else {
+        format!(
+            "{} claude: not on PATH; install Claude Code and sign in with it\n",
+            mark(false)
+        )
     };
-    let mut shown = program(
-        "Node",
-        &report["node"],
-        "not on PATH; the Claude adapter runs on it",
-    );
-    shown.push_str(&program(
-        "claude",
-        &report["claude"],
-        "not on PATH; install Claude Code and sign in with it",
-    ));
     let login = &report["login"];
     shown.push_str(&if login["present"] == true {
         format!("{} Claude login: {}\n", mark(true), text(login, "path"))
+    } else if login["api_key"] == true {
+        format!("{} Claude login: ANTHROPIC_API_KEY is set\n", mark(true))
     } else {
         format!(
-            "{} Claude login: no {}; run `claude` and sign in (on macOS the login is in the \
-             Keychain and there is no file)\n",
+            "{} Claude login: no {}, and no ANTHROPIC_API_KEY; run `claude` and sign in (on macOS \
+             the login is in the Keychain and there is no file)\n",
             mark(false),
             text(login, "path")
         )
     });
-    let adapter = &report["adapter"];
-    let pinned = text(adapter, "pinned");
-    shown.push_str(&match adapter["version"].as_str() {
-        Some(version) if version == pinned => {
-            format!("{} Claude adapter: {version}\n", mark(true))
-        }
-        Some(version) => format!(
-            "{} Claude adapter: {version} installed, {pinned} needed; run `flottille agent install`\n",
-            mark(false)
-        ),
-        None => format!(
-            "{} Claude adapter: not installed; run `flottille agent install`\n",
-            mark(false)
-        ),
-    });
+    for warning in report["warnings"].as_array().into_iter().flatten() {
+        shown.push_str(&format!("warn {}\n", warning.as_str().unwrap_or_default()));
+    }
     shown.push_str(if report["ready"] == true {
         "Claude agents can run.\n"
     } else {

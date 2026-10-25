@@ -1,0 +1,1022 @@
+//! Flottille's Claude bridge, `flottille bridge claude` (`docs/agents.md`): an ACP agent on stdio,
+//! which the daemon starts as it starts any agent, in front of the user's own `claude` driven in
+//! its stream-json mode. It translates and decides nothing: the bare mode comes from the daemon's
+//! options, which it refuses when they are not bare, and Claude's own permission prompts go to the
+//! daemon as ACP permission requests.
+//!
+//! One bridge runs one session. Once the session is open, the end of its `claude` is the end of
+//! the bridge, with the same exit code: the daemon sees the agent die.
+
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::process::ExitStatusExt;
+use std::path::{Path, PathBuf};
+use std::process::{ExitCode, ExitStatus, Stdio};
+use std::time::Duration;
+
+use flottille_core::paths::{Paths, ensure_private_dir};
+use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, Command};
+use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::mpsc;
+
+use crate::VERSION;
+use crate::claude;
+
+/// The models a session offers, as `claude` names them; `default` leaves the choice to it.
+const MODELS: [&str; 4] = ["default", "haiku", "sonnet", "opus"];
+
+/// The options of `_meta.claudeCode.options` the bridge takes; any other is refused.
+const OPTIONS: [&str; 6] = [
+    "tools",
+    "allowedTools",
+    "settingSources",
+    "strictMcpConfig",
+    "systemPrompt",
+    "env",
+];
+
+const NOT_FOUND: i64 = -32601;
+const INVALID: i64 = -32602;
+const INTERNAL: i64 = -32603;
+
+/// What Claude is told when one of its own permission prompts is refused.
+const REFUSED: &str = "Refused: this agent can use Flottille's tools only.";
+
+pub fn run(paths: &Paths) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let bridge = Bridge {
+        folder: paths.runtime.join("bridge"),
+        histories: paths.state.join("bridge/claude"),
+        offers_resume: std::env::var_os("FLOTTILLE_BRIDGE_NO_RESUME").is_none(),
+        out: tokio::io::stdout(),
+        claude: None,
+        from_claude: None,
+        waiting: HashMap::new(),
+        asked: HashMap::new(),
+        next: 0,
+        turn: None,
+    };
+    let code = runtime.block_on(bridge.serve())?;
+    // The standard input is read on a thread of the runtime that a dead `claude` leaves blocked.
+    runtime.shutdown_background();
+    Ok(ExitCode::from(code))
+}
+
+struct Bridge {
+    /// Where the MCP configuration with the session's token is written, out of the command line.
+    folder: PathBuf,
+    /// Each session's conversation, replayed by `session/load`.
+    histories: PathBuf,
+    offers_resume: bool,
+    out: tokio::io::Stdout,
+    claude: Option<Claude>,
+    from_claude: Option<mpsc::UnboundedReceiver<Value>>,
+    /// What waits for the answer to one of the bridge's control requests, by its id.
+    waiting: HashMap<String, Waiting>,
+    /// The permission prompts of `claude` asked of the client, by the ACP request's id: the
+    /// control request's id and the tool's input.
+    asked: HashMap<String, (String, Value)>,
+    next: u64,
+    turn: Option<Turn>,
+}
+
+/// The user's `claude`, running one session.
+struct Claude {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    session: String,
+    /// The MCP configuration file, removed with the process.
+    config: PathBuf,
+    history: PathBuf,
+    model: String,
+    open: bool,
+    /// The model's context window, once a result named it.
+    window: Option<u64>,
+}
+
+impl Drop for Claude {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.config);
+    }
+}
+
+/// The prompt being played.
+struct Turn {
+    id: Value,
+    cancelled: bool,
+    /// Whether the text of the message under way came as stream events, which its whole message
+    /// then repeats.
+    streamed: bool,
+    /// The context in use, as the last message or compaction said.
+    used: Option<u64>,
+}
+
+enum Waiting {
+    /// The session opens once `claude` took its `initialize`.
+    Open {
+        id: Value,
+        replay: bool,
+        answer: Value,
+    },
+    Model {
+        id: Value,
+        model: String,
+    },
+    Nothing,
+}
+
+type Failure = (i64, String);
+
+impl Bridge {
+    async fn serve(mut self) -> std::io::Result<u8> {
+        let mut input = BufReader::new(tokio::io::stdin()).lines();
+        let mut terminate = signal(SignalKind::terminate())?;
+        loop {
+            tokio::select! {
+                line = input.next_line() => match line {
+                    Ok(Some(line)) => {
+                        if let Ok(message) = serde_json::from_str::<Value>(&line) {
+                            self.client_said(message).await;
+                        }
+                    }
+                    _ => break,
+                },
+                message = next(&mut self.from_claude) => match message {
+                    Some(message) => self.claude_said(message).await,
+                    None => {
+                        if let Some(code) = self.claude_ended().await {
+                            return Ok(code);
+                        }
+                    }
+                },
+                _ = terminate.recv() => break,
+            }
+        }
+        if let Some(mut claude) = self.claude.take() {
+            // Its input closed, `claude` ends by itself; one that does not is killed.
+            drop(claude.stdin.take());
+            if tokio::time::timeout(Duration::from_secs(2), claude.child.wait())
+                .await
+                .is_err()
+            {
+                let _ = claude.child.kill().await;
+            }
+        }
+        Ok(0)
+    }
+
+    async fn send(&mut self, message: Value) {
+        let mut line = message.to_string();
+        line.push('\n');
+        // A client gone is the end of the input, which the loop sees.
+        let _ = self.out.write_all(line.as_bytes()).await;
+        let _ = self.out.flush().await;
+    }
+
+    async fn answer(&mut self, id: Value, result: Value) {
+        self.send(json!({"jsonrpc": "2.0", "id": id, "result": result}))
+            .await;
+    }
+
+    async fn fail(&mut self, id: Value, (code, message): Failure) {
+        self.send(json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}))
+            .await;
+    }
+
+    async fn update(&mut self, update: Value) {
+        let Some(claude) = &self.claude else { return };
+        let session = claude.session.clone();
+        self.send(json!({"jsonrpc": "2.0", "method": "session/update",
+            "params": {"sessionId": session, "update": update}}))
+            .await;
+    }
+
+    async fn write_claude(&mut self, message: Value) {
+        let Some(stdin) = self.claude.as_mut().and_then(|c| c.stdin.as_mut()) else {
+            return;
+        };
+        let mut line = message.to_string();
+        line.push('\n');
+        // A `claude` gone shows as the end of its output.
+        let _ = stdin.write_all(line.as_bytes()).await;
+        let _ = stdin.flush().await;
+    }
+
+    async fn control(&mut self, request: Value, waiting: Waiting) {
+        self.next += 1;
+        let id = format!("flottille-{}", self.next);
+        self.waiting.insert(id.clone(), waiting);
+        self.write_claude(json!({"type": "control_request", "request_id": id, "request": request}))
+            .await;
+    }
+
+    async fn client_said(&mut self, message: Value) {
+        let id = message.get("id").cloned().filter(|id| !id.is_null());
+        let Some(method) = message["method"].as_str() else {
+            if let Some(id) = id {
+                self.permission_answered(&id, &message["result"]).await;
+            }
+            return;
+        };
+        let params = &message["params"];
+        let Some(id) = id else {
+            if method == "session/cancel" {
+                self.cancel().await;
+            }
+            return;
+        };
+        let answered = match method {
+            "initialize" => Ok(Some(self.initialize())),
+            "session/new" | "session/resume" | "session/load" => {
+                self.open(&id, method, params).await
+            }
+            "session/set_config_option" => self.set_option(&id, params).await,
+            "session/prompt" => self.prompt(&id, params).await,
+            _ => Err((
+                NOT_FOUND,
+                format!("the Claude bridge does not know {method}"),
+            )),
+        };
+        match answered {
+            Ok(Some(result)) => self.answer(id, result).await,
+            Ok(None) => {}
+            Err(failure) => self.fail(id, failure).await,
+        }
+    }
+
+    fn initialize(&self) -> Value {
+        let mut sessions = json!({});
+        if self.offers_resume {
+            sessions["resume"] = json!({});
+        }
+        json!({
+            "protocolVersion": 1,
+            "agentCapabilities": {
+                "loadSession": true,
+                "promptCapabilities": {"image": false, "audio": false, "embeddedContext": false},
+                "mcpCapabilities": {"http": true, "sse": false},
+                "sessionCapabilities": sessions,
+            },
+            "agentInfo": {"name": "flottille-claude-bridge", "version": VERSION},
+            "authMethods": [],
+        })
+    }
+
+    /// Starts `claude` on the session: new, resumed, or loaded (resumed, its history replayed).
+    async fn open(
+        &mut self,
+        id: &Value,
+        method: &str,
+        params: &Value,
+    ) -> Result<Option<Value>, Failure> {
+        let invalid = |message: String| (INVALID, message);
+        if self.claude.is_some() {
+            return Err(invalid("this bridge runs a session already".into()));
+        }
+        let options = bare_options(&params["_meta"]["claudeCode"]["options"]).map_err(invalid)?;
+        let servers = mcp_servers(&params["mcpServers"]).map_err(invalid)?;
+        let cwd = params["cwd"]
+            .as_str()
+            .map(PathBuf::from)
+            .filter(|cwd| cwd.is_absolute())
+            .ok_or_else(|| invalid("the session needs an absolute cwd".into()))?;
+        let new = method == "session/new";
+        let session = if new {
+            new_session_id().map_err(|e| (INTERNAL, e.to_string()))?
+        } else {
+            params["sessionId"]
+                .as_str()
+                .filter(|id| is_session_id(id))
+                .ok_or_else(|| invalid("not a session id of the Claude bridge".into()))?
+                .to_owned()
+        };
+        let program = claude::find_program("claude").ok_or_else(|| {
+            (
+                INTERNAL,
+                "`claude` is not on PATH: install Claude Code and sign in with it first".into(),
+            )
+        })?;
+        let internal = |e: &dyn std::fmt::Display| (INTERNAL, e.to_string());
+        ensure_private_dir(&self.folder).map_err(|e| internal(&e))?;
+        ensure_private_dir(&self.histories).map_err(|e| internal(&e))?;
+        let config = self.folder.join(format!("{}.mcp.json", std::process::id()));
+        write_private(&config, &servers.to_string()).map_err(|e| internal(&e))?;
+        let mut child = Command::new(&program)
+            .args(arguments(&options, &config, new, &session))
+            .envs(options.env.iter().map(|(k, v)| (k, v)))
+            .env("CLAUDE_CODE_ENTRYPOINT", "sdk-rs")
+            .current_dir(&cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&config);
+                (INTERNAL, format!("cannot start {}: {e}", program.display()))
+            })?;
+        let stdin = child.stdin.take().expect("piped");
+        let stdout = child.stdout.take().expect("piped");
+        let (sender, receiver) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                // stdout is the protocol; anything else there is noise.
+                if let Ok(message) = serde_json::from_str::<Value>(&line)
+                    && sender.send(message).is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let history = self.histories.join(format!("{session}.jsonl"));
+        self.claude = Some(Claude {
+            child,
+            stdin: Some(stdin),
+            session: session.clone(),
+            config,
+            history,
+            model: "default".into(),
+            open: false,
+            window: None,
+        });
+        self.from_claude = Some(receiver);
+        let mut answer = json!({"configOptions": model_option("default")});
+        if new {
+            answer["sessionId"] = session.into();
+        }
+        self.control(
+            json!({"subtype": "initialize", "systemPrompt": options.prompt,
+                "systemPromptSnapshot": options.snapshot}),
+            Waiting::Open {
+                id: id.clone(),
+                replay: method == "session/load",
+                answer,
+            },
+        )
+        .await;
+        Ok(None)
+    }
+
+    async fn set_option(&mut self, id: &Value, params: &Value) -> Result<Option<Value>, Failure> {
+        if !self.claude.as_ref().is_some_and(|c| c.open) {
+            return Err((INVALID, "no session is open".into()));
+        }
+        if params["configId"] != "model" {
+            return Err((INVALID, format!("no option {}", params["configId"])));
+        }
+        let model = params["value"].as_str().unwrap_or_default();
+        if !MODELS.contains(&model) {
+            return Err((
+                INVALID,
+                format!("{model} is not a model offered: {}", MODELS.join(", ")),
+            ));
+        }
+        // Without a model, `claude` goes back to its own choice.
+        let mut request = json!({"subtype": "set_model"});
+        if model != "default" {
+            request["model"] = model.into();
+        }
+        self.control(
+            request,
+            Waiting::Model {
+                id: id.clone(),
+                model: model.to_owned(),
+            },
+        )
+        .await;
+        Ok(None)
+    }
+
+    async fn prompt(&mut self, id: &Value, params: &Value) -> Result<Option<Value>, Failure> {
+        let Some(claude) = self.claude.as_ref().filter(|c| c.open) else {
+            return Err((INVALID, "no session is open".into()));
+        };
+        if self.turn.is_some() {
+            return Err((INVALID, "a prompt is playing already".into()));
+        }
+        let mut text = String::new();
+        for block in params["prompt"].as_array().into_iter().flatten() {
+            match block["type"].as_str() {
+                Some("text") => text.push_str(block["text"].as_str().unwrap_or_default()),
+                Some("resource") => {
+                    let resource = &block["resource"];
+                    text.push_str(&format!(
+                        "{}\n{}",
+                        resource["uri"].as_str().unwrap_or_default(),
+                        resource["text"].as_str().unwrap_or_default()
+                    ));
+                }
+                other => {
+                    return Err((
+                        INVALID,
+                        format!("the Claude bridge takes no {} block", other.unwrap_or("?")),
+                    ));
+                }
+            }
+        }
+        remember(&claude.history, json!({"user": text}));
+        let session = claude.session.clone();
+        self.turn = Some(Turn {
+            id: id.clone(),
+            cancelled: false,
+            streamed: false,
+            used: None,
+        });
+        self.write_claude(
+            json!({"type": "user", "session_id": session, "parent_tool_use_id": null,
+            "message": {"role": "user", "content": [{"type": "text", "text": text}]}}),
+        )
+        .await;
+        Ok(None)
+    }
+
+    async fn cancel(&mut self) {
+        let Some(turn) = self.turn.as_mut().filter(|t| !t.cancelled) else {
+            return;
+        };
+        turn.cancelled = true;
+        self.control(json!({"subtype": "interrupt"}), Waiting::Nothing)
+            .await;
+    }
+
+    async fn permission_answered(&mut self, id: &Value, result: &Value) {
+        let key = id.as_str().map_or_else(|| id.to_string(), str::to_owned);
+        let Some((request, input)) = self.asked.remove(&key) else {
+            return;
+        };
+        let outcome = &result["outcome"];
+        let allowed = outcome["outcome"] == "selected" && outcome["optionId"] == "allow";
+        let decision = if allowed {
+            json!({"behavior": "allow", "updatedInput": input})
+        } else {
+            json!({"behavior": "deny", "message": REFUSED})
+        };
+        self.write_claude(json!({"type": "control_response", "response": {
+            "subtype": "success", "request_id": request, "response": decision}}))
+            .await;
+    }
+
+    /// `claude`'s output ended: its process is gone. The bridge's exit code once the session is
+    /// open; before, the open fails and the bridge waits for the next.
+    async fn claude_ended(&mut self) -> Option<u8> {
+        self.from_claude = None;
+        let mut claude = self.claude.take()?;
+        let status = claude.child.wait().await.ok();
+        if claude.open {
+            return Some(status.map_or(1, exit_code));
+        }
+        let ended = match status {
+            Some(status) => format!("claude ended as the session opened ({status})"),
+            None => "claude ended as the session opened".to_owned(),
+        };
+        let opening: Vec<Value> = self
+            .waiting
+            .drain()
+            .filter_map(|(_, waiting)| match waiting {
+                Waiting::Open { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect();
+        for id in opening {
+            self.fail(id, (INTERNAL, ended.clone())).await;
+        }
+        None
+    }
+
+    async fn claude_said(&mut self, message: Value) {
+        // A sub-agent's messages: there is none in bare mode, and they are not the session's.
+        if !message["parent_tool_use_id"].is_null() {
+            return;
+        }
+        match message["type"].as_str() {
+            Some("control_response") => self.control_answered(&message["response"]).await,
+            Some("control_request") => self.control_asked(&message).await,
+            Some("stream_event") => self.streamed(&message["event"]).await,
+            Some("assistant") => self.assistant(&message["message"]).await,
+            Some("user") => self.tool_results(&message["message"]).await,
+            Some("system") => self.system(&message).await,
+            Some("result") => self.result(&message).await,
+            _ => {}
+        }
+    }
+
+    async fn control_answered(&mut self, response: &Value) {
+        let id = response["request_id"].as_str().unwrap_or_default();
+        let Some(waiting) = self.waiting.remove(id) else {
+            return;
+        };
+        let refused = (response["subtype"] != "success").then(|| {
+            response["error"]
+                .as_str()
+                .unwrap_or("claude refused the request")
+                .to_owned()
+        });
+        match waiting {
+            Waiting::Open { id, replay, answer } => {
+                if let Some(error) = refused {
+                    self.claude = None;
+                    self.from_claude = None;
+                    return self.fail(id, (INTERNAL, error)).await;
+                }
+                if replay {
+                    self.replay().await;
+                }
+                if let Some(claude) = &mut self.claude {
+                    claude.open = true;
+                }
+                self.answer(id, answer).await;
+            }
+            Waiting::Model { id, model } => match refused {
+                Some(error) => self.fail(id, (INVALID, error)).await,
+                None => {
+                    if let Some(claude) = &mut self.claude {
+                        claude.model = model.clone();
+                    }
+                    self.answer(id, json!({"configOptions": model_option(&model)}))
+                        .await;
+                }
+            },
+            Waiting::Nothing => {}
+        }
+    }
+
+    /// The history of a loaded session, as `session/update`s before the answer.
+    async fn replay(&mut self) {
+        let Some(claude) = &self.claude else { return };
+        let Ok(history) = std::fs::read_to_string(&claude.history) else {
+            return;
+        };
+        for line in history.lines() {
+            let Ok(entry) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            let (kind, text) = if let Some(text) = entry["user"].as_str() {
+                ("user_message_chunk", text)
+            } else if let Some(text) = entry["agent"].as_str() {
+                ("agent_message_chunk", text)
+            } else if let Some(text) = entry["thought"].as_str() {
+                ("agent_thought_chunk", text)
+            } else {
+                continue;
+            };
+            self.update(json!({"sessionUpdate": kind, "content": {"type": "text", "text": text}}))
+                .await;
+        }
+    }
+
+    async fn control_asked(&mut self, message: &Value) {
+        let request = &message["request"];
+        let request_id = message["request_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        if request["subtype"] != "can_use_tool" {
+            return self
+                .write_claude(json!({"type": "control_response", "response": {"subtype": "error",
+                    "request_id": request_id, "error": "the Claude bridge does not take this request"}}))
+                .await;
+        }
+        let Some(claude) = &self.claude else { return };
+        let session = claude.session.clone();
+        self.next += 1;
+        let id = format!("permission-{}", self.next);
+        let tool = request["tool_name"].as_str().unwrap_or_default();
+        self.asked
+            .insert(id.clone(), (request_id, request["input"].clone()));
+        self.send(
+            json!({"jsonrpc": "2.0", "id": id, "method": "session/request_permission",
+            "params": {
+                "sessionId": session,
+                "toolCall": {"toolCallId": request["tool_use_id"], "title": tool,
+                    "rawInput": request["input"], "_meta": {"claudeCode": {"toolName": tool}}},
+                "options": [
+                    {"optionId": "allow", "name": "Allow", "kind": "allow_once"},
+                    {"optionId": "reject", "name": "Reject", "kind": "reject_once"},
+                ],
+            }}),
+        )
+        .await;
+    }
+
+    async fn chunk(&mut self, kind: &str, key: &str, text: &str) {
+        if let Some(claude) = &self.claude {
+            remember(&claude.history, json!({key: text}));
+        }
+        self.update(json!({"sessionUpdate": kind, "content": {"type": "text", "text": text}}))
+            .await;
+    }
+
+    async fn streamed(&mut self, event: &Value) {
+        if event["type"] != "content_block_delta" {
+            return;
+        }
+        let delta = &event["delta"];
+        let (kind, key, text) = match delta["type"].as_str() {
+            Some("text_delta") => ("agent_message_chunk", "agent", &delta["text"]),
+            Some("thinking_delta") => ("agent_thought_chunk", "thought", &delta["thinking"]),
+            _ => return,
+        };
+        let Some(text) = text.as_str() else { return };
+        if let Some(turn) = &mut self.turn {
+            turn.streamed = true;
+        }
+        self.chunk(kind, key, text).await;
+    }
+
+    async fn assistant(&mut self, message: &Value) {
+        let streamed = self.turn.as_ref().is_some_and(|t| t.streamed);
+        for block in message["content"].as_array().into_iter().flatten() {
+            match block["type"].as_str() {
+                Some("text") if !streamed => {
+                    let text = block["text"].as_str().unwrap_or_default();
+                    self.chunk("agent_message_chunk", "agent", text).await;
+                }
+                Some("thinking") if !streamed => {
+                    let text = block["thinking"].as_str().unwrap_or_default();
+                    self.chunk("agent_thought_chunk", "thought", text).await;
+                }
+                Some("tool_use") => {
+                    let tool = block["name"].as_str().unwrap_or_default();
+                    // The call's id is the tool use's, which `claude` hands Flottille's MCP server
+                    // as `claudecode/toolUseId`.
+                    self.update(
+                        json!({"sessionUpdate": "tool_call", "toolCallId": block["id"],
+                        "title": tool, "kind": "other", "status": "in_progress",
+                        "rawInput": block["input"], "_meta": {"claudeCode": {"toolName": tool}}}),
+                    )
+                    .await;
+                }
+                _ => {}
+            }
+        }
+        if let Some(turn) = &mut self.turn {
+            turn.streamed = false;
+            let usage = &message["usage"];
+            if usage.is_object() {
+                turn.used = Some(
+                    [
+                        "input_tokens",
+                        "output_tokens",
+                        "cache_read_input_tokens",
+                        "cache_creation_input_tokens",
+                    ]
+                    .iter()
+                    .map(|key| usage[key].as_u64().unwrap_or(0))
+                    .sum(),
+                );
+            }
+        }
+    }
+
+    async fn tool_results(&mut self, message: &Value) {
+        for block in message["content"].as_array().into_iter().flatten() {
+            if block["type"] != "tool_result" {
+                continue;
+            }
+            let status = if block["is_error"] == true {
+                "failed"
+            } else {
+                "completed"
+            };
+            self.update(json!({"sessionUpdate": "tool_call_update",
+                "toolCallId": block["tool_use_id"], "status": status, "rawOutput": block["content"]}))
+                .await;
+        }
+    }
+
+    async fn system(&mut self, message: &Value) {
+        match message["subtype"].as_str() {
+            Some("compact_boundary") => {
+                let metadata = &message["compact_metadata"];
+                self.next += 1;
+                let id = format!("compaction-{}", self.next);
+                self.update(json!({"sessionUpdate": "tool_call", "toolCallId": id,
+                    "title": "Compacting the conversation", "kind": "other", "status": "completed",
+                    "_meta": {"contextCompaction": {"trigger": metadata["trigger"],
+                        "preTokens": metadata["pre_tokens"], "postTokens": metadata["post_tokens"]}}}))
+                    .await;
+                if let (Some(turn), Some(used)) = (&mut self.turn, metadata["post_tokens"].as_u64())
+                {
+                    turn.used = Some(used);
+                }
+            }
+            Some("api_retry") => {
+                let text = format!(
+                    "the provider is retrying (attempt {} of {}): {}",
+                    message["attempt"],
+                    message["max_retries"],
+                    message["error"].as_str().unwrap_or("unknown error")
+                );
+                self.update(
+                    json!({"sessionUpdate": "session_info_update", "_meta": {"jetbrains":
+                    {"air": {"sessionFailure": {"severity": "warning", "message": text}}}}}),
+                )
+                .await;
+            }
+            _ => {}
+        }
+    }
+
+    /// The end of a turn: the context in use, then the prompt's answer.
+    async fn result(&mut self, message: &Value) {
+        let Some(turn) = self.turn.take() else { return };
+        let window = message["modelUsage"]
+            .as_object()
+            .into_iter()
+            .flat_map(|models| models.values())
+            .filter_map(|model| model["contextWindow"].as_u64())
+            .max();
+        if let Some(claude) = &mut self.claude {
+            claude.window = window.or(claude.window);
+        }
+        let window = self.claude.as_ref().and_then(|c| c.window);
+        if let (Some(used), Some(size)) = (turn.used, window) {
+            let mut update = json!({"sessionUpdate": "usage_update", "used": used, "size": size});
+            if let Some(cost) = message["total_cost_usd"].as_f64() {
+                update["cost"] = json!({"amount": cost, "currency": "USD"});
+            }
+            self.update(update).await;
+        }
+        let stop = message["stop_reason"].as_str();
+        let stop_reason = if turn.cancelled {
+            "cancelled"
+        } else if stop == Some("refusal") {
+            "refusal"
+        } else if stop == Some("max_tokens") {
+            "max_tokens"
+        } else if matches!(
+            message["subtype"].as_str(),
+            Some(
+                "error_max_turns" | "error_max_budget_usd" | "error_max_structured_output_retries"
+            )
+        ) {
+            "max_turn_requests"
+        } else if message["is_error"] == true {
+            let errors: Vec<&str> = message["errors"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            let text = match message["result"].as_str() {
+                Some(text) if !text.is_empty() => text.to_owned(),
+                _ if !errors.is_empty() => errors.join(", "),
+                _ => message["subtype"].as_str().unwrap_or("error").to_owned(),
+            };
+            return self.fail(turn.id, (INTERNAL, text)).await;
+        } else {
+            "end_turn"
+        };
+        let usage = &message["usage"];
+        let count = |key: &str| usage[key].as_u64().unwrap_or(0);
+        let (input, output, read, write) = (
+            count("input_tokens"),
+            count("output_tokens"),
+            count("cache_read_input_tokens"),
+            count("cache_creation_input_tokens"),
+        );
+        self.answer(
+            turn.id,
+            json!({"stopReason": stop_reason, "usage": {"inputTokens": input,
+                "outputTokens": output, "cachedReadTokens": read, "cachedWriteTokens": write,
+                "totalTokens": input + output + read + write}}),
+        )
+        .await;
+    }
+}
+
+async fn next(receiver: &mut Option<mpsc::UnboundedReceiver<Value>>) -> Option<Value> {
+    match receiver {
+        Some(receiver) => receiver.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The options of a bare session: what the daemon set, checked to be bare.
+#[derive(Debug, PartialEq)]
+struct Options {
+    allowed: Vec<String>,
+    prompt: Vec<String>,
+    snapshot: bool,
+    env: Vec<(String, String)>,
+}
+
+fn bare_options(options: &Value) -> Result<Options, String> {
+    let options = options
+        .as_object()
+        .ok_or("the session has no Claude options: bare mode needs them")?;
+    if let Some(key) = options.keys().find(|key| !OPTIONS.contains(&key.as_str())) {
+        return Err(format!("the Claude bridge does not take the option {key}"));
+    }
+    let empty = |key: &str| options.get(key) == Some(&json!([]));
+    if !empty("tools")
+        || !empty("settingSources")
+        || options.get("strictMcpConfig") != Some(&json!(true))
+    {
+        return Err(
+            "not bare: a session needs `tools` and `settingSources` empty and `strictMcpConfig`"
+                .into(),
+        );
+    }
+    let strings = |value: Option<&Value>| -> Option<Vec<String>> {
+        value?
+            .as_array()?
+            .iter()
+            .map(|v| v.as_str().map(str::to_owned))
+            .collect()
+    };
+    let allowed = strings(options.get("allowedTools").or(Some(&json!([]))))
+        .filter(|tools| tools.iter().all(|t| !t.is_empty() && !t.contains(',')))
+        .ok_or("`allowedTools` must be a list of tool names")?;
+    let system = options
+        .get("systemPrompt")
+        .filter(|p| p["type"] == "custom")
+        .ok_or("bare mode needs Flottille's own system prompt")?;
+    let prompt = match &system["prompt"] {
+        Value::String(text) => vec![text.clone()],
+        prompt => strings(Some(prompt)).ok_or("the system prompt is text or a list of texts")?,
+    };
+    let env = match options.get("env") {
+        None => Vec::new(),
+        Some(env) => env
+            .as_object()
+            .ok_or("`env` must be an object of texts")?
+            .iter()
+            .map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_owned())))
+            .collect::<Option<_>>()
+            .ok_or("`env` must be an object of texts")?,
+    };
+    Ok(Options {
+        allowed,
+        prompt,
+        snapshot: system["snapshot"] != false,
+        env,
+    })
+}
+
+/// The ACP MCP servers as `claude --mcp-config` takes them; HTTP only, as Flottille's is.
+fn mcp_servers(servers: &Value) -> Result<Value, String> {
+    let mut config = serde_json::Map::new();
+    for server in servers.as_array().into_iter().flatten() {
+        let name = server["name"].as_str().filter(|n| !n.is_empty());
+        let (Some(name), Some(url)) = (name, server["url"].as_str()) else {
+            return Err("an MCP server needs a name and a url".into());
+        };
+        if server["type"] != "http" {
+            return Err(format!("the MCP server {name} is not an HTTP one"));
+        }
+        let headers: serde_json::Map<String, Value> = server["headers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|h| Some((h["name"].as_str()?.to_owned(), h["value"].clone())))
+            .collect();
+        config.insert(
+            name.to_owned(),
+            json!({"type": "http", "url": url, "headers": headers}),
+        );
+    }
+    Ok(json!({"mcpServers": config}))
+}
+
+/// `claude`'s arguments, as the version of `claude::CLAUDE_VERSION` takes them: stream-json both
+/// ways, no built-in tool, no setting, no MCP server but the configuration's, and Claude's own
+/// permission prompts sent to the bridge.
+fn arguments(options: &Options, config: &Path, new: bool, session: &str) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--input-format",
+        "stream-json",
+        "--include-partial-messages",
+        "--permission-prompt-tool=stdio",
+        "--tools=",
+        "--setting-sources=",
+        "--strict-mcp-config",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    if !options.allowed.is_empty() {
+        args.push(format!("--allowedTools={}", options.allowed.join(",")));
+    }
+    args.push("--mcp-config".into());
+    args.push(config.display().to_string());
+    args.push(if new {
+        format!("--session-id={session}")
+    } else {
+        format!("--resume={session}")
+    });
+    args
+}
+
+fn model_option(current: &str) -> Value {
+    let options: Vec<Value> = MODELS
+        .iter()
+        .map(|model| json!({"value": model, "name": model}))
+        .collect();
+    json!([{"id": "model", "name": "Model", "category": "model", "type": "select",
+        "currentValue": current, "options": options}])
+}
+
+/// A file only the user can read, for the token it holds.
+fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(text.as_bytes())
+}
+
+/// One entry of the session's history; a history that cannot be written only loses its replay.
+fn remember(history: &Path, entry: Value) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(history)
+    {
+        let _ = file.write_all(format!("{entry}\n").as_bytes());
+    }
+}
+
+/// A new session id, a random UUID as `claude --session-id` takes it.
+fn new_session_id() -> std::io::Result<String> {
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    ))
+}
+
+/// A session id that names a file: letters, digits and dashes only.
+fn is_session_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// A process's end as an exit code: its own, or 128 and the signal that ended it.
+fn exit_code(status: ExitStatus) -> u8 {
+    match (status.code(), status.signal()) {
+        (Some(code), _) => code as u8,
+        (_, Some(signal)) => 128u8.saturating_add(signal as u8),
+        _ => 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_session_id_is_a_version_4_uuid() {
+        let id = new_session_id().unwrap();
+        assert_eq!(id.len(), 36);
+        assert_eq!(&id[14..15], "4");
+        assert!(is_session_id(&id));
+        assert_ne!(id, new_session_id().unwrap());
+        assert!(!is_session_id("../../etc"));
+        assert!(!is_session_id(""));
+    }
+
+    #[test]
+    fn a_text_system_prompt_and_missing_tools_are_taken_as_bare() {
+        let options = bare_options(&json!({"tools": [], "settingSources": [],
+            "strictMcpConfig": true, "systemPrompt": {"type": "custom", "prompt": "plain"}}))
+        .unwrap();
+        assert_eq!(options.prompt, ["plain"]);
+        assert!(options.allowed.is_empty());
+        assert!(options.snapshot);
+        assert!(
+            bare_options(
+                &json!({"tools": [], "settingSources": [], "strictMcpConfig": true,
+            "systemPrompt": {"type": "custom", "prompt": "p"}, "allowedTools": ["a,b"]})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn only_http_mcp_servers_are_taken() {
+        assert!(
+            mcp_servers(&json!([{"type": "stdio", "name": "x", "url": "u", "command": "sh"}]))
+                .is_err()
+        );
+        assert_eq!(mcp_servers(&json!([])).unwrap(), json!({"mcpServers": {}}));
+    }
+}

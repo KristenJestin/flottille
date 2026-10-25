@@ -3,6 +3,7 @@ mod agent_command;
 mod agents;
 mod approval_command;
 mod approvals;
+mod bridge;
 mod claude;
 mod client;
 mod daemon;
@@ -88,7 +89,7 @@ enum Command {
     },
     /// Deny a request: the agent is told nothing was done
     Deny { number: u64 },
-    /// Whether Claude agents can run here: Node, claude, its login, the adapter
+    /// Whether Claude agents can run here: claude, its version and its login
     Doctor {
         #[arg(long)]
         json: bool,
@@ -106,12 +107,25 @@ enum Command {
     },
     /// Serve the pilot MCP door on standard input and output, for an agent outside Flottille
     Mcp,
+    /// Speak ACP on standard input and output in front of an agent CLI: what the daemon starts
+    /// for each agent
+    #[command(hide = true)]
+    Bridge {
+        #[command(subcommand)]
+        agent: BridgeAgent,
+    },
     /// Print the daemon's events, one JSON object per line
     Watch {
         /// Print the stored events numbered after this one first
         #[arg(long, value_name = "N")]
         after: Option<u64>,
     },
+}
+
+#[derive(Subcommand)]
+enum BridgeAgent {
+    /// The user's own `claude`, in its stream-json mode
+    Claude,
 }
 
 #[derive(Subcommand)]
@@ -156,7 +170,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Project { action } => return project_command::run(&paths, action),
         Command::Workspace { action } => return workspace_command::run(&paths, action),
         Command::Agent { action } => return agent_command::run(&paths, action),
-        Command::Doctor { json } => return agent_command::doctor(&paths, json),
+        Command::Doctor { json } => return agent_command::doctor(json),
         Command::Approvals { json } => approval_command::approvals(&paths, json)?,
         Command::Approve { number, for_tree } => {
             approval_command::approve(&paths, number, for_tree)?
@@ -164,6 +178,9 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Deny { number } => approval_command::deny(&paths, number)?,
         Command::Inbox { after, limit, json } => inbox_command::inbox(&paths, after, limit, json)?,
         Command::Mcp => pilot::run(&paths)?,
+        Command::Bridge {
+            agent: BridgeAgent::Claude,
+        } => return bridge::run(&paths),
         Command::Watch { after } => {
             let mut client = Client::connect_or_start(&paths)?;
             client.request("events.watch", serde_json::to_value(WatchParams { after })?)?;

@@ -1,7 +1,7 @@
 //! The `agent.*` methods (`docs/protocol.md`) and the life of each agent (`docs/agents.md`).
 //!
-//! An agent is owned by one task of its own, which starts its adapter process when a delivery
-//! comes, keeps it while it works, lets it go after the idle release time, notices when it dies
+//! An agent is owned by one task of its own, which starts its process (the Claude bridge) when a
+//! delivery comes, keeps it while it works, lets it go after the idle release time, notices when it dies
 //! and replaces its session then. The methods only write the store and hand the task its orders:
 //! none of them waits on the agent. Every prompt an agent gets is a delivery (`deliveries`).
 
@@ -329,7 +329,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         }
     };
     // Refused now rather than failed later: the user can act on it before anything is written.
-    claude::launch(&daemon.paths).map_err(Failure::refused)?;
+    claude::launch().map_err(Failure::refused)?;
     let now = now_ms();
     let depth = new.parent.as_ref().map_or(0, |(_, depth)| depth + 1);
     let at_depth_limit = depth >= DEPTH_LIMIT;
@@ -521,7 +521,7 @@ async fn process(
     turns: &mut Turns,
 ) -> Result<bool, String> {
     change(daemon, &agent.id, AgentState::Starting, None, None);
-    let launch = claude::launch(&daemon.paths)?;
+    let launch = claude::launch()?;
     // A token of this process's own, which revokes the last one.
     let grant = mcp::grant_of(daemon, agent)?;
     let token = daemon
@@ -538,12 +538,11 @@ async fn process(
     }
     command
         .args(&launch.args)
-        .envs(launch.env.iter().map(|(k, v)| (k, v)))
         .current_dir(&agent.folder)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        // Its own process group: the adapter, the CLI it runs and their children go together.
+        // Its own process group: the bridge, the `claude` it runs and their children go together.
         .process_group(0)
         .kill_on_drop(true);
     let mut child = command
@@ -598,7 +597,7 @@ async fn process(
             Ok(false)
         }
         Ok(Exit::Died(status)) => {
-            // The adapter is gone, not what it started: a `claude` left in its group would run on
+            // The bridge is gone, not what it started: a `claude` left in its group would run on
             // as an orphan, with its tools.
             signal_group(pid, libc::SIGKILL);
             daemon.mcp.retire(&agent.id);
