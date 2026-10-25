@@ -535,6 +535,33 @@ fn a_model_and_an_effort_are_set_and_checked_and_a_model_not_offered_fails() {
 }
 
 #[test]
+fn an_agent_in_short_says_the_model_it_took_else_the_one_asked() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"models": ["fake-small", "fake-large"]}));
+    project(&user);
+
+    let (asked, after) = run(&user, json!({"message": "hello", "model": "fake-large"}));
+    events_until(&user, &asked, after, "agent.turn_ended");
+    let (default, after) = run(&user, json!({"message": "hello"}));
+    events_until(&user, &default, after, "agent.turn_ended");
+
+    let listed = user.call("agent.list", json!({})).unwrap();
+    let model_of = |id: &str| {
+        listed["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == id)
+            .map(|a| a["model"].clone())
+            .unwrap()
+    };
+    assert_eq!(model_of(&asked), "fake-large");
+    assert_eq!(model_of(&default), "fake-small", "the model the agent took");
+    let tree = user.call("agent.tree", json!({"agent": asked})).unwrap();
+    assert_eq!(tree["agents"][0]["agent"]["model"], "fake-large");
+}
+
+#[test]
 fn an_agent_in_a_workspace_works_in_its_folder() {
     let user = User::with_fake_agent();
     project(&user);

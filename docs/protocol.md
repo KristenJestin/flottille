@@ -355,7 +355,9 @@ names its root).
 `{"agent"}`. The whole tree of the agent's root, each agent before its children:
 `{"agents": [{"agent", "doing", "waiting_on", "needs_user"}]}`. `agent` is the agent in short
 (`id`, `role`, `title`, `project`, `workspace`, `parent`, `depth`, `epoch`, `state`,
-`state_reason`, `created_at`, `active_at`, `ended_at`, `waiting_on_answer`); `doing` a sentence of what it does
+`state_reason`, `created_at`, `active_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
+took at the last start of its process, else the one asked, `null` for the agent's default before it
+started); `doing` a sentence of what it does
 (`working`, `idle`, `running \`cargo test\` for 12 min`, `waiting for approval #3`, `failed: …`);
 `waiting_on` `parent` for a child whose request or question waits for its parent, `user` for a
 root whose own does, else `null`; `needs_user`, for the root, whether a request of its tree or its

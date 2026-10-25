@@ -1091,6 +1091,7 @@ pub fn summary(agent: &Agent) -> Value {
         "active_at": agent.active_at,
         "ended_at": agent.ended_at,
         "waiting_on_answer": agent.waiting_on_answer,
+        "model": agent.taken.model.as_ref().or(agent.chosen.model.as_ref()),
     })
 }
 
