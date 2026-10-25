@@ -53,7 +53,12 @@ presence only) or given the API key of one of the model providers it takes: `ANT
 is a choice the maintainer can revise). Neither is a warning, not a failure: OpenCode offers
 some free models with no sign-in, and takes a cloud's credentials (`AWS_*` for Bedrock, say) that
 Flottille does not count. Its version is checked against 1.19.0, the version whose bare mode was
-qualified ("Bare mode for OpenCode", below): another one is a warning.
+qualified ("Bare mode for OpenCode", below): another one is refused, its agents with it, since
+the bare mode rests on what that version reads and on two variables it keeps for its own tests
+(`OPENCODE_TEST_HOME`, `OPENCODE_TEST_MANAGED_CONFIG_DIR`), which another version may drop. The
+user may run another version at their own risk with `allow_unqualified_version = true` under
+`[opencode]` in `providers.toml`: it is then a warning that names both versions. An `opencode`
+that does not say its version is refused the same way.
 
 An agent is refused at its start, with a sentence that says why and names the providers that
 are ready, while its provider is not enabled or not ready ("Providers", below).
@@ -66,16 +71,21 @@ configuration, how it is checked ready, how it names Flottille's tools and how i
 efforts are read; the tree, the deliveries, the gate and the store know nothing of them.
 
 - **Enabled**: `$XDG_CONFIG_HOME/flottille/providers.toml`, one table per provider, each with
-  `enabled`. Without the file, or without a provider's table, Claude is enabled and OpenCode is
-  not. A provider it does not know, a key other than `enabled`, or a value of the wrong type is
-  refused, naming the key at fault:
+  `enabled`, and OpenCode's with `allow_unqualified_version` (above; `false` by default, and
+  refused under `[claude]`, whose version is only ever a warning). Without the file, or without a
+  provider's table, Claude is enabled and OpenCode is not. A provider it does not know, another
+  key, or a value of the wrong type is refused, naming the key at fault:
 
   ```toml
   [opencode]
   enabled = true
   ```
 
-- **Ready**: enabled, and its program on `PATH`. A sign-in Flottille can see (its login file is
+- **Ready**: enabled, its program on `PATH`, and, for OpenCode, its version the qualified one or
+  allowed (above). The version is asked (`--version`, given 5 s, off the daemon's thread) by
+  `doctor`, `provider.list` and each start of an agent's process, and kept while the program's
+  file does not change: an agent's start is refused at once when it is known, else the agent
+  fails when its process would start. A sign-in Flottille can see (its login file is
   there or one of its API keys is set) is not needed: without one, `doctor` warns, and an agent
   that is not signed in at all fails once its provider refuses it. A test override (below) stands for
   the program.

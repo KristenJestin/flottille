@@ -478,3 +478,104 @@ fn an_agent_whose_provider_was_disabled_fails_at_its_next_start_saying_so() {
     // Not started again behind the user's back.
     assert_eq!(starts(&user, "opencode"), 1);
 }
+
+/// A user whose `opencode` on PATH answers `--version` with `version` and is otherwise the fake
+/// agent, its folder `fake-opencode`; Claude stands on the fake agent too.
+fn user_with_opencode(version: &str) -> User {
+    let user = User::new();
+    for dir in ["bin", "fake-claude", "fake-opencode"] {
+        std::fs::create_dir(user.path(dir)).unwrap();
+    }
+    std::os::unix::fs::symlink(common::fake_agent(), user.path("fake-claude/agent")).unwrap();
+    std::os::unix::fs::symlink(common::program("git"), user.path("bin/git")).unwrap();
+    let script = user.path("bin/opencode");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo {version}; exit 0; fi\n\
+             FLOTTILLE_FAKE_AGENT_DIR={} exec {}\n",
+            user.path("fake-opencode").display(),
+            common::fake_agent().display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let (claude, bin) = (user.path("fake-claude/agent"), user.path("bin"));
+    let user = user
+        .with_env("FLOTTILLE_AGENT_COMMAND_CLAUDE", claude.to_str().unwrap())
+        .with_env("PATH", bin.to_str().unwrap());
+    user.write_providers("[opencode]\nenabled = true\n");
+    user
+}
+
+#[test]
+fn opencode_of_another_version_is_refused_unless_the_user_allows_it() {
+    let user = user_with_opencode("1.20.0");
+    project(&user);
+
+    // Its version is asked when its process would start: the agent fails, saying so.
+    let first = id(&start(&user, json!({"message": "hello", "provider": "opencode"})).unwrap());
+    eventually("the failure", || agent(&user, &first)["state"] == "failed");
+    let shown = user.call("agent.show", json!({"agent": first})).unwrap();
+    let reason = shown["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "agent.failed")
+        .unwrap()["data"]["reason"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for part in ["1.20.0", "1.19.0", "allow_unqualified_version = true"] {
+        assert!(reason.contains(part), "{part}: {reason}");
+    }
+    assert_eq!(starts(&user, "opencode"), 0);
+
+    // Once known, a start is refused at once.
+    let (code, message) =
+        start(&user, json!({"message": "hello", "provider": "opencode"})).unwrap_err();
+    assert_eq!(code, "refused");
+    assert!(message.contains("opencode is 1.20.0"), "{message}");
+    assert!(
+        message.contains("the ready providers are claude"),
+        "{message}"
+    );
+    let doctor: Value = serde_json::from_slice(&user.run(&["doctor", "--json"]).stdout).unwrap();
+    assert_eq!(doctor["providers"][1]["ready"], false, "{doctor}");
+    assert!(
+        doctor["providers"][1]["why"]
+            .as_str()
+            .unwrap()
+            .contains("allow_unqualified_version"),
+        "{doctor}"
+    );
+
+    // The user allows it: it runs, with a warning that names both versions.
+    user.write_providers("[opencode]\nenabled = true\nallow_unqualified_version = true\n");
+    let allowed = id(&start(&user, json!({"message": "hello", "provider": "opencode"})).unwrap());
+    eventually("the session", || agent(&user, &allowed)["state"] == "idle");
+    assert_eq!(starts(&user, "opencode"), 1);
+    let doctor: Value = serde_json::from_slice(&user.run(&["doctor", "--json"]).stdout).unwrap();
+    assert_eq!(doctor["providers"][1]["ready"], true, "{doctor}");
+    let warnings = doctor["warnings"].to_string();
+    assert!(
+        warnings.contains("1.20.0") && warnings.contains("1.19.0"),
+        "{doctor}"
+    );
+}
+
+#[test]
+fn opencode_of_the_qualified_version_runs() {
+    let user = user_with_opencode("1.19.0");
+    project(&user);
+
+    let started = id(&start(&user, json!({"message": "hello", "provider": "opencode"})).unwrap());
+
+    eventually("the session", || agent(&user, &started)["state"] == "idle");
+    let started = user
+        .provider_received("opencode")
+        .into_iter()
+        .find(|entry| entry["started"] == true)
+        .unwrap();
+    assert_eq!(started["env"]["OPENCODE_DISABLE_PROJECT_CONFIG"], "1");
+}

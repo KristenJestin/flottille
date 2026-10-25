@@ -161,7 +161,7 @@ pub fn launch(provider: &Provider, paths: &Paths, agent: &Agent) -> Result<Launc
 /// Whether an agent's process may start on the provider now: a sentence saying why not.
 pub fn startable(paths: &Paths, provider: &'static Provider) -> Result<(), String> {
     let settings = Settings::load(paths)?;
-    match Check::of(provider, &settings, false).why_not() {
+    match Check::of(provider, &settings, Version::Ask).why_not() {
         Some(why) => Err(format!("provider {} {why}", provider.name)),
         None => Ok(()),
     }
@@ -211,6 +211,17 @@ pub fn find_program(name: &str) -> Option<PathBuf> {
         })
 }
 
+/// How much a check looks at the program's version.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Version {
+    /// Not at all.
+    Skip,
+    /// What an earlier check asked, when the program has not changed since: never waits.
+    Known,
+    /// `<program> --version`, given 5 s, unless an earlier check asked it of the same program.
+    Ask,
+}
+
 /// What is known of a provider on this machine: whether it is enabled, its program, its login.
 pub struct Check {
     pub provider: &'static Provider,
@@ -220,6 +231,10 @@ pub struct Check {
     pub program: Option<PathBuf>,
     /// `None` when not asked for, or not known.
     pub version: Option<String>,
+    /// Whether `version` was read from the program: `None` then means it could not say.
+    pub version_read: bool,
+    /// The user allows a version other than the qualified one (`allow_unqualified_version`).
+    pub unqualified_allowed: bool,
     pub login: Option<PathBuf>,
     pub login_present: bool,
     /// The sign-in variable found set, by name.
@@ -227,16 +242,17 @@ pub struct Check {
 }
 
 impl Check {
-    /// Checks the provider; `version` runs `<program> --version` (given 5 s, kept while the
-    /// program does not change).
-    pub fn of(provider: &'static Provider, settings: &Settings, version: bool) -> Check {
+    /// Checks the provider, looking at its program's version as `version` says.
+    pub fn of(provider: &'static Provider, settings: &Settings, version: Version) -> Check {
         let overridden = overridden(provider);
         let program = find_program(provider.program);
         // A test override stands for the program: it is never asked its version.
-        let version = match (&program, version && overridden.is_none()) {
-            (Some(program), true) => version_of(program),
+        let read = match (&program, version != Version::Skip && overridden.is_none()) {
+            (Some(program), true) => version_of(program, version == Version::Ask),
             _ => None,
         };
+        let version_read = read.is_some();
+        let version = read.flatten();
         let login = (provider.login_file)();
         // Only its presence: the file is never opened, the key never read.
         let login_present = login
@@ -253,6 +269,8 @@ impl Check {
             overridden,
             program,
             version,
+            version_read,
+            unqualified_allowed: settings.allows_unqualified_version(provider.name),
             login,
             login_present,
             api_key,
@@ -277,9 +295,37 @@ impl Check {
                 provider.program, provider.install
             ));
         }
+        if self.version_refused() {
+            let allow = format!(
+                "`allow_unqualified_version = true` under [{}] in providers.toml runs it anyway, \
+                 at the user's own risk",
+                provider.name
+            );
+            return Some(match &self.version {
+                Some(version) => format!(
+                    "is not ready: {} is {version}, and only {} was qualified for its bare mode \
+                     ({allow})",
+                    provider.program, provider.checked
+                ),
+                None => format!(
+                    "is not ready: `{} --version` did not say its version, and only {} was \
+                     qualified for its bare mode ({allow})",
+                    provider.program, provider.checked
+                ),
+            });
+        }
         // A missing login is never a refusal: the provider may be signed in where the daemon
         // cannot look (the macOS Keychain, a cloud's own credentials), or need no sign-in.
         None
+    }
+
+    /// Whether the program's version, read, is one its bare mode does not hold on for sure and
+    /// the user did not allow.
+    fn version_refused(&self) -> bool {
+        provider::QUALIFIED_ONLY.contains(&self.provider.name)
+            && !self.unqualified_allowed
+            && self.version_read
+            && self.version.as_deref() != Some(self.provider.checked)
     }
 
     pub fn ready(&self) -> bool {
@@ -293,6 +339,7 @@ impl Check {
         let mut warnings = Vec::new();
         if let Some(version) = self.version.as_deref()
             && version != provider.checked
+            && !self.version_refused()
         {
             warnings.push(format!(
                 "{} is {version}, and this Flottille was checked against {}: {}",
@@ -341,7 +388,7 @@ impl Check {
 }
 
 /// Every provider checked, with the user's settings.
-pub fn checks(settings: &Settings, version: bool) -> Vec<Check> {
+pub fn checks(settings: &Settings, version: Version) -> Vec<Check> {
     PROVIDERS
         .iter()
         .map(|provider| Check::of(provider, settings, version))
@@ -355,7 +402,7 @@ pub fn doctor(paths: &Paths) -> Value {
         Ok(settings) => (settings, Vec::new()),
         Err(error) => (Settings::default(), vec![error]),
     };
-    let checks = checks(&settings, true);
+    let checks = checks(&settings, Version::Ask);
     warnings.extend(checks.iter().flat_map(Check::warnings));
     let ready = checks.iter().any(|c| c.enabled) && checks.iter().all(|c| !c.enabled || c.ready());
     json!({
@@ -370,13 +417,20 @@ static VERSIONS: Mutex<Option<Versions>> = Mutex::new(None);
 
 type Versions = HashMap<(PathBuf, SystemTime), Option<String>>;
 
-/// `<program> --version`, given 5 s: the first version number it prints. Kept while the program
-/// is the same file: a new version of it is asked again.
-fn version_of(program: &Path) -> Option<String> {
-    let modified = std::fs::metadata(program).and_then(|m| m.modified()).ok()?;
+/// `<program> --version`, given 5 s: the first version number it prints, `None` inside when it
+/// printed none. Kept while the program is the same file: a new version of it is asked again.
+/// Without `ask`, only what was kept; `None` when nothing was.
+fn version_of(program: &Path, ask: bool) -> Option<Option<String>> {
+    let modified = std::fs::metadata(program).and_then(|m| m.modified()).ok();
+    let Some(modified) = modified else {
+        return ask.then_some(None);
+    };
     let key = (program.to_owned(), modified);
     if let Some(known) = VERSIONS.lock().unwrap().get_or_insert_default().get(&key) {
-        return known.clone();
+        return Some(known.clone());
+    }
+    if !ask {
+        return None;
     }
     let version = ask_version(program);
     VERSIONS
@@ -384,7 +438,7 @@ fn version_of(program: &Path) -> Option<String> {
         .unwrap()
         .get_or_insert_default()
         .insert(key, version.clone());
-    version
+    Some(version)
 }
 
 fn ask_version(program: &Path) -> Option<String> {
@@ -484,7 +538,7 @@ pub fn learn(daemon: &Daemon, provider: &'static Provider, options: &Value) {
     let current = model["currentValue"].as_str().unwrap_or_default();
     let efforts = find("thought_level").map(values).unwrap_or_default();
     let settings = Settings::load(&daemon.paths).unwrap_or_default();
-    let check = Check::of(provider, &settings, false);
+    let check = Check::of(provider, &settings, Version::Skip);
     let before = known_models(daemon, &check).unwrap_or_default();
     let models: Vec<Value> = values(model)
         .into_iter()
@@ -564,7 +618,7 @@ pub fn choose(
             )
         })?,
     };
-    let checks = checks(&settings, false);
+    let checks = checks(&settings, Version::Known);
     let check = checks
         .iter()
         .find(|c| c.provider.name == provider.name)
@@ -592,7 +646,7 @@ pub fn choose(
     });
     // What the provider offers is known once one of its sessions said it; until then a model or
     // an effort it does not offer fails the agent when its session opens.
-    let check = Check::of(provider, &settings, false);
+    let check = Check::of(provider, &settings, Version::Skip);
     if let Some(models) = known_models(daemon, &check)
         && let Some(model) = &model
     {
@@ -668,7 +722,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
 fn list(daemon: &Daemon, project: Option<&Project>) -> Result<Value, Failure> {
     let settings =
         Settings::load(&daemon.paths).map_err(|error| Failure::new("invalid-config", error))?;
-    let providers: Vec<Value> = checks(&settings, true)
+    let providers: Vec<Value> = checks(&settings, Version::Ask)
         .iter()
         .map(|check| {
             let mut entry = check.to_json();

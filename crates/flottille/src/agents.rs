@@ -576,7 +576,11 @@ async fn process(
     let provider = providers::of(agent)?;
     // Checked at every start, a replacement's included: the user may have disabled the provider
     // since the agent was made.
-    providers::startable(&daemon.paths, provider)?;
+    // Its version may be asked, which can take seconds: off the daemon's thread.
+    let paths = daemon.paths.clone();
+    tokio::task::spawn_blocking(move || providers::startable(&paths, provider))
+        .await
+        .map_err(|e| e.to_string())??;
     let launch = providers::launch(provider, &daemon.paths, agent)?;
     // A token of this process's own, which revokes the last one.
     let grant = mcp::grant_of(daemon, agent)?;
