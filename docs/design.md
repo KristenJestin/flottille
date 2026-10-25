@@ -10,8 +10,10 @@ This document is the reference for what Flottille is and how it is built. It sta
 mechanisms it reuses from an earlier, larger project are written out in full in
 [`reference/hemera.md`](reference/hemera.md), the real multi-repository case it must handle is in
 [`reference/multi-repo-case.md`](reference/multi-repo-case.md), the way of handing work between
-agents that it must build in is in [`reference/orchestration.md`](reference/orchestration.md), and
-what is known about the window toolkit is in [`reference/gpui.md`](reference/gpui.md).
+agents that it must build in is in [`reference/orchestration.md`](reference/orchestration.md),
+what the MCP protocol and its main client do today, and the rules Flottille's two MCP doors follow
+because of it, are in [`reference/mcp.md`](reference/mcp.md), and what is known about the window
+toolkit is in [`reference/gpui.md`](reference/gpui.md).
 
 ## 1. What Flottille is, and what it is not
 
@@ -136,7 +138,8 @@ prompts answer themselves: Flottille's tools are allowed, anything else is rejec
 
 ### 4.3 The tools an agent gets (first milestones)
 
-Generic tools, as specified in `reference/hemera.md` §3 (arguments, limits, exact refusal texts):
+Generic tools, as specified in `reference/hemera.md` §3 (arguments, limits, exact refusal texts),
+with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
 
 - files: `fs_read`, `fs_list`, `search`, `fs_write`, `fs_edit` (read-before-write fingerprints,
   temp file + rename, all-or-nothing edits);
@@ -147,29 +150,30 @@ Flottille's own tools:
 
 - `agent_launch {title, brief, model?, role?, workspace?: existing | new {name, repositories?} | parent's}`:
   starts a child, answers at once with its id. Refused (never queued) above the caps.
-- `agent_send {agent, message}`: a message to one of the caller's children.
-- `agent_status {agent?}`: for one child or all of them: state, what it is doing now (thinking,
+- `agent_send {agent_id, message}`: a message to one of the caller's children.
+- `agent_status {agent_id?}`: for one child or all of them: state, what it is doing now (thinking,
   in a tool call, which command runs and for how long, waiting for approval #n, waiting on the
   provider), time since its last sign of activity, context use, last few messages.
-- `agent_read {agent, after?}`: a page of the child's conversation.
-- `agent_stop {agent}`: stops the child and its own tree.
+- `agent_read {agent_id, after?}`: a page of the child's conversation.
+- `agent_stop {agent_id}`: stops the child and its own tree.
 - `report {text}`: the caller is done; its report goes to its parent at once and the session ends
   (see 5.3). A root agent's report goes to the user.
 - `ask_user {question}` (a root only): a question to the user, answered later as a delivery
   (never blocks).
 - `ask_parent {question}` (a child only, in place of `ask_user`): a question to its parent,
   delivered as `child-question`; the parent answers with `agent_send`.
-- `approval_forward {request, why}` / `approval_deny {request, why}`: answer a request held for
-  the caller by one of its children (§7). Forwarding passes it to the caller's parent, or to the
-  user when the caller is a root. There is no tool to allow a request.
+- `approval_answer {request_id, decision: forward | deny, why}`: answer a request held for the
+  caller by one of its children (§7). `forward` passes it to the caller's parent, or to the user
+  when the caller is a root. There is no way to allow a request.
 
-The tool list of a session is fixed for its whole life (prompt cache, `reference/hemera.md` §7):
-whether an agent is a root or a child is known when it starts.
+The tool list of a session is fixed for its whole life (prompt cache, `reference/hemera.md` §7)
+and depends on what the agent can do, known when it starts: a root gets `ask_user`, a child
+`ask_parent`; an agent at the depth limit gets no `agent_*` tools and no `approval_answer`. A lead
+has about 17 tools, a leaf worker 11 (`reference/mcp.md` §4).
 
 ### 4.4 Roles
 
-Two roles at first, with the same tools except `ask_user` (a root's) and `ask_parent` (a
-child's):
+Two roles at first, with the tool lists of 4.3:
 
 - **lead**: the role of an agent the user starts. Its instructions carry the orchestration
   standard (`reference/orchestration.md`): when to launch a child, which model, one precise task
@@ -220,7 +224,7 @@ data can never forge a marker. No timers wake an agent: waking is always a deliv
 | ends a turn without reporting | Flottille first sends the child one reminder ("end with `report`…"); a second turn without a report tells the parent `child-idle`, with the child's last message. |
 | fails (agent error, provider limit, replacement limit) | `child-failed`, with the reason and the last output lines. Urgent. |
 | is stuck (no sign of activity for 5 min in a turn, not waiting on the provider, no command of its own running) | `child-stuck`; Flottille replaces it once, and says so. |
-| has a call held by the gate (an "ask") | `child-asks`, with the request number, the call and the reasons. Urgent. The parent answers with `approval_deny` or `approval_forward` (§7). |
+| has a call held by the gate (an "ask") | `child-asks`, with the request number, the call and the reasons. Urgent. The parent answers with `approval_answer` (forward or deny, §7). |
 | calls `ask_parent` | `child-question`, with the question. The parent answers with `agent_send`. |
 | sits idle with nothing queued while another launch waits for a slot | ended, and `child-ended` tells the parent. |
 
@@ -299,9 +303,8 @@ an agent. Who holds the request depends on who asked:
 - **A root's request is the user's.** It appears in the window, in `flottille approvals`, and in
   the event stream. The user answers deny, allow once, or allow for the root's tree (an exact
   identity grant, never for a sensitive place).
-- **A child's request is held by its parent**, as a `child-asks` delivery. The parent denies it
-  (`approval_deny`) or forwards it with one sentence of why (`approval_forward`); forwarding
-  passes it to the parent's own parent, one level at a time, and from the root to the user, with
+- **A child's request is held by its parent**, as a `child-asks` delivery. The parent denies it or
+  forwards it with one sentence of why (`approval_answer`); forwarding passes it to the parent's own parent, one level at a time, and from the root to the user, with
   every reason given on the way. **No agent can allow a request**: the gate's "ask" always ends
   with the user or with a refusal. A request held by an agent is not in `flottille approvals` and
   the user cannot answer it until it is forwarded.
