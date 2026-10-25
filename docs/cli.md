@@ -2,7 +2,8 @@
 
 `flottille` is a client of the daemon's socket (`docs/protocol.md`): every command asks the daemon
 what it needs, and starts it in the background when nobody listens. Nothing here reads Flottille's
-database. A desktop shell, a status bar or a script integrates Flottille through these commands.
+database. A desktop shell, a status bar or a script integrates Flottille through these commands,
+and an agent running outside Flottille drives it through [`flottille mcp`](#the-pilot-door).
 
 - **`--json`**: the commands that take it print the daemon's answer as one JSON object (the shape
   is the method's, in `docs/protocol.md`), and nothing else, on the standard output. Without it
@@ -359,3 +360,87 @@ Denies the request: the agent is told nothing was done.
 $ flottille deny 2
 Request #2 is denied; agent ce034b165403 is told nothing was done.
 ```
+
+## The pilot door
+
+### `flottille mcp`
+
+Serves an MCP server on its standard input and output, for an agent running outside Flottille (a
+coding agent in a terminal) to drive Flottille: it starts root agents, writes to them, reads every
+agent of their trees and follows what happens. It is a client of the daemon's socket, like every
+command here, and starts the daemon when nobody listens. It is not meant to be run by hand: the
+outside agent's client runs it (see below).
+
+The door serves these tools, always in this order. Agents are named by `agent_id`.
+
+| Tool | |
+|---|---|
+| `projects_list` | the projects: name, folder, repositories |
+| `workspaces_list {project?}` | the workspaces and their state |
+| `workspace_create {project, name, repositories?, branch?, offline?}` | makes a workspace; its preparation goes on in the background |
+| `agent_start {project, message, workspace?, model?, role?}` | starts a root agent; answers at once with its id and an event number to follow it from |
+| `agent_send {agent_id, message}` | writes to a **root** agent; refused for a child, naming its root |
+| `agent_status {agent_id?}` | what an agent does now, its last messages; every root without `agent_id` |
+| `agent_read {agent_id, after?}` | a page of the conversation of **any** agent of a tree, with how to read on |
+| `agent_stop {agent_id}` | stops a **root** agent and its tree; refused for a child, naming its root |
+| `agents_list {project?, agent_id?}` | the agents as trees, with what each does |
+| `approvals_list` | the requests that wait for the user |
+| `events_since {after, wait_seconds?}` | the events after a number, oldest first, with the number to ask next |
+
+`events_since` is how an outside agent follows without polling. With `wait_seconds` (at most 90,
+under Claude Code's two minutes after which a call moves to the background) and nothing new, the
+call waits and returns **as soon as one event arrives**; it answers empty (`No event after <n>
+yet…`) at the end of the wait. A result holds at most 100 events and stays under 40,000
+characters, every long text of an event cut; it ends with the number to ask next.
+
+What the door **never** does: give the outside agent Flottille's file or command tools, or answer
+an approval. A request the gate holds stays the user's, whatever asks: `approvals_list` shows what
+waits, and the user answers with `flottille approve` or `flottille deny`.
+
+Both protocol revisions are served, 2025-11-25 (with `initialize`) and 2026-07-28 (with
+`server/discover`), and no state lives in the protocol session. The tool list is fixed. Every tool
+has a title, a short description and annotations (`readOnlyHint` on the reads, `destructiveHint`
+on `agent_stop`). Results are text, under 40,000 characters, and errors under 2,000, a sentence
+saying what to do next; what an agent said is escaped, so that it never forges a Flottille marker.
+The server's instructions (under 4,096 characters) tell an outside agent what Flottille is and
+when to reach for these tools. The tools are not marked `anthropic/alwaysLoad`: the outside agent
+finds them through tool search, which is what the instructions are for.
+
+```
+$ printf '%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"demo","version":"1"}}}' \
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"projects_list","arguments":{}}}' \
+  | flottille mcp
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"flottille","version":"0.1.0 (f21246dfb458)"},"instructions":"Flottille runs coding agents on the user's own machine: …"}}
+{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"No project is registered yet: the user registers one with `flottille project add <folder>`.\n"}],"isError":false}}
+```
+
+#### Adding the door to a terminal Claude Code
+
+```
+claude mcp add --scope user flottille -- flottille mcp
+```
+
+The first `flottille` is the name of the server: its tools appear to the agent as
+`mcp__flottille__agent_start` and so on. What follows `--` is the command Claude Code runs,
+`flottille mcp`; the `--` keeps Claude Code from reading `mcp` or a later flag as its own. The
+scope says where the entry lives:
+
+- `local` (the default): you, in this project only;
+- `user`: you, in every project (the right one for Flottille, which is not tied to a project);
+- `project`: written in the project's `.mcp.json` and shared with whoever clones it. Not for
+  Flottille: the entry names a program installed on your machine.
+
+`claude mcp list` shows the entry, `claude mcp remove flottille` takes it out. `flottille` must be
+on the `PATH` Claude Code runs with; otherwise give its full path after `--`.
+
+**Tool search.** Claude Code does not load an MCP server's tools into the agent's context at
+the start: it defers them, and the agent finds the ones it needs through a search step
+(`ENABLE_TOOL_SEARCH`, on by default). So the outside agent first sees only the server's
+instructions (the first 4,096 characters of them are read), which say what Flottille is and
+when to look for its tools; it then searches, finds `agent_start` or `events_since`, and
+calls them. That keeps the context light, and is why the door does not ask for its tools to
+be loaded upfront. Set `ENABLE_TOOL_SEARCH=false` in the environment of Claude Code to load
+all eleven tools at the start instead: each costs 100 to 500 tokens on every request, and the
+agent no longer has to search for them.

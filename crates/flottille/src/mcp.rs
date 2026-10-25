@@ -55,8 +55,8 @@ pub const PATH: &str = "/mcp";
 const BODY_LIMIT: usize = 16 * 1024 * 1024;
 /// A normal result stays under this many characters, a refusal or an error under the other
 /// (`docs/reference/mcp.md` §4 rule 5).
-const RESULT_LIMIT: usize = 40_000;
-const ERROR_LIMIT: usize = 2_000;
+pub const RESULT_LIMIT: usize = 40_000;
+pub const ERROR_LIMIT: usize = 2_000;
 /// What a recorded call keeps of each text of its arguments.
 const ARGUMENT_CHARS: usize = 500;
 /// The call keys remembered, for retries, across agents.
@@ -68,15 +68,16 @@ const REFUSALS_LOGGED: usize = 20;
 /// How long a list of tools may be cached: as long as the token, which a new process replaces.
 const LIST_TTL_MS: u64 = 24 * 3600 * 1000;
 
-/// One served tool: its name, what the agent's client shows of it, how it is called.
-struct Definition {
-    name: &'static str,
-    title: &'static str,
-    description: &'static str,
-    read_only: bool,
-    idempotent: bool,
-    destructive: bool,
-    schema: fn() -> Value,
+/// One served tool: its name, what the agent's client shows of it, how it is called. The pilot
+/// door (`pilot`) lists its own in the same shape.
+pub struct Definition {
+    pub name: &'static str,
+    pub title: &'static str,
+    pub description: &'static str,
+    pub read_only: bool,
+    pub idempotent: bool,
+    pub destructive: bool,
+    pub schema: fn() -> Value,
 }
 
 /// What a call of a session that was replaced is answered.
@@ -411,7 +412,13 @@ fn definition(name: &str) -> Option<&'static Definition> {
     SERVED.iter().find(|tool| tool.name == name)
 }
 
-fn tool_of(definition: &Definition) -> Tool {
+/// The tool as a client lists it. `always_load` loads it upfront in Claude Code instead of
+/// through tool search: for the agents Flottille runs, which have nothing else.
+pub fn tool_of(definition: &Definition, always_load: bool) -> Tool {
+    let mut meta = Map::new();
+    if always_load {
+        meta.insert("anthropic/alwaysLoad".into(), true.into());
+    }
     serde_json::from_value(json!({
         "name": definition.name,
         "title": definition.title,
@@ -425,7 +432,7 @@ fn tool_of(definition: &Definition) -> Tool {
             "openWorldHint": false,
         },
         // In bare mode Flottille's tools are all the agent has: loaded upfront, never searched.
-        "_meta": {"anthropic/alwaysLoad": true},
+        "_meta": meta,
     }))
     .expect("a tool definition is a tool")
 }
@@ -829,7 +836,7 @@ impl ServerHandler for Handler {
             .tools
             .iter()
             .filter_map(|name| definition(name))
-            .map(tool_of)
+            .map(|definition| tool_of(definition, true))
             .collect();
         Ok(ListToolsResult::with_all_items(tools)
             .with_ttl_ms(LIST_TTL_MS)
@@ -1177,7 +1184,7 @@ pub fn record_of(args: &Value, place: &Place) -> Value {
 }
 
 /// A text cut at `limit` characters, saying how much was left out.
-fn cut(text: &str, limit: usize) -> String {
+pub fn cut(text: &str, limit: usize) -> String {
     let count = text.chars().count();
     if count <= limit {
         return text.to_owned();
@@ -1205,7 +1212,7 @@ mod tests {
     #[test]
     fn every_tool_is_described_for_a_new_colleague() {
         for definition in &SERVED {
-            let tool = serde_json::to_value(tool_of(definition)).unwrap();
+            let tool = serde_json::to_value(tool_of(definition, true)).unwrap();
             let description = tool["description"].as_str().unwrap();
             assert!(description.len() < 1000, "{}", definition.name);
             assert_eq!(tool["_meta"]["anthropic/alwaysLoad"], true);

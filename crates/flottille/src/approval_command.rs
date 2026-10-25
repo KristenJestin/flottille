@@ -51,6 +51,16 @@ fn approvals_text(listed: &Value) -> String {
     if requests.is_empty() {
         return "No request waits for you.\n".into();
     }
+    let mut text = request_lines(requests);
+    text.push_str(
+        "Answer with `flottille approve <n>` (`--for-tree` for the same call from now on) or \
+         `flottille deny <n>`.\n",
+    );
+    text
+}
+
+/// The requests, each with its call, its reasons and who forwarded it.
+pub fn request_lines(requests: &[Value]) -> String {
     let mut text = String::new();
     for request in requests {
         text.push_str(&format!(
@@ -71,10 +81,6 @@ fn approvals_text(listed: &Value) -> String {
             ));
         }
     }
-    text.push_str(
-        "Answer with `flottille approve <n>` (`--for-tree` for the same call from now on) or \
-         `flottille deny <n>`.\n",
-    );
     text
 }
 

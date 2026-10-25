@@ -18,9 +18,10 @@ woken only by deliveries. Flottille's MCP server and its tools are in `docs/tool
 | `flottille agent install` | Installs the Claude adapter at the version this Flottille runs. |
 | `flottille doctor [--json]` | Whether Claude agents can run here. Fails when they cannot. |
 
-These are a minimal way in until the real commands come; the protocol has the rest
-(`agent.send`, `agent.cancel`, `agent.stop`, `agent.tree`, `agent.list`, `docs/protocol.md`).
-`agent run` starts a root.
+`agent run` starts a root and follows its first turn; `agent start`, `send`, `read`, `stop`, `list`
+and `tree` drive a root and read its tree, and `flottille mcp` does the same for an agent outside
+Flottille: all of them are in `docs/cli.md`. The protocol has the rest (`agent.cancel`,
+`docs/protocol.md`).
 
 ## What the machine needs
 

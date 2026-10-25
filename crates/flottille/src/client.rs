@@ -17,10 +17,27 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(25);
 
+/// An error the daemon answered a request with: its code (`docs/protocol.md`) and its sentence.
+#[derive(Debug)]
+pub struct DaemonError {
+    pub code: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for DaemonError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for DaemonError {}
+
 pub struct Client {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
     next_id: u64,
+    /// The start of a line read before a timeout cut the read short.
+    partial: String,
 }
 
 impl Client {
@@ -31,6 +48,7 @@ impl Client {
                 reader: BufReader::new(stream.try_clone()?),
                 writer: stream,
                 next_id: 1,
+                partial: String::new(),
             })),
             // No socket, or one left by a daemon that died: nobody is listening.
             Err(error)
@@ -94,7 +112,10 @@ impl Client {
                 continue;
             }
             if let Some(error) = message.error {
-                return Err(error.message.into());
+                return Err(Box::new(DaemonError {
+                    code: error.code,
+                    message: error.message,
+                }));
             }
             return Ok(message.result.unwrap_or(Value::Null));
         }
@@ -110,13 +131,46 @@ impl Client {
         Ok(None)
     }
 
+    /// The next event of a subscription, `None` when none came within `wait`.
+    pub fn next_event_within(&mut self, wait: Duration) -> Result<Option<Event>> {
+        let deadline = Instant::now() + wait;
+        let event = loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break None;
+            }
+            self.writer.set_read_timeout(Some(left))?;
+            match self.read() {
+                Ok(Some(Message {
+                    event: Some(event), ..
+                })) => break Some(event),
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    self.writer.set_read_timeout(None)?;
+                    return Err("the daemon closed the connection".into());
+                }
+                Err(error) if is_timeout(error.as_ref()) => break None,
+                Err(error) => return Err(error),
+            }
+        };
+        self.writer.set_read_timeout(None)?;
+        Ok(event)
+    }
+
     fn read(&mut self) -> Result<Option<Message>> {
-        let mut line = String::new();
-        if self.reader.read_line(&mut line)? == 0 {
+        // A line cut short by a timeout stays in `partial` for the next read.
+        if self.reader.read_line(&mut self.partial)? == 0 {
             return Ok(None);
         }
+        let line = std::mem::take(&mut self.partial);
         Ok(Some(serde_json::from_str(&line)?))
     }
+}
+
+fn is_timeout(error: &(dyn std::error::Error + 'static)) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut))
 }
 
 /// Starts `flottille daemon` in its own session, detached from this terminal, its output in the

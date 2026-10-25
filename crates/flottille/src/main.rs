@@ -13,6 +13,7 @@ mod git;
 mod inbox;
 mod inbox_command;
 mod mcp;
+mod pilot;
 mod place;
 mod project_command;
 mod projects;
@@ -103,6 +104,8 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Serve the pilot MCP door on standard input and output, for an agent outside Flottille
+    Mcp,
     /// Print the daemon's events, one JSON object per line
     Watch {
         /// Print the stored events numbered after this one first
@@ -160,6 +163,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         }
         Command::Deny { number } => approval_command::deny(&paths, number)?,
         Command::Inbox { after, limit, json } => inbox_command::inbox(&paths, after, limit, json)?,
+        Command::Mcp => pilot::run(&paths)?,
         Command::Watch { after } => {
             let mut client = Client::connect_or_start(&paths)?;
             client.request("events.watch", serde_json::to_value(WatchParams { after })?)?;
