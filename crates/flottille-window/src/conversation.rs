@@ -131,6 +131,13 @@ impl Conversation {
         }
     }
 
+    /// The same agent's conversation, empty, to be read again from its start.
+    pub fn restarted(&self) -> Self {
+        let mut empty = Self::new(self.me.clone(), self.parent.clone());
+        empty.names = self.names.clone();
+        empty
+    }
+
     pub fn blocks(&self) -> &[Block] {
         &self.blocks
     }
@@ -334,7 +341,8 @@ impl Conversation {
         if !data["raw_input"].is_null() {
             call.args = one_line(&data["raw_input"]);
             if call.name == "fs_edit" {
-                self.edits.insert(call.id.clone(), data["raw_input"].clone());
+                self.edits
+                    .insert(call.id.clone(), data["raw_input"].clone());
             }
         }
         if let Some(status) = data["status"].as_str() {
@@ -606,6 +614,19 @@ mod tests {
                 }
             ]
         );
+    }
+
+    #[test]
+    fn a_conversation_read_again_from_its_start_still_names_the_children() {
+        let mut c = root();
+        c.set_names(HashMap::from([("0123456789ab".into(), "docs-pass".into())]));
+        let mut c = c.restarted();
+        c.apply(&event(
+            1,
+            "agent.prompted",
+            json!({"text": "[flottille:child-report]\nYour child \"docs-pass\" (agent 0123456789ab) reported:\n\nDone."}),
+        ));
+        assert!(matches!(&c.blocks()[0], Block::Report { from, .. } if from == "docs-pass"));
     }
 
     #[test]

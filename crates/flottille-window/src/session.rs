@@ -686,9 +686,7 @@ impl ConversationView {
     }
 
     fn clear(&mut self, cx: &mut Context<Self>) {
-        let me = self.model.me().to_owned();
-        let parent = self.model.parent().map(str::to_owned);
-        self.model = Conversation::new(me, parent);
+        self.model = self.model.restarted();
         self.rows.clear();
         cx.notify();
     }
