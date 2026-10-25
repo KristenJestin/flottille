@@ -1,15 +1,14 @@
 //! `flottille agent chat`: a loop in the terminal on one root agent (`docs/cli.md`).
 
-use std::fs::File;
-use std::io::{BufRead, IsTerminal, Read, Write};
-use std::os::fd::FromRawFd;
+use std::io::{BufRead, IsTerminal, Write};
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use flottille_core::paths::Paths;
 use flottille_core::protocol::{AgentName, AgentSend};
+use tokio::signal::unix::{SignalKind, signal};
 
 use crate::agent_command::{place, text};
 use crate::client::Client;
@@ -137,59 +136,52 @@ fn refuse(client: &mut Client, agent: &str) -> Result<()> {
     }
 }
 
-/// Ctrl+C. A signal handler can do almost nothing, so it only writes a byte to a pipe; a thread
-/// reads the pipe. During a turn it asks the daemon to cancel it, and the chat goes on; at the
-/// prompt it leaves, the agent untouched.
+/// Ctrl+C. A thread of its own listens for it: during a turn it asks the daemon to cancel the
+/// turn and the chat goes on; at the prompt it leaves, the agent untouched.
 struct Interrupt {
     in_turn: Arc<AtomicBool>,
 }
 
-/// The write end of the pipe the handler writes to.
-static WAKE: AtomicI32 = AtomicI32::new(-1);
-
-extern "C" fn on_sigint(_: libc::c_int) {
-    // SAFETY: write(2) is async-signal-safe; the byte's value does not matter. errno is kept
-    // for the code the signal interrupted.
-    unsafe {
-        let errno = *libc::__errno_location();
-        libc::write(WAKE.load(Ordering::Relaxed), b"!".as_ptr().cast(), 1);
-        *libc::__errno_location() = errno;
-    }
-}
-
 impl Interrupt {
+    /// Returns once the thread listens, so that no Ctrl+C after it is missed.
     fn install(paths: Paths, agent: String) -> Result<Interrupt> {
-        let mut ends = [0; 2];
-        // SAFETY: `ends` holds the two descriptors pipe2 fills in.
-        if unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        WAKE.store(ends[1], Ordering::SeqCst);
-        // SAFETY: a zeroed sigaction is valid; the handler only calls async-signal-safe functions.
-        unsafe {
-            let mut action: libc::sigaction = std::mem::zeroed();
-            action.sa_sigaction = on_sigint as extern "C" fn(libc::c_int) as libc::sighandler_t;
-            libc::sigemptyset(&mut action.sa_mask);
-            if libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut()) != 0 {
-                return Err(std::io::Error::last_os_error().into());
-            }
-        }
-        // SAFETY: the read end is ours alone, and nothing else closes it.
-        let mut wake = unsafe { File::from_raw_fd(ends[0]) };
         let in_turn = Arc::new(AtomicBool::new(false));
         let during_turn = in_turn.clone();
+        let (ready, listening) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let mut byte = [0];
-            while wake.read(&mut byte).is_ok_and(|read| read > 0) {
-                if during_turn.load(Ordering::SeqCst) {
-                    cancel(&paths, &agent, &during_turn);
-                } else {
-                    // Not the standard output's lock: the chat may hold it.
-                    eprintln!();
-                    std::process::exit(0);
+            let listen = || -> std::io::Result<_> {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                let signals = {
+                    let _entered = runtime.enter();
+                    signal(SignalKind::interrupt())?
+                };
+                Ok((runtime, signals))
+            };
+            let (runtime, mut signals) = match listen() {
+                Ok(listening) => {
+                    let _ = ready.send(Ok(()));
+                    listening
                 }
-            }
+                Err(error) => {
+                    let _ = ready.send(Err(error));
+                    return;
+                }
+            };
+            runtime.block_on(async {
+                while signals.recv().await.is_some() {
+                    if during_turn.load(Ordering::SeqCst) {
+                        cancel(&paths, &agent, &during_turn);
+                    } else {
+                        // Not the standard output's lock: the chat may hold it.
+                        eprintln!();
+                        std::process::exit(0);
+                    }
+                }
+            });
         });
+        listening.recv()??;
         Ok(Interrupt { in_turn })
     }
 }
