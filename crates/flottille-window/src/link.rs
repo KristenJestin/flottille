@@ -32,6 +32,11 @@ pub enum Update {
     Disconnected(String),
     /// What came of something the window asked (`actions`).
     Done(Outcome),
+    /// What the open session page's link read or saw, with the link's token.
+    Session {
+        token: u64,
+        update: crate::session_link::SessionUpdate,
+    },
 }
 
 /// What the link has seen, readable from any thread: the number of the last event, and how many
@@ -280,7 +285,7 @@ impl Conn {
         })
     }
 
-    fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+    pub(crate) fn request(&mut self, method: &str, params: Value) -> Result<Value> {
         self.ask(method, params)?
             .map_err(|message| format!("{method}: {message}"))
     }

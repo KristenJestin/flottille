@@ -9,6 +9,7 @@ pub mod link;
 pub mod model;
 pub mod page;
 pub mod project;
+pub mod session_link;
 pub mod shell;
 pub mod tree;
 
