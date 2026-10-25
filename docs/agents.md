@@ -18,8 +18,9 @@ woken only by deliveries. Flottille's MCP server and its tools are in `docs/tool
 | `flottille agent show <agent> [--json]` | The agent and its conversation. |
 | `flottille doctor [--json]` | Whether Claude agents can run here. Fails when they cannot. |
 
-`agent run` starts a root and follows its first turn; `agent start`, `send`, `read`, `stop`, `list`
-and `tree` drive a root and read its tree, and `flottille mcp` does the same for an agent outside
+`agent run` starts a root and follows its first turn; `agent send --follow` and `agent chat` write
+to a root and follow the turn of their message; `agent start`, `send`, `read`, `stop`, `list` and
+`tree` drive a root and read its tree, and `flottille mcp` does the same for an agent outside
 Flottille: all of them are in `docs/cli.md`. The protocol has the rest (`agent.cancel`,
 `docs/protocol.md`).
 

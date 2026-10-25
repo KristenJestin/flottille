@@ -537,6 +537,101 @@ fn send_follow_with_json_prints_the_answer_with_the_agent_once_its_turn_ended() 
 }
 
 #[test]
+fn chat_sends_two_lines_in_a_row_to_the_same_agent_and_the_second_reply_shows_the_agent_kept_the_first()
+ {
+    let user = user();
+    let agent = idle_agent(&user);
+    let mut chat = Running::start(&user, &["agent", "chat", &agent]);
+
+    chat.type_line("teal is my colour");
+    chat.wait_for("ok\n", false);
+    chat.type_line("RECALL what I said");
+    chat.wait_for("earlier you said: ", false);
+    chat.close_input();
+
+    let (status, out, _) = chat.finish();
+    assert!(status.success());
+    assert!(out.contains("teal is my colour"), "{out}");
+    assert_eq!(
+        user.received_requests("session/new").len(),
+        1,
+        "one session for both lines"
+    );
+    assert_eq!(agent_state(&user, &agent), "idle");
+}
+
+#[test]
+fn chat_ctrl_c_during_a_turn_cancels_it_and_the_agent_stays_alive() {
+    let user = user();
+    let agent = idle_agent(&user);
+    let mut chat = Running::start(&user, &["agent", "chat", &agent]);
+
+    chat.type_line("HANG until I cancel");
+    eventually("the turn to run", || prompted_with(&user, "HANG until"));
+    chat.interrupt();
+    chat.wait_for("(the turn ended: cancelled)", false);
+
+    // Still in the chat: the next line is sent and answered.
+    chat.type_line("GREET");
+    chat.wait_for(REPLY.trim_end(), false);
+    chat.type_line("/exit");
+    let (status, _, _) = chat.finish();
+    assert!(status.success());
+    assert_eq!(agent_state(&user, &agent), "idle");
+}
+
+#[test]
+fn chat_ctrl_c_at_the_prompt_leaves_without_stopping_the_agent() {
+    let user = user();
+    let agent = idle_agent(&user);
+    let mut chat = Running::start(&user, &["agent", "chat", &agent]);
+    chat.type_line("GREET");
+    chat.wait_for(REPLY.trim_end(), false);
+
+    chat.interrupt();
+
+    let (status, _, _) = chat.finish();
+    assert!(status.success());
+    assert_eq!(agent_state(&user, &agent), "idle");
+}
+
+#[test]
+fn chat_ctrl_d_leaves_and_the_agent_stays_alive() {
+    let user = user();
+    let agent = idle_agent(&user);
+    let mut chat = Running::start(&user, &["agent", "chat", &agent]);
+    chat.type_line("GREET");
+    chat.wait_for(REPLY.trim_end(), false);
+
+    chat.close_input();
+
+    let (status, _, _) = chat.finish();
+    assert!(status.success());
+    assert_eq!(agent_state(&user, &agent), "idle");
+}
+
+#[test]
+fn chat_slash_exit_leaves_and_another_line_starting_with_a_slash_is_a_message() {
+    let user = user();
+    let agent = idle_agent(&user);
+    let mut chat = Running::start(&user, &["agent", "chat", &agent]);
+
+    chat.type_line("/etc/hosts looks odd");
+    chat.wait_for("ok\n", false);
+    chat.type_line("/exit");
+    chat.type_line("GREET after the exit");
+
+    let (status, out, _) = chat.finish();
+    assert!(status.success());
+    assert!(prompted_with(&user, "/etc/hosts looks odd"));
+    assert!(
+        !prompted_with(&user, "after the exit"),
+        "nothing is read after /exit: {out}"
+    );
+    assert_eq!(agent_state(&user, &agent), "idle");
+}
+
+#[test]
 fn send_follow_on_a_child_is_refused_naming_its_root_and_sends_nothing() {
     let user = user();
     let (child, root) = child_and_root(&user);
@@ -551,6 +646,54 @@ fn send_follow_on_a_child_is_refused_naming_its_root_and_sends_nothing() {
         "{refused}"
     );
     assert!(!prompted_with(&user, "GREET"), "nothing reached the child");
+}
+
+#[test]
+fn chat_on_a_child_is_refused_naming_its_root_before_it_reads_anything() {
+    let user = user();
+    let (child, root) = child_and_root(&user);
+
+    let output = user.run(&["agent", "chat", &child]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let refused = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        refused.contains("only its parent") && refused.contains(&root),
+        "{refused}"
+    );
+}
+
+#[test]
+fn chat_on_an_agent_that_ended_is_refused_with_the_daemon_s_sentence() {
+    let user = user();
+    let agent = idle_agent(&user);
+    user.run(&["agent", "stop", &agent]);
+
+    let output = user.run(&["agent", "chat", &agent]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let refused = String::from_utf8(output.stderr).unwrap();
+    assert!(refused.starts_with("flottille: "), "{refused}");
+    assert!(refused.contains("ended"), "{refused}");
+}
+
+#[test]
+fn chat_shows_a_request_waiting_for_the_user_with_the_commands_that_answer_it() {
+    let user = user();
+    let agent = idle_agent(&user);
+    let mut chat = Running::start(&user, &["agent", "chat", &agent]);
+
+    chat.type_line("ASK-FILE");
+    chat.wait_for("flottille approve 1", true);
+    chat.wait_for("waiting for the user's answer", false);
+
+    chat.type_line("/exit");
+    let (_, _, err) = chat.finish();
+    assert!(err.contains("flottille deny 1"), "{err}");
+    // The chat never answers it.
+    let waiting = json_of(user.run(&["approvals", "--json"]));
+    assert_eq!(waiting["requests"].as_array().unwrap().len(), 1);
 }
 
 #[test]

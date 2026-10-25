@@ -4,6 +4,7 @@ mod agents;
 mod approval_command;
 mod approvals;
 mod bridge;
+mod chat;
 mod claude;
 mod client;
 mod daemon;

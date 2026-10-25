@@ -8,6 +8,7 @@ use flottille_core::paths::Paths;
 use flottille_core::protocol::{AgentName, AgentRun, AgentSend};
 use serde_json::Value;
 
+use crate::chat;
 use crate::claude;
 use crate::client::Client;
 use crate::follow::{Turn, follow};
@@ -43,6 +44,8 @@ pub enum AgentAction {
         #[arg(long)]
         json: bool,
     },
+    /// Talk to a root agent from the terminal: each line you type is sent, and the reply streams
+    Chat { agent: String },
     /// A page of an agent's conversation: any agent of a tree
     Read {
         agent: String,
@@ -169,6 +172,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
             }
             Ok(code)
         }
+        AgentAction::Chat { agent } => chat::run(paths, &agent),
         AgentAction::Read { agent, after, json } => {
             let page = Client::connect_or_start(paths)?.request(
                 "agent.read",
