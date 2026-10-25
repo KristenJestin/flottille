@@ -328,6 +328,55 @@ fn through_the_bridge_a_death_of_claude_is_the_agent_s_death() {
 }
 
 #[test]
+fn through_the_bridge_a_provider_limit_is_reported_and_the_agent_lives_on() {
+    let user = User::with_fake_claude();
+    user.claude_script(json!({"turns": [{"when": "work", "do": [{"limit": "five_hour"}]}]}));
+    project(&user);
+    let (id, after) = run(&user, "work");
+
+    let events = events_until(&user, &id, after, "agent.turn_ended");
+
+    let limit = events
+        .iter()
+        .find(|e| e["name"] == "agent.provider_limit")
+        .expect("an agent.provider_limit");
+    assert!(
+        limit["data"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("hit your limit"),
+        "{limit}"
+    );
+    assert_eq!(events.last().unwrap()["data"]["stop_reason"], "end_turn");
+    assert_eq!(show(&user, &id)["agent"]["state"], "idle");
+}
+
+#[test]
+fn through_the_bridge_a_provider_error_is_reported_and_the_agent_lives_on() {
+    let user = User::with_fake_claude();
+    user.claude_script(
+        json!({"turns": [{"when": "work", "do": [], "error": "API Error: 500 the provider failed"}]}),
+    );
+    project(&user);
+    let (id, after) = run(&user, "work");
+
+    let events = events_until(&user, &id, after, "agent.turn_ended");
+
+    let error = events
+        .iter()
+        .find(|e| e["name"] == "agent.provider_error")
+        .expect("an agent.provider_error");
+    assert!(
+        error["data"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("the provider failed"),
+        "{error}"
+    );
+    assert_eq!(show(&user, &id)["agent"]["state"], "idle");
+}
+
+#[test]
 fn an_agent_is_refused_while_claude_is_not_on_path() {
     let user = User::new();
     // `git` alone: whatever else the machine has, no `claude` can be found.

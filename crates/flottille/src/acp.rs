@@ -484,6 +484,7 @@ fn event_of(update: &Value) -> Option<(&'static str, Map<String, Value>)> {
             match (failure["severity"].as_str(), failure["category"].as_str()) {
                 (Some("warning"), _) => ("agent.provider_wait", message),
                 (Some("error"), Some("limit")) => ("agent.provider_limit", message),
+                (Some("error"), _) => ("agent.provider_error", message),
                 _ => return None,
             }
         }
@@ -526,6 +527,9 @@ mod tests {
         let limit = json!({"sessionUpdate": "session_info_update",
             "_meta": {"jetbrains": {"air": {"sessionFailure": {"severity": "error", "category": "limit"}}}}});
         assert_eq!(event_of(&limit).unwrap().0, "agent.provider_limit");
+        let error = json!({"sessionUpdate": "session_info_update",
+            "_meta": {"jetbrains": {"air": {"sessionFailure": {"severity": "error", "category": "service"}}}}});
+        assert_eq!(event_of(&error).unwrap().0, "agent.provider_error");
         let commands =
             json!({"sessionUpdate": "available_commands_update", "availableCommands": []});
         assert!(event_of(&commands).is_none());

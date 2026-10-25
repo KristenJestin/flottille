@@ -167,7 +167,13 @@ bridge runs one session.
   context window, the cost in USD), then the prompt's answer with its usage and its stop reason:
   `cancelled` after a cancel, `refusal` or `max_tokens` as `claude` says, `max_turn_requests` for
   a result `error_max_turns`, `error_max_budget_usd` or `error_max_structured_output_retries`,
-  `end_turn` otherwise; a result that is an error fails the prompt with its text.
+  `end_turn` otherwise. A result that is an error ends the turn `end_turn` too, after a
+  `session_info_update` with a `jetbrains.air` `sessionFailure` of severity `error` and its text:
+  category `limit` when the provider refused it for a limit (a `rate_limit_event` rejected, an
+  error `rate_limit`, `billing_error` or `account_on_hold`, or Claude Code's own message for a
+  spent usage), `service` otherwise. The session lives on, as with Claude Code's own ACP
+  adapter. Only a signed-out `claude` (`Please run /login`, an error `authentication_failed`)
+  fails the prompt, and so the agent: it cannot go on until the user signs in again.
 - **A cancel** (`session/cancel`) is an `interrupt` control request.
 - **Claude's permission prompts** (`can_use_tool`) become `session/request_permission` (the tool
   in `_meta.claudeCode.toolName`, the tool use's id, options `allow_once` and `reject_once`); the

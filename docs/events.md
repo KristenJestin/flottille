@@ -206,10 +206,11 @@ The agent compacted its context.
 The agent's plan (`entries`), its context use (`used` and `size` in tokens, `cost`), its mode
 (`mode`), its options (`options`, as ACP gives them). Each with `agent` and `replay`.
 
-#### `agent.provider_wait`, `agent.provider_limit`
+#### `agent.provider_wait`, `agent.provider_limit`, `agent.provider_error`
 
-The provider makes the agent wait, or refuses it for a limit (`message`, when it says one). Each
-with `agent` and `replay`.
+The provider makes the agent wait, refuses it for a limit, or fails its turn for another reason
+once its retries are spent (`message`, when it says one). Each with `agent` and `replay`. A limit
+or an error ends the turn (`agent.turn_ended`): the agent lives on and takes the next message.
 
 #### `agent.permission_answered`
 

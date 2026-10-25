@@ -45,6 +45,23 @@ const INTERNAL: i64 = -32603;
 /// What Claude is told when one of its own permission prompts is refused.
 const REFUSED: &str = "Refused: this agent can use Flottille's tools only.";
 
+/// How Claude Code's own messages for a spent usage start, as the pinned version's Agent SDK
+/// lists them (`USAGE_LIMIT_ERROR_PREFIXES`).
+const USAGE_LIMIT: [&str; 12] = [
+    "You've hit your",
+    "You've reached your",
+    "You're out of usage credits",
+    "Your org is out of usage · add funds to continue",
+    "Your org is out of usage · contact your admin",
+    "Your seat type doesn't include usage credits",
+    "Your seat type doesn't include usage",
+    "Your usage allocation has been disabled by your admin",
+    "Your group's usage limit is set to $0",
+    "Fable 5 requires usage credits",
+    "You're out of extra usage",
+    "Your seat type doesn't include extra usage",
+];
+
 pub fn run(paths: &Paths) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -114,6 +131,11 @@ struct Turn {
     streamed: bool,
     /// The context in use, as the last message or compaction said.
     used: Option<u64>,
+    /// The provider refused the turn for a limit: a rate limit rejected, an error or a message
+    /// of Claude Code's saying so.
+    limited: bool,
+    /// The kind of error the last message of the turn carried (`authentication_failed`…).
+    error: Option<String>,
 }
 
 enum Waiting {
@@ -427,6 +449,8 @@ impl Bridge {
             cancelled: false,
             streamed: false,
             used: None,
+            limited: false,
+            error: None,
         });
         self.write_claude(
             json!({"type": "user", "session_id": session, "parent_tool_use_id": null,
@@ -498,10 +522,24 @@ impl Bridge {
             Some("control_response") => self.control_answered(&message["response"]).await,
             Some("control_request") => self.control_asked(&message).await,
             Some("stream_event") => self.streamed(&message["event"]).await,
-            Some("assistant") => self.assistant(&message["message"]).await,
+            Some("assistant") => self.assistant(&message).await,
             Some("user") => self.tool_results(&message["message"]).await,
             Some("system") => self.system(&message).await,
             Some("result") => self.result(&message).await,
+            Some("rate_limit_event") => {
+                let info = &message["rate_limit_info"];
+                // Past its own limit, an account with extra usage goes on on that.
+                let overage = matches!(
+                    info["overageStatus"].as_str(),
+                    Some("allowed" | "allowed_warning")
+                );
+                if let Some(turn) = &mut self.turn
+                    && info["status"] == "rejected"
+                    && !overage
+                {
+                    turn.limited = true;
+                }
+            }
             _ => {}
         }
     }
@@ -629,7 +667,16 @@ impl Bridge {
         self.chunk(kind, key, text).await;
     }
 
-    async fn assistant(&mut self, message: &Value) {
+    async fn assistant(&mut self, whole: &Value) {
+        let message = &whole["message"];
+        if let Some(turn) = &mut self.turn {
+            turn.error = whole["error"].as_str().map(str::to_owned);
+            let text = message["content"][0]["text"].as_str().unwrap_or_default();
+            if message["model"] == "<synthetic>" && USAGE_LIMIT.iter().any(|p| text.starts_with(p))
+            {
+                turn.limited = true;
+            }
+        }
         let streamed = self.turn.as_ref().is_some_and(|t| t.streamed);
         for block in message["content"].as_array().into_iter().flatten() {
             match block["type"].as_str() {
@@ -769,7 +816,31 @@ impl Bridge {
                 _ if !errors.is_empty() => errors.join(", "),
                 _ => message["subtype"].as_str().unwrap_or("error").to_owned(),
             };
-            return self.fail(turn.id, (INTERNAL, text)).await;
+            let error = turn.error.as_deref();
+            // Signed out: the agent cannot go on until the user signs in again.
+            if text.contains("Please run /login")
+                || matches!(
+                    error,
+                    Some("authentication_failed" | "oauth_org_not_allowed")
+                )
+            {
+                return self.fail(turn.id, (INTERNAL, text)).await;
+            }
+            // Any other error ends the turn, the session alive, as Claude Code's own adapter
+            // ends it for a client that takes session failures.
+            let limit = turn.limited
+                || matches!(
+                    error,
+                    Some("rate_limit" | "billing_error" | "account_on_hold")
+                );
+            let category = if limit { "limit" } else { "service" };
+            self.update(
+                json!({"sessionUpdate": "session_info_update", "_meta": {"jetbrains":
+                {"air": {"sessionFailure": {"severity": "error", "category": category,
+                    "message": text}}}}}),
+            )
+            .await;
+            "end_turn"
         } else {
             "end_turn"
         };

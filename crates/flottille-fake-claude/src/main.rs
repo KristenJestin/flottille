@@ -33,6 +33,7 @@
 //! | `{"permission": {"tool": "Bash", "input": {}}}` | a `can_use_tool` control request, the answer recorded |
 //! | `{"compaction": true}` | a `compacting` status, then a `compact_boundary` |
 //! | `{"retry": true}` | an `api_retry` message: the provider is overloaded |
+//! | `{"limit": "five_hour"}` | a `rate_limit_event` rejected for that limit, then the synthetic message Claude Code writes, with its `error`; the result is an error with its text |
 //! | `{"wait": 500}` | waits that many milliseconds; an interrupt ends the turn |
 //! | `{"hang": true}` | goes silent until an interrupt |
 //! | `{"die": 3}` | exits at once with that code |
@@ -250,6 +251,7 @@ impl Fake {
             "model": MODEL, "claude_code_version": VERSION, "tools": [], "mcp_servers": []}),
         );
         let mut said = String::new();
+        let mut limited = None;
         for step in turn["do"].as_array().into_iter().flatten() {
             if self.is_interrupted() {
                 break;
@@ -288,6 +290,18 @@ impl Fake {
                     "attempt": 1, "max_retries": 10, "retry_delay_ms": 500, "error_status": 529,
                     "error": "overloaded"}),
                 );
+            } else if let Some(kind) = step["limit"].as_str() {
+                self.send(
+                    json!({"type": "rate_limit_event", "session_id": self.session,
+                    "uuid": "u-limit", "rate_limit_info": {"status": "rejected",
+                        "rateLimitType": kind, "resetsAt": 1792950000}}),
+                );
+                let text = "You've hit your limit · resets 3pm";
+                self.send(json!({"type": "assistant", "parent_tool_use_id": null,
+                    "session_id": self.session, "error": "rate_limit",
+                    "message": {"model": "<synthetic>", "role": "assistant",
+                        "content": [{"type": "text", "text": text}]}}));
+                limited = Some(text);
             } else if let Some(ms) = step["wait"].as_u64() {
                 let deadline = Instant::now() + Duration::from_millis(ms);
                 while Instant::now() < deadline && !self.is_interrupted() {
@@ -302,7 +316,7 @@ impl Fake {
             }
         }
         let interrupted = self.is_interrupted();
-        let error = turn["error"].as_str();
+        let error = turn["error"].as_str().or(limited);
         let subtype = match turn["subtype"].as_str() {
             Some(subtype) => subtype,
             None if interrupted => "error_during_execution",

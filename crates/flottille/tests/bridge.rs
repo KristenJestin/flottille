@@ -597,13 +597,12 @@ fn the_model_is_an_option_set_on_claude() {
 }
 
 #[test]
-fn the_stop_reason_follows_claude_s_result_and_an_error_fails_the_prompt() {
+fn the_stop_reason_follows_claude_s_result() {
     let user = User::with_fake_claude();
     user.claude_script(json!({"turns": [
         {"when": "refuse", "do": [], "stop_reason": "refusal"},
         {"when": "long", "do": [{"say": "and"}], "stop_reason": "max_tokens"},
-        {"when": "loop", "do": [], "subtype": "error_max_turns"},
-        {"when": "broken", "do": [], "error": "API Error: 500 the provider failed"}
+        {"when": "loop", "do": [], "subtype": "error_max_turns"}
     ]}));
     let mut bridge = Bridge::start(&user);
     let session = bridge.open(&user, &[]);
@@ -616,13 +615,65 @@ fn the_stop_reason_follows_claude_s_result_and_an_error_fails_the_prompt() {
         let (answer, _) = bridge.prompt(&session, text);
         assert_eq!(answer.unwrap()["stopReason"], stop, "{text}");
     }
-    let (failed, _) = bridge.prompt(&session, "broken");
+}
+
+/// The session failures of a turn's updates: severity, category and message.
+fn failures(seen: &[Value]) -> Vec<(String, String, String)> {
+    updates(seen)
+        .iter()
+        .filter(|u| u["sessionUpdate"] == "session_info_update")
+        .map(|u| {
+            let failure = &u["_meta"]["jetbrains"]["air"]["sessionFailure"];
+            let text = |key: &str| failure[key].as_str().unwrap_or_default().to_owned();
+            (text("severity"), text("category"), text("message"))
+        })
+        .collect()
+}
+
+#[test]
+fn a_rejected_rate_limit_ends_the_turn_with_a_limit_failure() {
+    let user = User::with_fake_claude();
+    user.claude_script(json!({"turns": [{"when": "work", "do": [{"limit": "five_hour"}]}]}));
+    let mut bridge = Bridge::start(&user);
+    let session = bridge.open(&user, &[]);
+
+    let (answer, seen) = bridge.prompt(&session, "work");
+
+    assert_eq!(answer.unwrap()["stopReason"], "end_turn");
+    let failures = failures(&seen);
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    let (severity, category, message) = &failures[0];
+    assert_eq!((severity.as_str(), category.as_str()), ("error", "limit"));
+    assert!(message.contains("hit your limit"), "{message}");
+    // The session goes on: the next prompt is played.
+    assert_eq!(
+        bridge.prompt(&session, "again").0.unwrap()["stopReason"],
+        "end_turn"
+    );
+}
+
+#[test]
+fn a_provider_error_ends_the_turn_with_a_failure_and_only_a_sign_in_error_fails_the_prompt() {
+    let user = User::with_fake_claude();
+    user.claude_script(json!({"turns": [
+        {"when": "broken", "do": [], "error": "API Error: 500 the provider failed"},
+        {"when": "signed", "do": [], "error": "Invalid API key · Please run /login"}
+    ]}));
+    let mut bridge = Bridge::start(&user);
+    let session = bridge.open(&user, &[]);
+
+    let (answer, seen) = bridge.prompt(&session, "broken");
+
+    assert_eq!(answer.unwrap()["stopReason"], "end_turn");
+    let failures = failures(&seen);
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    let (severity, category, message) = &failures[0];
+    assert_eq!((severity.as_str(), category.as_str()), ("error", "service"));
+    assert!(message.contains("the provider failed"), "{message}");
+    let (failed, _) = bridge.prompt(&session, "signed out");
     let failed = failed.unwrap_err();
     assert!(
-        failed["message"]
-            .as_str()
-            .unwrap()
-            .contains("the provider failed"),
+        failed["message"].as_str().unwrap().contains("/login"),
         "{failed}"
     );
 }
