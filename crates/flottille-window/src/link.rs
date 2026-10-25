@@ -287,10 +287,27 @@ impl Conn {
 
     /// The daemon's answer: its result, or the sentence of its error. The outer error is the
     /// connection's.
-    pub(crate) fn ask(
+    fn ask(&mut self, method: &str, params: Value) -> Result<std::result::Result<Value, String>> {
+        self.ask_until(method, params, None)
+    }
+
+    /// [`Conn::ask`], waiting at most `bound`: past it the daemon is taken as silent, an error of
+    /// the connection, which is not to be used again (its late answer would come to the next
+    /// request).
+    pub(crate) fn ask_within(
         &mut self,
         method: &str,
         params: Value,
+        bound: Duration,
+    ) -> Result<std::result::Result<Value, String>> {
+        self.ask_until(method, params, Some((Instant::now() + bound, bound)))
+    }
+
+    fn ask_until(
+        &mut self,
+        method: &str,
+        params: Value,
+        deadline: Option<(Instant, Duration)>,
     ) -> Result<std::result::Result<Value, String>> {
         let id = self.next_id.to_string();
         self.next_id += 1;
@@ -312,7 +329,22 @@ impl Conn {
             .write_all(line.as_bytes())
             .map_err(|e| format!("the daemon's socket: {e}"))?;
         loop {
-            let message = self.read(None)?.ok_or("the daemon closed the connection")?;
+            let message = match deadline {
+                None => self.read(None)?.ok_or("the daemon closed the connection")?,
+                Some((at, bound)) => {
+                    let left = at.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Err(format!(
+                            "the daemon did not answer {method} within {}",
+                            spoken(bound)
+                        ));
+                    }
+                    match self.read(Some(left))? {
+                        Some(message) => message,
+                        None => continue,
+                    }
+                }
+            };
             if let Some(event) = message.event {
                 self.queued.insert(0, event);
                 continue;
@@ -370,6 +402,15 @@ impl Conn {
             Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => Ok(None),
             Err(e) => Err(format!("the daemon's socket: {e}")),
         }
+    }
+}
+
+/// A bound as a sentence says it.
+fn spoken(bound: Duration) -> String {
+    match bound.as_secs() {
+        0 => format!("{} ms", bound.as_millis()),
+        secs if secs < 120 => format!("{secs} s"),
+        secs => format!("{} min", secs / 60),
     }
 }
 
