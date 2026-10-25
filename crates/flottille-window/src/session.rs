@@ -915,29 +915,25 @@ impl ConversationView {
             } else {
                 18.
             }));
+        // A list's item is not stretched to its width: the column is centred in a full one.
+        let centred = |column| div().w_full().child(column).into_any_element();
         if self.earlier && ix == 0 {
             let page = self.page.clone();
-            return column
-                .flex()
-                .justify_center()
-                .child(
-                    Button::quiet("show-earlier", "Show earlier").on_click(move |_, _, cx| {
-                        page.update(cx, |page, cx| page.show_earlier(cx)).ok();
-                    }),
-                )
-                .into_any_element();
+            return centred(column.flex().justify_center().child(
+                Button::quiet("show-earlier", "Show earlier").on_click(move |_, _, cx| {
+                    page.update(cx, |page, cx| page.show_earlier(cx)).ok();
+                }),
+            ));
         }
         let at = ix - usize::from(self.earlier);
         let Some(row) = self.rows.get(at) else {
             return div().into_any_element();
         };
-        column
-            .child(enter(
-                ElementId::Name(format!("enter-row-{}-{at}", self.id).into()),
-                0,
-                row.clone(),
-            ))
-            .into_any_element()
+        centred(column.child(enter(
+            ElementId::Name(format!("enter-row-{}-{at}", self.id).into()),
+            0,
+            row.clone(),
+        )))
     }
 }
 
