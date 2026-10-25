@@ -923,6 +923,20 @@ impl Store {
         rows.map(|row| row?).collect()
     }
 
+    /// The requests `held_by` holds or held, in any state, that one of `agents` asked, oldest
+    /// first: a request that reached the user stays held by them.
+    pub fn requests_reaching(&self, held_by: &str, agents: &[String]) -> Result<Vec<Request>> {
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {REQUEST_COLUMNS} FROM approval_requests WHERE held_by = ?1 \
+             AND agent IN (SELECT value FROM json_each(?2)) ORDER BY number"
+        ))?;
+        let rows = statement.query_map(
+            params![held_by, serde_json::to_string(agents)?],
+            request_row,
+        )?;
+        rows.map(|row| row?).collect()
+    }
+
     /// The pending requests the agent's calls made, whoever holds them, oldest first.
     pub fn pending_requests_of(&self, agent: &str) -> Result<Vec<Request>> {
         let mut statement = self.connection.prepare_cached(&format!(

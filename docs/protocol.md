@@ -450,8 +450,10 @@ ended first; `decision` is `deny`, `once` or `tree` once it is decided.
 
 #### `approval.list`
 
-No parameters. `{"requests": [...]}`: the pending requests the user holds, oldest first. A request
-held by an agent is not there.
+`{"tree"?}`. `{"requests": [...]}`: the pending requests the user holds, oldest first. A request
+held by an agent is not there. With `tree`, an agent's id: every request an agent of its root's
+tree asked that reached the user, pending, decided or cancelled, oldest first (`not-found` when
+there is no such agent).
 
 #### `approval.approve`
 

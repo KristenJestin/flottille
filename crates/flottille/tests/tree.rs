@@ -444,6 +444,61 @@ fn a_worker_s_ask_goes_to_the_lead_who_denies_or_forwards_it_to_the_user_who_all
 }
 
 #[test]
+fn the_requests_of_a_tree_that_reached_the_user_are_listed_with_their_decisions() {
+    let user = user();
+    let (lead_id, lead) = lead(&user);
+    launch(&lead, "reader", "HANG and read the settings");
+    let worker = titled(&user, "reader");
+    // One the lead denies itself: it never reached the user.
+    let kept = held(worker.call("fs_read", json!({"path": ".env"})));
+    prompted(&user, &["[flottille:child-asks]", &format!("#{kept}")]);
+    ok(lead.call(
+        "approval_answer",
+        json!({"request_id": kept, "decision": "deny", "why": "not needed"}),
+    ));
+    // One it forwards, which the user denies.
+    let forwarded = held(worker.call("fs_read", json!({"path": ".env"})));
+    prompted(&user, &["[flottille:child-asks]", &format!("#{forwarded}")]);
+    ok(lead.call(
+        "approval_answer",
+        json!({"request_id": forwarded, "decision": "forward", "why": "the worker needs it"}),
+    ));
+    user.call("approval.deny", json!({"number": forwarded}))
+        .unwrap();
+    // And the lead's own, still pending.
+    let own = held(lead.call("fs_read", json!({"path": ".env"})));
+
+    let listed = user
+        .call("approval.list", json!({"tree": lead_id}))
+        .unwrap()["requests"]
+        .as_array()
+        .unwrap()
+        .clone();
+
+    let numbers: Vec<u64> = listed
+        .iter()
+        .map(|r| r["number"].as_u64().unwrap())
+        .collect();
+    assert_eq!(
+        numbers,
+        [forwarded, own],
+        "oldest first, only what reached the user"
+    );
+    assert_eq!(listed[0]["decision"], "deny");
+    assert_eq!(listed[0]["forwards"][0]["by"], lead_id.as_str());
+    assert_eq!(listed[1]["state"], "pending");
+    let pending: Vec<u64> = approvals(&user)
+        .iter()
+        .map(|r| r["number"].as_u64().unwrap())
+        .collect();
+    assert_eq!(pending, [own], "without a tree, only the pending ones");
+    let error = user
+        .call("approval.list", json!({"tree": "000000000000"}))
+        .unwrap_err();
+    assert_eq!(error.0, "not-found", "{error:?}");
+}
+
+#[test]
 fn a_root_s_question_waits_for_the_user_until_the_user_writes() {
     let user = user();
     let (lead_id, lead) = lead(&user);
