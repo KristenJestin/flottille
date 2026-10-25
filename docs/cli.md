@@ -12,7 +12,27 @@ and an agent running outside Flottille drives it through [`flottille mcp`](#the-
   sentence on the standard error, `flottille: <sentence>`: the sentence of the daemon's refusal
   when it refused. Nothing was done then.
 - **Agents are named by their id**, twelve hexadecimal digits, as `agent list` shows them.
+- **The program answers to `flottille` and to `flot`** (see [The `flot` name](#the-flot-name)).
+  The examples below write `flottille`.
 - The examples below use invented projects and paths.
+
+## The `flot` name
+
+`flot` is a second name for the same program, shorter to type. `cargo install` builds one binary,
+`flottille`, and makes no link; add it yourself, once, in a folder of your `PATH`:
+
+```
+ln -s "$(command -v flottille)" ~/.local/bin/flot
+```
+
+The program looks at the name it was called by (the file name of its `argv[0]`): through the link,
+`flot status` is `flottille status`, one daemon serves both, and the help (`Usage: flot …`), the
+errors (`flot: <sentence>`) and the commands it tells you to run (`flot approve 3`) say `flot`. A
+link under any other name works the same way, under that name.
+
+`flot` is not the name of a package or a command in the official repositories of Arch Linux, in
+Debian or in Homebrew (checked in October 2026), so the link does not shadow a tool you may have
+installed from them.
 
 ## The daemon
 
@@ -219,7 +239,8 @@ Follow it with `flottille agent read bd7ed8152969`, or `flottille watch --after 
 
 `start`, then follows the agent and prints its reply until its first turn ends: for trying an
 agent by hand. Same options as `start`, except `--role`. `--json` prints the agent once the turn
-ended, as `agent show --json` does. (It is `start` followed by `watch`, nothing more.)
+ended, as `agent show --json` does. (It is `start` followed by `watch`, nothing more.) It follows
+the turn as `send --follow` does, below.
 
 ### `flottille agent send <agent> <message>`
 
@@ -235,6 +256,69 @@ Read what follows with `flottille agent read bd7ed8152969 --after 21`.
 
 $ flottille agent send 1eb211e2dbf2 "Do it differently."
 flottille: agent 1eb211e2dbf2 is a child of agent bd7ed8152969: only its parent writes to it; the user writes to and stops its root, agent bd7ed8152969
+```
+
+**`--follow` (`-f`)** sends, then prints the reply as it streams until the turn ends, exactly as
+`agent run` prints one: the agent's text as it comes, then a line break, and `(the turn ended:
+<reason>)` when the turn did not end with `end_turn` (cancelled, for instance). Without it, `send`
+returns at once, as above.
+
+- **The turn followed is the one that plays your message.** When a turn runs, the message waits
+  for it to end: what is left of that turn is not printed, and the command waits for the turn
+  your message starts. (It follows the message's delivery, `docs/agents.md`, not the first turn
+  end it sees.)
+- **Exit code**: 0 when the turn ended, whatever its stop reason; 1 when the agent failed or
+  ended before (the sentence is on the standard error), or when the send was refused: for a
+  child, the daemon's sentence above, and nothing was sent.
+- **A request waiting for you**: when a call of the agent's tree is held for you (a root's, or a
+  child's that was forwarded up), one line on the standard error gives its number and the
+  commands that answer it, `Answer with `flottille approve <n>` or `flottille deny <n>``, in the
+  name the program was called by. The command never answers it.
+- **`--json`** prints one object, `{"agent": {...}, "after": <n>}`, once the turn ended: the
+  agent as it is then, and nothing else on the standard output.
+- **Ctrl+C** stops the command, not the turn: the agent goes on. (`agent chat` cancels.)
+- What is printed from the agent is what the daemon stored, already masked of secrets; it is
+  printed as it came.
+
+```
+$ flottille agent send bd7ed8152969 "Which database did we pick?" --follow
+We picked PostgreSQL.
+```
+
+### `flottille agent chat <agent>`
+
+A conversation with a root agent in the terminal. It checks the agent first, as `send` does, and
+refuses a child, an agent that ended and an agent that failed with the daemon's sentence on the
+standard error and exit code 1, before it reads anything. Then it loops:
+
+- each line you type is sent to the agent, and its reply streams, as with `send --follow`, until
+  its turn ends; then you are asked for the next line (`> `, when the input is a terminal). An
+  empty line sends nothing. The next line goes to the **same** agent and the same session: it
+  remembers the lines before it. A message sent while a turn the chat did not start runs waits
+  for that turn, and the chat prints the turn that plays it.
+- **`/exit`** is the only command of the chat. Any other line, one that starts with a slash too
+  (`/etc/hosts looks odd`), is a message to the agent.
+- **Leaving never stops the agent**: `/exit`, Ctrl+D (end of input) and Ctrl+C at the prompt
+  leave with exit code 0, and the agent goes on with what it has. `agent stop` stops it.
+- **Ctrl+C during a turn cancels the turn** (`agent.cancel`, `docs/protocol.md`) and stays in the
+  chat: the turn ends `cancelled`, the agent lives, and the next line goes on in its session.
+- **A request waiting for you** is shown as `send --follow` shows it, in the same one line, with
+  `flottille approve <n>` and `flottille deny <n>`; answer it from another terminal. The chat
+  never answers it. The agent's result comes as a message to the agent once you answer, which
+  may be after the chat's turn ended: a reply that starts while the chat waits for your line is
+  not printed by it; `flottille agent read <agent> --after <n>` shows it.
+- The input need not be a terminal: lines read from a pipe are sent one after the other, each
+  one's reply printed before the next is sent, and the end of the input leaves.
+
+```
+$ flottille agent chat bd7ed8152969
+Chat with agent bd7ed8152969, shop in workspace login. Type /exit or press Ctrl+D to leave: the agent goes on without you. Ctrl+C cancels the turn that runs.
+> Which database did we pick?
+We picked PostgreSQL.
+> Read .env and tell me the port.
+(the agent's reply)
+A request waits for you: #4 of agent bd7ed8152969. Answer with `flottille approve 4` or `flottille deny 4`.
+> /exit
 ```
 
 ### `flottille agent read <agent>`
