@@ -37,6 +37,7 @@
 //! | `{"compaction": true}` | a `compacting` status, then a `compact_boundary` |
 //! | `{"retry": true}` | an `api_retry` message: the provider is overloaded |
 //! | `{"limit": "five_hour"}` | a `rate_limit_event` rejected for that limit, then the synthetic message Claude Code writes, with its `error`; the result is an error with its text |
+//! | `{"garbage": true}` | a line on its output that is not UTF-8 |
 //! | `{"wait": 500}` | waits that many milliseconds; an interrupt ends the turn |
 //! | `{"hang": true}` | goes silent until an interrupt |
 //! | `{"die": 3}` | exits at once with that code |
@@ -334,6 +335,10 @@ impl Fake {
                     "message": {"model": "<synthetic>", "role": "assistant",
                         "content": [{"type": "text", "text": text}]}}));
                 limited = Some(text);
+            } else if step["garbage"] == true {
+                let mut out = self.out.lock().unwrap();
+                out.write_all(b"\xff\xfe not text\n").unwrap();
+                out.flush().unwrap();
             } else if let Some(ms) = step["wait"].as_u64() {
                 let deadline = Instant::now() + Duration::from_millis(ms);
                 while Instant::now() < deadline && !self.is_interrupted() {

@@ -809,6 +809,25 @@ fn a_provider_error_ends_the_turn_with_a_failure_and_only_a_sign_in_error_fails_
 }
 
 #[test]
+fn a_line_of_claude_s_that_is_not_text_is_skipped() {
+    let user = User::with_fake_claude();
+    user.claude_script(
+        json!({"turns": [{"when": "noise", "do": [{"garbage": true}, {"say": "after"}]}]}),
+    );
+    let mut bridge = Bridge::start(&user);
+    let session = bridge.open(&user, &[]);
+
+    let (answer, seen) = bridge.prompt(&session, "noise");
+
+    assert_eq!(answer.unwrap()["stopReason"], "end_turn");
+    assert!(
+        updates(&seen)
+            .iter()
+            .any(|u| u["content"]["text"] == "after")
+    );
+}
+
+#[test]
 fn a_death_of_claude_ends_the_bridge_with_its_exit_code() {
     let user = User::with_fake_claude();
     user.claude_script(json!({"turns": [{"when": "die", "do": [{"say": "Bye"}, {"die": 3}]}]}));

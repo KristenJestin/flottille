@@ -358,14 +358,20 @@ impl Bridge {
         let stdout = child.stdout.take().expect("piped");
         let (sender, receiver) = mpsc::unbounded_channel();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let mut stdout = BufReader::new(stdout);
+            let mut line = Vec::new();
+            // Bytes, not text: a line that is not UTF-8 is noise to skip, not the end.
+            while let Ok(read) = stdout.read_until(b'\n', &mut line).await {
+                if read == 0 {
+                    break;
+                }
                 // stdout is the protocol; anything else there is noise.
-                if let Ok(message) = serde_json::from_str::<Value>(&line)
+                if let Ok(message) = serde_json::from_str::<Value>(&String::from_utf8_lossy(&line))
                     && sender.send(message).is_err()
                 {
                     break;
                 }
+                line.clear();
             }
         });
         let history = claude::history(&self.paths, &session).expect("a session id names a file");
