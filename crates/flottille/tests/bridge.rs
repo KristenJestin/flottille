@@ -828,6 +828,32 @@ fn a_line_of_claude_s_that_is_not_text_is_skipped() {
 }
 
 #[test]
+fn a_prompt_s_text_blocks_are_parted_by_a_blank_line_and_a_resource_is_refused() {
+    let user = User::with_fake_claude();
+    let mut bridge = Bridge::start(&user);
+    let session = bridge.open(&user, &[]);
+
+    let (answer, _) = bridge.request(
+        "session/prompt",
+        json!({"sessionId": session, "prompt": [
+            {"type": "text", "text": "first"}, {"type": "text", "text": "second"}]}),
+    );
+    answer.unwrap();
+    let (refused, _) = bridge.request(
+        "session/prompt",
+        json!({"sessionId": session, "prompt": [{"type": "text", "text": "see"},
+            {"type": "resource", "resource": {"uri": "file:///notes.md", "text": "notes"}}]}),
+    );
+
+    assert!(refused.is_err());
+    let prompts: Vec<Value> = written(&user, "user")
+        .into_iter()
+        .map(|m| m["message"]["content"][0]["text"].clone())
+        .collect();
+    assert_eq!(prompts, [json!("first\n\nsecond")]);
+}
+
+#[test]
 fn a_death_of_claude_ends_the_bridge_with_its_exit_code() {
     let user = User::with_fake_claude();
     user.claude_script(json!({"turns": [{"when": "die", "do": [{"say": "Bye"}, {"die": 3}]}]}));

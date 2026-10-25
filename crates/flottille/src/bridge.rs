@@ -444,18 +444,11 @@ impl Bridge {
         if self.turn.is_some() {
             return Err((INVALID, "a prompt is playing already".into()));
         }
-        let mut text = String::new();
+        // Text only, as `initialize` said (`embeddedContext: false`).
+        let mut texts = Vec::new();
         for block in params["prompt"].as_array().into_iter().flatten() {
             match block["type"].as_str() {
-                Some("text") => text.push_str(block["text"].as_str().unwrap_or_default()),
-                Some("resource") => {
-                    let resource = &block["resource"];
-                    text.push_str(&format!(
-                        "{}\n{}",
-                        resource["uri"].as_str().unwrap_or_default(),
-                        resource["text"].as_str().unwrap_or_default()
-                    ));
-                }
+                Some("text") => texts.push(block["text"].as_str().unwrap_or_default()),
                 other => {
                     return Err((
                         INVALID,
@@ -464,6 +457,7 @@ impl Bridge {
                 }
             }
         }
+        let text = texts.join("\n\n");
         remember(&claude.history, "user", &text, &self.env);
         let session = claude.session.clone();
         self.turn = Some(Turn {
