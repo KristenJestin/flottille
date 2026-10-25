@@ -260,8 +260,13 @@ fn permission(tools: &[String]) -> Value {
 
 /// 32 hexadecimal digits from the system's random source.
 fn password() -> std::io::Result<String> {
+    password_from(&mut std::fs::File::open("/dev/urandom")?)
+}
+
+/// 16 bytes of `source`, in hexadecimal.
+fn password_from(source: &mut impl Read) -> std::io::Result<String> {
     let mut bytes = [0u8; 16];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    source.read_exact(&mut bytes)?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
@@ -475,6 +480,21 @@ mod tests {
         ] {
             assert_eq!(withheld(name), gone, "{name}");
         }
+    }
+
+    #[test]
+    fn the_server_password_is_32_hexadecimal_digits_of_16_random_bytes() {
+        assert_eq!(
+            password_from(&mut [0xab_u8; 16].as_slice()).unwrap(),
+            "ab".repeat(16)
+        );
+        assert!(password_from(&mut [0_u8; 15].as_slice()).is_err());
+        let (one, two) = (password().unwrap(), password().unwrap());
+        for made in [&one, &two] {
+            assert_eq!(made.len(), 32, "{made}");
+            assert!(made.chars().all(|c| c.is_ascii_hexdigit()), "{made}");
+        }
+        assert_ne!(one, two);
     }
 
     #[test]

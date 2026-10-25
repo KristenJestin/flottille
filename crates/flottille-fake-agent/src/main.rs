@@ -12,7 +12,8 @@
 //!   it received (`{"pid", "received": <the JSON-RPC message as it came>}`), and for what it did
 //!   that a test checks (`{"pid", "started": true, "env": {…}}`, `{"pid", "permission": <the
 //!   client's answer>}`, `{"pid", "mcp": {"status", "body"}}`); `env` holds the variables it was
-//!   started with whose names start with `OPENCODE_` or `XDG_`, a password's value as `set`;
+//!   started with whose names start with `OPENCODE_` or `XDG_`, a password's value as `set` (or
+//!   empty, when it is);
 //! - `sessions/<id>.jsonl`, the history of each session, so that a new process can load it;
 //! - `played.json`, how many times each turn with `times` was played, across processes;
 //! - `kept.json`, the values `keep` kept, across processes.
@@ -106,7 +107,8 @@ fn main() {
         .filter(|(name, _)| name.starts_with("OPENCODE_") || name.starts_with("XDG_"))
         .map(|(name, value)| {
             let value = if name.ends_with("_PASSWORD") {
-                "set".to_owned()
+                // Never written down; an empty one shows.
+                if value.is_empty() { "" } else { "set" }.to_owned()
             } else {
                 value
             };
