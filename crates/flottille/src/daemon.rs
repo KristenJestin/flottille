@@ -142,6 +142,21 @@ impl Daemon {
         Ok(value)
     }
 
+    /// Writes the store as `write` does, for a change with several events.
+    pub fn write_all<T>(
+        &self,
+        write: impl FnOnce(&mut Store) -> flottille_core::Result<(T, Vec<Event>)>,
+    ) -> flottille_core::Result<T> {
+        let mut events = self.events.lock().unwrap();
+        let (value, written) = write(&mut events.store)?;
+        if let Some(bus) = &events.bus {
+            for event in written {
+                let _ = bus.send(event);
+            }
+        }
+        Ok(value)
+    }
+
     fn subscribe(&self, after: Option<u64>) -> Result<Subscription> {
         let events = self.events.lock().unwrap();
         let bus = events.bus.as_ref().ok_or("the daemon is stopping")?;

@@ -944,6 +944,35 @@ fn a_user_cannot_cancel_a_worker_s_turn() {
 }
 
 #[test]
+fn an_agent_that_ends_cancels_the_requests_it_made_and_those_it_holds() {
+    let user = user();
+    let (lead_id, lead) = lead(&user);
+    let worker_id = launch(&lead, "reader", "HANG and read the settings");
+    let worker = titled(&user, "reader");
+    let first = held(worker.call("fs_read", json!({"path": ".env"})));
+    prompted(&user, &["[flottille:child-asks]", &format!("#{first}")]);
+    ok(lead.call(
+        "approval_answer",
+        json!({"request_id": first, "decision": "forward", "why": "the user decides"}),
+    ));
+    let second = held(worker.call("fs_read", json!({"path": "./.env"})));
+    assert_eq!(approvals(&user).len(), 1);
+    assert_eq!(user.status()["agents"]["waiting_for_user"], 1);
+
+    user.call("agent.stop", json!({"agent": lead_id})).unwrap();
+
+    eventually("the requests cancelled", || approvals(&user).is_empty());
+    assert_eq!(user.status()["agents"]["waiting_for_user"], 0);
+    let tree = user.call("agent.tree", json!({"agent": lead_id})).unwrap();
+    assert_eq!(tree["agents"][0]["needs_user"], false);
+    let cancelled: Vec<u64> = events(&user, &worker_id, "approval.cancelled")
+        .iter()
+        .map(|e| e["data"]["number"].as_u64().unwrap())
+        .collect();
+    assert_eq!(cancelled, [first, second]);
+}
+
+#[test]
 fn a_daemon_restart_does_not_send_a_working_agent_its_prompt_again() {
     let user = user();
     let (_, lead) = lead(&user);

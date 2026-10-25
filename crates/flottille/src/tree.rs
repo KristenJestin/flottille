@@ -918,6 +918,11 @@ fn end(daemon: &Arc<Daemon>, id: &str, state: AgentState, reason: &str) -> bool 
         Some((event, json!({"reason": reason}))),
     );
     let _ = daemon.write(|store| Ok(((), store.supersede(id)?)));
+    // Nobody is left to answer what it asked, nor to answer what it held: nobody sees them.
+    let _ = daemon.write_all(|store| {
+        let events = store.cancel_requests(id, &format!("agent {id} {}", state.as_str()))?;
+        Ok(((), events))
+    });
     deliveries::forget(daemon, id);
     agents::tell(daemon, id, Order::Stop);
     let (daemon, id) = (daemon.clone(), id.to_owned());
