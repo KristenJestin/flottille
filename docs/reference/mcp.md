@@ -3,8 +3,8 @@
 Flottille serves MCP twice. The **agent door** serves the tools of the agents Flottille runs, over
 Streamable HTTP on `127.0.0.1`, with one bearer token per agent. The **pilot door** is
 `flottille mcp`, on stdio, for an agent running outside Flottille. This file records what the
-protocol and the main client (Claude Code, which the ACP adapter runs) do today, and the rules
-both doors follow because of it. Checked in October 2026.
+protocol and the main client (Claude Code, which Flottille's own Claude bridge drives in its
+stream-json mode) do today, and the rules both doors follow because of it. Checked in October 2026.
 
 ## 1. The protocol
 
@@ -108,7 +108,9 @@ and the 2026 practice around it:
    - `_meta["anthropic/alwaysLoad"]: true` on every tool;
    - `ENABLE_TOOL_SEARCH=false` in the agent's environment.
 
-   Both, because the adapter's configuration cannot carry the per-server `alwaysLoad`.
+   Both: the bridge's `--mcp-config` gives `claude` the server's type, URL and token header only,
+   so the mark on each tool and the variable, which the bridge passes to `claude` from the bare
+   options' `env`, are what keep the tools upfront.
 8. **A result saved to a file is lost.** An agent in bare mode has no tool to read Claude
    Code's `tool-results` files. Rule 5 is therefore a hard limit here: fs_read pages, search
    results, command tails and agent conversations are cut and paged below the threshold, never
@@ -120,8 +122,9 @@ and the 2026 practice around it:
 
    A lead has about 17 tools, a leaf worker 11.
 10. **The idempotency key** of a call is read from the call's `_meta` (`claudecode/toolUseId` for
-    Claude). Check that the adapter in use still sends it, and fall back to no deduplication,
-    said in the log, when it does not.
+    Claude). `claude` calls Flottille's server itself and sends it with every call; the bridge
+    never sees MCP calls. Check that the `claude` version Flottille pins still sends it, and fall
+    back to no deduplication, said once per agent in the daemon's log, when a call has none.
 
 ### Pilot door
 
