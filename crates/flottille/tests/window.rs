@@ -486,6 +486,15 @@ fn recipe(user: &User, project: &str, body: &str) {
     std::fs::write(file, text).unwrap();
 }
 
+/// A recipe script that waits for `gate` to exist, then runs `then`: the test says when the
+/// preparation ends.
+fn gated(then: &str, gate: &std::path::Path) -> String {
+    format!(
+        "while [ ! -e '{}' ]; do sleep 0.05; done\n{then}\n",
+        gate.display()
+    )
+}
+
 fn page_of(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<ProjectPage> {
     shell
         .read_with(cx, |s, cx| s.main().read(cx).project_page().cloned())
@@ -615,7 +624,8 @@ fn starting_a_task_in_a_new_workspace_prepares_it_then_starts_the_session_in_it(
 ) {
     let user = user();
     project(&user, "atlas");
-    recipe(&user, "atlas", "sleep 1\necho prepared\n");
+    let gate = user.path("gate");
+    recipe(&user, "atlas", &gated("echo prepared", &gate));
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     until(&shell, cx, "the page is shown", |cx| {
         shell.read_with(cx, |s, cx| s.main().read(cx).project_page().is_some())
@@ -643,6 +653,16 @@ fn starting_a_task_in_a_new_workspace_prepares_it_then_starts_the_session_in_it(
             })
         },
     );
+    assert!(
+        composer.read_with(cx, |c, _| c.is_sending()),
+        "it waits for the preparation"
+    );
+    assert_eq!(
+        user.call("agent.list", json!({})).unwrap()["agents"],
+        json!([]),
+        "nothing starts before the workspace is ready"
+    );
+    std::fs::write(&gate, "").unwrap();
     until(&shell, cx, "the session's page opens", |cx| {
         matches!(
             shell.read_with(cx, |s, _| s.selected().cloned()),
