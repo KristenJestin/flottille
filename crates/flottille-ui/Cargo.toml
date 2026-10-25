@@ -1,0 +1,20 @@
+[package]
+name = "flottille-ui"
+description = "Flottille's shared window components: tokens, states, rows, cards, motion"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["fast"]
+# GPUI Fast, the retained-mode fork; `--no-default-features` builds plain GPUI.
+fast = ["gpui-kit/gpui-fast"]
+
+[dependencies]
+gpui-kit = { version = "=0.8.0", default-features = false, features = ["assets"] }
+toml = "1.1.8"
+
+[dev-dependencies]
+gpui-kit = { version = "=0.8.0", default-features = false, features = ["assets", "test-support"] }
+tempfile = "3.27.0"
