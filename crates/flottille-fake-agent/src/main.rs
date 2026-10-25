@@ -154,7 +154,8 @@ impl Record {
             .append(true)
             .open(&self.0)
             .expect("cannot write received.jsonl");
-        writeln!(file, "{entry}").unwrap();
+        // One write: the agents of a tree share the file, and their lines must not mix.
+        file.write_all(format!("{entry}\n").as_bytes()).unwrap();
     }
 }
 
