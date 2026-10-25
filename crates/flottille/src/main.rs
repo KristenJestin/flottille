@@ -16,6 +16,7 @@ mod inbox_command;
 mod mcp;
 mod pilot;
 mod place;
+mod program;
 mod project_command;
 mod projects;
 mod roles;
@@ -28,7 +29,7 @@ mod workspaces;
 use std::io::Write;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use flottille_core::paths::Paths;
 use flottille_core::protocol::WatchParams;
 use serde_json::Value;
@@ -137,12 +138,19 @@ enum DaemonAction {
     Stop,
 }
 
+/// The command line, its help and its errors naming the program as it was called.
+fn parse() -> Cli {
+    let name = program::name();
+    let mut matches = Cli::command().name(name).bin_name(name).get_matches();
+    Cli::from_arg_matches_mut(&mut matches).unwrap_or_else(|error| error.exit())
+}
+
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = parse();
     match run(cli) {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("flottille: {error}");
+            eprintln!("{}: {error}", program::name());
             ExitCode::FAILURE
         }
     }
@@ -239,7 +247,6 @@ mod tests {
     /// private path.
     #[test]
     fn every_command_has_its_section_in_the_cli_docs() {
-        use clap::CommandFactory;
         let docs = include_str!("../../../docs/cli.md");
         fn walk(command: &clap::Command, path: &str, docs: &str, missing: &mut Vec<String>) {
             for sub in command.get_subcommands().filter(|c| c.get_name() != "help") {

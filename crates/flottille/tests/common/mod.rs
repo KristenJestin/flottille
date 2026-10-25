@@ -147,6 +147,12 @@ impl User {
         command_of(self.dir.path(), &self.env, args)
     }
 
+    /// A command of this user run through another path to the program: a link to it, for
+    /// instance, under the name it will answer to.
+    pub fn command_through(&self, program: &Path, args: &[&str]) -> Command {
+        command_for(program, self.dir.path(), &self.env, args)
+    }
+
     /// Connects to this user's daemon as a client that starts it when nobody listens (the
     /// command line's `connect_or_start`): `flottille status` starts it, then the socket is
     /// opened. Usable from any thread, for as long as the user lives.
@@ -281,7 +287,11 @@ impl User {
 
 /// A command of the user whose folder is `dir`.
 fn command_of(dir: &Path, env: &[(String, String)], args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_flottille"));
+    command_for(Path::new(env!("CARGO_BIN_EXE_flottille")), dir, env, args)
+}
+
+fn command_for(program: &Path, dir: &Path, env: &[(String, String)], args: &[&str]) -> Command {
+    let mut command = Command::new(program);
     command
         .args(args)
         .env("HOME", dir.join("home"))
