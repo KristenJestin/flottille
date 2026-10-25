@@ -330,9 +330,11 @@ fn through_the_bridge_a_death_of_claude_is_the_agent_s_death() {
 #[test]
 fn an_agent_is_refused_while_claude_is_not_on_path() {
     let user = User::new();
+    // `git` alone: whatever else the machine has, no `claude` can be found.
     std::fs::create_dir(user.path("bin")).unwrap();
-    let path = format!("{}:/usr/bin:/bin", user.path("bin").display());
-    let user = user.with_env("PATH", &path);
+    std::os::unix::fs::symlink(common::program("git"), user.path("bin/git")).unwrap();
+    let path = user.path("bin");
+    let user = user.with_env("PATH", path.to_str().unwrap());
     project(&user);
 
     let refused = user

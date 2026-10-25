@@ -75,7 +75,13 @@ impl User {
         std::fs::create_dir(user.path("claude")).unwrap();
         std::fs::create_dir(user.path("bin")).unwrap();
         std::os::unix::fs::symlink(fake_claude(), user.path("bin/claude")).unwrap();
-        let path = format!("{}:/usr/bin:/bin", user.path("bin").display());
+        // The test's own PATH after it, without `/usr/bin` forced in: a run on a PATH without
+        // `node` shows that nothing needs it.
+        let path = format!(
+            "{}:{}",
+            user.path("bin").display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
         let dir = user.path("claude");
         user.with_env("PATH", &path)
             .with_env("FLOTTILLE_FAKE_CLAUDE_DIR", dir.to_str().unwrap())
@@ -322,6 +328,14 @@ pub fn fake_agent() -> PathBuf {
         path.display()
     );
     path
+}
+
+/// A program of the test's own PATH, as a shell would find it.
+pub fn program(name: &str) -> PathBuf {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join(name))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| panic!("{name} is not on PATH"))
 }
 
 /// The fake `claude`'s binary, built beside Flottille's as the fake agent is.
