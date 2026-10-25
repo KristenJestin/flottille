@@ -15,7 +15,7 @@ use flottille_ui::omarchy::Environment;
 use flottille_ui::state::icon_id;
 use flottille_window::Shell;
 use flottille_window::actions::Changes;
-use flottille_window::composer::{Choice, Composer, Tab};
+use flottille_window::composer::{Choice, Composer, PlaceChoice, Tab};
 use flottille_window::link::{self, Connect};
 use flottille_window::model::{Place, Preparation};
 use flottille_window::project::{NewWorkspace, PlaceCard, ProjectPage};
@@ -1087,5 +1087,58 @@ fn a_turn_ending_in_another_project_does_not_ask_for_details(cx: &mut TestAppCon
     assert!(
         asked(cx) > before,
         "atlas's own work may have changed its lines"
+    );
+}
+
+#[gpui_kit::test]
+fn a_chosen_workspace_that_stops_being_ready_cannot_take_the_task(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    workspace(&user, "atlas", "login");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    until(&shell, cx, "the page shows login", |cx| {
+        card_of(&shell, Some("login"), cx).is_some()
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("new-session-in-login", cx));
+    cx.simulate_input("Fix the timeout");
+    let composer = composer_of(&shell, "atlas", cx);
+    let places = |login_ready: bool| {
+        vec![
+            PlaceChoice {
+                workspace: None,
+                ready: true,
+            },
+            PlaceChoice {
+                workspace: Some("login".into()),
+                ready: login_ready,
+            },
+        ]
+    };
+
+    // What the next read says when login is prepared again.
+    composer.update(cx, |c, cx| c.set_places(places(false), cx));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.update(|window, cx| window.click("send", cx));
+    cx.simulate_keystrokes("enter");
+
+    assert!(
+        !composer.read_with(cx, |c, _| c.is_sending()),
+        "nothing is sent to it, nor to main in its place"
+    );
+    assert_eq!(
+        composer.read_with(cx, |c, _| (
+            c.choice().clone(),
+            c.blocked().map(str::to_owned)
+        )),
+        (
+            Choice::Workspace("login".into()),
+            Some("login is not ready: a session starts there once it is prepared".into())
+        )
+    );
+    composer.update(cx, |c, cx| c.set_places(places(true), cx));
+    assert_eq!(
+        composer.read_with(cx, |c, _| c.blocked().map(str::to_owned)),
+        None
     );
 }

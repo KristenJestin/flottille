@@ -78,6 +78,7 @@ pub struct Composer {
     /// Where the session being started was asked to start, until the daemon answers.
     sending: Option<Target>,
     error: Option<SharedString>,
+    blocked: Option<String>,
     /// How many times it was drawn: the tests count them.
     renders: usize,
     _subscriptions: Vec<Subscription>,
@@ -157,6 +158,7 @@ impl Composer {
             icons: HashMap::new(),
             sending: None,
             error: None,
+            blocked: None,
             renders: 0,
             _subscriptions: subscriptions,
         }
@@ -218,6 +220,7 @@ impl Composer {
                 self.choice = Choice::Main;
             }
             self.places = places;
+            self.set_blocked();
             cx.notify();
         }
     }
@@ -245,6 +248,7 @@ impl Composer {
         if self.choice != choice {
             self.choice = choice;
             self.error = None;
+            self.set_blocked();
         }
         let focus = match self.choice {
             Choice::New => self.name.read(cx).focus_handle(cx),
@@ -273,8 +277,33 @@ impl Composer {
         cx.notify();
     }
 
+    /// Why the chosen place cannot take a session now: a workspace prepared again. The choice is
+    /// kept, not moved to `main`, so that a task meant for the workspace is not sent elsewhere.
+    pub fn blocked(&self) -> Option<&str> {
+        self.blocked.as_deref()
+    }
+
+    fn set_blocked(&mut self) {
+        self.blocked = match &self.choice {
+            Choice::Workspace(name)
+                if self
+                    .places
+                    .iter()
+                    .any(|p| p.workspace.as_deref() == Some(name.as_str()) && !p.ready) =>
+            {
+                Some(format!(
+                    "{name} is not ready: a session starts there once it is prepared"
+                ))
+            }
+            _ => None,
+        };
+    }
+
     fn can_send(&self) -> bool {
-        self.sending.is_none() && self.has_text && (self.choice != Choice::New || self.has_name)
+        self.blocked.is_none()
+            && self.sending.is_none()
+            && self.has_text
+            && (self.choice != Choice::New || self.has_name)
     }
 
     /// Starts a session with what the field holds, where the picker says.
@@ -671,6 +700,18 @@ impl Render for Composer {
                     .child(body),
             )
             .child(self.render_pickers(cx).into_any_element())
+            .when_some(self.blocked.clone(), |d, why| {
+                d.child(
+                    div()
+                        .id("composer-blocked")
+                        .px(px(10.))
+                        .pt(px(6.))
+                        .pb(px(2.))
+                        .text_size(px(12.5))
+                        .text_color(p.faint)
+                        .child(SharedString::from(why)),
+                )
+            })
             .when_some(self.error.clone(), |d, error| {
                 d.child(
                     div()
