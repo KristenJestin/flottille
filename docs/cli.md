@@ -77,18 +77,23 @@ $ flottille watch --after 0
 
 ### `flottille doctor`
 
-Whether Claude agents can run here: `claude`, its version, and its login (the login file checked
-for presence, never read; or `ANTHROPIC_API_KEY` set, never printed). Exit code 1 while something
-is missing. A `claude` of another version than the one this Flottille was checked against is a
-warning that names both, not a failure. `--json` prints the report: `{"claude": {"present",
-"path", "version", "checked"}, "login": {"present", "path", "api_key"}, "warnings", "ready"}`.
+Each provider (`docs/agents.md`, "Providers"): whether it is enabled (`providers.toml`), its
+program, its version and its login (the login file checked for presence, never read; or an API
+key set, named, never printed), and whether its agents can run, with why not. Exit code 1 when no
+provider is enabled or an enabled one cannot run; a provider that is not enabled is not a
+failure. A program of another version than the one this Flottille was checked against is a
+warning that names both, not a failure. `--json` prints the report: `{"providers": [{"name",
+"title", "enabled", "ready", "why", "program": {"name", "present", "path", "version", "checked"},
+"login": {"present", "path", "api_key"}, "override"}], "warnings", "ready"}` (`provider.list`,
+`docs/protocol.md`, gives the same with the models).
 
 ```
 $ flottille doctor
 ok   claude: 2.1.300 (/usr/bin/claude)
 ok   Claude login: ~/.claude/.credentials.json
-warn claude is 2.1.300, and this Flottille was checked against 2.1.295: its stream-json mode may have changed
 Claude agents can run.
+OpenCode agents cannot run: opencode is not enabled (`enabled = true` under [opencode] in providers.toml enables it)
+warn claude is 2.1.300, and this Flottille was checked against 2.1.295: its stream-json mode may have changed
 ```
 
 ## Projects
@@ -216,7 +221,8 @@ Removed workspace login of shop: its worktrees and its folder. Its branches are 
 
 ## Agents
 
-An agent is one session of a Claude agent run over ACP (`docs/agents.md`). You start **root**
+An agent is one session of an agent run over ACP on one of its providers, Claude or OpenCode
+(`docs/agents.md`). You start **root**
 agents and write to them; a root may launch sub-agents of its own, which belong to it (design §5).
 You can read any agent of a tree, never write to a child and stop it only with its root: the
 refusal names the root.
@@ -224,8 +230,12 @@ refusal names the root.
 ### `flottille agent start <project> <message>`
 
 Starts a root agent and gives it its first message, then returns at once: the agent works on its
-own. `--workspace <name>` runs it in a ready workspace (the project folder otherwise), `--model
-<model>` asks for a model (never replaced by another), `--role lead|worker` (`lead` by default).
+own. `--workspace <name>` runs it in a ready workspace (the project folder otherwise),
+`--provider <provider>` on a provider (the project's otherwise, for the agent's life), `--model
+<model>` asks for a model (the project's otherwise; never replaced by another), `--effort
+<effort>` for an effort of the model, `--role lead|worker` (`lead` by default). A provider that is
+not ready, or a model or an effort it is known not to offer, is refused with a sentence that names
+what is available.
 `--json` prints `agent.start`: `{"agent": {...}, "after": <n>}`, where `after` is the event number
 to follow it from (`flottille watch --after <n>`, `flottille agent read <id> --after <n>`).
 
@@ -343,7 +353,7 @@ That is all for now; later, read on with `flottille agent read bd7ed8152969 --af
 ### `flottille agent show <agent>`
 
 The agent, and its conversation in full as events (`docs/events.md`): the agent's state and
-place, then what was said, thought and done, with the turns and the processes. `--json` prints
+place, its provider and model, then what was said, thought and done, with the turns and the processes. `--json` prints
 `agent.show`: `{"agent", "events"}`, the agent with its instructions and tools, and its first
 1,000 events.
 
@@ -360,7 +370,8 @@ Stopped agent bd7ed8152969 and its tree; it is ended now. Its workspace stays.
 
 ### `flottille agent list`
 
-The agents, in short, of every project or of `--project <name>`: id, role, place and state. Every
+The agents, in short, of every project or of `--project <name>`: id, role, place, provider and
+model, and state. Every
 agent, ended ones and children included, oldest first: a plain listing of the daemon's
 `agent.list`. (The pilot door's `agents_list` and `agent_status` page through the root agents,
 newest first, with `agent.trees`; the command line has no equivalent, it reads `agent list` or
@@ -368,8 +379,8 @@ newest first, with `agent.trees`; the command line has no equivalent, it reads `
 
 ```
 $ flottille agent list
-agent bd7ed8152969, lead in shop, workspace login: idle
-  "add the login page" (agent 1eb211e2dbf2), worker in shop, workspace login: working
+agent bd7ed8152969, lead in shop, workspace login, on claude (sonnet): idle
+  "add the login page" (agent 1eb211e2dbf2), worker in shop, workspace login, on opencode (openai/gpt-5): working
 ```
 
 ### `flottille agent tree <agent>`
@@ -380,8 +391,8 @@ waits for (its parent, or you), and whether a request of the tree waits for you.
 
 ```
 $ flottille agent tree bd7ed8152969
-agent bd7ed8152969, lead in shop, workspace login: idle for 2 s
-  "add the login page" (agent 1eb211e2dbf2), worker in shop, workspace login: in a turn
+agent bd7ed8152969, lead in shop, workspace login, on claude (sonnet): idle for 2 s
+  "add the login page" (agent 1eb211e2dbf2), worker in shop, workspace login, on opencode (openai/gpt-5): in a turn
 ```
 
 ## What reaches you
@@ -486,7 +497,7 @@ The door serves these tools, always in this order. Agents are named by `agent_id
 | `projects_list` | the projects: name, folder, repositories |
 | `workspaces_list {project?}` | the workspaces and their state |
 | `workspace_create {project, name, repositories?, branch?, offline?}` | makes a workspace; its preparation goes on in the background |
-| `agent_start {project, message, workspace?, model?, role?}` | starts a root agent; answers at once with its id and an event number to follow it from |
+| `agent_start {project, message, workspace?, provider?, model?, effort?, role?}` | starts a root agent; answers at once with its id and an event number to follow it from |
 | `agent_send {agent_id, message}` | writes to a **root** agent; refused for a child, naming its root |
 | `agent_status {agent_id?, ended?, before?}` | what an agent does now, its last messages; without `agent_id`, the **live** root agents, newest first, 20 at a time (`ended: true` adds the ended and failed ones; a page that does not hold them all ends with the call that reads on, with `before`) |
 | `agent_read {agent_id, after?}` | a page of the conversation of **any** agent of a tree, with how to read on |

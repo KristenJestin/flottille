@@ -115,8 +115,14 @@ Flottille is an ACP client. Each agent session is one process speaking ACP on st
   warns on another). Nothing else is installed: the user's `claude`, signed in (or given
   `ANTHROPIC_API_KEY`), is the only prerequisite. How the bridge maps ACP to `claude` is
   in `docs/agents.md`.
-- **Codex** and **OpenCode** come later (`codex-acp` with the patch described in
-  `reference/hemera.md` §2, and `opencode acp`). Gemini CLI speaks ACP natively too.
+- **OpenCode**: the user's own `opencode acp`, its configuration moved into Flottille's data
+  folder and its bare agent given in its environment (`docs/agents.md`, "Bare mode for
+  OpenCode").
+- **Codex** comes later (`codex-acp` with the patch described in `reference/hemera.md` §2).
+  Gemini CLI speaks ACP natively too.
+
+Each is a provider, an entry of its own in the daemon; which are enabled is the user's
+(`providers.toml`), and each agent runs on one for life (`docs/agents.md`, "Providers").
 
 Handshake, session open order (resume, else load, else new), model/effort/mode options, event
 mapping, cancel, idle release of processes and death handling follow `reference/hemera.md` §1.
@@ -129,7 +135,9 @@ own and never reads or copies credentials.
 Every agent runs in bare mode (`reference/hemera.md` §2): no built-in tools, no user or project
 settings, no skills, no plugins, no user MCP servers, only Flottille's MCP server. For Claude,
 set by the bridge on `claude` itself: `tools: []`, `settingSources: []`, `strictMcpConfig: true`, `allowedTools` = the exact names of
-the session's Flottille tools, a custom system prompt, and the two MCP timeouts raised.
+the session's Flottille tools, a custom system prompt, and the two MCP timeouts raised. For
+OpenCode, set in its environment: every tool denied but Flottille's, its own agents disabled,
+its prompt the agent's instructions, and no configuration of the user's or the project's.
 
 This is what makes the rest hold: with no shell and no native sub-agent tool, an agent **cannot**
 start another agent (no `Task`, no `claude --bg`, no background shell) except through
