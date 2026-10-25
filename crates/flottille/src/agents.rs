@@ -574,6 +574,9 @@ async fn process(
 ) -> Result<bool, String> {
     change(daemon, &agent.id, AgentState::Starting, None, None);
     let provider = providers::of(agent)?;
+    // Checked at every start, a replacement's included: the user may have disabled the provider
+    // since the agent was made.
+    providers::startable(&daemon.paths, provider)?;
     let launch = providers::launch(provider, &daemon.paths, agent)?;
     // A token of this process's own, which revokes the last one.
     let grant = mcp::grant_of(daemon, agent)?;

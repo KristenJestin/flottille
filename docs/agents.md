@@ -82,7 +82,10 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
 - **An agent's provider** is the one asked (`--provider`, `agent_start`'s and `agent_launch`'s
   `provider`), else the project's (`provider` in its file, `docs/projects.md`), else the first one
   enabled; a child's is its parent's unless it names another. It is kept in the agent and never
-  changes: a replacement runs on the same provider.
+  changes: a replacement runs on the same provider. It is checked again at each start of the
+  agent's process, a replacement's included: an agent whose provider is no longer enabled or
+  ready fails (`agent.failed`, with the sentence a start would be refused with), and is not
+  started again.
 - **Its model** is the one asked, else the project's (`model` in its file, for the project's own
   provider only), else the provider's default. Its effort is the one asked, else the model's
   default.

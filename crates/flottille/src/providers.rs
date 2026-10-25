@@ -158,6 +158,15 @@ pub fn launch(provider: &Provider, paths: &Paths, agent: &Agent) -> Result<Launc
     })
 }
 
+/// Whether an agent's process may start on the provider now: a sentence saying why not.
+pub fn startable(paths: &Paths, provider: &'static Provider) -> Result<(), String> {
+    let settings = Settings::load(paths)?;
+    match Check::of(provider, &settings, false).why_not() {
+        Some(why) => Err(format!("provider {} {why}", provider.name)),
+        None => Ok(()),
+    }
+}
+
 /// The test override of the provider's agent, when one is set.
 fn overridden(provider: &Provider) -> Option<PathBuf> {
     let own = format!("FLOTTILLE_AGENT_COMMAND_{}", provider.name.to_uppercase());

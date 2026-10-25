@@ -443,3 +443,38 @@ fn a_claude_agent_without_a_login_file_still_starts() {
 
     eventually("the session", || agent(&user, &started)["state"] == "idle");
 }
+
+#[test]
+fn an_agent_whose_provider_was_disabled_fails_at_its_next_start_saying_so() {
+    let user = User::with_fake_providers().with_env("FLOTTILLE_IDLE_RELEASE_MS", "300");
+    project(&user);
+    let started = id(&start(&user, json!({"message": "hello", "provider": "opencode"})).unwrap());
+    let events = |user: &User| {
+        user.call("agent.show", json!({"agent": started})).unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    eventually("the release", || {
+        events(&user).iter().any(|e| e["name"] == "agent.released")
+    });
+
+    user.write_providers("[opencode]\nenabled = false\n");
+    user.call("agent.send", json!({"agent": started, "message": "again"}))
+        .unwrap();
+
+    eventually("the failure", || {
+        agent(&user, &started)["state"] == "failed"
+    });
+    let failed = events(&user);
+    let reason = failed.iter().find(|e| e["name"] == "agent.failed").unwrap()["data"]["reason"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        reason.contains("provider opencode is not enabled"),
+        "{reason}"
+    );
+    // Not started again behind the user's back.
+    assert_eq!(starts(&user, "opencode"), 1);
+}
