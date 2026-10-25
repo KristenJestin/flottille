@@ -168,6 +168,11 @@ pub async fn show(daemon: Arc<Daemon>, params: Value) -> std::result::Result<Val
             "." => folder.clone(),
             path => folder.join(path),
         };
+        // A folder that is not its own repository yet: git would answer for the one around it.
+        if !checkout.join(".git").exists() {
+            repository["branch"] = Value::Null;
+            continue;
+        }
         let head = git::run(
             &checkout,
             &["symbolic-ref", "--quiet", "--short", "HEAD"],

@@ -290,6 +290,34 @@ fn a_shown_project_says_the_branch_each_repository_is_on() {
 }
 
 #[test]
+fn a_repository_folder_that_is_not_a_repository_yet_is_on_no_branch() {
+    let user = User::new();
+    let app = user.path("work/app");
+    user.git_init(&app);
+    std::fs::write(app.join("README.md"), "made up\n").unwrap();
+    user.git(&app, &["add", "README.md"]);
+    user.git(&app, &["commit", "--quiet", "-m", "start"]);
+    // Inside the project's repository, not cloned yet: git would answer for the parent.
+    std::fs::create_dir_all(app.join("lib")).unwrap();
+    user.write_project_file(
+        "app",
+        &format!(
+            "folder = \"{}\"\n[[repositories]]\npath = \".\"\n[[repositories]]\npath = \"lib\"\n",
+            app.display()
+        ),
+    );
+
+    let shown = user.call("project.show", json!({"name": "app"})).unwrap();
+
+    assert_eq!(shown["repositories"][0]["branch"], "main");
+    assert_eq!(
+        shown["repositories"][1]["branch"],
+        Value::Null,
+        "not the branch of the repository around it"
+    );
+}
+
+#[test]
 fn a_file_that_cannot_be_used_is_reported_with_its_file_and_key() {
     let user = User::new();
     let app = user.path("work/app");
