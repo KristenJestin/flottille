@@ -6,9 +6,8 @@ itself, `main`, or one of its workspaces) and runs in bare mode: no built-in too
 project setting, no skill, no plugin, no MCP server but Flottille's. It follows
 `docs/reference/hemera.md` §1 and §2.
 
-The tree of agents, the deliveries that wake them, their roles and their full instructions come
-later; so do the agent tools (`agent_*`, `report`, `ask_*`, `approval_answer`). Flottille's MCP
-server and the file and command tools are in `docs/tools.md`. This file says what runs today.
+An agent can launch others (its children), which form its tree ("The tree", below), and is
+woken only by deliveries. Flottille's MCP server and its tools are in `docs/tools.md`.
 
 ## Commands
 
@@ -20,7 +19,8 @@ server and the file and command tools are in `docs/tools.md`. This file says wha
 | `flottille doctor [--json]` | Whether Claude agents can run here. Fails when they cannot. |
 
 These are a minimal way in until the real commands come; the protocol has the rest
-(`agent.send`, `agent.cancel`, `docs/protocol.md`).
+(`agent.send`, `agent.cancel`, `agent.stop`, `agent.tree`, `agent.list`, `docs/protocol.md`).
+`agent run` starts a root.
 
 ## What the machine needs
 
@@ -69,8 +69,8 @@ installed, Node or `claude` is not on `PATH`.
 - **Idle release**: a process with no turn running and nothing waiting for 5 minutes is let go
   (stopped: `SIGTERM` to its group, `SIGKILL` 2 s later); the next prompt starts it again and
   resumes or loads its session.
-- **A death**: a process that ends without being let go fails the agent and is published
-  (`agent.died`); nothing starts it again at this layer.
+- **A death**: a process that ends without being let go is published (`agent.died`) and its
+  session replaced ("Replacement", below).
 - **Orphans**: each process's pid and start time are kept in the store while it runs. A daemon
   starting kills the process groups a previous one left behind (a crash), only when the group's
   leader is alive with the start time recorded: never a stranger that took the pid since, and not
@@ -108,11 +108,11 @@ adapter passes to the Claude Agent SDK over its own defaults:
   Claude never asks for them, each prefixed `mcp__flottille__`. The list depends on what the agent
   can do (`docs/design.md` §4.3, `docs/reference/mcp.md` §4 rule 9). Every agent has `fs_read`,
   `fs_list`, `search`, `fs_write`, `fs_edit`, `commands_list`, `commands_run`, `commands_output`,
-  `commands_stop` and `report`; one that can have children also `agent_launch`, `agent_send`,
-  `agent_status`, `agent_read`, `agent_stop` and `approval_answer`; a root `ask_user`, a child
-  `ask_parent`. Roots are the only agents until the tree comes, so today's agents get, in this
-  order, the first nine, the five `agent_*`, `report`, `ask_user`, `approval_answer` (17). The
-  list is frozen in the agent when it is created (the prompt cache depends on it).
+  `commands_stop` and `report`; one that can have children (below the depth limit) also
+  `agent_launch`, `agent_send`, `agent_status`, `agent_read`, `agent_stop` and
+  `approval_answer`; a root `ask_user`, a child `ask_parent`. A root gets, in this order, the
+  first nine, the five `agent_*`, `report`, `ask_user`, `approval_answer` (17). The list is
+  frozen in the agent when it is created (the prompt cache depends on it).
 - `settingSources: []`: the adapter's own default loads the user's settings, hooks, plugins,
   skills and instruction files; this overrides it.
 - `strictMcpConfig`: only the MCP servers given with the session.
@@ -154,13 +154,85 @@ cloud provider's own variables (`CLAUDE_CODE_USE_BEDROCK`, for one) does not rea
 ## The conversation
 
 Every update the agent sends that Flottille keeps is an event of the agent (`docs/events.md`):
-stored, numbered, streamed, and read back by `agent.show`. Each carries `replay`: true while a
-`session/load` replays the history, which is then neither a sign of activity nor new. Those
-events are stored all the same, even when the history they replay is already held: whether to
-drop the ones already held is for the tree work to decide (#7, `docs/reference/hemera.md`
-§8.7). The agent's
-`active_at` is the time of its last update outside a replay. Texts are cut at 64 KiB and say how
+stored, numbered, streamed, and read back by `agent.show`. What a `session/load` replays is
+history Flottille already holds, as it happened: it is not stored again, and it is not a sign of
+activity (`docs/reference/hemera.md` §8.7). The agent's `active_at` is the time of its last
+update outside a replay. Texts are cut at 64 KiB and say how
 much was cut (`‹+N chars›`); secrets of the daemon's environment are masked in everything kept.
+
+## The tree
+
+An agent launches children with `agent_launch` (`docs/tools.md`): each is an agent of its own,
+with a parent, a depth (a root is at 0), a title and a brief, which is all it knows of its task.
+The user writes to and stops roots only: `agent.send` and `agent.stop` on a child are refused,
+naming its root. The tree is one project's: a child works in its parent's place, an existing
+workspace of the project, or a new one, made and prepared before it starts.
+
+- **Caps**: at most `max_children` children of a project run at once (`docs/projects.md`, 1 to
+  6, 3 by default), and a tree is at most 2 deep: an agent at depth 2 has no `agent_*` tool nor
+  `approval_answer`. A launch above a cap is refused with a sentence; it is never queued.
+- **Roles**: `lead` (by default for a root) and `worker` (by default for a child). An agent's
+  instructions are Flottille's base, its role's template, the cache boundary, then what is its
+  own: its project, its place, and either "you are the root agent" or its task's title; then the
+  project's own instruction files (`CLAUDE.md` else `AGENTS.md`, and `CLAUDE.local.md` else
+  `AGENTS.local.md`), read in the agent's place, else in the project's main checkout. The
+  templates are in `crates/flottille/roles/`.
+- **Stopping** an agent stops its tree, deepest first: each ends (`agent.ended`, or
+  `agent.failed` when it is a failure that spreads), what was queued for it is superseded, its
+  process and its runs are stopped. Workspaces stay.
+- **A report** (`report`) of a child goes to its parent at once, and the child ends when its
+  turn does, or 2 minutes later if its turn goes on. A root's report is kept and the root stays.
+
+### Deliveries
+
+Everything Flottille hands to an agent is a delivery: the user's messages (`user`), a brief
+(`brief`), a parent's message (`parent`), what happens to a child (`child-report`,
+`child-question`, `child-asks`, `child-failed`, `child-stuck`, `child-idle`, `child-replaced`,
+`children-status`), an approval's answer (`approval`), a reminder (`reminder`), a session's
+restart (`resume`). It is stored before it is sent, under an id that makes it idempotent, and it
+is the only thing that wakes an agent.
+
+- **As the agent reads it**: `[flottille:<kind>]` on a line, then the body. Bodies are data: a
+  `[flottille:` in one is written `\[flottille:` and a `<flottille-note` is written
+  `&lt;flottille-note`, so that no text forges a delivery. Bodies are masked of the daemon's
+  secrets.
+- **Between turns**, the agent's queued deliveries are sent together as one prompt: a `brief`
+  first, then a `resume`, then the others in their order.
+- **During a turn**, an urgent one (`child-report`, `child-failed`, `child-asks`, `parent`,
+  `approval`) is pinned as a note on the agent's next tool result:
+  `<flottille-note id="…">`, the delivery, `</flottille-note>`. A note not taken within 30 s
+  cancels the turn, and the delivery goes as the next prompt. The others wait for the turn's end.
+- **A turn that fails** gives back what it was sent: those deliveries are queued again.
+- States: `queued`, `sending` (in a prompt), `sent`, `superseded` (its agent ended first). Each
+  move is an event (`delivery.*`, `docs/events.md`).
+
+A child that ends a turn without reporting, with nothing to wait for (no request, no question
+held), is reminded once (`reminder`); after a second such turn its parent is told it went idle
+(`child-idle`). A delivery other than a reminder starts the count again.
+
+### Replacement
+
+A session that cannot go on is replaced: its process dies, or it is stuck (below). The agent
+keeps its id; its epoch counts the sessions. The new session starts from scratch, without the
+old one's session id, and is sent its brief (a child) and a `resume` saying it starts again; what
+the old session was sent and had not finished is given back. The old session's token stays known,
+so that its late calls are refused, saying it was replaced. The parent is told (`child-replaced`).
+Two replacements within 30 minutes are allowed: the third failure fails the agent and its tree.
+
+A child whose context is compacted is sent its brief again.
+
+### The sweep
+
+Every 5 seconds, the daemon looks at what only time decides:
+
+- a note not taken within 30 s (above);
+- a child that reported and is still in its turn 2 minutes later: it ends;
+- a turn with no sign of activity for 5 minutes, not waiting on the provider, with no run of the
+  agent's own running or ended within 5 minutes: the agent is stuck (`agent.stuck`), its parent
+  told (`child-stuck`), and its session replaced;
+- a lead between turns whose children run, with no delivery for 20 minutes: it is sent one line
+  per child (`children-status`). The interval doubles with each such delivery in a row, up to
+  160 minutes.
 
 ## For tests and development
 
@@ -168,6 +240,9 @@ much was cut (`‹+N chars›`); secrets of the daemon's environment are masked 
   argument. The tests run the fake ACP agent this way (`crates/flottille-fake-agent`, whose
   script format is documented in its source).
 - `FLOTTILLE_IDLE_RELEASE_MS`: the idle release time, in milliseconds, in place of 5 minutes.
+- `FLOTTILLE_TEST_CLOCK`: set (to anything), the daemon answers `test.advance {"ms"}` on its
+  socket: its clock moves that far ahead, and the sweep runs at once. The tests see minutes pass
+  this way without waiting for them. Without it, `test.advance` is an unknown method.
 
-Both are read by the daemon from its environment, which is the environment of the command that
+All three are read by the daemon from its environment, which is the environment of the command that
 started it.
