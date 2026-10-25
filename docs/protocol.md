@@ -138,8 +138,10 @@ message starts with the key at fault). A file with an error does not hide the ot
 
 #### `project.show`
 
-`{"name"}`. The result is the project. `not-found` when there is none, `invalid-config` when its file
-cannot be used.
+`{"name"}`. The result is the project, each repository with `branch`: the branch its checkout in
+the project folder is on now, `null` when it is on none (a detached checkout, or a folder git cannot
+read). `project.list` leaves it out: it runs no git. `not-found` when there is none,
+`invalid-config` when its file cannot be used.
 
 #### `project.detect`
 
