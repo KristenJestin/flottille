@@ -89,15 +89,16 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             refuse_final(&agent)?;
             refuse_empty(&asked.message)?;
             let after = daemon.read(Store::last_seq)?;
-            deliveries::deliver(
+            let delivery = deliveries::deliver(
                 daemon,
                 &agent.id,
                 "user",
                 None,
                 &asked.message,
                 approval::BETWEEN_TURNS,
-            );
-            Ok(json!({"agent": agent.to_json(), "after": after}))
+            )
+            .ok_or_else(|| Failure::new("unavailable", "the message could not be stored"))?;
+            Ok(json!({"agent": agent.to_json(), "after": after, "delivery": delivery}))
         }
         "agent.stop" => {
             let asked: AgentName = serde_json::from_value(params)?;
