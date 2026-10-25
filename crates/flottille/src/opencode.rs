@@ -185,7 +185,9 @@ fn config(instructions: &Path) -> Result<Value, String> {
                 "prompt": format!("{{file:{shown}}}"),
                 // A tool whose last matching rule denies it for every pattern is not sent to the
                 // model at all; MCP tools are named `<server>_<tool>` and go through the same rules.
-                "permission": {"*": "deny", format!("{MCP_SERVER}_*"): "allow"},
+                // A third identical call in a row asks `doom_loop`, which `*` would deny: Flottille's
+                // gate judges the calls.
+                "permission": {"*": "deny", "doom_loop": "allow", format!("{MCP_SERVER}_*"): "allow"},
             },
             "build": {"disable": true},
             "plan": {"disable": true},
@@ -275,7 +277,7 @@ mod tests {
                     "flottille": {
                         "mode": "primary",
                         "prompt": "{file:/run/user/1000/flottille/opencode/3f9a1c0b7d2e.md}",
-                        "permission": {"*": "deny", "flottille_*": "allow"},
+                        "permission": {"*": "deny", "doom_loop": "allow", "flottille_*": "allow"},
                     },
                     "build": {"disable": true},
                     "plan": {"disable": true},

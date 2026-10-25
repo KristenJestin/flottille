@@ -226,7 +226,7 @@ after.
     "flottille": {
       "mode": "primary",
       "prompt": "{file:<runtime>/opencode/<agent>.md}",
-      "permission": {"*": "deny", "flottille_*": "allow"}
+      "permission": {"*": "deny", "doom_loop": "allow", "flottille_*": "allow"}
     },
     "build": {"disable": true}, "plan": {"disable": true},
     "general": {"disable": true}, "explore": {"disable": true}
@@ -246,6 +246,10 @@ after.
   nothing of the user's can loosen them. MCP tools go through the same rules, named
   `<server>_<tool>` (`opencode/src/mcp/catalog.ts:119`): `flottille_*` lets Flottille's through,
   and Flottille's tools are named `flottille_fs_read` and so on for an OpenCode agent.
+- **Repeated calls**: OpenCode asks the `doom_loop` permission before a third identical tool
+  call in a row (`opencode/src/session/processor.ts:356-379`; `ask` by default,
+  `opencode/src/agent/agent.ts:121`), which `"*": "deny"` would turn into a failed call:
+  `doom_loop` is allowed, and Flottille's gate judges the call itself.
 - **No sub-agent**: the `task` tool is denied, and the agents that ship with OpenCode are
   disabled; `flottille` is the only one.
 - **No command**: OpenCode's ACP agent takes a prompt whose text, its text blocks joined and
