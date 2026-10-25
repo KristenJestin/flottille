@@ -242,8 +242,9 @@ workspace is answered `failed`, with the step's failure.
 `{"project", "name"}`. The workspace, each repository with `changes`: `{"added", "removed"}`, the
 lines added and removed in its worktree since its base commit, whether its branch committed them
 or they are not committed yet, new files git does not ignore counted whole (a binary file, a link
-or a file over 8 MiB counts no line); `null` when git cannot read the worktree (not made yet, or
-gone). `workspace.list` leaves it out: it runs no git.
+or a file over 8 MiB counts no line). It writes nothing, not even git's index. `changes` is `null`
+when git cannot read the worktree (not made yet, or gone). `workspace.list` leaves it out: it runs
+no git.
 
 #### `workspace.prepare`
 

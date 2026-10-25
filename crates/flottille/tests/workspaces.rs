@@ -199,6 +199,30 @@ fn a_shown_workspace_counts_the_lines_added_and_removed_in_each_repository() {
 }
 
 #[test]
+fn showing_a_workspace_does_not_write_its_index() {
+    use std::os::unix::fs::MetadataExt as _;
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    fixture.create(json!({})).unwrap();
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    let web = fixture.workspace("login").join("web");
+    let index = web.join(fixture.git(&web, &["rev-parse", "--git-path", "index"]));
+    let before = std::fs::metadata(&index).unwrap();
+    // The same content, a newer time: a refreshing git rewrites the index for it.
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(web.join("README.md"), "web\n").unwrap();
+
+    fixture.show("login").unwrap();
+
+    let after = std::fs::metadata(&index).unwrap();
+    assert_eq!(
+        (after.ino(), after.mtime(), after.mtime_nsec()),
+        (before.ino(), before.mtime(), before.mtime_nsec()),
+        "an agent's own git add or commit could fail on the index being rewritten"
+    );
+}
+
+#[test]
 fn a_workspace_over_three_repositories_takes_develop_where_it_exists_and_main_elsewhere() {
     let fixture = Fixture::new(false);
     fixture.configure("");

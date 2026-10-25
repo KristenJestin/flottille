@@ -96,10 +96,16 @@ const COUNTED_FILE: u64 = 8 * 1024 * 1024;
 /// what is changed and not committed, and the new files git does not ignore. A binary file counts
 /// no line. `None` when git cannot read the worktree (it is not made yet, or gone).
 async fn changes(folder: &Path, base: &str) -> Option<Value> {
-    let diff = git::run(folder, &["diff", "--numstat", base, "--"], Class::Read)
-        .await
-        .ok()
-        .filter(|output| output.success)?;
+    // `diff-index`, not `diff`: `diff` refreshes the index and writes it, under the feet of an
+    // agent's own `git add` or `commit` in the same worktree.
+    let diff = git::run(
+        folder,
+        &["diff-index", "--numstat", base, "--"],
+        Class::Read,
+    )
+    .await
+    .ok()
+    .filter(|output| output.success)?;
     let (mut added, mut removed) = (0u64, 0u64);
     for line in diff.stdout.lines() {
         let mut counts = line.split('\t');
