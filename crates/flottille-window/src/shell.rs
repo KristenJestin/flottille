@@ -22,8 +22,10 @@ use crate::actions::{Actions, Command, Outcome};
 use crate::composer::{Choice, Composer, PlaceChoice, RunningSession};
 use crate::link::{self, Connect, Seen, Update};
 use crate::model::{BellItem, Place, Preparation, Snapshot};
+use crate::open::Opener;
 use crate::page::{MainArea, Page};
 use crate::project::{NewWorkspace, PlaceData, ProjectData, SessionLine, repository_label};
+use crate::session::{Follow, Opened, Reply, SessionPage};
 use crate::tree::{PlaceNode, ProjectNode, SessionRow, Sidebar};
 
 /// Below this width the session page's rail becomes a drawer from the right.
@@ -86,6 +88,13 @@ pub struct Shell {
     /// again only when that work changed.
     details_of: Option<(String, Work)>,
     details_asked: usize,
+    /// What a session page needs to follow its session.
+    follow: Follow,
+    /// The open session's page; it follows its session while it is open.
+    session_page: Option<Entity<SessionPage>>,
+    /// Each session's composer, made when its page first opens: a draft and a send belong to
+    /// their session.
+    replies: HashMap<String, Entity<Reply>>,
     /// The link's updates, until a task takes them.
     updates: Option<UnboundedReceiver<Update>>,
     _link: Task<()>,
@@ -134,6 +143,11 @@ impl Shell {
     pub fn new_polled(connect: Connect, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (sender, updates) = unbounded();
         let seen = link::spawn_into(connect.clone(), sender.clone());
+        let follow = Follow {
+            connect: connect.clone(),
+            updates: sender.clone(),
+            opener: crate::open::system(),
+        };
         let actions = Actions::spawn(connect, sender);
         let this = cx.entity().downgrade();
         let top = cx.new(|_| TopBar::new(this.clone()));
@@ -172,6 +186,9 @@ impl Shell {
             actions,
             details_of: None,
             details_asked: 0,
+            follow,
+            session_page: None,
+            replies: HashMap::new(),
             updates: Some(updates),
             _link: Task::ready(()),
             _clock,
@@ -215,6 +232,76 @@ impl Shell {
             )
         });
         Some(forms.clone())
+    }
+
+    /// What opens a folder in the user's editor, for the session pages opened from now on.
+    pub fn set_opener(&mut self, opener: Opener) {
+        self.follow.opener = opener;
+    }
+
+    /// The composer of a session whose page was opened.
+    pub fn reply_of(&self, session: &str) -> Option<&Entity<Reply>> {
+        self.replies.get(session)
+    }
+
+    /// The open session's page, made the first time, and kept while the same session is open.
+    fn session_for(
+        &mut self,
+        page: &Page,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<SessionPage>> {
+        let Page::Session {
+            id,
+            title,
+            place,
+            status,
+        } = page
+        else {
+            self.session_page = None;
+            return None;
+        };
+        if let Some(open) = self.session_page.clone()
+            && open.read(cx).id() == id
+        {
+            open.update(cx, |open, cx| open.set_title(title, cx));
+            return Some(open);
+        }
+        let project = self.snapshot.session(id)?.project.clone();
+        let folder = match place {
+            None => self
+                .snapshot
+                .projects
+                .iter()
+                .find(|p| p.name == project)
+                .map(|p| p.folder.clone()),
+            Some(name) => self
+                .snapshot
+                .workspaces
+                .iter()
+                .find(|w| w.project == project && &w.name == name)
+                .map(|w| w.folder.clone()),
+        };
+        let opened = Opened {
+            id: id.clone(),
+            title: title.clone(),
+            project,
+            place: place.clone(),
+            folder: folder.map(Into::into),
+        };
+        let this = cx.entity().downgrade();
+        let reply = self
+            .replies
+            .entry(id.clone())
+            .or_insert_with(|| {
+                let (this, id) = (this.clone(), id.clone());
+                cx.new(|cx| Reply::new(this, id, window, cx))
+            })
+            .clone();
+        let (follow, layout, status) = (self.follow.clone(), self.layout, status.clone());
+        let page = cx.new(|cx| SessionPage::new(this, opened, status, reply, follow, layout, cx));
+        self.session_page = Some(page.clone());
+        Some(page)
     }
 
     /// Asks the daemon, off the UI thread; the answer comes back as an update.
@@ -299,6 +386,12 @@ impl Shell {
                 self.show(snapshot, window, cx);
             }
             Update::Done(outcome) => self.done(outcome, window, cx),
+            // Only the open page's link is listened to: what an older one sends is dropped.
+            Update::Session { token, update } => {
+                if let Some(page) = self.session_page.clone() {
+                    page.update(cx, |page, cx| page.apply(token, update, cx));
+                }
+            }
         }
     }
 
@@ -322,6 +415,21 @@ impl Shell {
             Outcome::NotStarted { project, why } => {
                 if let Some(composer) = self.composer_of(&project).cloned() {
                     composer.update(cx, |composer, cx| composer.not_started(&why, cx));
+                }
+            }
+            Outcome::Replied { session, refused } => {
+                if let Some(reply) = self.replies.get(&session).cloned() {
+                    reply.update(cx, |reply, cx| reply.replied(refused, window, cx));
+                }
+            }
+            // A card answered on a page that is no longer open has nothing to fold.
+            Outcome::Answered {
+                number,
+                decision,
+                refused,
+            } => {
+                if let Some(page) = self.session_page.clone() {
+                    page.update(cx, |page, cx| page.answered(number, decision, refused, cx));
                 }
             }
             Outcome::WorkspaceDone { project, name } => {
@@ -588,6 +696,8 @@ impl Shell {
         }
         self.forms
             .retain(|name, _| snapshot.projects.iter().any(|p| &p.name == name));
+        self.replies
+            .retain(|id, _| snapshot.sessions.iter().any(|s| &s.id == id));
         self.snapshot = snapshot;
 
         // What was open is shown as it is now; the first project opens when nothing is.
@@ -601,7 +711,9 @@ impl Shell {
                 let page = self.page_of(&selection, cx);
                 if self.main.read(cx).page() != &page {
                     let forms = self.forms_for(&page, window, cx);
-                    self.main.update(cx, |main, cx| main.show(page, forms, cx));
+                    let session = self.session_for(&page, window, cx);
+                    self.main
+                        .update(cx, |main, cx| main.show(page, forms, session, cx));
                 }
                 self.refresh_project(cx);
             }
@@ -641,7 +753,9 @@ impl Shell {
         let page = self.page_of(&selection, cx);
         self.selected = Some(selection);
         let forms = self.forms_for(&page, window, cx);
-        self.main.update(cx, |main, cx| main.show(page, forms, cx));
+        let session = self.session_for(&page, window, cx);
+        self.main
+            .update(cx, |main, cx| main.show(page, forms, session, cx));
         self.refresh_project(cx);
     }
 

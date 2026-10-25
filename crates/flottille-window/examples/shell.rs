@@ -71,8 +71,9 @@ fn main() {
                                 composer.update(cx, |c, cx| c.select_tab(Tab::Running, cx));
                             }
                         }
-                        if rail {
-                            let drawer = shell.main().read(cx).drawer().clone();
+                        let page = shell.main().read(cx).session_page().cloned();
+                        if rail && let Some(page) = page {
+                            let drawer = page.read(cx).drawer().clone();
                             drawer.update(cx, |d, cx| d.open(cx));
                         }
                     })

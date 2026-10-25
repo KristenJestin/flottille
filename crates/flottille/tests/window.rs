@@ -10,15 +10,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use common::User;
+use common::mcp::Mcp;
 use flottille_ui::AgentState;
 use flottille_ui::omarchy::Environment;
 use flottille_ui::state::icon_id;
 use flottille_window::Shell;
 use flottille_window::actions::Changes;
 use flottille_window::composer::{Choice, Composer, PlaceChoice, Tab};
+use flottille_window::conversation::Block;
 use flottille_window::link::{self, Connect};
 use flottille_window::model::{Place, Preparation};
 use flottille_window::project::{NewWorkspace, PlaceCard, ProjectPage};
+use flottille_window::session::SessionPage;
 use flottille_window::shell::{Layout, Selection};
 use flottille_window::tree::{place_id, project_id, session_id};
 use gpui_kit::test::TestWindowExt;
@@ -1163,4 +1166,524 @@ fn a_chosen_workspace_that_stops_being_ready_cannot_take_the_task(cx: &mut TestA
         composer.read_with(cx, |c, _| c.blocked().map(str::to_owned)),
         None
     );
+}
+
+// The session page (#13): a lead and its workers, driven through their own MCP sessions as the
+// fake agent would (`tests/tree.rs`), while the fake agent plays the turns (`HANG` keeps a worker
+// mid-turn).
+
+/// A user whose fake agent keeps a worker mid-turn when its brief says `HANG`, and answers "ok"
+/// otherwise.
+fn team_user() -> User {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [{"when": "HANG", "do": [{"hang": true}]}]}));
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    user
+}
+
+/// The project `app`, its `.env` copied into its ready workspace `w`, and a lead the user started
+/// there, its first turn ended: the lead's id, its MCP session and the workspace's folder.
+fn lead_in_w(user: &User) -> (String, Mcp, PathBuf) {
+    project(user, "app");
+    let file = user.project_file("app");
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    text.push_str("\n[[recipe]]\ncopy = [\".env\"]\n");
+    std::fs::write(&file, text).unwrap();
+    workspace(user, "app", "w");
+    let folder = user
+        .call("workspace.show", json!({"project": "app", "name": "w"}))
+        .unwrap()["folder"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let answer = user
+        .call(
+            "agent.run",
+            json!({"project": "app", "workspace": "w", "message": "lead the work"}),
+        )
+        .unwrap();
+    let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+    let mcp = mcp_session(user, |prompt| prompt.contains("You are the root"));
+    eventually("the lead's first turn", || {
+        user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["state"] == "idle"
+    });
+    (id, mcp, PathBuf::from(folder))
+}
+
+/// The MCP session of the last agent session opened whose instructions `which` accepts.
+fn mcp_session(user: &User, which: impl Fn(&str) -> bool) -> Mcp {
+    let found = || {
+        user.received_requests("session/new")
+            .into_iter()
+            .rev()
+            .find(|opened| {
+                which(
+                    opened["params"]["_meta"]["claudeCode"]["options"]["systemPrompt"]["prompt"][2]
+                        .as_str()
+                        .unwrap_or_default(),
+                )
+            })
+    };
+    eventually("the session", || found().is_some());
+    let server = found().unwrap()["params"]["mcpServers"][0].clone();
+    Mcp::initialize(
+        server["url"].as_str().unwrap(),
+        server["headers"][0]["value"].as_str().unwrap(),
+    )
+}
+
+/// Launches a worker of the lead's in `w`, kept mid-turn: its id and its MCP session.
+fn worker(user: &User, lead: &Mcp, title: &str) -> (String, Mcp) {
+    let answer = lead.call(
+        "agent_launch",
+        json!({"title": title, "brief": format!("HANG and {title}"), "workspace": "w"}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    let id = answer
+        .text
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 12 && w.chars().all(|c| c.is_ascii_hexdigit()))
+        .unwrap()
+        .to_owned();
+    let task = format!("Your task: {title}.");
+    (id, mcp_session(user, |prompt| prompt.contains(&task)))
+}
+
+/// The number of the request a held call's answer names.
+fn held_number(answer: common::mcp::Answer) -> u64 {
+    assert!(!answer.error, "{}", answer.text);
+    let rest = answer
+        .text
+        .split_once("request #")
+        .unwrap_or_else(|| panic!("not held: {}", answer.text))
+        .1
+        .to_owned();
+    rest.split(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// Opens the session of `lead` as a click on its row in the tree would, and waits for its page to
+/// show its first rows.
+fn open_session<'a>(
+    user: &User,
+    lead: &str,
+    width: f32,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    let (shell, cx) = window(user, Arc::new(user.connector()), width, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(lead)).is_some())
+    });
+    if width < 860. {
+        cx.update(|window, cx| window.click("open-tree", cx));
+        settle(cx);
+    }
+    cx.update(|window, cx| window.click(session_id(lead), cx));
+    until(
+        &shell,
+        cx,
+        "the session's page shows its conversation",
+        |cx| {
+            session_page(&shell, cx).read_with(cx, |page, cx| {
+                !page.conversation().read(cx).rows().is_empty() && !page.tree().is_empty()
+            })
+        },
+    );
+    (shell, cx)
+}
+
+fn session_page(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<SessionPage> {
+    shell
+        .read_with(cx, |s, cx| s.main().read(cx).session_page().cloned())
+        .expect("a session's page is open")
+}
+
+fn rail_ids(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Vec<String> {
+    page.read_with(cx, |page, cx| {
+        page.rail()
+            .read(cx)
+            .agents()
+            .iter()
+            .map(|a| a.id.clone())
+            .collect()
+    })
+}
+
+fn blocks(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Vec<Block> {
+    page.read_with(cx, |page, cx| {
+        page.conversation().read(cx).blocks().to_vec()
+    })
+}
+
+#[gpui_kit::test]
+fn the_rail_shows_a_lead_and_two_workers(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, mcp, _) = lead_in_w(&user);
+    let (first, _a) = worker(&user, &mcp, "build the form");
+    let (second, _b) = worker(&user, &mcp, "write the tests");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+
+    until(&shell, cx, "the rail shows the three agents", |cx| {
+        rail_ids(&page, cx).len() == 3
+    });
+    settle(cx);
+    assert_eq!(
+        rail_ids(&page, cx),
+        [lead.clone(), first.clone(), second.clone()],
+        "the lead first"
+    );
+    cx.update(|window, _| {
+        let x = |id: &str| window.find(format!("rail-row-{id}")).bounds().origin.x;
+        assert!(
+            x(&first) > x(&lead),
+            "a worker sits below its lead, indented"
+        );
+        assert_eq!(x(&first), x(&second));
+        assert!(window.try_find(format!("elbow-{first}")).is_some());
+    });
+    let (names, states) = page.read_with(cx, |page, cx| {
+        let rail = page.rail().read(cx);
+        (
+            rail.agents()
+                .iter()
+                .map(|a| a.name.clone())
+                .collect::<Vec<_>>(),
+            rail.agents()
+                .iter()
+                .map(|a| a.status.read(cx).state())
+                .collect::<Vec<_>>(),
+        )
+    });
+    assert_eq!(names, ["lead", "build the form", "write the tests"]);
+    assert_eq!(
+        states,
+        [AgentState::Idle, AgentState::Running, AgentState::Running]
+    );
+}
+
+#[gpui_kit::test]
+fn a_message_arriving_appends_without_rebuilding_other_rows(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    send(&user, &lead, "and the docs");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "both turns are shown", |cx| {
+        blocks(&page, cx).len() == 4
+    });
+    settle(cx);
+    let rows = page.read_with(cx, |p, cx| p.conversation().read(cx).rows().to_vec());
+    let renders = |cx: &mut VisualTestContext| {
+        rows.iter()
+            .map(|row| row.read_with(cx, |row, _| row.renders()))
+            .collect::<Vec<_>>()
+    };
+    let before = renders(cx);
+    assert!(before.iter().all(|r| *r >= 1), "every row was drawn");
+
+    send(&user, &lead, "and the changelog");
+    until(
+        &shell,
+        cx,
+        "the new message and its answer are shown",
+        |cx| blocks(&page, cx).len() == 6,
+    );
+    settle(cx);
+
+    assert_eq!(
+        blocks(&page, cx)[4],
+        Block::Message {
+            from: "you".into(),
+            text: "and the changelog".into()
+        }
+    );
+    assert_eq!(renders(cx), before, "no row already there is drawn again");
+}
+
+#[gpui_kit::test]
+fn replying_delivers_to_the_lead(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    settle(cx);
+
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("Use the staging database");
+    cx.simulate_keystrokes("shift-enter");
+    cx.simulate_input("and say when done");
+    cx.simulate_keystrokes("enter");
+
+    let reply = shell
+        .read_with(cx, |s, _| s.reply_of(&lead).cloned())
+        .unwrap();
+    until(&shell, cx, "the daemon took the message", |cx| {
+        reply.read_with(cx, |r, cx| {
+            !r.is_sending() && r.field().read(cx).value().is_empty()
+        })
+    });
+    assert_eq!(
+        reply.read_with(cx, |r, _| r.error().map(str::to_owned)),
+        None
+    );
+    let delivered = user
+        .received_requests("session/prompt")
+        .iter()
+        .filter_map(|p| p["params"]["prompt"][0]["text"].as_str().map(str::to_owned))
+        .any(|text| text.contains("Use the staging database\nand say when done"));
+    assert!(
+        delivered,
+        "the lead was sent the message, its new line kept"
+    );
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the message is in the conversation", |cx| {
+        blocks(&page, cx).contains(&Block::Message {
+            from: "you".into(),
+            text: "Use the staging database\nand say when done".into(),
+        })
+    });
+}
+
+#[gpui_kit::test]
+fn selecting_a_worker_shows_its_conversation_with_no_composer_and_nothing_can_send_to_it(
+    cx: &mut TestAppContext,
+) {
+    let user = team_user();
+    let (lead, mcp, _) = lead_in_w(&user);
+    let (worker_id, _worker) = worker(&user, &mcp, "build the form");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the worker is in the rail", |cx| {
+        rail_ids(&page, cx).contains(&worker_id)
+    });
+    settle(cx);
+
+    cx.update(|window, cx| window.click(format!("rail-row-{worker_id}"), cx));
+    until(&shell, cx, "the worker's brief is shown", |cx| {
+        session_page(&shell, cx).read_with(cx, |p, _| p.shown() == worker_id)
+            && !blocks(&page, cx).is_empty()
+    });
+    settle(cx);
+
+    match &blocks(&page, cx)[0] {
+        Block::Message { from, text } => {
+            assert_eq!(from, "lead → build the form");
+            assert!(text.contains("HANG and build the form"), "{text}");
+        }
+        other => panic!("the brief comes first, not {other:?}"),
+    }
+    cx.update(|window, _| {
+        for id in ["reply", "reply-field", "reply-send"] {
+            assert!(window.try_find(id).is_none(), "{id} is shown");
+        }
+        assert!(window.try_find("read-only").is_some());
+    });
+    // No way to send to it: no composer of its own, and the only composer writes to the lead.
+    assert!(page.read_with(cx, |p, _| p.reply().is_none()));
+    assert!(shell.read_with(cx, |s, _| s.reply_of(&worker_id).is_none()));
+    let to = shell.read_with(cx, |s, cx| {
+        s.reply_of(&lead).map(|r| r.read(cx).session().to_owned())
+    });
+    assert_eq!(to.as_deref(), Some(lead.as_str()));
+    cx.simulate_input("are you there?");
+    cx.simulate_keystrokes("enter");
+    std::thread::sleep(Duration::from_millis(300));
+    let prompts = user.received_requests("session/prompt");
+    assert!(
+        !prompts
+            .iter()
+            .any(|p| p.to_string().contains("are you there?")),
+        "nothing typed reached an agent"
+    );
+
+    // Back to the lead: its conversation and its composer.
+    cx.update(|window, cx| window.click("back-to-root", cx));
+    until(&shell, cx, "the lead's conversation is back", |cx| {
+        session_page(&shell, cx).read_with(cx, |p, _| p.shown() == lead)
+    });
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find("reply").is_some()));
+}
+
+#[gpui_kit::test]
+fn a_worker_s_request_held_by_the_lead_waits_on_it_then_forwarded_needs_me_with_its_card(
+    cx: &mut TestAppContext,
+) {
+    let user = team_user();
+    let (lead, mcp, _) = lead_in_w(&user);
+    let (worker_id, worker) = worker(&user, &mcp, "read the settings");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+
+    // The worker hits an ask: its lead holds it.
+    let number = held_number(worker.call("fs_read", json!({"path": ".env"})));
+    until(&shell, cx, "the worker waits on its lead", |cx| {
+        page.read_with(cx, |p, cx| p.state(&worker_id, cx)) == Some(AgentState::Waiting)
+    });
+    settle(cx);
+    assert_ne!(
+        page.read_with(cx, |p, cx| p.state(&lead, cx)),
+        Some(AgentState::NeedsYou)
+    );
+    assert_ne!(mark_of(&shell, &lead, cx), Some(AgentState::NeedsYou));
+    cx.update(|window, _| {
+        assert!(window.try_find(format!("approval-{number}")).is_none());
+    });
+
+    // The lead forwards it: it is the user's now.
+    let answer = mcp.call(
+        "approval_answer",
+        json!({"request_id": number, "decision": "forward", "why": "the form needs the database name"}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    until(
+        &shell,
+        cx,
+        "the lead and the session need me, with the card",
+        |cx| {
+            page.read_with(cx, |p, cx| p.state(&lead, cx)) == Some(AgentState::NeedsYou)
+                && mark_of(&shell, &lead, cx) == Some(AgentState::NeedsYou)
+                && cx.update(|window, _| window.try_find(format!("allow-once-{number}")).is_some())
+        },
+    );
+    assert_eq!(
+        page.read_with(cx, |p, cx| p.state(&worker_id, cx)),
+        Some(AgentState::Waiting),
+        "only the root needs me: its worker still waits, in grey"
+    );
+    let card = page
+        .read_with(cx, |p, cx| {
+            p.conversation()
+                .read(cx)
+                .rows()
+                .iter()
+                .find_map(|row| row.read(cx).card().cloned())
+        })
+        .unwrap();
+    assert_eq!(card.asked.as_deref(), Some("Read .env"));
+    let why = card.why.unwrap();
+    assert!(
+        why.contains("lead forwards it: the form needs the database name"),
+        "{why}"
+    );
+    assert_eq!(
+        card.source.as_deref(),
+        Some(format!("asked by read the settings · forwarded by lead · #{number}").as_str())
+    );
+}
+
+#[gpui_kit::test]
+fn approving_once_from_the_card_performs_the_call_and_leaves_the_record(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let number = held_number(mcp.call("fs_read", json!({"path": ".env"})));
+    until(&shell, cx, "the card is shown", |cx| {
+        cx.update(|window, _| window.try_find(format!("allow-once-{number}")).is_some())
+    });
+    settle(cx);
+
+    cx.update(|window, cx| window.click(format!("allow-once-{number}"), cx));
+    until(&shell, cx, "the card folds into its record", |cx| {
+        cx.update(|window, _| {
+            window
+                .try_find(format!("approval-record-{number}"))
+                .is_some()
+                && window.try_find(format!("allow-once-{number}")).is_none()
+        })
+    });
+    let record = session_page(&shell, cx).read_with(cx, |p, cx| {
+        p.conversation()
+            .read(cx)
+            .rows()
+            .iter()
+            .find_map(|row| row.read(cx).card().and_then(|c| c.record()))
+    });
+    assert_eq!(record.as_deref(), Some("Allowed once · Read .env · lead"));
+    assert!(
+        user.call("approval.list", json!({})).unwrap()["requests"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    // The call was made: its result wakes the idle lead, masked.
+    let result = || {
+        user.received_requests("session/prompt")
+            .iter()
+            .filter_map(|p| p["params"]["prompt"][0]["text"].as_str().map(str::to_owned))
+            .find(|text| {
+                text.contains(&format!(
+                    "Request #{number} (fs_read) was approved by the user"
+                ))
+            })
+    };
+    eventually("the result", || result().is_some());
+    let seen = result().unwrap();
+    assert!(seen.contains("TOKEN"), "{seen}");
+    assert!(!seen.contains("made-up-made-up"), "{seen}");
+}
+
+#[gpui_kit::test]
+fn a_child_appearing_adds_its_row_to_the_rail_and_the_sub_agents_list(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    settle(cx);
+    assert_eq!(rail_ids(&page, cx), std::slice::from_ref(&lead));
+    assert!(!blocks(&page, cx).contains(&Block::SubAgents));
+
+    let (child, _worker) = worker(&user, &mcp, "build the form");
+    until(
+        &shell,
+        cx,
+        "the child is in the rail and in the list",
+        |cx| {
+            rail_ids(&page, cx) == [lead.clone(), child.clone()]
+                && cx.update(|window, _| window.try_find(format!("sub-agent-{child}")).is_some())
+        },
+    );
+    let listed = page.read_with(cx, |p, cx| {
+        p.conversation()
+            .read(cx)
+            .rows()
+            .iter()
+            .flat_map(|row| row.read(cx).sub_agents().to_vec())
+            .map(|a| (a.id, a.name))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(listed, [(child.clone(), "build the form".to_owned())]);
+
+    // Selecting it from the list shows its conversation.
+    settle(cx);
+    cx.update(|window, cx| window.click(format!("sub-agent-{child}"), cx));
+    until(&shell, cx, "the child's conversation", |cx| {
+        session_page(&shell, cx).read_with(cx, |p, _| p.shown() == child)
+    });
+}
+
+#[gpui_kit::test]
+fn the_editor_button_opens_the_place_s_folder_with_the_system_handler(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, _mcp, folder) = lead_in_w(&user);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let given: Arc<std::sync::Mutex<Vec<PathBuf>>> = Arc::default();
+    let opened = given.clone();
+    shell.update(cx, |s, _| {
+        s.set_opener(Arc::new(move |path: &std::path::Path| {
+            opened.lock().unwrap().push(path.to_owned())
+        }))
+    });
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&lead)).is_some())
+    });
+    cx.update(|window, cx| window.click(session_id(&lead), cx));
+    settle(cx);
+
+    cx.update(|window, cx| window.click("open-in-editor", cx));
+
+    assert_eq!(*given.lock().unwrap(), [folder]);
 }
