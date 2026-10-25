@@ -1834,7 +1834,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("flottille.db");
         let old = Connection::open(&path).unwrap();
-        let previous = MIGRATIONS.len() - 1;
+        // The schema just before the migration that keeps `ready_at`, wherever it sits.
+        let previous = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("ADD COLUMN ready_at"))
+            .unwrap();
         for migration in &MIGRATIONS[..previous] {
             old.execute_batch(migration).unwrap();
         }
