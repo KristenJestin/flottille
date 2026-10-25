@@ -493,6 +493,27 @@ fn through_the_bridge_a_session_s_history_goes_when_its_agent_ends() {
 }
 
 #[test]
+fn through_the_bridge_an_agent_runs_on_a_path_of_claude_and_git_alone() {
+    let user = User::with_fake_claude();
+    // No `node`, `npm` or anything else of the machine's: what runs needs nothing more.
+    std::os::unix::fs::symlink(common::program("git"), user.path("bin/git")).unwrap();
+    let path = user.path("bin");
+    let user = user.with_env("PATH", path.to_str().unwrap());
+    user.claude_script(json!({"turns": [{"when": "hello", "do": [{"say": "Hello!"}]}]}));
+    project(&user);
+    let (id, after) = run(&user, "hello");
+
+    let events = events_until(&user, &id, after, "agent.turn_ended");
+
+    assert!(events.iter().any(|e| e["data"]["text"] == "Hello!"));
+    assert_eq!(events.last().unwrap()["data"]["stop_reason"], "end_turn");
+    assert_eq!(
+        user.claude_starts()[0]["env"]["PATH"],
+        path.to_str().unwrap()
+    );
+}
+
+#[test]
 fn an_agent_is_refused_while_claude_is_not_on_path() {
     let user = User::new();
     // `git` alone: whatever else the machine has, no `claude` can be found.
