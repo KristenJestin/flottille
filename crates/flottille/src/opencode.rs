@@ -15,7 +15,7 @@ use flottille_core::paths::{Paths, ensure_private_dir};
 use serde_json::{Value, json};
 
 use crate::claude::BOUNDARY;
-use crate::providers::{self, Env, MCP_SERVER, Program, Provider};
+use crate::providers::{self, Env, Program, Provider};
 
 /// The version of `opencode` whose bare mode was qualified (`docs/agents.md`).
 pub const OPENCODE_VERSION: &str = "1.19.0";
@@ -125,7 +125,7 @@ fn env(paths: &Paths, agent: &Agent) -> Result<Env, String> {
         .and_then(|mut out| out.write_all(text.as_bytes()))
         .map_err(|e| format!("cannot write the agent's instructions: {e}"))?;
     let password = password().map_err(|e| format!("cannot make OpenCode's password: {e}"))?;
-    Ok(bare(paths, &file, &password)?
+    Ok(bare(paths, &file, &password, &agent.tools)?
         .into_iter()
         .map(|(name, value)| (name.into(), value.into()))
         .collect())
@@ -137,6 +137,7 @@ fn bare(
     paths: &Paths,
     instructions: &Path,
     password: &str,
+    tools: &[String],
 ) -> Result<Vec<(String, String)>, String> {
     let root = folder(paths);
     let path = |sub: &str| root.join(sub).to_string_lossy().into_owned();
@@ -159,17 +160,18 @@ fn bare(
         ("OPENCODE_SERVER_PASSWORD".into(), password.into()),
         (
             "OPENCODE_CONFIG_CONTENT".into(),
-            config(instructions)?.to_string(),
+            config(instructions, tools)?.to_string(),
         ),
     ])
 }
 
 /// The configuration Flottille gives OpenCode: one primary agent, its own, denied every tool but
-/// Flottille's, its prompt the agent's instructions; nothing shared, nothing updated.
+/// the agent's own (`tools`, as OpenCode names them), its prompt the agent's instructions;
+/// nothing shared, nothing updated.
 ///
 /// OpenCode replaces `{env:…}` and `{file:…}` in this text before it reads it: no text of the
 /// agent's goes in it but the path of its instructions, whose file is read as it is.
-fn config(instructions: &Path) -> Result<Value, String> {
+fn config(instructions: &Path, tools: &[String]) -> Result<Value, String> {
     let shown = instructions.to_string_lossy();
     if shown.contains(['{', '}', '"', '\\']) || shown.chars().any(char::is_control) {
         return Err(format!(
@@ -183,11 +185,7 @@ fn config(instructions: &Path) -> Result<Value, String> {
             AGENT: {
                 "mode": "primary",
                 "prompt": format!("{{file:{shown}}}"),
-                // A tool whose last matching rule denies it for every pattern is not sent to the
-                // model at all; MCP tools are named `<server>_<tool>` and go through the same rules.
-                // A third identical call in a row asks `doom_loop`, which `*` would deny: Flottille's
-                // gate judges the calls.
-                "permission": {"*": "deny", "doom_loop": "allow", format!("{MCP_SERVER}_*"): "allow"},
+                "permission": permission(tools),
             },
             "build": {"disable": true},
             "plan": {"disable": true},
@@ -199,6 +197,51 @@ fn config(instructions: &Path) -> Result<Value, String> {
         "snapshot": false,
         "experimental": {"mcp_timeout": TOOL_WAIT_MS},
     }))
+}
+
+/// The permissions OpenCode names for its own tools, in OpenCode 1.19.0 (`docs/agents.md`).
+const BUILT_IN: [&str; 21] = [
+    "bash",
+    "read",
+    "glob",
+    "grep",
+    "list",
+    "edit",
+    "write",
+    "apply_patch",
+    "task",
+    "webfetch",
+    "websearch",
+    "codesearch",
+    "todowrite",
+    "todoread",
+    "skill",
+    "question",
+    "plan_enter",
+    "plan_exit",
+    "lsp",
+    "execute",
+    "external_directory",
+];
+
+/// The agent's rules, in order: OpenCode takes the last one that matches, and leaves a tool whose
+/// last rule denies it for every pattern out of what the model is sent. A configuration merged
+/// before Flottille's keeps the place of its keys: OpenCode's own tools are each denied by name,
+/// after `*`, so that a rule of that configuration's on one of them is overwritten, and only the
+/// agent's own tools are allowed, by name, so that another MCP server named like Flottille's
+/// (`<server>_<tool>`) is not. A third identical call in a row asks `doom_loop`, which `*` would
+/// deny: Flottille's gate judges the calls.
+fn permission(tools: &[String]) -> Value {
+    let mut rules = serde_json::Map::new();
+    rules.insert("*".into(), "deny".into());
+    rules.insert("doom_loop".into(), "allow".into());
+    for tool in BUILT_IN {
+        rules.insert(tool.into(), "deny".into());
+    }
+    for tool in tools {
+        rules.insert(tool.clone(), "allow".into());
+    }
+    Value::Object(rules)
 }
 
 /// 32 hexadecimal digits from the system's random source.
@@ -239,7 +282,11 @@ mod tests {
     fn opencode_s_bare_environment_and_config_content_are_exactly_these() {
         let file = Path::new("/run/user/1000/flottille/opencode/3f9a1c0b7d2e.md");
 
-        let env = bare(&paths(), file, "0123456789abcdef0123456789abcdef").unwrap();
+        let tools = [
+            "flottille_fs_read".to_owned(),
+            "flottille_report".to_owned(),
+        ];
+        let env = bare(&paths(), file, "0123456789abcdef0123456789abcdef", &tools).unwrap();
 
         let data = "/home/u/.local/share/flottille/agents/opencode";
         let expected: Vec<(String, String)> = [
@@ -277,7 +324,18 @@ mod tests {
                     "flottille": {
                         "mode": "primary",
                         "prompt": "{file:/run/user/1000/flottille/opencode/3f9a1c0b7d2e.md}",
-                        "permission": {"*": "deny", "doom_loop": "allow", "flottille_*": "allow"},
+                        "permission": {
+                            "*": "deny",
+                            "doom_loop": "allow",
+                            "bash": "deny", "read": "deny", "glob": "deny", "grep": "deny",
+                            "list": "deny", "edit": "deny", "write": "deny",
+                            "apply_patch": "deny", "task": "deny", "webfetch": "deny",
+                            "websearch": "deny", "codesearch": "deny", "todowrite": "deny",
+                            "todoread": "deny", "skill": "deny", "question": "deny",
+                            "plan_enter": "deny", "plan_exit": "deny", "lsp": "deny",
+                            "execute": "deny", "external_directory": "deny",
+                            "flottille_fs_read": "allow", "flottille_report": "allow",
+                        },
                     },
                     "build": {"disable": true},
                     "plan": {"disable": true},
@@ -292,8 +350,74 @@ mod tests {
         );
         // The deny rule comes before the allow: OpenCode takes the last rule that matches.
         let text = env.last().unwrap().1.as_str();
-        assert!(text.find("\"*\":\"deny\"").unwrap() < text.find("\"flottille_*\"").unwrap());
+        assert!(text.find("\"*\":\"deny\"").unwrap() < text.find("\"flottille_fs_read\"").unwrap());
         assert!(!text.contains("{env:"), "{text}");
+    }
+
+    /// What OpenCode makes of a configuration merged into another (`mergeDeep` of remeda: a key
+    /// already there keeps its place and takes the new value, a new key comes last), then of its
+    /// permission rules (one per key, in order: the last that matches decides).
+    fn decides(remote: Value, ours: &Value, tool: &str) -> String {
+        fn merge(into: &mut Value, from: &Value) {
+            match (into, from) {
+                (Value::Object(into), Value::Object(from)) => {
+                    for (key, value) in from {
+                        match into.get_mut(key) {
+                            Some(slot) => merge(slot, value),
+                            None => {
+                                into.insert(key.clone(), value.clone());
+                            }
+                        }
+                    }
+                }
+                (into, from) => *into = from.clone(),
+            }
+        }
+        fn matches(pattern: &str, name: &str) -> bool {
+            match pattern.split_once('*') {
+                None => pattern == name,
+                Some((head, rest)) => {
+                    name.starts_with(head)
+                        && (head.len()..=name.len())
+                            .any(|at| name.is_char_boundary(at) && matches(rest, &name[at..]))
+                }
+            }
+        }
+        let mut merged = remote;
+        merge(&mut merged, ours);
+        let rules = merged["agent"]["flottille"]["permission"]
+            .as_object()
+            .unwrap();
+        rules
+            .iter()
+            .rfind(|(pattern, _)| matches(pattern, tool))
+            .map(|(_, action)| action.as_str().unwrap().to_owned())
+            .unwrap()
+    }
+
+    #[test]
+    fn a_remote_configuration_merged_first_cannot_turn_a_built_in_tool_back_on() {
+        let ours = config(Path::new("/run/a.md"), &["flottille_report".to_owned()]).unwrap();
+        for remote in [
+            json!({"agent": {"flottille": {"permission": {"*": "allow", "bash": "allow"}}}}),
+            json!({"agent": {"flottille": {"permission": {"bash": "allow", "*": "allow"}}}}),
+            json!({"agent": {"flottille": {"permission": {"b*": "allow"}}}}),
+        ] {
+            assert_eq!(decides(remote.clone(), &ours, "bash"), "deny", "{remote}");
+            assert_eq!(
+                decides(remote.clone(), &ours, "webfetch"),
+                "deny",
+                "{remote}"
+            );
+            assert_eq!(
+                decides(remote.clone(), &ours, "flottille_report"),
+                "allow",
+                "{remote}"
+            );
+        }
+        // A server of the remote's named like Flottille's is not one of the agent's tools.
+        let remote = json!({"agent": {"flottille": {"permission": {"flottille_*": "allow"}}}});
+        assert_eq!(decides(remote, &ours, "flottille_evil_run"), "deny");
     }
 
     #[test]
@@ -304,7 +428,7 @@ mod tests {
             "/run/a\\b.md",
             "/run/a\nb.md",
         ] {
-            assert!(config(Path::new(path)).is_err(), "{path}");
+            assert!(config(Path::new(path), &[]).is_err(), "{path}");
         }
     }
 

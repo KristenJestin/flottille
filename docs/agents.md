@@ -226,7 +226,11 @@ after.
     "flottille": {
       "mode": "primary",
       "prompt": "{file:<runtime>/opencode/<agent>.md}",
-      "permission": {"*": "deny", "doom_loop": "allow", "flottille_*": "allow"}
+      "permission": {
+        "*": "deny", "doom_loop": "allow",
+        "bash": "deny", "read": "deny", "…": "deny", "external_directory": "deny",
+        "flottille_fs_read": "allow", "…": "allow"
+      }
     },
     "build": {"disable": true}, "plan": {"disable": true},
     "general": {"disable": true}, "explore": {"disable": true}
@@ -242,10 +246,15 @@ after.
   todo, websearch, skill, patch, lsp, plan…; `opencode/src/tool/registry.ts:209-245`) are left
   out of what the model is sent when the last permission rule that matches them denies them for
   every pattern (`opencode/src/permission/index.ts:204`): `"*": "deny"` does it for all of them,
-  MCP resource tools included. The agent's rules come last (`opencode/src/agent/agent.ts`), so
-  nothing of the user's can loosen them. MCP tools go through the same rules, named
-  `<server>_<tool>` (`opencode/src/mcp/catalog.ts:119`): `flottille_*` lets Flottille's through,
-  and Flottille's tools are named `flottille_fs_read` and so on for an OpenCode agent.
+  MCP resource tools included, and each permission OpenCode names for one of its tools is denied
+  again by name after it (`bash`, `read`, `glob`, `grep`, `list`, `edit`, `write`, `apply_patch`,
+  `task`, `webfetch`, `websearch`, `codesearch`, `todowrite`, `todoread`, `skill`, `question`,
+  `plan_enter`, `plan_exit`, `lsp`, `execute`, `external_directory`; any key is accepted, in its
+  order: `core/src/v1/config/permission.ts`). The agent's rules come last
+  (`opencode/src/agent/agent.ts:138, 277-293`), so nothing of the user's can loosen them. MCP
+  tools go through the same rules, named `<server>_<tool>` (`opencode/src/mcp/catalog.ts:119`):
+  only the agent's own tools are allowed, each by name (`flottille_fs_read` and so on for an
+  OpenCode agent), so that another server named like Flottille's is not.
 - **Repeated calls**: OpenCode asks the `doom_loop` permission before a third identical tool
   call in a row (`opencode/src/session/processor.ts:356-379`; `ask` by default,
   `opencode/src/agent/agent.ts:121`), which `"*": "deny"` would turn into a failed call:
@@ -280,12 +289,24 @@ after.
 - **What it keeps**: its configuration folder, home, managed folder and database are in
   `<data>/agents/opencode`. Its data folder (`$XDG_DATA_HOME/opencode`) stays the user's, since the
   login is there.
-- **Open**: a login of type `wellknown` in `auth.json` (an organisation's OpenCode server) makes
-  OpenCode fetch that server's configuration and merge it before Flottille's
-  (`opencode/src/config/config.ts:371-380`). Flottille's comes after and its agent's rules last,
-  but other keys of such a configuration (an MCP server, say) would not be undone, and shutting
-  it would mean reading `auth.json`, which Flottille never does. A user signed in that way should
-  know it.
+- **An organisation's sign-in is full control.** A login of type `wellknown` in `auth.json` (an
+  organisation's OpenCode server, `opencode auth login <url>`) makes OpenCode fetch that server's
+  configuration at every start and merge it before every other one
+  (`opencode/src/config/config.ts:370-410`). Flottille's comes after it, merged with `mergeDeep`
+  (remeda): a key Flottille sets takes Flottille's value, a key it does not set stays, and the
+  lists of `instructions` are joined (`opencode/src/config/config.ts:42-52`). What Flottille wins:
+  `default_agent`, its agent's prompt, the disabled agents, and its rules above, as far as they
+  go: the remote's own rules for the agent `flottille` keep their place, so a rule of the remote's
+  on one of OpenCode's tools followed by a pattern of its own that matches that tool
+  (`{"*": …, "bash": …, "b*": "allow"}`) still allows it; a remote rule that comes after `*`
+  without naming a tool Flottille lists allows what it matches. What it cannot undo, since their
+  names are the remote's: its `mcp` servers (a `local` one is a program the remote names, started
+  on the user's machine outside the gate), its `plugin`s (code OpenCode loads), its
+  `instructions` (added to the agent's), its `provider` settings (where the prompts go). Such a
+  sign-in therefore gives that organisation's server full control of Flottille's OpenCode agents,
+  a shell included. Flottille cannot tell: knowing it would mean reading `auth.json`, which it
+  never opens, so `flottille doctor` does not warn of it. A user signed in that way should sign
+  in to OpenCode another way (an API key) to run its agents under Flottille.
 
 ## The Claude bridge
 
