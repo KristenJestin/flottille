@@ -665,6 +665,25 @@ impl Store {
         rows.map(|row| row?).collect()
     }
 
+    /// At most `limit` events of the agent numbered before `before`, the last ones, oldest first.
+    pub fn agent_events_before(
+        &self,
+        agent: &str,
+        before: u64,
+        limit: usize,
+    ) -> Result<Vec<Event>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT e.seq, e.at, e.name, e.data FROM agent_events a JOIN events e ON e.seq = a.seq \
+             WHERE a.agent = ?1 AND a.seq < ?2 ORDER BY a.seq DESC LIMIT ?3",
+        )?;
+        // SQLite's integers are signed: a bound past them is every event.
+        let before = i64::try_from(before).unwrap_or(i64::MAX);
+        let rows = statement.query_map(params![agent, before, limit as u64], event_row)?;
+        let mut events = rows.map(|row| row?).collect::<Result<Vec<_>>>()?;
+        events.reverse();
+        Ok(events)
+    }
+
     /// The agent's last events of that name, the newest first.
     pub fn last_agent_events(&self, agent: &str, name: &str, limit: usize) -> Result<Vec<Event>> {
         let mut statement = self.connection.prepare_cached(

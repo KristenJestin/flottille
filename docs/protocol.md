@@ -399,8 +399,10 @@ listing leaves out. `refused` when `before` is not a root agent. The pilot door'
 
 #### `agent.show`
 
-`{"agent", "after"?}`. `{"agent", "events"}`: the agent, and its events in order (at most 1000,
-those numbered after `after` when it is given).
+`{"agent", "after"?, "before"?}`. `{"agent", "events", "more"}`: the agent, and a page of its
+events, oldest first: at most 1000, the first ones (those numbered after `after` when it is given),
+or with `before` the last ones numbered before it. `more` says whether events remain past the
+page: newer ones, or with `before` older ones.
 
 ### `inbox.list`
 

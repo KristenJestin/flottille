@@ -43,6 +43,17 @@ const STOP_GRACE: Duration = Duration::from_secs(2);
 /// The events `agent.show` gives at once.
 const PAGE: usize = 1000;
 
+/// `agent.show`'s parameters: a page of the agent's events after `after`, or the last before
+/// `before`.
+#[derive(serde::Deserialize)]
+struct AgentShow {
+    agent: String,
+    #[serde(default)]
+    after: Option<u64>,
+    #[serde(default)]
+    before: Option<u64>,
+}
+
 /// A depth an agent may have, at most: a root is at 0, so a lead's worker may have workers and
 /// theirs may not (`docs/design.md` §5.1).
 pub const DEPTH_LIMIT: u32 = 2;
@@ -171,11 +182,19 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             Ok(json!({"agent": agent.to_json(), "cancelled": cancelled}))
         }
         "agent.show" => {
-            let asked: AgentName = serde_json::from_value(params)?;
+            let asked: AgentShow = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
-            let events = daemon
-                .read(|store| store.agent_events(&agent.id, asked.after.unwrap_or(0), PAGE))?;
-            Ok(json!({"agent": agent.to_json(), "events": events}))
+            // One more than a page is read, to say whether more remain.
+            let mut events = daemon.read(|store| match asked.before {
+                Some(before) => store.agent_events_before(&agent.id, before, PAGE + 1),
+                None => store.agent_events(&agent.id, asked.after.unwrap_or(0), PAGE + 1),
+            })?;
+            let more = events.len() > PAGE;
+            if more && asked.before.is_some() {
+                events.remove(0);
+            }
+            events.truncate(PAGE);
+            Ok(json!({"agent": agent.to_json(), "events": events, "more": more}))
         }
         method => Err(Failure::new(
             "unknown-method",
