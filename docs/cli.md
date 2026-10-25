@@ -265,8 +265,9 @@ returns at once, as above.
 
 - **The turn followed is the one that plays your message.** When a turn runs, the message waits
   for it to end: what is left of that turn is not printed, and the command waits for the turn
-  your message starts. (It follows the message's delivery, `docs/agents.md`, not the first turn
-  end it sees.)
+  your message starts. (It follows the delivery the daemon named in its answer to the send,
+  `docs/protocol.md`, not the first turn end it sees: a message another client writes to the same
+  agent meanwhile has its own turn, unless one prompt takes both, which answers both.)
 - **Exit code**: 0 when the turn ended, whatever its stop reason; 1 when the agent failed or
   ended before (the sentence is on the standard error), or when the send was refused: for a
   child, the daemon's sentence above, and nothing was sent.

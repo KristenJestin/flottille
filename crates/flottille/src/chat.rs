@@ -96,7 +96,7 @@ fn send_and_follow(
         client,
         agent,
         sent["after"].as_u64(),
-        Turn::Sent,
+        Turn::Sent(text(&sent, "delivery").to_owned()),
         false,
     )
 }

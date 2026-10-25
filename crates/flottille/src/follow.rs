@@ -19,9 +19,11 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub enum Turn {
     /// The agent's first: everything after the event number belongs to it (`agent run`).
     First,
-    /// The one that plays a message just sent. The agent may be in a turn already, which this
-    /// one is not: the message is queued behind it, and the turn ends that follow are not for it.
-    Sent,
+    /// The one that plays the message just sent, named by the id of its delivery (the answer to
+    /// `agent.send`). The agent may be in a turn already, which this one is not: the message is
+    /// queued behind it, and the turn ends that follow are not for it. Another client's message
+    /// queued around it is not it either; a prompt that takes both is one turn, and answers both.
+    Sent(String),
 }
 
 /// Follows the agent's events after `after` until the turn ends, printing its reply as it
@@ -40,9 +42,10 @@ pub fn follow(
     let mut events = Client::connect_or_start(paths)?;
     events.request("events.watch", serde_json::to_value(WatchParams { after })?)?;
     let mut shown_requests = HashSet::new();
-    // The delivery of the message sent, once its `delivery.queued` was seen, until it is sent.
-    let mut awaited: Option<String> = None;
-    let mut playing = matches!(turn, Turn::First);
+    let (awaited, mut playing) = match turn {
+        Turn::First => (None, true),
+        Turn::Sent(delivery) => (Some(delivery), false),
+    };
     let mut out = std::io::stdout();
     loop {
         let event = events
@@ -74,11 +77,6 @@ pub fn follow(
             continue;
         }
         match event.name.as_str() {
-            "delivery.queued"
-                if matches!(turn, Turn::Sent) && awaited.is_none() && data["kind"] == "user" =>
-            {
-                awaited = data["delivery"].as_str().map(str::to_owned);
-            }
             "delivery.sent" if mentions(data, awaited.as_deref()) => playing = true,
             // The turn failed: the message goes back to the queue and is played again.
             "delivery.given_back" if mentions(data, awaited.as_deref()) => playing = false,

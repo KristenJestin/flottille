@@ -155,7 +155,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                     &mut client,
                     &agent,
                     sent["after"].as_u64(),
-                    Turn::Sent,
+                    Turn::Sent(text(&sent, "delivery").to_owned()),
                     json,
                 )?;
                 // The agent as the turn left it.

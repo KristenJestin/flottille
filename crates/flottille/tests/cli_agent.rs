@@ -26,6 +26,7 @@ fn user() -> User {
             {"mcp": {"tool": "report", "arguments": {"text": "all done, tests pass"}}}]},
         {"when": "die-always", "do": [{"die": 4}]},
         {"when": "GREET", "do": [{"say": "hello from the fake"}]},
+        {"when": "SLOWLY", "do": [{"wait": 800}, {"say": "mine"}]},
         {"when": "RECALL", "do": [{"recall": true}]},
         {"when": "ASK-FILE", "do": [
             {"mcp": {"tool": "fs_read", "arguments": {"path": ".env"}}},
@@ -710,4 +711,20 @@ fn send_follow_with_an_empty_message_is_refused_and_follows_nothing() {
         refused.starts_with("flottille: ") && refused.contains("empty"),
         "{refused}"
     );
+}
+
+#[test]
+fn send_follow_prints_only_the_reply_to_its_own_message_when_another_client_writes_right_after() {
+    let user = user();
+    let agent = idle_agent(&user);
+    let following = Running::start(&user, &["agent", "send", &agent, "SLOWLY", "--follow"]);
+    eventually("the turn to run", || prompted_with(&user, "SLOWLY"));
+
+    // Another client writes to the same agent while that turn runs: its own turn follows.
+    user.call("agent.send", json!({"agent": agent, "message": "GREET"}))
+        .unwrap();
+
+    let (status, out, _) = following.finish();
+    assert!(status.success());
+    assert_eq!(out, "mine\n");
 }
