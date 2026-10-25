@@ -1,0 +1,382 @@
+//! The window's side of the socket, on its own thread: it connects, subscribes to the events,
+//! reads what the shell shows, and reads it again when an event says it changed. On a broken
+//! connection it connects again (with a backoff), resumes the events after the last one it saw and
+//! reads everything again, which the events alone cannot rebuild. The UI only ever receives parsed
+//! [`Update`]s; it never waits on the socket.
+
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, ErrorKind, Write};
+use std::os::unix::net::UnixStream;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+use flottille_core::protocol::{Event, Message, Request};
+use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use serde_json::{Value, json};
+
+use crate::model::{Answers, OpenQuestion, Snapshot, is_final};
+
+type Result<T> = std::result::Result<T, String>;
+
+/// Opens a connection to the daemon, starting it when nobody listens: the command line's
+/// `Client::connect_or_start` in the binary, something else in a test.
+pub type Connect = Arc<dyn Fn() -> std::io::Result<UnixStream> + Send + Sync>;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Update {
+    /// A fresh read of everything the shell shows.
+    Snapshot(Snapshot),
+    /// The connection broke, with why; the link is connecting again.
+    Disconnected(String),
+}
+
+/// What the link has seen, readable from any thread: the number of the last event, and how many
+/// events came that did not follow the one before (a gap in the stream).
+#[derive(Debug, Default)]
+pub struct Seen {
+    pub last_seq: AtomicU64,
+    pub events: AtomicU64,
+    pub gaps: AtomicU64,
+    pub connections: AtomicU64,
+}
+
+const FIRST_RETRY: Duration = Duration::from_millis(100);
+const LAST_RETRY: Duration = Duration::from_secs(5);
+/// Events that come together are read in one go before the shell is read again.
+const QUIET: Duration = Duration::from_millis(40);
+/// The inbox entries looked at for a root's open question.
+const INBOX: u64 = 100;
+
+/// Starts the link's thread. It ends when the receiver is dropped.
+pub fn spawn(connect: Connect) -> (UnboundedReceiver<Update>, Arc<Seen>) {
+    let (sender, receiver) = unbounded();
+    let seen = Arc::new(Seen::default());
+    let shared = seen.clone();
+    std::thread::Builder::new()
+        .name("flottille-link".into())
+        .spawn(move || run(connect, sender, shared))
+        .expect("a thread for the daemon's socket");
+    (receiver, seen)
+}
+
+fn run(connect: Connect, updates: UnboundedSender<Update>, seen: Arc<Seen>) {
+    let mut retry = FIRST_RETRY;
+    let mut briefs = HashMap::new();
+    loop {
+        let why = match connect() {
+            Ok(stream) => {
+                seen.connections.fetch_add(1, Ordering::Relaxed);
+                retry = FIRST_RETRY;
+                match follow(stream, &updates, &seen, &mut briefs) {
+                    Ok(()) => return,
+                    Err(why) => why,
+                }
+            }
+            Err(error) => format!("cannot reach the daemon: {error}"),
+        };
+        if updates.unbounded_send(Update::Disconnected(why)).is_err() {
+            return;
+        }
+        std::thread::sleep(retry);
+        retry = (retry * 2).min(LAST_RETRY);
+    }
+}
+
+/// Follows one connection until it breaks (an error) or the window is gone (`Ok`).
+fn follow(
+    stream: UnixStream,
+    updates: &UnboundedSender<Update>,
+    seen: &Seen,
+    briefs: &mut HashMap<String, String>,
+) -> Result<()> {
+    let mut conn = Conn::new(stream).map_err(|e| e.to_string())?;
+    let last = seen.last_seq.load(Ordering::Relaxed);
+    let after = (seen.connections.load(Ordering::Relaxed) > 1 || last > 0).then_some(last);
+    let started = conn.request("events.watch", json!({"after": after}))?;
+    if after.is_none() {
+        seen.last_seq
+            .store(started["after"].as_u64().unwrap_or(0), Ordering::Relaxed);
+    }
+    let mut stale = true;
+    loop {
+        // Everything that came already, then a short quiet, before reading the shell again.
+        let wait = if stale { Some(QUIET) } else { None };
+        match conn.next_event(wait)? {
+            Some(event) => {
+                note(seen, &event);
+                stale |= matters(&event);
+            }
+            None => {
+                let snapshot = read(&mut conn, briefs, seen)?;
+                if updates.unbounded_send(Update::Snapshot(snapshot)).is_err() {
+                    return Ok(());
+                }
+                // Events that came while it read are queued: they make it stale again.
+                stale = false;
+                while let Some(event) = conn.queued.pop() {
+                    note(seen, &event);
+                    stale |= matters(&event);
+                }
+            }
+        }
+    }
+}
+
+fn note(seen: &Seen, event: &Event) {
+    let last = seen.last_seq.swap(event.seq, Ordering::Relaxed);
+    if last != 0 && event.seq != last + 1 {
+        seen.gaps.fetch_add(1, Ordering::Relaxed);
+    }
+    seen.events.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Whether an event changes what the shell shows. A conversation's pieces, tool calls and runs
+/// do not: they are many, and the session page follows them itself.
+fn matters(event: &Event) -> bool {
+    let name = event.name.as_str();
+    match name.split_once('.').map(|(subject, _)| subject) {
+        Some("project" | "approval" | "daemon") => true,
+        Some("workspace") => matches!(name, "workspace.created" | "workspace.removed"),
+        Some("agent") => matches!(
+            name,
+            "agent.created"
+                | "agent.started"
+                | "agent.prompted"
+                | "agent.turn_ended"
+                | "agent.released"
+                | "agent.died"
+                | "agent.replaced"
+                | "agent.failed"
+                | "agent.ended"
+                | "agent.asked"
+                | "agent.reported"
+        ),
+        Some("delivery") => name == "delivery.queued" && event.data["kind"] == "user",
+        _ => false,
+    }
+}
+
+/// A fresh read of everything the shell shows, on any connection.
+pub fn read_once(stream: UnixStream) -> Result<Snapshot> {
+    let mut conn = Conn::new(stream).map_err(|e| e.to_string())?;
+    read(&mut conn, &mut HashMap::new(), &Seen::default())
+}
+
+fn read(conn: &mut Conn, briefs: &mut HashMap<String, String>, seen: &Seen) -> Result<Snapshot> {
+    let projects = conn.request("project.list", json!({}))?;
+    let workspaces = conn.request("workspace.list", json!({}))?;
+    let agents = conn.request("agent.list", json!({}))?;
+    let approvals = conn.request("approval.list", json!({}))?;
+    let inbox = conn.request("inbox.list", json!({"limit": INBOX}))?;
+    let roots: Vec<(String, bool)> = agents["agents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|agent| agent["parent"].is_null())
+        .map(|agent| {
+            (
+                agent["id"].as_str().unwrap_or_default().to_owned(),
+                is_final(agent["state"].as_str().unwrap_or_default()),
+            )
+        })
+        .collect();
+    // A root's first message is its brief and never changes: read once.
+    let now = seen.last_seq.load(Ordering::Relaxed);
+    for (id, _) in &roots {
+        if !briefs.contains_key(id) {
+            let shown = conn.request("agent.show", json!({"agent": id, "after": now}))?;
+            let brief = shown["agent"]["brief"].as_str().unwrap_or_default();
+            briefs.insert(id.clone(), brief.to_owned());
+        }
+    }
+    let mut last_questions: HashMap<String, OpenQuestion> = HashMap::new();
+    for entry in inbox["entries"].as_array().into_iter().flatten() {
+        if entry["kind"] == "question" {
+            let question = OpenQuestion {
+                seq: entry["seq"].as_u64().unwrap_or(0),
+                at: entry["at"].as_u64().unwrap_or(0),
+                agent: entry["agent"].as_str().unwrap_or_default().to_owned(),
+                text: entry["text"].as_str().unwrap_or_default().to_owned(),
+            };
+            last_questions.insert(question.agent.clone(), question);
+        }
+    }
+    let mut questions = Vec::new();
+    for (id, ended) in &roots {
+        let Some(question) = last_questions.remove(id) else {
+            continue;
+        };
+        if *ended {
+            continue;
+        }
+        // Open until the user writes to the root.
+        let since = conn.request("agent.show", json!({"agent": id, "after": question.seq}))?;
+        let answered = since["events"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|event| event["name"] == "delivery.queued" && event["data"]["kind"] == "user");
+        if !answered {
+            questions.push(question);
+        }
+    }
+    Ok(Snapshot::build(Answers {
+        projects: &projects,
+        workspaces: &workspaces,
+        agents: &agents,
+        approvals: &approvals,
+        questions: &questions,
+        briefs,
+    }))
+}
+
+/// One connection: requests answered in turn, events kept aside meanwhile.
+struct Conn {
+    reader: BufReader<UnixStream>,
+    writer: UnixStream,
+    next_id: u64,
+    /// The start of a line a timeout cut short, kept as bytes: a cut can fall inside a character.
+    partial: Vec<u8>,
+    /// Events that came while a request waited for its answer, the newest first.
+    queued: Vec<Event>,
+}
+
+impl Conn {
+    fn new(stream: UnixStream) -> std::io::Result<Conn> {
+        stream.set_read_timeout(None)?;
+        Ok(Conn {
+            reader: BufReader::new(stream.try_clone()?),
+            writer: stream,
+            next_id: 1,
+            partial: Vec::new(),
+            queued: Vec::new(),
+        })
+    }
+
+    fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+        let id = self.next_id.to_string();
+        self.next_id += 1;
+        let params = match params {
+            Value::Object(mut map) => {
+                map.retain(|_, value| !value.is_null());
+                Value::Object(map)
+            }
+            other => other,
+        };
+        let request = Request {
+            id: id.clone(),
+            method: method.to_owned(),
+            params,
+        };
+        let mut line = serde_json::to_string(&request).map_err(|e| e.to_string())?;
+        line.push('\n');
+        self.writer
+            .write_all(line.as_bytes())
+            .map_err(|e| format!("the daemon's socket: {e}"))?;
+        loop {
+            let message = self.read(None)?.ok_or("the daemon closed the connection")?;
+            if let Some(event) = message.event {
+                self.queued.insert(0, event);
+                continue;
+            }
+            if message.id.as_deref() != Some(&id) {
+                continue;
+            }
+            if let Some(error) = message.error {
+                return Err(format!("{method}: {}", error.message));
+            }
+            return Ok(message.result.unwrap_or(Value::Null));
+        }
+    }
+
+    /// The next event, waiting at most `wait` (`None`: as long as it takes); `None` when none
+    /// came in time.
+    fn next_event(&mut self, wait: Option<Duration>) -> Result<Option<Event>> {
+        if let Some(event) = self.queued.pop() {
+            return Ok(Some(event));
+        }
+        let deadline = wait.map(|wait| Instant::now() + wait);
+        loop {
+            let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+            if left == Some(Duration::ZERO) {
+                return Ok(None);
+            }
+            match self.read(left)? {
+                Some(Message {
+                    event: Some(event), ..
+                }) => return Ok(Some(event)),
+                Some(_) => {}
+                None if left.is_some() => return Ok(None),
+                None => return Err("the daemon closed the connection".into()),
+            }
+        }
+    }
+
+    /// The next message; `None` at the end of the stream, or when `wait` ran out.
+    fn read(&mut self, wait: Option<Duration>) -> Result<Option<Message>> {
+        self.writer
+            .set_read_timeout(wait)
+            .map_err(|e| e.to_string())?;
+        let read = self.reader.read_until(b'\n', &mut self.partial);
+        let _ = self.writer.set_read_timeout(None);
+        match read {
+            Ok(0) if wait.is_some() => Err("the daemon closed the connection".into()),
+            Ok(0) => Ok(None),
+            Ok(_) if !self.partial.ends_with(b"\n") => Ok(None),
+            Ok(_) => {
+                let line = std::mem::take(&mut self.partial);
+                serde_json::from_slice(&line)
+                    .map(Some)
+                    .map_err(|e| format!("the daemon sent a line that is not a message: {e}"))
+            }
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => Ok(None),
+            Err(e) => Err(format!("the daemon's socket: {e}")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(name: &str, data: Value) -> Event {
+        Event {
+            seq: 1,
+            at: 0,
+            name: name.into(),
+            data,
+        }
+    }
+
+    #[test]
+    fn a_conversation_piece_does_not_read_the_shell_again() {
+        assert!(!matters(&event("agent.message", json!({"text": "hi"}))));
+        assert!(!matters(&event("agent.tool_call", json!({}))));
+        assert!(!matters(&event(
+            "delivery.queued",
+            json!({"kind": "brief"})
+        )));
+        assert!(matters(&event("delivery.queued", json!({"kind": "user"}))));
+        assert!(matters(&event("approval.requested", json!({}))));
+        assert!(matters(&event("agent.turn_ended", json!({}))));
+        assert!(matters(&event("workspace.created", json!({}))));
+        assert!(!matters(&event("workspace.step_done", json!({}))));
+    }
+
+    #[test]
+    fn an_event_that_does_not_follow_the_last_is_a_gap() {
+        let seen = Seen::default();
+        for seq in [4, 5, 7] {
+            note(
+                &seen,
+                &Event {
+                    seq,
+                    ..event("x.y", json!({}))
+                },
+            );
+        }
+        assert_eq!(seen.gaps.load(Ordering::Relaxed), 1);
+        assert_eq!(seen.last_seq.load(Ordering::Relaxed), 7);
+    }
+}
