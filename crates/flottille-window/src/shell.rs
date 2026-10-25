@@ -82,6 +82,10 @@ pub struct Shell {
     /// a send and a name asked belong to their project.
     forms: HashMap<String, Forms>,
     actions: Actions,
+    /// The open page's project and its work when its details were last asked for: they are asked
+    /// again only when that work changed.
+    details_of: Option<(String, Work)>,
+    details_asked: usize,
     /// The link's updates, until a task takes them.
     updates: Option<UnboundedReceiver<Update>>,
     _link: Task<()>,
@@ -89,6 +93,15 @@ pub struct Shell {
 }
 
 type Forms = (Entity<Composer>, Entity<NewWorkspace>);
+
+/// What can change a project's details (its branches, its workspaces' lines): the project itself,
+/// its workspaces and how far they are prepared, and its sessions' states (an agent changes files
+/// while it works).
+type Work = (
+    crate::model::Project,
+    Vec<(String, Preparation)>,
+    Vec<(String, Option<AgentState>)>,
+);
 
 pub fn now_ms() -> u64 {
     SystemTime::now()
@@ -157,6 +170,8 @@ impl Shell {
             sessions: HashMap::new(),
             forms: HashMap::new(),
             actions,
+            details_of: None,
+            details_asked: 0,
             updates: Some(updates),
             _link: Task::ready(()),
             _clock,
@@ -342,12 +357,29 @@ impl Shell {
     /// again.
     fn refresh_project(&mut self, cx: &mut Context<Self>) {
         let Some(page) = self.main.read(cx).project_page().cloned() else {
+            // A page opened later is a new one: it asks for its details.
+            self.details_of = None;
             return;
         };
         let name = page.read(cx).name().to_owned();
         let Some(project) = self.snapshot.projects.iter().find(|p| p.name == name) else {
             return;
         };
+        let work: Work = (
+            project.clone(),
+            self.snapshot
+                .workspaces
+                .iter()
+                .filter(|w| w.project == name)
+                .map(|w| (w.name.clone(), w.preparation.clone()))
+                .collect(),
+            self.snapshot
+                .sessions
+                .iter()
+                .filter(|s| s.project == name)
+                .map(|s| (s.id.clone(), s.mark))
+                .collect(),
+        );
         let line = |session: &crate::model::Session, cx: &App| {
             self.sessions.get(&session.id).map(|row| SessionLine {
                 id: session.id.clone(),
@@ -436,7 +468,20 @@ impl Shell {
                 composer.set_running(running, cx);
             });
         }
-        self.actions.send(Command::Details(name));
+        if self
+            .details_of
+            .as_ref()
+            .is_none_or(|(asked, then)| *asked != name || *then != work)
+        {
+            self.details_of = Some((name.clone(), work));
+            self.details_asked += 1;
+            self.actions.send(Command::Details(name));
+        }
+    }
+
+    /// How many times the open page's details were asked for: the tests count them.
+    pub fn details_asked(&self) -> usize {
+        self.details_asked
     }
 
     fn set_online(&mut self, online: bool, cx: &mut Context<Self>) {

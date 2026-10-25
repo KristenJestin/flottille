@@ -57,8 +57,17 @@ pub struct Details {
     pub project: String,
     /// Each repository's path and the branch its checkout in the project folder is on.
     pub branches: Vec<(String, Option<String>)>,
-    /// The lines added and removed in each workspace, all its repositories together.
-    pub changes: HashMap<String, (u64, u64)>,
+    /// The lines changed in each workspace, all its repositories together.
+    pub changes: HashMap<String, Changes>,
+}
+
+/// The lines added and removed in a workspace.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Changes {
+    pub added: u64,
+    pub removed: u64,
+    /// The daemon stopped reading new files: there are more lines than said.
+    pub capped: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -365,10 +374,12 @@ fn details(
         ) else {
             continue;
         };
-        let mut total = (0, 0);
+        let mut total = Changes::default();
         for repository in shown["repositories"].as_array().into_iter().flatten() {
-            total.0 += repository["changes"]["added"].as_u64().unwrap_or(0);
-            total.1 += repository["changes"]["removed"].as_u64().unwrap_or(0);
+            let changes = &repository["changes"];
+            total.added += changes["added"].as_u64().unwrap_or(0);
+            total.removed += changes["removed"].as_u64().unwrap_or(0);
+            total.capped |= changes["capped"] == true;
         }
         changes.insert(name.to_owned(), total);
     }

@@ -14,6 +14,7 @@ use flottille_ui::AgentState;
 use flottille_ui::omarchy::Environment;
 use flottille_ui::state::icon_id;
 use flottille_window::Shell;
+use flottille_window::actions::Changes;
 use flottille_window::composer::{Choice, Composer, Tab};
 use flottille_window::link::{self, Connect};
 use flottille_window::model::{Place, Preparation};
@@ -32,6 +33,7 @@ fn user() -> User {
         {"when": "read the env", "do": [{"mcp": {"tool": "fs_read", "arguments": {"path": ".env"}}}]},
         {"when": "ask me", "do": [{"mcp": {"tool": "ask_user", "arguments": {"question": "Which database?"}}}]},
         {"when": "work a while", "do": [{"wait": 4000}, {"say": "done"}]},
+        {"when": "work briefly", "do": [{"wait": 1000}, {"say": "done"}]},
         {"when": "work long", "do": [{"wait": 30000}, {"say": "done"}]}
     ]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
@@ -556,12 +558,32 @@ fn the_page_lists_main_and_two_workspaces_with_their_sessions(cx: &mut TestAppCo
             .unwrap(),
     );
     std::fs::write(login.join("NOTES.md"), "one\ntwo\nthree\n").unwrap();
+    // More new files than the daemon reads: the card says "at least".
+    let generated = login.with_file_name("export-csv").join("generated");
+    std::fs::create_dir_all(&generated).unwrap();
+    for at in 0..1001 {
+        std::fs::write(generated.join(format!("{at}.txt")), "x\n").unwrap();
+    }
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
 
     until(&shell, cx, "the page shows the lines changed", |cx| {
-        card_of(&shell, Some("login"), cx)
-            .is_some_and(|card| card.read_with(cx, |c, _| c.changes()) == Some((3, 0)))
+        card_of(&shell, Some("login"), cx).is_some_and(|card| {
+            card.read_with(cx, |c, _| c.changes())
+                == Some(Changes {
+                    added: 3,
+                    removed: 0,
+                    capped: false,
+                })
+        })
     });
+    assert_eq!(
+        card_of(&shell, Some("export-csv"), cx).map(|card| card.read_with(cx, |c, _| c.changes())),
+        Some(Some(Changes {
+            added: 1000,
+            removed: 0,
+            capped: true
+        }))
+    );
     let page = page_of(&shell, cx);
     let places: Vec<Place> = page.read_with(cx, |page, cx| {
         page.cards()
@@ -1027,5 +1049,43 @@ fn a_new_workspace_made_in_one_project_does_not_close_another_project_s_form(
     assert!(
         error.is_some_and(|e| e.contains("login")),
         "and says why it was refused"
+    );
+}
+
+#[gpui_kit::test]
+fn a_turn_ending_in_another_project_does_not_ask_for_details(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    project(&user, "borealis");
+    let here = start(&user, "atlas", None, "Release notes for 2.4");
+    let there = start(&user, "borealis", None, "Tidy the aliases");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    until(&shell, cx, "the page has its details", |cx| {
+        page_of(&shell, cx).read_with(cx, |page, _| page.chips()) == ["atlas · main"]
+    });
+    let asked = |cx: &mut VisualTestContext| shell.read_with(cx, |s, _| s.details_asked());
+    let before = asked(cx);
+
+    let turn = |id: &str, cx: &mut VisualTestContext| {
+        send(&user, id, "work briefly");
+        until(&shell, cx, "the session runs", |cx| {
+            mark_of(&shell, id, cx) == Some(AgentState::Running)
+        });
+        until(&shell, cx, "its turn ended", |cx| {
+            mark_of(&shell, id, cx).is_none()
+        });
+    };
+    turn(&there, cx);
+    assert_eq!(
+        asked(cx),
+        before,
+        "borealis's work changes nothing on atlas's page"
+    );
+
+    turn(&here, cx);
+    assert!(
+        asked(cx) > before,
+        "atlas's own work may have changed its lines"
     );
 }

@@ -16,7 +16,7 @@ use gpui_kit::{
     TestSupportExt as _, WeakEntity, Window, div, px,
 };
 
-use crate::actions::{Command, Details};
+use crate::actions::{Changes, Command, Details};
 use crate::composer::{Choice, Composer, agents_label};
 use crate::model::{Place, Preparation, ago};
 use crate::shell::{Selection, Shell, now_ms};
@@ -369,7 +369,7 @@ pub struct PlaceCard {
     project: String,
     data: PlaceData,
     /// Lines added and removed, once the daemon said.
-    changes: Option<(u64, u64)>,
+    changes: Option<Changes>,
     confirming: bool,
     busy: Option<Busy>,
     error: Option<SharedString>,
@@ -414,7 +414,7 @@ impl PlaceCard {
         &self.data
     }
 
-    pub fn changes(&self) -> Option<(u64, u64)> {
+    pub fn changes(&self) -> Option<Changes> {
         self.changes
     }
 
@@ -526,7 +526,14 @@ impl Render for PlaceCard {
             );
         }
         title = title.child(div().flex_1());
-        if let Some((added, removed)) = self.changes {
+        if let Some(Changes {
+            added,
+            removed,
+            capped,
+        }) = self.changes
+        {
+            // Capped: the daemon stopped counting new files, there are more.
+            let at_least = if capped { "≥" } else { "" };
             title = title.child(
                 div()
                     .id(id("changes"))
@@ -535,7 +542,7 @@ impl Render for PlaceCard {
                     .gap(px(6.))
                     .mono(11.5)
                     .font_weight(gpui_kit::FontWeight::NORMAL)
-                    .child(div().text_color(p.ok).child(format!("+{added}")))
+                    .child(div().text_color(p.ok).child(format!("{at_least}+{added}")))
                     .child(div().text_color(p.fail).child(format!("−{removed}"))),
             );
         }
