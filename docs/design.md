@@ -31,7 +31,7 @@ what is known about the window toolkit is in [`reference/gpui.md`](reference/gpu
   approvals that reach the user.
 
 **It is not (yet):** a planning tool. There is no specification workflow, no phases, no proof
-system, no remote judge. Those may come later; the first tranches must give something to use and
+system, no remote judge. Those may come later; the first milestones must give something to use and
 try quickly. When in doubt, the smaller thing wins.
 
 **It is generic.** Nothing is tied to one machine, one desktop, one forge or one agent. Links open
@@ -107,7 +107,7 @@ child, and a child never asks the user anything: what it needs goes to its paren
 
 Flottille is an ACP client. Each agent session is one process speaking ACP on stdio:
 
-- **Claude Code** (tranche 1): Flottille's own bridge, `flottille bridge claude`, written in Rust
+- **Claude Code** (first): Flottille's own bridge, `flottille bridge claude`, written in Rust
   inside Flottille's binary. It speaks ACP to the daemon and drives the user's own `claude` in its
   stream-json mode, at the version of `claude` Flottille was checked against (`flottille doctor`
   warns on another). Nothing else is installed: the user's `claude`, signed in (or given
@@ -134,7 +134,7 @@ start another agent (no `Task`, no `claude --bg`, no background shell) except th
 `agent_launch`, and it cannot do anything the gate did not see. The agent's own permission
 prompts answer themselves: Flottille's tools are allowed, anything else is rejected.
 
-### 4.3 The tools an agent gets (tranche 1)
+### 4.3 The tools an agent gets (first milestones)
 
 Generic tools, as specified in `reference/hemera.md` §3 (arguments, limits, exact refusal texts):
 
@@ -168,7 +168,7 @@ whether an agent is a root or a child is known when it starts.
 
 ### 4.4 Roles
 
-Two roles in tranche 1, with the same tools except `ask_user` (a root's) and `ask_parent` (a
+Two roles at first, with the same tools except `ask_user` (a root's) and `ask_parent` (a
 child's):
 
 - **lead**: the role of an agent the user starts. Its instructions carry the orchestration
@@ -320,7 +320,7 @@ repository and for the project folder: `CLAUDE.md` or `AGENTS.md` (the agent's o
 **and the local files `CLAUDE.local.md` / `AGENTS.local.md` when present** (they hold rules the
 user keeps out of the repository).
 
-Later (not tranche 1), a project gains **references** (documents an agent reads with a tool:
+Later (milestone "Forges and tickets"), a project gains **references** (documents an agent reads with a tool:
 what skills hold today) and **procedures** (named multi-step actions with their own scoped
 authorizations: what slash commands hold today), see `reference/multi-repo-case.md`.
 
@@ -335,7 +335,7 @@ becomes the child's record, the report is a tool, waiting is deliveries, closing
 
 ## 10. The window
 
-GPUI Fast with gpui-kit, English only (no translation layer). Tranche 1 screens:
+GPUI Fast with gpui-kit, English only (no translation layer). Screens of the milestone "The window":
 
 - a top bar with search and a bell counting what waits for the user;
 - left: the tree project › place › session. `main` and the workspaces sit at the same level
@@ -367,26 +367,29 @@ repository.
 
 ## 12. Later: remote
 
-Designed for, not built in tranche 1: the daemon's protocol over an authenticated network
+Designed for, not built before the milestone "Remote": the daemon's protocol over an authenticated network
 transport (for example on a private network such as Tailscale), a light client on a phone, and
 sending work to another machine running Flottille (its daemon owns the agents there; the tree
 spans machines through deliveries).
 
-## 13. Tranches
+## 13. Milestones
 
-1. **A usable core**: projects, multi-repository workspaces with recipes, Claude agents in bare
-   mode over ACP, the generic tools, the gate with approvals, the tree with deliveries, reports
-   and waking, the pilot door, the CLI and events, the window. Accepted when the user runs a
-   real piece of work on a multi-repository project: a lead launches two workers in their own
-   workspaces, one hits an approval, one gets stuck or fails, the lead is told each time without
-   anyone polling, and the user follows every agent in the window and answers what reaches them:
-   the root's messages and the requests forwarded up to it.
-2. **More agents**: Codex and OpenCode in bare mode.
-3. **Forges, tickets, pipelines**: GitHub and Bitbucket (pull requests, checks, pipelines),
+The plan is cut into GitHub milestones; each ends on something the user can use.
+
+1. **Usable from the CLI**: projects, multi-repository workspaces with recipes, Claude agents in
+   bare mode over ACP, the generic tools, the gate with approvals, the tree with deliveries,
+   reports and waking, the pilot door, the CLI and events. Accepted when the user runs a real
+   piece of work on a multi-repository project from a terminal: a lead launches two workers in
+   their own workspaces, one hits an approval, one gets stuck or fails, the lead is told each
+   time without anyone polling, and the user follows every agent and answers what reaches them
+   (the root's messages and the requests forwarded up to it) from the CLI.
+2. **The window**: the same piece of work followed and answered in the window.
+3. **More agents**: Codex and OpenCode in bare mode.
+4. **Forges and tickets**: GitHub and Bitbucket (pull requests, checks, pipelines),
    issue trackers (GitHub issues, Jira read-only), linked to workspaces; procedures with scoped
    authorizations (open the pull requests of a workspace, merge a stack in dependency order,
    close a workspace).
-4. **Remote**: network transport, phone, other machines.
+5. **Remote**: network transport, phone, other machines.
 
 ## 14. Defaults taken, to confirm
 
