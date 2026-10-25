@@ -75,7 +75,8 @@ pub struct Composer {
     menu: bool,
     running: Vec<RunningSession>,
     icons: HashMap<String, Entity<StateIcon>>,
-    sending: bool,
+    /// Where the session being started was asked to start, until the daemon answers.
+    sending: Option<Target>,
     error: Option<SharedString>,
     /// How many times it was drawn: the tests count them.
     renders: usize,
@@ -94,7 +95,14 @@ fn editor_style(cx: &gpui_kit::App) -> InputEditorStyle {
 }
 
 impl Composer {
-    pub fn new(shell: WeakEntity<Shell>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// The composer of one project: its draft and the session it starts belong to it, so that
+    /// opening another project's page neither carries the draft there nor loses it.
+    pub fn new(
+        shell: WeakEntity<Shell>,
+        project: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let field = cx.new(|cx| {
             let mut field = TextareaState::new(window, cx)
                 .submit_on_enter(true)
@@ -133,7 +141,7 @@ impl Composer {
         ];
         Self {
             shell,
-            project: String::new(),
+            project,
             tab: Tab::NewTask,
             slide: Motion::settled(0.0),
             tabs: Rc::new(RefCell::new([None, None, None])),
@@ -147,7 +155,7 @@ impl Composer {
             menu: false,
             running: Vec::new(),
             icons: HashMap::new(),
-            sending: false,
+            sending: None,
             error: None,
             renders: 0,
             _subscriptions: subscriptions,
@@ -184,7 +192,7 @@ impl Composer {
     }
 
     pub fn is_sending(&self) -> bool {
-        self.sending
+        self.sending.is_some()
     }
 
     pub fn field(&self) -> &Entity<TextareaState> {
@@ -198,17 +206,6 @@ impl Composer {
     /// The sessions the "Running agents" tab lists, in order.
     pub fn running(&self) -> &[RunningSession] {
         &self.running
-    }
-
-    /// The project it starts sessions in; another project starts from `main`, with no error.
-    pub fn set_project(&mut self, project: &str, cx: &mut Context<Self>) {
-        if self.project != project {
-            self.project = project.to_owned();
-            self.choice = Choice::Main;
-            self.menu = false;
-            self.error = None;
-            cx.notify();
-        }
     }
 
     pub fn set_places(&mut self, places: Vec<PlaceChoice>, cx: &mut Context<Self>) {
@@ -277,13 +274,13 @@ impl Composer {
     }
 
     fn can_send(&self) -> bool {
-        !self.sending && self.has_text && (self.choice != Choice::New || self.has_name)
+        self.sending.is_none() && self.has_text && (self.choice != Choice::New || self.has_name)
     }
 
     /// Starts a session with what the field holds, where the picker says.
     pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let _ = window;
-        if !self.can_send() || self.project.is_empty() {
+        if !self.can_send() {
             return;
         }
         let message = self.field.read(cx).value().trim().to_owned();
@@ -294,10 +291,10 @@ impl Composer {
         };
         let command = Command::Start {
             project: self.project.clone(),
-            target,
+            target: target.clone(),
             message,
         };
-        self.sending = true;
+        self.sending = Some(target);
         self.error = None;
         self.menu = false;
         self.shell
@@ -308,23 +305,26 @@ impl Composer {
 
     /// The session started: the field is emptied for the next one.
     pub fn started(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.sending = false;
+        let sent = self.sending.take();
         self.error = None;
         self.field
             .update(cx, |field, cx| field.set_value("", window, cx));
         self.has_text = false;
-        if self.choice == Choice::New {
+        // The name was the new workspace's, made now: what the picker says since does not matter.
+        if matches!(sent, Some(Target::New(_))) {
             self.name
                 .update(cx, |name, cx| name.set_value("", window, cx));
             self.has_name = false;
-            self.choice = Choice::Main;
+            if self.choice == Choice::New {
+                self.choice = Choice::Main;
+            }
         }
         cx.notify();
     }
 
     /// No session started: the field keeps the message, and says why.
     pub fn not_started(&mut self, why: &str, cx: &mut Context<Self>) {
-        self.sending = false;
+        self.sending = None;
         self.error = Some(SharedString::from(why.to_owned()));
         cx.notify();
     }
@@ -683,7 +683,7 @@ impl Render for Composer {
                         .child(error),
                 )
             })
-            .when(self.sending, |d| {
+            .when(self.sending.is_some(), |d| {
                 d.child(
                     div()
                         .px(px(10.))

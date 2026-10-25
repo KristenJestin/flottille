@@ -78,14 +78,17 @@ pub struct Shell {
     projects: HashMap<String, Entity<ProjectNode>>,
     places: HashMap<(String, Place), Entity<PlaceNode>>,
     sessions: HashMap<String, Entity<SessionRow>>,
-    composer: Entity<Composer>,
-    new_workspace: Entity<NewWorkspace>,
+    /// Each project's composer and new workspace form, made when its page first opens: a draft,
+    /// a send and a name asked belong to their project.
+    forms: HashMap<String, Forms>,
     actions: Actions,
     /// The link's updates, until a task takes them.
     updates: Option<UnboundedReceiver<Update>>,
     _link: Task<()>,
     _clock: Task<()>,
 }
+
+type Forms = (Entity<Composer>, Entity<NewWorkspace>);
 
 pub fn now_ms() -> u64 {
     SystemTime::now()
@@ -122,12 +125,9 @@ impl Shell {
         let this = cx.entity().downgrade();
         let top = cx.new(|_| TopBar::new(this.clone()));
         let sidebar = cx.new(|_| Sidebar::new(this.clone()));
-        let composer = cx.new(|cx| Composer::new(this.clone(), window, cx));
-        let new_workspace = cx.new(|cx| NewWorkspace::new(this.clone(), window, cx));
         let main = {
-            let (this, composer, new_workspace) =
-                (this.clone(), composer.clone(), new_workspace.clone());
-            cx.new(|cx| MainArea::new(this, composer, new_workspace, cx))
+            let this = this.clone();
+            cx.new(|cx| MainArea::new(this, cx))
         };
         let left = cx.new(|_| Drawer::new("tree-drawer", Side::Left, px(SIDEBAR), sidebar.clone()));
         let bell = cx.new(|_| BellList::new(this.clone()));
@@ -155,8 +155,7 @@ impl Shell {
             projects: HashMap::new(),
             places: HashMap::new(),
             sessions: HashMap::new(),
-            composer,
-            new_workspace,
+            forms: HashMap::new(),
             actions,
             updates: Some(updates),
             _link: Task::ready(()),
@@ -173,12 +172,34 @@ impl Shell {
         }
     }
 
-    pub fn composer(&self) -> &Entity<Composer> {
-        &self.composer
+    /// The composer of a project whose page was opened.
+    pub fn composer_of(&self, project: &str) -> Option<&Entity<Composer>> {
+        self.forms.get(project).map(|(composer, _)| composer)
     }
 
-    pub fn new_workspace(&self) -> &Entity<NewWorkspace> {
-        &self.new_workspace
+    pub fn new_workspace_of(&self, project: &str) -> Option<&Entity<NewWorkspace>> {
+        self.forms.get(project).map(|(_, form)| form)
+    }
+
+    /// The composer and form of the page's project, made the first time.
+    fn forms_for(
+        &mut self,
+        page: &Page,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Forms> {
+        let Page::Project { name } = page else {
+            return None;
+        };
+        let this = cx.entity().downgrade();
+        let forms = self.forms.entry(name.clone()).or_insert_with(|| {
+            let (a, b) = (this.clone(), this);
+            (
+                cx.new(|cx| Composer::new(a, name.clone(), window, cx)),
+                cx.new(|cx| NewWorkspace::new(b, name.clone(), window, cx)),
+            )
+        });
+        Some(forms.clone())
     }
 
     /// Asks the daemon, off the UI thread; the answer comes back as an update.
@@ -187,9 +208,16 @@ impl Shell {
     }
 
     /// "New session in …": the composer, set to start there.
-    pub fn compose_in(&mut self, choice: Choice, window: &mut Window, cx: &mut Context<Self>) {
-        self.composer
-            .update(cx, |composer, cx| composer.choose(choice, window, cx));
+    pub fn compose_in(
+        &mut self,
+        project: &str,
+        choice: Choice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(composer) = self.composer_of(project).cloned() {
+            composer.update(cx, |composer, cx| composer.choose(choice, window, cx));
+        }
     }
 
     /// What the window shows now, as the daemon last gave it.
@@ -253,7 +281,7 @@ impl Shell {
             Update::Disconnected(_) => self.set_online(false, cx),
             Update::Snapshot(snapshot) => {
                 self.set_online(true, cx);
-                self.show(snapshot, cx);
+                self.show(snapshot, window, cx);
             }
             Update::Done(outcome) => self.done(outcome, window, cx),
         }
@@ -267,14 +295,19 @@ impl Shell {
                     page.update(cx, |page, cx| page.set_details(&details, cx));
                 }
             }
-            Outcome::Started { agent, .. } => {
-                self.composer
-                    .update(cx, |composer, cx| composer.started(window, cx));
-                self.open(Selection::Session(agent), window, cx);
+            // The session opens only if the user is still on the page they started it from.
+            Outcome::Started { project, agent } => {
+                if let Some(composer) = self.composer_of(&project).cloned() {
+                    composer.update(cx, |composer, cx| composer.started(window, cx));
+                }
+                if self.selected == Some(Selection::Project(project)) {
+                    self.open(Selection::Session(agent), window, cx);
+                }
             }
-            Outcome::NotStarted { why, .. } => {
-                self.composer
-                    .update(cx, |composer, cx| composer.not_started(&why, cx));
+            Outcome::NotStarted { project, why } => {
+                if let Some(composer) = self.composer_of(&project).cloned() {
+                    composer.update(cx, |composer, cx| composer.not_started(&why, cx));
+                }
             }
             Outcome::WorkspaceDone { project, name } => {
                 self.workspace_answered(&project, &name, None, window, cx)
@@ -293,9 +326,10 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.new_workspace.read(cx).creating() == Some(name) {
-            self.new_workspace
-                .update(cx, |form, cx| form.answered(refused, window, cx));
+        if let Some(form) = self.new_workspace_of(project).cloned()
+            && form.read(cx).creating() == Some(name)
+        {
+            form.update(cx, |form, cx| form.answered(refused, window, cx));
         } else if let Some(page) = self.main.read(cx).project_page().cloned()
             && page.read(cx).name() == project
             && let Some(card) = page.read(cx).card(&Some(name.to_owned()), cx)
@@ -396,13 +430,12 @@ impl Shell {
             places,
         };
         page.update(cx, |page, cx| page.set(data, cx));
-        self.composer.update(cx, |composer, cx| {
-            composer.set_project(&name, cx);
-            composer.set_places(choices, cx);
-            composer.set_running(running, cx);
-        });
-        self.new_workspace
-            .update(cx, |form, cx| form.set_project(&name, cx));
+        if let Some(composer) = self.composer_of(&name).cloned() {
+            composer.update(cx, |composer, cx| {
+                composer.set_places(choices, cx);
+                composer.set_running(running, cx);
+            });
+        }
         self.actions.send(Command::Details(name));
     }
 
@@ -414,7 +447,7 @@ impl Shell {
 
     /// Brings every row up to `snapshot`, creating and dropping rows as needed. A row whose data
     /// did not change is not drawn again.
-    fn show(&mut self, snapshot: Snapshot, cx: &mut Context<Self>) {
+    fn show(&mut self, snapshot: Snapshot, window: &mut Window, cx: &mut Context<Self>) {
         let now = now_ms();
         let this = cx.entity().downgrade();
         let mut projects = HashMap::new();
@@ -508,19 +541,22 @@ impl Shell {
         if self.bell.read(cx).items != items {
             self.bell.update(cx, |bell, cx| bell.set(items, cx));
         }
+        self.forms
+            .retain(|name, _| snapshot.projects.iter().any(|p| &p.name == name));
         self.snapshot = snapshot;
 
         // What was open is shown as it is now; the first project opens when nothing is.
         match self.selected.clone() {
             None => {
                 if let Some(first) = self.snapshot.projects.first() {
-                    self.select(Selection::Project(first.name.clone()), cx);
+                    self.select(Selection::Project(first.name.clone()), window, cx);
                 }
             }
             Some(selection) => {
                 let page = self.page_of(&selection, cx);
                 if self.main.read(cx).page() != &page {
-                    self.main.update(cx, |main, cx| main.show(page, cx));
+                    let forms = self.forms_for(&page, window, cx);
+                    self.main.update(cx, |main, cx| main.show(page, forms, cx));
                 }
                 self.refresh_project(cx);
             }
@@ -540,13 +576,13 @@ impl Shell {
     }
 
     /// Opens a project's page or a session's: a choice made in a drawer closes it.
-    pub fn open(&mut self, selection: Selection, _: &mut Window, cx: &mut Context<Self>) {
-        self.select(selection, cx);
+    pub fn open(&mut self, selection: Selection, window: &mut Window, cx: &mut Context<Self>) {
+        self.select(selection, window, cx);
         self.left.update(cx, |drawer, cx| drawer.close(cx));
         self.set_bell(false, cx);
     }
 
-    fn select(&mut self, selection: Selection, cx: &mut Context<Self>) {
+    fn select(&mut self, selection: Selection, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(Selection::Session(old)) = &self.selected
             && let Some(row) = self.sessions.get(old)
         {
@@ -559,7 +595,8 @@ impl Shell {
         }
         let page = self.page_of(&selection, cx);
         self.selected = Some(selection);
-        self.main.update(cx, |main, cx| main.show(page, cx));
+        let forms = self.forms_for(&page, window, cx);
+        self.main.update(cx, |main, cx| main.show(page, forms, cx));
         self.refresh_project(cx);
     }
 

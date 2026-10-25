@@ -40,8 +40,6 @@ pub struct MainArea {
     page: Page,
     layout: Layout,
     shell: WeakEntity<Shell>,
-    composer: Entity<Composer>,
-    new_workspace: Entity<NewWorkspace>,
     /// The open project's page.
     project: Option<Entity<ProjectPage>>,
     pill: Option<Entity<Pill>>,
@@ -52,20 +50,13 @@ pub struct MainArea {
 }
 
 impl MainArea {
-    pub fn new(
-        shell: WeakEntity<Shell>,
-        composer: Entity<Composer>,
-        new_workspace: Entity<NewWorkspace>,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(shell: WeakEntity<Shell>, cx: &mut Context<Self>) -> Self {
         let rail = cx.new(|_| Rail { lead: None });
         let drawer = cx.new(|_| Drawer::new("rail-drawer", Side::Right, px(RAIL), rail.clone()));
         Self {
             page: Page::Empty,
             layout: Layout::Wide,
             shell,
-            composer,
-            new_workspace,
             project: None,
             pill: None,
             rail,
@@ -86,23 +77,29 @@ impl MainArea {
         self.project.as_ref()
     }
 
-    pub fn show(&mut self, page: Page, cx: &mut Context<Self>) {
+    /// Shows `page`; a project's page gets that project's composer and new workspace form.
+    pub fn show(
+        &mut self,
+        page: Page,
+        forms: Option<(Entity<Composer>, Entity<NewWorkspace>)>,
+        cx: &mut Context<Self>,
+    ) {
         // Another project's page is a new one: its content enters, the old one is gone.
-        self.project = match &page {
-            Page::Project { name } => match self.project.take() {
-                Some(open) if open.read(cx).name() == name => Some(open),
-                _ => {
-                    let (shell, name) = (self.shell.clone(), name.clone());
-                    let (composer, new_workspace) =
-                        (self.composer.clone(), self.new_workspace.clone());
-                    let narrow = self.layout == Layout::Narrow;
-                    Some(cx.new(|cx| {
-                        let mut page = ProjectPage::new(shell, name, composer, new_workspace);
-                        page.set_narrow(narrow, cx);
-                        page
-                    }))
+        self.project = match (&page, forms) {
+            (Page::Project { name }, Some((composer, new_workspace))) => {
+                match self.project.take() {
+                    Some(open) if open.read(cx).name() == name => Some(open),
+                    _ => {
+                        let (shell, name) = (self.shell.clone(), name.clone());
+                        let narrow = self.layout == Layout::Narrow;
+                        Some(cx.new(|cx| {
+                            let mut page = ProjectPage::new(shell, name, composer, new_workspace);
+                            page.set_narrow(narrow, cx);
+                            page
+                        }))
+                    }
                 }
-            },
+            }
             _ => None,
         };
         self.pill = match &page {

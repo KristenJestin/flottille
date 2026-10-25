@@ -14,10 +14,10 @@ use flottille_ui::AgentState;
 use flottille_ui::omarchy::Environment;
 use flottille_ui::state::icon_id;
 use flottille_window::Shell;
-use flottille_window::composer::{Choice, Tab};
+use flottille_window::composer::{Choice, Composer, Tab};
 use flottille_window::link::{self, Connect};
 use flottille_window::model::{Place, Preparation};
-use flottille_window::project::{PlaceCard, ProjectPage};
+use flottille_window::project::{NewWorkspace, PlaceCard, ProjectPage};
 use flottille_window::shell::{Layout, Selection};
 use flottille_window::tree::{place_id, project_id, session_id};
 use gpui_kit::test::TestWindowExt;
@@ -611,7 +611,7 @@ fn the_page_lists_main_and_two_workspaces_with_their_sessions(cx: &mut TestAppCo
 
     // "New session in login" points the composer there.
     cx.update(|window, cx| window.click("new-session-in-login", cx));
-    let composer = shell.read_with(cx, |s, _| s.composer().clone());
+    let composer = composer_of(&shell, "atlas", cx);
     assert_eq!(
         composer.read_with(cx, |c, _| c.choice().clone()),
         Choice::Workspace("login".into())
@@ -637,7 +637,7 @@ fn starting_a_task_in_a_new_workspace_prepares_it_then_starts_the_session_in_it(
     cx.update(|window, cx| window.click("place-choice-new", cx));
     cx.simulate_input("login-fix");
     cx.simulate_keystrokes("enter");
-    let composer = shell.read_with(cx, |s, _| s.composer().clone());
+    let composer = composer_of(&shell, "atlas", cx);
     assert!(composer.read_with(cx, |c, _| c.is_sending()));
 
     until(
@@ -711,7 +711,7 @@ fn a_failing_recipe_shows_its_output_on_the_card(cx: &mut TestAppContext) {
     cx.simulate_input("broken");
     cx.update(|window, cx| window.click("send", cx));
 
-    let composer = shell.read_with(cx, |s, _| s.composer().clone());
+    let composer = composer_of(&shell, "atlas", cx);
     until(&shell, cx, "the composer says no session started", |cx| {
         composer.read_with(cx, |c, _| c.error().is_some())
     });
@@ -766,7 +766,7 @@ fn the_running_agents_tab_lists_a_waiting_session_first(cx: &mut TestAppContext)
     settle(cx);
 
     cx.update(|window, cx| window.click("tab-running", cx));
-    let composer = shell.read_with(cx, |s, _| s.composer().clone());
+    let composer = composer_of(&shell, "atlas", cx);
     assert_eq!(composer.read_with(cx, |c, _| c.tab()), Tab::Running);
     let listed: Vec<String> = composer.read_with(cx, |c, _| {
         c.running().iter().map(|s| s.id.clone()).collect()
@@ -810,7 +810,7 @@ fn typing_in_the_composer_does_not_redraw_the_page(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("right");
     settle(cx);
     let page = page_of(&shell, cx);
-    let composer = shell.read_with(cx, |s, _| s.composer().clone());
+    let composer = composer_of(&shell, "atlas", cx);
     let cards = page.read_with(cx, |page, _| page.cards().to_vec());
     let renders = |cx: &mut VisualTestContext| {
         (
@@ -845,5 +845,187 @@ fn typing_in_the_composer_does_not_redraw_the_page(cx: &mut TestAppContext) {
         composer_after,
         composer_before + 1,
         "the composer is drawn again once, when its send button wakes up, not once a letter"
+    );
+}
+
+fn composer_of(
+    shell: &Entity<Shell>,
+    project: &str,
+    cx: &mut VisualTestContext,
+) -> Entity<Composer> {
+    shell
+        .read_with(cx, |s, _| s.composer_of(project).cloned())
+        .unwrap_or_else(|| panic!("{project}'s page has a composer"))
+}
+
+fn field_of(composer: &Entity<Composer>, cx: &mut VisualTestContext) -> String {
+    composer.read_with(cx, |c, cx| c.field().read(cx).value().to_string())
+}
+
+/// Opens `project`'s page, as a click in the tree would, and lets its entrance end.
+fn open_project(shell: &Entity<Shell>, project: &str, cx: &mut VisualTestContext) {
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::Project(project.into()), window, cx)
+    });
+    until(shell, cx, "the project's page is shown", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .project_page()
+                .is_some_and(|page| page.read(cx).name() == project)
+        })
+    });
+    settle(cx);
+}
+
+/// Sends `task` from atlas's composer into a new workspace named `name`.
+fn send_in_new(task: &str, name: &str, cx: &mut VisualTestContext) {
+    type_task(task, cx);
+    cx.update(|window, cx| window.click("place-picker", cx));
+    cx.update(|window, cx| window.click("place-choice-new", cx));
+    cx.simulate_input(name);
+    cx.simulate_keystrokes("enter");
+}
+
+#[gpui_kit::test]
+fn a_session_started_after_switching_project_stays_with_its_project(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    project(&user, "borealis");
+    let gate = user.path("gate");
+    recipe(&user, "atlas", &gated("echo prepared", &gate));
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    send_in_new("Fix the login", "login-fix", cx);
+    let atlas = composer_of(&shell, "atlas", cx);
+    assert!(atlas.read_with(cx, |c, _| c.is_sending()));
+
+    open_project(&shell, "borealis", cx);
+    let borealis = composer_of(&shell, "borealis", cx);
+    assert!(
+        !borealis.read_with(cx, |c, _| c.is_sending()),
+        "another project's send is not this one's"
+    );
+    assert_eq!(field_of(&borealis, cx), "", "nor its draft");
+    type_task("A draft for borealis", cx);
+    std::fs::write(&gate, "").unwrap();
+    until(&shell, cx, "atlas's session started", |cx| {
+        !atlas.read_with(cx, |c, _| c.is_sending())
+    });
+
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(Selection::Project("borealis".into())),
+        "the user is not pulled away from the page they opened"
+    );
+    assert_eq!(field_of(&borealis, cx), "A draft for borealis");
+    assert!(borealis.read_with(cx, |c, _| c.error().is_none() && !c.is_sending()));
+    let agents = user.call("agent.list", json!({})).unwrap();
+    assert_eq!(agents["agents"][0]["workspace"], "login-fix");
+    assert_eq!(field_of(&atlas, cx), "", "atlas's field is emptied");
+    assert_eq!(
+        atlas.read_with(cx, |c, cx| (
+            c.name_field().read(cx).value().to_string(),
+            c.choice().clone()
+        )),
+        (String::new(), Choice::Main),
+        "and the new workspace's name with it"
+    );
+    open_project(&shell, "atlas", cx);
+    assert_eq!(
+        shell.read_with(cx, |s, cx| s
+            .main()
+            .read(cx)
+            .project_page()
+            .unwrap()
+            .read(cx)
+            .composer()
+            .clone()),
+        atlas,
+        "atlas's page shows atlas's composer"
+    );
+}
+
+#[gpui_kit::test]
+fn a_send_that_fails_after_switching_project_says_so_on_its_project(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    project(&user, "borealis");
+    let gate = user.path("gate");
+    recipe(
+        &user,
+        "atlas",
+        &gated("echo 'made-up failure'\nexit 3", &gate),
+    );
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    send_in_new("Try the broken recipe", "broken", cx);
+    let atlas = composer_of(&shell, "atlas", cx);
+
+    open_project(&shell, "borealis", cx);
+    let borealis = composer_of(&shell, "borealis", cx);
+    type_task("A draft for borealis", cx);
+    std::fs::write(&gate, "").unwrap();
+    until(&shell, cx, "atlas's send failed", |cx| {
+        atlas.read_with(cx, |c, _| c.error().is_some())
+    });
+
+    assert!(
+        borealis.read_with(cx, |c, _| c.error().is_none() && !c.is_sending()),
+        "the failure is not shown on another project"
+    );
+    assert_eq!(field_of(&borealis, cx), "A draft for borealis");
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(Selection::Project("borealis".into()))
+    );
+    open_project(&shell, "atlas", cx);
+    assert_eq!(
+        field_of(&atlas, cx),
+        "Try the broken recipe",
+        "atlas keeps its task, to send again"
+    );
+}
+
+#[gpui_kit::test]
+fn a_new_workspace_made_in_one_project_does_not_close_another_project_s_form(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    project(&user, "borealis");
+    workspace(&user, "borealis", "login");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let form_of = |project: &str, cx: &mut VisualTestContext| {
+        shell
+            .read_with(cx, |s, _| s.new_workspace_of(project).cloned())
+            .unwrap()
+    };
+    let create = |form: &Entity<NewWorkspace>, cx: &mut VisualTestContext| {
+        form.update_in(cx, |form, window, cx| form.open(window, cx));
+        cx.simulate_input("login");
+        cx.simulate_keystrokes("enter");
+    };
+    let atlas = form_of("atlas", cx);
+    create(&atlas, cx);
+    // Atlas's answer is not taken before borealis asks the same name.
+    open_project(&shell, "borealis", cx);
+    let borealis = form_of("borealis", cx);
+    create(&borealis, cx);
+    until(&shell, cx, "both were answered", |cx| {
+        atlas.read_with(cx, |f, _| f.creating().is_none())
+            && borealis.read_with(cx, |f, _| f.creating().is_none())
+    });
+
+    assert!(
+        !atlas.read_with(cx, |f, _| f.is_open()),
+        "atlas's workspace was made"
+    );
+    let (open, error) = borealis.read_with(cx, |f, _| (f.is_open(), f.error().map(str::to_owned)));
+    assert!(open, "borealis's form stays open");
+    assert!(
+        error.is_some_and(|e| e.contains("login")),
+        "and says why it was refused"
     );
 }

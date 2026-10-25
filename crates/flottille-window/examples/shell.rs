@@ -65,8 +65,11 @@ fn main() {
                             shell.open_tree(cx);
                         }
                         if running {
-                            let composer = shell.composer().clone();
-                            composer.update(cx, |c, cx| c.select_tab(Tab::Running, cx));
+                            let open = shell.main().read(cx).project_page().cloned();
+                            if let Some(page) = open {
+                                let composer = page.read(cx).composer().clone();
+                                composer.update(cx, |c, cx| c.select_tab(Tab::Running, cx));
+                            }
                         }
                         if rail {
                             let drawer = shell.main().read(cx).drawer().clone();

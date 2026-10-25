@@ -114,6 +114,10 @@ impl ProjectPage {
         self.renders
     }
 
+    pub fn composer(&self) -> &Entity<Composer> {
+        &self.composer
+    }
+
     pub fn cards(&self) -> &[Entity<PlaceCard>] {
         &self.cards
     }
@@ -695,7 +699,7 @@ impl Render for PlaceCard {
                     .ok();
             })
         });
-        let shell = self.shell.clone();
+        let (shell, project) = (self.shell.clone(), self.project.clone());
         let choice = match &place {
             None => Choice::Main,
             Some(name) => Choice::Workspace(name.clone()),
@@ -718,7 +722,9 @@ impl Render for PlaceCard {
                     .on_click(move |_, window, cx| {
                         let choice = choice.clone();
                         shell
-                            .update(cx, |shell, cx| shell.compose_in(choice, window, cx))
+                            .update(cx, |shell, cx| {
+                                shell.compose_in(&project, choice, window, cx)
+                            })
                             .ok();
                     })
             })
@@ -781,7 +787,13 @@ pub struct NewWorkspace {
 }
 
 impl NewWorkspace {
-    pub fn new(shell: WeakEntity<Shell>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// The form of one project: a name asked in it is answered in it.
+    pub fn new(
+        shell: WeakEntity<Shell>,
+        project: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let name = cx.new(|cx| {
             let p = palette(cx);
             let mut name = InputState::new(window, cx).placeholder("name, for example login-fix");
@@ -810,7 +822,7 @@ impl NewWorkspace {
             ];
         Self {
             shell,
-            project: String::new(),
+            project,
             open: false,
             name,
             has_name: false,
@@ -834,16 +846,6 @@ impl NewWorkspace {
 
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
-    }
-
-    pub fn set_project(&mut self, project: &str, cx: &mut Context<Self>) {
-        if self.project != project {
-            self.project = project.to_owned();
-            self.open = false;
-            self.error = None;
-            self.creating = None;
-            cx.notify();
-        }
     }
 
     pub fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
