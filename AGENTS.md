@@ -132,8 +132,7 @@ git config core.hooksPath .githooks     # once per clone: the commit-msg and pre
   `pre-commit` hook refuses it.
 - Never rewrite published history. No `--no-verify`.
 - One commit = one intent. No `wip` commits. Don't mix formatting and logic in one commit.
-- Commits use the Git user configured on the machine, and no trailer names an agent as co-author
-  (`Co-authored-by: Claude …`): `tools/commit-message.sh` refuses it.
+- Commits use the Git user configured on the machine.
 - The subject is `<type>(<scope>): <subject>`: the **scope is required**, the subject is 72
   characters at most, starts lowercase, has no final period, and the type is one of feat, fix,
   refactor, test, docs, chore, build, ci, perf. `tools/commit-message.sh` is the judge (the
