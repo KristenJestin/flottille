@@ -1,5 +1,5 @@
-//! Claude Code through its ACP adapter (`docs/agents.md`): where Flottille installs the adapter,
-//! how it starts it, the bare options that leave the agent nothing but Flottille's tools, and what
+//! Claude Code through Flottille's own bridge (`docs/agents.md`): how the daemon starts the
+//! bridge, the bare options that leave the agent nothing but Flottille's tools, and what
 //! `flottille doctor` checks.
 
 use std::ffi::OsString;
@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 use flottille_core::paths::Paths;
 use serde_json::{Value, json};
 
-/// The adapter, at the version Flottille was checked against (`docs/reference/acp.md`).
-pub const ADAPTER: &str = "@agentclientprotocol/claude-agent-acp";
-pub const ADAPTER_VERSION: &str = "0.95.0";
+/// The version of `claude` whose stream-json mode the bridge was checked against
+/// (`docs/reference/acp.md`).
+pub const CLAUDE_VERSION: &str = "2.1.295";
 
 /// Claude Code caches the system prompt before this marker across sessions.
 pub const BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
@@ -105,12 +105,13 @@ pub fn tools(root: bool, at_depth_limit: bool) -> Vec<String> {
         .collect()
 }
 
-/// `_meta` of `session/new`, `session/load` and `session/resume`: the bare mode.
+/// `_meta` of `session/new`, `session/load` and `session/resume`: the bare mode, which the bridge
+/// sets on `claude` (`bridge.rs`).
 pub fn session_meta(instructions: &str, tools: &[String]) -> Value {
     json!({"claudeCode": {"options": {
         "tools": [],
         "allowedTools": tools,
-        // The adapter's default loads the user's settings, hooks, plugins and skills.
+        // Claude Code's default loads the user's settings, hooks, plugins and skills.
         "settingSources": [],
         "strictMcpConfig": true,
         "systemPrompt": {"type": "custom", "prompt": system_prompt(instructions), "snapshot": true},
@@ -135,29 +136,6 @@ fn system_prompt(instructions: &str) -> Value {
     }
 }
 
-/// Where Flottille installs the adapter: `npm install --prefix` of this folder.
-pub fn adapter_prefix(paths: &Paths) -> PathBuf {
-    paths.data.join("adapters/claude")
-}
-
-fn adapter_package(paths: &Paths) -> PathBuf {
-    adapter_prefix(paths).join("node_modules").join(ADAPTER)
-}
-
-/// The installed adapter: its version and the script its package names as its program.
-fn installed_adapter(paths: &Paths) -> Option<(String, PathBuf)> {
-    let package = adapter_package(paths);
-    let manifest: Value =
-        serde_json::from_str(&std::fs::read_to_string(package.join("package.json")).ok()?).ok()?;
-    let version = manifest["version"].as_str()?.to_owned();
-    let bin = match &manifest["bin"] {
-        Value::String(script) => Some(script.as_str()),
-        Value::Object(scripts) => scripts.values().next().and_then(Value::as_str),
-        _ => None,
-    };
-    Some((version, package.join(bin.unwrap_or("dist/index.js"))))
-}
-
 /// A program of that name in `PATH`, as a shell would find it, without one.
 pub fn find_program(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
@@ -170,110 +148,107 @@ pub fn find_program(name: &str) -> Option<PathBuf> {
         })
 }
 
-/// How the adapter process starts.
+/// Where each bridge writes the MCP configuration with its token, `<its pid>.mcp.json`.
+pub fn bridge_files(paths: &Paths) -> PathBuf {
+    paths.runtime.join("bridge")
+}
+
+/// The bridge of that pid is gone: its MCP configuration goes with it, even when it was killed
+/// before it could remove it.
+pub fn forget_bridge(paths: &Paths, pid: u32) {
+    let _ = std::fs::remove_file(bridge_files(paths).join(format!("{pid}.mcp.json")));
+}
+
+/// At daemon start: no bridge of a previous daemon runs any more (its group was killed), and its
+/// token was that daemon's. What they left goes.
+pub fn forget_bridges(paths: &Paths) {
+    let Ok(entries) = std::fs::read_dir(bridge_files(paths)) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().ends_with(".mcp.json") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Where the bridge keeps each session's conversation, which a load replays.
+pub fn histories(paths: &Paths) -> PathBuf {
+    paths.state.join("bridge/claude")
+}
+
+/// The bridge's history of a session, which a session id of the bridge names.
+pub fn history(paths: &Paths, session: &str) -> Option<PathBuf> {
+    is_session_id(session).then(|| histories(paths).join(format!("{session}.jsonl")))
+}
+
+/// A session id that names a file: letters, digits and dashes only.
+pub fn is_session_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// The session is over (replaced, or its agent ended): its history goes, nothing will load it.
+pub fn forget_history(paths: &Paths, session: &str) {
+    if let Some(path) = history(paths, session) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// How the agent's process starts.
 pub struct Launch {
     pub program: PathBuf,
     pub args: Vec<OsString>,
-    pub env: Vec<(&'static str, OsString)>,
 }
 
-/// The adapter run by Node, pointed at the user's `claude`; or, for tests and development, the
-/// program `FLOTTILLE_AGENT_COMMAND` names in its place. A sentence the user can act on when
-/// something is missing.
-pub fn launch(paths: &Paths) -> Result<Launch, String> {
-    let claude = find_program("claude");
-    let env: Vec<(&'static str, OsString)> = claude
-        .iter()
-        .map(|claude| ("CLAUDE_CODE_EXECUTABLE", claude.clone().into_os_string()))
-        .collect();
+/// Flottille's own bridge, `flottille bridge claude`, which drives the user's `claude`; or, for
+/// tests and development, the program `FLOTTILLE_AGENT_COMMAND` names in its place. A sentence the
+/// user can act on when something is missing.
+pub fn launch() -> Result<Launch, String> {
     if let Some(program) = std::env::var_os("FLOTTILLE_AGENT_COMMAND") {
         return Ok(Launch {
             program: program.into(),
             args: Vec::new(),
-            env,
         });
     }
-    let Some((version, script)) = installed_adapter(paths) else {
-        return Err(
-            "the Claude adapter is not installed: run `flottille agent install` (it needs npm)"
-                .into(),
-        );
-    };
-    if version != ADAPTER_VERSION {
-        return Err(format!(
-            "the Claude adapter installed is {version}, this Flottille runs {ADAPTER_VERSION}: run \
-             `flottille agent install`"
-        ));
-    }
-    let node = find_program("node")
-        .ok_or("Node is not installed, or not on PATH: the Claude adapter runs on it")?;
-    if claude.is_none() {
+    if find_program("claude").is_none() {
         return Err(
             "`claude` is not on PATH: install Claude Code and sign in with it first".into(),
         );
     }
+    let program =
+        std::env::current_exe().map_err(|e| format!("cannot find Flottille itself: {e}"))?;
     Ok(Launch {
-        program: node,
-        args: vec![script.into_os_string()],
-        env,
+        program,
+        args: vec!["bridge".into(), "claude".into()],
     })
 }
 
-/// `npm install` of the pinned adapter into Flottille's data folder; never `npx`.
-pub fn install(paths: &Paths) -> Result<(), String> {
-    let npm = find_program("npm").ok_or(
-        "npm is not installed, or not on PATH: it comes with Node, which the adapter needs",
-    )?;
-    let prefix = adapter_prefix(paths);
-    std::fs::create_dir_all(&prefix).map_err(|e| format!("{}: {e}", prefix.display()))?;
-    let status = Command::new(npm)
-        .arg("install")
-        .arg("--prefix")
-        .arg(&prefix)
-        // The adapter runs the user's own `claude`: the SDK's bundled one is not needed, nor any
-        // install script.
-        .args([
-            "--omit=optional",
-            "--ignore-scripts",
-            "--no-audit",
-            "--no-fund",
-        ])
-        .arg(format!("{ADAPTER}@{ADAPTER_VERSION}"))
-        .stdin(Stdio::null())
-        .status()
-        .map_err(|e| format!("npm: {e}"))?;
-    if !status.success() {
-        return Err(format!("npm install failed ({status})"));
-    }
-    Ok(())
-}
-
 /// What `flottille doctor` reports: whether Claude agents can run on this machine.
-pub fn doctor(paths: &Paths) -> Value {
-    let program = |name: &str| match find_program(name) {
-        None => json!({"present": false}),
-        Some(path) => json!({"present": true, "path": path, "version": version_of(&path)}),
+pub fn doctor() -> Value {
+    let mut warnings = Vec::new();
+    let claude = match find_program("claude") {
+        None => json!({"present": false, "checked": CLAUDE_VERSION}),
+        Some(path) => {
+            let version = version_of(&path);
+            if let Some(version) = version.as_deref().filter(|v| *v != CLAUDE_VERSION) {
+                warnings.push(format!(
+                    "claude is {version}, and this Flottille was checked against {CLAUDE_VERSION}: \
+                     its stream-json mode may have changed"
+                ));
+            }
+            json!({"present": true, "path": path, "version": version, "checked": CLAUDE_VERSION})
+        }
     };
-    let node = program("node");
-    let claude = program("claude");
-    // Only its presence: the file is never opened.
+    // Only its presence: the file is never opened, the key never read.
     let login = login_file();
+    let api_key = std::env::var_os("ANTHROPIC_API_KEY").is_some_and(|key| !key.is_empty());
     let login = json!({
         "present": login.as_deref().is_some_and(|p| std::fs::symlink_metadata(p).is_ok()),
         "path": login,
+        "api_key": api_key,
     });
-    let adapter = match installed_adapter(paths) {
-        None => {
-            json!({"present": false, "pinned": ADAPTER_VERSION, "path": adapter_package(paths)})
-        }
-        Some((version, _)) => json!({"present": true, "version": version,
-            "pinned": ADAPTER_VERSION, "path": adapter_package(paths)}),
-    };
-    let ready = node["present"] == true
-        && claude["present"] == true
-        && login["present"] == true
-        && adapter["version"] == ADAPTER_VERSION;
-    json!({"node": node, "claude": claude, "login": login, "adapter": adapter, "ready": ready})
+    let ready = claude["present"] == true && (login["present"] == true || api_key);
+    json!({"claude": claude, "login": login, "warnings": warnings, "ready": ready})
 }
 
 /// Claude's login file: in `$CLAUDE_CONFIG_DIR`, or `~/.claude`.

@@ -1,7 +1,7 @@
 //! The `agent.*` methods (`docs/protocol.md`) and the life of each agent (`docs/agents.md`).
 //!
-//! An agent is owned by one task of its own, which starts its adapter process when a delivery
-//! comes, keeps it while it works, lets it go after the idle release time, notices when it dies
+//! An agent is owned by one task of its own, which starts its process (the Claude bridge) when a
+//! delivery comes, keeps it while it works, lets it go after the idle release time, notices when it dies
 //! and replaces its session then. The methods only write the store and hand the task its orders:
 //! none of them waits on the agent. Every prompt an agent gets is a delivery (`deliveries`).
 
@@ -228,6 +228,14 @@ fn refuse_empty(message: &str) -> Result<(), Failure> {
 fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
     let project = projects::load_project(daemon, &asked.project)?;
     refuse_empty(&asked.message)?;
+    // Claude Code's permission modes decide which of its calls run unasked: in bare mode every
+    // call goes through Flottille's gate, which no mode may loosen.
+    if let Some(mode) = &asked.mode {
+        return Err(Failure::refused(format!(
+            "an agent takes no mode ({mode} was asked): Flottille's gate decides every tool call, \
+             and a permission mode of Claude Code's could only loosen it"
+        )));
+    }
     let role = roles::role(asked.role.as_deref().unwrap_or(roles::LEAD)).ok_or_else(|| {
         Failure::refused(format!(
             "there is no role {}: the roles are {}",
@@ -329,7 +337,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         }
     };
     // Refused now rather than failed later: the user can act on it before anything is written.
-    claude::launch(&daemon.paths).map_err(Failure::refused)?;
+    claude::launch().map_err(Failure::refused)?;
     let now = now_ms();
     let depth = new.parent.as_ref().map_or(0, |(_, depth)| depth + 1);
     let at_depth_limit = depth >= DEPTH_LIMIT;
@@ -469,8 +477,19 @@ fn idle_release() -> Duration {
         .map_or(IDLE_RELEASE, Duration::from_millis)
 }
 
+/// The agent's task: its life, then, once it ended, its session's history goes.
+async fn agent_task(daemon: Arc<Daemon>, id: String, orders: mpsc::UnboundedReceiver<Order>) {
+    agent_life(daemon.clone(), id.clone(), orders).await;
+    if let Ok(Some(agent)) = daemon.read(|store| store.agent(&id))
+        && agent.state.is_final()
+        && let Some(native) = &agent.native_id
+    {
+        claude::forget_history(&daemon.paths, native);
+    }
+}
+
 /// The life of one agent: a process per stretch of work, until it stops or fails.
-async fn agent_task(daemon: Arc<Daemon>, id: String, mut orders: mpsc::UnboundedReceiver<Order>) {
+async fn agent_life(daemon: Arc<Daemon>, id: String, mut orders: mpsc::UnboundedReceiver<Order>) {
     let mut turns = Turns {
         queued: VecDeque::new(),
         running: false,
@@ -521,7 +540,7 @@ async fn process(
     turns: &mut Turns,
 ) -> Result<bool, String> {
     change(daemon, &agent.id, AgentState::Starting, None, None);
-    let launch = claude::launch(&daemon.paths)?;
+    let launch = claude::launch()?;
     // A token of this process's own, which revokes the last one.
     let grant = mcp::grant_of(daemon, agent)?;
     let token = daemon
@@ -538,12 +557,11 @@ async fn process(
     }
     command
         .args(&launch.args)
-        .envs(launch.env.iter().map(|(k, v)| (k, v)))
         .current_dir(&agent.folder)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        // Its own process group: the adapter, the CLI it runs and their children go together.
+        // Its own process group: the bridge, the `claude` it runs and their children go together.
         .process_group(0)
         .kill_on_drop(true);
     let mut child = command
@@ -598,7 +616,7 @@ async fn process(
             Ok(false)
         }
         Ok(Exit::Died(status)) => {
-            // The adapter is gone, not what it started: a `claude` left in its group would run on
+            // The bridge is gone, not what it started: a `claude` left in its group would run on
             // as an orphan, with its tools.
             signal_group(pid, libc::SIGKILL);
             daemon.mcp.retire(&agent.id);
@@ -617,6 +635,7 @@ async fn process(
         }
     };
     let _ = daemon.read(|store| store.remove_process(pid));
+    claude::forget_bridge(&daemon.paths, pid);
     goes_on
 }
 
@@ -676,6 +695,11 @@ pub fn replace(daemon: &Arc<Daemon>, id: &str, reason: &str, counted: bool, tell
             store.supersede_like(id, &[&format!("brief-{id}-"), &format!("resume-{id}-")])?,
         ))
     });
+    let replaced = daemon
+        .read(|store| store.agent(id))
+        .ok()
+        .flatten()
+        .and_then(|agent| agent.native_id);
     let agent = match daemon.write(|store| store.replace_agent(id, &reason, counted)) {
         Ok(agent) if !agent.state.is_final() => agent,
         Ok(_) => return false,
@@ -684,6 +708,10 @@ pub fn replace(daemon: &Arc<Daemon>, id: &str, reason: &str, counted: bool, tell
             return false;
         }
     };
+    // No process runs here: the old session is over, and nothing will load it.
+    if let Some(native) = replaced {
+        claude::forget_history(&daemon.paths, &native);
+    }
     if let Some(brief) = &agent.brief {
         deliveries::deliver(
             daemon,

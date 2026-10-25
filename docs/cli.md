@@ -57,17 +57,18 @@ $ flottille watch --after 0
 
 ### `flottille doctor`
 
-Whether Claude agents can run here: Node, `claude`, its login (checked for presence, never read)
-and the adapter Flottille installs. Exit code 1 while something is missing. `--json` prints the
-report.
+Whether Claude agents can run here: `claude`, its version, and its login (the login file checked
+for presence, never read; or `ANTHROPIC_API_KEY` set, never printed). Exit code 1 while something
+is missing. A `claude` of another version than the one this Flottille was checked against is a
+warning that names both, not a failure. `--json` prints the report: `{"claude": {"present",
+"path", "version", "checked"}, "login": {"present", "path", "api_key"}, "warnings", "ready"}`.
 
 ```
 $ flottille doctor
-ok   Node: 24.16.0 (/usr/bin/node)
-ok   claude: 1.0.0 (/usr/bin/claude)
+ok   claude: 2.1.300 (/usr/bin/claude)
 ok   Claude login: ~/.claude/.credentials.json
-MISSING Claude adapter: not installed; run `flottille agent install`
-Claude agents cannot run until what is missing is there.
+warn claude is 2.1.300, and this Flottille was checked against 2.1.295: its stream-json mode may have changed
+Claude agents can run.
 ```
 
 ## Projects
@@ -298,11 +299,6 @@ agent bd7ed8152969, lead in shop, workspace login: idle for 2 s
   "add the login page" (agent 1eb211e2dbf2), worker in shop, workspace login: in a turn
 ```
 
-### `flottille agent install`
-
-Installs the Claude adapter at the version Flottille pins into its own data folder, with `npm`
-(never `npx`). `flottille doctor` says whether it is there.
-
 ## What reaches you
 
 ### `flottille inbox`
@@ -365,6 +361,12 @@ Request #2 is denied; agent ce034b165403 is told nothing was done.
 ```
 
 ## The pilot door
+
+### `flottille bridge claude`
+
+Not for you: the program the daemon starts for each Claude agent, hidden from `--help`. It speaks
+ACP on its standard input and output and drives your `claude` in its stream-json mode
+(`docs/agents.md`, "The Claude bridge").
 
 ### `flottille mcp`
 

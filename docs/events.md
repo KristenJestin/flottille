@@ -157,10 +157,10 @@ Its process runs and its session is open, its options set.
 | Field | |
 |---|---|
 | `agent` | |
-| `pid` | The adapter's process id. |
+| `pid` | The agent's process id (the Claude bridge's). |
 | `opened` | `new`, `resumed` or `loaded`. |
 | `native_id` | The ACP session id. |
-| `agent_version` | The adapter's name and version. |
+| `agent_version` | The agent's name and version, as its `initialize` gives them (`flottille-claude-bridge` and Flottille's version). |
 | `taken` | `{"model", "effort", "mode"}`: what the agent took. |
 
 #### `agent.prompted`
@@ -206,10 +206,11 @@ The agent compacted its context.
 The agent's plan (`entries`), its context use (`used` and `size` in tokens, `cost`), its mode
 (`mode`), its options (`options`, as ACP gives them). Each with `agent` and `replay`.
 
-#### `agent.provider_wait`, `agent.provider_limit`
+#### `agent.provider_wait`, `agent.provider_limit`, `agent.provider_error`
 
-The provider makes the agent wait, or refuses it for a limit (`message`, when it says one). Each
-with `agent` and `replay`.
+The provider makes the agent wait, refuses it for a limit, or fails its turn for another reason
+once its retries are spent (`message`, when it says one). Each with `agent` and `replay`. A limit
+or an error ends the turn (`agent.turn_ended`): the agent lives on and takes the next message.
 
 #### `agent.permission_answered`
 

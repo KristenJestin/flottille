@@ -19,7 +19,7 @@ and the tree's tools (`agent_*`, `report`, `ask_user` or `ask_parent`, `approval
   `localhost:<port>`, and an `Origin`, when there is one, `http://` with one of them; anything
   else gets 403.
 - **Tokens**: each start of an agent's process mints a token for it (32 random bytes,
-  base64url), handed to the adapter in the `Authorization: Bearer <token>` header of the
+  base64url), handed to the agent in the `Authorization: Bearer <token>` header of the
   session's MCP server. Only its SHA-256 digest is kept, in memory. Minting a token revokes the
   agent's previous one, and the process's end revokes it. The token of a session that was
   replaced (`docs/agents.md`) is kept instead, so that its late calls are told why: every one is

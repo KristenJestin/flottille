@@ -68,6 +68,50 @@ impl User {
             .with_env("FLOTTILLE_FAKE_AGENT_DIR", dir.to_str().unwrap())
     }
 
+    /// A user whose agents run through Flottille's Claude bridge in front of the fake `claude`
+    /// (`crates/flottille-fake-claude`): `bin/claude` first in `PATH`, its folder `claude`.
+    pub fn with_fake_claude() -> User {
+        let user = User::new();
+        std::fs::create_dir(user.path("claude")).unwrap();
+        std::fs::create_dir(user.path("bin")).unwrap();
+        std::os::unix::fs::symlink(fake_claude(), user.path("bin/claude")).unwrap();
+        // The test's own PATH after it, without `/usr/bin` forced in: a run on a PATH without
+        // `node` shows that nothing needs it.
+        let path = format!(
+            "{}:{}",
+            user.path("bin").display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let dir = user.path("claude");
+        user.with_env("PATH", &path)
+            .with_env("FLOTTILLE_FAKE_CLAUDE_DIR", dir.to_str().unwrap())
+    }
+
+    /// The fake `claude`'s script.
+    pub fn claude_script(&self, script: Value) {
+        std::fs::write(self.path("claude/script.json"), script.to_string()).unwrap();
+    }
+
+    /// What the fake `claude` was started with and read, one entry per line of its record.
+    pub fn claude_received(&self) -> Vec<Value> {
+        match std::fs::read_to_string(self.path("claude/received.jsonl")) {
+            Ok(text) => text
+                .split_inclusive('\n')
+                .filter(|line| line.ends_with('\n'))
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// How each fake `claude` was started, the first first.
+    pub fn claude_starts(&self) -> Vec<Value> {
+        self.claude_received()
+            .into_iter()
+            .filter_map(|entry| entry.get("started").cloned())
+            .collect()
+    }
+
     /// The fake agent's script (`crates/flottille-fake-agent`).
     pub fn fake_script(&self, script: Value) {
         std::fs::write(self.path("fake/script.json"), script.to_string()).unwrap();
@@ -281,6 +325,25 @@ pub fn fake_agent() -> PathBuf {
     assert!(
         path.exists(),
         "{} is missing: run the tests from the workspace's root, or `cargo build -p flottille-fake-agent` first",
+        path.display()
+    );
+    path
+}
+
+/// A program of the test's own PATH, as a shell would find it.
+pub fn program(name: &str) -> PathBuf {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join(name))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| panic!("{name} is not on PATH"))
+}
+
+/// The fake `claude`'s binary, built beside Flottille's as the fake agent is.
+pub fn fake_claude() -> PathBuf {
+    let path = Path::new(env!("CARGO_BIN_EXE_flottille")).with_file_name("flottille-fake-claude");
+    assert!(
+        path.exists(),
+        "{} is missing: run the tests from the workspace's root, or `cargo build -p flottille-fake-claude` first",
         path.display()
     );
     path

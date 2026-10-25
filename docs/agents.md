@@ -1,7 +1,8 @@
 # Agents
 
-An agent is one agent session, run over ACP (`docs/design.md` §4): a Claude Code adapter process
-that Flottille starts, talks to on its stdio, and owns. It works in a place (the project folder
+An agent is one agent session, run over ACP (`docs/design.md` §4): a process of Flottille's own
+Claude bridge, in front of the user's `claude`, that Flottille starts, talks to on its stdio, and
+owns. It works in a place (the project folder
 itself, `main`, or one of its workspaces) and runs in bare mode: no built-in tool, no user or
 project setting, no skill, no plugin, no MCP server but Flottille's. It follows
 `docs/reference/hemera.md` §1 and §2.
@@ -15,7 +16,6 @@ woken only by deliveries. Flottille's MCP server and its tools are in `docs/tool
 |---|---|
 | `flottille agent run <project> [--workspace <name>] [--model <model>] <message>` | Starts a Claude agent with a first message and prints its reply as it comes, until the turn ends. Fails when the agent fails or its process dies. `--json` prints the agent instead, once the turn ended. |
 | `flottille agent show <agent> [--json]` | The agent and its conversation. |
-| `flottille agent install` | Installs the Claude adapter at the version this Flottille runs. |
 | `flottille doctor [--json]` | Whether Claude agents can run here. Fails when they cannot. |
 
 `agent run` starts a root and follows its first turn; `agent start`, `send`, `read`, `stop`, `list`
@@ -25,35 +25,32 @@ Flottille: all of them are in `docs/cli.md`. The protocol has the rest (`agent.c
 
 ## What the machine needs
 
-- **Node**, on `PATH`: the adapter runs on it.
-- **The user's own `claude`**, on `PATH` and signed in by the user. Flottille provides no login of
-  its own and never reads, copies or prints the user's credentials: `flottille doctor` checks
-  that the login file (`$CLAUDE_CONFIG_DIR/.credentials.json`, else `~/.claude/.credentials.json`)
-  exists, without opening it. On macOS the login is in the Keychain and there is no file.
-- **The adapter** `@agentclientprotocol/claude-agent-acp`, at the version Flottille pins
-  (0.95.0), installed by `flottille agent install`: `npm install --prefix
-  $XDG_DATA_HOME/flottille/adapters/claude` of that version, without its optional packages (the
-  SDK's own copy of Claude Code: the user's `claude` is the one run) and without install scripts.
-  Flottille never uses `npx`.
+Only **the user's own `claude`**, on `PATH`, signed in by the user or given `ANTHROPIC_API_KEY`.
+Nothing else is installed: the bridge that speaks ACP in front of it is Flottille's own binary
+(below). Flottille provides no login of its own and never reads, copies or prints the user's
+credentials: `flottille doctor` checks that the login file (`$CLAUDE_CONFIG_DIR/.credentials.json`,
+else `~/.claude/.credentials.json`) exists, without opening it, or that `ANTHROPIC_API_KEY` is set,
+without printing it. On macOS the login is in the Keychain and there is no file.
 
-`flottille doctor` reports each of them: Node and its version, `claude` with its path and version
-(`claude --version`, given 5 s), whether the login file is there, the adapter's version beside
-the pinned one. `agent.run` is refused with a sentence saying what to do while the adapter is not
-installed, Node or `claude` is not on `PATH`.
+`flottille doctor` reports `claude` with its path and version (`claude --version`, given 5 s),
+beside the version this Flottille was checked against (2.1.295): another version is a warning that
+names both, not a failure, since the stream-json mode the bridge speaks may have changed. It
+fails while `claude` is not on `PATH` or neither the login file nor the key is there. `agent.run`
+is refused with a sentence saying what to do while `claude` is not on `PATH`.
 
 ## How an agent runs
 
-- **The process**: `node <the adapter's program>` (the `bin` of its `package.json`), in the
-  agent's folder, in a process group of its own, with the daemon's environment less what it has
-  no business with (below), plus `CLAUDE_CODE_EXECUTABLE` set to the user's `claude`. Its stderr
-  goes to the daemon's log, masked; its stdout is the protocol.
+- **The process**: `flottille bridge claude` (the daemon's own binary, "The Claude bridge",
+  below), in the agent's folder, in a process group of its own, with the daemon's environment
+  less what it has no business with (below). The `claude` it starts is in the same group. Its
+  stderr, and `claude`'s, go to the daemon's log, masked; its stdout is the protocol.
 - **The handshake**: `initialize` with ACP v1, the client named `Flottille`, and no `fs` or
   `terminal` capability (the agent has no built-in file or terminal tool) nor `subagents` (no
   native sub-agent). It declares the `jetbrains.air` extension with `recommendedValue` (a
   "default" option value is named) and `sessionFailure` (provider waits and limits are reported).
 - **The session**, opened with the agent's folder as `cwd`, Flottille's MCP server only, and the
   bare options in `_meta`, in this order: `session/resume` when the agent has a session id and
-  the adapter resumes; else `session/load` when it loads; else `session/new`. The session id is
+  the bridge resumes; else `session/load` when it loads; else `session/new`. The session id is
   kept: a process started again opens the same session.
 - **The options**: the model, the effort (`thought_level`) and the mode the user chose, in this
   order, each set with `session/set_config_option` and checked: an option the agent does not
@@ -88,7 +85,7 @@ installed, Node or `claude` is not on `PATH`.
 ## Bare mode for Claude
 
 `_meta.claudeCode.options` of `session/new`, `session/load` and `session/resume`, which the
-adapter passes to the Claude Agent SDK over its own defaults:
+bridge sets on `claude` ("The Claude bridge", below):
 
 ```json
 {
@@ -117,7 +114,7 @@ adapter passes to the Claude Agent SDK over its own defaults:
   `approval_answer`; a root `ask_user`, a child `ask_parent`. A root gets, in this order, the
   first nine, the five `agent_*`, `report`, `ask_user`, `approval_answer` (17). The list is
   frozen in the agent when it is created (the prompt cache depends on it).
-- `settingSources: []`: the adapter's own default loads the user's settings, hooks, plugins,
+- `settingSources: []`: Claude Code's own default loads the user's settings, hooks, plugins,
   skills and instruction files; this overrides it.
 - `strictMcpConfig`: only the MCP servers given with the session.
 - `systemPrompt`: the agent's instructions, frozen when it is created, split at the cache
@@ -130,6 +127,82 @@ adapter passes to the Claude Agent SDK over its own defaults:
 The MCP servers of the session are Flottille's alone: one HTTP server named `flottille`, the
 daemon's own (`docs/tools.md`), with the token of the agent's process in an `Authorization`
 header. Each start of the process mints a new token, which revokes the last; its end revokes it.
+
+## The Claude bridge
+
+`flottille bridge claude` (hidden from `--help`) is an ACP agent on stdio, written in Rust inside
+Flottille's binary, which drives the user's `claude` in its stream-json mode, as the version of
+`claude` it was checked against (2.1.295) speaks it. The daemon stays a plain ACP client: it
+starts the bridge as it would start any ACP agent, and the bridge translates. It decides nothing:
+the bare mode is the daemon's options, which the bridge refuses when they are not bare
+(`tools` or `settingSources` not empty, `strictMcpConfig` not set, an option it does not know, an
+MCP server that is not HTTP), and Claude's own permission prompts are the daemon's to answer. One
+bridge runs one session.
+
+- **`claude` is started** without a shell, in the session's `cwd`, with the bridge's environment,
+  the options' `env` and `CLAUDE_CODE_ENTRYPOINT=sdk-rs`, and exactly these arguments:
+  `--output-format stream-json --verbose --input-format stream-json --include-partial-messages
+  --permission-prompt-tool=stdio --tools= --setting-sources= --strict-mcp-config
+  --allowedTools=<the tools, comma-separated> --mcp-config <file>`, then
+  `--session-id=<a new UUID>` for `session/new`, or `--resume=<id>` for a resume or a load.
+- **The MCP configuration** (`{"mcpServers": {"flottille": {"type": "http", "url", "headers"}}}`)
+  is a file only the user can read, `$XDG_RUNTIME_DIR/flottille/bridge/<the bridge's pid>.mcp.json`,
+  removed when the bridge ends: the token never shows on a command line, which other users can
+  read. A bridge killed before it could remove it leaves it to the daemon, which removes it once
+  the bridge's process group is gone, and removes any left at its start.
+- **The system prompt**, split at the cache boundary, goes in Claude Code's own `initialize`
+  control request (`systemPrompt: [before, boundary, after]`, `systemPromptSnapshot: true`), as
+  the official Agent SDK sends it. The session opens once `claude` answered it; a `claude` that
+  ends before (a resume of a session it does not know) fails the open.
+- **What `claude` says**, mapped to ACP updates: stream deltas of text and thinking become
+  `agent_message_chunk` and `agent_thought_chunk` (the whole message that follows does not repeat
+  them); a `tool_use` becomes a `tool_call` (`in_progress`, the tool's name as its title and in
+  `_meta.claudeCode.toolName`, its input as `rawInput`) whose id is the tool use's, the one
+  `claude` gives Flottille's MCP server as `claudecode/toolUseId`; a `tool_result` its
+  `tool_call_update` (`completed` or `failed`); a `compact_boundary` a completed `tool_call` with
+  `_meta.contextCompaction`; an `api_retry` a `session_info_update` with a `jetbrains.air`
+  `sessionFailure` of severity `warning` (a provider wait). A sub-agent's messages
+  (`parent_tool_use_id` set) are ignored: there is none in bare mode.
+- **A prompt** is its text blocks, parted by a blank line; any other block is refused, as
+  `initialize` says (`embeddedContext: false`).
+- **A line of `claude`'s output** that is not JSON, or not UTF-8, is skipped.
+- **A turn** is one `user` message written to `claude`; its `result` ends it: first a
+  `usage_update` (the context in use, as the last message or compaction said, the model's
+  context window, and the cost in USD of this `claude` process so far: it counts from zero again
+  in each process, after a release or a replacement, and is not the session's), then the prompt's answer with its usage and its stop reason:
+  `cancelled` after a cancel, `refusal` or `max_tokens` as `claude` says, `max_turn_requests` for
+  a result `error_max_turns`, `error_max_budget_usd` or `error_max_structured_output_retries`,
+  `end_turn` otherwise. A result that is an error ends the turn `end_turn` too, after a
+  `session_info_update` with a `jetbrains.air` `sessionFailure` of severity `error` and its text:
+  category `limit` when the provider refused it for a limit (a `rate_limit_event` rejected, an
+  error `rate_limit`, `billing_error` or `account_on_hold`, or Claude Code's own message for a
+  spent usage), `service` otherwise. The session lives on, as with Claude Code's own ACP
+  adapter. Only a signed-out `claude` (`Please run /login`, an error `authentication_failed`)
+  fails the prompt, and so the agent: it cannot go on until the user signs in again.
+- **A cancel** (`session/cancel`) is an `interrupt` control request.
+- **Claude's permission prompts** (`can_use_tool`) become `session/request_permission` (the tool
+  in `_meta.claudeCode.toolName`, the tool use's id, options `allow_once` and `reject_once`); the
+  answer allows the call with its input unchanged, or denies it. In bare mode they should almost
+  never come: Flottille's tools are pre-allowed.
+- **The model** is an option (`model`) whose values are the `models` of `claude`'s answer to
+  `initialize` (their `value`, `default` first when it does not list it), set with a `set_model`
+  control request; a value it did not list is refused with the list.
+- **The effort** is an option (`effort`, category `thought_level`) when the model set has effort
+  levels (`supportsEffort`, `supportedEffortLevels` in the same answer): `default` and those
+  levels, set with an `apply_flag_settings` control request (`effortLevel`, `null` for
+  `default`), the session's own flag layer, as `--effort` would. A model without the level set
+  takes `default` back. There is no mode option: `agent.start` refuses a `mode`, since a
+  permission mode of Claude Code's could only loosen Flottille's gate.
+- **Resume and load**: both start `claude` with `--resume`. A load first replays the session's
+  history, the texts of its prompts, replies and thoughts, which the bridge keeps in
+  `$XDG_STATE_HOME/flottille/bridge/claude/<session>.jsonl` (it never reads Claude Code's own
+  files): one line per message, its secrets masked as the daemon masks what it keeps, only its
+  later half kept past 4 MiB. The daemon removes it when the session is replaced or its agent
+  ends.
+- **A death**: once the session is open, the end of `claude` ends the bridge with its exit code
+  (128 and the signal for a signal), which the daemon sees as the agent's death.
+- **Its end**: its input closed or a `SIGTERM`, the bridge closes `claude`'s input, kills it if
+  it is still there 2 s later, and removes the MCP configuration.
 
 ## The agent's environment
 
@@ -146,7 +219,7 @@ maintainer can revise.
   `CLAUDE_CODE_OAUTH_TOKEN`.
 - **The user's Claude Code settings**, which would change the agent Flottille specifies:
   `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `ANTHROPIC_DEFAULT_*_MODEL`, `CLAUDE_CODE_*`
-  (Flottille sets `CLAUDE_CODE_EXECUTABLE` itself, and the bare options carry the others it needs;
+  (the bare options carry the ones Flottille needs;
   the prompt cache lifetime, `CLAUDE_CODE_PROMPT_CACHE_TTL`, is among them), `DISABLE_*`,
   `MAX_THINKING_TOKENS`, `FORCE_PROMPT_CACHING_5M`.
 
@@ -248,13 +321,16 @@ Every 5 seconds, the daemon looks at what only time decides:
 
 ## For tests and development
 
-- `FLOTTILLE_AGENT_COMMAND`: a program the daemon runs in place of Node and the adapter, with no
+- `FLOTTILLE_AGENT_COMMAND`: a program the daemon runs in place of the Claude bridge, with no
   argument. The tests run the fake ACP agent this way (`crates/flottille-fake-agent`, whose
-  script format is documented in its source).
+  script format is documented in its source). The bridge itself is tested in front of a fake
+  `claude` (`crates/flottille-fake-claude`), first in `PATH`.
+- `FLOTTILLE_BRIDGE_NO_RESUME`: set (to anything), the bridge does not offer `session/resume`, so
+  that the daemon loads its sessions; the tests reach the load this way.
 - `FLOTTILLE_IDLE_RELEASE_MS`: the idle release time, in milliseconds, in place of 5 minutes.
 - `FLOTTILLE_TEST_CLOCK`: set (to anything), the daemon answers `test.advance {"ms"}` on its
   socket: its clock moves that far ahead, and the sweep runs at once. The tests see minutes pass
   this way without waiting for them. Without it, `test.advance` is an unknown method.
 
-All three are read by the daemon from its environment, which is the environment of the command that
+All of them are read by the daemon (or the bridge it starts) from its environment, which is the environment of the command that
 started it.
