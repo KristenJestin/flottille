@@ -1435,6 +1435,7 @@ pub struct SessionRail {
     marks: HashMap<String, (Entity<StateIcon>, Entity<Pill>)>,
     selected: String,
     workspace: Option<String>,
+    project: String,
     place: Option<PlaceFacts>,
     renders: usize,
 }
@@ -1447,6 +1448,7 @@ impl SessionRail {
             marks: HashMap::new(),
             selected: root,
             workspace: opened.place.clone(),
+            project: opened.project.clone(),
             place: None,
             renders: 0,
         }
@@ -1523,21 +1525,58 @@ impl Render for SessionRail {
                     ))
                 })
                 .child(
-                    ListRow::new(
-                        ElementId::Name(format!("rail-row-{}", agent.id).into()),
-                        SharedString::from(agent.name.clone()),
-                    )
-                    .leading(mark)
-                    .when_some(agent.model.clone(), |row, model| {
-                        row.detail(SharedString::from(model))
-                    })
-                    .trailing(pill)
-                    .selected(agent.id == self.selected)
-                    .on_click(move |_, _, cx| {
-                        if let Some(page) = page.upgrade() {
-                            page.update(cx, |page, cx| page.select(&target, cx));
-                        }
-                    }),
+                    // The name over the model: a rail is too narrow for both on one line.
+                    div()
+                        .id(ElementId::Name(format!("rail-row-{}", agent.id).into()))
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .px(px(10.))
+                        .py(px(6.))
+                        .rounded(px(8.))
+                        .cursor_pointer()
+                        .when(agent.id == self.selected, |d| d.bg(p.card2))
+                        .when(agent.id != self.selected, |d| d.hover(|s| s.bg(p.hover)))
+                        .child(
+                            div()
+                                .w(px(16.))
+                                .flex_none()
+                                .flex()
+                                .justify_center()
+                                .child(mark),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .child(
+                                    div()
+                                        .medium()
+                                        .text_size(px(13.))
+                                        .text_ellipsis()
+                                        .overflow_hidden()
+                                        .child(SharedString::from(agent.name.clone())),
+                                )
+                                .when_some(agent.model.clone(), |d, model| {
+                                    d.child(
+                                        div()
+                                            .mono(11.)
+                                            .text_color(p.faint)
+                                            .text_ellipsis()
+                                            .overflow_hidden()
+                                            .child(SharedString::from(model)),
+                                    )
+                                }),
+                        )
+                        .child(div().flex_none().child(pill))
+                        .on_click(move |_, _, cx| {
+                            if let Some(page) = page.upgrade() {
+                                page.update(cx, |page, cx| page.select(&target, cx));
+                            }
+                        })
+                        .test_support(),
                 )
                 .test_support()
         });
@@ -1560,7 +1599,7 @@ impl Render for SessionRail {
                     RepositoryFacts::Branch(Some(branch)) => branch.clone(),
                     RepositoryFacts::Branch(None) => "no branch".to_owned(),
                 };
-                (path.clone(), said)
+                (crate::project::repository_label(&self.project, path), said)
             })
             .collect();
         let mut facts: Vec<(&str, String)> = Vec::new();
