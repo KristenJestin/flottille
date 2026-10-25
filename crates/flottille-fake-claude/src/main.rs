@@ -21,6 +21,8 @@
 //! {"turns": [{"when": "hello", "do": [{"think": "a greeting"}, {"say": "Hello!"}]}]}
 //! ```
 //!
+//! `models`, when given, replaces the models the answer to `initialize` lists (`MODELS`).
+//!
 //! A prompt plays the first turn whose `when` is in its text; a prompt matching none is answered
 //! `ok`. A turn ends with a `result` message: `"stop_reason"` (`end_turn` by default), `"subtype"`
 //! (`success` by default) and `"error"` (a text: the result is an error) shape it.
@@ -51,6 +53,19 @@ use serde_json::{Map, Value, json};
 /// The version the bridge was checked against: `claude --version` prints it.
 const VERSION: &str = "2.1.295";
 const MODEL: &str = "claude-fake-1";
+
+/// The models the answer to `initialize` lists, as Claude Code describes them.
+fn models() -> Value {
+    json!([
+        {"value": "default", "displayName": "Default (recommended)",
+            "description": "The model Claude Code picks", "supportsEffort": true,
+            "supportedEffortLevels": ["low", "medium", "high", "xhigh"]},
+        {"value": "fable", "displayName": "Fable", "description": "The largest",
+            "supportsEffort": true,
+            "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"]},
+        {"value": "haiku", "displayName": "Haiku", "description": "The fastest"}
+    ])
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -96,6 +111,7 @@ fn main() {
     let interrupted = Arc::new(Mutex::new(false));
     let out = Arc::new(Mutex::new(std::io::stdout()));
     let reader = Reader {
+        models: script.get("models").cloned().unwrap_or_else(models),
         record: record.clone(),
         out: out.clone(),
         interrupted: interrupted.clone(),
@@ -151,6 +167,7 @@ fn send(out: &Mutex<std::io::Stdout>, message: Value) {
 }
 
 struct Reader {
+    models: Value,
     record: Record,
     out: Arc<Mutex<std::io::Stdout>>,
     interrupted: Arc<Mutex<bool>>,
@@ -174,13 +191,20 @@ impl Reader {
                     let _ = answers.send(message);
                 }
                 Some("control_request") => {
-                    if message["request"]["subtype"] == "interrupt" {
-                        *self.interrupted.lock().unwrap() = true;
+                    let mut answer = json!({});
+                    match message["request"]["subtype"].as_str() {
+                        Some("interrupt") => *self.interrupted.lock().unwrap() = true,
+                        Some("initialize") => {
+                            answer = json!({"commands": [], "agents": [], "output_style": "default",
+                                "available_output_styles": ["default"], "models": self.models,
+                                "account": {}});
+                        }
+                        _ => {}
                     }
                     send(
                         &self.out,
                         json!({"type": "control_response", "response": {
-                            "subtype": "success", "request_id": message["request_id"], "response": {}}}),
+                            "subtype": "success", "request_id": message["request_id"], "response": answer}}),
                     );
                 }
                 _ => {}

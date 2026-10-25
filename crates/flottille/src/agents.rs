@@ -228,6 +228,14 @@ fn refuse_empty(message: &str) -> Result<(), Failure> {
 fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
     let project = projects::load_project(daemon, &asked.project)?;
     refuse_empty(&asked.message)?;
+    // Claude Code's permission modes decide which of its calls run unasked: in bare mode every
+    // call goes through Flottille's gate, which no mode may loosen.
+    if let Some(mode) = &asked.mode {
+        return Err(Failure::refused(format!(
+            "an agent takes no mode ({mode} was asked): Flottille's gate decides every tool call, \
+             and a permission mode of Claude Code's could only loosen it"
+        )));
+    }
     let role = roles::role(asked.role.as_deref().unwrap_or(roles::LEAD)).ok_or_else(|| {
         Failure::refused(format!(
             "there is no role {}: the roles are {}",

@@ -593,9 +593,40 @@ fn the_bridge_offers_load_and_resume_and_resume_can_be_withheld() {
     assert!(capabilities["sessionCapabilities"]["resume"].is_null());
 }
 
+/// The values an option of the answer offers, by its id.
+fn offered(answer: &Value, id: &str) -> Option<Vec<String>> {
+    let option = answer["configOptions"]
+        .as_array()?
+        .iter()
+        .find(|o| o["id"] == id)?;
+    Some(
+        option["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["value"].as_str().unwrap().to_owned())
+            .collect(),
+    )
+}
+
+fn current(answer: &Value, id: &str) -> Value {
+    answer["configOptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["id"] == id)
+        .map(|o| o["currentValue"].clone())
+        .unwrap_or_default()
+}
+
 #[test]
-fn the_model_is_an_option_set_on_claude() {
+fn the_models_offered_are_claude_s_own_and_an_unknown_one_is_refused_with_them() {
     let user = User::with_fake_claude();
+    user.claude_script(json!({"models": [
+        {"value": "default", "displayName": "Default (recommended)", "description": "d"},
+        {"value": "fable", "displayName": "Fable", "description": "f"},
+        {"value": "haiku", "displayName": "Haiku", "description": "h"}
+    ]}));
     let mut bridge = Bridge::start(&user);
     let (opened, _) = bridge.request("session/new", new_session(&user, &[]));
     let opened = opened.unwrap();
@@ -603,30 +634,96 @@ fn the_model_is_an_option_set_on_claude() {
     let model = &opened["configOptions"][0];
     assert_eq!(model["category"], "model");
     assert_eq!(model["currentValue"], "default");
-    let values: Vec<&str> = model["options"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|o| o["value"].as_str().unwrap())
-        .collect();
-    assert_eq!(values, ["default", "haiku", "sonnet", "opus"]);
+    assert_eq!(
+        offered(&opened, "model").unwrap(),
+        ["default", "fable", "haiku"]
+    );
+    assert_eq!(model["options"][1]["name"], "Fable");
 
     let (set, _) = bridge.request(
         "session/set_config_option",
-        json!({"sessionId": session, "configId": model["id"], "value": "haiku"}),
+        json!({"sessionId": session, "configId": "model", "value": "fable"}),
     );
 
-    assert_eq!(set.unwrap()["configOptions"][0]["currentValue"], "haiku");
+    assert_eq!(current(&set.unwrap(), "model"), "fable");
     let asked: Vec<Value> = written(&user, "control_request")
         .into_iter()
         .filter(|m| m["request"]["subtype"] == "set_model")
         .collect();
-    assert_eq!(asked[0]["request"]["model"], "haiku");
+    assert_eq!(asked[0]["request"]["model"], "fable");
     let (refused, _) = bridge.request(
         "session/set_config_option",
-        json!({"sessionId": session, "configId": model["id"], "value": "gpt"}),
+        json!({"sessionId": session, "configId": "model", "value": "opus"}),
     );
-    assert!(refused.is_err());
+    let refused = refused.unwrap_err();
+    assert!(
+        refused["message"]
+            .as_str()
+            .unwrap()
+            .contains("default, fable, haiku"),
+        "{refused}"
+    );
+}
+
+#[test]
+fn the_effort_is_an_option_of_the_model_set_on_claude() {
+    let user = User::with_fake_claude();
+    let mut bridge = Bridge::start(&user);
+    let (opened, _) = bridge.request("session/new", new_session(&user, &[]));
+    let opened = opened.unwrap();
+    let session = opened["sessionId"].as_str().unwrap().to_owned();
+    assert_eq!(
+        offered(&opened, "effort").unwrap(),
+        ["default", "low", "medium", "high", "xhigh"]
+    );
+    let effort = opened["configOptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["id"] == "effort")
+        .unwrap()
+        .clone();
+    assert_eq!(effort["category"], "thought_level");
+    assert_eq!(effort["currentValue"], "default");
+    let set = |bridge: &mut Bridge, id: &str, value: &str| {
+        bridge
+            .request(
+                "session/set_config_option",
+                json!({"sessionId": session, "configId": id, "value": value}),
+            )
+            .0
+    };
+    let flags = || -> Vec<Value> {
+        written(&user, "control_request")
+            .into_iter()
+            .filter(|m| m["request"]["subtype"] == "apply_flag_settings")
+            .map(|m| m["request"]["settings"].clone())
+            .collect()
+    };
+
+    let high = set(&mut bridge, "effort", "high").unwrap();
+
+    assert_eq!(current(&high, "effort"), "high");
+    assert_eq!(flags(), [json!({"effortLevel": "high"})]);
+    assert!(
+        set(&mut bridge, "effort", "max").is_err(),
+        "not the default model's"
+    );
+    let fable = set(&mut bridge, "model", "fable").unwrap();
+    assert_eq!(current(&fable, "effort"), "high", "fable takes it too");
+    assert!(
+        offered(&fable, "effort")
+            .unwrap()
+            .contains(&"max".to_owned())
+    );
+    // Haiku has no effort: the option goes, and the level set goes back to Claude's own.
+    let haiku = set(&mut bridge, "model", "haiku").unwrap();
+    assert!(offered(&haiku, "effort").is_none());
+    assert_eq!(
+        flags(),
+        [json!({"effortLevel": "high"}), json!({"effortLevel": null})]
+    );
+    assert!(set(&mut bridge, "effort", "low").is_err());
 }
 
 #[test]

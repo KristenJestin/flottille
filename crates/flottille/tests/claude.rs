@@ -376,6 +376,64 @@ fn through_the_bridge_a_provider_error_is_reported_and_the_agent_lives_on() {
     assert_eq!(show(&user, &id)["agent"]["state"], "idle");
 }
 
+#[test]
+fn through_the_bridge_an_agent_takes_the_model_and_the_effort_asked() {
+    let user = User::with_fake_claude();
+    project(&user);
+    let answer = user
+        .call(
+            "agent.start",
+            json!({"project": "app", "message": "hello", "model": "fable", "effort": "max"}),
+        )
+        .unwrap();
+    let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+
+    events_until(
+        &user,
+        &id,
+        answer["after"].as_u64().unwrap(),
+        "agent.turn_ended",
+    );
+
+    let taken = &show(&user, &id)["agent"]["taken"];
+    assert_eq!(taken["model"], "fable");
+    assert_eq!(taken["effort"], "max");
+    let asked: Vec<Value> = user
+        .claude_received()
+        .into_iter()
+        .filter_map(|e| e.get("received").cloned())
+        .filter(|m| m["type"] == "control_request")
+        .map(|m| m["request"].clone())
+        .filter(|r| r["subtype"] != "initialize")
+        .collect();
+    assert_eq!(
+        asked,
+        [
+            json!({"subtype": "set_model", "model": "fable"}),
+            json!({"subtype": "apply_flag_settings", "settings": {"effortLevel": "max"}})
+        ]
+    );
+}
+
+#[test]
+fn an_agent_asked_for_a_mode_is_refused_with_a_sentence() {
+    let user = User::with_fake_claude();
+    project(&user);
+
+    let refused = user
+        .call(
+            "agent.start",
+            json!({"project": "app", "message": "hello", "mode": "plan"}),
+        )
+        .unwrap_err();
+
+    assert_eq!(refused.0, "refused");
+    assert!(refused.1.contains("mode"), "{}", refused.1);
+    let listed = user.call("agent.list", Value::Null).unwrap();
+    assert_eq!(listed["agents"], json!([]), "an agent was created");
+    assert!(user.claude_starts().is_empty());
+}
+
 /// The bridge's history of the agent's session, once its session is open.
 fn history(user: &User, agent: &str) -> PathBuf {
     let native = show(user, agent)["agent"]["native_id"]

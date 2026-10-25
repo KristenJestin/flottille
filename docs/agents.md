@@ -179,8 +179,15 @@ bridge runs one session.
   in `_meta.claudeCode.toolName`, the tool use's id, options `allow_once` and `reject_once`); the
   answer allows the call with its input unchanged, or denies it. In bare mode they should almost
   never come: Flottille's tools are pre-allowed.
-- **The model** is the session's one option (`model`: `default`, `haiku`, `sonnet`, `opus`), set
-  with a `set_model` control request. There is no effort or mode option.
+- **The model** is an option (`model`) whose values are the `models` of `claude`'s answer to
+  `initialize` (their `value`, `default` first when it does not list it), set with a `set_model`
+  control request; a value it did not list is refused with the list.
+- **The effort** is an option (`effort`, category `thought_level`) when the model set has effort
+  levels (`supportsEffort`, `supportedEffortLevels` in the same answer): `default` and those
+  levels, set with an `apply_flag_settings` control request (`effortLevel`, `null` for
+  `default`), the session's own flag layer, as `--effort` would. A model without the level set
+  takes `default` back. There is no mode option: `agent.start` refuses a `mode`, since a
+  permission mode of Claude Code's could only loosen Flottille's gate.
 - **Resume and load**: both start `claude` with `--resume`. A load first replays the session's
   history, the texts of its prompts, replies and thoughts, which the bridge keeps in
   `$XDG_STATE_HOME/flottille/bridge/claude/<session>.jsonl` (it never reads Claude Code's own

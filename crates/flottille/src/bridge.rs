@@ -27,9 +27,6 @@ use tokio::sync::mpsc;
 use crate::VERSION;
 use crate::claude;
 
-/// The models a session offers, as `claude` names them; `default` leaves the choice to it.
-const MODELS: [&str; 4] = ["default", "haiku", "sonnet", "opus"];
-
 /// The options of `_meta.claudeCode.options` the bridge takes; any other is refused.
 const OPTIONS: [&str; 6] = [
     "tools",
@@ -117,7 +114,11 @@ struct Claude {
     /// The MCP configuration file, removed with the process.
     config: PathBuf,
     history: PathBuf,
+    /// The models its answer to `initialize` listed, each with its effort levels.
+    models: Vec<Value>,
     model: String,
+    /// The effort level set, `default` for Claude Code's own.
+    effort: String,
     open: bool,
     /// The model's context window, once a result named it.
     window: Option<u64>,
@@ -150,11 +151,15 @@ enum Waiting {
     Open {
         id: Value,
         replay: bool,
-        answer: Value,
+        new: bool,
     },
     Model {
         id: Value,
         model: String,
+    },
+    Effort {
+        id: Value,
+        effort: String,
     },
     Nothing,
 }
@@ -370,22 +375,20 @@ impl Bridge {
             session: session.clone(),
             config,
             history,
+            models: Vec::new(),
             model: "default".into(),
+            effort: "default".into(),
             open: false,
             window: None,
         });
         self.from_claude = Some(receiver);
-        let mut answer = json!({"configOptions": model_option("default")});
-        if new {
-            answer["sessionId"] = session.into();
-        }
         self.control(
             json!({"subtype": "initialize", "systemPrompt": options.prompt,
                 "systemPromptSnapshot": options.snapshot}),
             Waiting::Open {
                 id: id.clone(),
                 replay: method == "session/load",
-                answer,
+                new,
             },
         )
         .await;
@@ -393,32 +396,38 @@ impl Bridge {
     }
 
     async fn set_option(&mut self, id: &Value, params: &Value) -> Result<Option<Value>, Failure> {
-        if !self.claude.as_ref().is_some_and(|c| c.open) {
+        let Some(claude) = self.claude.as_ref().filter(|c| c.open) else {
             return Err((INVALID, "no session is open".into()));
-        }
-        if params["configId"] != "model" {
-            return Err((INVALID, format!("no option {}", params["configId"])));
-        }
-        let model = params["value"].as_str().unwrap_or_default();
-        if !MODELS.contains(&model) {
+        };
+        let option = params["configId"].as_str().unwrap_or_default();
+        let value = params["value"].as_str().unwrap_or_default().to_owned();
+        let offered = match option {
+            "model" => model_values(&claude.models),
+            "effort" => effort_levels(&claude.models, &claude.model)
+                .ok_or((INVALID, format!("the model {} has no effort", claude.model)))?,
+            _ => return Err((INVALID, format!("no option {option}"))),
+        };
+        if !offered.contains(&value) {
             return Err((
                 INVALID,
-                format!("{model} is not a model offered: {}", MODELS.join(", ")),
+                format!("{value} is not a {option} offered: {}", offered.join(", ")),
             ));
         }
-        // Without a model, `claude` goes back to its own choice.
-        let mut request = json!({"subtype": "set_model"});
-        if model != "default" {
-            request["model"] = model.into();
-        }
-        self.control(
-            request,
-            Waiting::Model {
-                id: id.clone(),
-                model: model.to_owned(),
-            },
-        )
-        .await;
+        let id = id.clone();
+        let (request, waiting) = if option == "model" {
+            // Without a model, `claude` goes back to its own choice.
+            let mut request = json!({"subtype": "set_model"});
+            if value != "default" {
+                request["model"] = value.clone().into();
+            }
+            (request, Waiting::Model { id, model: value })
+        } else {
+            (
+                effort_request(&value),
+                Waiting::Effort { id, effort: value },
+            )
+        };
+        self.control(request, waiting).await;
         Ok(None)
     }
 
@@ -563,7 +572,7 @@ impl Bridge {
                 .to_owned()
         });
         match waiting {
-            Waiting::Open { id, replay, answer } => {
+            Waiting::Open { id, replay, new } => {
                 if let Some(error) = refused {
                     self.claude = None;
                     self.from_claude = None;
@@ -572,21 +581,53 @@ impl Bridge {
                 if replay {
                     self.replay().await;
                 }
-                if let Some(claude) = &mut self.claude {
-                    claude.open = true;
+                let Some(claude) = &mut self.claude else {
+                    return;
+                };
+                claude.open = true;
+                claude.models = response["response"]["models"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                let mut answer = json!({"configOptions": config_options(claude)});
+                if new {
+                    answer["sessionId"] = claude.session.clone().into();
                 }
                 self.answer(id, answer).await;
             }
-            Waiting::Model { id, model } => match refused {
-                Some(error) => self.fail(id, (INVALID, error)).await,
-                None => {
-                    if let Some(claude) = &mut self.claude {
-                        claude.model = model.clone();
-                    }
-                    self.answer(id, json!({"configOptions": model_option(&model)}))
+            Waiting::Model { id, model } => {
+                if let Some(error) = refused {
+                    return self.fail(id, (INVALID, error)).await;
+                }
+                let Some(claude) = &mut self.claude else {
+                    return;
+                };
+                claude.model = model;
+                // A level the new model does not have goes back to Claude Code's own.
+                let kept = effort_levels(&claude.models, &claude.model)
+                    .is_some_and(|levels| levels.contains(&claude.effort));
+                let reset = !kept && claude.effort != "default";
+                if !kept {
+                    claude.effort = "default".into();
+                }
+                let options = config_options(claude);
+                if reset {
+                    self.control(effort_request("default"), Waiting::Nothing)
                         .await;
                 }
-            },
+                self.answer(id, json!({"configOptions": options})).await;
+            }
+            Waiting::Effort { id, effort } => {
+                if let Some(error) = refused {
+                    return self.fail(id, (INVALID, error)).await;
+                }
+                let Some(claude) = &mut self.claude else {
+                    return;
+                };
+                claude.effort = effort;
+                let options = config_options(claude);
+                self.answer(id, json!({"configOptions": options})).await;
+            }
             Waiting::Nothing => {}
         }
     }
@@ -994,13 +1035,75 @@ fn arguments(options: &Options, config: &Path, new: bool, session: &str) -> Vec<
     args
 }
 
-fn model_option(current: &str) -> Value {
-    let options: Vec<Value> = MODELS
+/// The session's options: the models `claude` listed, and the effort levels of the one set when
+/// it has any.
+fn config_options(claude: &Claude) -> Value {
+    let mut models: Vec<Value> = claude
+        .models
         .iter()
-        .map(|model| json!({"value": model, "name": model}))
+        .filter_map(|model| {
+            let value = model["value"].as_str()?;
+            let name = model["displayName"].as_str().unwrap_or(value);
+            Some(json!({"value": value, "name": name}))
+        })
         .collect();
-    json!([{"id": "model", "name": "Model", "category": "model", "type": "select",
-        "currentValue": current, "options": options}])
+    if !models.iter().any(|m| m["value"] == "default") {
+        models.insert(0, json!({"value": "default", "name": "Default"}));
+    }
+    let mut options = vec![
+        json!({"id": "model", "name": "Model", "category": "model", "type": "select",
+        "currentValue": claude.model, "options": models}),
+    ];
+    if let Some(levels) = effort_levels(&claude.models, &claude.model) {
+        let levels: Vec<Value> = levels
+            .iter()
+            .map(|level| json!({"value": level, "name": level}))
+            .collect();
+        options.push(
+            json!({"id": "effort", "name": "Effort", "category": "thought_level",
+            "type": "select", "currentValue": claude.effort, "options": levels}),
+        );
+    }
+    Value::Array(options)
+}
+
+/// The models offered, `default` first when `claude` did not list it.
+fn model_values(models: &[Value]) -> Vec<String> {
+    let mut values: Vec<String> = models
+        .iter()
+        .filter_map(|m| m["value"].as_str().map(str::to_owned))
+        .collect();
+    if !values.iter().any(|v| v == "default") {
+        values.insert(0, "default".into());
+    }
+    values
+}
+
+/// The effort levels of a model, `default` first; `None` for a model without any.
+fn effort_levels(models: &[Value], model: &str) -> Option<Vec<String>> {
+    let model = models.iter().find(|m| m["value"] == model)?;
+    let levels: Vec<String> = model["supportedEffortLevels"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|l| l.as_str().map(str::to_owned))
+        .collect();
+    (model["supportsEffort"] == true && !levels.is_empty()).then(|| {
+        std::iter::once("default".to_owned())
+            .chain(levels)
+            .collect()
+    })
+}
+
+/// Sets the session's effort on `claude`'s flag layer, as `--effort` would; `null` goes back to
+/// its own.
+fn effort_request(effort: &str) -> Value {
+    let level = if effort == "default" {
+        Value::Null
+    } else {
+        effort.into()
+    };
+    json!({"subtype": "apply_flag_settings", "settings": {"effortLevel": level}})
 }
 
 /// A file only the user can read, for the token it holds.
