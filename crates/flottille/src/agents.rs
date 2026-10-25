@@ -380,7 +380,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         brief: Some(new.brief),
         reported_at: None,
         quiet_turns: 0,
-        waiting_on_parent: false,
+        waiting_on_answer: false,
     };
     daemon.write(|store| {
         let event = store.create_agent(

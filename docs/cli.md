@@ -33,8 +33,8 @@ The daemon stopped.
 
 ### `flottille status`
 
-The daemon's version, uptime and counts of agents: running, waiting for you (a request you hold),
-failed. `--json` prints `daemon.status`.
+The daemon's version, uptime and counts of agents: running, waiting for you (a request you hold,
+or a root's question you have not answered), failed. `--json` prints `daemon.status`.
 
 ```
 $ flottille status
@@ -308,7 +308,7 @@ What your **root** agents sent you, oldest first. An entry is one of:
 | Kind | What it is | The event it comes from |
 |---|---|---|
 | `report` | the root called `report`: it is done, and says what it did | `agent.reported` |
-| `question` | the root called `ask_user`: it asks you something and goes on without waiting; answer it with `flottille agent send` | `agent.asked` (`to` is `user`) |
+| `question` | the root called `ask_user`: it asks you something and goes on without waiting; answer it with `flottille agent send`, which ends its wait for you | `agent.asked` (`to` is `user`) |
 | `failure` | the root cannot go on: its process could not start, its session could not open, an option it was asked is not one it offers, it was replaced too often (twice in 30 minutes), or its new workspace could not be prepared (`docs/events.md` also lists "its parent failed", which only concerns a child) | `agent.failed` |
 
 A child's report, question or failure goes to its parent, never to the inbox. The requests a gate

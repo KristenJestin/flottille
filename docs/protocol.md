@@ -82,7 +82,8 @@ No parameters. The result:
 
 `version` is the full version: the release and, for a build from a git checkout, its commit.
 `agents` counts the agents running (starting or in a turn), the root agents waiting for the user
-(with a request the user holds, `approval.list`), and the agents that failed (`docs/agents.md`).
+(with a request the user holds, `approval.list`, or a question not answered yet), and the agents
+that failed (`docs/agents.md`).
 
 ### `daemon.stop`
 
@@ -271,7 +272,7 @@ there. An agent in a result:
   "brief": null,
   "reported_at": null,
   "quiet_turns": 0,
-  "waiting_on_parent": false,
+  "waiting_on_answer": false,
   "project": "app",
   "workspace": "login",
   "folder": "/work/app-work/login",
@@ -298,8 +299,9 @@ at the last start of its process. `active_at` is its last sign of activity, `nul
 first. `instructions` and `tools` are frozen when the agent is created. `parent` is the agent that
 launched it (`null` for a root), `depth` its depth in the tree, `epoch` the number of its session
 (each replacement adds one), `title` and `brief` a child's task, `reported_at` when it reported,
-`quiet_turns` its turns ended without a report in a row, `waiting_on_parent` whether a question of
-it waits for its parent (`docs/agents.md`, "The tree").
+`quiet_turns` its turns ended without a report in a row, `waiting_on_answer` whether a question of
+it waits for an answer: a child's from its parent, a root's from the user, until that one writes to
+it (`docs/agents.md`, "The tree").
 
 Each method answers `not-found` when the agent does not exist.
 
@@ -341,11 +343,11 @@ names its root).
 `{"agent"}`. The whole tree of the agent's root, each agent before its children:
 `{"agents": [{"agent", "doing", "waiting_on", "needs_user"}]}`. `agent` is the agent in short
 (`id`, `role`, `title`, `project`, `workspace`, `parent`, `depth`, `epoch`, `state`,
-`state_reason`, `created_at`, `active_at`, `ended_at`); `doing` a sentence of what it does
+`state_reason`, `created_at`, `active_at`, `ended_at`, `waiting_on_answer`); `doing` a sentence of what it does
 (`working`, `idle`, `running \`cargo test\` for 12 min`, `waiting for approval #3`, `failed: …`);
 `waiting_on` `parent` for a child whose request or question waits for its parent, `user` for a
-root whose own does, else `null`; `needs_user`, for the root, whether a request of its tree waits
-for the user.
+root whose own does, else `null`; `needs_user`, for the root, whether a request of its tree or its
+own question waits for the user.
 
 #### `agent.read`
 

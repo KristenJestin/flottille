@@ -322,14 +322,22 @@ pub fn settle_at_start(daemon: &Arc<Daemon>) {
     }
 }
 
-/// The agents waiting for the user: the roots of the trees with a request the user holds (a child
-/// waits on its parent, never on the user).
+/// The agents waiting for the user: the roots of the trees with a request the user holds, and the
+/// roots whose question waits for the user's answer (a child waits on its parent, never on the
+/// user).
 pub fn waiting_for_user(daemon: &Daemon) -> flottille_core::Result<usize> {
     let mut agents: Vec<String> = daemon
         .read(|store| store.pending_requests(approval::USER))?
         .into_iter()
         .map(|request| tree::root_of(daemon, &request.agent))
         .collect();
+    agents.extend(
+        daemon
+            .read(|store| store.agents())?
+            .into_iter()
+            .filter(tree::asks_the_user)
+            .map(|agent| agent.id),
+    );
     agents.sort();
     agents.dedup();
     Ok(agents.len())

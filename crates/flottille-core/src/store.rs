@@ -196,6 +196,10 @@ const MIGRATIONS: &[&str] = &[
         counted INTEGER NOT NULL
     ) STRICT;
 ",
+    "
+    -- A root's question waits for the user as a child's waits for its parent.
+    ALTER TABLE agents RENAME COLUMN waiting_on_parent TO waiting_on_answer;
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -207,7 +211,7 @@ const RUN_COLUMNS: &str =
 const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, state, state_reason, \
     created_at, updated_at, active_at, ended_at, chosen_model, chosen_effort, chosen_mode, \
     taken_model, taken_effort, taken_mode, native_id, agent_version, instructions, tools, parent, \
-    depth, epoch, title, brief, reported_at, quiet_turns, waiting_on_parent";
+    depth, epoch, title, brief, reported_at, quiet_turns, waiting_on_answer";
 
 const DELIVERY_COLUMNS: &str = "id, agent, kind, body, urgency, state, created_at, sent_at";
 
@@ -223,7 +227,7 @@ pub struct AgentChange {
     /// `Some(None)` forgets it.
     pub reported_at: Option<Option<u64>>,
     pub quiet_turns: Option<u32>,
-    pub waiting_on_parent: Option<bool>,
+    pub waiting_on_answer: Option<bool>,
 }
 
 pub struct Store {
@@ -494,7 +498,7 @@ impl Store {
                 agent.brief,
                 agent.reported_at,
                 agent.quiet_turns,
-                agent.waiting_on_parent,
+                agent.waiting_on_answer,
             ],
         )?;
         let event = append_agent_event(&transaction, &agent.id, event.0, event.1)?;
@@ -570,9 +574,9 @@ impl Store {
                 params![id, quiet_turns],
             )?;
         }
-        if let Some(waiting) = change.waiting_on_parent {
+        if let Some(waiting) = change.waiting_on_answer {
             transaction.execute(
-                "UPDATE agents SET waiting_on_parent = ?2 WHERE id = ?1",
+                "UPDATE agents SET waiting_on_answer = ?2 WHERE id = ?1",
                 params![id, waiting],
             )?;
         }
@@ -1288,7 +1292,7 @@ impl Store {
         let now = now_ms();
         let changed = transaction.execute(
             "UPDATE agents SET epoch = epoch + 1, native_id = NULL, state = 'starting', \
-             state_reason = ?2, reported_at = NULL, quiet_turns = 0, waiting_on_parent = 0, \
+             state_reason = ?2, reported_at = NULL, quiet_turns = 0, waiting_on_answer = 0, \
              updated_at = ?3 WHERE id = ?1 AND state NOT IN ('ended', 'failed')",
             params![id, reason, now],
         )?;
@@ -1530,7 +1534,7 @@ fn agent_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Agent>> {
         brief: text(26)?,
         reported_at: row.get(27)?,
         quiet_turns: row.get(28)?,
-        waiting_on_parent: row.get(29)?,
+        waiting_on_answer: row.get(29)?,
     }))
 }
 
@@ -1838,7 +1842,7 @@ mod tests {
             brief: Some("hello".into()),
             reported_at: None,
             quiet_turns: 0,
-            waiting_on_parent: false,
+            waiting_on_answer: false,
         }
     }
 

@@ -408,7 +408,10 @@ pub fn doing(daemon: &Daemon, agent: &Agent) -> String {
     match agent.state {
         AgentState::Working => "in a turn".into(),
         _ if agent.reported_at.is_some() => "reported".into(),
-        _ if agent.waiting_on_parent => "waiting for its parent's answer".into(),
+        _ if agent.waiting_on_answer && agent.parent.is_some() => {
+            "waiting for its parent's answer".into()
+        }
+        _ if agent.waiting_on_answer => "waiting for the user's answer".into(),
         _ => format!("idle for {}", ago(now.saturating_sub(agent.updated_at))),
     }
 }
@@ -667,7 +670,7 @@ fn ask(daemon: &Arc<Daemon>, caller: &Agent, tool: &str, args: Value) -> Done {
             let (_, event) = store.change_agent(
                 &caller.id,
                 AgentChange {
-                    waiting_on_parent: caller.parent.is_some().then_some(true),
+                    waiting_on_answer: Some(true),
                     ..AgentChange::default()
                 },
                 Some((
@@ -970,7 +973,7 @@ pub fn after_turn(daemon: &Arc<Daemon>, id: &str, stop_reason: &str) {
     let asking = daemon
         .read(|store| store.pending_requests_of(id))
         .is_ok_and(|requests| !requests.is_empty());
-    if !queued.is_empty() || asking || agent.waiting_on_parent {
+    if !queued.is_empty() || asking || agent.waiting_on_answer {
         return;
     }
     let quiet = |turns| {
@@ -1087,6 +1090,7 @@ pub fn summary(agent: &Agent) -> Value {
         "created_at": agent.created_at,
         "active_at": agent.active_at,
         "ended_at": agent.ended_at,
+        "waiting_on_answer": agent.waiting_on_answer,
     })
 }
 
@@ -1161,6 +1165,11 @@ pub fn trees(daemon: &Daemon, asked: &AgentTrees) -> Result<Value, Failure> {
     Ok(json!({"trees": trees, "more": more, "hidden": hidden}))
 }
 
+/// A root whose question waits for the user's answer; a root that ended waits for nothing.
+pub fn asks_the_user(agent: &Agent) -> bool {
+    agent.parent.is_none() && agent.waiting_on_answer && !agent.state.is_final()
+}
+
 /// The agent's whole tree, from its root, each agent before its children: what it does, whom it
 /// waits on (a child on its parent, never on the user), and for the root, whether a request of
 /// its tree waits for the user.
@@ -1176,15 +1185,16 @@ pub fn tree(daemon: &Daemon, agent: &Agent) -> Result<Vec<Value>, Failure> {
         let asking = !daemon
             .read(|store| store.pending_requests_of(&agent.id))?
             .is_empty();
-        let waiting_on = match (&agent.parent, asking || agent.waiting_on_parent) {
+        let waiting_on = match (&agent.parent, asking || agent.waiting_on_answer) {
             (_, false) => Value::Null,
             (Some(_), true) => "parent".into(),
             (None, true) => "user".into(),
         };
         let needs_user = agent.parent.is_none()
-            && user_requests
-                .iter()
-                .any(|request| root_of(daemon, &request.agent) == agent.id);
+            && (asks_the_user(&agent)
+                || user_requests
+                    .iter()
+                    .any(|request| root_of(daemon, &request.agent) == agent.id));
         out.push(json!({
             "agent": summary(&agent),
             "doing": doing(daemon, &agent),
