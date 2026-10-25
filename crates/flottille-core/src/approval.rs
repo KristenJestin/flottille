@@ -49,6 +49,8 @@ pub enum RequestState {
     Denied,
     /// Allowed: performed, or being performed.
     Allowed,
+    /// Never answered: the agent that asked, or the one that held it, ended.
+    Cancelled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +69,7 @@ impl RequestState {
             RequestState::Pending => "pending",
             RequestState::Denied => "denied",
             RequestState::Allowed => "allowed",
+            RequestState::Cancelled => "cancelled",
         }
     }
 
@@ -75,6 +78,7 @@ impl RequestState {
             RequestState::Pending,
             RequestState::Denied,
             RequestState::Allowed,
+            RequestState::Cancelled,
         ]
         .into_iter()
         .find(|state| state.as_str() == text)

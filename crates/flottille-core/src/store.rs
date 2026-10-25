@@ -975,6 +975,36 @@ impl Store {
         Ok(Some((request, event)))
     }
 
+    /// The pending requests the agent made or holds are cancelled: it ended, and nobody is left
+    /// to answer them or to be answered. Their `approval.cancelled` events, one per request.
+    pub fn cancel_requests(&mut self, agent: &str, why: &str) -> Result<Vec<Event>> {
+        let transaction = self.connection.transaction()?;
+        let cancelled: Vec<(u64, String, String)> = {
+            let mut statement = transaction.prepare_cached(
+                "UPDATE approval_requests SET state = 'cancelled', decided_at = ?2 \
+                 WHERE (agent = ?1 OR held_by = ?1) AND state = 'pending' \
+                 RETURNING number, agent, held_by",
+            )?;
+            statement
+                .query_map(params![agent, now_ms()], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        let mut events = Vec::new();
+        for (number, asker, held_by) in cancelled {
+            events.push(append_agent_event(
+                &transaction,
+                &asker,
+                "approval.cancelled",
+                json!({"number": number, "agent": asker, "held_by": held_by, "why": why}),
+            )?);
+        }
+        transaction.commit()?;
+        events.sort_by_key(|e| e.data["number"].as_u64());
+        Ok(events)
+    }
+
     /// Whether the user allowed this exact call for the tree.
     pub fn tree_granted(&self, tree: &str, identity: &str) -> Result<bool> {
         let mut statement = self.connection.prepare_cached(
@@ -1033,12 +1063,13 @@ impl Store {
     }
 
     /// Stores a delivery, queued, with its `delivery.queued` event; `None` when one of its id
-    /// was stored already.
+    /// was stored already, or its agent ended (nothing would ever send it).
     pub fn deliver(&mut self, delivery: &Delivery) -> Result<Option<Event>> {
         let transaction = self.connection.transaction()?;
         let stored = transaction.execute(
             "INSERT OR IGNORE INTO deliveries (id, agent, kind, body, urgency, state, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6)",
+             SELECT ?1, ?2, ?3, ?4, ?5, 'queued', ?6 WHERE EXISTS (SELECT 1 FROM agents \
+             WHERE id = ?2 AND state NOT IN ('ended', 'failed'))",
             params![
                 delivery.id,
                 delivery.agent,
@@ -1169,6 +1200,37 @@ impl Store {
                 .query_map(params![agent], |row| row.get(0))?
                 .collect::<rusqlite::Result<_>>()?
         };
+        let event = if ids.is_empty() {
+            None
+        } else {
+            Some(append_agent_event(
+                &transaction,
+                agent,
+                "delivery.superseded",
+                json!({"agent": agent, "deliveries": ids}),
+            )?)
+        };
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    /// The agent's deliveries not sent yet whose ids start with one of `prefixes` are
+    /// superseded: a fresh one takes their place. Their `delivery.superseded` event, when there
+    /// were some.
+    pub fn supersede_like(&mut self, agent: &str, prefixes: &[&str]) -> Result<Option<Event>> {
+        let transaction = self.connection.transaction()?;
+        let mut ids: Vec<String> = Vec::new();
+        for prefix in prefixes {
+            let mut statement = transaction.prepare_cached(
+                "UPDATE deliveries SET state = 'superseded' \
+                 WHERE agent = ?1 AND state IN ('queued', 'sending') \
+                 AND substr(id, 1, length(?2)) = ?2 RETURNING id",
+            )?;
+            let found = statement
+                .query_map(params![agent, prefix], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            ids.extend(found);
+        }
         let event = if ids.is_empty() {
             None
         } else {
@@ -2030,6 +2092,59 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_brief_supersedes_the_ones_not_sent_and_an_ended_agent_is_delivered_nothing() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .create_agent(&an_agent(), ("agent.created", json!({})))
+            .unwrap();
+        let agent = "0123456789ab";
+        for id in ["brief-a-0", "resume-a-0", "child-1", "brief-a-1"] {
+            store.deliver(&a_delivery(id, "brief")).unwrap();
+        }
+        store
+            .move_deliveries(agent, &["brief-a-0".into()], "queued", "sending", "prompt")
+            .unwrap();
+        store
+            .move_deliveries(agent, &["brief-a-1".into()], "queued", "sent", "prompt")
+            .unwrap();
+
+        let event = store
+            .supersede_like(agent, &["brief-a-", "resume-a-"])
+            .unwrap();
+
+        assert_eq!(
+            event.unwrap().data["deliveries"],
+            json!(["brief-a-0", "resume-a-0"])
+        );
+        let queued: Vec<String> = store
+            .deliveries(agent, "queued")
+            .unwrap()
+            .into_iter()
+            .map(|d| d.id)
+            .collect();
+        assert_eq!(queued, ["child-1"]);
+        assert_eq!(store.delivery("brief-a-1").unwrap().unwrap().state, "sent");
+
+        store
+            .change_agent(
+                agent,
+                AgentChange {
+                    state: Some(AgentState::Ended),
+                    ..AgentChange::default()
+                },
+                None,
+            )
+            .unwrap();
+        assert!(
+            store
+                .deliver(&a_delivery("late", "child-report"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.delivery("late").unwrap().is_none());
+    }
+
+    #[test]
     fn a_replacement_bumps_the_epoch_forgets_the_session_and_is_counted() {
         let mut store = Store::open_in_memory().unwrap();
         let mut agent = an_agent();
@@ -2232,6 +2347,44 @@ mod tests {
             .unwrap();
         assert_eq!(denied.state, RequestState::Denied);
         assert!(store.pending_requests(approval::USER).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_pending_requests_an_ended_agent_made_or_holds_are_cancelled_with_their_event() {
+        let mut store = Store::open_in_memory().unwrap();
+        let agent = an_agent();
+        store
+            .create_agent(&agent, ("agent.created", json!({})))
+            .unwrap();
+        let (made, _) = store.ask(&a_request(Some("toolu_01"))).unwrap();
+        let (held, _) = store
+            .ask(&Request {
+                held_by: agent.id.clone(),
+                ..a_request(Some("toolu_02"))
+            })
+            .unwrap();
+        let (decided, _) = store.ask(&a_request(Some("toolu_03"))).unwrap();
+        store
+            .decide(decided.number, Decision::Deny, &agent.id, approval::USER)
+            .unwrap();
+
+        let events = store.cancel_requests(&agent.id, "its agent ended").unwrap();
+
+        let numbers: Vec<_> = events.iter().map(|e| e.data["number"].clone()).collect();
+        assert_eq!(numbers, [json!(made.number), json!(held.number)]);
+        assert_eq!(events[0].name, "approval.cancelled");
+        assert_eq!(events[0].data["why"], "its agent ended");
+        let state = |n| store.request(n).unwrap().unwrap().state;
+        assert_eq!(state(made.number), RequestState::Cancelled);
+        assert_eq!(state(held.number), RequestState::Cancelled);
+        assert_eq!(state(decided.number), RequestState::Denied);
+        assert!(store.pending_requests(approval::USER).unwrap().is_empty());
+        assert!(
+            store
+                .cancel_requests(&agent.id, "again")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
