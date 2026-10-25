@@ -22,11 +22,12 @@ use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
 
 /// A user whose fake agent answers "ok", reads `.env` when asked to (a call the gate holds for
-/// the user), and works a few seconds when asked to.
+/// the user), asks the user a question when asked to, and works a few seconds when asked to.
 fn user() -> User {
     let user = User::with_fake_agent();
     user.fake_script(json!({"turns": [
         {"when": "read the env", "do": [{"mcp": {"tool": "fs_read", "arguments": {"path": ".env"}}}]},
+        {"when": "ask me", "do": [{"mcp": {"tool": "ask_user", "arguments": {"question": "Which database?"}}}]},
         {"when": "work a while", "do": [{"wait": 4000}, {"say": "done"}]}
     ]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
@@ -279,6 +280,34 @@ fn choosing_an_item_of_the_bell_opens_its_session(cx: &mut TestAppContext) {
         !shell.read_with(cx, |s, _| s.bell_open()),
         "a choice closes the list"
     );
+}
+
+#[gpui_kit::test]
+fn a_root_s_question_marks_its_session_and_rings_the_bell_until_the_user_writes(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    let id = start(&user, "atlas", None, "Sessions expire too early");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    until(&shell, cx, "the session is shown", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&id)).is_some())
+    });
+
+    send(&user, &id, "ask me");
+    until(&shell, cx, "the question waits for the user", |cx| {
+        mark_of(&shell, &id, cx) == Some(AgentState::NeedsYou)
+    });
+    assert_eq!(shell.read_with(cx, |s, cx| s.top().read(cx).count()), 1);
+    let item = shell.read_with(cx, |s, _| s.snapshot().bell[0].clone());
+    assert_eq!(item.session, id);
+    assert_eq!(item.detail, "Which database?");
+
+    send(&user, &id, "postgres");
+    until(&shell, cx, "the answer is taken", |cx| {
+        shell.read_with(cx, |s, cx| s.top().read(cx).count()) == 0
+            && mark_of(&shell, &id, cx) != Some(AgentState::NeedsYou)
+    });
 }
 
 #[gpui_kit::test]

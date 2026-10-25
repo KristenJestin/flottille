@@ -444,6 +444,38 @@ fn a_worker_s_ask_goes_to_the_lead_who_denies_or_forwards_it_to_the_user_who_all
 }
 
 #[test]
+fn a_root_s_question_waits_for_the_user_until_the_user_writes() {
+    let user = user();
+    let (lead_id, lead) = lead(&user);
+    let waiting = |user: &User| {
+        let tree = user.call("agent.tree", json!({"agent": lead_id})).unwrap();
+        let root = tree["agents"][0].clone();
+        (
+            root["waiting_on"].clone(),
+            root["needs_user"].clone(),
+            user.status()["agents"]["waiting_for_user"].clone(),
+        )
+    };
+    assert_eq!(waiting(&user), (Value::Null, json!(false), json!(0)));
+
+    ok(lead.call("ask_user", json!({"question": "which database?"})));
+
+    assert_eq!(waiting(&user), (json!("user"), json!(true), json!(1)));
+    assert_eq!(show(&user, &lead_id)["agent"]["waiting_on_answer"], true);
+    assert!(approvals(&user).is_empty(), "a question is not a request");
+
+    user.call(
+        "agent.send",
+        json!({"agent": lead_id, "message": "postgres"}),
+    )
+    .unwrap();
+    prompted(&user, &["postgres"]);
+    eventually("the answer taken", || {
+        waiting(&user) == (Value::Null, json!(false), json!(0))
+    });
+}
+
+#[test]
 fn a_worker_s_worker_s_ask_climbs_one_parent_at_a_time_and_each_forward_adds_its_why() {
     let user = user();
     let (lead_id, lead) = lead(&user);
