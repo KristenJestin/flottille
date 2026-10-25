@@ -304,13 +304,39 @@ fn a_worker_that_dies_is_replaced_once_and_the_lead_is_told() {
     let shown = show(&user, &worker)["agent"].clone();
     assert_eq!(shown["epoch"], 1);
     assert_ne!(shown["state"], "failed");
-    // The new session started again from the brief.
-    let briefs = prompts(&user)
-        .into_iter()
-        .filter(|p| p.contains("[flottille:brief]") && p.contains("die-once then work"))
-        .count();
-    assert_eq!(briefs, 2);
-    assert!(prompted(&user, &["[flottille:resume]"]).contains("start again"));
+    // The new session started again from the brief, given once to each session.
+    let resume = prompted(&user, &["[flottille:resume]"]);
+    assert!(resume.contains("start again"), "{resume}");
+    assert_eq!(occurrences(&user, "die-once then work"), 2);
+    assert_eq!(resume.matches("[flottille:brief]").count(), 1, "{resume}");
+}
+
+/// How many times `text` was sent to the fake agents, every prompt counted.
+fn occurrences(user: &User, text: &str) -> usize {
+    prompts(user).iter().map(|p| p.matches(text).count()).sum()
+}
+
+#[test]
+fn a_replaced_lead_gets_its_first_message_once() {
+    let user = user();
+    project(&user);
+    let answer = user
+        .call(
+            "agent.run",
+            json!({"project": "app", "workspace": "w", "message": "die-once and lead"}),
+        )
+        .unwrap();
+    let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+
+    prompted(&user, &["[flottille:resume]"]);
+    eventually("its new session's turn", || state(&user, &id) == "idle");
+    assert_eq!(show(&user, &id)["agent"]["epoch"], 1);
+    assert_eq!(
+        occurrences(&user, "die-once and lead"),
+        2,
+        "{:?}",
+        prompts(&user)
+    );
 }
 
 #[test]
@@ -849,4 +875,27 @@ fn big_reports_pinned_on_an_agent_read_page_keep_its_cursor_and_stay_under_40000
     let both = format!("{page}{next}");
     assert!(both.contains("REPORT-0"), "the first report rode");
     assert!(both.contains("REPORT-1"), "the second report rode");
+}
+
+#[test]
+fn a_daemon_restart_does_not_send_a_working_agent_its_prompt_again() {
+    let user = user();
+    let (_, lead) = lead(&user);
+    let id = launch(&lead, "steady", "HANG through the restart");
+    eventually("its turn", || state(&user, &id) == "working");
+    let daemon = user.status()["pid"].as_u64().unwrap();
+
+    // SAFETY: kill has no memory precondition.
+    unsafe { libc::kill(daemon as i32, libc::SIGKILL) };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while std::path::Path::new(&format!("/proc/{daemon}")).exists() {
+        assert!(Instant::now() < deadline, "the daemon did not die");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    user.status();
+
+    let resumed = prompted(&user, &["Flottille restarted while you worked"]);
+    assert!(!resumed.contains("HANG through the restart"), "{resumed}");
+    eventually("its resumed turn", || state(&user, &id) == "idle");
+    assert_eq!(occurrences(&user, "HANG through the restart"), 1);
 }

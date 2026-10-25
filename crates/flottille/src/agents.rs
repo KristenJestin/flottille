@@ -223,11 +223,13 @@ fn run(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
             },
         },
     )?;
+    // The root's brief is its first message: a replacement supersedes it by its id, as any
+    // brief, and delivers the brief again.
     deliveries::deliver(
         daemon,
         &agent.id,
         "user",
-        None,
+        Some(format!("brief-{}-0", agent.id)),
         &asked.message,
         approval::BETWEEN_TURNS,
     );
@@ -636,6 +638,14 @@ pub fn replace(daemon: &Arc<Daemon>, id: &str, reason: &str, counted: bool, tell
         return false;
     }
     let _ = daemon.write(|store| Ok(((), store.give_back(id)?)));
+    // The new session gets one brief and one word on why: those its old sessions were given, or
+    // were still to be given, go.
+    let _ = daemon.write(|store| {
+        Ok((
+            (),
+            store.supersede_like(id, &[&format!("brief-{id}-"), &format!("resume-{id}-")])?,
+        ))
+    });
     let agent = match daemon.write(|store| store.replace_agent(id, &reason, counted)) {
         Ok(agent) if !agent.state.is_final() => agent,
         Ok(_) => return false,
@@ -882,9 +892,10 @@ pub fn kill_orphans(store: &Store) {
 }
 
 /// At daemon start: an agent that was starting or working has lost its process and its turn. Its
-/// session is kept (the next process resumes it, which keeps what it knew); what its lost turn
-/// held is given back, a working one is told its turn was cut, and every agent with something
-/// queued is rung.
+/// session is kept (the next process resumes it, which keeps what it knew), and every agent with
+/// something queued is rung. A working agent's prompt was sent (it is working once its prompt is
+/// asked): it is in the session's history, so it is taken as sent, never sent again, and the
+/// agent is told its turn was cut. A starting agent's was not sent yet: it is given back.
 pub fn settle_at_start(daemon: &Arc<Daemon>) {
     let agents = match daemon.read(Store::agents) {
         Ok(agents) => agents,
@@ -902,8 +913,10 @@ pub fn settle_at_start(daemon: &Arc<Daemon>) {
                 None,
                 Some(("agent.released", json!({"reason": "restart"}))),
             );
-            let _ = daemon.write(|store| Ok(((), store.give_back(&agent.id)?)));
-            if agent.state == AgentState::Working {
+            if agent.state == AgentState::Starting {
+                let _ = daemon.write(|store| Ok(((), store.give_back(&agent.id)?)));
+            } else {
+                let _ = daemon.read(|store| store.deliveries_taken(&agent.id));
                 deliveries::deliver(
                     daemon,
                     &agent.id,
