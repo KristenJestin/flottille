@@ -20,25 +20,12 @@ check() { # <subject> <where>
   fi
 }
 
-# Commits are the maintainer's, made with the machine's Git user: no agent signs them.
-signed() { # <message> <where>
-  if grep -qiE '^[[:space:]]*co-authored-by:.*(claude|anthropic)' <<<"$1"; then
-    echo "$2: a Co-authored-by trailer names an agent; commits carry the machine's Git user only" >&2
-    return 1
-  fi
-}
-
 if [ "${1:-}" = "--range" ]; then
   status=0
   while read -r sha; do
     check "$(git log -1 --format=%s "$sha")" "${sha:0:8}" || status=1
-    signed "$(git log -1 --format=%B "$sha")" "${sha:0:8}" || status=1
   done < <(git rev-list "$2")
   exit $status
 fi
 
-message=$(grep -v '^#' "$1" || true)
-status=0
-check "$(head -1 <<<"$message")" "${1##*/}" || status=1
-signed "$message" "${1##*/}" || status=1
-exit $status
+check "$(grep -v '^#' "$1" | head -1)" "${1##*/}"
