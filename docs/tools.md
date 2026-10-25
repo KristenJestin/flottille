@@ -39,7 +39,9 @@ below.
 - **A result** is one text block, `isError` for a refusal or a failure. A normal result stays
   under 40,000 characters (`docs/reference/mcp.md` §4 rules 5 and 8: an agent in bare mode cannot
   read a result Claude Code saved to a file), a refusal or a failure under 2,000. A failure reads
-  `the call failed: …`, masked of the daemon's and the place's secrets. The notes pinned for the
+  `the call failed: …`. A result and a failure are masked of the daemon's and the place's secrets
+  (a file read or a search hit shows `[masked]` for them). A call the gate held is answered with
+  the waiting text, not as an error (below). The notes pinned for the
   agent (the deliveries that reach it in a turn) are appended to the result after a blank line,
   whole and counted in its limit: it is the text that is cut short to make room for them.
 - **Every call is recorded** as an `agent.tool_served` event of the agent (`docs/events.md`):
@@ -50,13 +52,11 @@ below.
 
 The agent's place is its folder: a workspace, or the project folder (`main`).
 
-**Every call is decided once**, by `gate::decide`, after the tool is known to be the agent's and
-before it is performed: `commands_output` and `commands_stop` as much as the file tools. It is
-given the agent's grant, the tool, the arguments, the words of the command a run would start and
-the paths the call reaches, and answers allow or deny with the sentence that says why (the gate of
-#6 adds ask). Until it comes, a call is allowed inside the place and refused outside it, with
-`refused: X is outside this agent's place: …`; the tools check that a path they resolve is inside
-again, whatever the gate says. A path is resolved this way:
+**Every call is decided once**, by the gate (below), after the tool is known to be the agent's
+and before it is performed: `commands_output` and `commands_stop` as much as the file tools. A
+path outside the place is asked for; the tools check again that a path they resolve is inside,
+and refuse it with `refused: X is outside this agent's place: …`, unless the user allowed the call.
+A path is resolved this way:
 
 - relative to the place's top, or to a repository's folder when the call names `repository`
   (one of the project's repositories by its path, else
@@ -105,8 +105,7 @@ check and the rename is not seen. The file's folder is checked to be
 inside the place on the disk after it is made and again just before the rename, so that a folder
 swapped for a link to the outside meanwhile is refused
 (`refused: X: its folder is no longer inside this agent's place …`, nothing written). A check is
-not a lock: a swap between it and the rename is not seen; closing it is the gate's (#6, writes
-under another path than the place's).
+not a lock: a swap between it and the rename is not seen.
 
 ## Commands
 
@@ -122,8 +121,8 @@ under another path than the place's).
   `;`, a backtick, a redirection, `$(`, `${`, `$VAR` or `%VAR%` outside single quotes, and `*`,
   `?`, a leading `~` or `[…]` outside any quotes are refused with: `Flottille runs a command
   without a shell, and “T” is shell syntax: put it in a script of the repository and run the
-  script.` A line naming a shell as its program (`sh -c '…'`) is split like any other: refusing
-  it is the gate's (#6).
+  script.` A line naming a shell as its program is split like any other; the gate judges the
+  line a shell runs with `-c` (below).
 - **Waiting**: the call waits `timeout` seconds (30 by default) for the end. A catalogue command
   that keeps running (`serve`) answers at once, and one already running for the agent is joined.
   A call stopped by its client stops its run.
@@ -152,18 +151,11 @@ under another path than the place's).
   - `git push` made to fail where the environment can: `GIT_CONFIG_COUNT` incremented, with
     `GIT_CONFIG_KEY_<n>=url./dev/null/flottille-refused-push/.pushInsteadOf` and an empty
     `GIT_CONFIG_VALUE_<n>`, which rewrites every push URL to a path that is no repository.
-- **A repository with a push URL** (`remote.<name>.pushurl`, which git does not rewrite with
-  `pushInsteadOf`) refuses the runs whose first word is `git`: Flottille reads the repository's
-  push URLs with `git config --get-regexp` when it spawns the run, and answers
-  `refused: this repository has a push URL (remote.<name>.pushurl) and git push is refused for
-  agents…` (never the URL, which may hold a password). Other programs run.
-- **What the environment cannot do belongs to the gate (#6).** The environment above stops the
-  common `git push` only: `git -c url.<x>.pushInsteadOf=<x> push`, `env -u GIT_CONFIG_COUNT git
-  push`, a `git config` write, a push URL added by a program that is not `git`, and any write
-  under `.git/` get past it. Refusing `git push` in every form, `git -c`, `git config` writes, the
-  `env` wrapper (and `sudo`, `npx`, `sh -c` and the other wrappers) and writes under `.git/` is
-  the gate's, which reads the words of the command (`gate::Call::words`); until it comes,
-  `git push` is not guaranteed to fail.
+- **The environment does not stop every push**: `git -c url.<x>.pushInsteadOf=<x> push`,
+  `env -u GIT_CONFIG_COUNT git push`, a remote with a push URL of its own
+  (`remote.<name>.pushurl`, which git does not rewrite) and a `git config` write all get past it.
+  The gate refuses each of these in the words of a line (below); a script the agent wrote and runs
+  is not read, and there the environment is the only wall.
 - **A stop ends the run's process group, not every descendant.** `commands_stop`, a timeout of
   the call's client and the daemon's stop signal the group the run was spawned in (`SIGTERM`,
   then `SIGKILL` after 5 s), and what the run left in its group is killed when its own process
@@ -174,3 +166,114 @@ under another path than the place's).
   daemon started after a crash kills the groups a previous one left (only while their leader is
   the process it started) and marks their runs interrupted. A daemon that stops stops its runs,
   interrupted. When a run's own process ends, what it left in its group is killed with it.
+
+## The gate
+
+Every call goes through `gate::decide` once (`docs/design.md` §7), in the order of
+`docs/reference/hemera.md` §4 without the remote judge. It is given the agent's grant, the tool,
+the arguments, the words of the line a run would start, the catalogue command it names, the paths
+the call reaches, the project's never list and Flottille's own folders, and answers:
+
+1. **The project folder is read-only for agents** (`docs/design.md` §6.2; no project grants
+   writing there yet): `fs_write` and `fs_edit` are refused there, and `commands_run` runs only a
+   catalogue command that is both `check` and `read_only`. A workspace is where an agent writes
+   and runs.
+2. **Deny**, with a sentence saying why and what to do instead (under 2,000 characters):
+   - the project's `never` list: an entry matches a line's words from any position (its first
+     word is a program, in any folder), or a catalogue command by its name;
+   - a write under a `.git` folder or file (`fs_write`, `fs_edit`, a link that leads there), and a
+     command any of whose words (or an option's value after `=`, or a `NAME=value`'s value) names
+     a path in one;
+   - a recursive deletion that names no `.git` but would take one: `rm` with `-r`, `-R` or
+     `--recursive`, and `find` with `-delete` (or `-exec rm -r`), when a target, resolved from the
+     folder the run starts in, is the place's folder, a repository's, or a folder above one
+     (`rm -rf .`, `rm -r ./`, `rm -R <repository>`, `find . -delete`). Deleting inside a
+     repository stays allowed (`rm -r target`), and so does a deletion of a nested folder that
+     holds a `.git` of its own: only the repositories the place lists are guarded;
+   - git: `push`, `send-pack`, `http-push`, `subtree push`, `lfs push`; `-c` and `--config-env`
+     before the subcommand; `merge`, `rebase`, `reset`, `switch`, `filter-branch`, `update-ref`;
+     `commit`, `cherry-pick`, `revert`, `am`, `commit-tree` (no project grants commits yet);
+     `fast-import`, `update-index`; `symbolic-ref` that points a ref (`git symbolic-ref HEAD
+     refs/heads/other` switches the branch) or deletes one, where `symbolic-ref HEAD` (with
+     `--short`, `-q`) reads; `replace` but listing (`-l`, `--list`); `notes` but listing and
+     showing (no subcommand, `list`, `show`, `get-ref`); `tag` but listing (no argument, `-l`,
+     `--list`); `checkout` but `checkout -- <paths>`; `branch -d`, `-D`, `--delete`; `config` but
+     its reads (`--get`, `--get-all`, `--get-regexp`, `--list`, `-l`, `get`, `list`);
+   - the forge command lines beyond their reads: for `gh`, `pr view/list/diff/checks/status`,
+     `issue view/list`, `run view/list`; for `glab`, `mr view/list/diff`, `issue view/list`,
+     `ci view/list/status`; for `bkt`, `pr view/list/diff`, `issue view/list`,
+     `pipeline view/list`; for all, `repo view`, `auth status` and `api` with GET, no field, no
+     input and not `graphql`; `auth token` and `auth status` with `--show-token` (`-t`) are
+     refused, since they print a login;
+   - publishing: `npm`, `pnpm`, `yarn`, `bun`, `cargo`, `poetry`, `flit`, `hatch`, `uv` with
+     `publish` or `unpublish`, `twine upload`, `gem`, `dotnet` and `nuget` with `push`.
+
+   These are judged on the line and on every program a wrapper runs, unwrapped in turn (16 at
+   most): `env` (its options, `NAME=value` words and `-S` line), `sudo`, `doas`, `nice`, `nohup`,
+   `timeout`, `time`, `stdbuf`, `command`, `exec`, `xargs`, `npx` (and its `-c` line),
+   `pnpm dlx`/`exec`, `yarn dlx`/`exec`, `bunx`, `uvx`, and a shell (`sh`, `bash`, `zsh`, `dash`,
+   `ksh`, `mksh`, `ash`, `fish`) with `-c`, whose line is split as `commands_run` splits one and
+   judged in turn: a line that cannot be split is refused. A shell running a script is not
+   unwrapped: the script is not read.
+
+   **Known gaps**, which no command gate closes: a script written with `fs_write` and then run
+   (`./script.sh`, `sh script.sh`) is not read, so what it does is out of the gate's reach; a git
+   alias in the user's own configuration (`alias.<name> = push`) is run by git itself, and the
+   gate sees only the alias's name. For a push, the run's environment (above) is the only wall
+   left there.
+3. **Ask**: a sensitive place; a path outside the place, or one that cannot be resolved; a
+   catalogue command marked `ask_before_running`, or whose program is a shell; a run when the
+   project's configuration cannot be read. Sensitive places are `.env` and `.env.*` anywhere but
+   the templates (`.example`, `.sample`, `.template`, `.dist`), `.ssh`, `.gnupg`, `.aws`, `.azure`,
+   `.config/gcloud`, `.kube`, `.docker/config.json`, `.config/gh`, `.netrc`, `.npmrc`, `.pypirc`,
+   `.git-credentials`, `.local/share/keyrings`, `Library/Keychains` and the agents' logins
+   (`.claude`, `.claude.json`, `.codex`, `.local/share/opencode`) wherever they sit along the path,
+   `/etc/shadow`, `/etc/sudoers`, `/etc/sudoers.d`, and Flottille's own folders (data,
+   configuration, state, runtime). Inside the place only what sits below it counts.
+4. **Allow** anything else: reads, `commands_list`, `commands_output`, `commands_stop`, a
+   catalogue command not marked, a line inside the place, a write inside the place.
+
+The words of a line that name paths (every word but the program, an option's value after `=`, a
+`NAME=value`'s value) are resolved from the folder the run starts in, as a file tool's path is.
+
+**A held call** ("ask") is written as a request (`flottille approvals`, `docs/protocol.md`) and
+answered at once, not as an error, with:
+
+> Waiting for the user's approval, request #n. This action has not happened; do not assume it
+> did. Continue with work that does not depend on it, or end your turn saying you wait. The answer
+> will be handed to you when the user gives it.
+
+A request holds its number (counted across every agent), the call frozen whole (what is
+performed once it is allowed; it is shown cut and masked), the reasons, masked, whether it
+reaches a sensitive place, the agent that asked, and who holds it: the user for a root's request,
+the parent for a child's (which denies it or forwards it up with one sentence of why, #7). Until
+the tree, every agent is a root. The same call key (`claudecode/toolUseId`) of the same agent asked
+twice gives the same request. A request that cannot be written refuses the call: `refused: the
+request for the user could not be made, so nothing was done; say so and go on with what does not
+depend on it`.
+
+**The user answers** a request they hold: deny, allow once, or allow for the root's tree, which
+grants that exact call (its tool, its paths, its words or its catalogue command with its line,
+not a write's content nor a read's page) to every agent of the tree from then on without asking;
+it is never given for a request that reaches a sensitive place, and a sensitive place asks every
+time. A request held by an agent is not listed for the user and cannot be answered by them.
+
+| Command | |
+|---|---|
+| `flottille approvals [--json]` | The requests the user holds, each with its number, the agent, the call and why. |
+| `flottille approve <n> [--for-tree]` | Allows the request once, or for the root's tree. Refused for a request held by an agent, one already decided, and `--for-tree` on a sensitive place. |
+| `flottille deny <n>` | Denies it: the agent is told nothing was done. |
+
+**An allowed request** is checked again (the gate on the frozen call: a refusal now, or a reason
+to ask that the request did not have, stops it), performed as the agent's call (recorded as its
+`agent.tool_served`, with the request's number), and its answer stored as the agent's `approval`
+delivery, masked, which the deliveries send (#7):
+
+- `Request #n (tool) was approved by the user, and Flottille has now done it. Its result:` and
+  the result;
+- `Request #n (tool) was approved by the user, but nothing was done: …` for a failure;
+- `Request #n (tool) was not executed: …` for a refusal, or when the situation changed;
+- `Request #n (tool) was refused by the user. Nothing was done.` for a denial;
+- `Request #n (tool) was approved by the user, but Flottille stopped while it was doing it, and
+  cannot tell whether it took effect: check before asking again.` when a daemon stopped while it
+  performed it (said by the next one, at its start).

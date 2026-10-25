@@ -76,6 +76,8 @@ pub struct Context<'a> {
     pub daemon: &'a Daemon,
     pub agent: &'a str,
     pub place: &'a Place,
+    /// The user allowed the call: its path may be outside the place.
+    pub approved: bool,
 }
 
 impl Context<'_> {
@@ -83,9 +85,12 @@ impl Context<'_> {
     fn path(&self, repository: Option<&str>, named: &str) -> Result<Resolved, Outcome> {
         let (_, base) = self.place.base(repository).map_err(Outcome::Refused)?;
         let resolved = self.place.resolve(base, named);
+        if self.approved {
+            return Ok(resolved);
+        }
         match gate::contained(std::slice::from_ref(&resolved)) {
-            Verdict::Allow => Ok(resolved),
             Verdict::Deny(why) => Err(Outcome::Refused(why)),
+            _ => Ok(resolved),
         }
     }
 
@@ -939,7 +944,8 @@ fn diff(before: &str, after: &str) -> String {
 /// Refuses unless the folder the file goes in is still inside the place on the disk: a folder
 /// swapped for a link since the path was resolved would take the write out of it.
 fn check_parent(place: &Place, parent: &Path, path: &Resolved) -> Result<(), Outcome> {
-    if place.holds(parent) {
+    // Outside the place, the user allowed it.
+    if !path.inside || place.holds(parent) {
         return Ok(());
     }
     Err(Outcome::Refused(format!(
