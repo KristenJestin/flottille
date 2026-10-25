@@ -3,13 +3,16 @@
 //! Every screen of the window is built from these pieces, with the same tokens, the same states
 //! and the same motion. A second, slightly different version of one of them is a defect.
 
+pub mod color;
 pub mod icons;
 pub mod motion;
+pub mod theme;
 pub mod typography;
 
 use gpui_kit::App;
 
 pub use icons::{Icon, Icons, icon};
+pub use theme::{Palette, palette};
 pub use typography::Type;
 
 /// Initialises gpui-kit (which reads the system's reduced-motion setting) and the bundled fonts.
