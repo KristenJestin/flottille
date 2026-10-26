@@ -482,7 +482,8 @@ impl Composer {
 
     fn can_send(&self) -> bool {
         self.blocked.is_none()
-            && self.provider().is_some_and(Provider::offered)
+            // Before the daemon listed the providers, it picks one itself, or says why not.
+            && (self.provider().is_some_and(Provider::offered) || !self.providers.known)
             && self.sending.is_none()
             && self.has_text
             && (self.choice != Choice::New || self.has_name)
