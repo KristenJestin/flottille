@@ -53,6 +53,8 @@
 //! | Step | What the agent does |
 //! |---|---|
 //! | `{"say": "text"}` | an `agent_message_chunk` |
+//! | `{"say": "text", "message": "m1"}` | the same, its `messageId` `m1`: the chunks that share one belong to one message |
+//! | `{"update": {…}}` | that session update, as it is |
 //! | `{"recall": true}` | an `agent_message_chunk` saying what the user said earlier in this session (`earlier you said: a | b`): the proof that a session kept its history |
 //! | `{"think": "text"}` | an `agent_thought_chunk` |
 //! | `{"usage": {"used": 190000, "size": 200000}}` | a `usage_update` |
@@ -403,10 +405,16 @@ impl Agent {
                 return "cancelled".into();
             }
             if let Some(text) = step["say"].as_str() {
-                self.say(session, text);
+                self.say(session, text, step["message"].as_str());
+            } else if let Some(update) = step.get("update") {
+                self.notify(session, update.clone());
             } else if step["recall"] == true {
                 let said = self.said_by_the_user(session);
-                self.say(session, &format!("earlier you said: {}", said.join(" | ")));
+                self.say(
+                    session,
+                    &format!("earlier you said: {}", said.join(" | ")),
+                    None,
+                );
             } else if let Some(text) = step["think"].as_str() {
                 self.notify(
                     session,
@@ -544,12 +552,13 @@ impl Agent {
         );
     }
 
-    fn say(&self, session: &str, text: &str) {
+    fn say(&self, session: &str, text: &str, message: Option<&str>) {
         self.remember(session, json!({"agent": text}));
-        self.notify(
-            session,
-            json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}),
-        );
+        let mut update = json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}});
+        if let Some(message) = message {
+            update["messageId"] = message.into();
+        }
+        self.notify(session, update);
     }
 
     /// What the user said in the session before the prompt that runs, the oldest first.
