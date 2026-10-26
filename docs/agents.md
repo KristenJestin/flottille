@@ -16,6 +16,7 @@ woken only by deliveries. Flottille's MCP server and its tools are in `docs/tool
 |---|---|
 | `flottille agent run <project> [--workspace <name>] [--provider <provider>] [--model <model>] [--effort <effort>] <message>` | Starts an agent with a first message and prints its reply as it comes, until the turn ends. Fails when the agent fails or its process dies. `--json` prints the agent instead, once the turn ended. |
 | `flottille agent show <agent> [--json]` | The agent (its provider and model among the rest) and its conversation. |
+| `flottille provider enable <provider>`, `flottille provider disable <provider>` | Enables or disables a provider in `providers.toml` ("Providers", below). |
 | `flottille doctor [--json]` | Each provider: enabled or not, whether its agents can run here and why not. Fails when no provider is enabled or an enabled one cannot run. |
 
 `agent run` starts a root and follows its first turn; `agent send --follow` and `agent chat` write
@@ -80,6 +81,10 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   [opencode]
   enabled = true
   ```
+
+  `flottille provider enable <name>` and `flottille provider disable <name>` (the methods
+  `provider.enable` and `provider.disable`, `docs/protocol.md`) set `enabled` in the file, the rest
+  of it kept as it is, and the window's settings page does the same with its switches.
 
 - **Ready**: enabled, its program on `PATH`, and, for OpenCode, its version the qualified one or
   allowed (above). The version is asked (`--version`, given 5 s, off the daemon's thread) by

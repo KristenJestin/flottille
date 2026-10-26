@@ -775,3 +775,30 @@ fn without_a_providers_toml_enabling_a_provider_writes_one() {
     assert_eq!(providers_file(&user), "[opencode]\nenabled = true\n");
     assert_eq!(listed(&user, "opencode")["ready"], true);
 }
+
+#[test]
+fn the_provider_command_enables_and_disables_a_provider() {
+    let user = User::with_fake_providers();
+
+    let output = user.run(&["provider", "disable", "opencode"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "opencode is disabled: its agents running now go on, and fail at their next start.\n"
+    );
+    assert_eq!(listed(&user, "opencode")["enabled"], false);
+
+    let output = user.run(&["provider", "enable", "opencode"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "opencode is enabled.\n"
+    );
+
+    let output = user.run(&["provider", "enable", "codex"]);
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "flottille: there is no provider codex: the providers are claude, opencode\n"
+    );
+}

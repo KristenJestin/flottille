@@ -98,6 +98,27 @@ OpenCode agents cannot run: opencode is not enabled (`enabled = true` under [ope
 warn claude is 2.1.300, and this Flottille was checked against 2.1.295: its stream-json mode may have changed
 ```
 
+### `flottille provider enable <name>`
+
+Enables a provider (`docs/agents.md`, "Providers"): sets `enabled = true` under its table of
+`providers.toml`, the rest of the file kept as you wrote it, comments included. The window's
+settings page does the same with its switches.
+
+```
+$ flottille provider enable opencode
+opencode is enabled.
+```
+
+### `flottille provider disable <name>`
+
+Disables a provider the same way. It stops no agent: those running on it go on, and each fails at
+the next start of its process, saying why.
+
+```
+$ flottille provider disable opencode
+opencode is disabled: its agents running now go on, and fail at their next start.
+```
+
 ## Projects
 
 A project is a folder registered with its configuration (`docs/projects.md`).
