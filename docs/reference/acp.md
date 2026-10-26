@@ -29,11 +29,12 @@ when you start: these move every week.
 | Agent | How | Version seen |
 |---|---|---|
 | Claude Code | **Flottille's own bridge**, `flottille bridge claude` (Rust, inside Flottille's binary), below. The official adapter `@agentclientprotocol/claude-agent-acp` (TypeScript, on the official Claude Agent SDK) is not used. | `claude` 2.1.295 (the adapter was 0.95.0, on Agent SDK 0.3.309) |
-| Codex | `@agentclientprotocol/codex-acp` (TypeScript, drives `codex app-server`; `CODEX_PATH`, `CODEX_CONFIG`) | 2.2.2 (Hemera patched 1.12.0) |
+| Codex | **Flottille's own bridge**, `flottille bridge codex` (Rust, inside Flottille's binary), in front of `codex app-server` on stdio. The adapter `@agentclientprotocol/codex-acp` (TypeScript, drives `codex app-server`; `CODEX_PATH`, `CODEX_CONFIG`) is not used. | `codex` 0.162.0 (the adapter was 2.2.2; Hemera patched 1.12.0) |
 | OpenCode | native `opencode acp` | 1.19.0 |
 | Gemini CLI | native `gemini --acp` | 0.65.0 |
 
-Claude Code itself (2.1.295) has no native ACP mode; Codex (0.162.1) neither.
+Claude Code itself (2.1.295) has no native ACP mode; Codex (0.162.0) neither. The Codex bridge
+is described in `docs/agents.md` ("Bare mode for Codex", "The Codex bridge").
 
 ## Claude, through Flottille's own bridge
 

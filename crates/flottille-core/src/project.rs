@@ -768,9 +768,9 @@ mod tests {
         assert_eq!(project.model.as_deref(), Some("m"));
         assert_eq!(parse(MINIMAL).unwrap().provider, None);
         assert_eq!(
-            refusal(&format!("provider = \"codex\"\n{MINIMAL}")),
-            "projects/app.toml: provider: unknown provider \"codex\": the providers are claude, \
-             opencode"
+            refusal(&format!("provider = \"gemini\"\n{MINIMAL}")),
+            "projects/app.toml: provider: unknown provider \"gemini\": the providers are claude, \
+             opencode, codex"
         );
     }
 

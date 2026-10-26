@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
 use crate::projects::{self, Failure};
-use crate::{claude, opencode};
+use crate::{claude, codex, opencode};
 
 /// The name of Flottille's MCP server, the only one an agent has.
 pub const MCP_SERVER: &str = "flottille";
@@ -59,6 +59,9 @@ pub struct Provider {
     pub env: fn(&Paths, &Agent) -> Result<Env, String>,
     /// `_meta` of `session/new`, `session/load` and `session/resume`.
     pub session_meta: fn(&str, &[String]) -> Value,
+    /// Why its agents cannot run on this machine whatever the user does in Flottille, as a
+    /// clause after the provider's name; `None` when nothing stops them.
+    pub unready: fn() -> Option<String>,
     /// The process of that pid is gone: what Flottille kept for it goes.
     pub forget_process: fn(&Paths, u32),
     /// A session of the agent is over (replaced, or the agent ended).
@@ -74,7 +77,7 @@ pub type Program = (PathBuf, Vec<OsString>);
 /// Variables set for a process.
 pub type Env = Vec<(OsString, OsString)>;
 
-pub static PROVIDERS: [&Provider; 2] = [&claude::PROVIDER, &opencode::PROVIDER];
+pub static PROVIDERS: [&Provider; 3] = [&claude::PROVIDER, &opencode::PROVIDER, &codex::PROVIDER];
 
 /// The provider of that name.
 pub fn get(name: &str) -> Option<&'static Provider> {
@@ -174,6 +177,11 @@ fn overridden(provider: &Provider) -> Option<PathBuf> {
         .or_else(|| std::env::var_os("FLOTTILLE_AGENT_COMMAND"))
         .filter(|program| !program.is_empty())
         .map(PathBuf::from)
+}
+
+/// Nothing on the machine stops the provider's agents.
+pub fn ready_here() -> Option<String> {
+    None
 }
 
 /// Forge tokens and the folders of their command lines' configuration, and any variable named
@@ -299,6 +307,9 @@ impl Check {
                 "is not ready: `{}` is not on PATH ({})",
                 provider.program, provider.install
             ));
+        }
+        if let Some(why) = (provider.unready)() {
+            return Some(why);
         }
         if self.version_refused() {
             let allow = format!(

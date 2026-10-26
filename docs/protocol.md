@@ -432,6 +432,9 @@ when they name none:
     },
     {"name": "opencode", "title": "OpenCode", "enabled": false, "ready": false,
      "why": "is not enabled (`enabled = true` under [opencode] in providers.toml enables it)", "…": "…",
+     "models": null},
+    {"name": "codex", "title": "Codex", "enabled": false, "ready": false,
+     "why": "is not enabled (`enabled = true` under [codex] in providers.toml enables it)", "…": "…",
      "models": null}
   ],
   "project": {"name": "app", "provider": "claude", "model": "sonnet"}

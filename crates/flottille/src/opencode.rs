@@ -58,6 +58,7 @@ pub static PROVIDER: Provider = Provider {
     command,
     env,
     session_meta,
+    unready: providers::ready_here,
     forget_process,
     forget_session,
     forget_agent,
