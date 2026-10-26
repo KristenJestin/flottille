@@ -34,6 +34,7 @@ pub struct TreeAgent {
     pub title: Option<String>,
     pub state: String,
     pub state_reason: Option<String>,
+    pub provider: String,
     pub model: Option<String>,
     pub doing: String,
     /// `parent`, `user` or nothing.
@@ -53,6 +54,7 @@ impl TreeAgent {
             title: text(&agent["title"]),
             state: text(&agent["state"]).unwrap_or_default(),
             state_reason: text(&agent["state_reason"]),
+            provider: text(&agent["provider"]).unwrap_or_default(),
             model: text(&agent["model"]),
             doing: text(&entry["doing"]).unwrap_or_default(),
             waiting_on: text(&entry["waiting_on"]),

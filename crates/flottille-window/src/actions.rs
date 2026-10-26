@@ -28,6 +28,15 @@ pub enum Target {
     New(String),
 }
 
+/// What a session is started on: each left out takes the daemon's default (the project's, else
+/// the provider's).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Pick {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     /// What the project page shows beyond the shell's read: branches and lines changed.
@@ -35,8 +44,16 @@ pub enum Command {
     Start {
         project: String,
         target: Target,
+        pick: Pick,
         message: String,
     },
+    /// Enables or disables a provider in `providers.toml`.
+    SetProvider {
+        name: String,
+        enabled: bool,
+    },
+    /// Reads the providers again: `providers.toml` is the user's to edit by hand too.
+    ReadProviders,
     CreateWorkspace {
         project: String,
         name: String,
@@ -113,6 +130,13 @@ pub enum Outcome {
         project: String,
         name: String,
         why: String,
+    },
+    /// The providers, read again; `None` when the daemon could not be asked.
+    Providers(Option<crate::providers::Providers>),
+    /// A provider was enabled or disabled as asked, or the daemon refused it with why.
+    ProviderSet {
+        name: String,
+        refused: Option<String>,
     },
     /// A message to the session's root was taken, or refused with why.
     Replied {
@@ -271,11 +295,13 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
         Command::Start {
             project,
             target: Target::New(name),
+            pick,
             message,
-        } => start_in_new(connect, &project, &name, &message, bounds),
+        } => start_in_new(connect, &project, &name, &pick, &message, bounds),
         Command::Start {
             project,
             target,
+            pick,
             message,
         } => {
             let workspace = match target {
@@ -285,12 +311,33 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             match ask_alone(
                 connect,
                 "agent.start",
-                start_params(&project, workspace.as_deref(), &message),
+                start_params(&project, workspace.as_deref(), &pick, &message),
                 bounds.quick,
             ) {
                 Ok(Ok(started)) => started_outcome(&project, &started),
                 Ok(Err(why)) | Err(why) => Outcome::NotStarted { project, why },
             }
+        }
+        Command::SetProvider { name, enabled } => {
+            let method = if enabled {
+                "provider.enable"
+            } else {
+                "provider.disable"
+            };
+            let refused = match ask_alone(connect, method, json!({"name": name}), bounds.quick) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::ProviderSet { name, refused }
+        }
+        Command::ReadProviders => {
+            let listed = ask_alone(connect, "provider.list", json!({}), bounds.quick);
+            // A daemon that did not answer changes nothing: the link reads them when it is back.
+            Outcome::Providers(match &listed {
+                Ok(Ok(listed)) => Some(crate::providers::Providers::of(Ok(listed))),
+                Ok(Err(why)) => Some(crate::providers::Providers::of(Err(why.clone()))),
+                Err(_) => None,
+            })
         }
         Command::CreateWorkspace { project, name } => workspace_outcome(
             ask_alone(
@@ -379,13 +426,16 @@ fn workspace_outcome(
     }
 }
 
-fn start_params(project: &str, workspace: Option<&str>, message: &str) -> Value {
-    // No model: the agent's default, the only one known before its session opens.
-    let mut params = json!({"project": project, "message": message});
-    if let Some(workspace) = workspace {
-        params["workspace"] = json!(workspace);
-    }
-    params
+fn start_params(project: &str, workspace: Option<&str>, pick: &Pick, message: &str) -> Value {
+    // What is left out is the daemon's to choose; a null is never sent.
+    json!({
+        "project": project,
+        "workspace": workspace,
+        "provider": pick.provider,
+        "model": pick.model,
+        "effort": pick.effort,
+        "message": message,
+    })
 }
 
 fn started_outcome(project: &str, started: &Value) -> Outcome {
@@ -473,6 +523,7 @@ fn start_in_new(
     connect: &Connect,
     project: &str,
     name: &str,
+    pick: &Pick,
     message: &str,
     bounds: Bounds,
 ) -> Outcome {
@@ -527,7 +578,7 @@ fn start_in_new(
     }
     match conn.ask_within(
         "agent.start",
-        start_params(project, Some(name), message),
+        start_params(project, Some(name), pick, message),
         bounds.quick,
     ) {
         Ok(Ok(started)) => started_outcome(project, &started),
@@ -606,6 +657,7 @@ mod tests {
         Command::Start {
             project: "atlas".into(),
             target: Target::Main,
+            pick: Pick::default(),
             message: "Fix the timeout".into(),
         }
     }

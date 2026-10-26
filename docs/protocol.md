@@ -450,6 +450,18 @@ none is enabled, its `model` `null` when the project names none. `not-found` whe
 does not exist; `invalid-config` when `providers.toml` cannot be read (the sentence names the key
 at fault).
 
+### `provider.enable`, `provider.disable`
+
+`{"name"}`. Enables or disables the provider in `providers.toml` (`docs/agents.md`, "Providers"):
+`{"name", "enabled"}`. The daemon sets `enabled` under the provider's table and keeps the rest of
+the file as it is, its comments included; it makes the file, or the table, when there is none.
+When this changes the file it emits `provider.changed` (`docs/events.md`); asking for what the file
+already says changes nothing and emits nothing. Disabling a provider stops no agent: those running
+on it go on, and each fails at the next start of its process, saying why (`agent.failed`).
+`not-found` when there is no provider of that name (the sentence names the providers);
+`invalid-config` when `providers.toml` cannot be read (the sentence names the key at fault), and
+the file is then left as it is.
+
 ### `inbox.list`
 
 `{"after"?, "limit"?}`. What the root agents sent to the user: `{"entries": [...]}`, oldest first.

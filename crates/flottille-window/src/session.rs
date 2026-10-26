@@ -456,9 +456,9 @@ impl SessionPage {
             }
         }
         if let Some(root) = tree.iter().find(|a| a.parent.is_none()) {
-            let model = root.model.clone();
+            let runs_on = (root.provider.clone(), root.model.clone());
             let facts = self.reply.read(cx).facts.clone();
-            facts.update(cx, |facts, cx| facts.set_model(model, cx));
+            facts.update(cx, |facts, cx| facts.set_model(runs_on, cx));
         }
         let names: HashMap<String, String> =
             tree.iter().map(|a| (a.id.clone(), name_of(a))).collect();
@@ -469,6 +469,7 @@ impl SessionPage {
                 Some(RailAgent {
                     id: agent.id.clone(),
                     name: name_of(agent),
+                    provider: agent.provider.clone(),
                     model: agent.model.clone(),
                     depth: agent.depth,
                     status,
@@ -549,6 +550,7 @@ impl SessionPage {
                 Some(SubAgent {
                     id: agent.id.clone(),
                     name: name_of(agent),
+                    provider: agent.provider.clone(),
                     model: agent.model.clone(),
                     doing: agent.doing.clone(),
                     status: self.statuses.get(&agent.id)?.clone(),
@@ -979,6 +981,7 @@ impl Render for ConversationView {
 pub struct SubAgent {
     pub id: String,
     pub name: String,
+    pub provider: String,
     pub model: Option<String>,
     pub doing: String,
     pub status: Entity<Status>,
@@ -1422,9 +1425,10 @@ impl Render for Row {
                         SharedString::from(agent.name.clone()),
                     )
                     .leading(self.icons[&agent.id].clone())
-                    .when_some(agent.model.clone(), |row, model| {
-                        row.detail(SharedString::from(model))
-                    })
+                    .detail(SharedString::from(runs_on(
+                        &agent.provider,
+                        agent.model.as_deref(),
+                    )))
                     .meta(SharedString::from(agent.doing.clone()))
                     .trailing(self.pills[&agent.id].clone())
                     .on_click(move |_, _, cx| {
@@ -1675,6 +1679,7 @@ impl Render for ThinkingTimer {
 pub struct RailAgent {
     pub id: String,
     pub name: String,
+    pub provider: String,
     pub model: Option<String>,
     pub depth: u64,
     pub status: Entity<Status>,
@@ -1778,7 +1783,8 @@ impl Render for SessionRail {
                     ))
                 })
                 .child(
-                    // The name over the model: a rail is too narrow for both on one line.
+                    // The name over the provider and model: a rail is too narrow for both on one
+                    // line.
                     div()
                         .id(ElementId::Name(format!("rail-row-{}", agent.id).into()))
                         .flex()
@@ -1812,16 +1818,17 @@ impl Render for SessionRail {
                                         .overflow_hidden()
                                         .child(SharedString::from(agent.name.clone())),
                                 )
-                                .when_some(agent.model.clone(), |d, model| {
-                                    d.child(
-                                        div()
-                                            .mono(11.)
-                                            .text_color(p.faint)
-                                            .text_ellipsis()
-                                            .overflow_hidden()
-                                            .child(SharedString::from(model)),
-                                    )
-                                }),
+                                .child(
+                                    div()
+                                        .mono(11.)
+                                        .text_color(p.faint)
+                                        .text_ellipsis()
+                                        .overflow_hidden()
+                                        .child(SharedString::from(runs_on(
+                                            &agent.provider,
+                                            agent.model.as_deref(),
+                                        ))),
+                                ),
                         )
                         .child(div().flex_none().child(pill))
                         .on_click(move |_, _, cx| {
@@ -2009,6 +2016,7 @@ impl Reply {
             session,
             field,
             facts: cx.new(|_| ReplyFacts {
+                provider: None,
                 model: None,
                 context: None,
             }),
@@ -2171,8 +2179,14 @@ impl Render for Reply {
     }
 }
 
-/// The root's model and the context it used, below the field.
+/// What an agent runs on, as a line: its provider and its model.
+pub fn runs_on(provider: &str, model: Option<&str>) -> String {
+    format!("{provider} · {}", model.unwrap_or("default model"))
+}
+
+/// The root's provider and model and the context it used, below the field.
 pub struct ReplyFacts {
+    provider: Option<String>,
     model: Option<String>,
     context: Option<u64>,
 }
@@ -2182,13 +2196,23 @@ impl ReplyFacts {
         self.model.as_deref()
     }
 
+    /// What it shows of what the root runs on.
+    pub fn shown(&self) -> String {
+        match &self.provider {
+            Some(provider) => runs_on(provider, self.model.as_deref()),
+            None => self.model.clone().unwrap_or_else(|| "default model".into()),
+        }
+    }
+
     pub fn context(&self) -> Option<u64> {
         self.context
     }
 
-    fn set_model(&mut self, model: Option<String>, cx: &mut Context<Self>) {
-        if self.model != model {
+    fn set_model(&mut self, (provider, model): (String, Option<String>), cx: &mut Context<Self>) {
+        let provider = Some(provider).filter(|p| !p.is_empty());
+        if self.model != model || self.provider != provider {
             self.model = model;
+            self.provider = provider;
             cx.notify();
         }
     }
@@ -2213,9 +2237,7 @@ impl Render for ReplyFacts {
             .gap(px(6.))
             .text_size(px(12.5))
             .text_color(p.mute)
-            .child(SharedString::from(
-                self.model.clone().unwrap_or_else(|| "default model".into()),
-            ))
+            .child(SharedString::from(self.shown()))
             .when_some(self.context, |d, used| {
                 d.child(
                     div()
@@ -2241,6 +2263,7 @@ mod tests {
             title: Some("build the form".into()),
             state: state.into(),
             state_reason: None,
+            provider: "claude".into(),
             model: None,
             doing: String::new(),
             waiting_on: None,

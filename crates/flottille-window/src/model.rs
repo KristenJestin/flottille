@@ -27,6 +27,9 @@ pub struct Project {
     pub repositories: Vec<String>,
     /// Its workspaces by name; `main`, the project folder, is always there and not listed.
     pub workspaces: Vec<String>,
+    /// The provider and the model its file gives its agents, when it gives them.
+    pub provider: Option<String>,
+    pub model: Option<String>,
 }
 
 /// A workspace as its card shows it.
@@ -320,6 +323,8 @@ impl Snapshot {
                         .collect(),
                     name,
                     workspaces,
+                    provider: project["provider"].as_str().map(str::to_owned),
+                    model: project["model"].as_str().map(str::to_owned),
                 }
             })
             .collect();

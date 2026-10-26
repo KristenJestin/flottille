@@ -99,6 +99,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Enable or disable a provider in providers.toml
+    Provider {
+        #[command(subcommand)]
+        action: ProviderAction,
+    },
     /// What your root agents sent you: their reports, their questions, their failures
     Inbox {
         /// List what came after this event number
@@ -128,6 +133,14 @@ enum Command {
         #[arg(long, value_name = "N")]
         after: Option<u64>,
     },
+}
+
+#[derive(Subcommand)]
+enum ProviderAction {
+    /// Let agents run on it
+    Enable { name: String },
+    /// Start no more agents on it: those running now go on, and fail at their next start
+    Disable { name: String },
 }
 
 #[derive(Subcommand)]
@@ -186,6 +199,22 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Workspace { action } => return workspace_command::run(&paths, action),
         Command::Agent { action } => return agent_command::run(&paths, action),
         Command::Doctor { json } => return agent_command::doctor(&paths, json),
+        Command::Provider { action } => {
+            let (method, name) = match action {
+                ProviderAction::Enable { name } => ("provider.enable", name),
+                ProviderAction::Disable { name } => ("provider.disable", name),
+            };
+            let answer = Client::connect_or_start(&paths)?
+                .request(method, serde_json::json!({"name": name}))?;
+            let name = answer["name"].as_str().unwrap_or_default();
+            if answer["enabled"] == true {
+                println!("{name} is enabled.");
+            } else {
+                println!(
+                    "{name} is disabled: its agents running now go on, and fail at their next start."
+                );
+            }
+        }
         Command::Approvals { json } => approval_command::approvals(&paths, json)?,
         Command::Approve { number, for_tree } => {
             approval_command::approve(&paths, number, for_tree)?

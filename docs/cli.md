@@ -98,6 +98,27 @@ OpenCode agents cannot run: opencode is not enabled (`enabled = true` under [ope
 warn claude is 2.1.300, and this Flottille was checked against 2.1.295: its stream-json mode may have changed
 ```
 
+### `flottille provider enable <name>`
+
+Enables a provider (`docs/agents.md`, "Providers"): sets `enabled = true` under its table of
+`providers.toml`, the rest of the file kept as you wrote it, comments included. The window's
+settings page does the same with its switches.
+
+```
+$ flottille provider enable opencode
+opencode is enabled.
+```
+
+### `flottille provider disable <name>`
+
+Disables a provider the same way. It stops no agent: those running on it go on, and each fails at
+the next start of its process, saying why.
+
+```
+$ flottille provider disable opencode
+opencode is disabled: its agents running now go on, and fail at their next start.
+```
+
 ## Projects
 
 A project is a folder registered with its configuration (`docs/projects.md`).
@@ -472,6 +493,16 @@ you have not answered yet; choosing one opens its session. A session is marked `
 daemon says its root needs you, as `flottille status` does: the window decides none of this, it
 shows the daemon's state. A session is marked running while an agent of its tree starts or works;
 otherwise it shows how long ago its tree was last active.
+
+The settings button of the top bar opens the settings page: every provider, enabled or not with
+a switch (`flottille provider enable` and `disable` do the same), how it signs in (its program's
+login file found, or the name of the API key set, never its value), and whether its agents can
+run here, as `flottille doctor` says it. The composer that starts a session offers the providers
+that are enabled and ready, then the chosen one's models (as its sessions said them: until one
+did, its default model), then the model's efforts when it has some. It starts on the project's
+provider and model, else on those the last session started from the window used. When no provider
+is ready it says why, and links to the settings page. The session page shows each agent's
+provider beside its model.
 
 Below 1240 pixels wide, the session page's rail of agents becomes a drawer from the right; below
 860, the tree of projects becomes a drawer from the left, opened by the menu button of the top bar.

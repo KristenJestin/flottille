@@ -18,14 +18,16 @@ use gpui_kit::{
     Task, WeakEntity, Window, canvas, div, point, px,
 };
 
-use crate::actions::{Actions, Command, Outcome};
+use crate::actions::{Actions, Command, Outcome, Pick};
 use crate::composer::{Choice, Composer, PlaceChoice, RunningSession};
 use crate::link::{self, Connect, Seen, Update};
 use crate::model::{BellItem, Place, Preparation, Snapshot};
 use crate::open::Opener;
 use crate::page::{MainArea, Page};
 use crate::project::{NewWorkspace, PlaceData, ProjectData, SessionLine, repository_label};
+use crate::providers::Providers;
 use crate::session::{Follow, Opened, Reply, SessionPage};
+use crate::settings::SettingsPage;
 use crate::tree::{PlaceNode, ProjectNode, SessionRow, Sidebar};
 
 /// Below this width the session page's rail becomes a drawer from the right.
@@ -64,6 +66,7 @@ impl Layout {
 pub enum Selection {
     Project(String),
     Session(String),
+    Settings,
 }
 
 pub struct Shell {
@@ -95,6 +98,12 @@ pub struct Shell {
     /// Each session's composer, made when its page first opens: a draft and a send belong to
     /// their session.
     replies: HashMap<String, Entity<Reply>>,
+    /// The providers as the daemon last listed them.
+    providers: Providers,
+    /// What the last session started from a composer started on, for this run of the window:
+    /// a composer with no project default starts there.
+    last_pick: Option<Pick>,
+    settings: Entity<SettingsPage>,
     /// The link's updates, until a task takes them.
     updates: Option<UnboundedReceiver<Update>>,
     _link: Task<()>,
@@ -152,9 +161,10 @@ impl Shell {
         let this = cx.entity().downgrade();
         let top = cx.new(|_| TopBar::new(this.clone()));
         let sidebar = cx.new(|_| Sidebar::new(this.clone()));
+        let settings = cx.new(|_| SettingsPage::new(this.clone()));
         let main = {
-            let this = this.clone();
-            cx.new(|cx| MainArea::new(this, cx))
+            let (this, settings) = (this.clone(), settings.clone());
+            cx.new(|cx| MainArea::new(this, settings, cx))
         };
         let left = cx.new(|_| Drawer::new("tree-drawer", Side::Left, px(SIDEBAR), sidebar.clone()));
         let bell = cx.new(|_| BellList::new(this.clone()));
@@ -189,6 +199,9 @@ impl Shell {
             follow,
             session_page: None,
             replies: HashMap::new(),
+            providers: Providers::default(),
+            last_pick: None,
+            settings,
             updates: Some(updates),
             _link: Task::ready(()),
             _clock,
@@ -386,6 +399,7 @@ impl Shell {
                 self.show(snapshot, window, cx);
             }
             Update::Done(outcome) => self.done(outcome, window, cx),
+            Update::Providers(providers) => self.set_providers(providers, cx),
             // Only the open page's link is listened to: what an older one sends is dropped.
             Update::Session { token, update } => {
                 if let Some(page) = self.session_page.clone() {
@@ -405,8 +419,11 @@ impl Shell {
             }
             // The session opens only if the user is still on the page they started it from.
             Outcome::Started { project, agent } => {
-                if let Some(composer) = self.composer_of(&project).cloned() {
-                    composer.update(cx, |composer, cx| composer.started(window, cx));
+                if let Some(composer) = self.composer_of(&project).cloned()
+                    && let Some(used) =
+                        composer.update(cx, |composer, cx| composer.started(window, cx))
+                {
+                    self.last_pick = Some(used);
                 }
                 if self.selected == Some(Selection::Project(project)) {
                     self.open(Selection::Session(agent), window, cx);
@@ -435,6 +452,17 @@ impl Shell {
                 {
                     page.update(cx, |page, cx| page.answered(number, decision, refused, cx));
                 }
+            }
+            Outcome::Providers(Some(providers)) => self.set_providers(providers, cx),
+            Outcome::Providers(None) => {}
+            Outcome::ProviderSet { name, refused } => {
+                // The change shows once the providers are read again: now, rather than only when
+                // its event comes, since a change to what the file already said emits none.
+                if refused.is_none() {
+                    self.actions.send(Command::ReadProviders);
+                }
+                self.settings
+                    .update(cx, |page, cx| page.answered(&name, refused, cx));
             }
             Outcome::WorkspaceDone { project, name } => {
                 self.workspace_answered(&project, &name, None, window, cx)
@@ -574,10 +602,18 @@ impl Shell {
             places,
         };
         page.update(cx, |page, cx| page.set(data, cx));
+        let default = (project.provider.clone(), project.model.clone());
         if let Some(composer) = self.composer_of(&name).cloned() {
+            let (providers, last) = (&self.providers, self.last_pick.as_ref());
             composer.update(cx, |composer, cx| {
                 composer.set_places(choices, cx);
                 composer.set_running(running, cx);
+                composer.set_providers(
+                    providers,
+                    (default.0.as_deref(), default.1.as_deref()),
+                    last,
+                    cx,
+                );
             });
         }
         if self
@@ -589,6 +625,29 @@ impl Shell {
             self.details_asked += 1;
             self.actions.send(Command::Details(name));
         }
+    }
+
+    /// The providers as the daemon lists them, to the settings page and to every composer.
+    fn set_providers(&mut self, providers: Providers, cx: &mut Context<Self>) {
+        self.settings
+            .update(cx, |page, cx| page.set_providers(&providers, cx));
+        for (name, (composer, _)) in &self.forms {
+            let project = self.snapshot.projects.iter().find(|p| &p.name == name);
+            let default = (
+                project.and_then(|p| p.provider.as_deref()),
+                project.and_then(|p| p.model.as_deref()),
+            );
+            let last = self.last_pick.as_ref();
+            composer.update(cx, |composer, cx| {
+                composer.set_providers(&providers, default, last, cx)
+            });
+        }
+        self.providers = providers;
+    }
+
+    /// The providers as the daemon last listed them.
+    pub fn providers(&self) -> &Providers {
+        &self.providers
     }
 
     /// How many times the open page's details were asked for: the tests count them.
@@ -754,6 +813,10 @@ impl Shell {
         {
             row.update(cx, |row, cx| row.set_selected(true, cx));
         }
+        // Opened, the page reads the providers again: the file is the user's to edit by hand.
+        if selection == Selection::Settings && self.selected != Some(Selection::Settings) {
+            self.actions.send(Command::ReadProviders);
+        }
         let page = self.page_of(&selection, cx);
         self.selected = Some(selection);
         let forms = self.forms_for(&page, window, cx);
@@ -766,6 +829,7 @@ impl Shell {
     /// The page of what is selected, as the daemon last gave it.
     fn page_of(&self, selection: &Selection, cx: &App) -> Page {
         match selection {
+            Selection::Settings => Page::Settings,
             Selection::Project(name) => {
                 match self.snapshot.projects.iter().find(|p| &p.name == name) {
                     Some(project) => Page::Project {
@@ -806,7 +870,7 @@ impl Shell {
         let project = match &self.selected {
             Some(Selection::Project(name)) => Some(name.clone()),
             Some(Selection::Session(id)) => self.snapshot.session(id).map(|s| s.project.clone()),
-            None => None,
+            Some(Selection::Settings) | None => None,
         }
         .or_else(|| self.snapshot.projects.first().map(|p| p.name.clone()));
         if let Some(project) = project {
@@ -959,6 +1023,7 @@ impl Render for TopBar {
         let p = palette(cx);
         let shell = self.shell.clone();
         let menu_shell = self.shell.clone();
+        let settings_shell = self.shell.clone();
         let mut bell =
             Button::icon("bell", Icon::Bell, "Waiting for you").on_click(move |_, _, cx| {
                 shell.update(cx, |shell, cx| shell.toggle_bell(cx)).ok();
@@ -1025,6 +1090,15 @@ impl Render for TopBar {
                     .child(icon(Icon::Search).size(px(13.)).text_color(p.faint))
                     .child("Search")
                     .child(div().mono(11.).child("Ctrl K")),
+            )
+            .child(
+                Button::icon("settings", Icon::Settings, "Settings").on_click(
+                    move |_, window, cx| {
+                        settings_shell
+                            .update(cx, |shell, cx| shell.open(Selection::Settings, window, cx))
+                            .ok();
+                    },
+                ),
             )
             .child(bell)
     }
