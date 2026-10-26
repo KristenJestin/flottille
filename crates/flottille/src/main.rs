@@ -207,6 +207,9 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             let answer = Client::connect_or_start(&paths)?
                 .request(method, serde_json::json!({"name": name}))?;
             let name = answer["name"].as_str().unwrap_or_default();
+            if let Some(warning) = answer["warning"].as_str() {
+                eprintln!("flottille: {warning}");
+            }
             if answer["enabled"] == true {
                 println!("{name} is enabled.");
             } else {

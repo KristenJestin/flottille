@@ -2,7 +2,18 @@
 //! enabled and ready, why not, how it signs in. A key is never shown, nor held: the daemon gives
 //! the name of the variable set, never its value.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use serde_json::Value;
+
+/// The `provider.list` reads, numbered as they are asked, whoever asks: answers come back in any
+/// order, and one older than an answer applied is dropped (`Shell`).
+static READS: AtomicU64 = AtomicU64::new(0);
+
+/// The number of a read about to be asked.
+pub fn next_read() -> u64 {
+    READS.fetch_add(1, Ordering::Relaxed) + 1
+}
 
 /// A model a provider's sessions offered.
 #[derive(Clone, Debug, PartialEq)]

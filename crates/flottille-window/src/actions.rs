@@ -131,8 +131,9 @@ pub enum Outcome {
         name: String,
         why: String,
     },
-    /// The providers, read again; `None` when the daemon could not be asked.
-    Providers(Option<crate::providers::Providers>),
+    /// The providers, read again, with the read's number (`providers::next_read`); `None` when
+    /// the daemon could not be asked.
+    Providers(u64, Option<crate::providers::Providers>),
     /// A provider was enabled or disabled as asked, or the daemon refused it with why.
     ProviderSet {
         name: String,
@@ -165,7 +166,7 @@ pub(crate) struct Bounds {
     pub quiet: Duration,
 }
 
-const BOUNDS: Bounds = Bounds {
+pub(crate) const BOUNDS: Bounds = Bounds {
     quick: Duration::from_secs(120),
     slow: Duration::from_secs(31 * 60),
     quiet: Duration::from_secs(30),
@@ -331,13 +332,8 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             Outcome::ProviderSet { name, refused }
         }
         Command::ReadProviders => {
-            let listed = ask_alone(connect, "provider.list", json!({}), bounds.quick);
-            // A daemon that did not answer changes nothing: the link reads them when it is back.
-            Outcome::Providers(match &listed {
-                Ok(Ok(listed)) => Some(crate::providers::Providers::of(Ok(listed))),
-                Ok(Err(why)) => Some(crate::providers::Providers::of(Err(why.clone()))),
-                Err(_) => None,
-            })
+            let read = crate::providers::next_read();
+            Outcome::Providers(read, read_providers(connect, bounds.quick))
         }
         Command::CreateWorkspace { project, name } => workspace_outcome(
             ask_alone(
@@ -415,6 +411,21 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
     }
 }
 
+/// The providers on a connection of their own, or the daemon's sentence when it cannot list them.
+/// `None` when the daemon did not answer: that changes nothing, and the link reads them again once
+/// it is back.
+pub(crate) fn read_providers(
+    connect: &Connect,
+    bound: Duration,
+) -> Option<crate::providers::Providers> {
+    match ask_alone(connect, "provider.list", json!({}), bound) {
+        Ok(listed) => Some(crate::providers::Providers::of(
+            listed.as_ref().map_err(Clone::clone),
+        )),
+        Err(_) => None,
+    }
+}
+
 fn workspace_outcome(
     answer: Result<Result<Value, String>, String>,
     project: String,
@@ -427,7 +438,7 @@ fn workspace_outcome(
 }
 
 fn start_params(project: &str, workspace: Option<&str>, pick: &Pick, message: &str) -> Value {
-    // What is left out is the daemon's to choose; a null is never sent.
+    // What is left out is sent as a null, which the daemon reads as absent: its to choose.
     json!({
         "project": project,
         "workspace": workspace,

@@ -455,8 +455,13 @@ at fault).
 `{"name"}`. Enables or disables the provider in `providers.toml` (`docs/agents.md`, "Providers"):
 `{"name", "enabled"}`. The daemon sets `enabled` under the provider's table and keeps the rest of
 the file as it is, its comments included; it makes the file, or the table, when there is none.
+The file is written in place: a temporary file beside it is renamed over it, so that a reader
+never sees half of one; a `providers.toml` that is a symbolic link stays one (its target is
+written), its mode is kept, and no temporary file stays when the write fails.
 When this changes the file it emits `provider.changed` (`docs/events.md`); asking for what the file
-already says changes nothing and emits nothing. Disabling a provider stops no agent: those running
+already says changes nothing and emits nothing. When the file was written but its event could not
+be sent, the change happened all the same: the answer says so in `warning`, a sentence, and the
+command line prints it. Disabling a provider stops no agent: those running
 on it go on, and each fails at the next start of its process, saying why (`agent.failed`).
 `not-found` when there is no provider of that name (the sentence names the providers);
 `invalid-config` when `providers.toml` cannot be read (the sentence names the key at fault), and

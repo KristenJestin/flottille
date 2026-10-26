@@ -802,3 +802,47 @@ fn the_provider_command_enables_and_disables_a_provider() {
         "flottille: there is no provider codex: the providers are claude, opencode\n"
     );
 }
+
+#[test]
+fn a_providers_toml_behind_a_symbolic_link_is_still_a_link_after_a_switch_its_mode_unchanged() {
+    use std::os::unix::fs::PermissionsExt;
+    let user = User::with_fake_providers();
+    let link = user.path("config/flottille/providers.toml");
+    let real = user.path("dotfiles/flottille/providers.toml");
+    std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+    std::fs::write(
+        &real,
+        "# Kept with the dotfiles.\n[opencode]\nenabled = true\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o640)).unwrap();
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    user.call("provider.disable", json!({"name": "opencode"}))
+        .unwrap();
+
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link was replaced by a file"
+    );
+    assert_eq!(std::fs::read_link(&link).unwrap(), real);
+    let text = std::fs::read_to_string(&real).unwrap();
+    assert!(text.contains("# Kept with the dotfiles."), "{text}");
+    assert!(text.contains("enabled = false"), "{text}");
+    assert_eq!(common::mode(real.clone()) & 0o777, 0o640);
+    for dir in [link.parent().unwrap(), real.parent().unwrap()] {
+        let names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.iter().all(|name| !name.ends_with(".tmp")),
+            "{names:?}"
+        );
+    }
+    assert_eq!(listed(&user, "opencode")["enabled"], false);
+}

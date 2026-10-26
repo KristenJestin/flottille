@@ -755,15 +755,18 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
                     ),
                 )
             })?;
-            if set_enabled(&daemon.paths, provider.name, enabled)? {
+            let announced = if set_enabled(&daemon.paths, provider.name, enabled)? {
                 daemon
                     .emit(
                         "provider.changed",
                         json!({"name": provider.name, "enabled": enabled}),
                     )
-                    .map_err(|error| Failure::new("unavailable", error.to_string()))?;
-            }
-            Ok(json!({"name": provider.name, "enabled": enabled}))
+                    .map(drop)
+                    .map_err(|error| error.to_string())
+            } else {
+                Ok(())
+            };
+            Ok(switched(provider.name, enabled, announced))
         }
         method => Err(Failure::new(
             "unknown-method",
@@ -824,12 +827,53 @@ fn set_enabled(paths: &Paths, name: &str, enabled: bool) -> Result<bool, Failure
     }
     let text = document.to_string();
     Settings::parse(&text).map_err(|error| Failure::new("invalid-config", error))?;
-    // A reader sees the old file or the new one, never half of one.
     std::fs::create_dir_all(&paths.config).map_err(unavailable)?;
-    let writing = paths.config.join(".providers.toml.tmp");
-    std::fs::write(&writing, text).map_err(unavailable)?;
-    std::fs::rename(&writing, &file).map_err(unavailable)?;
+    write_in_place(&file, &text).map_err(unavailable)?;
     Ok(true)
+}
+
+/// Writes `text` in place of `file`, through a temporary file beside it so that a reader sees
+/// the old file or the new one, never half of one. A symbolic link stays one (its target is
+/// written, the temporary file beside the target), the file's mode is kept, and no temporary
+/// file stays when a step fails.
+fn write_in_place(file: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let real = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_owned());
+    let mode = std::fs::metadata(&real).ok().map(|m| m.permissions());
+    let name = real.file_name().unwrap_or_default().to_string_lossy();
+    let writing = real.with_file_name(format!(".{name}.tmp"));
+    let written = (|| {
+        let mut out = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(mode.as_ref().map_or(0o644, |m| m.mode() & 0o777))
+            .open(&writing)?;
+        out.write_all(text.as_bytes())?;
+        // The mode asked at creation is the umask's to narrow: the file's own is set again.
+        if let Some(mode) = mode {
+            out.set_permissions(mode)?;
+        }
+        drop(out);
+        std::fs::rename(&writing, &real)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&writing);
+    }
+    written
+}
+
+/// The answer to a switch. When the file was written but its event could not be sent, the
+/// change happened all the same: the answer says so rather than refusing.
+fn switched(name: &str, enabled: bool, announced: Result<(), String>) -> Value {
+    let mut answer = json!({"name": name, "enabled": enabled});
+    if let Err(error) = announced {
+        answer["warning"] = json!(format!(
+            "providers.toml was written, but its event could not be sent: {error}"
+        ));
+    }
+    answer
 }
 
 /// Every provider as `doctor` reports it, with the models it offers (`null` until a session of
@@ -948,6 +992,36 @@ mod tests {
             Some("3.4.5-beta.1")
         );
         assert_eq!(first_version("no version"), None);
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // A folder in the file's place: the temporary file is written, and the rename fails.
+        let file = dir.path().join("providers.toml");
+        std::fs::create_dir(&file).unwrap();
+        std::fs::write(file.join("kept"), "").unwrap();
+
+        assert!(write_in_place(&file, "[claude]\nenabled = true\n").is_err());
+
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["providers.toml"]);
+    }
+
+    #[test]
+    fn a_write_whose_event_could_not_be_sent_answers_that_the_change_happened() {
+        assert_eq!(
+            switched("opencode", false, Ok(())),
+            json!({"name": "opencode", "enabled": false})
+        );
+        assert_eq!(
+            switched("opencode", true, Err("disk I/O error".into())),
+            json!({"name": "opencode", "enabled": true, "warning":
+                "providers.toml was written, but its event could not be sent: disk I/O error"})
+        );
     }
 
     #[test]

@@ -98,8 +98,9 @@ pub struct Shell {
     /// Each session's composer, made when its page first opens: a draft and a send belong to
     /// their session.
     replies: HashMap<String, Entity<Reply>>,
-    /// The providers as the daemon last listed them.
+    /// The providers as the daemon last listed them, and the number of that read.
     providers: Providers,
+    providers_read: u64,
     /// What the last session started from a composer started on, for this run of the window:
     /// a composer with no project default starts there.
     last_pick: Option<Pick>,
@@ -200,6 +201,7 @@ impl Shell {
             session_page: None,
             replies: HashMap::new(),
             providers: Providers::default(),
+            providers_read: 0,
             last_pick: None,
             settings,
             updates: Some(updates),
@@ -399,7 +401,7 @@ impl Shell {
                 self.show(snapshot, window, cx);
             }
             Update::Done(outcome) => self.done(outcome, window, cx),
-            Update::Providers(providers) => self.set_providers(providers, cx),
+            Update::Providers(read, providers) => self.set_providers(read, providers, cx),
             // Only the open page's link is listened to: what an older one sends is dropped.
             Update::Session { token, update } => {
                 if let Some(page) = self.session_page.clone() {
@@ -453,8 +455,8 @@ impl Shell {
                     page.update(cx, |page, cx| page.answered(number, decision, refused, cx));
                 }
             }
-            Outcome::Providers(Some(providers)) => self.set_providers(providers, cx),
-            Outcome::Providers(None) => {}
+            Outcome::Providers(read, Some(providers)) => self.set_providers(read, providers, cx),
+            Outcome::Providers(_, None) => {}
             Outcome::ProviderSet { name, refused } => {
                 // The change shows once the providers are read again: now, rather than only when
                 // its event comes, since a change to what the file already said emits none.
@@ -627,8 +629,13 @@ impl Shell {
         }
     }
 
-    /// The providers as the daemon lists them, to the settings page and to every composer.
-    fn set_providers(&mut self, providers: Providers, cx: &mut Context<Self>) {
+    /// The providers as the daemon lists them, to the settings page and to every composer; an
+    /// answer to a read asked before the last one applied is older than it, and dropped.
+    fn set_providers(&mut self, read: u64, providers: Providers, cx: &mut Context<Self>) {
+        if read < self.providers_read {
+            return;
+        }
+        self.providers_read = read;
         self.settings
             .update(cx, |page, cx| page.set_providers(&providers, cx));
         for (name, (composer, _)) in &self.forms {

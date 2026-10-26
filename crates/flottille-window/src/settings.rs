@@ -64,6 +64,20 @@ impl SettingsPage {
         }
     }
 
+    /// Whether the provider's switch shows it on: what it was asked to become while the daemon
+    /// has not listed it so.
+    pub fn switch_on(&self, name: &str) -> bool {
+        self.pending
+            .get(name)
+            .copied()
+            .unwrap_or_else(|| self.providers.get(name).is_some_and(|p| p.enabled))
+    }
+
+    /// Whether a switch of the provider waits for the daemon.
+    pub fn is_pending(&self, name: &str) -> bool {
+        self.pending.contains_key(name)
+    }
+
     pub fn set_providers(&mut self, providers: &Providers, cx: &mut Context<Self>) {
         // A switch shows what it was asked to become until the daemon lists it so.
         self.pending
@@ -111,7 +125,7 @@ impl SettingsPage {
     fn card(&self, provider: &Provider, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let name = provider.name.clone();
-        let on = self.pending.get(&name).copied().unwrap_or(provider.enabled);
+        let on = self.switch_on(&name);
         let switch = Switch::new(
             ElementId::Name(format!("provider-switch-{name}").into()),
             on,

@@ -500,7 +500,11 @@ login file found, or the name of the API key set, never its value), and whether 
 run here, as `flottille doctor` says it. The composer that starts a session offers the providers
 that are enabled and ready, then the chosen one's models (as its sessions said them: until one
 did, its default model), then the model's efforts when it has some. It starts on the project's
-provider and model, else on those the last session started from the window used. When no provider
+provider and model, else on those the last session started from the window used. A project that
+names a model and no provider gives it to the first provider enabled, as the daemon does: on that
+provider the composer shows the project's model, marked so, with its efforts, and "default model"
+only on the others. A project's model its provider is known not to offer is said, and the session
+starts once another model is picked. When no provider
 is ready it says why, and links to the settings page. The session page shows each agent's
 provider beside its model.
 
