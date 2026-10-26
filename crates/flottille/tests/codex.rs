@@ -156,12 +156,13 @@ fn a_reply_streamed_in_many_deltas_reads_as_one_message() {
     let (id, after) = run(&user, "tools");
 
     let events = events_until(&user, &id, after, "agent.turn_ended");
-    // The stream stays piece by piece, for `watch` and the window.
-    let streamed = events
+    // The stream, for `watch` and the window, is the reply as it settles.
+    let streamed: String = events
         .iter()
         .filter(|e| e["name"] == "agent.message")
-        .count();
-    assert_eq!(streamed, pieces.len(), "{events:?}");
+        .map(|e| e["data"]["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(streamed, pieces.concat(), "{events:?}");
     let read = user.call("agent.read", json!({"agent": id})).unwrap();
     let said: Vec<&str> = read["lines"]
         .as_array()

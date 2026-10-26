@@ -15,7 +15,7 @@ use flottille_core::agent::{Agent, AgentState, Choices, new_id};
 use flottille_core::approval;
 use flottille_core::project::Project;
 use flottille_core::protocol::{AgentName, AgentRun, AgentSend, AgentTrees};
-use flottille_core::secrets;
+use flottille_core::secrets::{self, Secrets};
 use flottille_core::store::{AgentChange, Store, now_ms};
 use flottille_core::workspace::State;
 use serde_json::{Value, json};
@@ -629,13 +629,16 @@ async fn process(
         tokio::spawn(log_stderr(agent.id.clone(), stderr, env.clone()));
     }
 
-    let events = Arc::new(Recorder {
+    let recorder = Arc::new(Recorder {
         daemon: daemon.clone(),
         agent: agent.id.clone(),
         provider,
         pid,
+        secrets: Secrets::new(&env, &[]),
         env,
+        saying: Mutex::new(None),
     });
+    let events = recorder.clone();
     let server = acp::Server {
         url: daemon.mcp.url.clone(),
         token,
@@ -651,6 +654,7 @@ async fn process(
         server,
     )
     .await;
+    recorder.said();
     if !matches!(exit, Ok(Exit::Died(_) | Exit::Replace(_))) {
         daemon.mcp.revoke(&agent.id);
     }
@@ -857,6 +861,83 @@ struct Recorder {
     pid: u32,
     /// Secrets of the daemon's environment are masked out of what the agent says and does.
     env: BTreeMap<OsString, OsString>,
+    /// The secret values of `env`, found once for every piece the agent says.
+    secrets: Secrets,
+    /// The message the agent is saying, while it says it.
+    saying: Mutex<Option<Saying>>,
+}
+
+/// Events of the session that say nothing of the conversation: they may come between two pieces
+/// of one message without ending it.
+const BOOKKEEPING: [&str; 4] = [
+    "agent.usage",
+    "agent.mode_changed",
+    "agent.options_changed",
+    "agent.provider_wait",
+];
+
+/// A message the agent is still saying: its id, when its source gives one, its last part, held
+/// back until it is settled (`Secrets::settled`), and the bookkeeping kept after it.
+struct Saying {
+    id: Option<String>,
+    held: String,
+    after: Vec<(String, Value, bool)>,
+}
+
+/// A piece the session handled after its end (a process that died as it spoke) is kept too.
+impl Drop for Recorder {
+    fn drop(&mut self) {
+        self.said();
+    }
+}
+
+impl Recorder {
+    /// A piece of what the agent says. A secret its pieces split is whole only in the message:
+    /// what of it is settled is recorded, masked, and the rest held back until the next piece or
+    /// its end.
+    fn say(&self, data: &Value) {
+        let mut saying = self.saying.lock().unwrap();
+        let id = data["message_id"].as_str().map(str::to_owned);
+        if saying.as_ref().is_some_and(|said| said.id != id) {
+            self.end(saying.take());
+        }
+        let said = saying.get_or_insert(Saying {
+            id,
+            held: String::new(),
+            after: Vec::new(),
+        });
+        said.held
+            .push_str(data["text"].as_str().unwrap_or_default());
+        let settled = said.held.drain(..self.secrets.settled(&said.held));
+        self.record_said(said.id.as_deref(), settled.as_str());
+    }
+
+    /// The message the agent was saying is over: what was held back is recorded.
+    fn said(&self) {
+        let mut saying = self.saying.lock().unwrap();
+        self.end(saying.take());
+    }
+
+    fn end(&self, saying: Option<Saying>) {
+        if let Some(said) = saying {
+            self.record_said(said.id.as_deref(), &said.held);
+            for (name, data, activity) in said.after {
+                record(&self.daemon, &self.agent, &name, data, activity);
+            }
+        }
+    }
+
+    /// Records `text` of the message `id`, masked, in pieces no line of a reader cuts.
+    fn record_said(&self, id: Option<&str>, text: &str) {
+        let masked: Vec<char> = self.secrets.mask(text).chars().collect();
+        for piece in masked.chunks(tree::LINE_CHARS) {
+            let mut data = json!({"text": piece.iter().collect::<String>(), "replay": false});
+            if let Some(id) = id {
+                data["message_id"] = self.secrets.mask(id).into();
+            }
+            record(&self.daemon, &self.agent, "agent.message", data, true);
+        }
+    }
 }
 
 impl acp::Events for Recorder {
@@ -874,13 +955,23 @@ impl acp::Events for Recorder {
                 waiting.remove(&self.agent);
             }
         }
-        record(
-            &self.daemon,
-            &self.agent,
-            name,
-            mask(data, &self.env),
-            activity,
-        );
+        if name == "agent.message" {
+            self.say(&data);
+            return;
+        }
+        let data = mask(data, &self.env);
+        // Bookkeeping between two pieces of a message does not end it: it is kept after the
+        // message, which stays one. Anything else the agent does (a tool call, a thought, a
+        // compaction…) ends it.
+        if BOOKKEEPING.contains(&name) {
+            if let Some(said) = self.saying.lock().unwrap().as_mut() {
+                said.after.push((name.to_owned(), data, activity));
+                return;
+            }
+        } else {
+            self.said();
+        }
+        record(&self.daemon, &self.agent, name, data, activity);
         if name == "agent.compacted" {
             tree::compacted(&self.daemon, &self.agent);
         }
@@ -927,6 +1018,7 @@ impl acp::Events for Recorder {
     }
 
     fn turn_ended(&self, stop_reason: &str, usage: Value) {
+        self.said();
         let _ = self
             .daemon
             .read(|store| store.deliveries_taken(&self.agent));

@@ -3048,3 +3048,49 @@ fn the_model_picker_lists_claude_s_models_by_name_with_default_model_once(cx: &m
     cx.update(|window, cx| window.click("model-choice-fable", cx));
     assert_eq!(model_shown(&composer, cx), "Fable");
 }
+
+/// A secret the daemon knows through its environment (#63).
+const SECRET: &str = "s3cr3t-token-value";
+
+#[gpui_kit::test]
+fn a_token_streamed_over_three_pieces_never_shows_in_clear_in_the_window_s_conversation(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent().with_env("API_TOKEN", SECRET);
+    user.fake_script(json!({"turns": [{"when": "tell", "do": [
+        {"say": "the token is s3cr3t-"}, {"say": "token-"}, {"say": "value, keep it quiet"}
+    ]}]}));
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    project(&user, "app");
+    let lead = start(&user, "app", None, "hello");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    settle(cx);
+
+    // Streamed live to the open page.
+    send(&user, &lead, "tell");
+    let texts = |cx: &mut VisualTestContext| -> Vec<String> {
+        blocks(&page, cx)
+            .into_iter()
+            .filter_map(|block| match block {
+                Block::Text { text } => Some(text),
+                _ => None,
+            })
+            .collect()
+    };
+    until(&shell, cx, "the reply is shown whole", |cx| {
+        texts(cx).iter().any(|t| t.ends_with("keep it quiet"))
+    });
+    settle(cx);
+
+    let shown = texts(cx);
+    assert!(
+        shown.iter().all(|t| !t.contains(SECRET)),
+        "{}",
+        shown.join("|").replace(SECRET, "<clear>")
+    );
+    assert!(
+        shown.contains(&"the token is [masked], keep it quiet".to_owned()),
+        "{shown:?}"
+    );
+}

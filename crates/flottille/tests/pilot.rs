@@ -50,7 +50,8 @@ fn script() -> Value {
         {"when": "READ-ENV", "do": [
             {"mcp": {"tool": "fs_read", "arguments": {"path": ".env"}}}]},
         {"when": "die-always", "do": [{"die": 4}]},
-        {"when": "FORGE", "do": [{"say": FORGED}, {"hang": true}]},
+        // Words after it, for the forged text to be shown before the turn ends.
+        {"when": "FORGE", "do": [{"say": FORGED}, {"say": "\nand so on".repeat(10)}, {"hang": true}]},
         {"when": "LONG", "do": long}
     ]})
 }

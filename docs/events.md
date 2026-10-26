@@ -185,7 +185,9 @@ A turn starts with this message.
 #### `agent.user_message`, `agent.message`, `agent.thought`
 
 A piece of text of the user (seen in a replay), of the agent's reply, or of its thinking, as it
-streams: the pieces of one reply follow each other.
+streams: the pieces of one reply follow each other. The pieces of a reply are the daemon's, not
+the provider's: it masks the reply whole and keeps what is settled, at most 2,000 characters a
+piece (`docs/agents.md` "The conversation").
 
 | Field | |
 |---|---|
