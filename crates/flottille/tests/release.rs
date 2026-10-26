@@ -827,6 +827,120 @@ fn install_sh_cut_short_by_the_network_runs_nothing() {
     );
 }
 
+/// An alpha holding two archives while it is replaced, the older one listed first.
+fn alpha_with_two_archives(releases: &Releases, programs: &Path) {
+    let old = releases.release(
+        "alpha-feat-x",
+        "0.5.0-alpha.feat-x.7",
+        &standing_for(programs, "0.5.0-alpha.feat-x.7"),
+        None,
+    );
+    let new = releases.release(
+        "alpha-feat-x",
+        "0.5.0-alpha.feat-x.8",
+        &standing_for(programs, "0.5.0-alpha.feat-x.8"),
+        None,
+    );
+    let mut both = old.clone();
+    both["assets"]
+        .as_array_mut()
+        .unwrap()
+        .extend(new["assets"].as_array().unwrap().iter().cloned());
+    releases.put(
+        "/repos/o/r/releases/tags/alpha-feat-x",
+        both.to_string().into_bytes(),
+    );
+}
+
+#[test]
+fn install_sh_picks_the_highest_archive_of_an_alpha_being_replaced() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    alpha_with_two_archives(&releases, programs.path());
+    let home = tempfile::tempdir().unwrap();
+
+    let output = install(
+        home.path(),
+        &releases,
+        &["--channel", "alpha", "--branch", "feat/x"],
+    );
+
+    assert!(output.status.success(), "{output:?}");
+    let said = Command::new(home.path().join(".local/bin/flottille"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&said.stdout).trim(),
+        "flottille 0.5.0-alpha.feat-x.8 (test, 000000000000)"
+    );
+}
+
+#[test]
+fn install_sh_refuses_while_a_daemon_runs_and_says_to_stop_it_first() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    three_channels(&releases, programs.path());
+    let user = User::new();
+    // Started by any command, from the binary already installed.
+    user.status();
+
+    let output = Command::new("sh")
+        .arg(tool("install.sh"))
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap())
+        .env("HOME", user.path("home"))
+        .env("XDG_RUNTIME_DIR", user.path("runtime"))
+        .env("FLOTTILLE_RELEASES", releases.api())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("`flottille daemon stop`"),
+        "{output:?}"
+    );
+    assert!(!user.path("home/.local/bin/flottille").exists());
+    assert!(
+        releases.asked.lock().unwrap().is_empty(),
+        "nothing was read"
+    );
+    // The check started no daemon of its own and stopped none: the one running still answers.
+    assert!(
+        std::os::unix::net::UnixStream::connect(user.path("runtime/flottille/daemon.sock")).is_ok()
+    );
+
+    user.run(&["daemon", "stop"]);
+    let output = Command::new("sh")
+        .arg(tool("install.sh"))
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap())
+        .env("HOME", user.path("home"))
+        .env("XDG_RUNTIME_DIR", user.path("runtime"))
+        .env("FLOTTILLE_RELEASES", releases.api())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "once stopped: {output:?}");
+}
+
+#[test]
+fn the_publish_job_runs_no_git_and_not_inside_the_artifact() {
+    // The job holding the write token: an artifact can carry a repository's layout, whose
+    // configuration git would apply from the current folder (core.sshCommand, insteadOf).
+    let workflow = std::fs::read_to_string(tool(".github/workflows/ci.yml")).unwrap();
+    let publish = &workflow[workflow.find("\n  publish:\n").expect("a publish job")..];
+    for line in publish.lines().filter(|l| !l.trim_start().starts_with('#')) {
+        assert!(!line.contains("working-directory"), "{line}");
+        // `git` run as a command, not `…/git/ref/…` in the API's paths.
+        assert!(
+            !line
+                .split_whitespace()
+                .any(|word| word.rsplit(['(', '=', ';', '|', '&']).next() == Some("git")),
+            "{line}"
+        );
+    }
+}
+
 #[test]
 fn the_branch_name_is_sanitised_the_same_way_everywhere() {
     // Each byte but ASCII letters, digits and dashes is a dash: `é` is two.
@@ -1211,6 +1325,30 @@ fn flottille_update_refuses_a_branch_without_the_alpha_channel() {
     assert!(
         releases.asked.lock().unwrap().is_empty(),
         "nothing was read"
+    );
+}
+
+#[test]
+fn flottille_update_picks_the_highest_archive_of_an_alpha_being_replaced() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    alpha_with_two_archives(&releases, programs.path());
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+    let binary = installed(&user);
+
+    let output = user
+        .command_through(
+            &binary,
+            &["update", "--channel", "alpha", "--branch", "feat/x"],
+        )
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let said = Command::new(&binary).arg("--version").output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&said.stdout).trim(),
+        "flottille 0.5.0-alpha.feat-x.8 (test, 000000000000)"
     );
 }
 

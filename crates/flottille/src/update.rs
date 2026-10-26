@@ -84,6 +84,14 @@ pub fn run(
     Ok(ExitCode::SUCCESS)
 }
 
+/// The archive of the highest version among these addresses.
+fn highest(urls: Vec<String>) -> Option<String> {
+    urls.into_iter()
+        .filter_map(|url| Some((version_of(url.rsplit('/').next()?)?, url)))
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, url)| url)
+}
+
 /// The version an archive is of, `0.3.0-beta.12` in `flottille-0.3.0-beta.12-x86_64-linux.tar.gz`.
 fn version_of(name: &str) -> Option<Version> {
     let version = name
@@ -112,16 +120,16 @@ fn archive_url(channel: &str, branch: Option<&str>) -> Result<String> {
             urls(&release).into_iter().next()
         }
         // The newest by version, whatever order they were published in.
-        "beta" => json(&format!("{}/releases?per_page=100", api()))?
-            .unwrap_or_default()
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|r| r["tag_name"].as_str().is_some_and(|t| t.contains("-beta.")))
-            .flat_map(&urls)
-            .filter_map(|url| Some((version_of(url.rsplit('/').next()?)?, url)))
-            .max_by(|a, b| a.0.cmp(&b.0))
-            .map(|(_, url)| url),
+        "beta" => highest(
+            json(&format!("{}/releases?per_page=100", api()))?
+                .unwrap_or_default()
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|r| r["tag_name"].as_str().is_some_and(|t| t.contains("-beta.")))
+                .flat_map(&urls)
+                .collect(),
+        ),
         "alpha" => {
             let branch = branch
                 .or(Some(BRANCH).filter(|b| !b.is_empty()))
@@ -139,7 +147,8 @@ fn archive_url(channel: &str, branch: Option<&str>) -> Result<String> {
                 .collect();
             let release = json(&format!("{}/releases/tags/alpha-{tag}", api()))?
                 .ok_or_else(|| format!("there is no alpha release for {branch}"))?;
-            urls(&release).into_iter().next()
+            // Two while it is replaced: the newer.
+            highest(urls(&release))
         }
         _ => return Err("the channel is stable, beta or alpha".into()),
     };

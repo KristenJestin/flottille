@@ -24,8 +24,10 @@ holds none of `dev`'s commits, so CI keeps the link itself:
   `dev`, without its pre-release (`0.3.0-beta.12` releases `0.3.0`).
 - **Its changelog** lists the commits of `dev` between the previous mark and the new one.
 - A push to `main` that is not the squash of a pull request from `dev` (none should happen)
-  publishes nothing, and its run says why. Neither does a run on a head of `dev` already
-  released.
+  publishes nothing and fails its run, saying why. Should GitHub's API not list the pull request
+  of a real release yet, run the run again once it does (`gh run rerun <run id>`, or "Re-run
+  jobs" on the run's page): the lookup is made again. A run on a head of `dev` already released
+  publishes nothing.
 
 ## The version
 
@@ -49,6 +51,9 @@ for HEAD by default):
   `alpha-feat-46-packages`. CI, its cleanup, `install.sh` and `flottille update` follow that one
   rule. Two names that give the same one (`feat/a_b` and `feat/a-b`) share an alpha: the last
   push wins.
+- **An alpha's number can go down**: it counts the branch's commits, so a force-push with fewer
+  of them gives a lower `N`, and `flottille update` then calls that newest build older and asks
+  for `--force`. The numbering stays as it is: rewriting a branch is the exception.
 
 `Cargo.toml` keeps its own version; CI gives the computed one to the build
 (`FLOTTILLE_BUILD_VERSION`, `FLOTTILLE_BUILD_CHANNEL`, `FLOTTILLE_BUILD_BRANCH`, read by
@@ -76,9 +81,12 @@ beside its checks:
     breaking changes, features, fixes, performance and other changes, each
     `- **<scope>**: <subject>` with the pull request number its squash kept.
 - **`publish`**, once `verify` passed on the pushed commit, runs none of the branch's code: it
-  takes what `build` made and alone holds the right to write releases and tags. Right before
-  writing, it reads the branch's tip again: a branch moved on to another commit, or deleted,
-  publishes nothing (the later push publishes itself). Then:
+  takes what `build` made and alone holds the right to write releases and tags. It runs no git
+  and never works inside the artifact's folder, whose files the branch's code made (a
+  repository's layout left there would hand git its configuration): only `gh`, naming the files
+  it uploads. Right before writing, it reads the branch's tip again through GitHub's API: a
+  branch moved on to another commit, or deleted, publishes nothing (the later push publishes
+  itself). Then:
   - on `main`, the mark `released/vX.Y.Z`, then the release `vX.Y.Z` on the squash, marked
     latest;
   - on `dev`, the pre-release `vX.Y.Z-beta.N`;
@@ -88,7 +96,8 @@ beside its checks:
     same version, run again or pushed over), a download in that moment can find a sum that is
     not its archive's: it then refuses and installs nothing.
 
-  Run again, a stable or beta release already published is left as it is.
+  Run again, a stable or beta release already published is left as it is. A release left as a
+  draft by a failed upload, of any channel, is deleted and made again.
 
 `.github/workflows/alpha-cleanup.yml` deletes a branch's alpha, and its tag, when the branch is
 deleted. It shares the branch's `publish` concurrency group, so it waits for one still running,
@@ -111,9 +120,12 @@ one each release's notes name, of its own commit.
 function called on its last line, so a download cut short runs nothing. It reads the channel's
 release from GitHub's API (stable: the latest release; beta: the highest version among the
 `-beta.` pre-releases, whatever order they were published in; alpha: the branch's
-`alpha-<branch>`), downloads its archive and sum, checks the sum (a wrong one installs nothing),
+`alpha-<branch>`, the higher version when it holds two archives while it is replaced), downloads
+its archive and sum, checks the sum (a wrong one installs nothing),
 and puts `flottille` in `~/.local/bin`, written beside it then renamed over it, with `flot` a link
-to it. A release that is not there and a network or GitHub failure are said apart. When the new
+to it. It refuses while Flottille's daemon runs, as `flottille update` does, and says to stop it
+first: it tells by the lock the daemon holds beside its socket (with `flock`, or by the socket
+alone where `flock` is missing), without starting or speaking to one. A release that is not there and a network or GitHub failure are said apart. When the new
 binary does not answer `--version` (a system library missing), it is installed all the same and
 that is said. It says when `~/.local/bin` is not on `PATH`.
 
@@ -129,7 +141,9 @@ is the old one or the new one, never half of one.
 
 - **It refuses while the daemon runs**, and says to stop it first with `flottille daemon stop`
   (its agents stop with it). A daemon left running would go on from a file that is gone, and
-  could not start an agent's process, which is this binary too.
+  could not start an agent's process, which is this binary too. A client that starts a daemon
+  later from a binary replaced while it ran (the window left open) starts it from the new file
+  at that path, not from the deleted one.
 - **The same version is not installed again**: it says so and replaces nothing. **An older one
   is refused.** `--force` installs either.
 

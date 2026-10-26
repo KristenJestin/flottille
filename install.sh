@@ -29,6 +29,23 @@ archives() {
   tr ',' '\n' <"$1" | sed -n 's/.*"browser_download_url": *"\([^"]*-x86_64-linux\.tar\.gz\)".*/\1/p'
 }
 
+# The archive of the highest version among the addresses read, whatever order they come in.
+highest() {
+  sed 's|.*/flottille-\([^/]*\)-x86_64-linux\.tar\.gz$|\1 &|' | sort -t ' ' -k 1,1V | tail -n 1 | cut -d ' ' -f 2
+}
+
+# Whether Flottille's daemon runs: it holds the lock beside its socket. Asked without starting
+# one, and without speaking to it.
+daemon_runs() {
+  [ -n "${XDG_RUNTIME_DIR:-}" ] || return 1
+  [ -e "$XDG_RUNTIME_DIR/flottille/daemon.lock" ] || return 1
+  if command -v flock >/dev/null 2>&1; then
+    ! flock -n "$XDG_RUNTIME_DIR/flottille/daemon.lock" true
+  else
+    [ -S "$XDG_RUNTIME_DIR/flottille/daemon.sock" ]
+  fi
+}
+
 main() {
   api=${FLOTTILLE_RELEASES:-https://api.github.com/repos/KristenJestin/flottille}
   channel=stable
@@ -54,6 +71,10 @@ main() {
     command -v "$program" >/dev/null 2>&1 || fail "$program is needed"
   done
   [ "$(uname -s)-$(uname -m)" = Linux-x86_64 ] || fail "there are packages for Linux x86_64 only"
+  # It would go on from the file renamed over, and fail its next start of an agent.
+  if daemon_runs; then
+    fail "Flottille's daemon is running: stop it first with \`flottille daemon stop\` (its agents stop with it), then install."
+  fi
 
   work=$(mktemp -d)
   trap 'rm -rf "$work"' EXIT
@@ -65,17 +86,15 @@ main() {
       ;;
     beta)
       read_api "$api/releases?per_page=100" "$answer" || fail "cannot read the releases at $api"
-      # The newest by version, whatever order they were published in.
-      url=$(archives "$answer" | grep -- '/download/v[0-9.]*-beta\.[0-9]*/' |
-        sed 's|.*/flottille-\([^/]*\)-x86_64-linux\.tar\.gz$|\1 &|' |
-        sort -t ' ' -k 1,1V | tail -n 1 | cut -d ' ' -f 2)
+      url=$(archives "$answer" | grep -- '/download/v[0-9.]*-beta\.[0-9]*/' | highest)
       ;;
     alpha)
       [ -n "$branch" ] || fail "the alpha channel needs --branch <name>"
       # Each byte but ASCII letters, digits and dashes is a dash, as CI names the alpha.
       tag="alpha-$(printf '%s' "$branch" | LC_ALL=C tr -c 'A-Za-z0-9-' '-')"
       read_api "$api/releases/tags/$tag" "$answer" || fail "there is no alpha release for $branch"
-      url=$(archives "$answer" | head -n 1)
+      # Two while it is replaced: the newer.
+      url=$(archives "$answer" | highest)
       ;;
     *) fail "the channel is stable, beta or alpha" ;;
   esac

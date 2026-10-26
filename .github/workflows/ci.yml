@@ -100,7 +100,12 @@ jobs:
               # A release is the pull request dev → main merged by squash: its version is the one
               # the head of dev it squashed had, without the pre-release.
               at=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq "[.[] | select(.merge_commit_sha == \"$GITHUB_SHA\" and .base.ref == \"main\" and .head.ref == \"dev\" and .head.repo.full_name == \"$GITHUB_REPOSITORY\")][0].head.sha // empty")
-              [ -n "$at" ] || skip "$GITHUB_SHA is not the squash of a pull request from dev into main"
+              # No other push to main is expected: a lookup that found nothing is an error, and a
+              # pull request GitHub had not indexed yet is found when the run is run again.
+              if [ -z "$at" ]; then
+                echo "::error::$GITHUB_SHA is not the squash of a pull request from dev into main, as far as GitHub's API says now. Run this run again (gh run rerun $GITHUB_RUN_ID) to look again; nothing was published."
+                exit 1
+              fi
               git cat-file -e "$at^{commit}" 2>/dev/null || git fetch --quiet origin "$at"
               ;;
             dev) channel=beta ;;
@@ -172,13 +177,15 @@ jobs:
     # Shared with alpha-cleanup.yml: a branch's alpha is never deleted while it is published.
     concurrency:
       group: publish-${{ github.ref_name }}
+    # This job holds the write token: it runs no git and never works inside the artifact, whose
+    # files come from the branch's code (a repository's layout there would hand its config to
+    # git). Only `gh` runs, naming the files it uploads.
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: release
           path: release
       - name: Publish
-        working-directory: release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -189,42 +196,49 @@ jobs:
         run: |
           # Read right before publishing: a push over this commit publishes itself, after it, and
           # a deleted branch publishes nothing.
-          tip=$(git ls-remote "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "refs/heads/$GITHUB_REF_NAME" | cut -f 1)
-          if [ -z "$tip" ]; then echo "::notice::$GITHUB_REF_NAME was deleted: nothing is published."; exit 0; fi
-          if [ "$tip" != "$GITHUB_SHA" ]; then echo "::notice::$GITHUB_REF_NAME moved on to $tip: nothing is published."; exit 0; fi
+          if tip=$(gh api "repos/$GH_REPO/git/ref/heads/$GITHUB_REF_NAME" --jq .object.sha 2> "$RUNNER_TEMP/tip.err"); then
+            if [ "$tip" != "$GITHUB_SHA" ]; then echo "::notice::$GITHUB_REF_NAME moved on to $tip: nothing is published."; exit 0; fi
+          elif grep -q 'HTTP 404' "$RUNNER_TEMP/tip.err"; then
+            echo "::notice::$GITHUB_REF_NAME was deleted: nothing is published."; exit 0
+          else
+            cat "$RUNNER_TEMP/tip.err" >&2; exit 1
+          fi
           title="Flottille $VERSION"
+          # A release run again: published, it stays (stable, beta) or is replaced in place
+          # (alpha); a draft left by a failed upload is made again.
+          state=missing
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2> /dev/null); then
+            if [ "$draft" = true ]; then gh release delete "$TAG" --yes; else state=published; fi
+          fi
           case "$CHANNEL" in
             stable | beta)
-              # Run again: what is published stays; a draft left by a failed upload is made again.
-              draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || true)
-              if [ "$draft" = false ]; then echo "::notice::$TAG is already published."; exit 0; fi
-              if [ "$draft" = true ]; then gh release delete "$TAG" --yes; fi
+              if [ "$state" = published ]; then echo "::notice::$TAG is already published."; exit 0; fi
               if [ "$CHANNEL" = stable ]; then
-                # The mark the next betas count from: the head of dev this release squashed.
-                marked=$(gh api "repos/$GH_REPO/git/ref/tags/released/$TAG" --jq .object.sha 2>/dev/null || true)
-                if [ -z "$marked" ]; then
+                # The mark the next betas count from: the head of dev this release squashed. The
+                # exit status says whether it exists: an error's JSON is not filtered by --jq.
+                if marked=$(gh api "repos/$GH_REPO/git/ref/tags/released/$TAG" --jq .object.sha 2> /dev/null); then
+                  if [ "$marked" != "$RELEASED" ]; then echo "::error::released/$TAG marks $marked, not $RELEASED."; exit 1; fi
+                else
                   gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/released/$TAG" -f sha="$RELEASED" > /dev/null
-                elif [ "$marked" != "$RELEASED" ]; then
-                  echo "::error::released/$TAG marks $marked, not $RELEASED."; exit 1
                 fi
-                gh release create "$TAG" assets/* --target "$GITHUB_SHA" --title "$title" --notes-file notes.md --latest
+                gh release create "$TAG" release/assets/* --target "$GITHUB_SHA" --title "$title" --notes-file release/notes.md --latest
               else
-                gh release create "$TAG" assets/* --target "$GITHUB_SHA" --title "$title" --notes-file notes.md --prerelease --latest=false
+                gh release create "$TAG" release/assets/* --target "$GITHUB_SHA" --title "$title" --notes-file release/notes.md --prerelease --latest=false
               fi
               ;;
             alpha)
-              if gh release view "$TAG" > /dev/null 2>&1; then
+              if [ "$state" = published ]; then
                 # Replaced in place, never missing: the tag moves, the new files come (each sum
                 # before its archive), then the old ones go.
                 gh api -X PATCH "repos/$GH_REPO/git/refs/tags/$TAG" -f sha="$GITHUB_SHA" -F force=true > /dev/null
-                gh release upload "$TAG" assets/*.sha256 --clobber
-                gh release upload "$TAG" assets/*.tar.gz --clobber
+                gh release upload "$TAG" release/assets/*.sha256 --clobber
+                gh release upload "$TAG" release/assets/*.tar.gz --clobber
                 for name in $(gh release view "$TAG" --json assets --jq '.assets[].name'); do
-                  [ -e "assets/$name" ] || gh release delete-asset "$TAG" "$name" --yes
+                  [ -e "release/assets/$name" ] || gh release delete-asset "$TAG" "$name" --yes
                 done
-                gh release edit "$TAG" --title "$title" --notes-file notes.md --prerelease --latest=false
+                gh release edit "$TAG" --title "$title" --notes-file release/notes.md --prerelease --latest=false
               else
-                gh release create "$TAG" assets/* --target "$GITHUB_SHA" --title "$title" --notes-file notes.md --prerelease --latest=false
+                gh release create "$TAG" release/assets/* --target "$GITHUB_SHA" --title "$title" --notes-file release/notes.md --prerelease --latest=false
               fi
               ;;
           esac

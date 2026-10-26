@@ -5,6 +5,7 @@ use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -187,7 +188,7 @@ fn start_daemon(paths: &Paths) -> Result<Child> {
         .append(true)
         .mode(0o600)
         .open(paths.log())?;
-    let mut command = Command::new(std::env::current_exe()?);
+    let mut command = Command::new(program_to_start(std::env::current_exe()?));
     command
         .arg("daemon")
         .current_dir("/")
@@ -206,6 +207,19 @@ fn start_daemon(paths: &Paths) -> Result<Child> {
     Ok(command.spawn()?)
 }
 
+/// The program a daemon is started from: this one, or, when it was replaced while it ran
+/// (`flottille update`, `install.sh`), the new file at its path. Linux then names the running
+/// one `<path> (deleted)`, which cannot be started.
+fn program_to_start(exe: PathBuf) -> PathBuf {
+    match exe
+        .to_str()
+        .and_then(|path| path.strip_suffix(" (deleted)"))
+    {
+        Some(path) if std::path::Path::new(path).exists() => PathBuf::from(path),
+        _ => exe,
+    }
+}
+
 /// Waits until the daemon has let go of its lock, so that the next command starts a new one.
 pub fn wait_until_stopped(paths: &Paths) -> Result<()> {
     let lock = match File::open(paths.lock()) {
@@ -222,4 +236,25 @@ pub fn wait_until_stopped(paths: &Paths) -> Result<()> {
     }
     lock.unlock()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_daemon_is_started_from_the_new_binary_when_this_one_was_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille");
+        let deleted = dir.path().join("flottille (deleted)");
+
+        // Replaced: the path holds the new binary again.
+        std::fs::write(&path, "").unwrap();
+        assert_eq!(program_to_start(deleted.clone()), path);
+        // Removed, nothing at the path: the name is kept, and its start fails saying it.
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(program_to_start(deleted.clone()), deleted);
+        // Not replaced.
+        assert_eq!(program_to_start(path.clone()), path);
+    }
 }
