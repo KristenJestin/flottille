@@ -3,6 +3,7 @@
 mod common;
 
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -299,4 +300,142 @@ fn a_daemon_whose_socket_is_removed_records_why_and_stops_its_agents() {
     within(20, "the daemon and its agent are gone", || {
         !alive(daemon) && !alive(agent)
     });
+}
+
+/// A project `app`, one git repository with one commit.
+fn app(user: &User) {
+    let folder = user.path("work/app");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "app\n").unwrap();
+    user.git(&folder, &["add", "."]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    user.call("project.add", json!({"folder": folder, "name": "app"}))
+        .unwrap();
+}
+
+/// The pids of the fake agent's processes, in the order they started.
+fn fake_starts(user: &User) -> Vec<u64> {
+    user.received()
+        .iter()
+        .filter(|e| e["started"] == true)
+        .filter_map(|e| e["pid"].as_u64())
+        .collect()
+}
+
+/// An agent that never answers its session's opening: its daemon's task never sees the order to
+/// stop, so the daemon stopping waits the whole grace for it, then kills what is left.
+fn held_agent(user: &User) -> (String, u64) {
+    user.fake_script(json!({"stall": true}));
+    let held = user
+        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    within(10, "the held agent's process starts", || {
+        !fake_starts(user).is_empty()
+    });
+    // The agents started from now on answer.
+    user.fake_script(json!({"turns": [{"when": "hello", "do": [{"say": "Hello"}]}]}));
+    (held, fake_starts(user)[0])
+}
+
+fn agent_events(user: &User, agent: &str) -> Vec<serde_json::Value> {
+    user.call("agent.show", json!({"agent": agent})).unwrap()["events"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn a_daemon_stopping_on_socket_while_a_second_starts_kills_none_of_its_agents_and_keeps_its_states()
+{
+    let user = User::with_fake_agent();
+    app(&user);
+    let first = user.status()["pid"].as_u64().unwrap();
+    let (held, held_pid) = held_agent(&user);
+
+    // The runtime folder is replaced (a logout), and a client starts a second daemon at once, on
+    // the same store, while the first stops on its lost socket.
+    std::fs::remove_dir_all(user.path("runtime")).unwrap();
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(user.path("runtime"))
+        .unwrap();
+    let second = user.status()["pid"].as_u64().unwrap();
+    assert_ne!(first, second);
+    let started = user
+        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let fresh = started["agent"]["id"].as_str().unwrap().to_owned();
+    let watch = user.watch(&["--after", &started["after"].to_string()]);
+    watch.until(|e| e["name"] == "agent.turn_ended" && e["data"]["agent"] == fresh.as_str());
+
+    within(20, "the first daemon exits", || !alive(first));
+    let seconds: Vec<u64> = fake_starts(&user)
+        .into_iter()
+        .filter(|pid| *pid != held_pid)
+        .collect();
+    assert!(!seconds.is_empty());
+    for pid in seconds {
+        assert!(
+            alive(pid),
+            "the second daemon's agent process {pid} was killed"
+        );
+    }
+    assert_eq!(user.status()["pid"].as_u64().unwrap(), second);
+    // The held agent was settled by the second daemon alone: the first one, stopping, wrote
+    // nothing over it.
+    let events = agent_events(&user, &held);
+    let names: Vec<&str> = events.iter().filter_map(|e| e["name"].as_str()).collect();
+    assert!(
+        events
+            .iter()
+            .any(|e| e["name"] == "agent.released" && e["data"]["reason"] == "restart"),
+        "{names:?}"
+    );
+    assert!(
+        !names.contains(&"agent.died") && !names.contains(&"agent.failed"),
+        "{names:?}"
+    );
+    for agent in [&held, &fresh] {
+        let state =
+            user.call("agent.show", json!({"agent": agent})).unwrap()["agent"]["state"].clone();
+        assert_ne!(state, "failed", "agent {agent}");
+    }
+}
+
+/// When the process started, in clock ticks after boot (`/proc/<pid>/stat`, field 22).
+fn start_time(pid: u32) -> u64 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let rest = stat.rsplit_once(')').unwrap().1;
+    rest.split_whitespace().nth(19).unwrap().parse().unwrap()
+}
+
+#[test]
+fn a_daemon_stopping_kills_only_the_processes_it_started_never_another_s_of_the_table() {
+    let user = User::with_fake_agent();
+    app(&user);
+    let daemon = user.status()["pid"].as_u64().unwrap();
+    let (held, held_pid) = held_agent(&user);
+    // A process the table says is an agent's, which this daemon did not start.
+    let mut other = std::process::Command::new("sleep")
+        .arg("60")
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    flottille_core::store::Store::open(&user.path("state/flottille/flottille.db"))
+        .unwrap()
+        .add_process(other.id(), start_time(other.id()), &held)
+        .unwrap();
+
+    user.run(&["daemon", "stop"]);
+
+    within(20, "the daemon and its held agent are gone", || {
+        !alive(daemon) && !alive(held_pid)
+    });
+    let survived = alive(other.id().into()) && other.try_wait().unwrap().is_none();
+    let _ = other.kill();
+    let _ = other.wait();
+    assert!(survived, "the daemon killed a process it did not start");
 }

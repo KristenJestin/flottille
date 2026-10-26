@@ -85,6 +85,9 @@ type Task = (mpsc::UnboundedSender<Order>, JoinHandle<()>);
 #[derive(Default)]
 pub struct Live {
     tasks: Mutex<HashMap<String, Task>>,
+    /// The processes this daemon started that have not ended, with their start times: the only
+    /// ones it kills when it stops, whatever the shared table holds.
+    processes: Mutex<HashMap<u32, u64>>,
 }
 
 /// Answers an `agent.*` request.
@@ -488,10 +491,13 @@ pub async fn stop_all(daemon: &Daemon) {
         }
     }
     if !stuck.is_empty() {
-        // The rows of the tasks that finished are gone: those left are the stuck ones' processes,
+        // The processes of the tasks that finished are gone: those left are the stuck ones',
         // killed while their leader is alive (the task is aborted after, which kills it too).
+        let left: Vec<_> = daemon.agents.processes.lock().unwrap().drain().collect();
         let _ = daemon.read(|store| {
-            kill_orphans(store);
+            for (pid, started) in left {
+                kill_left(store, pid, started);
+            }
             Ok(())
         });
         for task in stuck {
@@ -612,6 +618,7 @@ async fn process(
         .map_err(|e| format!("cannot start {}: {e}", launch.program.display()))?;
     let pid = child.id().ok_or("the agent's process ended at once")?;
     if let Some(started) = start_time(pid) {
+        daemon.agents.processes.lock().unwrap().insert(pid, started);
         let _ = daemon.read(|store| store.add_process(pid, started, &agent.id));
     }
     // What Flottille set (a password) is masked too, wherever the agent would say it.
@@ -683,6 +690,7 @@ async fn process(
             Err(reason)
         }
     };
+    daemon.agents.processes.lock().unwrap().remove(&pid);
     let _ = daemon.read(|store| store.remove_process(pid));
     (provider.forget_process)(&daemon.paths, pid);
     goes_on
@@ -998,12 +1006,18 @@ pub fn kill_orphans(store: &Store) {
         }
     };
     for (pid, started) in processes {
-        if start_time(pid) == Some(started) {
-            signal_group(pid, libc::SIGKILL);
-            eprintln!("flottille daemon: killed the agent process {pid} that was left running");
-        }
-        let _ = store.remove_process(pid);
+        kill_left(store, pid, started);
     }
+}
+
+/// Kills the process group of `pid` when it is still the process started at `started`, then
+/// forgets it.
+fn kill_left(store: &Store, pid: u32, started: u64) {
+    if start_time(pid) == Some(started) {
+        signal_group(pid, libc::SIGKILL);
+        eprintln!("flottille daemon: killed the agent process {pid} that was left running");
+    }
+    let _ = store.remove_process(pid);
 }
 
 /// At daemon start: an agent that was starting or working has lost its process and its turn. Its
