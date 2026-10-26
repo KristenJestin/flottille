@@ -123,10 +123,11 @@ opencode is disabled: its agents running now go on, and fail at their next start
 ### `flottille update`
 
 Replaces Flottille with the latest build of a channel (`docs/releases.md`): `--channel stable`,
-`beta` or `alpha` (by default the channel this build is on; a local build takes stable), and for
-alpha `--branch <name>` (by default the branch this build came from). The archive's SHA-256 sum is
-checked before anything is replaced. It refuses while an agent runs, naming the roots to stop.
-`flottille --version` says the channel installed.
+`beta` or `alpha` (by default the channel this build is on; a local build takes stable), and with
+`--channel alpha`, `--branch <name>` (by default the branch this build came from). The archive's
+SHA-256 sum is checked before anything is replaced. It refuses while the daemon runs: stop it
+first with `flottille daemon stop`. The same version is not installed again and an older one is
+refused, unless `--force`. `flottille --version` says the channel installed.
 
 ```
 $ flottille update --channel beta

@@ -1,6 +1,7 @@
 //! `flottille update` (`docs/releases.md`): replaces this binary with the latest build of a
-//! channel, its SHA-256 sum checked first. Never while agents run: their processes are this
-//! binary too, and the daemon that runs them would be left on a file that is gone.
+//! channel, its SHA-256 sum checked first. Never while the daemon runs: it would go on from a
+//! file that is gone (`/proc/self/exe` then names `… (deleted)`), and its next start of an
+//! agent's process, which is this binary too, would fail.
 //!
 //! The releases are read from GitHub's API with the user's own `curl` and unpacked with their
 //! own `tar`, both spawned without a shell, as git is.
@@ -9,10 +10,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
 use flottille_core::paths::Paths;
+use semver::Version;
 use serde_json::Value;
 
 use crate::client::Client;
 use crate::files::sha256;
+use crate::program;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -26,15 +29,46 @@ fn api() -> String {
 /// The channel this binary was built on (`build.rs`); a local build updates from stable.
 pub const CHANNEL: &str = env!("FLOTTILLE_CHANNEL");
 const BRANCH: &str = env!("FLOTTILLE_BRANCH");
+/// This build's version alone, `0.3.0-beta.12`.
+const VERSION: &str = env!("FLOTTILLE_VERSION_NUMBER");
 
-pub fn run(paths: &Paths, channel: Option<String>, branch: Option<String>) -> Result<ExitCode> {
+pub fn run(
+    paths: &Paths,
+    channel: Option<String>,
+    branch: Option<String>,
+    force: bool,
+) -> Result<ExitCode> {
+    if branch.is_some() && channel.as_deref() != Some("alpha") {
+        return Err("--branch names an alpha: give it with --channel alpha".into());
+    }
     let channel = channel.unwrap_or_else(|| match CHANNEL {
         "beta" | "alpha" => CHANNEL.to_owned(),
         _ => "stable".to_owned(),
     });
-    refuse_while_agents_run(paths)?;
+    if Client::connect(paths)?.is_some() {
+        return Err(format!(
+            "the daemon is running, and would go on from a binary that is gone: stop it first \
+             with `{} daemon stop` (its agents stop with it), then update.",
+            program::name()
+        )
+        .into());
+    }
     let url = archive_url(&channel, branch.as_deref())?;
     let name = url.rsplit('/').next().unwrap_or_default().to_owned();
+    let version = version_of(&name);
+    if let (Some(new), Ok(this)) = (&version, Version::parse(VERSION))
+        && !force
+    {
+        if *new == this {
+            println!("Flottille is already {this}: nothing to update (--force installs it again).");
+            return Ok(ExitCode::SUCCESS);
+        }
+        if *new < this {
+            return Err(
+                format!("{new} is older than this {this}: --force goes back to it.").into(),
+            );
+        }
+    }
     let archive = fetch(&url)?;
     let published = String::from_utf8(fetch(&format!("{url}.sha256"))?)?;
     let sum = published.split_whitespace().next().unwrap_or_default();
@@ -47,56 +81,15 @@ pub fn run(paths: &Paths, channel: Option<String>, branch: Option<String>) -> Re
     let binary = std::env::current_exe()?.canonicalize()?;
     let version = replace(&binary, &name, &archive)?;
     println!("{} is now {version}.", binary.display());
-    if Client::connect(paths)?.is_some() {
-        println!(
-            "The daemon still runs the version before: `flottille daemon stop` stops it, and the \
-             next command starts the new one."
-        );
-    }
     Ok(ExitCode::SUCCESS)
 }
 
-/// Refuses while an agent starts or works, naming the roots to stop. Without a daemon, none runs.
-fn refuse_while_agents_run(paths: &Paths) -> Result<()> {
-    let Some(mut client) = Client::connect(paths)? else {
-        return Ok(());
-    };
-    let listed = client.request("agent.list", Value::Null)?;
-    let agents = listed["agents"].as_array().cloned().unwrap_or_default();
-    let running: Vec<&Value> = agents
-        .iter()
-        .filter(|a| matches!(a["state"].as_str(), Some("starting" | "working")))
-        .collect();
-    if running.is_empty() {
-        return Ok(());
-    }
-    // A child stops with its root: the roots are what the user stops.
-    let root_of = |agent: &Value| {
-        let mut agent = agent.clone();
-        while let Some(parent) = agent["parent"].as_str() {
-            match agents.iter().find(|a| a["id"] == parent) {
-                Some(found) => agent = found.clone(),
-                None => break,
-            }
-        }
-        agent["id"].as_str().unwrap_or_default().to_owned()
-    };
-    let mut roots: Vec<String> = running.iter().map(|a| root_of(a)).collect();
-    roots.sort();
-    roots.dedup();
-    let count = match running.len() {
-        1 => "1 agent is running".to_owned(),
-        n => format!("{n} agents are running"),
-    };
-    let stops: Vec<String> = roots
-        .iter()
-        .map(|root| format!("`flottille agent stop {root}`"))
-        .collect();
-    Err(format!(
-        "{count}: Flottille is not replaced under them. Stop them first ({}), then update.",
-        stops.join(", ")
-    )
-    .into())
+/// The version an archive is of, `0.3.0-beta.12` in `flottille-0.3.0-beta.12-x86_64-linux.tar.gz`.
+fn version_of(name: &str) -> Option<Version> {
+    let version = name
+        .strip_prefix("flottille-")?
+        .strip_suffix("-x86_64-linux.tar.gz")?;
+    Version::parse(version).ok()
 }
 
 /// The address of the channel's latest archive for this machine.
@@ -113,33 +106,39 @@ fn archive_url(channel: &str, branch: Option<&str>) -> Result<String> {
             .collect()
     };
     let found = match channel {
-        "stable" => urls(&json(&format!("{}/releases/latest", api()))?)
-            .into_iter()
-            .next(),
-        // The releases come newest first: the first beta is the latest.
+        "stable" => {
+            let release = json(&format!("{}/releases/latest", api()))?
+                .ok_or("there is no stable release yet")?;
+            urls(&release).into_iter().next()
+        }
+        // The newest by version, whatever order they were published in.
         "beta" => json(&format!("{}/releases?per_page=100", api()))?
+            .unwrap_or_default()
             .as_array()
             .into_iter()
             .flatten()
             .filter(|r| r["tag_name"].as_str().is_some_and(|t| t.contains("-beta.")))
             .flat_map(&urls)
-            .next(),
+            .filter_map(|url| Some((version_of(url.rsplit('/').next()?)?, url)))
+            .max_by(|a, b| a.0.cmp(&b.0))
+            .map(|(_, url)| url),
         "alpha" => {
             let branch = branch
                 .or(Some(BRANCH).filter(|b| !b.is_empty()))
                 .ok_or("the alpha channel needs --branch <name>")?;
+            // Each byte but ASCII letters, digits and dashes is a dash, as CI names the alpha.
             let tag: String = branch
-                .chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() || c == '-' {
-                        c
+                .bytes()
+                .map(|b| {
+                    if b.is_ascii_alphanumeric() || b == b'-' {
+                        b as char
                     } else {
                         '-'
                     }
                 })
                 .collect();
-            let release = json(&format!("{}/releases/tags/alpha-{tag}", api()))
-                .map_err(|_| format!("there is no alpha release for {branch}"))?;
+            let release = json(&format!("{}/releases/tags/alpha-{tag}", api()))?
+                .ok_or_else(|| format!("there is no alpha release for {branch}"))?;
             urls(&release).into_iter().next()
         }
         _ => return Err("the channel is stable, beta or alpha".into()),
@@ -147,21 +146,30 @@ fn archive_url(channel: &str, branch: Option<&str>) -> Result<String> {
     found.ok_or_else(|| format!("there is no {channel} release for Linux x86_64").into())
 }
 
-fn json(url: &str) -> Result<Value> {
-    Ok(serde_json::from_slice(&fetch(url)?)?)
+/// The API's answer at `url`; none when it is not there (404), which is not the failure of the
+/// network or of GitHub.
+fn json(url: &str) -> Result<Option<Value>> {
+    // The status follows the body, on a line of its own.
+    let body = curl(url, &["--write-out", "\n%{http_code}"])?;
+    let text = String::from_utf8(body)?;
+    let (body, code) = text.rsplit_once('\n').unwrap_or(("", &text));
+    match code {
+        "200" => Ok(Some(serde_json::from_str(body)?)),
+        "404" => Ok(None),
+        code => Err(format!("cannot read {url}: GitHub answered {code}").into()),
+    }
 }
 
-/// The body at `url`, through the user's `curl`.
+/// The file at `url`.
 fn fetch(url: &str) -> Result<Vec<u8>> {
+    curl(url, &["--fail"])
+}
+
+/// What the user's `curl` reads at `url`.
+fn curl(url: &str, options: &[&str]) -> Result<Vec<u8>> {
     let output = Command::new("curl")
-        .args([
-            "--fail",
-            "--silent",
-            "--show-error",
-            "--location",
-            "--",
-            url,
-        ])
+        .args(options)
+        .args(["--silent", "--show-error", "--location", "--", url])
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("cannot run curl: {e}"))?;

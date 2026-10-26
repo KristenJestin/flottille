@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# The changelog of a release (docs/releases.md): the Angular commits since the last stable tag
-# (tools/version.sh), or of the range given, grouped by type, oldest first, each with the pull
-# request number its squash kept.
-#   tools/changelog.sh [<range>]
+# The changelog of a release (docs/releases.md): the Angular commits since the last release's
+# mark (tools/version.sh) up to `--at` (HEAD by default), or of the range given, grouped by type,
+# oldest first, each with the pull request number its squash kept. A stable release's is the dev
+# commits between the previous mark and the head of dev it releases.
+#   tools/changelog.sh [--at <rev> | <range>]
 set -euo pipefail
 
 range=${1:-}
-if [ -z "$range" ]; then
-  read -r _ since <<<"$("$(dirname "$0")/version.sh" base)" || true
-  range=HEAD
-  if [ -n "${since:-}" ]; then range="$since..HEAD"; fi
+if [ -z "$range" ] || [ "$range" = --at ]; then
+  at=HEAD
+  if [ "$range" = --at ]; then at=${2:?changelog.sh: --at needs a commit}; fi
+  read -r _ since <<<"$("$(dirname "$0")/version.sh" base --at "$at")" || true
+  range=$at
+  if [ -n "${since:-}" ]; then range="$since..$at"; fi
 fi
 
 ANGULAR='^([a-z]+)(\(([a-z0-9-]+)\))?(!)?: (.*)$'

@@ -21,7 +21,8 @@ curl -fsSL https://raw.githubusercontent.com/KristenJestin/flottille/main/instal
 ```
 
 `sh -s -- --channel beta` takes the build of `dev`, `--channel alpha --branch <name>` a feature
-branch's; `flottille update` takes the latest of its channel. See
+branch's; `flottille update` takes the latest of its channel. Until the first stable release,
+`main` has no `install.sh`: take the one of `dev` (`…/flottille/dev/install.sh`). See
 [`docs/releases.md`](docs/releases.md).
 
 ## License

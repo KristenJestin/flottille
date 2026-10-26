@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
-# The version a build of HEAD gets, computed from the Angular commits since the last stable tag,
-# never typed (docs/releases.md):
-#   tools/version.sh stable                  X.Y.Z; exits 3, printing nothing, when no commit bumps
-#   tools/version.sh beta                    X.Y.Z-beta.N
-#   tools/version.sh alpha [--branch <name>] X.Y.Z-alpha.<branch>.N
-# `feat` bumps the minor, `fix` and `perf` the patch, `!` or a `BREAKING CHANGE:` footer the major
-# (the minor before 1.0). N counts the commits since the last stable tag.
+# The version a build gets, computed from the Angular commits since the last release, never
+# typed (docs/releases.md):
+#   tools/version.sh stable [--at <rev>]                  X.Y.Z; exits 3, printing nothing, when
+#                                                         nothing was committed since the release
+#   tools/version.sh beta [--at <rev>]                    X.Y.Z-beta.N
+#   tools/version.sh alpha [--branch <name>] [--at <rev>] X.Y.Z-alpha.<branch>.N
+#   tools/version.sh base [--at <rev>]                    <tag> <commit> the versions count from
+# `--at` is the commit to compute for, HEAD by default. The last release is the highest stable
+# tag `vX.Y.Z`, wherever it is, and the versions count from its mark `released/vX.Y.Z`, the head
+# of dev it released (the tag's own commit when it has no mark). `feat` bumps the minor, `fix`
+# and `perf` the patch, `!` or a `BREAKING CHANGE:` footer the major (the minor before 1.0), and
+# nothing that bumps is the next patch: the stable version is the beta's without its
+# pre-release. N counts the commits since the mark.
 set -euo pipefail
 
 channel=${1:-}
@@ -14,34 +20,41 @@ case "$channel" in stable | beta | alpha | base) ;; *)
   exit 2
   ;;
 esac
-branch=
-if [ "${2:-}" = "--branch" ]; then branch=${3:?version.sh: --branch needs a name}; fi
+shift
+branch= at=HEAD
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --branch) branch=${2:?version.sh: --branch needs a name} ;;
+    --at) at=${2:?version.sh: --at needs a commit} ;;
+    *)
+      echo "version.sh: unknown argument $1" >&2
+      exit 2
+      ;;
+  esac
+  shift 2
+done
+at=$(git rev-parse --verify "$at^{commit}")
 
-# The last stable tag HEAD holds: the commit it tags, or, when it tags the merge of dev into
-# main, the dev commit merged (its second parent), which dev goes on from.
-base= since=
-while read -r tag; do
-  [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
-  commit=$(git rev-parse "$tag^{commit}")
-  if git merge-base --is-ancestor "$commit" HEAD; then
-    at=$commit
-  elif merged=$(git rev-parse -q --verify "$commit^2") && git merge-base --is-ancestor "$merged" HEAD; then
-    at=$merged
-  else
-    continue
-  fi
-  if [ -z "$base" ] || [ "$(printf '%s\n%s\n' "${base#v}" "${tag#v}" | sort -V | tail -1)" = "${tag#v}" ]; then
-    base=$tag since=$at
-  fi
-done < <(git tag --list 'v*')
+# The highest stable tag, compared as versions; its mark, or its own commit.
+base=$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
+since=
+if [ -n "$base" ]; then
+  since=$(git rev-parse -q --verify "refs/tags/released/$base^{commit}" ||
+    git rev-parse --verify "$base^{commit}")
+fi
 
-# `base`: the tag and the commit the versions count from (tools/changelog.sh), when there is one.
 if [ "$channel" = base ]; then
   if [ -n "$base" ]; then echo "$base $since"; fi
   exit 0
 fi
-range=HEAD
-if [ -n "$since" ]; then range="$since..HEAD"; fi
+# What the mark released is not counted again, even on a branch that does not hold it.
+range=$at
+if [ -n "$since" ]; then range="$since..$at"; fi
+count=$(git rev-list --count --first-parent "$range")
+if [ "$channel" = stable ] && [ "$count" -eq 0 ]; then
+  echo "version.sh: nothing to release since ${base:-the first commit}" >&2
+  exit 3
+fi
 IFS=. read -r major minor patch <<<"${base#v}"
 major=${major:-0} minor=${minor:-0} patch=${patch:-0}
 
@@ -64,28 +77,23 @@ while IFS= read -r -d '' message; do
   if [ "$level" -gt "$bump" ]; then bump=$level; fi
 done < <(git log -z --no-merges --format=%B "$range")
 
-if [ "$bump" -eq 0 ] && [ "$channel" = stable ]; then
-  echo "version.sh: nothing to release since ${base:-the first commit}" >&2
-  exit 3
-fi
 # Before 1.0, a breaking change bumps the minor.
 if [ "$bump" -eq 3 ] && [ "$major" -eq 0 ]; then bump=2; fi
 case "$bump" in
   3) major=$((major + 1)) minor=0 patch=0 ;;
   2) minor=$((minor + 1)) patch=0 ;;
-  # A pre-release with nothing that bumps is still past the stable one.
   *) patch=$((patch + 1)) ;;
 esac
 next="$major.$minor.$patch"
-count=$(git rev-list --count --first-parent "$range")
 
 case "$channel" in
   stable) echo "$next" ;;
   beta) echo "$next-beta.$count" ;;
   alpha)
     if [ -z "$branch" ]; then branch=$(git rev-parse --abbrev-ref HEAD); fi
-    # A pre-release's identifiers are letters, digits and dashes.
-    name=$(printf '%s' "$branch" | tr -c 'A-Za-z0-9-' '-')
+    # Each byte but ASCII letters, digits and dashes is a dash, the rule of every other place
+    # that names an alpha (docs/releases.md).
+    name=$(printf '%s' "$branch" | LC_ALL=C tr -c 'A-Za-z0-9-' '-')
     echo "$next-alpha.$name.$count"
     ;;
 esac

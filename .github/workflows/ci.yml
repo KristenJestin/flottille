@@ -65,42 +65,71 @@ jobs:
       - if: steps.cargo.outputs.present == 'true'
         run: cargo test --locked
 
-  # The packages (docs/releases.md): main is stable, dev beta, a feature branch its own alpha,
-  # once `verify` passed on the pushed commit. The version is computed, never typed, and the tag
-  # is CI's own.
-  publish:
-    needs: verify
+  # The packages (docs/releases.md): main is stable, dev beta, a feature branch its own alpha.
+  # `build` runs the branch's code with a token that can only read; `publish`, once `verify`
+  # passed on the pushed commit, runs none of it and alone may write the releases and the tags.
+  build:
     if: github.event_name == 'push'
     # Old enough a C library that the binary runs on current Arch and Debian stable.
     runs-on: ubuntu-22.04
     permissions:
-      contents: write
-    concurrency:
-      group: publish-${{ github.ref }}
+      contents: read
+      # To find the pull request a push to main squashed.
+      pull-requests: read
+    outputs:
+      skip: ${{ steps.version.outputs.skip }}
+      channel: ${{ steps.version.outputs.channel }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      released: ${{ steps.version.outputs.released }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: The channel and the version
         id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          skip() { echo "::notice::$1: nothing is published."; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0; }
+          at=$GITHUB_SHA
           case "$GITHUB_REF_NAME" in
-            main) channel=stable ;;
+            main)
+              channel=stable
+              # A release is the pull request dev → main merged by squash: its version is the one
+              # the head of dev it squashed had, without the pre-release.
+              at=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq "[.[] | select(.merge_commit_sha == \"$GITHUB_SHA\" and .base.ref == \"main\" and .head.ref == \"dev\" and .head.repo.full_name == \"$GITHUB_REPOSITORY\")][0].head.sha // empty")
+              [ -n "$at" ] || skip "$GITHUB_SHA is not the squash of a pull request from dev into main"
+              git cat-file -e "$at^{commit}" 2>/dev/null || git fetch --quiet origin "$at"
+              ;;
             dev) channel=beta ;;
             *) channel=alpha ;;
           esac
           status=0
-          version=$(tools/version.sh "$channel" --branch "$GITHUB_REF_NAME") || status=$?
-          # 3: no commit since the last stable tag bumps the version, nothing to release.
-          if [ "$status" -eq 3 ]; then echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          version=$(tools/version.sh "$channel" --branch "$GITHUB_REF_NAME" --at "$at") || status=$?
+          # 3: nothing was committed since the last release, which is then this one, run again.
+          [ "$status" -ne 3 ] || skip "nothing to release since the last stable release"
           [ "$status" -eq 0 ] || exit "$status"
-          echo "channel=$channel" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          case "$channel" in
+            # Each byte but ASCII letters, digits and dashes is a dash (docs/releases.md).
+            alpha) tag="alpha-$(printf '%s' "$GITHUB_REF_NAME" | LC_ALL=C tr -c 'A-Za-z0-9-' '-')" ;;
+            *) tag="v$version" ;;
+          esac
+          tools/changelog.sh --at "$at" > "$RUNNER_TEMP/changelog.md"
+          {
+            echo "channel=$channel"
+            echo "version=$version"
+            echo "tag=$tag"
+            if [ "$channel" = stable ]; then echo "released=$at"; fi
+          } >> "$GITHUB_OUTPUT"
       - name: Have the window's system libraries
         if: steps.version.outputs.skip != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
+      - if: steps.version.outputs.skip != 'true'
+        uses: Swatinem/rust-cache@v2
       - name: Build
         if: steps.version.outputs.skip != 'true'
         env:
@@ -108,34 +137,94 @@ jobs:
           FLOTTILLE_BUILD_CHANNEL: ${{ steps.version.outputs.channel }}
           FLOTTILLE_BUILD_BRANCH: ${{ github.ref_name }}
         run: cargo build --release --locked -p flottille
-      - name: Package
-        if: steps.version.outputs.skip != 'true'
-        run: tools/package.sh "${{ steps.version.outputs.version }}" target/release/flottille dist
-      - name: Release notes
-        if: steps.version.outputs.skip != 'true'
-        run: |
-          {
-            echo "Flottille ${{ steps.version.outputs.version }}, ${{ steps.version.outputs.channel }}, built from ${GITHUB_SHA:0:12}."
-            echo
-            echo "Linux x86_64. Install: \`curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.sh | sh\` (see docs/releases.md)."
-            echo "The window needs the system's fontconfig, freetype, xkbcommon (and xkbcommon-x11), wayland-client or libxcb, and a Vulkan loader with a driver."
-            echo
-            tools/changelog.sh
-          } > notes.md
-      - name: Publish
+      - name: Package, with the notes
         if: steps.version.outputs.skip != 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
           CHANNEL: ${{ steps.version.outputs.channel }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
+          out="$RUNNER_TEMP/release"
+          tools/package.sh "$VERSION" target/release/flottille "$out/assets"
+          # The install.sh of this very commit: main has none before the first stable release.
+          install="curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/install.sh | sh -s -- --channel $CHANNEL"
+          if [ "$CHANNEL" = alpha ]; then install="$install --branch '$GITHUB_REF_NAME'"; fi
+          {
+            echo "Flottille $VERSION, $CHANNEL, built from ${GITHUB_SHA:0:12}."
+            echo
+            echo "Linux x86_64. Install: \`$install\` (see docs/releases.md)."
+            echo "The window needs the system's fontconfig, freetype, xkbcommon (and xkbcommon-x11), wayland-client or libxcb, and a Vulkan loader with a driver."
+            echo
+            cat "$RUNNER_TEMP/changelog.md"
+          } > "$out/notes.md"
+      - if: steps.version.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: ${{ runner.temp }}/release
+          retention-days: 1
+
+  publish:
+    needs: [verify, build]
+    if: github.event_name == 'push' && needs.build.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # Shared with alpha-cleanup.yml: a branch's alpha is never deleted while it is published.
+    concurrency:
+      group: publish-${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: release
+      - name: Publish
+        working-directory: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CHANNEL: ${{ needs.build.outputs.channel }}
+          VERSION: ${{ needs.build.outputs.version }}
+          TAG: ${{ needs.build.outputs.tag }}
+          RELEASED: ${{ needs.build.outputs.released }}
+        run: |
+          # Read right before publishing: a push over this commit publishes itself, after it, and
+          # a deleted branch publishes nothing.
+          tip=$(git ls-remote "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "refs/heads/$GITHUB_REF_NAME" | cut -f 1)
+          if [ -z "$tip" ]; then echo "::notice::$GITHUB_REF_NAME was deleted: nothing is published."; exit 0; fi
+          if [ "$tip" != "$GITHUB_SHA" ]; then echo "::notice::$GITHUB_REF_NAME moved on to $tip: nothing is published."; exit 0; fi
+          title="Flottille $VERSION"
           case "$CHANNEL" in
-            stable) gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" --title "Flottille $VERSION" --notes-file notes.md --latest ;;
-            beta) gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" --title "Flottille $VERSION" --notes-file notes.md --prerelease --latest=false ;;
+            stable | beta)
+              # Run again: what is published stays; a draft left by a failed upload is made again.
+              draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || true)
+              if [ "$draft" = false ]; then echo "::notice::$TAG is already published."; exit 0; fi
+              if [ "$draft" = true ]; then gh release delete "$TAG" --yes; fi
+              if [ "$CHANNEL" = stable ]; then
+                # The mark the next betas count from: the head of dev this release squashed.
+                marked=$(gh api "repos/$GH_REPO/git/ref/tags/released/$TAG" --jq .object.sha 2>/dev/null || true)
+                if [ -z "$marked" ]; then
+                  gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/released/$TAG" -f sha="$RELEASED" > /dev/null
+                elif [ "$marked" != "$RELEASED" ]; then
+                  echo "::error::released/$TAG marks $marked, not $RELEASED."; exit 1
+                fi
+                gh release create "$TAG" assets/* --target "$GITHUB_SHA" --title "$title" --notes-file notes.md --latest
+              else
+                gh release create "$TAG" assets/* --target "$GITHUB_SHA" --title "$title" --notes-file notes.md --prerelease --latest=false
+              fi
+              ;;
             alpha)
-              # One rolling pre-release per branch, replaced at each push.
-              tag="alpha-$(printf '%s' "$GITHUB_REF_NAME" | tr -c 'A-Za-z0-9-' '-')"
-              gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
-              gh release create "$tag" dist/* --target "$GITHUB_SHA" --title "Flottille $VERSION" --notes-file notes.md --prerelease --latest=false
+              if gh release view "$TAG" > /dev/null 2>&1; then
+                # Replaced in place, never missing: the tag moves, the new files come (each sum
+                # before its archive), then the old ones go.
+                gh api -X PATCH "repos/$GH_REPO/git/refs/tags/$TAG" -f sha="$GITHUB_SHA" -F force=true > /dev/null
+                gh release upload "$TAG" assets/*.sha256 --clobber
+                gh release upload "$TAG" assets/*.tar.gz --clobber
+                for name in $(gh release view "$TAG" --json assets --jq '.assets[].name'); do
+                  [ -e "assets/$name" ] || gh release delete-asset "$TAG" "$name" --yes
+                done
+                gh release edit "$TAG" --title "$title" --notes-file notes.md --prerelease --latest=false
+              else
+                gh release create "$TAG" assets/* --target "$GITHUB_SHA" --title "$title" --notes-file notes.md --prerelease --latest=false
+              fi
               ;;
           esac

@@ -133,9 +133,13 @@ enum Command {
         /// stable, beta or alpha; the channel of this build by default
         #[arg(long, value_parser = ["stable", "beta", "alpha"])]
         channel: Option<String>,
-        /// The branch whose alpha to take (`feat/46-packages`); this build's by default
+        /// The branch whose alpha to take (`feat/46-packages`), with `--channel alpha`; this
+        /// build's by default
         #[arg(long)]
         branch: Option<String>,
+        /// Install it even when it is this version, or an older one
+        #[arg(long)]
+        force: bool,
     },
     /// Print the daemon's events, one JSON object per line
     Watch {
@@ -235,7 +239,11 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Deny { number } => approval_command::deny(&paths, number)?,
         Command::Inbox { after, limit, json } => inbox_command::inbox(&paths, after, limit, json)?,
         Command::Mcp => pilot::run(&paths)?,
-        Command::Update { channel, branch } => return update::run(&paths, channel, branch),
+        Command::Update {
+            channel,
+            branch,
+            force,
+        } => return update::run(&paths, channel, branch, force),
         Command::Bridge {
             agent: BridgeAgent::Claude,
         } => return bridge::run(&paths),

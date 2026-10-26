@@ -31,6 +31,7 @@ fn main() {
         }
     }
     println!("cargo:rustc-env=FLOTTILLE_VERSION={full}");
+    println!("cargo:rustc-env=FLOTTILLE_VERSION_NUMBER={version}");
     println!("cargo:rustc-env=FLOTTILLE_CHANNEL={channel}");
     println!("cargo:rustc-env=FLOTTILLE_BRANCH={branch}");
 }
