@@ -30,6 +30,7 @@
 //! | Step | What the fake does |
 //! |---|---|
 //! | `{"say": "text"}` | an `agentMessage` item, its text as one delta |
+//! | `{"say": ["te", "xt"]}` | an `agentMessage` item, streamed as one delta per piece |
 //! | `{"think": "text"}` | a `reasoning` item, its text as one summary delta |
 //! | `{"tool": {"id", "server", "tool", "arguments", "result", "error"}}` | an `mcpToolCall` item of the server (`flottille` when none is given), completed with the result, or failed with the error |
 //! | `{"item": {…}}` | `item/started` with that item, as it is |
@@ -276,14 +277,15 @@ impl Fake {
         thread: &str,
         turn: &str,
         started: Value,
-        delta: Option<(&str, &str)>,
+        delta: Option<(&str, &[&str])>,
         completed: Value,
     ) {
         self.notify(
             "item/started",
             json!({"threadId": thread, "turnId": turn, "item": started}),
         );
-        if let Some((method, text)) = delta {
+        let (method, pieces) = delta.unwrap_or_default();
+        for text in pieces {
             self.notify(
                 method,
                 json!({"threadId": thread, "turnId": turn, "itemId": started["id"],
@@ -358,14 +360,18 @@ impl Fake {
     }
 
     fn step(&mut self, thread: &str, turn: &str, step: &Value, answered: &Receiver<Value>) {
-        if let Some(text) = step["say"].as_str() {
+        if let Some(said) = step.get("say").filter(|s| !s.is_null()) {
+            let pieces: Vec<&str> = match said.as_array() {
+                Some(pieces) => pieces.iter().filter_map(Value::as_str).collect(),
+                None => said.as_str().into_iter().collect(),
+            };
             let id = self.id("msg");
             self.item(
                 thread,
                 turn,
                 json!({"type": "agentMessage", "id": id, "text": ""}),
-                Some(("item/agentMessage/delta", text)),
-                json!({"type": "agentMessage", "id": id, "text": text}),
+                Some(("item/agentMessage/delta", &pieces)),
+                json!({"type": "agentMessage", "id": id, "text": pieces.concat()}),
             );
         } else if let Some(text) = step["think"].as_str() {
             let id = self.id("rs");
@@ -373,7 +379,7 @@ impl Fake {
                 thread,
                 turn,
                 json!({"type": "reasoning", "id": id, "summary": [], "content": []}),
-                Some(("item/reasoning/summaryTextDelta", text)),
+                Some(("item/reasoning/summaryTextDelta", &[text])),
                 json!({"type": "reasoning", "id": id, "summary": [text], "content": []}),
             );
         } else if let Some(tool) = step.get("tool") {

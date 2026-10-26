@@ -642,6 +642,10 @@ history Flottille already holds, as it happened: it is not stored again, and it 
 activity (`docs/reference/hemera.md` §8.7). The agent's `active_at` is the time of its last
 update outside a replay. Texts are cut at 64 KiB and say how
 much was cut (`‹+N chars›`); secrets of the daemon's environment are masked in everything kept.
+A reply is kept as it streams, one event per piece the provider sends (a token, for Codex), so
+that `watch` and the window show it as it comes; `agent.read` and `agent_read` join the pieces
+that follow each other into one line, led by the number of the first, and a reply longer than a
+line (2,000 characters) goes on, whole, on the next ones.
 
 ## The tree
 

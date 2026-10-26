@@ -137,3 +137,42 @@ fn a_codex_session_s_thread_is_deleted_when_flottille_forgets_it() {
     assert_eq!(deleted.len(), 1);
     assert_eq!(deleted[0]["params"], json!({"threadId": native}));
 }
+
+#[test]
+fn a_reply_streamed_in_many_deltas_reads_as_one_message() {
+    let (user, _) = user_with_codex();
+    let pieces = [
+        "Available",
+        " tool",
+        " names",
+        ":",
+        " `",
+        "fs",
+        "_list",
+        "`.",
+    ];
+    user.codex_script(json!({"turns": [{"when": "tools", "do": [{"say": pieces}]}]}));
+
+    let (id, after) = run(&user, "tools");
+
+    let events = events_until(&user, &id, after, "agent.turn_ended");
+    // The stream stays piece by piece, for `watch` and the window.
+    let streamed = events
+        .iter()
+        .filter(|e| e["name"] == "agent.message")
+        .count();
+    assert_eq!(streamed, pieces.len(), "{events:?}");
+    let read = user.call("agent.read", json!({"agent": id})).unwrap();
+    let said: Vec<&str> = read["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|l| l.as_str())
+        .filter(|l| l.contains(" said: "))
+        .collect();
+    assert_eq!(said.len(), 1, "{read}");
+    assert!(
+        said[0].ends_with(" said: Available tool names: `fs_list`."),
+        "{said:?}"
+    );
+}

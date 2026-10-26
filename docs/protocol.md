@@ -374,7 +374,8 @@ own question waits for the user.
 
 `{"agent", "after"?}`. A page of the agent's conversation, any agent of a tree: `{"agent", "name",
 "lines", "after", "more"}`. `lines` are what the agent was sent, what it said, its tool calls, its
-turns' ends and its reports, each led by `#<n>`, the number of its event, at most 30,000
+turns' ends and its reports, each led by `#<n>`, the number of its event (a reply streamed in
+pieces is one line, led by its first piece's), at most 30,000
 characters of them in all; `name` is the agent as another is told of it (its title and its id);
 `after` is the number to read on after, and `more` whether the page stopped before the end of what
 is stored. `agent_read` of the agents' tools gives the same page to a parent.
