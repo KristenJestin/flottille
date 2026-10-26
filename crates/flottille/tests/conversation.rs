@@ -415,6 +415,27 @@ fn watched_reply(user: &User, agent: &str, after: u64) -> String {
 }
 
 #[test]
+fn a_usage_update_between_two_pieces_that_split_a_secret_does_not_end_the_reply() {
+    let user = user(json!([{"when": "go", "do": [
+        {"say": "the token is s3cr3t-"},
+        {"usage": {"used": 1000, "size": 200000}},
+        {"say": "token-value, keep it quiet"}
+    ]}]));
+    let (id, after) = run(&user, "go");
+    turn_ended(&user, &id, after, 1);
+
+    let lines = lines(&read(&user, &id, 0));
+
+    let text = lines.join("\n");
+    assert!(
+        !text.contains("s3cr3t-"),
+        "{}",
+        text.replace("s3cr3t-", "<clear>")
+    );
+    assert_eq!(said(&lines), ["the token is [masked], keep it quiet"]);
+}
+
+#[test]
 fn a_token_streamed_over_three_pieces_never_shows_in_clear_in_watch() {
     let user = user(json!([{"when": "go", "do": secret_in_pieces()}]));
     let (id, after) = run(&user, "go");

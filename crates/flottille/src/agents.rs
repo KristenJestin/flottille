@@ -867,11 +867,21 @@ struct Recorder {
     saying: Mutex<Option<Saying>>,
 }
 
-/// A message the agent is still saying: its id, when its source gives one, and its last part,
-/// held back until it is settled (`Secrets::settled`).
+/// Events of the session that say nothing of the conversation: they may come between two pieces
+/// of one message without ending it.
+const BOOKKEEPING: [&str; 4] = [
+    "agent.usage",
+    "agent.mode_changed",
+    "agent.options_changed",
+    "agent.provider_wait",
+];
+
+/// A message the agent is still saying: its id, when its source gives one, its last part, held
+/// back until it is settled (`Secrets::settled`), and the bookkeeping kept after it.
 struct Saying {
     id: Option<String>,
     held: String,
+    after: Vec<(String, Value, bool)>,
 }
 
 /// A piece the session handled after its end (a process that died as it spoke) is kept too.
@@ -894,6 +904,7 @@ impl Recorder {
         let said = saying.get_or_insert(Saying {
             id,
             held: String::new(),
+            after: Vec::new(),
         });
         said.held
             .push_str(data["text"].as_str().unwrap_or_default());
@@ -910,6 +921,9 @@ impl Recorder {
     fn end(&self, saying: Option<Saying>) {
         if let Some(said) = saying {
             self.record_said(said.id.as_deref(), &said.held);
+            for (name, data, activity) in said.after {
+                record(&self.daemon, &self.agent, &name, data, activity);
+            }
         }
     }
 
@@ -945,15 +959,19 @@ impl acp::Events for Recorder {
             self.say(&data);
             return;
         }
-        // Anything else the agent does ends the message it was saying.
-        self.said();
-        record(
-            &self.daemon,
-            &self.agent,
-            name,
-            mask(data, &self.env),
-            activity,
-        );
+        let data = mask(data, &self.env);
+        // Bookkeeping between two pieces of a message does not end it: it is kept after the
+        // message, which stays one. Anything else the agent does (a tool call, a thought, a
+        // compaction…) ends it.
+        if BOOKKEEPING.contains(&name) {
+            if let Some(said) = self.saying.lock().unwrap().as_mut() {
+                said.after.push((name.to_owned(), data, activity));
+                return;
+            }
+        } else {
+            self.said();
+        }
+        record(&self.daemon, &self.agent, name, data, activity);
         if name == "agent.compacted" {
             tree::compacted(&self.daemon, &self.agent);
         }
