@@ -510,8 +510,8 @@ bridge runs one session.
   the official Agent SDK sends it. The session opens once `claude` answered it; a `claude` that
   ends before (a resume of a session it does not know) fails the open.
 - **What `claude` says**, mapped to ACP updates: stream deltas of text and thinking become
-  `agent_message_chunk` and `agent_thought_chunk` (the whole message that follows does not repeat
-  them); a `tool_use` becomes a `tool_call` (`in_progress`, the tool's name as its title and in
+  `agent_message_chunk` and `agent_thought_chunk`, with no message id (the whole message that
+  follows does not repeat them); a `tool_use` becomes a `tool_call` (`in_progress`, the tool's name as its title and in
   `_meta.claudeCode.toolName`, its input as `rawInput`) whose id is the tool use's, the one
   `claude` gives Flottille's MCP server as `claudecode/toolUseId`; a `tool_result` its
   `tool_call_update` (`completed` or `failed`); a `compact_boundary` a completed `tool_call` with
@@ -577,7 +577,8 @@ servers are Flottille's HTTP one alone). One bridge runs one session.
   is no `session/load`. A `codex` that ends before fails the open.
 - **What `codex` says**, mapped to ACP updates: `item/agentMessage/delta` becomes
   `agent_message_chunk`, as does the text of an `agentMessage` item that completes without a
-  delta (a question of `request_user_input_async`, above); `item/reasoning/summaryTextDelta` and `item/reasoning/textDelta`
+  delta (a question of `request_user_input_async`, above), each with the id of its item as
+  `messageId`; `item/reasoning/summaryTextDelta` and `item/reasoning/textDelta`
   `agent_thought_chunk`; a call of Flottille's server (`mcpToolCall`) a `tool_call` (`in_progress`,
   `mcp__flottille__<tool>` as its title, or the resource tool's own name, its arguments as
   `rawInput`) whose id is Codex's item id,
@@ -655,8 +656,21 @@ update outside a replay. Texts are cut at 64 KiB and say how
 much was cut (`‹+N chars›`); secrets of the daemon's environment are masked in everything kept.
 A reply is kept as it streams, one event per piece the provider sends (a token, for Codex), so
 that `watch` and the window show it as it comes; `agent.read` and `agent_read` join the pieces
-that follow each other into one line, led by the number of the first, and a reply longer than a
-line (2,000 characters) goes on, whole, on the next ones.
+that follow each other into one line, led by the number of the first, and mask the joined text:
+a secret split over several pieces is whole only there, and `agent_status`'s last messages are
+masked the same way. A reply longer than a line (2,000 characters) goes on, whole, on the next
+ones, as long as it is streamed in pieces; a single piece over 2,000 characters is cut
+(`‹+N chars›`), as a long question of `request_user_input_async` is, since it comes as one.
+
+Two messages in a row are not one. A piece carries the id of its message when its source gives
+one (`message_id` of `agent.message`, from ACP's `messageId`): the joining stops where the id
+changes. Codex's bridge gives the id of the item, so a reply and then a question of
+`request_user_input_async` read as two lines. A source that gives none (Claude's bridge,
+OpenCode's adapter today) is joined as before: its pieces follow each other until a tool call,
+the end of a turn or any other event comes between, a thought or a tool-call update included.
+
+Known limit: a secret that the end of a line (2,000 characters) or of a page cuts in two is masked
+on each side alone, so neither half is recognised.
 
 ## The tree
 
