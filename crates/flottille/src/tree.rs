@@ -43,7 +43,7 @@ pub const TOOLS: [&str; 9] = [
 /// limit, with room for the notes pinned on it.
 const READ_PAGE: usize = 30_000;
 /// What a line of a conversation keeps of a text.
-const LINE_CHARS: usize = 2_000;
+pub(crate) const LINE_CHARS: usize = 2_000;
 /// The last messages `agent_status` and a parent's deliveries show of a child.
 const LAST_MESSAGES: usize = 3;
 const MESSAGE_CHARS: usize = 600;
@@ -473,7 +473,7 @@ fn last_messages(daemon: &Daemon, agent: &str) -> Vec<String> {
         }
     }
     let skip = messages.len().saturating_sub(LAST_MESSAGES);
-    // Secrets are masked per piece when stored; one split over several pieces is whole only here.
+    // A reply is stored masked whole (`agents::Recorder`); masked again for one stored before.
     let env = std::env::vars_os().collect();
     messages
         .into_iter()
@@ -524,7 +524,7 @@ pub fn conversation(daemon: &Daemon, agent: &Agent, after: u64) -> flottille_cor
     };
     // The message being joined: the numbers of its first and last pieces, its id and its text.
     let mut said: Option<(u64, u64, Option<String>, String)> = None;
-    // Secrets are masked per piece when stored; one split over several pieces is whole only here.
+    // A reply is stored masked whole (`agents::Recorder`); masked again for one stored before.
     let env = std::env::vars_os().collect();
     let said_line = |text: String| {
         conversation_line(

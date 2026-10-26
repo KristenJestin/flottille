@@ -240,16 +240,27 @@ fn a_page_that_fills_up_in_the_middle_of_a_joined_reply_goes_on_where_the_line_s
 }
 
 #[test]
-fn a_reply_still_streaming_when_the_events_run_out_is_read_as_it_is_so_far() {
+fn a_reply_still_streaming_when_the_events_run_out_is_read_as_far_as_it_is_settled() {
+    // Both long enough for a part of each to settle: two pieces stored.
+    let (first, then) = ("this reply is long ".repeat(10), "and goes on ".repeat(20));
     let user = user(json!([{"when": "go", "do": [
-        {"say": "Hel"}, {"say": "lo, wor"}, {"hang": true}
+        {"say": &first}, {"say": format!("{then}still going")}, {"hang": true}
     ]}]));
     let (id, _) = run(&user, "go");
+    let whole = format!("{first}{then}still going");
     let mut page = Value::Null;
-    eventually("the two pieces", || {
+    // Held back: the last word, and as much as the longest secret the daemon knows.
+    eventually("the settled part of both pieces", || {
         page = read(&user, &id, 0);
-        said(&lines(&page)) == ["Hello, wor"]
+        let said = said(&lines(&page));
+        said.len() == 1 && said[0].len() > first.len()
     });
+    let said = said(&lines(&page));
+    assert!(
+        whole.starts_with(&said[0]) && said[0].ends_with(' '),
+        "{said:?}"
+    );
+    assert!(!said[0].contains("still"), "{said:?}");
 
     assert_eq!(page["more"], false);
     let last = number(lines(&page).last().unwrap());
@@ -379,13 +390,158 @@ fn a_question_codex_asks_whole_after_a_reply_is_not_glued_to_it() {
 }
 
 #[test]
-fn a_single_piece_over_2000_characters_is_still_cut() {
+fn a_single_piece_over_2000_characters_goes_on_whole_on_the_next_line() {
     let user = user(json!([{"when": "go", "do": [{"say": "q".repeat(2_500)}]}]));
     let (id, after) = run(&user, "go");
     turn_ended(&user, &id, after, 1);
 
     let said = said(&lines(&read(&user, &id, 0)));
 
-    assert_eq!(said.len(), 1);
-    assert_eq!(said[0], format!("{}‹+500 chars›", "q".repeat(2_000)));
+    assert_eq!(said, ["q".repeat(2_000), "q".repeat(500)]);
+}
+
+// A message is masked whole before it is stored or shown (#63): every reader gets masked text.
+
+/// What the agent said, its pieces as `watch` streams them, joined.
+fn watched_reply(user: &User, agent: &str, after: u64) -> String {
+    let events = user
+        .watch(&["--after", &after.to_string()])
+        .until(|e| e["data"]["agent"] == agent && e["name"] == "agent.turn_ended");
+    events
+        .iter()
+        .filter(|e| e["data"]["agent"] == agent && e["name"] == "agent.message")
+        .map(|e| e["data"]["text"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_token_streamed_over_three_pieces_never_shows_in_clear_in_watch() {
+    let user = user(json!([{"when": "go", "do": secret_in_pieces()}]));
+    let (id, after) = run(&user, "go");
+
+    let reply = watched_reply(&user, &id, after);
+
+    assert!(
+        !reply.contains(SECRET),
+        "{}",
+        reply.replace(SECRET, "<clear>")
+    );
+    assert_eq!(reply, "the token is [masked], keep it quiet");
+}
+
+#[test]
+fn a_token_streamed_over_three_pieces_never_shows_in_clear_in_agent_show_json() {
+    let user = user(json!([{"when": "go", "do": secret_in_pieces()}]));
+    let (id, after) = run(&user, "go");
+    turn_ended(&user, &id, after, 1);
+
+    let output = user.run(&["agent", "show", &id, "--json"]);
+    assert!(output.status.success());
+    let shown: Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    let text = shown.to_string();
+    assert!(
+        !text.contains(SECRET),
+        "{}",
+        text.replace(SECRET, "<clear>")
+    );
+    let reply: String = shown["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["name"] == "agent.message")
+        .map(|e| e["data"]["text"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(reply, "the token is [masked], keep it quiet");
+}
+
+#[test]
+fn a_token_streamed_over_three_pieces_never_shows_in_clear_in_the_store() {
+    let user = user(json!([{"when": "go", "do": secret_in_pieces()}]));
+    let (id, after) = run(&user, "go");
+    turn_ended(&user, &id, after, 1);
+
+    let store =
+        flottille_core::store::Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let events = store.agent_events(&id, 0, 200).unwrap();
+
+    let reply: String = events
+        .iter()
+        .filter(|e| e.name == "agent.message")
+        .map(|e| e.data["text"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        !reply.contains(SECRET),
+        "{}",
+        reply.replace(SECRET, "<clear>")
+    );
+    assert_eq!(reply, "the token is [masked], keep it quiet");
+}
+
+#[test]
+fn a_token_cut_by_the_line_break_of_a_long_reply_reads_masked() {
+    // The first piece fills a line but for the start of the token; the second ends it.
+    let filler = "word ".repeat(395);
+    let user = user(json!([{"when": "go", "do": [
+        {"say": format!("{filler}s3cr3t-tok")},
+        {"say": "en-value, keep it quiet"}
+    ]}]));
+    let (id, after) = run(&user, "go");
+    turn_ended(&user, &id, after, 1);
+
+    let said = said(&lines(&read(&user, &id, 0)));
+
+    let text = said.concat();
+    assert!(
+        !text.contains("s3cr3t-tok") && !text.contains("en-value"),
+        "{said:?}"
+    );
+    assert_eq!(text, format!("{filler}[masked], keep it quiet"));
+    assert!(said.iter().all(|line| line.chars().count() <= 2_000));
+}
+
+#[test]
+fn a_provider_variable_s_value_streamed_in_pieces_reads_masked() {
+    let user = User::with_fake_providers();
+    user.provider_script(
+        "opencode",
+        json!({"turns": [{"when": "go", "do": [
+            {"say": "the password is "},
+            {"say_variable": "OPENCODE_SERVER_PASSWORD"},
+            {"say": " and no more"}
+        ]}]}),
+    );
+    project(&user);
+    let answer = user
+        .call(
+            "agent.run",
+            json!({"project": "app", "message": "go", "provider": "opencode"}),
+        )
+        .unwrap();
+    let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+    let after = answer["after"].as_u64().unwrap();
+
+    let watched = watched_reply(&user, &id, after);
+    let said = said(&lines(&read(&user, &id, 0)));
+
+    // Compared without a message: a failure would print the password.
+    assert!(watched == "the password is [masked] and no more");
+    assert!(said == ["the password is [masked] and no more"]);
+}
+
+#[test]
+fn the_held_tail_of_a_reply_is_kept_when_the_agent_ends() {
+    // Played once: the session that replaces it answers `ok`. The wait lets the pieces be read
+    // before the process dies.
+    let user = user(json!([{"when": "go", "times": 1, "do": [
+        {"say": "last "}, {"say": "words"}, {"wait": 300}, {"die": 3}
+    ]}]));
+    let (id, _) = run(&user, "go");
+
+    let mut said_so_far = Vec::new();
+    eventually("the last words, then the next session's reply", || {
+        said_so_far = said(&lines(&read(&user, &id, 0)));
+        said_so_far.len() == 2
+    });
+    assert_eq!(said_so_far, ["last words", "ok"]);
 }

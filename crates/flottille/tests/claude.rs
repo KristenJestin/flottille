@@ -95,20 +95,20 @@ fn through_the_bridge_a_session_is_opened_and_a_prompt_gets_its_reply() {
         .collect();
     let names = names(&events);
     assert_eq!(
-        names[..6],
+        names[..5],
         [
             "agent.created",
             "agent.started",
             "agent.prompted",
             "agent.thought",
             "agent.message",
-            "agent.message"
         ]
     );
     assert_eq!(names.last(), Some(&"agent.turn_ended"));
     assert!(names.contains(&"agent.usage"), "{names:?}");
     assert_eq!(events[1]["data"]["opened"], "new");
-    assert_eq!(events[5]["data"]["text"], " there!");
+    // Its two pieces, short enough to be held back whole until the message ends.
+    assert_eq!(events[4]["data"]["text"], "Hello there!");
     assert_eq!(events.last().unwrap()["data"]["stop_reason"], "end_turn");
     // The session the daemon knows is the one `claude` was started on, in the project's folder.
     let start = &user.claude_starts()[0];
@@ -248,7 +248,8 @@ fn through_the_bridge_a_load_replays_history_that_is_not_recorded_again() {
 fn through_the_bridge_a_cancel_ends_the_turn_with_cancelled() {
     let user = User::with_fake_claude();
     user.claude_script(
-        json!({"turns": [{"when": "long", "do": [{"say": "Working on it"}, {"hang": true}]}]}),
+        // Long enough for its start to be shown before the turn ends.
+        json!({"turns": [{"when": "long", "do": [{"say": "Working on it. ".repeat(20)}, {"hang": true}]}]}),
     );
     project(&user);
     let (id, after) = run(&user, "a long task");

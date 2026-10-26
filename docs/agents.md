@@ -655,13 +655,19 @@ history Flottille already holds, as it happened: it is not stored again, and it 
 activity (`docs/reference/hemera.md` §8.7). The agent's `active_at` is the time of its last
 update outside a replay. Texts are cut at 64 KiB and say how
 much was cut (`‹+N chars›`); secrets of the daemon's environment are masked in everything kept.
-A reply is kept as it streams, one event per piece the provider sends (a token, for Codex), so
-that `watch` and the window show it as it comes; `agent.read` and `agent_read` join the pieces
-that follow each other into one line, led by the number of the first, and mask the joined text:
-a secret split over several pieces is whole only there, and `agent_status`'s last messages are
-masked the same way. A reply longer than a line (2,000 characters) goes on, whole, on the next
-ones, as long as it is streamed in pieces; a single piece over 2,000 characters is cut
-(`‹+N chars›`), as a long question of `request_user_input_async` is, since it comes as one.
+A reply is kept as it streams, so that `watch` and the window show it as it comes, and it is
+masked whole before it is kept: a secret split over several pieces of the provider (a token, for
+Codex) never shows in clear, in the stream, the window, `agent.read` or the store. The daemon
+holds back the end of the message it is receiving, enough to cover the longest secret it knows:
+the last word (a token ends at a whitespace, up to 4 KiB), as many characters as the longest
+secret value of its environment and of the provider's own variables, and a private key block
+until its end line. What can no longer be part of a secret is masked and kept at once, as pieces
+of a line (2,000 characters) at most; what was held back is kept when the message ends (another
+message id, any other event of the agent, the end of the turn, the end of the agent's process).
+So the stored pieces are not the provider's, and the reply shows a few words late. `agent.read`
+and `agent_read` join the pieces that follow each other into one line, led by the number of the
+first, and mask the joined text again, as `agent_status`'s last messages: replies kept before
+this held back nothing. A reply longer than a line goes on, whole, on the next ones.
 
 Two messages in a row are not one. A piece carries the id of its message when its source gives
 one (`message_id` of `agent.message`, from ACP's `messageId`): the joining stops where the id
@@ -670,8 +676,9 @@ changes. Codex's bridge gives the id of the item, so a reply and then a question
 OpenCode's adapter today) is joined as before: its pieces follow each other until a tool call,
 the end of a turn or any other event comes between, a thought or a tool-call update included.
 
-Known limit: a secret that the end of a line (2,000 characters) or of a page cuts in two is masked
-on each side alone, so neither half is recognised.
+Known limit: a word over 4 KiB is not held back whole, so a token, a JWT or a URL's password
+longer than that, with no whitespace, is masked in part only. A secret in a thought or in the
+user's own message (seen in a replay) is masked piece by piece, as before.
 
 ## The tree
 

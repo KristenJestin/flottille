@@ -37,6 +37,15 @@ pub fn mask(text: &str, env: &BTreeMap<OsString, OsString>) -> String {
 /// `mask`, and every one of `values` masked too: the values of the files holding secrets of the
 /// place a command ran in (`file_values`).
 pub fn mask_also(text: &str, env: &BTreeMap<OsString, OsString>, values: &[String]) -> String {
+    let mut masked = text.to_owned();
+    for value in secret_values(env, values) {
+        masked = masked.replace(value, MASK);
+    }
+    mask_tokens(&mask_private_keys(&masked))
+}
+
+/// The values `mask_also` masks, the longest first: a secret holding a shorter one is masked whole.
+fn secret_values<'a>(env: &'a BTreeMap<OsString, OsString>, values: &'a [String]) -> Vec<&'a str> {
     let mut values: Vec<&str> = values
         .iter()
         .map(String::as_str)
@@ -55,13 +64,56 @@ pub fn mask_also(text: &str, env: &BTreeMap<OsString, OsString>, values: &[Strin
                 .map(|(_, value)| value),
         )
         .collect();
-    // The longest first: a secret holding a shorter one is masked whole.
     values.sort_by_key(|value| std::cmp::Reverse(value.len()));
-    let mut masked = text.to_owned();
-    for value in values {
-        masked = masked.replace(value, MASK);
+    values
+}
+
+/// The most of a word (no whitespace) `settled` holds back: a token, a JWT or a URL's password
+/// longer than that is shown in part.
+const HELD_WORD: usize = 4096;
+
+/// How much of `text`, a message still streaming, is settled: masked alone, it reads as it will
+/// once the message is whole, so it can be stored and shown now. The rest may still be part of a
+/// secret the next pieces complete: the last word, as long as the longest value `mask` knows at
+/// least, and a private key block until its end line.
+pub fn settled(text: &str, env: &BTreeMap<OsString, OsString>) -> usize {
+    let values = secret_values(env, &[]);
+    let longest = values.first().map_or(0, |value| value.len());
+    let floor = |at: usize| {
+        (0..=at)
+            .rev()
+            .find(|&i| text.is_char_boundary(i))
+            .unwrap_or(0)
+    };
+    let mut cut = floor(text.len().saturating_sub(longest));
+    // Tokens, JWTs and a URL's password end at a whitespace: after the last one, unless the
+    // word it starts is too long to hold.
+    let word = text[..cut].rfind(char::is_whitespace).map_or(0, |at| {
+        at + text[at..].chars().next().map_or(1, char::len_utf8)
+    });
+    cut = cut.min(word.max(floor(text.len().saturating_sub(longest.max(HELD_WORD)))));
+    loop {
+        let before = cut;
+        for value in &values {
+            for (at, _) in text.match_indices(value) {
+                if at < cut && cut < at + value.len() {
+                    cut = at;
+                }
+            }
+        }
+        // A private key block is masked to its end line: none is settled before it.
+        if let Some(begin) = text[..cut].rfind("-----BEGIN ") {
+            let closed = text[begin..cut]
+                .find("-----END ")
+                .is_some_and(|end| text[begin + end + "-----END ".len()..cut].contains("-----"));
+            if !closed {
+                cut = begin;
+            }
+        }
+        if cut == before {
+            return cut;
+        }
     }
-    mask_tokens(&mask_private_keys(&masked))
 }
 
 /// Whether a file of that name holds secrets as `KEY=VALUE` lines: `.env`, `.env.local`…
@@ -310,6 +362,79 @@ mod tests {
         );
         assert!(secret_file(".env") && secret_file(".env.local"));
         assert!(!secret_file("env") && !secret_file(".envrc"));
+    }
+
+    /// `text` streamed in the pieces `pieces` cuts it into, each settled part masked as it comes and
+    /// the rest at the end, as the recorder does.
+    fn streamed(text: &str, pieces: &[usize], env: &BTreeMap<OsString, OsString>) -> String {
+        let (mut shown, mut held, mut from) = (String::new(), String::new(), 0);
+        for &to in pieces.iter().chain([&text.len()]) {
+            held.push_str(&text[from..to]);
+            from = to;
+            let cut = settled(&held, env);
+            shown.push_str(&mask(&held[..cut], env));
+            held.drain(..cut);
+        }
+        shown + &mask(&held, env)
+    }
+
+    /// A reply holding every kind of secret `mask` knows, all invented.
+    const REPLY: &str = "Done: the value s3cr3t-token-value is set, \
+        token=ghp_abcdefghijklmnopqrstuvwxyz0123 ok, \
+        Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmYWtlIn0.c2lnbmF0dXJl-x_y done, \
+        fetch https://someone:hunter2-fake@forge.example/app.git, a key\n\
+        -----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAA\nZmFrZQ==\n\
+        -----END OPENSSH PRIVATE KEY-----\nand é, ok.";
+
+    #[test]
+    fn a_message_streamed_in_any_pieces_reads_as_it_would_whole() {
+        let env = BTreeMap::from([("API_TOKEN".into(), "s3cr3t-token-value".into())]);
+        let whole = mask(REPLY, &env);
+        assert!(
+            !whole.contains("s3cr3t") && !whole.contains("hunter2"),
+            "{whole}"
+        );
+        let bounds: Vec<usize> = (1..REPLY.len())
+            .filter(|&i| REPLY.is_char_boundary(i))
+            .collect();
+        // Cut in two anywhere, and in pieces of every size up to 9.
+        for &at in &bounds {
+            assert_eq!(streamed(REPLY, &[at], &env), whole, "cut at {at}");
+        }
+        for size in 1..=9 {
+            let pieces: Vec<usize> = bounds.iter().copied().filter(|i| i % size == 0).collect();
+            assert_eq!(streamed(REPLY, &pieces, &env), whole, "pieces of {size}");
+        }
+    }
+
+    #[test]
+    fn what_is_settled_holds_no_part_of_a_secret_still_coming() {
+        let env = BTreeMap::from([("API_TOKEN".into(), "s3cr3t-token-value".into())]);
+        // Each is the start of a secret its next piece would complete.
+        for (start, settles) in [
+            (
+                "the value is set, the value s3cr3t-tok",
+                "the value is set, ",
+            ),
+            ("token=ghp_abcdefghij", ""),
+            (
+                "a key\n-----BEGIN RSA PRIVATE KEY-----\nMIIfake\n",
+                "a key\n",
+            ),
+        ] {
+            assert_eq!(&start[..settled(start, &env)], settles);
+        }
+    }
+
+    #[test]
+    fn a_long_word_is_held_back_no_more_than_a_bound() {
+        let word = "x".repeat(10_000);
+
+        assert_eq!(settled(&word, &BTreeMap::new()), 10_000 - HELD_WORD);
+        assert_eq!(
+            settled("plain words and more", &BTreeMap::new()),
+            "plain words and ".len()
+        );
     }
 
     #[test]

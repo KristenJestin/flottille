@@ -106,15 +106,15 @@ fn a_session_is_opened_and_a_prompt_gets_its_reply_recorded_as_events() {
             "agent.prompted",
             "agent.thought",
             "agent.message",
-            "agent.message",
             "agent.turn_ended"
         ]
     );
     assert_eq!(events[1]["data"]["opened"], "new");
     assert_eq!(events[2]["data"]["text"], "[flottille:user]\nhello");
-    assert_eq!(events[4]["data"]["text"], "Hello");
+    // Its two pieces, short enough to be held back whole until the turn's end (`docs/agents.md`).
+    assert_eq!(events[4]["data"]["text"], "Hello there!");
     assert_eq!(events[4]["data"]["replay"], false);
-    assert_eq!(events[6]["data"]["stop_reason"], "end_turn");
+    assert_eq!(events[5]["data"]["stop_reason"], "end_turn");
     let opened = user.received_requests("session/new");
     assert_eq!(opened.len(), 1);
     assert_eq!(
@@ -301,7 +301,8 @@ fn a_load_replays_history_that_is_held_already_and_not_recorded_again() {
 fn a_cancel_ends_the_turn_with_cancelled() {
     let user = User::with_fake_agent();
     user.fake_script(
-        json!({"turns": [{"when": "long", "do": [{"say": "Working on it"}, {"hang": true}]}]}),
+        // Long enough for its start to be shown before the turn ends.
+        json!({"turns": [{"when": "long", "do": [{"say": "Working on it. ".repeat(20)}, {"hang": true}]}]}),
     );
     project(&user);
     let (id, after) = run(&user, json!({"message": "a long task"}));
@@ -698,7 +699,7 @@ fn agent_send_answers_with_the_id_of_the_delivery_it_stored() {
 #[test]
 fn agent_show_pages_from_either_end_and_says_when_more_remain() {
     let user = User::with_fake_agent();
-    let says: Vec<Value> = (0..1100).map(|n| json!({"say": format!("{n} ")})).collect();
+    let says: Vec<Value> = (0..1200).map(|n| json!({"say": format!("{n} ")})).collect();
     user.fake_script(json!({"turns": [{"when": "talk", "do": says}]}));
     project(&user);
     let (id, after) = run(&user, json!({"message": "talk"}));
