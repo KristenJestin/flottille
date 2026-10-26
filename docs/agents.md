@@ -66,8 +66,8 @@ default: `$CODEX_HOME/auth.json` else `~/.codex/auth.json`, checked for its pres
 given `CODEX_ACCESS_TOKEN`. Neither is a warning, not a failure; a login kept in the system's
 keyring does not reach Flottille's agents ("Bare mode for Codex", below), nor does a sign-in to a
 ChatGPT business, education or enterprise plan, which the bridge refuses. Its version is checked
-against 0.162.0, the version whose bare mode was qualified: another one is refused unless the user
-allows it (`allow_unqualified_version = true` under `[codex]`), as for OpenCode. While the machine
+against 0.162.0 and 0.162.1, the versions whose bare mode was qualified: another one is refused
+unless the user allows it (`allow_unqualified_version = true` under `[codex]`), as for OpenCode. While the machine
 has Codex settings of its own, `/etc/codex`, Codex is not ready.
 
 An agent is refused at its start, with a sentence that says why and names the providers that
@@ -361,7 +361,9 @@ Codex has no ACP mode and no allowlist of tools: its agent is Flottille's bridge
 `codex app-server` on stdio ("The Codex bridge", below), and its bare mode is a set of switches,
 each shutting one thing, on the command line, in the environment and in each thread. It was
 qualified against Codex 0.162.0 by reading its source (tag `rust-v0.162.0`; the places below are
-under `codex-rs/`), without running an agent: the run that proves it comes after. A version of
+under `codex-rs/`), without running an agent: the run that proves it comes after. 0.162.1 differs
+from it only in its terminal interface (`tui/`), a test and its version number (`git diff --stat
+rust-v0.162.0 rust-v0.162.1`), so it is qualified too. A version of
 Codex can add a tool that is on by default, which is why another version is refused unless the
 user allows it (`allow_unqualified_version`), and why the bridge watches every turn.
 
@@ -533,7 +535,7 @@ bridge runs one session.
 
 `flottille bridge codex` (hidden from `--help`) is an ACP agent on stdio, written in Rust inside
 Flottille's binary, which drives the user's `codex app-server` on stdio, as the version of `codex`
-it was checked against (0.162.0) speaks it: JSON-RPC lines without a `jsonrpc` field. The daemon
+it was checked against (0.162.0 and 0.162.1) speaks it: JSON-RPC lines without a `jsonrpc` field. The daemon
 starts it as any ACP agent; it refuses a session whose options are not the daemon's (`_meta.codex`
 holds the agent's `instructions` and its `tools`, as Codex names them, and nothing else; the MCP
 servers are Flottille's HTTP one alone). One bridge runs one session.

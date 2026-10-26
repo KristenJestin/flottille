@@ -33,6 +33,7 @@ pub static PROVIDER: Provider = Provider {
     title: "Claude",
     program: "claude",
     checked: CLAUDE_VERSION,
+    also_qualified: &[],
     may_change: "its stream-json mode may have changed",
     install: "install Claude Code and sign in with it first",
     login_file,

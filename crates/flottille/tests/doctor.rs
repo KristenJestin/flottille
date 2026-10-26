@@ -358,7 +358,10 @@ fn doctor_reports_codex_enabled_or_not_ready_or_not_by_sign_in_or_by_key() {
     assert!(!ok, "{report}");
     let why = codex_of(&report)["why"].as_str().unwrap().to_owned();
     assert!(why.contains("codex is 0.163.0"), "{why}");
-    assert!(why.contains("only 0.162.0 was qualified"), "{why}");
+    assert!(
+        why.contains("only 0.162.0 and 0.162.1 were qualified"),
+        "{why}"
+    );
     assert!(text.contains("Codex agents cannot run"), "{text}");
 
     // Not on PATH: not ready.
@@ -367,4 +370,35 @@ fn doctor_reports_codex_enabled_or_not_ready_or_not_by_sign_in_or_by_key() {
     assert!(!ok, "{report}");
     let why = codex_of(&report)["why"].as_str().unwrap().to_owned();
     assert!(why.contains("`codex` is not on PATH"), "{why}");
+}
+
+/// Codex enabled and signed in by its access token, at that version.
+fn user_with_codex(version: &str) -> User {
+    let user = user_with_bin();
+    claude(&user, "2.1.295");
+    login(&user);
+    codex(&user, version);
+    std::fs::create_dir_all(user.path("config/flottille")).unwrap();
+    std::fs::write(
+        user.path("config/flottille/providers.toml"),
+        "[codex]\nenabled = true\n",
+    )
+    .unwrap();
+    user.with_env("CODEX_ACCESS_TOKEN", "invented-codex-token")
+}
+
+#[test]
+fn doctor_takes_codex_0_162_1_as_qualified_too() {
+    let user = user_with_codex("0.162.1");
+
+    let (ok, report, _) = doctor(&user);
+
+    assert!(ok, "{report}");
+    let entry = &report["providers"][2];
+    assert_eq!(entry["ready"], true, "{report}");
+    assert_eq!(entry["program"]["version"], "0.162.1");
+    assert!(
+        !report["warnings"].to_string().contains("0.162.1"),
+        "{report}"
+    );
 }

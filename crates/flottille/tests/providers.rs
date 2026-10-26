@@ -971,7 +971,10 @@ fn a_disabled_or_unready_codex_is_refused_naming_the_ready_providers() {
     let (_, message) = start(&user, json!({"message": "go", "provider": "codex"})).unwrap_err();
 
     assert!(message.contains("codex is 0.163.0"), "{message}");
-    assert!(message.contains("only 0.162.0 was qualified"), "{message}");
+    assert!(
+        message.contains("only 0.162.0 and 0.162.1 were qualified"),
+        "{message}"
+    );
     assert!(agents(&user).is_empty());
 }
 

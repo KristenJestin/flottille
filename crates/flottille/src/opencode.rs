@@ -46,6 +46,7 @@ pub static PROVIDER: Provider = Provider {
     title: "OpenCode",
     program: "opencode",
     checked: OPENCODE_VERSION,
+    also_qualified: &[],
     may_change: "its bare mode was qualified on that version, and may not hold on another",
     install: "install OpenCode and sign in with it first",
     login_file,

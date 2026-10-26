@@ -19,6 +19,9 @@ use crate::providers::{self, Env, MCP_SERVER, Program, Provider};
 /// The version of `codex` whose bare mode was qualified (`docs/agents.md`).
 pub const CODEX_VERSION: &str = "0.162.0";
 
+/// 0.162.1 changed only Codex's terminal interface: its bare mode holds as 0.162.0's.
+const ALSO_QUALIFIED: [&str; 1] = ["0.162.1"];
+
 /// A tool call waiting on a run sends nothing for a while: Codex's MCP limit must outlast it.
 const TOOL_WAIT_SEC: u64 = 600;
 
@@ -35,6 +38,7 @@ pub static PROVIDER: Provider = Provider {
     title: "Codex",
     program: "codex",
     checked: CODEX_VERSION,
+    also_qualified: &ALSO_QUALIFIED,
     may_change: "its bare mode was qualified on that version, and may not hold on another",
     install: "install Codex and sign in with it first",
     login_file,
