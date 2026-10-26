@@ -782,3 +782,31 @@ fn a_model_without_efforts_gets_its_turns_without_one() {
     assert_eq!(turn["model"], "gpt-plain");
     assert!(turn.get("effort").is_none(), "{turn}");
 }
+
+#[test]
+fn a_question_codex_asks_without_waiting_reaches_the_conversation_and_holds_nothing() {
+    // `request_user_input_async`: Codex answers the model `{"accepted":true}` at once and only
+    // reports the question as a reply of its own, never streamed.
+    let question = json!({"type": "agentMessage", "id": "call-q", "phase": "final_answer",
+        "text": "Which branch?\n- main\n- dev", "delivery": "async",
+        "questions": [{"title": "Which branch?", "options": ["main", "dev"]}]});
+    let user = User::with_fake_codex();
+    user.codex_script(json!({"turns": [{"when": "ask", "do": [
+        {"item": question}, {"completed": question}, {"say": "Asked."}]}]}));
+    let mut bridge = Bridge::start(&user);
+    let (session, _) = bridge.open(&user, &[]);
+
+    let (answer, seen) = bridge.prompt(&session, "ask");
+
+    assert_eq!(answer.unwrap()["stopReason"], "end_turn");
+    let said: Vec<Value> = updates(&seen)
+        .into_iter()
+        .filter(|u| u["sessionUpdate"] == "agent_message_chunk")
+        .map(|u| u["content"]["text"].clone())
+        .collect();
+    assert_eq!(
+        said,
+        [json!("Which branch?\n- main\n- dev"), json!("Asked.")]
+    );
+    assert!(sent(&user, "turn/interrupt").is_empty());
+}

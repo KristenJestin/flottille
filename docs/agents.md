@@ -429,7 +429,17 @@ default environment (`core/src/thread_manager.rs:2148-2154`) until a turn gives 
   mode whatever the switches say (`core/src/tools/mod.rs:75-85`): they get `exec` and `wait`, a
   JavaScript sandbox (V8, no file, network or process: `code-mode-runtime/`) whose only reach is
   the thread's other tools, and Flottille's tools are kept out of it (`omit_tools_from`), so the
-  model calls them directly.
+  model calls them directly. A root thread also gets `request_user_input_async` when the model's
+  catalogue lists it, as `gpt-6-luna`'s does, with no switch: it is decided by the catalogue
+  (`experimental_supported_tools`) and the session being a root one
+  (`core/src/tools/spec_plan.rs:1253-1275`); only replacing Codex's whole catalogue
+  (`model_catalog_json`) would remove it. It waits for no one: Codex answers the model
+  `{"accepted":true}` at once and reports the questions as a reply of its own, an `agentMessage`
+  item with `delivery: "async"`, never streamed
+  (`core/src/tools/handlers/request_user_input_async.rs:98-145`). The bridge passes that reply on
+  whole, so the question lands in the conversation, and the answer, if any, is the next prompt.
+  `send_message_to_user_async` does the same with a plain message, when the catalogue lists it
+  (its feature is off by default, `features/src/lib.rs:1750-1755`).
 - **What Flottille refuses**: the machine's own Codex settings, `/etc/codex` (its
   `config.toml`, `requirements.toml`, `managed_config.toml`, rules, skills and hooks), are loaded
   by every `codex app-server` before Flottille's switches and some after them, with no way to
@@ -566,7 +576,8 @@ servers are Flottille's HTTP one alone). One bridge runs one session.
   `session/new` or `thread/resume` for `session/resume`. The session id is Codex's thread id; there
   is no `session/load`. A `codex` that ends before fails the open.
 - **What `codex` says**, mapped to ACP updates: `item/agentMessage/delta` becomes
-  `agent_message_chunk`; `item/reasoning/summaryTextDelta` and `item/reasoning/textDelta`
+  `agent_message_chunk`, as does the text of an `agentMessage` item that completes without a
+  delta (a question of `request_user_input_async`, above); `item/reasoning/summaryTextDelta` and `item/reasoning/textDelta`
   `agent_thought_chunk`; a call of Flottille's server (`mcpToolCall`) a `tool_call` (`in_progress`,
   `mcp__flottille__<tool>` as its title, or the resource tool's own name, its arguments as
   `rawInput`) whose id is Codex's item id,

@@ -11,7 +11,7 @@
 //! One bridge runs one session. Once the session is open, the end of its `codex` is the end of
 //! the bridge, with the same exit code: the daemon sees the agent die.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::{ExitCode, ExitStatus, Stdio};
@@ -63,6 +63,7 @@ pub fn run(paths: &Paths) -> Result<ExitCode, Box<dyn std::error::Error>> {
         next: 0,
         turn: None,
         breach: None,
+        streamed: HashSet::new(),
     };
     let code = runtime.block_on(bridge.serve())?;
     // The standard input is read on a thread of the runtime that a dead `codex` leaves blocked.
@@ -81,6 +82,8 @@ struct Bridge {
     turn: Option<Turn>,
     /// Why the thread is no bare one: a tool of Codex's own started outside a prompt.
     breach: Option<String>,
+    /// The replies under way whose text came as deltas, by item id.
+    streamed: HashSet<String>,
 }
 
 /// The user's `codex`, running one thread.
@@ -477,7 +480,12 @@ impl Bridge {
         }
         let params = &message["params"];
         match method {
-            "item/agentMessage/delta" => self.chunk("agent_message_chunk", params).await,
+            "item/agentMessage/delta" => {
+                if let Some(item) = params["itemId"].as_str() {
+                    self.streamed.insert(item.to_owned());
+                }
+                self.chunk("agent_message_chunk", params).await;
+            }
             "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
                 self.chunk("agent_thought_chunk", params).await;
             }
@@ -617,6 +625,20 @@ impl Bridge {
                     "_meta": {"contextCompaction": {"trigger": "auto"}}}),
                 )
                 .await;
+            }
+            // A reply that came whole: the question of `request_user_input_async`, which Codex
+            // reports as a reply and answers the model at once (`core/src/tools/handlers/
+            // request_user_input_async.rs`).
+            Some("agentMessage") => {
+                let streamed = item["id"]
+                    .as_str()
+                    .is_some_and(|id| self.streamed.remove(id));
+                if let Some(text) = item["text"].as_str().filter(|t| !streamed && !t.is_empty()) {
+                    let text = text.to_owned();
+                    self.update(json!({"sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": text}}))
+                        .await;
+                }
             }
             _ => {}
         }
