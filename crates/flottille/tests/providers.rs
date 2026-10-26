@@ -850,6 +850,97 @@ fn a_providers_toml_behind_a_symbolic_link_is_still_a_link_after_a_switch_its_mo
     assert_eq!(listed(&user, "opencode")["enabled"], false);
 }
 
+/// The names in a folder.
+fn names_in(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_providers_toml_that_is_a_dangling_symbolic_link_stays_a_link_and_its_target_is_written() {
+    let user = User::with_fake_providers();
+    let link = user.path("config/flottille/providers.toml");
+    // No file to say otherwise: claude is enabled, and the switch is a change to write.
+    let dotfiles = user.path("dotfiles/flottille");
+    std::fs::create_dir_all(&dotfiles).unwrap();
+    std::fs::remove_file(&link).unwrap();
+    // A relative target, read from the link's folder, which does not exist yet.
+    std::os::unix::fs::symlink("../../dotfiles/flottille/providers.toml", &link).unwrap();
+
+    user.call("provider.disable", json!({"name": "claude"}))
+        .unwrap();
+
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link was replaced by a file"
+    );
+    assert_eq!(
+        std::fs::read_link(&link).unwrap(),
+        PathBuf::from("../../dotfiles/flottille/providers.toml")
+    );
+    let text = std::fs::read_to_string(dotfiles.join("providers.toml")).unwrap();
+    assert!(text.contains("enabled = false"), "{text}");
+    assert_eq!(names_in(&dotfiles), ["providers.toml"]);
+    assert_eq!(listed(&user, "claude")["enabled"], false);
+}
+
+#[test]
+fn a_dangling_symbolic_link_into_a_folder_that_does_not_exist_is_refused_and_left_as_it_is() {
+    let user = User::with_fake_providers();
+    let link = user.path("config/flottille/providers.toml");
+    let target = user.path("dotfiles/flottille/providers.toml");
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let (code, message) = user
+        .call("provider.disable", json!({"name": "claude"}))
+        .unwrap_err();
+
+    assert_eq!(code, "unavailable");
+    assert!(
+        message.starts_with("providers.toml: ") && message.contains("does not exist"),
+        "{message}"
+    );
+    assert_eq!(std::fs::read_link(&link).unwrap(), target);
+    assert!(!user.path("dotfiles").exists(), "a folder was created");
+    assert_eq!(
+        names_in(link.parent().unwrap()),
+        ["providers.toml"],
+        "nothing else is left in the folder"
+    );
+    assert_eq!(listed(&user, "claude")["enabled"], true);
+}
+
+#[test]
+fn a_switch_whose_write_fails_is_refused_and_leaves_the_file_and_no_temporary_file() {
+    let user = User::with_fake_providers();
+    let file = user.path("config/flottille/providers.toml");
+    let before = std::fs::read_to_string(&file).unwrap();
+    // The temporary file is written to a full device: the write fails after the file is made.
+    std::os::unix::fs::symlink(
+        "/dev/full",
+        user.path("config/flottille/.providers.toml.tmp"),
+    )
+    .unwrap();
+
+    let (code, message) = user
+        .call("provider.disable", json!({"name": "opencode"}))
+        .unwrap_err();
+
+    assert_eq!(code, "unavailable");
+    assert!(message.starts_with("providers.toml: "), "{message}");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+    assert_eq!(names_in(file.parent().unwrap()), ["providers.toml"]);
+    assert_eq!(listed(&user, "opencode")["enabled"], true);
+}
+
 /// Claude, OpenCode and Codex enabled, each on a fake agent of its own.
 fn user_with_codex() -> User {
     let user = User::with_fake_providers();

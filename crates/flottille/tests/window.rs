@@ -2664,68 +2664,95 @@ fn a_project_model_its_provider_is_known_not_to_offer_is_said_instead_of_dropped
     cx.update(|window, cx| window.click("model-picker", cx));
     cx.update(|window, cx| window.click("model-choice-open/medium", cx));
     assert!(composer.read_with(cx, |c, _| c.model_refused()).is_none());
+    cx.update(|window, cx| window.click("composer-field", cx));
+    cx.simulate_keystrokes("enter");
+    until(&shell, cx, "the session's page opens", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+    });
+    let page = session_page(&shell, cx);
+    let lead = page.read_with(cx, |p, _| p.id().to_owned());
+    let shown = user.call("agent.show", json!({"agent": lead})).unwrap()["agent"].clone();
+    assert_eq!(shown["provider"], "opencode");
+    assert_eq!(shown["chosen"]["model"], "open/medium");
+}
+
+/// What the relay of [`holding_provider_lists`] saw of the `provider.list` requests.
+#[derive(Default)]
+struct Relayed {
+    /// Asked by the window, over every connection.
+    asked: AtomicUsize,
+    /// Held answers the relay received from the daemon, as soon as they came.
+    answered: AtomicUsize,
+    /// Held answers let through to the window, after their delay.
+    released: AtomicUsize,
+    /// Asked and not yet let through to the window, and the most there were at once.
+    pending: AtomicUsize,
+    peak: AtomicUsize,
 }
 
 /// Connects to the user's daemon through a relay that holds back the answer to the `n`th
-/// `provider.list` asked (from 0, over every connection) for `hold(n)`. Also how many were asked,
-/// and how many held answers were let through.
+/// `provider.list` asked (from 0, over every connection) for `hold(n)`.
 fn holding_provider_lists(
     user: &User,
     hold: impl Fn(usize) -> Option<Duration> + Send + Sync + 'static,
-) -> (Connect, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+) -> (Connect, Arc<Relayed>) {
     use std::collections::HashMap;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
     use std::sync::Mutex;
     let connect = user.connector();
-    let asked = Arc::new(AtomicUsize::new(0));
-    let released = Arc::new(AtomicUsize::new(0));
+    let relayed = Arc::new(Relayed::default());
     let hold = Arc::new(hold);
-    let (counted, let_through) = (asked.clone(), released.clone());
+    let seen = relayed.clone();
     let relay: Connect = Arc::new(move || {
         let daemon = connect()?;
         let (window_side, relay_side) = UnixStream::pair()?;
-        let held: Arc<Mutex<HashMap<String, Duration>>> = Arc::default();
+        let held: Arc<Mutex<HashMap<String, Option<Duration>>>> = Arc::default();
         let (mut to_daemon, from_window) = (daemon.try_clone()?, relay_side.try_clone()?);
-        let (asked, hold, marks) = (counted.clone(), hold.clone(), held.clone());
+        let (relayed, hold, marks) = (seen.clone(), hold.clone(), held.clone());
         std::thread::spawn(move || {
             for line in BufReader::new(from_window).lines() {
                 let Ok(line) = line else { return };
                 let request: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
                 if request["method"] == "provider.list" {
-                    let n = asked.fetch_add(1, Ordering::SeqCst);
-                    if let Some(delay) = hold(n) {
-                        marks
-                            .lock()
-                            .unwrap()
-                            .insert(request["id"].to_string(), delay);
-                    }
+                    let n = relayed.asked.fetch_add(1, Ordering::SeqCst);
+                    let now = relayed.pending.fetch_add(1, Ordering::SeqCst) + 1;
+                    relayed.peak.fetch_max(now, Ordering::SeqCst);
+                    marks
+                        .lock()
+                        .unwrap()
+                        .insert(request["id"].to_string(), hold(n));
                 }
                 if writeln!(to_daemon, "{line}").is_err() {
                     return;
                 }
             }
         });
-        let (mut to_window, released) = (relay_side, let_through.clone());
+        let (mut to_window, relayed) = (relay_side, seen.clone());
         std::thread::spawn(move || {
             for line in BufReader::new(daemon).lines() {
                 let Ok(line) = line else { return };
                 let answer: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
-                let delay = held.lock().unwrap().remove(&answer["id"].to_string());
+                let listed = held.lock().unwrap().remove(&answer["id"].to_string());
+                let delay = listed.flatten();
                 if let Some(delay) = delay {
+                    relayed.answered.fetch_add(1, Ordering::SeqCst);
                     std::thread::sleep(delay);
                 }
                 if writeln!(to_window, "{line}").is_err() {
                     return;
                 }
                 if delay.is_some() {
-                    released.fetch_add(1, Ordering::SeqCst);
+                    relayed.released.fetch_add(1, Ordering::SeqCst);
+                }
+                if listed.is_some() {
+                    relayed.pending.fetch_sub(1, Ordering::SeqCst);
                 }
             }
         });
         Ok(window_side)
     });
-    (relay, asked, released)
+    (relay, relayed)
 }
 
 #[gpui_kit::test]
@@ -2735,12 +2762,18 @@ fn a_slow_provider_list_answer_that_arrives_after_a_newer_one_changes_nothing(
     let user = providers_user();
     project(&user, "atlas");
     // The link's first read is held: what it answers is the file as it was then.
-    let (connect, asked, released) =
+    let (connect, relayed) =
         holding_provider_lists(&user, |n| (n == 0).then_some(Duration::from_secs(3)));
     let (shell, cx) = window(&user, connect, 1280., cx);
     until(&shell, cx, "the link asked for the providers", |_| {
-        asked.load(Ordering::SeqCst) >= 1
+        relayed.asked.load(Ordering::SeqCst) >= 1
     });
+    // The daemon's answer is in the relay's hands, held, before the file is rewritten: it is the
+    // older state, not just a slow answer.
+    until(&shell, cx, "the daemon answered the held read", |_| {
+        relayed.answered.load(Ordering::SeqCst) >= 1
+    });
+    assert_eq!(relayed.released.load(Ordering::SeqCst), 0);
     user.write_providers("[opencode]\nenabled = false\n");
     let page = open_settings(&shell, cx);
     until(&shell, cx, "the newer read shows opencode disabled", |cx| {
@@ -2750,7 +2783,7 @@ fn a_slow_provider_list_answer_that_arrives_after_a_newer_one_changes_nothing(
     });
 
     until(&shell, cx, "the held answer arrived", |_| {
-        released.load(Ordering::SeqCst) == 1
+        relayed.released.load(Ordering::SeqCst) == 1
     });
     for _ in 0..10 {
         until(&shell, cx, "a frame", |_| true);
@@ -2765,26 +2798,66 @@ fn a_slow_provider_list_answer_that_arrives_after_a_newer_one_changes_nothing(
 }
 
 #[gpui_kit::test]
+fn many_events_while_a_provider_read_is_held_give_one_read_at_a_time_and_a_last_one_after_them(
+    cx: &mut TestAppContext,
+) {
+    let user = providers_user();
+    project(&user, "atlas");
+    // Every answer is held: a read lasts, and the sessions open meanwhile.
+    let (connect, relayed) = holding_provider_lists(&user, |_| Some(Duration::from_secs(4)));
+    let (shell, cx) = window(&user, connect, 1280., cx);
+    until(&shell, cx, "the link asked for the providers", |_| {
+        relayed.asked.load(Ordering::SeqCst) >= 1
+    });
+    let sessions: Vec<String> = (0..6)
+        .map(|n| start(&user, "atlas", None, &format!("hello {n}")))
+        .collect();
+    until(&shell, cx, "every session is shown", |cx| {
+        shell.read_with(cx, |s, _| sessions.iter().all(|id| s.session(id).is_some()))
+    });
+    // A read is still held when one more session opens: it is the one to be read after.
+    let asked = relayed.asked.load(Ordering::SeqCst);
+    let released = relayed.released.load(Ordering::SeqCst);
+    start(&user, "atlas", None, "the last one");
+    assert_eq!(
+        (
+            relayed.asked.load(Ordering::SeqCst),
+            relayed.released.load(Ordering::SeqCst)
+        ),
+        (asked, released),
+        "the read held at the start of the last session ended before it: too slow to prove"
+    );
+    until(&shell, cx, "a read follows the last session", |_| {
+        relayed.asked.load(Ordering::SeqCst) > asked
+    });
+    until(&shell, cx, "every read is answered", |_| {
+        relayed.pending.load(Ordering::SeqCst) == 0
+            && relayed.released.load(Ordering::SeqCst) == relayed.asked.load(Ordering::SeqCst)
+    });
+    assert_eq!(
+        relayed.peak.load(Ordering::SeqCst),
+        1,
+        "two provider.list were pending at once"
+    );
+}
+
+#[gpui_kit::test]
 fn the_providers_read_after_a_session_opened_does_not_hold_the_link_s_events(
     cx: &mut TestAppContext,
 ) {
     let user = providers_user();
     project(&user, "atlas");
-    let (connect, asked, _) = holding_provider_lists(&user, |_| Some(Duration::from_secs(15)));
+    let (connect, relayed) = holding_provider_lists(&user, |_| Some(Duration::from_secs(15)));
     let (shell, cx) = window(&user, connect, 1280., cx);
     until(&shell, cx, "the project is shown", |cx| {
         shell.read_with(cx, |s, _| s.project("atlas").is_some())
     });
     until(&shell, cx, "the link asked for the providers", |_| {
-        asked.load(Ordering::SeqCst) >= 1
+        relayed.asked.load(Ordering::SeqCst) >= 1
     });
+    // The first read is held for longer than the test: the sessions below mark that another is
+    // due, which waits for it (one read at a time) and must not hold the events.
     let first = start(&user, "atlas", None, "hello");
-    until(
-        &shell,
-        cx,
-        "the link read the providers after it started",
-        |_| asked.load(Ordering::SeqCst) >= 2,
-    );
 
     let begun = Instant::now();
     let second = start(&user, "atlas", None, "hello again");

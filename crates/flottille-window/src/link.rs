@@ -7,8 +7,8 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::net::UnixStream;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use flottille_core::protocol::{Event, Message, Request};
@@ -86,12 +86,13 @@ pub fn spawn_into(connect: Connect, sender: UnboundedSender<Update>) -> Arc<Seen
 fn run(connect: Connect, updates: UnboundedSender<Update>, seen: Arc<Seen>) {
     let mut retry = FIRST_RETRY;
     let mut briefs = HashMap::new();
+    let reads = ProviderReads::default();
     loop {
         let why = match connect() {
             Ok(stream) => {
                 seen.connections.fetch_add(1, Ordering::Relaxed);
                 retry = FIRST_RETRY;
-                match follow(stream, &connect, &updates, &seen, &mut briefs) {
+                match follow(stream, &connect, &updates, &seen, &mut briefs, &reads) {
                     Ok(()) => return,
                     Err(why) => why,
                 }
@@ -113,6 +114,7 @@ fn follow(
     updates: &UnboundedSender<Update>,
     seen: &Seen,
     briefs: &mut HashMap<String, String>,
+    reads: &ProviderReads,
 ) -> Result<()> {
     let mut conn = Conn::new(stream).map_err(|e| e.to_string())?;
     let last = seen.last_seq.load(Ordering::Relaxed);
@@ -148,7 +150,7 @@ fn follow(
                     }
                 }
                 if providers.take().is_some() {
-                    read_providers(connect, updates);
+                    reads.start(connect, updates);
                 }
                 // Events that came while it read are queued: they make it stale again.
                 while let Some(event) = conn.queued.pop() {
@@ -165,21 +167,75 @@ fn about_providers(event: &Event) -> bool {
     event.name.starts_with("provider.") || event.name == "agent.started"
 }
 
-/// Reads the providers on a thread and a connection of their own, with a bounded wait, so that
-/// the events are never held behind them (`--version` may take seconds).
-fn read_providers(connect: &Connect, updates: &UnboundedSender<Update>) {
-    let (connect, updates) = (connect.clone(), updates.clone());
-    let read = crate::providers::next_read();
-    std::thread::Builder::new()
-        .name("flottille-providers".into())
-        .spawn(move || {
+/// The providers' reads, one at a time: they run on a thread and a connection of their own, with
+/// a bounded wait, so that the events are never held behind them (`--version` may take seconds).
+/// A read asked while one is in flight only marks that another is due, which the thread makes
+/// when its read ends: a lead starting many sessions against a slow daemon gives a read and a
+/// last one, not one read each.
+#[derive(Clone, Default)]
+struct ProviderReads(Arc<Mutex<ReadState>>);
+
+#[derive(Default)]
+struct ReadState {
+    running: bool,
+    due: bool,
+}
+
+impl ProviderReads {
+    fn start(&self, connect: &Connect, updates: &UnboundedSender<Update>) {
+        let (reads, connect, updates) = (self.clone(), connect.clone(), updates.clone());
+        self.begin(move || {
+            std::thread::Builder::new()
+                .name("flottille-providers".into())
+                .spawn(move || reads.run(&connect, &updates))
+                .map(drop)
+        });
+    }
+
+    /// Runs `spawn` when no read is in flight, else marks that another is due. A thread that
+    /// cannot start is told and skipped: the next event asks again.
+    fn begin(&self, spawn: impl FnOnce() -> std::io::Result<()>) {
+        if !self.ask() {
+            return;
+        }
+        if let Err(error) = spawn() {
+            eprintln!("flottille: the providers cannot be read: {error}");
+            *self.0.lock().unwrap() = ReadState::default();
+        }
+    }
+
+    /// Whether to read now; when a read is in flight, it will read again when it ends.
+    fn ask(&self) -> bool {
+        let mut state = self.0.lock().unwrap();
+        if state.running {
+            state.due = true;
+            return false;
+        }
+        state.running = true;
+        true
+    }
+
+    /// A read ended: whether another is due. When none is, no read is in flight any more.
+    fn ended(&self) -> bool {
+        let mut state = self.0.lock().unwrap();
+        state.running = std::mem::take(&mut state.due);
+        state.running
+    }
+
+    fn run(&self, connect: &Connect, updates: &UnboundedSender<Update>) {
+        loop {
+            // Numbered as it is asked, whoever asks (`providers::next_read`).
+            let read = crate::providers::next_read();
             if let Some(listed) =
-                crate::actions::read_providers(&connect, crate::actions::BOUNDS.quick)
+                crate::actions::read_providers(connect, crate::actions::BOUNDS.quick)
             {
                 let _ = updates.unbounded_send(Update::Providers(read, listed));
             }
-        })
-        .expect("a thread for the providers' read");
+            if !self.ended() {
+                return;
+            }
+        }
+    }
 }
 
 fn note(seen: &Seen, event: &Event) {
@@ -508,6 +564,31 @@ mod tests {
         assert!(about_providers(&event("agent.started", json!({}))));
         assert!(!about_providers(&event("agent.turn_ended", json!({}))));
         assert!(!about_providers(&event("agent.message", json!({}))));
+    }
+
+    #[test]
+    fn a_read_asked_while_one_is_in_flight_waits_for_it_and_many_make_one() {
+        let reads = ProviderReads::default();
+        assert!(reads.ask());
+        assert!(!reads.ask());
+        assert!(!reads.ask());
+        assert!(reads.ended(), "one more read is due");
+        assert!(!reads.ended(), "and only one");
+        assert!(reads.ask(), "none is in flight any more");
+    }
+
+    #[test]
+    fn a_read_thread_that_cannot_start_is_skipped_and_the_next_event_asks_again() {
+        let reads = ProviderReads::default();
+        reads.begin(|| Err(std::io::Error::other("no thread")));
+
+        let mut started = 0;
+        reads.begin(|| {
+            started += 1;
+            Ok(())
+        });
+
+        assert_eq!(started, 1);
     }
 
     #[test]
