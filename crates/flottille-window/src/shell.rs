@@ -19,7 +19,7 @@ use gpui_kit::{
 };
 
 use crate::actions::{Actions, Command, Outcome, Pick};
-use crate::composer::{Choice, Composer, PlaceChoice, RunningSession};
+use crate::composer::{Choice, Composer, PlaceChoice};
 use crate::link::{self, Connect, Seen, Update};
 use crate::model::{BellItem, Place, Preparation, Snapshot};
 use crate::open::Opener;
@@ -582,21 +582,6 @@ impl Shell {
                 ready: workspace.preparation == Preparation::Ready,
             });
         }
-        let running: Vec<RunningSession> = self
-            .snapshot
-            .running_in(&name)
-            .into_iter()
-            .filter_map(|session| {
-                self.sessions.get(&session.id).map(|row| RunningSession {
-                    id: session.id.clone(),
-                    title: session.title.clone(),
-                    place: place_label(&session.place),
-                    agents: session.agents,
-                    waiting: session.mark == Some(AgentState::NeedsYou),
-                    status: row.read(cx).status(),
-                })
-            })
-            .collect();
         let data = ProjectData {
             name: name.clone(),
             folder: project.folder.clone(),
@@ -609,7 +594,6 @@ impl Shell {
             let (providers, last) = (&self.providers, self.last_pick.as_ref());
             composer.update(cx, |composer, cx| {
                 composer.set_places(choices, cx);
-                composer.set_running(running, cx);
                 composer.set_providers(
                     providers,
                     (default.0.as_deref(), default.1.as_deref()),
@@ -1229,8 +1213,4 @@ fn logo(color: gpui_kit::Hsla) -> gpui_kit::Canvas<()> {
             }
         },
     )
-}
-
-fn place_label(place: &Place) -> String {
-    crate::tree::place_name(place).to_owned()
 }

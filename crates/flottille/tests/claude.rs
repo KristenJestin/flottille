@@ -417,6 +417,38 @@ fn through_the_bridge_an_agent_takes_the_model_and_the_effort_asked() {
 }
 
 #[test]
+fn through_the_bridge_claude_s_models_are_listed_by_their_names_once_a_session_opened() {
+    let user = User::with_fake_claude();
+    project(&user);
+    let (id, after) = run(&user, "hello");
+    events_until(&user, &id, after, "agent.turn_ended");
+
+    let listed = user.call("provider.list", Value::Null).unwrap();
+    let claude = listed["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "claude")
+        .unwrap()
+        .clone();
+    let models = claude["models"].as_array().unwrap();
+    let named: Vec<(&str, &str)> = models
+        .iter()
+        .map(|m| (m["id"].as_str().unwrap(), m["name"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        named,
+        [
+            ("default", "Default (recommended)"),
+            ("fable", "Fable"),
+            ("haiku", "Haiku")
+        ]
+    );
+    assert_eq!(models[0]["default"], true);
+    assert_eq!(claude["models_outdated"], false);
+}
+
+#[test]
 fn an_agent_asked_for_a_mode_is_refused_with_a_sentence() {
     let user = User::with_fake_claude();
     project(&user);
