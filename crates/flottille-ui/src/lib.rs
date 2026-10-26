@@ -14,6 +14,7 @@ pub mod omarchy;
 pub mod reveal;
 pub mod rows;
 pub mod state;
+pub mod switch;
 pub mod theme;
 pub mod typography;
 
@@ -27,6 +28,7 @@ pub use omarchy::Environment;
 pub use reveal::{Fold, PulsingLabel, enter};
 pub use rows::{ListRow, TreeLevel, TreeRow, meta, section_label, tree_children};
 pub use state::{AgentState, Pill, StateIcon, Status};
+pub use switch::Switch;
 pub use theme::{Palette, palette};
 pub use typography::Type;
 
