@@ -54,6 +54,7 @@
 //! |---|---|
 //! | `{"say": "text"}` | an `agent_message_chunk` |
 //! | `{"say": "text", "message": "m1"}` | the same, its `messageId` `m1`: the chunks that share one belong to one message |
+//! | `{"say_variable": "NAME"}` | the value of that variable of its environment, in three `agent_message_chunk`s |
 //! | `{"update": {…}}` | that session update, as it is |
 //! | `{"recall": true}` | an `agent_message_chunk` saying what the user said earlier in this session (`earlier you said: a | b`): the proof that a session kept its history |
 //! | `{"think": "text"}` | an `agent_thought_chunk` |
@@ -406,6 +407,12 @@ impl Agent {
             }
             if let Some(text) = step["say"].as_str() {
                 self.say(session, text, step["message"].as_str());
+            } else if let Some(name) = step["say_variable"].as_str() {
+                let value: Vec<char> = std::env::var(name).unwrap_or_default().chars().collect();
+                let third = value.len().div_ceil(3).max(1);
+                for piece in value.chunks(third) {
+                    self.say(session, &piece.iter().collect::<String>(), None);
+                }
             } else if let Some(update) = step.get("update") {
                 self.notify(session, update.clone());
             } else if step["recall"] == true {
