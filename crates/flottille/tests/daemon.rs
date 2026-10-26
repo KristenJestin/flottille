@@ -3,9 +3,11 @@
 mod common;
 
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::path::PathBuf;
 use std::time::Duration;
 
-use common::{User, mode, processes_of};
+use common::{User, mode};
+use serde_json::json;
 
 #[test]
 fn the_first_command_starts_a_daemon() {
@@ -184,6 +186,10 @@ fn stopping_when_no_daemon_runs_starts_none() {
     assert!(!user.path("runtime/flottille/daemon.sock").exists());
 }
 
+fn alive(pid: u64) -> bool {
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
 /// Waits up to `seconds` for `done`, polling.
 fn within(seconds: u64, what: &str, done: impl Fn() -> bool) {
     let deadline = std::time::Instant::now() + Duration::from_secs(seconds);
@@ -200,10 +206,10 @@ fn within(seconds: u64, what: &str, done: impl Fn() -> bool) {
 fn a_dropped_user_leaves_no_daemon_and_no_folder_whatever_client_it_handed_out() {
     let user = User::new();
     let folder = user.path("");
+    let pid = user.status()["pid"].as_u64().unwrap();
     // A client the test still holds after the user, as the window's link is.
     let connect = user.connector();
     connect().unwrap();
-    assert!(!processes_of(&folder).is_empty());
 
     drop(user);
 
@@ -211,29 +217,25 @@ fn a_dropped_user_leaves_no_daemon_and_no_folder_whatever_client_it_handed_out()
         connect().is_err(),
         "a client of a dropped user started a daemon again"
     );
+    // A daemon started again would have made its folders again.
     assert!(!folder.exists(), "the folder came back");
-    assert!(
-        processes_of(&folder).is_empty(),
-        "a process of the dropped user is alive"
-    );
+    within(10, "the daemon exits", || !alive(pid));
 }
 
 #[test]
 fn a_daemon_whose_runtime_folder_was_removed_exits() {
     let user = User::new();
     let pid = user.status()["pid"].as_u64().unwrap();
-    let alive = || std::path::Path::new(&format!("/proc/{pid}")).exists();
 
     std::fs::remove_dir_all(user.path("runtime")).unwrap();
 
-    within(10, "the daemon exits", || !alive());
+    within(10, "the daemon exits", || !alive(pid));
 }
 
 #[test]
 fn a_daemon_whose_socket_leads_to_another_daemon_exits_and_leaves_that_one_alone() {
     let user = User::new();
     let first = user.status()["pid"].as_u64().unwrap();
-    let alive = |pid: u64| std::path::Path::new(&format!("/proc/{pid}")).exists();
 
     // The runtime folder is replaced under it, and a second daemon takes its place.
     std::fs::remove_dir_all(user.path("runtime")).unwrap();
@@ -247,4 +249,54 @@ fn a_daemon_whose_socket_leads_to_another_daemon_exits_and_leaves_that_one_alone
     within(10, "the first daemon exits", || !alive(first));
     assert!(alive(second));
     assert_eq!(user.status()["pid"].as_u64().unwrap(), second);
+}
+
+/// The permission bits of `path`, the sticky bit included.
+fn bits(path: PathBuf) -> u32 {
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o7777
+}
+
+#[test]
+fn the_socket_and_the_lock_are_sticky_so_a_cleanup_of_the_runtime_folder_keeps_them() {
+    let user = User::new();
+    user.status();
+
+    assert_eq!(bits(user.path("runtime/flottille/daemon.sock")), 0o1600);
+    assert_eq!(bits(user.path("runtime/flottille/daemon.lock")), 0o1600);
+}
+
+#[test]
+fn a_daemon_whose_socket_is_removed_records_why_and_stops_its_agents() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [{"when": "hello", "do": [{"say": "Hello"}]}]}));
+    let folder = user.path("work/app");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "app\n").unwrap();
+    user.git(&folder, &["add", "."]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    user.call("project.add", json!({"folder": folder, "name": "app"}))
+        .unwrap();
+    let started = user
+        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let id = started["agent"]["id"].as_str().unwrap().to_owned();
+    // From the run's own event, so that a turn ended already is not missed. Idle after it, the
+    // agent's process stays, waiting for the next message.
+    let watch = user.watch(&["--after", &started["after"].to_string()]);
+    watch.until(|e| e["name"] == "agent.turn_ended" && e["data"]["agent"] == id.as_str());
+    let daemon = user.status()["pid"].as_u64().unwrap();
+    let agent = user
+        .received()
+        .iter()
+        .find_map(|e| e["pid"].as_u64())
+        .expect("the fake agent recorded its pid");
+    assert!(alive(agent));
+
+    std::fs::remove_file(user.path("runtime/flottille/daemon.sock")).unwrap();
+
+    let stopping = watch.until(|e| e["name"] == "daemon.stopping");
+    assert_eq!(stopping.last().unwrap()["data"]["reason"], "socket");
+    within(20, "the daemon and its agent are gone", || {
+        !alive(daemon) && !alive(agent)
+    });
 }

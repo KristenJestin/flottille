@@ -14,6 +14,9 @@ it (`docs/design.md` §3, §11).
 - A daemon whose socket is gone, or whose path now leads to another socket (its runtime folder was
   removed), stops itself within a few seconds, as `daemon stop` does (`daemon.stopping`, reason
   `socket`): nobody could reach it.
+- The daemon and its agents end with the user's last session, unless `loginctl enable-linger` keeps
+  the runtime folder. The socket and the lock carry the sticky bit, so that a cleanup of files
+  untouched for 6 hours does not remove them.
 - Any command but `flottille daemon` starts the daemon in the background when nobody listens on
   the socket, then talks to it. The daemon started this way writes its output to
   `$XDG_STATE_HOME/flottille/daemon.log`.

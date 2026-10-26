@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{ErrorKind, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -36,6 +36,9 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const PAGE: usize = 500;
 /// How long the connections have, once the daemon stops, to send what they still hold.
 const GRACE: Duration = Duration::from_secs(2);
+/// The user only, and the sticky bit: the XDG spec lets a cleanup of `$XDG_RUNTIME_DIR` remove files
+/// untouched for 6 hours, except the ones with it, and a daemon's socket and lock are just that.
+const RUNTIME_FILE: u32 = 0o1600;
 /// How often the daemon checks that its socket is still the one at its path.
 const SOCKET_CHECK: Duration = Duration::from_secs(2);
 
@@ -74,6 +77,7 @@ fn take_lock(paths: &Paths) -> Result<File> {
         }
         Err(TryLockError::Error(error)) => return Err(error.into()),
     }
+    lock.set_permissions(std::fs::Permissions::from_mode(RUNTIME_FILE))?;
     lock.set_len(0)?;
     writeln!(lock, "{}", std::process::id())?;
     Ok(lock)
@@ -185,10 +189,29 @@ impl Daemon {
     }
 }
 
-/// Which file the socket path leads to now: `None` when there is none.
-fn socket_identity(socket: &std::path::Path) -> Option<(u64, u64)> {
-    let metadata = std::fs::symlink_metadata(socket).ok()?;
-    Some((metadata.dev(), metadata.ino()))
+/// The file (device, inode) the socket path leads to now.
+fn socket_identity(socket: &std::path::Path) -> std::io::Result<(u64, u64)> {
+    let metadata = std::fs::symlink_metadata(socket)?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+/// What the socket path leads to, against the socket the daemon bound.
+#[derive(Debug, PartialEq)]
+enum Socket {
+    Ours,
+    /// Absent, or another file now: nobody can reach this daemon.
+    Gone,
+    /// Not known: one failed `lstat` is no reason to stop the user's agents.
+    Unknown,
+}
+
+fn judge(seen: std::io::Result<(u64, u64)>, ours: (u64, u64)) -> Socket {
+    match seen {
+        Ok(identity) if identity == ours => Socket::Ours,
+        Ok(_) => Socket::Gone,
+        Err(error) if error.kind() == ErrorKind::NotFound => Socket::Gone,
+        Err(_) => Socket::Unknown,
+    }
 }
 
 async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
@@ -199,7 +222,8 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         _ => {}
     }
     let listener = UnixListener::bind(&socket)?;
-    let ours = socket_identity(&socket).ok_or("the socket is gone as soon as it is bound")?;
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(RUNTIME_FILE))?;
+    let ours = socket_identity(&socket)?;
     // This machine only, on a port of the system's choosing.
     let tools = TcpListener::bind(("127.0.0.1", 0)).await?;
     let (bus, _) = broadcast::channel(1024);
@@ -257,7 +281,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
             Some(_) = connections.join_next(), if !connections.is_empty() => {}
             _ = stop_requested.wait_for(|stopping| *stopping) => break "request",
             _ = socket_check.tick() => {
-                if socket_identity(&socket) != Some(ours) {
+                if judge(socket_identity(&socket), ours) == Socket::Gone {
                     break "socket";
                 }
             }
@@ -268,7 +292,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
 
     drop(listener);
     // Not the socket of another daemon that took the path since.
-    if socket_identity(&socket) == Some(ours) {
+    if judge(socket_identity(&socket), ours) == Socket::Ours {
         std::fs::remove_file(&socket)?;
     }
     agents::stop_all(&daemon).await;
@@ -475,5 +499,27 @@ async fn forward(daemon: Arc<Daemon>, mut subscription: Subscription, out: mpsc:
                 Err(RecvError::Closed) => return,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const OURS: (u64, u64) = (1, 2);
+
+    #[test]
+    fn only_a_socket_path_that_is_not_found_or_leads_elsewhere_is_gone() {
+        let error = |kind| Err(std::io::Error::from(kind));
+
+        assert_eq!(judge(Ok(OURS), OURS), Socket::Ours);
+        assert_eq!(judge(Ok((1, 3)), OURS), Socket::Gone);
+        assert_eq!(judge(error(ErrorKind::NotFound), OURS), Socket::Gone);
+        // A transient error skips the tick.
+        assert_eq!(
+            judge(error(ErrorKind::PermissionDenied), OURS),
+            Socket::Unknown
+        );
+        assert_eq!(judge(error(ErrorKind::Interrupted), OURS), Socket::Unknown);
     }
 }

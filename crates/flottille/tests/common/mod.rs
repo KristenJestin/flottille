@@ -372,32 +372,6 @@ impl Drop for User {
     }
 }
 
-/// The processes (pids) whose environment points into `folder`: a throwaway user's daemon, its
-/// agents. Only the processes this one may read, which are its own.
-pub fn processes_of(folder: &Path) -> Vec<u32> {
-    let runtime = format!("XDG_RUNTIME_DIR={}", folder.join("runtime").display());
-    let mut found = Vec::new();
-    for entry in std::fs::read_dir("/proc").unwrap().flatten() {
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|n| n.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        let Ok(environ) = std::fs::read(entry.path().join("environ")) else {
-            continue;
-        };
-        if environ
-            .split(|byte| *byte == 0)
-            .any(|var| var == runtime.as_bytes())
-        {
-            found.push(pid);
-        }
-    }
-    found
-}
-
 /// A running `flottille watch`, its output read line by line.
 pub struct Watch {
     child: Child,
