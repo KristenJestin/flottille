@@ -15,7 +15,7 @@ use flottille_core::agent::{Agent, AgentState, Choices, new_id};
 use flottille_core::approval;
 use flottille_core::project::Project;
 use flottille_core::protocol::{AgentName, AgentRun, AgentSend, AgentTrees};
-use flottille_core::secrets;
+use flottille_core::secrets::{self, Secrets};
 use flottille_core::store::{AgentChange, Store, now_ms};
 use flottille_core::workspace::State;
 use serde_json::{Value, json};
@@ -634,6 +634,7 @@ async fn process(
         agent: agent.id.clone(),
         provider,
         pid,
+        secrets: Secrets::new(&env, &[]),
         env,
         saying: Mutex::new(None),
     });
@@ -860,12 +861,14 @@ struct Recorder {
     pid: u32,
     /// Secrets of the daemon's environment are masked out of what the agent says and does.
     env: BTreeMap<OsString, OsString>,
+    /// The secret values of `env`, found once for every piece the agent says.
+    secrets: Secrets,
     /// The message the agent is saying, while it says it.
     saying: Mutex<Option<Saying>>,
 }
 
 /// A message the agent is still saying: its id, when its source gives one, and its last part,
-/// held back until it is settled (`secrets::settled`).
+/// held back until it is settled (`Secrets::settled`).
 struct Saying {
     id: Option<String>,
     held: String,
@@ -894,7 +897,7 @@ impl Recorder {
         });
         said.held
             .push_str(data["text"].as_str().unwrap_or_default());
-        let settled = said.held.drain(..secrets::settled(&said.held, &self.env));
+        let settled = said.held.drain(..self.secrets.settled(&said.held));
         self.record_said(said.id.as_deref(), settled.as_str());
     }
 
@@ -912,11 +915,11 @@ impl Recorder {
 
     /// Records `text` of the message `id`, masked, in pieces no line of a reader cuts.
     fn record_said(&self, id: Option<&str>, text: &str) {
-        let masked: Vec<char> = secrets::mask(text, &self.env).chars().collect();
+        let masked: Vec<char> = self.secrets.mask(text).chars().collect();
         for piece in masked.chunks(tree::LINE_CHARS) {
             let mut data = json!({"text": piece.iter().collect::<String>(), "replay": false});
             if let Some(id) = id {
-                data["message_id"] = secrets::mask(id, &self.env).into();
+                data["message_id"] = self.secrets.mask(id).into();
             }
             record(&self.daemon, &self.agent, "agent.message", data, true);
         }
