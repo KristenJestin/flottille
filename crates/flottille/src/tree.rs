@@ -448,25 +448,38 @@ fn cut(text: &str, limit: usize) -> String {
     format!("{kept}‹+{} chars›", count - limit)
 }
 
-/// The agent's last messages, each whole (its pieces joined), the oldest first.
+/// The id a piece of a reply carries when its source marks which message it belongs to.
+fn message_id(data: &Value) -> Option<&str> {
+    data["message_id"].as_str()
+}
+
+/// The agent's last messages, each whole (its pieces joined) and masked, the oldest first.
 fn last_messages(daemon: &Daemon, agent: &str) -> Vec<String> {
     let events = daemon
         .read(|store| store.last_agent_events(agent, "agent.message", 200))
         .unwrap_or_default();
-    // Pieces of one message follow each other: a gap in the numbers starts another.
-    let mut messages: Vec<(u64, String)> = Vec::new();
+    // Pieces of one message follow each other and share its id, when it has one: a gap in the
+    // numbers or another id starts another message.
+    let mut messages: Vec<(u64, Option<&str>, String)> = Vec::new();
     for event in events.iter().rev() {
         let text = event.data["text"].as_str().unwrap_or_default();
+        let id = message_id(&event.data);
         match messages.last_mut() {
-            Some((last, message)) if event.seq == *last + 1 => {
+            Some((last, current, message)) if event.seq == *last + 1 && id == *current => {
                 message.push_str(text);
                 *last = event.seq;
             }
-            _ => messages.push((event.seq, text.to_owned())),
+            _ => messages.push((event.seq, id, text.to_owned())),
         }
     }
     let skip = messages.len().saturating_sub(LAST_MESSAGES);
-    messages.into_iter().skip(skip).map(|(_, m)| m).collect()
+    // Secrets are masked per piece when stored; one split over several pieces is whole only here.
+    let env = std::env::vars_os().collect();
+    messages
+        .into_iter()
+        .skip(skip)
+        .map(|(_, _, message)| secrets::mask(&message, &env))
+        .collect()
 }
 
 #[derive(Deserialize)]
@@ -487,8 +500,9 @@ pub struct Page {
 }
 
 /// The agent's conversation after the event `after`, at most `READ_PAGE` characters of it. A
-/// message streamed in pieces is one line, led by the number of its first piece; a long one goes
-/// on, whole, on the next lines, each of `LINE_CHARS` at most.
+/// message streamed in pieces is one line, led by the number of its first piece, and masked once
+/// joined; a long one goes on, whole, on the next lines, each of `LINE_CHARS` at most. A piece
+/// that carries another message id starts another line.
 pub fn conversation(daemon: &Daemon, agent: &Agent, after: u64) -> flottille_core::Result<Page> {
     let mut page = Page {
         lines: Vec::new(),
@@ -508,9 +522,16 @@ pub fn conversation(daemon: &Daemon, agent: &Agent, after: u64) -> flottille_cor
         page.after = last;
         true
     };
-    // The message being joined: the numbers of its first and last pieces, and its text.
-    let mut said: Option<(u64, u64, String)> = None;
-    let said_line = |text: String| conversation_line("agent.message", &json!({"text": text}));
+    // The message being joined: the numbers of its first and last pieces, its id and its text.
+    let mut said: Option<(u64, u64, Option<String>, String)> = None;
+    // Secrets are masked per piece when stored; one split over several pieces is whole only here.
+    let env = std::env::vars_os().collect();
+    let said_line = |text: String| {
+        conversation_line(
+            "agent.message",
+            &json!({"text": secrets::mask(&text, &env)}),
+        )
+    };
     let mut read = after;
     'pages: loop {
         let events = daemon.read(|store| store.agent_events(&agent.id, read, 200))?;
@@ -521,9 +542,11 @@ pub fn conversation(daemon: &Daemon, agent: &Agent, after: u64) -> flottille_cor
             read = event.seq;
             if event.name == "agent.message" {
                 let piece = event.data["text"].as_str().unwrap_or_default();
+                let id = message_id(&event.data);
                 match &mut said {
-                    Some((_, last, text))
-                        if text.chars().count() + piece.chars().count() <= LINE_CHARS =>
+                    Some((_, last, current, text))
+                        if current.as_deref() == id
+                            && text.chars().count() + piece.chars().count() <= LINE_CHARS =>
                     {
                         *last = event.seq;
                         text.push_str(piece);
@@ -531,15 +554,20 @@ pub fn conversation(daemon: &Daemon, agent: &Agent, after: u64) -> flottille_cor
                     }
                     _ => {}
                 }
-                if let Some((first, last, text)) = said.take()
+                if let Some((first, last, _, text)) = said.take()
                     && !add(&mut page, first, last, said_line(text).unwrap_or_default())
                 {
                     break 'pages;
                 }
-                said = Some((event.seq, event.seq, piece.to_owned()));
+                said = Some((
+                    event.seq,
+                    event.seq,
+                    id.map(str::to_owned),
+                    piece.to_owned(),
+                ));
                 continue;
             }
-            if let Some((first, last, text)) = said.take()
+            if let Some((first, last, _, text)) = said.take()
                 && !add(&mut page, first, last, said_line(text).unwrap_or_default())
             {
                 break 'pages;
@@ -554,7 +582,7 @@ pub fn conversation(daemon: &Daemon, agent: &Agent, after: u64) -> flottille_cor
             }
         }
     }
-    if let Some((first, last, text)) = said.take().filter(|_| !page.more) {
+    if let Some((first, last, _, text)) = said.take().filter(|_| !page.more) {
         add(&mut page, first, last, said_line(text).unwrap_or_default());
     }
     Ok(page)

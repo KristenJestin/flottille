@@ -449,7 +449,14 @@ fn event_of(update: &Value) -> Option<(&'static str, Map<String, Value>)> {
     };
     let (name, data) = match update["sessionUpdate"].as_str()? {
         "user_message_chunk" => ("agent.user_message", text()?),
-        "agent_message_chunk" => ("agent.message", text()?),
+        "agent_message_chunk" => {
+            let mut data = text()?;
+            // The pieces that share an id are one message; another id starts another.
+            if let Some(id) = update["messageId"].as_str() {
+                data["message_id"] = id.into();
+            }
+            ("agent.message", data)
+        }
         "agent_thought_chunk" => ("agent.thought", text()?),
         kind @ ("tool_call" | "tool_call_update") => {
             let meta = &update["_meta"];
@@ -538,6 +545,21 @@ mod tests {
         }
         let delivery = "[flottille:brief]\n/init and @README.md and !`id`".to_owned();
         assert_eq!(prompt_text(delivery.clone()), Ok(delivery));
+    }
+
+    #[test]
+    fn a_message_chunk_keeps_the_id_of_its_message_when_it_has_one() {
+        let chunk = |extra: Value| {
+            let mut update = json!({"sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "hi"}});
+            update
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            event_of(&update).unwrap().1
+        };
+        assert_eq!(chunk(json!({"messageId": "m1"}))["message_id"], "m1");
+        assert!(!chunk(json!({})).contains_key("message_id"));
     }
 
     #[test]

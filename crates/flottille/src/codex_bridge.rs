@@ -540,7 +540,9 @@ impl Bridge {
             return;
         };
         let text = text.to_owned();
-        self.update(json!({"sessionUpdate": kind, "content": {"type": "text", "text": text}}))
+        // The item is the message: its pieces share its id, and the next item has another.
+        self.update(json!({"sessionUpdate": kind, "messageId": params["itemId"],
+            "content": {"type": "text", "text": text}}))
             .await;
     }
 
@@ -636,7 +638,7 @@ impl Bridge {
                 if let Some(text) = item["text"].as_str().filter(|t| !streamed && !t.is_empty()) {
                     let text = text.to_owned();
                     self.update(json!({"sessionUpdate": "agent_message_chunk",
-                        "content": {"type": "text", "text": text}}))
+                        "messageId": item["id"], "content": {"type": "text", "text": text}}))
                         .await;
                 }
             }

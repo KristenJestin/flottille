@@ -376,7 +376,7 @@ A request waits for you: #4 of agent bd7ed8152969. Answer with `flottille approv
 ### `flottille agent read <agent>`
 
 A page of the agent's conversation: what it was sent, what it said (each reply on one line, its
-streamed pieces joined), its tool calls, its reports.
+streamed pieces joined, two messages apart), its tool calls, its reports.
 Any agent of a tree. A page is at most 30,000 characters; its end says how to read on, with
 `--after <n>`. `--json` prints `agent.read`: `{"agent", "name", "lines", "after", "more"}`, where
 `more` says whether the page stopped before the end.
