@@ -834,12 +834,12 @@ fn set_enabled(paths: &Paths, name: &str, enabled: bool) -> Result<bool, Failure
 
 /// Writes `text` in place of `file`, through a temporary file beside it so that a reader sees
 /// the old file or the new one, never half of one. A symbolic link stays one (its target is
-/// written, the temporary file beside the target), the file's mode is kept, and no temporary
-/// file stays when a step fails.
+/// written, the temporary file beside the target, made when the link dangles), the file's mode
+/// is kept, and no temporary file stays when a step fails.
 fn write_in_place(file: &Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    let real = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_owned());
+    let real = written_path(file)?;
     let mode = std::fs::metadata(&real).ok().map(|m| m.permissions());
     let name = real.file_name().unwrap_or_default().to_string_lossy();
     let writing = real.with_file_name(format!(".{name}.tmp"));
@@ -862,6 +862,38 @@ fn write_in_place(file: &Path, text: &str) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&writing);
     }
     written
+}
+
+/// Where `file` is written: what it resolves to, or, when it is a symbolic link whose target does
+/// not exist yet, that target (followed link by link, a relative one from its link's folder). A
+/// folder is never made for it: a target without one is refused.
+fn written_path(file: &Path) -> std::io::Result<PathBuf> {
+    if let Ok(real) = std::fs::canonicalize(file) {
+        return Ok(real);
+    }
+    let mut path = file.to_owned();
+    let mut followed = false;
+    // The system's own bound on a chain of links.
+    for _ in 0..40 {
+        let Ok(target) = std::fs::read_link(&path) else {
+            let folder = path
+                .parent()
+                .filter(|folder| !folder.as_os_str().is_empty());
+            return match folder {
+                Some(folder) if followed && !folder.is_dir() => Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!(
+                        "the link points to {}, whose folder does not exist",
+                        path.display()
+                    ),
+                )),
+                _ => Ok(path),
+            };
+        };
+        path = path.parent().unwrap_or(Path::new("")).join(target);
+        followed = true;
+    }
+    Err(std::io::Error::other("too many levels of symbolic links"))
 }
 
 /// The answer to a switch. When the file was written but its event could not be sent, the
@@ -1009,6 +1041,39 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, ["providers.toml"]);
+    }
+
+    #[test]
+    fn a_chain_of_dangling_links_is_written_at_its_last_target_and_the_links_stay() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("dotfiles")).unwrap();
+        let (first, second) = (dir.path().join("providers.toml"), dir.path().join("second"));
+        std::os::unix::fs::symlink("second", &first).unwrap();
+        std::os::unix::fs::symlink("dotfiles/providers.toml", &second).unwrap();
+
+        write_in_place(&first, "[claude]\nenabled = true\n").unwrap();
+
+        assert_eq!(std::fs::read_link(&first).unwrap(), Path::new("second"));
+        assert_eq!(
+            std::fs::read_link(&second).unwrap(),
+            Path::new("dotfiles/providers.toml")
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("dotfiles/providers.toml")).unwrap(),
+            "[claude]\nenabled = true\n"
+        );
+    }
+
+    #[test]
+    fn a_loop_of_links_is_refused_with_a_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let (first, second) = (dir.path().join("providers.toml"), dir.path().join("second"));
+        std::os::unix::fs::symlink("second", &first).unwrap();
+        std::os::unix::fs::symlink("providers.toml", &second).unwrap();
+
+        let error = write_in_place(&first, "").unwrap_err();
+
+        assert!(error.to_string().contains("too many levels"), "{error}");
     }
 
     #[test]
