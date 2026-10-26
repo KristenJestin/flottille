@@ -11,6 +11,7 @@ use crate::composer::Composer;
 use crate::model::Place;
 use crate::project::{NewWorkspace, ProjectPage};
 use crate::session::SessionPage;
+use crate::settings::SettingsPage;
 use crate::shell::{Layout, Shell};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -26,6 +27,7 @@ pub enum Page {
         /// The model the session's row reads.
         status: Entity<Status>,
     },
+    Settings,
 }
 
 pub struct MainArea {
@@ -36,17 +38,29 @@ pub struct MainArea {
     project: Option<Entity<ProjectPage>>,
     /// The open session's page.
     session: Option<Entity<SessionPage>>,
+    /// The settings page, one for the window's life: it follows the providers while closed too.
+    settings: Entity<SettingsPage>,
 }
 
 impl MainArea {
-    pub fn new(shell: WeakEntity<Shell>, _: &mut Context<Self>) -> Self {
+    pub fn new(
+        shell: WeakEntity<Shell>,
+        settings: Entity<SettingsPage>,
+        _: &mut Context<Self>,
+    ) -> Self {
         Self {
             page: Page::Empty,
             layout: Layout::Wide,
             shell,
             project: None,
             session: None,
+            settings,
         }
+    }
+
+    /// The settings page, when it is the one shown.
+    pub fn settings_page(&self) -> Option<&Entity<SettingsPage>> {
+        (self.page == Page::Settings).then_some(&self.settings)
     }
 
     pub fn page(&self) -> &Page {
@@ -109,6 +123,8 @@ impl MainArea {
             if let Some(page) = &self.session {
                 page.update(cx, |page, cx| page.set_layout(layout, cx));
             }
+            self.settings
+                .update(cx, |page, cx| page.set_narrow(layout == Layout::Narrow, cx));
             cx.notify();
         }
     }
@@ -137,6 +153,7 @@ impl Render for MainArea {
             ),
             Page::Project { .. } => root.children(self.project.clone()),
             Page::Session { .. } => root.children(self.session.clone()),
+            Page::Settings => root.child(self.settings.clone()),
         }
     }
 }

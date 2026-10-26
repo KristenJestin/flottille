@@ -17,7 +17,8 @@ use gpui_kit::{
     Subscription, TestSupportExt as _, WeakEntity, Window, canvas, div, px,
 };
 
-use crate::actions::{Command, Target};
+use crate::actions::{Command, Pick, Target};
+use crate::providers::{Provider, Providers};
 use crate::shell::{Selection, Shell};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,6 +49,75 @@ pub struct RunningSession {
     pub status: Entity<Status>,
 }
 
+/// The list a picker of the composer opens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Menu {
+    Place,
+    Provider,
+    Model,
+    Effort,
+}
+
+/// The provider, the model and the effort a new session starts on, when the user has not picked
+/// one: the project's own provider (and its model), else the last ones used, else the first
+/// provider offered; each only when it is offered now.
+pub fn first_pick(
+    providers: &Providers,
+    project: (Option<&str>, Option<&str>),
+    last: Option<&Pick>,
+) -> Pick {
+    let offered = |name: &str| providers.get(name).is_some_and(Provider::offered);
+    if let (Some(provider), model) = project
+        && offered(provider)
+    {
+        return Pick {
+            provider: Some(provider.to_owned()),
+            model: model.map(str::to_owned),
+            effort: None,
+        }
+        .kept(providers);
+    }
+    if let Some(last) = last
+        && last.provider.as_deref().is_some_and(offered)
+    {
+        return last.clone().kept(providers);
+    }
+    Pick {
+        provider: providers.offered().next().map(|p| p.name.clone()),
+        ..Pick::default()
+    }
+}
+
+impl Pick {
+    /// The pick, less a model or an effort its provider is known not to offer.
+    pub fn kept(mut self, providers: &Providers) -> Pick {
+        let Some(provider) = self.provider.as_deref().and_then(|p| providers.get(p)) else {
+            return Pick::default();
+        };
+        if let (Some(model), Some(_)) = (&self.model, &provider.models)
+            && provider.model(model).is_none()
+        {
+            self.model = None;
+        }
+        if let Some(effort) = &self.effort
+            && efforts_of(provider, self.model.as_deref())
+                .is_some_and(|efforts| !efforts.contains(effort))
+        {
+            self.effort = None;
+        }
+        self
+    }
+}
+
+/// The efforts of the model (the provider's default one when `None`), once a session said them.
+pub fn efforts_of<'a>(provider: &'a Provider, model: Option<&str>) -> Option<&'a Vec<String>> {
+    let model = match model {
+        Some(model) => provider.model(model)?,
+        None => provider.default_model()?,
+    };
+    model.efforts.as_ref()
+}
+
 /// What the composer picks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Choice {
@@ -72,7 +142,15 @@ pub struct Composer {
     focused: bool,
     places: Vec<PlaceChoice>,
     choice: Choice,
-    menu: bool,
+    menu: Option<Menu>,
+    /// The providers as the daemon last listed them.
+    providers: Providers,
+    /// What the next session starts on, and whether the user picked its provider: a provider
+    /// picked is kept while it is offered.
+    pick: Pick,
+    picked: bool,
+    /// What the session being started was asked to start on, until the daemon answers.
+    sent: Option<Pick>,
     /// The "Running agents" tab's list and count, views of their own: a session starting or
     /// ending a turn redraws them, not the composer.
     running: Entity<RunningList>,
@@ -163,7 +241,11 @@ impl Composer {
             focused: false,
             places: Vec::new(),
             choice: Choice::Main,
-            menu: false,
+            menu: None,
+            providers: Providers::default(),
+            pick: Pick::default(),
+            picked: false,
+            sent: None,
             running,
             count: cx.new(|_| RunningCount { agents: 0 }),
             sending: None,
@@ -197,6 +279,85 @@ impl Composer {
 
     pub fn choice(&self) -> &Choice {
         &self.choice
+    }
+
+    /// What the next session starts on.
+    pub fn pick(&self) -> &Pick {
+        &self.pick
+    }
+
+    /// The providers the provider picker offers, in order: enabled and ready.
+    pub fn offered(&self) -> Vec<String> {
+        self.providers.offered().map(|p| p.name.clone()).collect()
+    }
+
+    /// Why no session can start, as the daemon says it of each provider; empty when one can.
+    pub fn not_ready(&self) -> Vec<String> {
+        self.providers.why_none()
+    }
+
+    /// The providers as the daemon lists them, and what the pickers start on when the user has
+    /// not picked: the project's provider and model, else the last ones used (`first_pick`).
+    pub fn set_providers(
+        &mut self,
+        providers: &Providers,
+        project: (Option<&str>, Option<&str>),
+        last: Option<&Pick>,
+        cx: &mut Context<Self>,
+    ) {
+        let still = self
+            .pick
+            .provider
+            .as_deref()
+            .and_then(|name| providers.get(name))
+            .is_some_and(Provider::offered);
+        let pick = if self.picked && still {
+            self.pick.clone().kept(providers)
+        } else {
+            self.picked = false;
+            first_pick(providers, project, last)
+        };
+        if self.providers != *providers || self.pick != pick {
+            self.providers = providers.clone();
+            self.pick = pick;
+            cx.notify();
+        }
+    }
+
+    /// Picks the provider; its model and effort go back to its defaults.
+    pub fn pick_provider(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.menu = None;
+        if self.providers.get(name).is_some_and(Provider::offered) {
+            self.picked = true;
+            if self.pick.provider.as_deref() != Some(name) {
+                self.pick = Pick {
+                    provider: Some(name.to_owned()),
+                    ..Pick::default()
+                };
+            }
+        }
+        cx.notify();
+    }
+
+    /// Picks the model, `None` for the provider's default; an effort it does not offer goes.
+    pub fn pick_model(&mut self, model: Option<String>, cx: &mut Context<Self>) {
+        self.menu = None;
+        self.picked = true;
+        self.pick.model = model;
+        self.pick = self.pick.clone().kept(&self.providers);
+        cx.notify();
+    }
+
+    /// Picks the effort, `None` for the model's default.
+    pub fn pick_effort(&mut self, effort: Option<String>, cx: &mut Context<Self>) {
+        self.menu = None;
+        self.picked = true;
+        self.pick.effort = effort;
+        cx.notify();
+    }
+
+    fn provider(&self) -> Option<&Provider> {
+        self.providers.get(self.pick.provider.as_deref()?)
     }
 
     pub fn error(&self) -> Option<&str> {
@@ -252,7 +413,7 @@ impl Composer {
 
     /// Picks where the next session starts, and puts the caret in the field.
     pub fn choose(&mut self, choice: Choice, window: &mut Window, cx: &mut Context<Self>) {
-        self.menu = false;
+        self.menu = None;
         self.tab = Tab::NewTask;
         self.slide_to(0.0, cx);
         if self.choice != choice {
@@ -271,7 +432,7 @@ impl Composer {
     pub fn select_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
         if self.tab != tab {
             self.tab = tab;
-            self.menu = false;
+            self.menu = None;
             self.slide_to(if tab == Tab::NewTask { 0.0 } else { 1.0 }, cx);
             cx.notify();
         }
@@ -282,8 +443,18 @@ impl Composer {
         self.slide.animate(target, PANEL, now, cx.reduce_motion());
     }
 
-    fn toggle_menu(&mut self, cx: &mut Context<Self>) {
-        self.menu = !self.menu;
+    /// Opens one of its pickers' lists.
+    pub fn open_menu(&mut self, menu: Menu, cx: &mut Context<Self>) {
+        self.menu = Some(menu);
+        cx.notify();
+    }
+
+    fn toggle_menu(&mut self, menu: Menu, cx: &mut Context<Self>) {
+        self.menu = if self.menu == Some(menu) {
+            None
+        } else {
+            Some(menu)
+        };
         cx.notify();
     }
 
@@ -311,6 +482,7 @@ impl Composer {
 
     fn can_send(&self) -> bool {
         self.blocked.is_none()
+            && self.provider().is_some_and(Provider::offered)
             && self.sending.is_none()
             && self.has_text
             && (self.choice != Choice::New || self.has_name)
@@ -331,19 +503,22 @@ impl Composer {
         let command = Command::Start {
             project: self.project.clone(),
             target: target.clone(),
+            pick: self.pick.clone(),
             message,
         };
         self.sending = Some(target);
+        self.sent = Some(self.pick.clone());
         self.error = None;
-        self.menu = false;
+        self.menu = None;
         self.shell
             .update(cx, |shell, _| shell.perform(command))
             .ok();
         cx.notify();
     }
 
-    /// The session started: the field is emptied for the next one.
-    pub fn started(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// The session started: the field is emptied for the next one. What it started on.
+    pub fn started(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<Pick> {
+        let used = self.sent.take();
         let sent = self.sending.take();
         self.error = None;
         self.field
@@ -359,11 +534,13 @@ impl Composer {
             }
         }
         cx.notify();
+        used
     }
 
     /// No session started: the field keeps the message, and says why.
     pub fn not_started(&mut self, why: &str, cx: &mut Context<Self>) {
         self.sending = None;
+        self.sent = None;
         self.error = Some(SharedString::from(why.to_owned()));
         cx.notify();
     }
@@ -484,7 +661,7 @@ impl Composer {
                     .child(icon(glyph).size(px(14.)).text_color(p.faint))
                     .child(SharedString::from(label))
                     .child(icon(Icon::Choose).size(px(10.)).text_color(p.faint))
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(cx)))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Place, cx)))
                     .test_support(),
             )
             .when(self.choice == Choice::New, |d| {
@@ -506,27 +683,258 @@ impl Composer {
                 )
             })
             .child(div().flex_1())
-            .child(
-                div()
-                    .id("agent-picker")
-                    .h(px(28.))
-                    .px(px(9.))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .text_size(px(12.5))
-                    .medium()
-                    .child("Claude")
-                    .child(div().text_color(p.faint).child("· default model")),
-            )
+            .children(self.render_agent_pickers(cx))
             .child(
                 Button::round("send", Icon::Send, "Start")
                     .disabled(!can_send)
                     .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
             )
-            .when(self.menu, |d| {
+            .when(self.menu == Some(Menu::Place), |d| {
                 d.child(self.render_menu(cx).into_any_element())
             })
+            .when_some(self.menu.filter(|m| *m != Menu::Place), |d, menu| {
+                d.child(self.render_agent_menu(menu, cx).into_any_element())
+            })
+    }
+
+    /// The provider, model and effort pickers: the model's once a provider is picked, the
+    /// effort's once the model is known to have efforts.
+    fn render_agent_pickers(&self, cx: &mut Context<Self>) -> Vec<gpui_kit::AnyElement> {
+        let p = palette(cx);
+        let Some(provider) = self.provider() else {
+            return Vec::new();
+        };
+        let picker = |id: &'static str, menu: Menu, label: String, strong: bool| {
+            div()
+                .id(id)
+                .h(px(28.))
+                .px(px(9.))
+                .rounded(px(7.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_size(px(12.5))
+                .text_color(if strong { p.text } else { p.mute })
+                .when(strong, |d| d.medium())
+                .when(!strong, |d| d.mono(12.))
+                .hover(|d| d.bg(p.hover).text_color(p.text))
+                .child(SharedString::from(label))
+                .child(icon(Icon::Choose).size(px(10.)).text_color(p.faint))
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_menu(menu, cx)))
+                .test_support()
+                .into_any_element()
+        };
+        let model = match (&self.pick.model, provider.default_model()) {
+            (Some(model), _) => model.clone(),
+            (None, Some(default)) => default.id.clone(),
+            (None, None) => "default model".to_owned(),
+        };
+        let mut pickers = vec![
+            picker(
+                "provider-picker",
+                Menu::Provider,
+                provider.title.clone(),
+                true,
+            ),
+            picker("model-picker", Menu::Model, model, false),
+        ];
+        if efforts_of(provider, self.pick.model.as_deref()).is_some_and(|e| !e.is_empty()) {
+            let effort = self
+                .pick
+                .effort
+                .clone()
+                .unwrap_or_else(|| "default effort".into());
+            pickers.push(picker("effort-picker", Menu::Effort, effort, false));
+        }
+        pickers
+    }
+
+    fn render_agent_menu(&self, menu: Menu, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let item =
+            |id: String, label: String, note: Option<String>, on: bool, pick: Option<Pick>| {
+                div()
+                    .id(ElementId::Name(id.into()))
+                    .h(px(28.))
+                    .px(px(8.))
+                    .rounded(px(7.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .text_size(px(12.5))
+                    .text_color(if pick.is_some() { p.text } else { p.faint })
+                    .when(on, |d| d.bg(p.sel))
+                    .when(pick.is_some() && !on, |d| d.hover(|d| d.bg(p.hover)))
+                    .child(div().flex_1().child(SharedString::from(label)))
+                    .when_some(note, |d, note| {
+                        d.child(
+                            div()
+                                .mono(11.)
+                                .text_color(p.faint)
+                                .child(SharedString::from(note)),
+                        )
+                    })
+                    .when_some(pick, |d, pick| {
+                        d.on_click(cx.listener(move |this, _, _, cx| match menu {
+                            Menu::Provider => {
+                                this.pick_provider(pick.provider.as_deref().unwrap_or_default(), cx)
+                            }
+                            Menu::Model => this.pick_model(pick.model.clone(), cx),
+                            _ => this.pick_effort(pick.effort.clone(), cx),
+                        }))
+                    })
+                    .test_support()
+            };
+        let pick = |provider: Option<&str>, model: Option<&str>, effort: Option<&str>| Pick {
+            provider: provider.map(str::to_owned),
+            model: model.map(str::to_owned),
+            effort: effort.map(str::to_owned),
+        };
+        let mut items = Vec::new();
+        let provider = self.provider();
+        match (menu, provider) {
+            (Menu::Provider, _) => {
+                for offered in self.providers.offered() {
+                    items.push(item(
+                        format!("provider-choice-{}", offered.name),
+                        offered.title.clone(),
+                        Some(offered.name.clone()),
+                        self.pick.provider.as_deref() == Some(offered.name.as_str()),
+                        Some(pick(Some(&offered.name), None, None)),
+                    ));
+                }
+            }
+            (Menu::Model, Some(provider)) => match &provider.models {
+                Some(models) => {
+                    for model in models {
+                        let on = match &self.pick.model {
+                            Some(picked) => picked == &model.id,
+                            None => model.default,
+                        };
+                        items.push(item(
+                            format!("model-choice-{}", model.id),
+                            model.id.clone(),
+                            model.default.then(|| "default".to_owned()),
+                            on,
+                            Some(pick(None, Some(&model.id), None)),
+                        ));
+                    }
+                }
+                // No agent is run just to list them: the first session of the provider says them.
+                None => {
+                    items.push(item(
+                        "model-choice-default".into(),
+                        "default model".into(),
+                        None,
+                        self.pick.model.is_none(),
+                        Some(pick(None, None, None)),
+                    ));
+                    if let Some(model) = &self.pick.model {
+                        items.push(item(
+                            format!("model-choice-{model}"),
+                            model.clone(),
+                            Some("the project's".into()),
+                            true,
+                            Some(pick(None, Some(model), None)),
+                        ));
+                    }
+                    items.push(item(
+                        "models-unknown".into(),
+                        format!(
+                            "{}'s models are known once one of its sessions opened",
+                            provider.title
+                        ),
+                        None,
+                        false,
+                        None,
+                    ));
+                }
+            },
+            (Menu::Effort, Some(provider)) => {
+                items.push(item(
+                    "effort-choice-default".into(),
+                    "default effort".into(),
+                    None,
+                    self.pick.effort.is_none(),
+                    Some(pick(None, None, None)),
+                ));
+                for effort in efforts_of(provider, self.pick.model.as_deref())
+                    .into_iter()
+                    .flatten()
+                {
+                    items.push(item(
+                        format!("effort-choice-{effort}"),
+                        effort.clone(),
+                        None,
+                        self.pick.effort.as_deref() == Some(effort.as_str()),
+                        Some(pick(None, None, Some(effort))),
+                    ));
+                }
+            }
+            _ => {}
+        }
+        div()
+            .id("agent-menu")
+            .occlude()
+            .absolute()
+            .top(px(40.))
+            .right(px(0.))
+            .w(px(280.))
+            .p(px(6.))
+            .rounded(px(10.))
+            .bg(p.card)
+            .border_1()
+            .border_color(p.line2)
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .children(items)
+    }
+
+    /// Why no session can start, as the daemon says it, and the way to the settings page.
+    fn render_not_ready(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let why = self.providers.why_none();
+        if why.is_empty() {
+            return None;
+        }
+        let p = palette(cx);
+        let shell = self.shell.clone();
+        Some(
+            div()
+                .id("composer-not-ready")
+                .px(px(10.))
+                .pt(px(6.))
+                .pb(px(2.))
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .text_size(px(12.5))
+                .text_color(p.faint)
+                .child(
+                    div()
+                        .text_color(p.mute)
+                        .child("No provider can start a session:"),
+                )
+                .children(
+                    why.into_iter()
+                        .map(|line| div().child(SharedString::from(line))),
+                )
+                .child(
+                    div()
+                        .id("open-settings")
+                        .mt(px(2.))
+                        .text_color(p.text)
+                        .cursor_pointer()
+                        .hover(|d| d.underline())
+                        .child("Open the settings")
+                        .on_click(move |_, window, cx| {
+                            shell
+                                .update(cx, |shell, cx| shell.open(Selection::Settings, window, cx))
+                                .ok();
+                        })
+                        .test_support(),
+                ),
+        )
     }
 
     fn render_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -668,6 +1076,7 @@ impl Render for Composer {
                     .child(body),
             )
             .child(self.render_pickers(cx).into_any_element())
+            .children(self.render_not_ready(cx))
             .when_some(self.blocked.clone(), |d, why| {
                 d.child(
                     div()

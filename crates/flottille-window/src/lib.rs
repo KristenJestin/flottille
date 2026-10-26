@@ -10,8 +10,10 @@ pub mod model;
 pub mod open;
 pub mod page;
 pub mod project;
+pub mod providers;
 pub mod session;
 pub mod session_link;
+pub mod settings;
 pub mod shell;
 pub mod tree;
 

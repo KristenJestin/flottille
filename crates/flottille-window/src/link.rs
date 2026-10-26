@@ -32,6 +32,8 @@ pub enum Update {
     Disconnected(String),
     /// What came of something the window asked (`actions`).
     Done(Outcome),
+    /// A fresh read of the providers (`provider.list`).
+    Providers(crate::providers::Providers),
     /// What the open session page's link read or saw, with the link's token.
     Session {
         token: u64,
@@ -118,34 +120,59 @@ fn follow(
         seen.last_seq
             .store(started["after"].as_u64().unwrap_or(0), Ordering::Relaxed);
     }
-    // When what the shell shows was first known to be stale.
+    // When what the shell shows, and the providers, were first known to be stale.
     let mut stale = Some(Instant::now());
+    let mut providers = Some(Instant::now());
+    let mark = |event: &Event, stale: &mut Option<Instant>, providers: &mut Option<Instant>| {
+        note(seen, event);
+        if matters(event) {
+            stale.get_or_insert_with(Instant::now);
+        }
+        if about_providers(event) {
+            providers.get_or_insert_with(Instant::now);
+        }
+    };
     loop {
         // Everything that came already, then a short quiet (or a short while at most), before
         // reading the shell again.
-        match conn.next_event(quiet_wait(stale))? {
-            Some(event) => {
-                note(seen, &event);
-                if matters(&event) {
-                    stale.get_or_insert_with(Instant::now);
-                }
-            }
+        let since = [stale, providers].into_iter().flatten().min();
+        match conn.next_event(quiet_wait(since))? {
+            Some(event) => mark(&event, &mut stale, &mut providers),
             None => {
-                let snapshot = read(&mut conn, briefs, seen)?;
-                if updates.unbounded_send(Update::Snapshot(snapshot)).is_err() {
-                    return Ok(());
+                if stale.take().is_some() {
+                    let snapshot = read(&mut conn, briefs, seen)?;
+                    if updates.unbounded_send(Update::Snapshot(snapshot)).is_err() {
+                        return Ok(());
+                    }
+                }
+                if providers.take().is_some() {
+                    let listed = read_providers(&mut conn)?;
+                    if updates.unbounded_send(Update::Providers(listed)).is_err() {
+                        return Ok(());
+                    }
                 }
                 // Events that came while it read are queued: they make it stale again.
-                stale = None;
                 while let Some(event) = conn.queued.pop() {
-                    note(seen, &event);
-                    if matters(&event) {
-                        stale.get_or_insert_with(Instant::now);
-                    }
+                    mark(&event, &mut stale, &mut providers);
                 }
             }
         }
     }
+}
+
+/// Whether an event may change what `provider.list` says: a provider enabled or disabled, or a
+/// session opened, which says the models its provider offers.
+fn about_providers(event: &Event) -> bool {
+    event.name.starts_with("provider.") || event.name == "agent.started"
+}
+
+/// The providers, or the daemon's sentence when it cannot list them. The outer error is the
+/// connection's.
+pub(crate) fn read_providers(conn: &mut Conn) -> Result<crate::providers::Providers> {
+    let answer = conn.ask("provider.list", json!({}))?;
+    Ok(crate::providers::Providers::of(
+        answer.as_ref().map_err(Clone::clone),
+    ))
 }
 
 fn note(seen: &Seen, event: &Event) {
@@ -466,6 +493,14 @@ mod tests {
             matters(&event("workspace.step_done", json!({}))),
             "a card shows the preparation"
         );
+    }
+
+    #[test]
+    fn a_provider_changed_or_a_session_opened_reads_the_providers_again() {
+        assert!(about_providers(&event("provider.changed", json!({}))));
+        assert!(about_providers(&event("agent.started", json!({}))));
+        assert!(!about_providers(&event("agent.turn_ended", json!({}))));
+        assert!(!about_providers(&event("agent.message", json!({}))));
     }
 
     #[test]

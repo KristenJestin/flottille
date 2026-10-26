@@ -22,6 +22,7 @@ use flottille_window::link::{self, Connect};
 use flottille_window::model::{Place, Preparation};
 use flottille_window::project::{NewWorkspace, PlaceCard, ProjectPage};
 use flottille_window::session::SessionPage;
+use flottille_window::settings::SettingsPage;
 use flottille_window::shell::{Layout, Selection};
 use flottille_window::tree::{place_id, project_id, session_id};
 use gpui_kit::test::TestWindowExt;
@@ -2158,5 +2159,281 @@ fn the_card_offers_allow_for_this_tree_only_when_the_place_is_not_sensitive(
             "never for a sensitive place"
         );
         assert!(window.try_find(format!("allow-tree-{plain}")).is_some());
+    });
+}
+
+// Providers (#27).
+
+/// A user whose Claude and OpenCode each stand on a fake ACP agent, both enabled. OpenCode's lead
+/// launches a helper on Claude when told to.
+fn providers_user() -> User {
+    let user = User::with_fake_providers();
+    user.provider_script(
+        "claude",
+        json!({"models": ["fake-small", "fake-large"], "efforts": ["low", "high"]}),
+    );
+    user.provider_script(
+        "opencode",
+        json!({"models": ["open/small", "open/medium"], "efforts": ["low", "high"], "turns": [
+            {"when": "launch a helper", "do": [{"mcp": {"tool": "agent_launch", "arguments": {
+                "title": "helper", "brief": "check the docs", "provider": "claude",
+                "model": "fake-large"}}}]}
+        ]}),
+    );
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    user
+}
+
+fn composer_offers(composer: &Entity<Composer>, cx: &mut VisualTestContext) -> Vec<String> {
+    composer.read_with(cx, |c, _| c.offered())
+}
+
+fn open_settings(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<SettingsPage> {
+    cx.update(|window, cx| window.click("settings", cx));
+    until(shell, cx, "the settings page is shown", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).settings_page().is_some())
+    });
+    settle(cx);
+    shell
+        .read_with(cx, |s, cx| s.main().read(cx).settings_page().cloned())
+        .unwrap()
+}
+
+/// What the settings page says of a provider, line by line.
+fn said_of(page: &Entity<SettingsPage>, name: &str, cx: &mut VisualTestContext) -> Vec<String> {
+    page.read_with(cx, |page, _| page.said_of(name))
+}
+
+#[gpui_kit::test]
+fn disabling_one_in_settings_removes_it_from_the_composer_s_picker(cx: &mut TestAppContext) {
+    let user = providers_user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let composer = composer_of(&shell, "atlas", cx);
+    until(&shell, cx, "both providers are offered", |cx| {
+        composer_offers(&composer, cx) == ["claude", "opencode"]
+    });
+
+    let page = open_settings(&shell, cx);
+    assert!(said_of(&page, "opencode", cx).contains(&"Ready".to_owned()));
+    cx.update(|window, cx| window.click("provider-switch-opencode", cx));
+    until(&shell, cx, "the page shows it disabled", |cx| {
+        said_of(&page, "opencode", cx)
+            .iter()
+            .any(|line| line.starts_with("opencode is not enabled"))
+    });
+
+    let file = std::fs::read_to_string(user.path("config/flottille/providers.toml")).unwrap();
+    assert!(file.contains("enabled = false"), "{file}");
+    open_project(&shell, "atlas", cx);
+    until(&shell, cx, "only claude is offered", |cx| {
+        composer_offers(&composer, cx) == ["claude"]
+    });
+}
+
+#[gpui_kit::test]
+fn choosing_the_other_and_a_model_starts_the_session_on_them_and_the_tree_shows_each_agent_s_provider_and_model(
+    cx: &mut TestAppContext,
+) {
+    let user = providers_user();
+    project(&user, "atlas");
+    // A first session of OpenCode says its models.
+    let first = user
+        .call(
+            "agent.start",
+            json!({"project": "atlas", "provider": "opencode", "message": "hello"}),
+        )
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    eventually("its first turn ends", || {
+        user.call("agent.show", json!({"agent": first})).unwrap()["agent"]["state"] == "idle"
+    });
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let composer = composer_of(&shell, "atlas", cx);
+    until(&shell, cx, "the composer starts on the first ready", |cx| {
+        composer.read_with(cx, |c, _| c.pick().provider.as_deref() == Some("claude"))
+    });
+
+    cx.update(|window, cx| window.click("provider-picker", cx));
+    cx.update(|window, cx| window.click("provider-choice-opencode", cx));
+    cx.update(|window, cx| window.click("model-picker", cx));
+    cx.update(|window, cx| window.click("model-choice-open/small", cx));
+    cx.update(|window, cx| window.click("effort-picker", cx));
+    cx.update(|window, cx| window.click("effort-choice-high", cx));
+    type_task("Please launch a helper", cx);
+    cx.simulate_keystrokes("enter");
+    until(&shell, cx, "the session's page opens", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+    });
+
+    let page = session_page(&shell, cx);
+    let lead = page.read_with(cx, |p, _| p.id().to_owned());
+    let shown = user.call("agent.show", json!({"agent": lead})).unwrap()["agent"].clone();
+    assert_eq!(shown["provider"], "opencode");
+    assert_eq!(shown["chosen"]["model"], "open/small");
+    assert_eq!(shown["chosen"]["effort"], "high");
+    until(&shell, cx, "the rail shows both agents", |cx| {
+        page.read_with(cx, |p, cx| p.rail().read(cx).agents().len() == 2)
+    });
+    let rail: Vec<(String, String, Option<String>)> = page.read_with(cx, |p, cx| {
+        p.rail()
+            .read(cx)
+            .agents()
+            .iter()
+            .map(|a| (a.name.clone(), a.provider.clone(), a.model.clone()))
+            .collect()
+    });
+    assert_eq!(rail[0].1, "opencode");
+    assert_eq!(rail[0].2.as_deref(), Some("open/small"));
+    assert_eq!(rail[1].1, "claude");
+    assert_eq!(rail[1].2.as_deref(), Some("fake-large"));
+    let reply = shell
+        .read_with(cx, |s, _| s.reply_of(&lead).cloned())
+        .unwrap();
+    assert_eq!(
+        reply.read_with(cx, |r, cx| r.facts().read(cx).shown()),
+        "opencode · open/small"
+    );
+}
+
+/// A user whose `opencode` on PATH says it is 9.9.9, a version its bare mode was not qualified
+/// on; Claude stands on the fake agent.
+fn unready_opencode_user() -> User {
+    let user = User::new();
+    for dir in ["bin", "fake-claude"] {
+        std::fs::create_dir(user.path(dir)).unwrap();
+    }
+    std::os::unix::fs::symlink(common::fake_agent(), user.path("fake-claude/agent")).unwrap();
+    std::os::unix::fs::symlink(common::program("git"), user.path("bin/git")).unwrap();
+    let script = user.path("bin/opencode");
+    std::fs::write(&script, "#!/bin/sh\necho 9.9.9\n").unwrap();
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let (claude, bin) = (user.path("fake-claude/agent"), user.path("bin"));
+    let user = user
+        .with_env("FLOTTILLE_AGENT_COMMAND_CLAUDE", claude.to_str().unwrap())
+        .with_env("PATH", bin.to_str().unwrap());
+    user.write_providers("[opencode]\nenabled = true\n");
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    user
+}
+
+#[gpui_kit::test]
+fn an_unready_provider_shows_its_reason_in_settings_and_is_not_offered(cx: &mut TestAppContext) {
+    let user = unready_opencode_user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_settings(&shell, cx);
+    until(&shell, cx, "the reason is shown", |cx| {
+        said_of(&page, "opencode", cx).iter().any(|line| {
+            line.starts_with(
+                "opencode is not ready: opencode is 9.9.9, and only 1.19.0 was qualified",
+            )
+        })
+    });
+    assert!(said_of(&page, "claude", cx).contains(&"Ready".to_owned()));
+
+    open_project(&shell, "atlas", cx);
+    let composer = composer_of(&shell, "atlas", cx);
+    until(&shell, cx, "the composer knows the providers", |cx| {
+        !composer_offers(&composer, cx).is_empty()
+    });
+    assert_eq!(composer_offers(&composer, cx), ["claude"]);
+}
+
+#[gpui_kit::test]
+fn when_nothing_is_ready_the_composer_says_why_and_links_to_the_settings_page(
+    cx: &mut TestAppContext,
+) {
+    let user = providers_user();
+    user.write_providers("[claude]\nenabled = false\n[opencode]\nenabled = false\n");
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let composer = composer_of(&shell, "atlas", cx);
+    until(&shell, cx, "the composer says why", |cx| {
+        composer.read_with(cx, |c, _| !c.not_ready().is_empty())
+    });
+    let why = composer.read_with(cx, |c, _| c.not_ready().to_vec());
+    assert!(why[0].starts_with("claude is not enabled"), "{why:?}");
+    assert!(why[1].starts_with("opencode is not enabled"), "{why:?}");
+
+    type_task("Fix the login", cx);
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    assert!(!composer.read_with(cx, |c, _| c.is_sending()));
+    assert!(
+        user.call("agent.list", json!({})).unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    cx.update(|window, cx| window.click("open-settings", cx));
+    until(&shell, cx, "the settings page opens", |cx| {
+        shell.read_with(cx, |s, _| s.selected() == Some(&Selection::Settings))
+    });
+}
+
+#[gpui_kit::test]
+fn the_settings_page_says_how_each_provider_signs_in_and_never_a_key_s_value(
+    cx: &mut TestAppContext,
+) {
+    let user = providers_user().with_env("OPENAI_API_KEY", "made-up-key-value");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_settings(&shell, cx);
+    until(&shell, cx, "the providers are shown", |cx| {
+        !said_of(&page, "opencode", cx).is_empty()
+    });
+
+    let opencode = said_of(&page, "opencode", cx);
+    assert!(
+        opencode
+            .iter()
+            .any(|line| line == "Signs in with the API key in OPENAI_API_KEY"),
+        "{opencode:?}"
+    );
+    let everything = format!("{opencode:?}{:?}", said_of(&page, "claude", cx));
+    assert!(!everything.contains("made-up-key-value"), "{everything}");
+}
+
+#[gpui_kit::test]
+fn the_pickers_start_on_the_project_s_default_then_on_the_last_ones_used(cx: &mut TestAppContext) {
+    let user = providers_user();
+    project(&user, "atlas");
+    project(&user, "borealis");
+    let file = user.project_file("atlas");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(
+        &file,
+        format!("provider = \"opencode\"\nmodel = \"open/medium\"\n{text}"),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let atlas = composer_of(&shell, "atlas", cx);
+    until(&shell, cx, "atlas starts on its own default", |cx| {
+        atlas.read_with(cx, |c, _| {
+            let pick = c.pick();
+            pick.provider.as_deref() == Some("opencode")
+                && pick.model.as_deref() == Some("open/medium")
+        })
+    });
+
+    type_task("A first task", cx);
+    cx.simulate_keystrokes("enter");
+    until(&shell, cx, "the session's page opens", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+    });
+    open_project(&shell, "borealis", cx);
+    let borealis = composer_of(&shell, "borealis", cx);
+    until(&shell, cx, "borealis starts on the last ones used", |cx| {
+        borealis.read_with(cx, |c, _| {
+            let pick = c.pick();
+            pick.provider.as_deref() == Some("opencode")
+                && pick.model.as_deref() == Some("open/medium")
+        })
     });
 }

@@ -494,6 +494,16 @@ daemon says its root needs you, as `flottille status` does: the window decides n
 shows the daemon's state. A session is marked running while an agent of its tree starts or works;
 otherwise it shows how long ago its tree was last active.
 
+The settings button of the top bar opens the settings page: every provider, enabled or not with
+a switch (`flottille provider enable` and `disable` do the same), how it signs in (its program's
+login file found, or the name of the API key set, never its value), and whether its agents can
+run here, as `flottille doctor` says it. The composer that starts a session offers the providers
+that are enabled and ready, then the chosen one's models (as its sessions said them: until one
+did, its default model), then the model's efforts when it has some. It starts on the project's
+provider and model, else on those the last session started from the window used. When no provider
+is ready it says why, and links to the settings page. The session page shows each agent's
+provider beside its model.
+
 Below 1240 pixels wide, the session page's rail of agents becomes a drawer from the right; below
 860, the tree of projects becomes a drawer from the left, opened by the menu button of the top bar.
 
