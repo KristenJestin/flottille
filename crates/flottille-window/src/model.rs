@@ -363,18 +363,6 @@ impl Snapshot {
             .iter()
             .find(|w| w.project == project && w.name == name)
     }
-
-    /// The project's sessions that run or wait for the user: those waiting first, then the
-    /// newest.
-    pub fn running_in<'a>(&'a self, project: &str) -> Vec<&'a Session> {
-        let mut running: Vec<&Session> = self
-            .sessions
-            .iter()
-            .filter(|s| s.project == project && s.mark.is_some())
-            .collect();
-        running.sort_by_key(|s| s.mark != Some(AgentState::NeedsYou));
-        running
-    }
 }
 
 /// How long ago, said short: `now`, `4m`, `1h`, `2d`, `3w`.
@@ -514,28 +502,6 @@ mod tests {
                 doing: "npm install (in api)".into(),
                 output: "npm ERR! made up".into()
             }
-        );
-    }
-
-    #[test]
-    fn the_running_sessions_put_those_waiting_for_the_user_first() {
-        let mut older = agent("r1", None, "idle", None);
-        older["created_at"] = json!(1);
-        let snapshot = build(
-            json!({"agents": [older, agent("r2", None, "working", None),
-                agent("r3", None, "idle", None)]}),
-            json!({"requests": []}),
-            &["r1"],
-        );
-        let ids: Vec<&str> = snapshot
-            .running_in("app")
-            .iter()
-            .map(|s| s.id.as_str())
-            .collect();
-        assert_eq!(
-            ids,
-            ["r1", "r2"],
-            "waiting first though older, at rest left out"
         );
     }
 
