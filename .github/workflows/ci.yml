@@ -3,11 +3,14 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [main, dev]
+    # A feature branch's pushes are verified, then published as its alpha (`publish`).
+    branches: [main, dev, "feat/**", "fix/**"]
   workflow_dispatch:
 
 jobs:
   commit-messages:
+    # A feature branch's commits are judged on its pull request, as before its pushes ran here.
+    if: github.event_name != 'push' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -61,3 +64,78 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - if: steps.cargo.outputs.present == 'true'
         run: cargo test --locked
+
+  # The packages (docs/releases.md): main is stable, dev beta, a feature branch its own alpha,
+  # once `verify` passed on the pushed commit. The version is computed, never typed, and the tag
+  # is CI's own.
+  publish:
+    needs: verify
+    if: github.event_name == 'push'
+    # Old enough a C library that the binary runs on current Arch and Debian stable.
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    concurrency:
+      group: publish-${{ github.ref }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: The channel and the version
+        id: version
+        run: |
+          case "$GITHUB_REF_NAME" in
+            main) channel=stable ;;
+            dev) channel=beta ;;
+            *) channel=alpha ;;
+          esac
+          status=0
+          version=$(tools/version.sh "$channel" --branch "$GITHUB_REF_NAME") || status=$?
+          # 3: no commit since the last stable tag bumps the version, nothing to release.
+          if [ "$status" -eq 3 ]; then echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          [ "$status" -eq 0 ] || exit "$status"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Have the window's system libraries
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
+      - name: Build
+        if: steps.version.outputs.skip != 'true'
+        env:
+          FLOTTILLE_BUILD_VERSION: ${{ steps.version.outputs.version }}
+          FLOTTILLE_BUILD_CHANNEL: ${{ steps.version.outputs.channel }}
+          FLOTTILLE_BUILD_BRANCH: ${{ github.ref_name }}
+        run: cargo build --release --locked -p flottille
+      - name: Package
+        if: steps.version.outputs.skip != 'true'
+        run: tools/package.sh "${{ steps.version.outputs.version }}" target/release/flottille dist
+      - name: Release notes
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          {
+            echo "Flottille ${{ steps.version.outputs.version }}, ${{ steps.version.outputs.channel }}, built from ${GITHUB_SHA:0:12}."
+            echo
+            echo "Linux x86_64. Install: \`curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.sh | sh\` (see docs/releases.md)."
+            echo "The window needs the system's fontconfig, freetype, xkbcommon (and xkbcommon-x11), wayland-client or libxcb, and a Vulkan loader with a driver."
+            echo
+            tools/changelog.sh
+          } > notes.md
+      - name: Publish
+        if: steps.version.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ steps.version.outputs.channel }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          case "$CHANNEL" in
+            stable) gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" --title "Flottille $VERSION" --notes-file notes.md --latest ;;
+            beta) gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" --title "Flottille $VERSION" --notes-file notes.md --prerelease --latest=false ;;
+            alpha)
+              # One rolling pre-release per branch, replaced at each push.
+              tag="alpha-$(printf '%s' "$GITHUB_REF_NAME" | tr -c 'A-Za-z0-9-' '-')"
+              gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
+              gh release create "$tag" dist/* --target "$GITHUB_SHA" --title "Flottille $VERSION" --notes-file notes.md --prerelease --latest=false
+              ;;
+          esac

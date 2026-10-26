@@ -27,6 +27,7 @@ mod roles;
 mod runs;
 mod sweep;
 mod tree;
+mod update;
 mod workspace_command;
 mod workspaces;
 
@@ -127,6 +128,15 @@ enum Command {
     /// Open the window: your projects, where their work happens, their sessions, and what waits
     /// for you
     Window,
+    /// Replace Flottille with the latest build of a channel, its sum checked first
+    Update {
+        /// stable, beta or alpha; the channel of this build by default
+        #[arg(long, value_parser = ["stable", "beta", "alpha"])]
+        channel: Option<String>,
+        /// The branch whose alpha to take (`feat/46-packages`); this build's by default
+        #[arg(long)]
+        branch: Option<String>,
+    },
     /// Print the daemon's events, one JSON object per line
     Watch {
         /// Print the stored events numbered after this one first
@@ -225,6 +235,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Deny { number } => approval_command::deny(&paths, number)?,
         Command::Inbox { after, limit, json } => inbox_command::inbox(&paths, after, limit, json)?,
         Command::Mcp => pilot::run(&paths)?,
+        Command::Update { channel, branch } => return update::run(&paths, channel, branch),
         Command::Bridge {
             agent: BridgeAgent::Claude,
         } => return bridge::run(&paths),

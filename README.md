@@ -12,6 +12,18 @@ agent CLIs you installed and signed in to yourself (Claude Code first).
 
 Early work in progress: see [`docs/design.md`](docs/design.md).
 
+## Installing
+
+On Linux x86_64, into `~/.local/bin`, without root:
+
+```
+curl -fsSL https://raw.githubusercontent.com/KristenJestin/flottille/main/install.sh | sh
+```
+
+`sh -s -- --channel beta` takes the build of `dev`, `--channel alpha --branch <name>` a feature
+branch's; `flottille update` takes the latest of its channel. See
+[`docs/releases.md`](docs/releases.md).
+
 ## License
 
 AGPL-3.0-only.
