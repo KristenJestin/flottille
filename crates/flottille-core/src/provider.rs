@@ -8,14 +8,14 @@ use serde::Deserialize;
 use crate::paths::Paths;
 
 /// Every provider Flottille knows, in the order they are listed and chosen by default.
-pub const NAMES: [&str; 2] = ["claude", "opencode"];
+pub const NAMES: [&str; 3] = ["claude", "opencode", "codex"];
 
 /// Enabled when the file says nothing of them: the provider Flottille always had.
 const ENABLED_BY_DEFAULT: [&str; 1] = ["claude"];
 
 /// The providers whose bare mode holds only on the version it was qualified on: another one is
 /// refused unless the user allows it (`allow_unqualified_version`).
-pub const QUALIFIED_ONLY: [&str; 1] = ["opencode"];
+pub const QUALIFIED_ONLY: [&str; 2] = ["opencode", "codex"];
 
 /// Which providers the user enabled: each known name, with its choice.
 #[derive(Clone, Debug, PartialEq)]
@@ -83,10 +83,14 @@ impl Settings {
             }
             if let Some(allow) = entry.allow_unqualified_version {
                 if !QUALIFIED_ONLY.contains(known) {
+                    let whose: Vec<String> = QUALIFIED_ONLY
+                        .iter()
+                        .map(|name| format!("{name}'s"))
+                        .collect();
                     return Err(refuse(format!(
-                        "{name}.allow_unqualified_version: only {}'s version is checked before \
-                         its agents start",
-                        QUALIFIED_ONLY.join(", ")
+                        "{name}.allow_unqualified_version: only {} versions are checked before \
+                         their agents start",
+                        whose.join(" and ")
                     )));
                 }
                 if allow {
@@ -142,17 +146,17 @@ mod tests {
         let claude = Settings::parse("[claude]\nallow_unqualified_version = true\n").unwrap_err();
         assert_eq!(
             claude,
-            "providers.toml: claude.allow_unqualified_version: only opencode's version is \
-             checked before its agents start"
+            "providers.toml: claude.allow_unqualified_version: only opencode's and codex's \
+             versions are checked before their agents start"
         );
     }
 
     #[test]
     fn an_unknown_provider_or_key_is_refused_with_its_key() {
-        let unknown = Settings::parse("[codex]\nenabled = true\n").unwrap_err();
+        let unknown = Settings::parse("[gemini]\nenabled = true\n").unwrap_err();
         assert_eq!(
             unknown,
-            "providers.toml: codex: unknown provider: the providers are claude, opencode"
+            "providers.toml: gemini: unknown provider: the providers are claude, opencode, codex"
         );
         let key = Settings::parse("[claude]\nenable = true\n").unwrap_err();
         assert!(key.starts_with("providers.toml: claude.enable: "), "{key}");

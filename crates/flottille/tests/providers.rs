@@ -1,4 +1,4 @@
-//! The providers of agents (`docs/agents.md`, "Providers"): Claude and OpenCode side by side, each
+//! The providers of agents (`docs/agents.md`, "Providers"): Claude, OpenCode and Codex side by side, each
 //! standing on a fake ACP agent of its own, the provider, model and effort chosen per agent and
 //! checked against the providers enabled and ready and the models they offer. No real agent runs.
 
@@ -319,12 +319,12 @@ fn an_unknown_provider_is_refused_naming_the_providers() {
     let user = User::with_fake_agent();
     project(&user);
 
-    let (code, message) = start(&user, json!({"message": "go", "provider": "codex"})).unwrap_err();
+    let (code, message) = start(&user, json!({"message": "go", "provider": "gemini"})).unwrap_err();
 
     assert_eq!(code, "refused");
     assert_eq!(
         message,
-        "there is no provider codex: the providers are claude, opencode"
+        "there is no provider gemini: the providers are claude, opencode, codex"
     );
 }
 
@@ -347,7 +347,7 @@ fn the_providers_method_lists_every_provider_enabled_ready_and_why_its_models_an
         .iter()
         .map(|p| p["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["claude", "opencode"]);
+    assert_eq!(names, ["claude", "opencode", "codex"]);
     let claude = &providers[0];
     assert_eq!(claude["enabled"], true);
     assert_eq!(claude["ready"], true);
@@ -736,12 +736,12 @@ fn an_unknown_provider_or_a_providers_toml_that_cannot_be_read_is_refused_and_le
     let user = User::with_fake_providers();
 
     let (code, message) = user
-        .call("provider.enable", json!({"name": "codex"}))
+        .call("provider.enable", json!({"name": "gemini"}))
         .unwrap_err();
     assert_eq!(code, "not-found");
     assert_eq!(
         message,
-        "there is no provider codex: the providers are claude, opencode"
+        "there is no provider gemini: the providers are claude, opencode, codex"
     );
     let (code, _) = user
         .call(
@@ -795,11 +795,11 @@ fn the_provider_command_enables_and_disables_a_provider() {
         "opencode is enabled.\n"
     );
 
-    let output = user.run(&["provider", "enable", "codex"]);
+    let output = user.run(&["provider", "enable", "gemini"]);
     assert!(!output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "flottille: there is no provider codex: the providers are claude, opencode\n"
+        "flottille: there is no provider gemini: the providers are claude, opencode, codex\n"
     );
 }
 
@@ -845,4 +845,164 @@ fn a_providers_toml_behind_a_symbolic_link_is_still_a_link_after_a_switch_its_mo
         );
     }
     assert_eq!(listed(&user, "opencode")["enabled"], false);
+}
+
+/// Claude, OpenCode and Codex enabled, each on a fake agent of its own.
+fn user_with_codex() -> User {
+    let user = User::with_fake_providers();
+    user.write_providers("[opencode]\nenabled = true\n[codex]\nenabled = true\n");
+    user
+}
+
+#[test]
+fn a_lead_on_claude_launches_a_child_on_codex() {
+    let user = user_with_codex();
+    user.provider_script(
+        "claude",
+        json!({"models": ["fake-small"], "turns": [
+            {"when": "LEAD", "do": [{"mcp": {"tool": "agent_launch", "arguments": {
+                "title": "other", "brief": "CHILD work", "provider": "codex",
+                "model": "gpt-fake-mini"}}}]}
+        ]}),
+    );
+    user.provider_script(
+        "codex",
+        json!({"models": ["gpt-fake", "gpt-fake-mini"], "efforts": ["low", "high"], "turns": [
+            {"when": "CHILD", "do": [{"mcp": {"tool": "report", "arguments": {"text": "child done"}}}]}
+        ]}),
+    );
+    project(&user);
+
+    let lead = id(&start(&user, json!({"message": "LEAD go"})).unwrap());
+    let child = id(&child(&user, &lead));
+
+    eventually("the report reaching the lead", || {
+        prompts(&user, "claude")
+            .iter()
+            .any(|p| p.contains("[flottille:child-report]") && p.contains("child done"))
+    });
+    let child = agent(&user, &child);
+    assert_eq!(child["provider"], "codex");
+    assert_eq!(child["taken"]["model"], "gpt-fake-mini");
+    assert!(
+        prompts(&user, "codex")
+            .iter()
+            .any(|p| p.contains("CHILD work"))
+    );
+    // Its session carried Codex's options: its instructions, and its tools as Codex names them.
+    let opened = user
+        .provider_received("codex")
+        .into_iter()
+        .find(|entry| entry["received"]["method"] == "session/new")
+        .unwrap();
+    let options = &opened["received"]["params"]["_meta"]["codex"];
+    assert!(options["instructions"].is_string(), "{options}");
+    let tools: Vec<&str> = options["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().unwrap())
+        .collect();
+    assert!(tools.contains(&"mcp__flottille__report"), "{tools:?}");
+    assert!(tools.contains(&"mcp__flottille__ask_parent"), "{tools:?}");
+    // Codex's own folder of Flottille's, the user's login linked in it, never opened.
+    let link = user.path("data/flottille/agents/codex/codex/auth.json");
+    assert_eq!(
+        std::fs::read_link(&link).unwrap(),
+        user.path("home/.codex/auth.json")
+    );
+    assert_eq!(
+        common::mode(user.path("data/flottille/agents/codex/home")),
+        0o700
+    );
+}
+
+#[test]
+fn a_disabled_or_unready_codex_is_refused_naming_the_ready_providers() {
+    // Disabled, as it is by default.
+    let user = User::with_fake_providers();
+    project(&user);
+
+    let (code, message) = start(&user, json!({"message": "go", "provider": "codex"})).unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert!(message.contains("codex is not enabled"), "{message}");
+    assert!(
+        message.contains("the ready providers are claude, opencode"),
+        "{message}"
+    );
+
+    // Enabled, and not on PATH.
+    let user = User::new();
+    std::fs::create_dir(user.path("fake-claude")).unwrap();
+    std::os::unix::fs::symlink(common::fake_agent(), user.path("fake-claude/agent")).unwrap();
+    std::fs::create_dir(user.path("bin")).unwrap();
+    std::os::unix::fs::symlink(common::program("git"), user.path("bin/git")).unwrap();
+    let (agent, bin) = (user.path("fake-claude/agent"), user.path("bin"));
+    let user = user
+        .with_env("FLOTTILLE_AGENT_COMMAND_CLAUDE", agent.to_str().unwrap())
+        .with_env("PATH", bin.to_str().unwrap());
+    user.write_providers("[codex]\nenabled = true\n");
+    project(&user);
+
+    let (_, message) = start(&user, json!({"message": "go", "provider": "codex"})).unwrap_err();
+
+    assert!(message.contains("codex is not ready"), "{message}");
+    assert!(message.contains("`codex` is not on PATH"), "{message}");
+    assert!(
+        message.contains("the ready providers are claude"),
+        "{message}"
+    );
+
+    // On PATH, of a version its bare mode was not qualified on.
+    std::fs::write(
+        user.path("bin/codex"),
+        "#!/bin/sh\n[ \"$1\" = --version ] && echo 'codex-cli 0.163.0'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        user.path("bin/codex"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    // Its version is asked once: by the list here, else at its process's start.
+    user.call("provider.list", Value::Null).unwrap();
+
+    let (_, message) = start(&user, json!({"message": "go", "provider": "codex"})).unwrap_err();
+
+    assert!(message.contains("codex is 0.163.0"), "{message}");
+    assert!(
+        message.contains("only 0.162.0 and 0.162.1 were qualified"),
+        "{message}"
+    );
+    assert!(agents(&user).is_empty());
+}
+
+#[test]
+fn an_unknown_model_is_refused_naming_codex_s_models() {
+    let user = user_with_codex();
+    user.provider_script(
+        "codex",
+        json!({"models": ["gpt-fake", "gpt-fake-mini"], "efforts": ["low", "high"]}),
+    );
+    project(&user);
+    let first = id(&start(&user, json!({"message": "hello", "provider": "codex"})).unwrap());
+    eventually("Codex's models known", || {
+        listed(&user, "codex")["models"].is_array()
+    });
+
+    let (code, message) = start(
+        &user,
+        json!({"message": "hello", "provider": "codex", "model": "gpt-huge"}),
+    )
+    .unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert!(
+        message
+            .contains("provider codex offers no model gpt-huge: it offers gpt-fake, gpt-fake-mini"),
+        "{message}"
+    );
+    assert_eq!(agents(&user).len(), 1);
+    assert_eq!(agent(&user, &first)["provider"], "codex");
 }

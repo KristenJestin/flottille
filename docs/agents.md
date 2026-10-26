@@ -14,7 +14,7 @@ woken only by deliveries. Flottille's MCP server and its tools are in `docs/tool
 
 | Command | |
 |---|---|
-| `flottille agent run <project> [--workspace <name>] [--provider <provider>] [--model <model>] [--effort <effort>] <message>` | Starts an agent with a first message and prints its reply as it comes, until the turn ends. Fails when the agent fails or its process dies. `--json` prints the agent instead, once the turn ended. |
+| `flottille agent run <project> [--workspace <name>] [--provider <provider>] [--model <model>] [--effort <effort>] <message>` | Starts an agent with a first message and prints its reply as it comes, until the turn ends. Fails when the agent fails or its process dies. `--json` prints the agent object instead (its id is `.id`), once the turn ended. |
 | `flottille agent show <agent> [--json]` | The agent (its provider and model among the rest) and its conversation. |
 | `flottille provider enable <provider>`, `flottille provider disable <provider>` | Enables or disables a provider in `providers.toml` ("Providers", below). |
 | `flottille doctor [--json]` | Each provider: enabled or not, whether its agents can run here and why not. Fails when no provider is enabled or an enabled one cannot run. |
@@ -61,20 +61,29 @@ user may run another version at their own risk with `allow_unqualified_version =
 `[opencode]` in `providers.toml`: it is then a warning that names both versions. An `opencode`
 that does not say its version is refused the same way.
 
+For Codex, the user's `codex`, signed in (`codex login`, its login kept in a file, Codex's
+default: `$CODEX_HOME/auth.json` else `~/.codex/auth.json`, checked for its presence only) or
+given `CODEX_ACCESS_TOKEN`. Neither is a warning, not a failure; a login kept in the system's
+keyring does not reach Flottille's agents ("Bare mode for Codex", below), nor does a sign-in to a
+ChatGPT business, education or enterprise plan, which the bridge refuses. Its version is checked
+against 0.162.0 and 0.162.1, the versions whose bare mode was qualified: another one is refused
+unless the user allows it (`allow_unqualified_version = true` under `[codex]`), as for OpenCode. While the machine
+has Codex settings of its own, `/etc/codex`, Codex is not ready.
+
 An agent is refused at its start, with a sentence that says why and names the providers that
 are ready, while its provider is not enabled or not ready ("Providers", below).
 
 ## Providers
 
-A provider is what an agent runs on: `claude` and `opencode`, in this order. Each is a module of
-the daemon (`claude.rs`, `opencode.rs`) that says how its agent starts, its bare environment and
-configuration, how it is checked ready, how it names Flottille's tools and how its models and
+A provider is what an agent runs on: `claude`, `opencode` and `codex`, in this order. Each is a
+module of the daemon (`claude.rs`, `opencode.rs`, `codex.rs`) that says how its agent starts,
+its bare environment and configuration, how it is checked ready, how it names Flottille's tools and how its models and
 efforts are read; the tree, the deliveries, the gate and the store know nothing of them.
 
 - **Enabled**: `$XDG_CONFIG_HOME/flottille/providers.toml`, one table per provider, each with
-  `enabled`, and OpenCode's with `allow_unqualified_version` (above; `false` by default, and
-  refused under `[claude]`, whose version is only ever a warning). Without the file, or without a
-  provider's table, Claude is enabled and OpenCode is not. A provider it does not know, another
+  `enabled`, and OpenCode's and Codex's with `allow_unqualified_version` (above; `false` by
+  default, and refused under `[claude]`, whose version is only ever a warning). Without the file,
+  or without a provider's table, Claude is enabled and OpenCode and Codex are not. A provider it does not know, another
   key, or a value of the wrong type is refused, naming the key at fault:
 
   ```toml
@@ -86,8 +95,8 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   `provider.enable` and `provider.disable`, `docs/protocol.md`) set `enabled` in the file, the rest
   of it kept as it is, and the window's settings page does the same with its switches.
 
-- **Ready**: enabled, its program on `PATH`, and, for OpenCode, its version the qualified one or
-  allowed (above). The version is asked (`--version`, given 5 s, off the daemon's thread) by
+- **Ready**: enabled, its program on `PATH`, for OpenCode and Codex its version the qualified one
+  or allowed (above), and for Codex no `/etc/codex` ("Bare mode for Codex", below). The version is asked (`--version`, given 5 s, off the daemon's thread) by
   `doctor`, `provider.list` and each start of an agent's process, and kept while the program's
   file does not change: an agent's start is refused at once when it is known, else the agent
   fails when its process would start. A sign-in Flottille can see (its login file is
@@ -122,8 +131,8 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   had that model. An effort asked without a model is checked against the default model's
   efforts, when they are known; until then it is taken, and a session that does not offer it
   fails the agent.
-- **Refusals** name what is available: `there is no provider codex: the providers are claude,
-  opencode`; `provider opencode is not enabled (…); the ready providers are claude`; `provider
+- **Refusals** name what is available: `there is no provider gemini: the providers are claude,
+  opencode, codex`; `provider opencode is not enabled (…); the ready providers are claude`; `provider
   opencode is not ready: `opencode` is not on PATH (…); no provider is ready: see `flottille
   doctor``; `provider claude offers no model x: it offers a, b`; `provider claude's model a
   offers no effort max: it offers low, high`; `provider claude's default model a offers no
@@ -135,7 +144,8 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
 
 - **The process**: the provider's. For Claude, `flottille bridge claude` (the daemon's own
   binary, "The Claude bridge", below); the `claude` it starts is in the same group. For OpenCode,
-  `opencode acp`, with its bare environment ("Bare mode for OpenCode", below). It runs in the
+  `opencode acp`, with its bare environment ("Bare mode for OpenCode", below). For Codex,
+  `flottille bridge codex` ("The Codex bridge", below), and the `codex app-server` it starts. It runs in the
   agent's folder, in a process group of its own, with the daemon's environment less what it has
   no business with (below). Its stderr goes to the daemon's log, masked; its stdout is the
   protocol.
@@ -345,6 +355,134 @@ after.
   never opens, so `flottille doctor` does not warn of it. A user signed in that way should sign
   in to OpenCode another way (an API key) to run its agents under Flottille.
 
+## Bare mode for Codex
+
+Codex has no ACP mode and no allowlist of tools: its agent is Flottille's bridge in front of
+`codex app-server` on stdio ("The Codex bridge", below), and its bare mode is a set of switches,
+each shutting one thing, on the command line, in the environment and in each thread. It was
+qualified against Codex 0.162.0 by reading its source (tag `rust-v0.162.0`; the places below are
+under `codex-rs/`), without running an agent: the run that proves it comes after. 0.162.1 differs
+from it only in its terminal interface (`tui/`), a test and its version number (`git diff --stat
+rust-v0.162.0 rust-v0.162.1`), so it is qualified too. A version of
+Codex can add a tool that is on by default, which is why another version is refused unless the
+user allows it (`allow_unqualified_version`), and why the bridge watches every turn.
+
+**The command line** (`codex::arguments`, table-tested): `codex -c <key>=<value> … app-server
+--listen stdio://`, each `-c` an override of the configuration that comes after the files Codex
+reads (`app-server/src/config_manager.rs:446-466`):
+
+| Override | What it shuts |
+|---|---|
+| `approval_policy="never"`, `sandbox_mode="read-only"` | No approval asked of anyone, and nothing Codex runs may write (`protocol/src/protocol.rs:1002-1042`). Read-only also keeps `thread/start` from marking the project trusted in Codex's configuration (`app-server/src/request_processors/thread_processor.rs:1349-1380`), which would load its `.codex/config.toml`, hooks and rules (`config/src/loader/mod.rs:1093-1111`): a project Codex was not told to trust loads none of them. |
+| `web_search="disabled"` | The hosted web search (`core/src/tools/hosted_spec.rs:19`). |
+| `project_doc_max_bytes=0` | The project's `AGENTS.md`, `AGENTS.override.md` and their fallbacks (`core/src/agents_md.rs:58-71`). |
+| `allow_login_shell=false`, `features.shell_tool=false`, `features.shell_snapshot=false` | The shell, `exec_command` and `write_stdin` (`core/src/tools/spec_plan.rs:1150-1165`), and the login shell Codex starts at each session to read the user's shell files (`core/src/shell_snapshot.rs:586-612`). |
+| `include_permissions_instructions=false`, `include_apps_instructions=false` | The instructions that describe a sandbox and apps the agent does not have (`config/src/config_toml.rs:256-266`). |
+| `analytics.enabled=false`, `feedback.enabled=false` | Codex's own reports (`analytics/src/client.rs:314-323`). |
+| `agents.enabled=false`, `features.multi_agent=false`, `features.multi_agent_v2=false` | Sub-agents, `spawn_agent` and the rest, whatever the model's catalogue says (`core/src/config/mod.rs:1604-1631`). |
+| `tools.experimental_request_user_input.enabled=false` | `request_user_input`, on by default (`core/src/config/mod.rs:2722-2728`). |
+| `skills.include_instructions=false`, `skills.bundled.enabled=false`, `features.skip_host_skill_discovery=true` | Skills: Codex's own, and those it finds in the home and the project (`ext/skills/src/host_roots.rs:28-185`). |
+| `features.view_image=false`, `features.image_generation=false`, `features.goals=false`, `features.sleep_tool=false`, `features.memories=false` | Each the tool of its name (`core/src/tools/spec_plan.rs:1253-1358`, `app-server/src/extensions.rs:76-88`). |
+| `features.apps=false`, `features.plugins=false`, `features.remote_plugin=false`, `features.tool_suggest=false`, `features.skill_mcp_dependency_install=false` | Apps and plugins, whose tools and MCP servers they bring, `codex_apps` among them (`codex-mcp/src/mcp/mod.rs:344-346`), the plugins' Git sync at start (`core-plugins/src/startup_sync.rs:30,77-106`), and installs. |
+| `features.hooks=false` | Hooks of any configuration (`hooks/src/engine/discovery.rs:128-186`). |
+| `features.stable_environment_tools=false`, `features.code_mode=false`, `features.code_mode_only=false` | Tools offered without an environment (`core/src/tools/spec_plan.rs:1155-1156`), and code mode, as far as a switch goes (below). |
+
+**The environment** (`codex::environment`, table-tested), set on `codex` by the bridge:
+
+| Variable | Value | What it shuts |
+|---|---|---|
+| `CODEX_HOME` | `<data>/agents/codex/codex` | The user's `config.toml`, profiles, `AGENTS.md`, rules, skills, threads and state (`utils/home-dir/src/lib.rs:13-62`, `codex-home/src/instructions/mod.rs:12-84`). Its `auth.json` is a link to the user's own login file (below). |
+| `HOME` | `<data>/agents/codex/home`, empty | `~/.agents/skills` and `~/.agents/plugins` (`ext/skills/src/host_roots.rs`, `core-plugins/src/marketplace.rs:20-24`). |
+| `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM` | `/dev/null`, `1` | The user's and the machine's Git configuration, for the read-only `git` Codex runs on its own in a repository (`git-utils/src/info.rs:39-121`, its hooks already off). |
+| `CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED` | `1` | The remote control's outbound connection (`app-server-transport/src/transport/remote_control/mod.rs:87-97`). |
+
+**Each thread** (`codex::thread`, table-tested): `thread/start` (and `thread/resume`) with the
+session's folder as `cwd`, `approvalPolicy: "never"`, `sandbox: "read-only"`, the agent's
+instructions as `baseInstructions` (in place of Codex's own), `environments: []`, and
+Flottille's server as the only MCP server of the thread's configuration; every `turn/start`
+gives `environments: []` again: `thread/resume` takes no `environments` in 0.162.0
+(`app-server-protocol/src/protocol/v2/thread.rs:354-430`), so a resumed thread has Codex's
+default environment (`core/src/thread_manager.rs:2148-2154`) until a turn gives it none.
+
+```json
+{"mcp_servers": {"flottille": {
+  "url": "http://127.0.0.1:…/mcp", "http_headers": {"Authorization": "Bearer …"},
+  "enabled_tools": ["fs_read", "…"], "required": true,
+  "default_tools_approval_mode": "approve", "omit_tools_from": ["deferred", "code_mode"],
+  "tool_timeout_sec": 600
+}}}
+```
+
+- **No environment, no built-in tool**: without one, Codex offers no command, no file patch, no
+  image view and no permission request (`app-server-protocol/src/protocol/v2/thread.rs:136-144`,
+  `core/src/tools/spec_plan.rs:1155-1358`).
+- **MCP**: Flottille's server alone, given with the thread through Codex's input, its token never
+  on a command line; only the agent's tools (`enabled_tools`), named `mcp__flottille__<tool>` for
+  the model (`codex-mcp/src/tools.rs:22,227-233`), listed upfront rather than searched for
+  (`core/src/tools/spec_plan.rs:267-275`), and approved by Codex, Flottille's gate judging each
+  call: under `never`, a call Codex would ask about is refused (`core/src/mcp_tool_call.rs:1615-1619`).
+  The MCP time limit is raised to 10 minutes, longer than a call held for the user.
+- **What stays, and reaches only Flottille's tools**: Codex adds `list_mcp_resources`,
+  `list_mcp_resource_templates` and `read_mcp_resource` whenever a thread has an MCP server, with
+  no switch (`core/src/tools/spec_plan.rs:1202-1216`): they read the resources of Codex's MCP
+  servers, here Flottille's only, which has none. Most models of Codex's catalogue run in code
+  mode whatever the switches say (`core/src/tools/mod.rs:75-85`): they get `exec` and `wait`, a
+  JavaScript sandbox (V8, no file, network or process: `code-mode-runtime/`) whose only reach is
+  the thread's other tools, and Flottille's tools are kept out of it (`omit_tools_from`), so the
+  model calls them directly. A root thread also gets `request_user_input_async` when the model's
+  catalogue lists it, as `gpt-6-luna`'s does, with no switch: it is decided by the catalogue
+  (`experimental_supported_tools`) and the session being a root one
+  (`core/src/tools/spec_plan.rs:1253-1275`); only replacing Codex's whole catalogue
+  (`model_catalog_json`) would remove it. It waits for no one: Codex answers the model
+  `{"accepted":true}` at once and reports the questions as a reply of its own, an `agentMessage`
+  item with `delivery: "async"`, never streamed
+  (`core/src/tools/handlers/request_user_input_async.rs:98-145`). The bridge passes that reply on
+  whole, so the question lands in the conversation, and the answer, if any, is the next prompt.
+  `send_message_to_user_async` does the same with a plain message, when the catalogue lists it
+  (its feature is off by default, `features/src/lib.rs:1750-1755`).
+- **What Flottille refuses**: the machine's own Codex settings, `/etc/codex` (its
+  `config.toml`, `requirements.toml`, `managed_config.toml`, rules, skills and hooks), are loaded
+  by every `codex app-server` before Flottille's switches and some after them, with no way to
+  skip them (`cli/src/main.rs:1284`, `config/src/loader/mod.rs:80,727`): while `/etc/codex`
+  exists, Codex is not ready. So are the settings a ChatGPT business, education or enterprise
+  workspace sends to Codex (`cloud-config/src/service.rs:52-60`): the bridge reads the account
+  first (`account/read`), and refuses the session on any plan but a personal one (free, go,
+  plus, pro, prolite, promax) or an API key.
+- **The watch**: an item other than the prompt, a reply, a thought, a call of Flottille's server
+  or a compaction, started or completed, is a tool of Codex's own. The two resource lists are
+  calls of Flottille's server too when the model names no server: Codex reports them as the
+  server `codex`'s (`core/src/tools/handlers/mcp_resource/list_mcp_resources.rs:79`,
+  `list_mcp_resource_templates.rs:79`). The bridge interrupts the turn and fails the prompt, and
+  so the agent, saying which; out of a prompt (a turn Codex started by itself), it interrupts
+  that turn and fails the next prompt at once, and a later `session/resume` of the thread too,
+  so that the agent fails. **The watch detects, it does not prevent**: Codex says an item has
+  started once its tool has begun (`item/started`), so the interrupt comes after the fact. What
+  holds is that Codex is never offered those tools (above); the watch is the backstop for a
+  version that would offer one. Codex's own requests to its client (approvals, questions for the
+  user, tools of the client's) are refused at once.
+- **Approval and sandbox give no gate of their own**: removing the tools is what holds. Codex
+  still compacts a long thread on its own, in the thread (`protocol/src/openai_models.rs:527-538`).
+- **The sign-in**: Codex's login stays the user's. `CODEX_HOME` of Flottille's holds `auth.json`,
+  a link the daemon makes to the user's own login file (`$CODEX_HOME/auth.json` of the user, or
+  `~/.codex/auth.json`), which Flottille never opens: Codex reads it there, and rewrites it in
+  place when it refreshes its tokens (`login/src/auth/storage.rs:214-231`), so the user's own
+  `codex` and Flottille's share one login, its refresh tokens included. Those tokens rotate, a
+  refresh making the last one void: each Codex reads the file again before it refreshes and when
+  a request is refused (`login/src/auth/manager.rs:1856-1858,2841-2870`), so the two go on with
+  whichever refreshed last. A login kept in the system's keyring is tied to the `CODEX_HOME` it
+  was made in (`login/src/auth/storage.rs:243-257`) and does not reach Flottille's agents; `CODEX_ACCESS_TOKEN` is the variable the app server takes
+  (`login/src/auth/manager.rs:1536`; it ignores `CODEX_API_KEY`, `app-server/src/lib.rs:550`).
+  Release builds of Codex refuse a `CODEX_HOME` in the temporary folder
+  (`arg0/src/lib.rs:341-356`): Flottille's data folder must not be there.
+- **What it keeps**: its threads, state and logs are in `<data>/agents/codex/codex`, apart from the
+  user's: each thread's rollout under `sessions/` (or `archived_sessions/`), with the raw output of
+  its tools, and its rows in `state_5.sqlite` and `logs_2.sqlite`. When Flottille forgets a session
+  (replaced, or its agent ended), the daemon starts `codex app-server` once more, bare, to delete
+  the thread with Codex's own `thread/delete`, which removes its rollouts and then its rows under
+  Codex's locks (`app-server/src/request_processors/thread_delete.rs`,
+  `thread-store/src/local/delete_thread.rs:95-140`, `state/src/runtime/threads.rs:1164-1208`). A
+  thread stays when Codex's agents cannot run at that moment (not enabled or not ready, above).
+
 ## The Claude bridge
 
 `flottille bridge claude` (hidden from `--help`) is an ACP agent on stdio, written in Rust inside
@@ -421,6 +559,52 @@ bridge runs one session.
 - **Its end**: its input closed or a `SIGTERM`, the bridge closes `claude`'s input, kills it if
   it is still there 2 s later, and removes the MCP configuration.
 
+## The Codex bridge
+
+`flottille bridge codex` (hidden from `--help`) is an ACP agent on stdio, written in Rust inside
+Flottille's binary, which drives the user's `codex app-server` on stdio, as the version of `codex`
+it was checked against (0.162.0 and 0.162.1) speaks it: JSON-RPC lines without a `jsonrpc` field. The daemon
+starts it as any ACP agent; it refuses a session whose options are not the daemon's (`_meta.codex`
+holds the agent's `instructions` and its `tools`, as Codex names them, and nothing else; the MCP
+servers are Flottille's HTTP one alone). One bridge runs one session.
+
+- **`codex` is started** without a shell, in the session's `cwd`, with the bridge's environment and
+  the bare one ("Bare mode for Codex", above), and the bare command line.
+- **The session opens** in order: `initialize` (the client `flottille`, with the experimental
+  API, which `environments` needs), `initialized`, `account/read` (not signed in, or signed in to a
+  workspace's plan: the open fails, saying why), `model/list`, then `thread/start` for
+  `session/new` or `thread/resume` for `session/resume`. The session id is Codex's thread id; there
+  is no `session/load`. A `codex` that ends before fails the open.
+- **What `codex` says**, mapped to ACP updates: `item/agentMessage/delta` becomes
+  `agent_message_chunk`, as does the text of an `agentMessage` item that completes without a
+  delta (a question of `request_user_input_async`, above); `item/reasoning/summaryTextDelta` and `item/reasoning/textDelta`
+  `agent_thought_chunk`; a call of Flottille's server (`mcpToolCall`) a `tool_call` (`in_progress`,
+  `mcp__flottille__<tool>` as its title, or the resource tool's own name, its arguments as
+  `rawInput`) whose id is Codex's item id,
+  and its end a `tool_call_update` (`completed` with the result's content, or `failed` with its
+  error); a `contextCompaction` a completed `tool_call` with `_meta.contextCompaction`; an `error`
+  Codex retries a `session_info_update` with a `jetbrains.air` `sessionFailure` of severity
+  `warning`. Any other item is a breach of bare mode (above).
+- **A prompt** is its text blocks, parted by a blank line, sent as one `turn/start` with the model,
+  the effort (left out when the model has none) and `environments: []`; any other block is
+  refused. `turn/completed` ends it: first a
+  `usage_update` (the context of the last request and the model's context window, as
+  `thread/tokenUsage/updated` said), then the answer with the turn's tokens and its stop reason:
+  `cancelled` for an interrupted turn, `end_turn` otherwise. A failed turn ends `end_turn` too,
+  after a `sessionFailure` of severity `error` with its message, category `limit` for
+  `usageLimitExceeded` and `rateLimitExceeded`, `service` otherwise; only a signed-out Codex
+  (`unauthorized`) fails the prompt, and so the agent.
+- **A cancel** (`session/cancel`) is a `turn/interrupt`.
+- **The model** is an option (`model`) whose values are the models `model/list` gave, hidden ones
+  left out, the thread's own first set; **the effort** an option (`effort`, category
+  `thought_level`) of the model's `supportedReasoningEfforts`, its default first set. Both go with
+  the next `turn/start`, which Codex keeps for the turns after; a model without the effort set
+  takes its own default. There is no mode option.
+- **A death**: once the session is open, the end of `codex` ends the bridge with its exit code
+  (128 and the signal for a signal), which the daemon sees as the agent's death.
+- **Its end**: its input closed or a `SIGTERM`, the bridge closes `codex`'s input and kills it if
+  it is still there 2 s later.
+
 ## The agent's environment
 
 The agent's process gets the daemon's environment less the variables its provider withholds
@@ -454,6 +638,13 @@ For OpenCode: the same forge tokens and secret-looking names, except the API key
 every `OTEL_*` one, which would send OpenCode's traces to the user's collector, its headers with
 them (`core/src/observability/otlp.ts`).
 
+For Codex: the same forge tokens and secret-looking names, except `CODEX_ACCESS_TOKEN`, its
+sign-in, and every `CODEX_*` variable of the user's (`CODEX_HOME`, which Flottille sets,
+`CODEX_SQLITE_HOME`, `CODEX_API_KEY`…), `OPENAI_*` (a key the app server would use for the
+realtime voice, not for its models), `AWS_*` (a cloud's models) and `OTEL_*`.
+`CODEX_CA_CERTIFICATE` passes: it names a certificate authority, as `SSL_CERT_FILE` does
+(`http-client/src/custom_ca.rs:61`).
+
 ## The conversation
 
 Every update the agent sends that Flottille keeps is an event of the agent (`docs/events.md`):
@@ -462,6 +653,10 @@ history Flottille already holds, as it happened: it is not stored again, and it 
 activity (`docs/reference/hemera.md` §8.7). The agent's `active_at` is the time of its last
 update outside a replay. Texts are cut at 64 KiB and say how
 much was cut (`‹+N chars›`); secrets of the daemon's environment are masked in everything kept.
+A reply is kept as it streams, one event per piece the provider sends (a token, for Codex), so
+that `watch` and the window show it as it comes; `agent.read` and `agent_read` join the pieces
+that follow each other into one line, led by the number of the first, and a reply longer than a
+line (2,000 characters) goes on, whole, on the next ones.
 
 ## The tree
 
@@ -552,8 +747,8 @@ Every 5 seconds, the daemon looks at what only time decides:
 ## For tests and development
 
 - `FLOTTILLE_AGENT_COMMAND`: a program the daemon runs in place of every provider's, with no
-  argument; `FLOTTILLE_AGENT_COMMAND_CLAUDE` and `FLOTTILLE_AGENT_COMMAND_OPENCODE`, in place of
-  one provider's (the tests run two fake agents standing for two providers this way). The
+  argument; `FLOTTILLE_AGENT_COMMAND_CLAUDE`, `FLOTTILLE_AGENT_COMMAND_OPENCODE` and
+  `FLOTTILLE_AGENT_COMMAND_CODEX`, in place of one provider's (the tests run two fake agents standing for two providers this way). The
   provider's bare environment is still set; the program stands for the provider's program and
   sign-in, so the provider is ready when it is enabled, and its version is never asked. The tests run the fake ACP agent this way (`crates/flottille-fake-agent`, whose
   script format is documented in its source). The bridge itself is tested in front of a fake
@@ -561,6 +756,8 @@ Every 5 seconds, the daemon looks at what only time decides:
 - `FLOTTILLE_BRIDGE_NO_RESUME`: set (to anything), the bridge does not offer `session/resume`, so
   that the daemon loads its sessions; the tests reach the load this way.
 - `FLOTTILLE_IDLE_RELEASE_MS`: the idle release time, in milliseconds, in place of 5 minutes.
+- `FLOTTILLE_CODEX_MACHINE_SETTINGS`: the folder checked in place of `/etc/codex` ("Bare mode for
+  Codex"), so that the tests do not depend on the machine's.
 - `FLOTTILLE_TEST_CLOCK`: set (to anything), the daemon answers `test.advance {"ms"}` on its
   socket: its clock moves that far ahead, and the sweep runs at once. The tests see minutes pass
   this way without waiting for them. Without it, `test.advance` is an unknown method.

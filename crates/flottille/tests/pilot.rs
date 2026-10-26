@@ -765,10 +765,10 @@ fn the_pilot_door_starts_an_agent_on_the_provider_model_and_effort_it_names() {
 
     let text = refused(pilot.call(
         "agent_start",
-        json!({"project": "app", "message": "go", "provider": "codex"}),
+        json!({"project": "app", "message": "go", "provider": "gemini"}),
     ));
     assert!(
-        text.contains("the providers are claude, opencode"),
+        text.contains("the providers are claude, opencode, codex"),
         "{text}"
     );
 }
