@@ -4,7 +4,7 @@
 
 mod common;
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::process::{Child, ChildStdin, ExitStatus, Output, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -326,6 +326,16 @@ impl Running {
         stdin.flush().unwrap();
     }
 
+    /// A line that may meet a program that has already gone (after `/exit`): a broken pipe
+    /// means nothing more is read, which is the behaviour the caller checks.
+    fn type_line_if_running(&mut self, line: &str) {
+        let stdin = self.stdin.as_mut().expect("standard input is closed");
+        let written = writeln!(stdin, "{line}").and_then(|()| stdin.flush());
+        if let Err(error) = written {
+            assert_eq!(error.kind(), ErrorKind::BrokenPipe, "{error}");
+        }
+    }
+
     /// Ctrl+D.
     fn close_input(&mut self) {
         self.stdin = None;
@@ -366,13 +376,12 @@ impl Running {
         }
     }
 
-    /// Waits for the command to end: how, what it printed, what it said.
-    fn finish(mut self) -> (ExitStatus, String, String) {
-        self.stdin = None;
+    /// Waits for the command to end, without closing its standard input.
+    fn wait_exit(&mut self) -> ExitStatus {
         let deadline = Instant::now() + Duration::from_secs(20);
-        let status = loop {
+        loop {
             if let Some(status) = self.child.try_wait().unwrap() {
-                break status;
+                return status;
             }
             if Instant::now() > deadline {
                 let _ = self.child.kill();
@@ -382,7 +391,13 @@ impl Running {
                 );
             }
             std::thread::sleep(Duration::from_millis(20));
-        };
+        }
+    }
+
+    /// Waits for the command to end: how, what it printed, what it said.
+    fn finish(mut self) -> (ExitStatus, String, String) {
+        self.stdin = None;
+        let status = self.wait_exit();
         while self.take(Duration::from_millis(200)).is_some() {}
         (status, self.out, self.err)
     }
@@ -620,11 +635,30 @@ fn chat_slash_exit_leaves_and_another_line_starting_with_a_slash_is_a_message() 
     chat.type_line("/etc/hosts looks odd");
     chat.wait_for("ok\n", false);
     chat.type_line("/exit");
-    chat.type_line("GREET after the exit");
+    chat.type_line_if_running("GREET after the exit");
 
     let (status, out, _) = chat.finish();
     assert!(status.success());
     assert!(prompted_with(&user, "/etc/hosts looks odd"));
+    assert!(
+        !prompted_with(&user, "after the exit"),
+        "nothing is read after /exit: {out}"
+    );
+    assert_eq!(agent_state(&user, &agent), "idle");
+}
+
+#[test]
+fn chat_a_line_typed_once_the_program_has_exited_is_not_read() {
+    let user = user();
+    let agent = idle_agent(&user);
+    let mut chat = Running::start(&user, &["agent", "chat", &agent]);
+
+    chat.type_line("/exit");
+    chat.wait_exit();
+    chat.type_line_if_running("GREET after the exit");
+
+    let (status, out, _) = chat.finish();
+    assert!(status.success());
     assert!(
         !prompted_with(&user, "after the exit"),
         "nothing is read after /exit: {out}"
