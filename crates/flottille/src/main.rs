@@ -7,6 +7,8 @@ mod bridge;
 mod chat;
 mod claude;
 mod client;
+mod codex;
+mod codex_bridge;
 mod daemon;
 mod deliveries;
 mod files;
@@ -161,6 +163,8 @@ enum ProviderAction {
 enum BridgeAgent {
     /// The user's own `claude`, in its stream-json mode
     Claude,
+    /// The user's own `codex`, its app server on stdio
+    Codex,
 }
 
 #[derive(Subcommand)]
@@ -247,6 +251,9 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Bridge {
             agent: BridgeAgent::Claude,
         } => return bridge::run(&paths),
+        Command::Bridge {
+            agent: BridgeAgent::Codex,
+        } => return codex_bridge::run(&paths),
         Command::Window => {
             let paths = paths.clone();
             flottille_window::run(std::sync::Arc::new(move || {

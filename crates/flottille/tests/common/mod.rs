@@ -68,12 +68,13 @@ impl User {
             .with_env("FLOTTILLE_FAKE_AGENT_DIR", dir.to_str().unwrap())
     }
 
-    /// A user with two providers, Claude and OpenCode, both enabled, each standing on a fake ACP
-    /// agent of its own: the per-provider test overrides name a link to the fake agent in the
-    /// folders `fake-claude` and `fake-opencode`, which the fake agent takes for its own folder.
+    /// A user with three providers, Claude, OpenCode and Codex, the first two enabled, each
+    /// standing on a fake ACP agent of its own: the per-provider test overrides name a link to the
+    /// fake agent in the folders `fake-claude`, `fake-opencode` and `fake-codex`, which the fake
+    /// agent takes for its own folder.
     pub fn with_fake_providers() -> User {
         let mut user = User::new();
-        for provider in ["claude", "opencode"] {
+        for provider in ["claude", "opencode", "codex"] {
             let dir = user.path(&format!("fake-{provider}"));
             std::fs::create_dir(&dir).unwrap();
             std::os::unix::fs::symlink(fake_agent(), dir.join("agent")).unwrap();
@@ -150,6 +151,33 @@ impl User {
             .into_iter()
             .filter_map(|entry| entry.get("started").cloned())
             .collect()
+    }
+
+    /// A user whose agents run through Flottille's Codex bridge in front of the fake `codex`
+    /// (`crates/flottille-fake-codex`): `bin/codex` first in `PATH`, its folder `codex`.
+    pub fn with_fake_codex() -> User {
+        let user = User::new();
+        std::fs::create_dir(user.path("codex")).unwrap();
+        std::fs::create_dir(user.path("bin")).unwrap();
+        std::os::unix::fs::symlink(fake_codex(), user.path("bin/codex")).unwrap();
+        let path = format!(
+            "{}:{}",
+            user.path("bin").display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let dir = user.path("codex");
+        user.with_env("PATH", &path)
+            .with_env("FLOTTILLE_FAKE_CODEX_DIR", dir.to_str().unwrap())
+    }
+
+    /// The fake `codex`'s script.
+    pub fn codex_script(&self, script: Value) {
+        std::fs::write(self.path("codex/script.json"), script.to_string()).unwrap();
+    }
+
+    /// What the fake `codex` was started with, read and was answered, one entry per line.
+    pub fn codex_received(&self) -> Vec<Value> {
+        records(&self.path("codex/received.jsonl"))
     }
 
     /// The fake agent's script (`crates/flottille-fake-agent`).
@@ -345,6 +373,8 @@ fn command_for(program: &Path, dir: &Path, env: &[(String, String)], args: &[&st
         .env("XDG_STATE_HOME", dir.join("state"))
         .env("XDG_CONFIG_HOME", dir.join("config"))
         .env("XDG_DATA_HOME", dir.join("data"))
+        // Codex's machine settings are the test's own, not the machine's `/etc/codex`.
+        .env("FLOTTILLE_CODEX_MACHINE_SETTINGS", dir.join("etc-codex"))
         .envs(env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::null());
     // The daemon runs git: never with the machine's settings.
@@ -422,6 +452,17 @@ pub fn fake_claude() -> PathBuf {
     assert!(
         path.exists(),
         "{} is missing: run the tests from the workspace's root, or `cargo build -p flottille-fake-claude` first",
+        path.display()
+    );
+    path
+}
+
+/// The fake `codex`'s binary, built beside Flottille's as the fake agent is.
+pub fn fake_codex() -> PathBuf {
+    let path = Path::new(env!("CARGO_BIN_EXE_flottille")).with_file_name("flottille-fake-codex");
+    assert!(
+        path.exists(),
+        "{} is missing: run the tests from the workspace's root, or `cargo build -p flottille-fake-codex` first",
         path.display()
     );
     path

@@ -1,4 +1,4 @@
-//! `flottille doctor`, with a fake PATH: no real `claude` nor `opencode` is ever run.
+//! `flottille doctor`, with a fake PATH: no real `claude`, `opencode` nor `codex` is ever run.
 
 mod common;
 
@@ -282,5 +282,143 @@ fn there_is_no_agent_install_any_more() {
     assert!(
         stderr.contains("unrecognized subcommand 'install'"),
         "{stderr}"
+    );
+}
+
+fn codex(user: &User, version: &str) {
+    write_script(
+        &user.path("bin/codex"),
+        &format!("#!/bin/sh\n[ \"$1\" = --version ] && echo 'codex-cli {version}'\n"),
+    );
+}
+
+#[test]
+fn doctor_reports_codex_enabled_or_not_ready_or_not_by_sign_in_or_by_key() {
+    // Disabled by default.
+    let user = user_with_bin();
+    claude(&user, "2.1.295");
+    login(&user);
+    codex(&user, "0.162.0");
+    let (ok, report, _) = doctor(&user);
+    assert!(ok, "{report}");
+    let codex_of = |report: &Value| report["providers"][2].clone();
+    assert_eq!(codex_of(&report)["name"], "codex");
+    assert_eq!(codex_of(&report)["enabled"], false);
+
+    // Enabled, on PATH, signed in by its access token, which is never shown.
+    std::fs::create_dir_all(user.path("config/flottille")).unwrap();
+    std::fs::write(
+        user.path("config/flottille/providers.toml"),
+        "[codex]\nenabled = true\n",
+    )
+    .unwrap();
+    let user = user.with_env("CODEX_ACCESS_TOKEN", "invented-codex-token");
+    let (ok, report, text) = doctor(&user);
+    assert!(ok, "{report}");
+    let entry = codex_of(&report);
+    assert_eq!(entry["ready"], true, "{report}");
+    assert_eq!(entry["program"]["version"], "0.162.0");
+    assert_eq!(entry["program"]["checked"], "0.162.0");
+    assert_eq!(entry["login"]["present"], false);
+    assert_eq!(entry["login"]["api_key"], "CODEX_ACCESS_TOKEN");
+    assert!(!report.to_string().contains("invented"), "{report}");
+    assert!(!text.contains("invented"), "{text}");
+    assert!(text.contains("Codex agents can run"), "{text}");
+
+    // By its login file, never read, in `~/.codex` or `$CODEX_HOME`.
+    let user = user.with_env("CODEX_ACCESS_TOKEN", "");
+    let file = user.path("home/.codex/auth.json");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "invented").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let (_, report, _) = doctor(&user);
+    let login = &codex_of(&report)["login"];
+    assert_eq!(login["present"], true, "{report}");
+    assert_eq!(login["path"], file.to_str().unwrap());
+    assert_eq!(login["api_key"], Value::Null);
+    let elsewhere = user.path("codex-home");
+    let user = user.with_env("CODEX_HOME", elsewhere.to_str().unwrap());
+    let (ok, report, _) = doctor(&user);
+    let login = &codex_of(&report)["login"];
+    assert_eq!(login["present"], false, "{report}");
+    assert_eq!(login["path"], elsewhere.join("auth.json").to_str().unwrap());
+
+    // Neither: ready, with a warning saying how to sign in.
+    assert!(ok, "{report}");
+    assert_eq!(codex_of(&report)["ready"], true);
+    let warnings = report["warnings"].to_string();
+    assert!(
+        warnings.contains("Codex is not signed in") && warnings.contains("codex login"),
+        "{report}"
+    );
+
+    // Another version: its bare mode is not qualified there, so it is not ready.
+    codex(&user, "0.163.0");
+    let (ok, report, text) = doctor(&user);
+    assert!(!ok, "{report}");
+    let why = codex_of(&report)["why"].as_str().unwrap().to_owned();
+    assert!(why.contains("codex is 0.163.0"), "{why}");
+    assert!(
+        why.contains("only 0.162.0 and 0.162.1 were qualified"),
+        "{why}"
+    );
+    assert!(text.contains("Codex agents cannot run"), "{text}");
+
+    // Not on PATH: not ready.
+    std::fs::remove_file(user.path("bin/codex")).unwrap();
+    let (ok, report, _) = doctor(&user);
+    assert!(!ok, "{report}");
+    let why = codex_of(&report)["why"].as_str().unwrap().to_owned();
+    assert!(why.contains("`codex` is not on PATH"), "{why}");
+}
+
+/// Codex enabled and signed in by its access token, at that version.
+fn user_with_codex(version: &str) -> User {
+    let user = user_with_bin();
+    claude(&user, "2.1.295");
+    login(&user);
+    codex(&user, version);
+    std::fs::create_dir_all(user.path("config/flottille")).unwrap();
+    std::fs::write(
+        user.path("config/flottille/providers.toml"),
+        "[codex]\nenabled = true\n",
+    )
+    .unwrap();
+    user.with_env("CODEX_ACCESS_TOKEN", "invented-codex-token")
+}
+
+#[test]
+fn doctor_reports_codex_not_ready_while_the_machine_has_codex_settings() {
+    let user = user_with_codex("0.162.0");
+    let (ok, report, _) = doctor(&user);
+    assert!(ok, "{report}");
+    assert_eq!(report["providers"][2]["ready"], true, "{report}");
+
+    // The machine's own Codex folder, here a test's own in place of `/etc/codex`.
+    let settings = user.path("etc-codex");
+    std::fs::create_dir(&settings).unwrap();
+    let (ok, report, _) = doctor(&user);
+
+    assert!(!ok, "{report}");
+    let why = report["providers"][2]["why"].as_str().unwrap().to_owned();
+    assert!(
+        why.contains(&format!("{} exists", settings.display())),
+        "{why}"
+    );
+}
+
+#[test]
+fn doctor_takes_codex_0_162_1_as_qualified_too() {
+    let user = user_with_codex("0.162.1");
+
+    let (ok, report, _) = doctor(&user);
+
+    assert!(ok, "{report}");
+    let entry = &report["providers"][2];
+    assert_eq!(entry["ready"], true, "{report}");
+    assert_eq!(entry["program"]["version"], "0.162.1");
+    assert!(
+        !report["warnings"].to_string().contains("0.162.1"),
+        "{report}"
     );
 }

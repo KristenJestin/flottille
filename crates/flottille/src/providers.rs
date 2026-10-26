@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
 use crate::projects::{self, Failure};
-use crate::{claude, opencode};
+use crate::{claude, codex, opencode};
 
 /// The name of Flottille's MCP server, the only one an agent has.
 pub const MCP_SERVER: &str = "flottille";
@@ -36,6 +36,8 @@ pub struct Provider {
     pub program: &'static str,
     /// The version of `program` this entry was checked against.
     pub checked: &'static str,
+    /// Other versions whose bare mode was qualified as well.
+    pub also_qualified: &'static [&'static str],
     /// What another version may have changed, for the warning that names both.
     pub may_change: &'static str,
     /// What to do when `program` is missing.
@@ -59,6 +61,9 @@ pub struct Provider {
     pub env: fn(&Paths, &Agent) -> Result<Env, String>,
     /// `_meta` of `session/new`, `session/load` and `session/resume`.
     pub session_meta: fn(&str, &[String]) -> Value,
+    /// Why its agents cannot run on this machine whatever the user does in Flottille, as a
+    /// clause after the provider's name; `None` when nothing stops them.
+    pub unready: fn() -> Option<String>,
     /// The process of that pid is gone: what Flottille kept for it goes.
     pub forget_process: fn(&Paths, u32),
     /// A session of the agent is over (replaced, or the agent ended).
@@ -74,7 +79,7 @@ pub type Program = (PathBuf, Vec<OsString>);
 /// Variables set for a process.
 pub type Env = Vec<(OsString, OsString)>;
 
-pub static PROVIDERS: [&Provider; 2] = [&claude::PROVIDER, &opencode::PROVIDER];
+pub static PROVIDERS: [&Provider; 3] = [&claude::PROVIDER, &opencode::PROVIDER, &codex::PROVIDER];
 
 /// The provider of that name.
 pub fn get(name: &str) -> Option<&'static Provider> {
@@ -168,12 +173,17 @@ pub fn startable(paths: &Paths, provider: &'static Provider) -> Result<(), Strin
 }
 
 /// The test override of the provider's agent, when one is set.
-fn overridden(provider: &Provider) -> Option<PathBuf> {
+pub fn overridden(provider: &Provider) -> Option<PathBuf> {
     let own = format!("FLOTTILLE_AGENT_COMMAND_{}", provider.name.to_uppercase());
     std::env::var_os(own)
         .or_else(|| std::env::var_os("FLOTTILLE_AGENT_COMMAND"))
         .filter(|program| !program.is_empty())
         .map(PathBuf::from)
+}
+
+/// Nothing on the machine stops the provider's agents.
+pub fn ready_here() -> Option<String> {
+    None
 }
 
 /// Forge tokens and the folders of their command lines' configuration, and any variable named
@@ -300,22 +310,29 @@ impl Check {
                 provider.program, provider.install
             ));
         }
+        if let Some(why) = (provider.unready)() {
+            return Some(why);
+        }
         if self.version_refused() {
             let allow = format!(
                 "`allow_unqualified_version = true` under [{}] in providers.toml runs it anyway, \
                  at the user's own risk",
                 provider.name
             );
+            let qualified = match provider.also_qualified {
+                [] => format!("{} was", provider.checked),
+                more => format!("{} and {} were", provider.checked, more.join(" and ")),
+            };
             return Some(match &self.version {
                 Some(version) => format!(
-                    "is not ready: {} is {version}, and only {} was qualified for its bare mode \
-                     ({allow})",
-                    provider.program, provider.checked
+                    "is not ready: {} is {version}, and only {qualified} qualified for its bare \
+                     mode ({allow})",
+                    provider.program
                 ),
                 None => format!(
-                    "is not ready: `{} --version` did not say its version, and only {} was \
+                    "is not ready: `{} --version` did not say its version, and only {qualified} \
                      qualified for its bare mode ({allow})",
-                    provider.program, provider.checked
+                    provider.program
                 ),
             });
         }
@@ -330,7 +347,11 @@ impl Check {
         provider::QUALIFIED_ONLY.contains(&self.provider.name)
             && !self.unqualified_allowed
             && self.version_read
-            && self.version.as_deref() != Some(self.provider.checked)
+            && !self.version.as_deref().is_some_and(|v| self.qualified(v))
+    }
+
+    fn qualified(&self, version: &str) -> bool {
+        version == self.provider.checked || self.provider.also_qualified.contains(&version)
     }
 
     pub fn ready(&self) -> bool {
@@ -343,7 +364,7 @@ impl Check {
         let provider = self.provider;
         let mut warnings = Vec::new();
         if let Some(version) = self.version.as_deref()
-            && version != provider.checked
+            && !self.qualified(version)
             && !self.version_refused()
         {
             warnings.push(format!(

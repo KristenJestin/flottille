@@ -486,31 +486,78 @@ pub struct Page {
     pub more: bool,
 }
 
-/// The agent's conversation after the event `after`, at most `READ_PAGE` characters of it.
+/// The agent's conversation after the event `after`, at most `READ_PAGE` characters of it. A
+/// message streamed in pieces is one line, led by the number of its first piece; a long one goes
+/// on, whole, on the next lines, each of `LINE_CHARS` at most.
 pub fn conversation(daemon: &Daemon, agent: &Agent, after: u64) -> flottille_core::Result<Page> {
-    let mut after = after;
-    let mut lines: Vec<String> = Vec::new();
+    let mut page = Page {
+        lines: Vec::new(),
+        after,
+        more: false,
+    };
     let mut size = 0;
-    let mut more = false;
+    // A line, unless the page is full: it ends after the event `last`.
+    let mut add = |page: &mut Page, first: u64, last: u64, line: String| {
+        let line = format!("#{first} {line}");
+        if size + line.len() > READ_PAGE && !page.lines.is_empty() {
+            page.more = true;
+            return false;
+        }
+        size += line.len() + 1;
+        page.lines.push(line);
+        page.after = last;
+        true
+    };
+    // The message being joined: the numbers of its first and last pieces, and its text.
+    let mut said: Option<(u64, u64, String)> = None;
+    let said_line = |text: String| conversation_line("agent.message", &json!({"text": text}));
+    let mut read = after;
     'pages: loop {
-        let events = daemon.read(|store| store.agent_events(&agent.id, after, 200))?;
+        let events = daemon.read(|store| store.agent_events(&agent.id, read, 200))?;
         if events.is_empty() {
             break;
         }
         for event in events {
-            if let Some(line) = conversation_line(&event.name, &event.data) {
-                let line = format!("#{} {line}", event.seq);
-                if size + line.len() > READ_PAGE && !lines.is_empty() {
-                    more = true;
+            read = event.seq;
+            if event.name == "agent.message" {
+                let piece = event.data["text"].as_str().unwrap_or_default();
+                match &mut said {
+                    Some((_, last, text))
+                        if text.chars().count() + piece.chars().count() <= LINE_CHARS =>
+                    {
+                        *last = event.seq;
+                        text.push_str(piece);
+                        continue;
+                    }
+                    _ => {}
+                }
+                if let Some((first, last, text)) = said.take()
+                    && !add(&mut page, first, last, said_line(text).unwrap_or_default())
+                {
                     break 'pages;
                 }
-                size += line.len() + 1;
-                lines.push(line);
+                said = Some((event.seq, event.seq, piece.to_owned()));
+                continue;
             }
-            after = event.seq;
+            if let Some((first, last, text)) = said.take()
+                && !add(&mut page, first, last, said_line(text).unwrap_or_default())
+            {
+                break 'pages;
+            }
+            match conversation_line(&event.name, &event.data) {
+                Some(line) => {
+                    if !add(&mut page, event.seq, event.seq, line) {
+                        break 'pages;
+                    }
+                }
+                None => page.after = event.seq,
+            }
         }
     }
-    Ok(Page { lines, after, more })
+    if let Some((first, last, text)) = said.take().filter(|_| !page.more) {
+        add(&mut page, first, last, said_line(text).unwrap_or_default());
+    }
+    Ok(page)
 }
 
 fn read(daemon: &Daemon, caller: &Agent, args: Value) -> Done {
