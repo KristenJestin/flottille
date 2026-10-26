@@ -63,6 +63,11 @@ impl Paths {
         self.runtime.join("daemon.lock")
     }
 
+    /// Held by the daemon that works on the store, for its whole life.
+    pub fn store_lock(&self) -> PathBuf {
+        self.state.join("store.lock")
+    }
+
     pub fn database(&self) -> PathBuf {
         self.state.join("flottille.db")
     }

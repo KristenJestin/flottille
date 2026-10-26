@@ -46,6 +46,7 @@ pub fn run(paths: &Paths) -> Result<()> {
     ensure_private_dir(&paths.runtime)?;
     ensure_private_dir(&paths.state)?;
     let _lock = take_lock(paths)?;
+    let _store_lock = hold_store(paths)?;
     let store = Store::open(&paths.database())?;
     // Before anything starts an agent: what a daemon that died left running is its own to kill.
     agents::kill_orphans(&store);
@@ -78,6 +79,34 @@ fn take_lock(paths: &Paths) -> Result<File> {
         Err(TryLockError::Error(error)) => return Err(error.into()),
     }
     lock.set_permissions(std::fs::Permissions::from_mode(RUNTIME_FILE))?;
+    lock.set_len(0)?;
+    writeln!(lock, "{}", std::process::id())?;
+    Ok(lock)
+}
+
+/// The runtime lock does not see a daemon whose runtime folder was removed: it may still be
+/// stopping its agents, and settling or killing them under it would undo what it writes. The store
+/// stays its until it exits; a daemon that died lets go of it as it does of the runtime lock.
+fn hold_store(paths: &Paths) -> Result<File> {
+    let mut lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(paths.store_lock())?;
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => {
+            let pid = std::fs::read_to_string(paths.store_lock()).unwrap_or_default();
+            eprintln!(
+                "flottille daemon: waiting for the daemon {} to stop, which still holds the store",
+                pid.trim()
+            );
+            lock.lock()?;
+        }
+        Err(TryLockError::Error(error)) => return Err(error.into()),
+    }
     lock.set_len(0)?;
     writeln!(lock, "{}", std::process::id())?;
     Ok(lock)
