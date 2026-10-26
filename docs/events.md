@@ -69,6 +69,16 @@ A project already there when the daemon starts is not announced, and a file that
 neither a change nor a removal: the project it was stays as it was until the file is fixed or taken
 away.
 
+### `provider.changed`
+
+A provider was enabled or disabled through the daemon (`provider.enable`, `provider.disable`).
+An edit of `providers.toml` by hand is not announced: it is read again at the next check.
+
+| Field | |
+|---|---|
+| `name` | The provider's name. |
+| `enabled` | Whether it is enabled now. |
+
 ### `workspace.created`
 
 A workspace was written, before anything is made on disk (`docs/workspaces.md`). Every event of a

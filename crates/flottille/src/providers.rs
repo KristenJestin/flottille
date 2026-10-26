@@ -738,11 +738,98 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
                 .await
                 .map_err(|e| Failure::new("unavailable", e.to_string()))?
         }
+        "provider.enable" | "provider.disable" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Named {
+                name: String,
+            }
+            let Named { name } = serde_json::from_value(params)?;
+            let enabled = method == "provider.enable";
+            let provider = get(&name).ok_or_else(|| {
+                Failure::new(
+                    "not-found",
+                    format!(
+                        "there is no provider {name}: the providers are {}",
+                        provider::NAMES.join(", ")
+                    ),
+                )
+            })?;
+            if set_enabled(&daemon.paths, provider.name, enabled)? {
+                daemon
+                    .emit(
+                        "provider.changed",
+                        json!({"name": provider.name, "enabled": enabled}),
+                    )
+                    .map_err(|error| Failure::new("unavailable", error.to_string()))?;
+            }
+            Ok(json!({"name": provider.name, "enabled": enabled}))
+        }
         method => Err(Failure::new(
             "unknown-method",
             format!("unknown method `{method}`"),
         )),
     }
+}
+
+/// One change of `providers.toml` at a time: each reads what the one before wrote.
+static WRITING: Mutex<()> = Mutex::new(());
+
+/// Sets `enabled` under the provider's table of `providers.toml`, the rest of the file kept as
+/// the user wrote it, comments included; the file is made when there is none. Whether it
+/// changed. A file the daemon cannot read is refused and left as it is.
+fn set_enabled(paths: &Paths, name: &str, enabled: bool) -> Result<bool, Failure> {
+    let _writing = WRITING.lock().unwrap();
+    let file = provider::file(paths);
+    let unavailable =
+        |error: std::io::Error| Failure::new("unavailable", format!("providers.toml: {error}"));
+    let text = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(unavailable(error)),
+    };
+    let before = Settings::parse(&text).map_err(|error| Failure::new("invalid-config", error))?;
+    if before.enabled(name) == enabled {
+        return Ok(false);
+    }
+    let mut document: toml_edit::DocumentMut =
+        text.parse().map_err(|error: toml_edit::TomlError| {
+            Failure::new(
+                "invalid-config",
+                format!("providers.toml: {}", error.message()),
+            )
+        })?;
+    if !document.contains_key(name) {
+        document.insert(name, toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    let table = document[name].as_table_like_mut().ok_or_else(|| {
+        Failure::new(
+            "invalid-config",
+            format!("providers.toml: {name}: not a table"),
+        )
+    })?;
+    match table
+        .get_mut("enabled")
+        .and_then(toml_edit::Item::as_value_mut)
+    {
+        // The comment after the value stays with it.
+        Some(value) => {
+            let decor = value.decor().clone();
+            *value = enabled.into();
+            *value.decor_mut() = decor;
+        }
+        None => {
+            table.insert("enabled", toml_edit::value(enabled));
+        }
+    }
+    let text = document.to_string();
+    Settings::parse(&text).map_err(|error| Failure::new("invalid-config", error))?;
+    // A reader sees the old file or the new one, never half of one.
+    std::fs::create_dir_all(&paths.config).map_err(unavailable)?;
+    let writing = paths.config.join(".providers.toml.tmp");
+    std::fs::write(&writing, text).map_err(unavailable)?;
+    std::fs::rename(&writing, &file).map_err(unavailable)?;
+    Ok(true)
 }
 
 /// Every provider as `doctor` reports it, with the models it offers (`null` until a session of

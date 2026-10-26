@@ -644,3 +644,134 @@ fn the_models_are_forgotten_when_the_api_keys_set_change_and_learned_again_from_
     });
     assert_eq!(models(&user)[1]["id"], "fake-large");
 }
+
+/// The user's `providers.toml`, as the daemon left it.
+fn providers_file(user: &User) -> String {
+    std::fs::read_to_string(user.path("config/flottille/providers.toml")).unwrap()
+}
+
+/// The provider of that name, as `provider.list` gives it.
+fn listed(user: &User, name: &str) -> Value {
+    user.call("provider.list", Value::Null).unwrap()["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == name)
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn a_provider_disabled_then_enabled_is_written_in_providers_toml_with_its_comments_and_announced() {
+    let user = User::with_fake_providers();
+    user.write_providers(
+        "# Which agents run here.\n[opencode]\nenabled = true # tried in October\n\
+         allow_unqualified_version = false\n",
+    );
+
+    let disabled = user
+        .call("provider.disable", json!({"name": "opencode"}))
+        .unwrap();
+
+    assert_eq!(disabled, json!({"name": "opencode", "enabled": false}));
+    let text = providers_file(&user);
+    assert!(text.contains("# Which agents run here."), "{text}");
+    assert!(
+        text.contains("enabled = false # tried in October"),
+        "{text}"
+    );
+    assert!(text.contains("allow_unqualified_version = false"), "{text}");
+    let opencode = listed(&user, "opencode");
+    assert_eq!(opencode["enabled"], false);
+    assert!(
+        opencode["why"]
+            .as_str()
+            .unwrap()
+            .starts_with("is not enabled"),
+        "{opencode}"
+    );
+
+    // Disabled again: nothing changes, nothing is announced.
+    let again = user
+        .call("provider.disable", json!({"name": "opencode"}))
+        .unwrap();
+    assert_eq!(again, json!({"name": "opencode", "enabled": false}));
+    // Claude has no table yet: one is added for it.
+    user.call("provider.disable", json!({"name": "claude"}))
+        .unwrap();
+    user.call("provider.enable", json!({"name": "claude"}))
+        .unwrap();
+    user.call("provider.enable", json!({"name": "opencode"}))
+        .unwrap();
+
+    let text = providers_file(&user);
+    assert!(text.contains("[claude]\nenabled = true"), "{text}");
+    assert!(text.contains("enabled = true # tried in October"), "{text}");
+    assert_eq!(listed(&user, "claude")["enabled"], true);
+    assert_eq!(listed(&user, "opencode")["enabled"], true);
+    let watch = user.watch(&["--after", "0"]);
+    let changes: Vec<Value> = watch
+        .until(|e| {
+            e["name"] == "provider.changed"
+                && e["data"]["name"] == "opencode"
+                && e["data"]["enabled"] == true
+        })
+        .into_iter()
+        .filter(|e| e["name"] == "provider.changed")
+        .map(|e| e["data"].clone())
+        .collect();
+    assert_eq!(
+        changes,
+        [
+            json!({"name": "opencode", "enabled": false}),
+            json!({"name": "claude", "enabled": false}),
+            json!({"name": "claude", "enabled": true}),
+            json!({"name": "opencode", "enabled": true}),
+        ]
+    );
+}
+
+#[test]
+fn an_unknown_provider_or_a_providers_toml_that_cannot_be_read_is_refused_and_left_as_it_is() {
+    let user = User::with_fake_providers();
+
+    let (code, message) = user
+        .call("provider.enable", json!({"name": "codex"}))
+        .unwrap_err();
+    assert_eq!(code, "not-found");
+    assert_eq!(
+        message,
+        "there is no provider codex: the providers are claude, opencode"
+    );
+    let (code, _) = user
+        .call(
+            "provider.enable",
+            json!({"name": "claude", "enabled": true}),
+        )
+        .unwrap_err();
+    assert_eq!(code, "invalid-params");
+
+    let broken = "[opencode]\nenabled = \"yes\"\n";
+    user.write_providers(broken);
+    let (code, message) = user
+        .call("provider.disable", json!({"name": "opencode"}))
+        .unwrap_err();
+    assert_eq!(code, "invalid-config");
+    assert!(
+        message.starts_with("providers.toml: opencode.enabled: "),
+        "{message}"
+    );
+    assert_eq!(providers_file(&user), broken);
+}
+
+#[test]
+fn without_a_providers_toml_enabling_a_provider_writes_one() {
+    let user = User::with_fake_providers();
+    std::fs::remove_file(user.path("config/flottille/providers.toml")).unwrap();
+
+    user.call("provider.enable", json!({"name": "opencode"}))
+        .unwrap();
+
+    assert_eq!(providers_file(&user), "[opencode]\nenabled = true\n");
+    assert_eq!(listed(&user, "opencode")["ready"], true);
+}
