@@ -115,11 +115,12 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   marked `"default": true` among the models once a session said it. Its effort is the one asked,
   else the model's default.
 - **The models**: what a session of the provider's agent offers in its config options (the
-  `model` option's values, and the `thought_level` option's for the model the session has), kept
-  by the daemon per provider (`provider_models` in the store), and learned again from every
-  session that opens. They are kept with the program they came from (its path and modification
-  time) and the names of the provider's API keys set (never their values): another version of
-  the program, or another set of keys in the daemon's environment, forgets them. They stay
+  `model` option's values and their names, and the `thought_level` option's for the model the
+  session has), kept by the daemon per provider (`provider_models` in the store), and learned
+  again from every session that opens. They are kept with the program they came from (its path and modification
+  time) and the names of the provider's API keys set (never their values): with another version
+  of the program, or another set of keys in the daemon's environment, they are only shown,
+  outdated (`provider.list`), and refuse nothing until a session says them again. They stay
   approximate: what the provider offers also depends on what neither says, its sign-in file
   (signing in or out with `opencode auth login`), OpenCode's model catalogue (fetched from
   `models.dev`, `core/src/models-dev.ts`) and its own state, and such a change shows only at the
