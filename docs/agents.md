@@ -14,7 +14,7 @@ woken only by deliveries. Flottille's MCP server and its tools are in `docs/tool
 
 | Command | |
 |---|---|
-| `flottille agent run <project> [--workspace <name>] [--provider <provider>] [--model <model>] [--effort <effort>] <message>` | Starts an agent with a first message and prints its reply as it comes, until the turn ends. Fails when the agent fails or its process dies. `--json` prints the agent instead, once the turn ended. |
+| `flottille agent run <project> [--workspace <name>] [--provider <provider>] [--model <model>] [--effort <effort>] <message>` | Starts an agent with a first message and prints its reply as it comes, until the turn ends. Fails when the agent fails or its process dies. `--json` prints the agent object instead (its id is `.id`), once the turn ended. |
 | `flottille agent show <agent> [--json]` | The agent (its provider and model among the rest) and its conversation. |
 | `flottille provider enable <provider>`, `flottille provider disable <provider>` | Enables or disables a provider in `providers.toml` ("Providers", below). |
 | `flottille doctor [--json]` | Each provider: enabled or not, whether its agents can run here and why not. Fails when no provider is enabled or an enabled one cannot run. |

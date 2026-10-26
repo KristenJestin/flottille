@@ -288,8 +288,9 @@ Follow it with `flottille agent read bd7ed8152969`, or `flottille watch --after 
 ### `flottille agent run <project> <message>`
 
 `start`, then follows the agent and prints its reply until its first turn ends: for trying an
-agent by hand. Same options as `start`, except `--role`. `--json` prints the agent once the turn
-ended, as `agent show --json` does. (It is `start` followed by `watch`, nothing more.) It follows
+agent by hand. Same options as `start`, except `--role`. `--json` prints nothing while the turn
+runs, then the agent alone, the object under `agent` in `agent show --json` (its id is `.id`, not
+`.agent.id`). (It is `start` followed by `watch`, nothing more.) It follows
 the turn as `send --follow` does, below.
 
 ### `flottille agent send <agent> <message>`
