@@ -12,7 +12,7 @@
 //!   (`{"pid", "received": <the message>}`), and the answers to its own requests
 //!   (`{"pid", "answered": <the answer>}`);
 //! - `threads/<id>`, one empty file per thread `thread/start` made: `thread/resume` of a thread
-//!   that has none fails, as the real one does.
+//!   that has none fails, as the real one does, and `thread/delete` removes it.
 //!
 //! # The script
 //!
@@ -23,14 +23,17 @@
 //! `account`, when given, replaces the account `account/read` answers (`null`: not signed in);
 //! `models` the models `model/list` answers (`MODELS`). A prompt plays the first turn whose
 //! `when` is in its text; a prompt matching none is answered `ok`. A turn whose `error` is given
-//! (`{"message", "codexErrorInfo"}`) ends `failed` with it.
+//! (`{"message", "codexErrorInfo"}`) ends `failed` with it. A turn's `then` is the steps of a
+//! turn Codex starts on its own once that one completed (its id `own-<n>`). With `answer_late`,
+//! the answer to `turn/start` comes after the turn completed, as Codex may send it.
 //!
 //! | Step | What the fake does |
 //! |---|---|
 //! | `{"say": "text"}` | an `agentMessage` item, its text as one delta |
 //! | `{"think": "text"}` | a `reasoning` item, its text as one summary delta |
-//! | `{"tool": {"id", "tool", "arguments", "result", "error"}}` | an `mcpToolCall` item of the server `flottille`, completed with the result, or failed with the error |
+//! | `{"tool": {"id", "server", "tool", "arguments", "result", "error"}}` | an `mcpToolCall` item of the server (`flottille` when none is given), completed with the result, or failed with the error |
 //! | `{"item": {…}}` | `item/started` with that item, as it is |
+//! | `{"completed": {…}}` | `item/completed` with that item, as it is, never started |
 //! | `{"compaction": true}` | a `contextCompaction` item |
 //! | `{"retry": "text"}` | an `error` notification that Codex retries |
 //! | `{"request": "method"}` | a request of Codex's own to the client, its answer recorded |
@@ -92,7 +95,7 @@ fn main() {
     };
 
     // A reader thread, so that an interrupt or an answer arrives while a turn plays.
-    let (turns, incoming) = mpsc::channel::<(String, String)>();
+    let (turns, incoming) = mpsc::channel::<Prompt>();
     let (answers, answered) = mpsc::channel::<Value>();
     let interrupted = Arc::new(Mutex::new(false));
     let out = Arc::new(Mutex::new(std::io::stdout()));
@@ -113,9 +116,17 @@ fn main() {
         interrupted,
         next: 0,
     };
-    for (thread, turn) in incoming {
-        fake.play(&thread, &turn, &answered);
+    for prompt in incoming {
+        fake.play(&prompt, &answered);
     }
+}
+
+/// A `turn/start` to play: its thread, its turn's id, its text, and its answer when it is late.
+struct Prompt {
+    thread: String,
+    turn: String,
+    text: String,
+    answer: Option<Value>,
 }
 
 #[derive(Clone)]
@@ -150,7 +161,7 @@ struct Reader {
 }
 
 impl Reader {
-    fn run(mut self, turns: mpsc::Sender<(String, String)>, answers: mpsc::Sender<Value>) {
+    fn run(mut self, turns: mpsc::Sender<Prompt>, answers: mpsc::Sender<Value>) {
         for line in std::io::stdin().lock().lines() {
             let Ok(line) = line else { break };
             let Ok(message) = serde_json::from_str::<Value>(&line) else {
@@ -203,16 +214,29 @@ impl Reader {
                         .flatten()
                         .filter_map(|input| input["text"].as_str())
                         .collect();
-                    send(
-                        &self.out,
-                        json!({"id": id, "result": {"turn": {"id": turn, "items": [],
-                            "status": "inProgress", "error": null}}}),
-                    );
-                    let thread = params["threadId"].as_str().unwrap_or_default().to_owned();
-                    if turns.send((thread, format!("{turn}\n{text}"))).is_err() {
+                    let answer = json!({"id": id, "result": {"turn": {"id": turn, "items": [],
+                        "status": "inProgress", "error": null}}});
+                    let late = self.script["answer_late"] == true;
+                    if !late {
+                        send(&self.out, answer.clone());
+                    }
+                    let prompt = Prompt {
+                        thread: params["threadId"].as_str().unwrap_or_default().to_owned(),
+                        turn,
+                        text,
+                        answer: late.then_some(answer),
+                    };
+                    if turns.send(prompt).is_err() {
                         break;
                     }
                     continue;
+                }
+                "thread/delete" => {
+                    let thread = params["threadId"].as_str().unwrap_or_default();
+                    match std::fs::remove_file(self.threads.join(thread)) {
+                        Ok(()) => Ok(json!({})),
+                        Err(_) => Err(format!("thread not found: {thread}")),
+                    }
                 }
                 "turn/interrupt" => {
                     *self.interrupted.lock().unwrap() = true;
@@ -277,15 +301,31 @@ impl Fake {
         format!("{kind}-{}", self.next)
     }
 
-    fn play(&mut self, thread: &str, prompt: &str, answered: &Receiver<Value>) {
-        let (turn, text) = prompt.split_once('\n').unwrap_or((prompt, ""));
+    fn play(&mut self, prompt: &Prompt, answered: &Receiver<Value>) {
         let script = self.script["turns"]
             .as_array()
             .into_iter()
             .flatten()
-            .find(|t| t["when"].as_str().is_some_and(|when| text.contains(when)))
+            .find(|t| {
+                t["when"]
+                    .as_str()
+                    .is_some_and(|when| prompt.text.contains(when))
+            })
             .cloned()
             .unwrap_or_else(|| json!({"do": [{"say": "ok"}]}));
+        self.turn(&prompt.thread, &prompt.turn, &script, answered);
+        if let Some(answer) = &prompt.answer {
+            send(&self.out, answer.clone());
+        }
+        if let Some(steps) = script.get("then") {
+            *self.interrupted.lock().unwrap() = false;
+            let own = self.id("own");
+            self.turn(&prompt.thread, &own, &json!({"do": steps}), answered);
+        }
+    }
+
+    /// One turn: started, its steps, the usage, completed.
+    fn turn(&mut self, thread: &str, turn: &str, script: &Value, answered: &Receiver<Value>) {
         self.notify(
             "turn/started",
             json!({"threadId": thread, "turn": {"id": turn, "items": [], "status": "inProgress"}}),
@@ -294,81 +334,7 @@ impl Fake {
             if self.is_interrupted() {
                 break;
             }
-            if let Some(text) = step["say"].as_str() {
-                let id = self.id("msg");
-                self.item(
-                    thread,
-                    turn,
-                    json!({"type": "agentMessage", "id": id, "text": ""}),
-                    Some(("item/agentMessage/delta", text)),
-                    json!({"type": "agentMessage", "id": id, "text": text}),
-                );
-            } else if let Some(text) = step["think"].as_str() {
-                let id = self.id("rs");
-                self.item(
-                    thread,
-                    turn,
-                    json!({"type": "reasoning", "id": id, "summary": [], "content": []}),
-                    Some(("item/reasoning/summaryTextDelta", text)),
-                    json!({"type": "reasoning", "id": id, "summary": [text], "content": []}),
-                );
-            } else if let Some(tool) = step.get("tool") {
-                let call = json!({"type": "mcpToolCall", "id": tool["id"], "server": "flottille",
-                    "tool": tool["tool"], "status": "inProgress", "arguments": tool["arguments"],
-                    "result": null, "error": null, "durationMs": null});
-                let mut done = call.clone();
-                if let Some(error) = tool.get("error") {
-                    done["status"] = "failed".into();
-                    done["error"] = json!({"message": error});
-                } else {
-                    done["status"] = "completed".into();
-                    done["result"] = json!({"content": tool["result"], "structuredContent": null});
-                }
-                done["durationMs"] = 12.into();
-                self.item(thread, turn, call, None, done);
-            } else if let Some(item) = step.get("item") {
-                self.notify(
-                    "item/started",
-                    json!({"threadId": thread, "turnId": turn, "item": item}),
-                );
-            } else if step.get("compaction").is_some() {
-                let id = self.id("compact");
-                let item = json!({"type": "contextCompaction", "id": id});
-                self.item(thread, turn, item.clone(), None, item);
-            } else if let Some(text) = step["retry"].as_str() {
-                self.notify(
-                    "error",
-                    json!({"threadId": thread, "turnId": turn, "willRetry": true,
-                        "error": {"message": text, "codexErrorInfo": "serverOverloaded"}}),
-                );
-            } else if let Some(method) = step["request"].as_str() {
-                let id = self.id("codex-request");
-                send(
-                    &self.out,
-                    json!({"id": id, "method": method, "params": {"threadId": thread,
-                        "turnId": turn, "itemId": "call-1", "command": "ls"}}),
-                );
-                let answer = loop {
-                    match answered.recv_timeout(Duration::from_secs(30)) {
-                        Ok(answer) if answer["id"] == id.as_str() => break answer,
-                        Ok(_) => continue,
-                        Err(RecvTimeoutError::Timeout) => break json!({"timeout": true}),
-                        Err(RecvTimeoutError::Disconnected) => break json!({"closed": true}),
-                    }
-                };
-                self.record.write(json!({"answered": answer}));
-            } else if let Some(ms) = step["wait"].as_u64() {
-                let deadline = Instant::now() + Duration::from_millis(ms);
-                while Instant::now() < deadline && !self.is_interrupted() {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            } else if step["hang"] == true {
-                while !self.is_interrupted() {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            } else if let Some(code) = step["die"].as_i64() {
-                std::process::exit(code as i32);
-            }
+            self.step(thread, turn, step, answered);
         }
         let usage = json!({"totalTokens": 1300, "inputTokens": 1200, "cachedInputTokens": 1000,
             "cacheWriteInputTokens": 0, "outputTokens": 100, "reasoningOutputTokens": 40});
@@ -389,5 +355,89 @@ impl Fake {
             json!({"threadId": thread, "turn": {"id": turn, "items": [], "status": status,
                 "error": error}}),
         );
+    }
+
+    fn step(&mut self, thread: &str, turn: &str, step: &Value, answered: &Receiver<Value>) {
+        if let Some(text) = step["say"].as_str() {
+            let id = self.id("msg");
+            self.item(
+                thread,
+                turn,
+                json!({"type": "agentMessage", "id": id, "text": ""}),
+                Some(("item/agentMessage/delta", text)),
+                json!({"type": "agentMessage", "id": id, "text": text}),
+            );
+        } else if let Some(text) = step["think"].as_str() {
+            let id = self.id("rs");
+            self.item(
+                thread,
+                turn,
+                json!({"type": "reasoning", "id": id, "summary": [], "content": []}),
+                Some(("item/reasoning/summaryTextDelta", text)),
+                json!({"type": "reasoning", "id": id, "summary": [text], "content": []}),
+            );
+        } else if let Some(tool) = step.get("tool") {
+            let server = tool.get("server").cloned().unwrap_or("flottille".into());
+            let call = json!({"type": "mcpToolCall", "id": tool["id"], "server": server,
+                "tool": tool["tool"], "status": "inProgress", "arguments": tool["arguments"],
+                "result": null, "error": null, "durationMs": null});
+            let mut done = call.clone();
+            if let Some(error) = tool.get("error") {
+                done["status"] = "failed".into();
+                done["error"] = json!({"message": error});
+            } else {
+                done["status"] = "completed".into();
+                done["result"] = json!({"content": tool["result"], "structuredContent": null});
+            }
+            done["durationMs"] = 12.into();
+            self.item(thread, turn, call, None, done);
+        } else if let Some(item) = step.get("item") {
+            self.notify(
+                "item/started",
+                json!({"threadId": thread, "turnId": turn, "item": item}),
+            );
+        } else if let Some(item) = step.get("completed") {
+            self.notify(
+                "item/completed",
+                json!({"threadId": thread, "turnId": turn, "item": item}),
+            );
+        } else if step.get("compaction").is_some() {
+            let id = self.id("compact");
+            let item = json!({"type": "contextCompaction", "id": id});
+            self.item(thread, turn, item.clone(), None, item);
+        } else if let Some(text) = step["retry"].as_str() {
+            self.notify(
+                "error",
+                json!({"threadId": thread, "turnId": turn, "willRetry": true,
+                    "error": {"message": text, "codexErrorInfo": "serverOverloaded"}}),
+            );
+        } else if let Some(method) = step["request"].as_str() {
+            let id = self.id("codex-request");
+            send(
+                &self.out,
+                json!({"id": id, "method": method, "params": {"threadId": thread,
+                    "turnId": turn, "itemId": "call-1", "command": "ls"}}),
+            );
+            let answer = loop {
+                match answered.recv_timeout(Duration::from_secs(30)) {
+                    Ok(answer) if answer["id"] == id.as_str() => break answer,
+                    Ok(_) => continue,
+                    Err(RecvTimeoutError::Timeout) => break json!({"timeout": true}),
+                    Err(RecvTimeoutError::Disconnected) => break json!({"closed": true}),
+                }
+            };
+            self.record.write(json!({"answered": answer}));
+        } else if let Some(ms) = step["wait"].as_u64() {
+            let deadline = Instant::now() + Duration::from_millis(ms);
+            while Instant::now() < deadline && !self.is_interrupted() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        } else if step["hang"] == true {
+            while !self.is_interrupted() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        } else if let Some(code) = step["die"].as_i64() {
+            std::process::exit(code as i32);
+        }
     }
 }

@@ -388,6 +388,26 @@ fn user_with_codex(version: &str) -> User {
 }
 
 #[test]
+fn doctor_reports_codex_not_ready_while_the_machine_has_codex_settings() {
+    let user = user_with_codex("0.162.0");
+    let (ok, report, _) = doctor(&user);
+    assert!(ok, "{report}");
+    assert_eq!(report["providers"][2]["ready"], true, "{report}");
+
+    // The machine's own Codex folder, here a test's own in place of `/etc/codex`.
+    let settings = user.path("etc-codex");
+    std::fs::create_dir(&settings).unwrap();
+    let (ok, report, _) = doctor(&user);
+
+    assert!(!ok, "{report}");
+    let why = report["providers"][2]["why"].as_str().unwrap().to_owned();
+    assert!(
+        why.contains(&format!("{} exists", settings.display())),
+        "{why}"
+    );
+}
+
+#[test]
 fn doctor_takes_codex_0_162_1_as_qualified_too() {
     let user = user_with_codex("0.162.1");
 

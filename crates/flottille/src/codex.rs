@@ -30,8 +30,13 @@ const TOOL_WAIT_SEC: u64 = 600;
 /// the app-server does not read it (`app-server/src/lib.rs:550`).
 const SIGN_IN: [&str; 1] = ["CODEX_ACCESS_TOKEN"];
 
-/// The machine's own Codex settings, which every `codex app-server` loads and nothing turns off.
+/// The machine's own Codex settings, which every `codex app-server` loads and nothing turns off;
+/// `FLOTTILLE_CODEX_MACHINE_SETTINGS` names another folder, for the tests.
 const MACHINE_SETTINGS: &str = "/etc/codex";
+
+/// A Codex certificate authority, which passes as `SSL_CERT_FILE` does
+/// (`http-client/src/custom_ca.rs:61`).
+const CA_CERTIFICATE: &str = "CODEX_CA_CERTIFICATE";
 
 pub static PROVIDER: Provider = Provider {
     name: "codex",
@@ -63,7 +68,7 @@ pub static PROVIDER: Provider = Provider {
 /// sign-ins than Codex's own would reach what bare mode turns off (the realtime voice, a cloud
 /// provider's models, `OTEL_*` exports with their headers).
 pub fn withheld(name: &str) -> bool {
-    if SIGN_IN.contains(&name) {
+    if SIGN_IN.contains(&name) || name == CA_CERTIFICATE {
         return false;
     }
     ["CODEX_", "OPENAI_", "AWS_", "OTEL_"]
@@ -129,7 +134,9 @@ fn link_login(link: &Path, login: &Path) -> std::io::Result<()> {
 
 /// Not ready while the machine has Codex settings of its own.
 fn unready() -> Option<String> {
-    machine_settings(Path::new(MACHINE_SETTINGS))
+    let folder = std::env::var_os("FLOTTILLE_CODEX_MACHINE_SETTINGS")
+        .map_or_else(|| PathBuf::from(MACHINE_SETTINGS), PathBuf::from);
+    machine_settings(&folder)
 }
 
 fn machine_settings(folder: &Path) -> Option<String> {
@@ -154,8 +161,34 @@ fn session_meta(instructions: &str, tools: &[String]) -> Value {
 
 fn forget_process(_paths: &Paths, _pid: u32) {}
 
-/// Its threads are in Codex's folder of Flottille's: they stay, as history.
-fn forget_session(_paths: &Paths, _session: &str) {}
+/// The session's thread goes, with the raw output of its tools: Codex deletes it itself, in the
+/// background. It stays while Codex's agents cannot run; a test's stand-in for Codex is never
+/// asked to.
+fn forget_session(paths: &Paths, session: &str) {
+    if !crate::claude::is_session_id(session) {
+        return;
+    }
+    let _ = std::fs::remove_file(breaches(paths).join(session));
+    if providers::overridden(&PROVIDER).is_some() {
+        return;
+    }
+    let (paths, thread) = (paths.clone(), session.to_owned());
+    // Its version may be asked, which can take seconds: off the daemon's thread.
+    std::thread::spawn(move || {
+        let deleted = providers::startable(&paths, &PROVIDER)
+            .and_then(|()| providers::find_program("codex").ok_or("`codex` is not on PATH".into()))
+            .and_then(|program| crate::codex_bridge::delete_thread(&program, &paths, &thread));
+        if let Err(error) = deleted {
+            eprintln!("flottille daemon: Codex's thread {thread} stays: {error}");
+        }
+    });
+}
+
+/// Where the bridge marks a thread in which Codex started a tool of its own outside a prompt, so
+/// that its session is not resumed.
+pub fn breaches(paths: &Paths) -> PathBuf {
+    folder(paths).join("breaches")
+}
 
 fn forget_agent(_paths: &Paths, _agent: &str) {}
 
@@ -418,6 +451,7 @@ mod tests {
             ("DB_PASSWORD", true),
             ("HTTPS_PROXY", false),
             ("SSL_CERT_FILE", false),
+            ("CODEX_CA_CERTIFICATE", false),
             ("PATH", false),
             ("HOME", false),
             ("LANG", false),

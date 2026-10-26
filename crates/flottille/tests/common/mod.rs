@@ -373,6 +373,8 @@ fn command_for(program: &Path, dir: &Path, env: &[(String, String)], args: &[&st
         .env("XDG_STATE_HOME", dir.join("state"))
         .env("XDG_CONFIG_HOME", dir.join("config"))
         .env("XDG_DATA_HOME", dir.join("data"))
+        // Codex's machine settings are the test's own, not the machine's `/etc/codex`.
+        .env("FLOTTILLE_CODEX_MACHINE_SETTINGS", dir.join("etc-codex"))
         .envs(env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::null());
     // The daemon runs git: never with the machine's settings.

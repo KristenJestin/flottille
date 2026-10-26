@@ -400,7 +400,9 @@ reads (`app-server/src/config_manager.rs:446-466`):
 session's folder as `cwd`, `approvalPolicy: "never"`, `sandbox: "read-only"`, the agent's
 instructions as `baseInstructions` (in place of Codex's own), `environments: []`, and
 Flottille's server as the only MCP server of the thread's configuration; every `turn/start`
-gives `environments: []` again, as a resumed thread takes them from its turns.
+gives `environments: []` again: `thread/resume` takes no `environments` in 0.162.0
+(`app-server-protocol/src/protocol/v2/thread.rs:354-430`), so a resumed thread has Codex's
+default environment (`core/src/thread_manager.rs:2148-2154`) until a turn gives it none.
 
 ```json
 {"mcp_servers": {"flottille": {
@@ -436,24 +438,40 @@ gives `environments: []` again, as a resumed thread takes them from its turns.
   workspace sends to Codex (`cloud-config/src/service.rs:52-60`): the bridge reads the account
   first (`account/read`), and refuses the session on any plan but a personal one (free, go,
   plus, pro, prolite, promax) or an API key.
-- **The watch**: an item of a turn other than the prompt, a reply, a thought, a call of
-  Flottille's server or a compaction is a tool of Codex's own: the bridge interrupts the turn and
-  fails the prompt, and so the agent, saying which. Codex's own requests to its client (approvals,
-  questions for the user, tools of the client's) are refused at once.
+- **The watch**: an item other than the prompt, a reply, a thought, a call of Flottille's server
+  or a compaction, started or completed, is a tool of Codex's own. The two resource lists are
+  calls of Flottille's server too when the model names no server: Codex reports them as the
+  server `codex`'s (`core/src/tools/handlers/mcp_resource/list_mcp_resources.rs:79`,
+  `list_mcp_resource_templates.rs:79`). The bridge interrupts the turn and fails the prompt, and
+  so the agent, saying which; out of a prompt (a turn Codex started by itself), it interrupts
+  that turn and fails the next prompt at once, and a later `session/resume` of the thread too,
+  so that the agent fails. **The watch detects, it does not prevent**: Codex says an item has
+  started once its tool has begun (`item/started`), so the interrupt comes after the fact. What
+  holds is that Codex is never offered those tools (above); the watch is the backstop for a
+  version that would offer one. Codex's own requests to its client (approvals, questions for the
+  user, tools of the client's) are refused at once.
 - **Approval and sandbox give no gate of their own**: removing the tools is what holds. Codex
   still compacts a long thread on its own, in the thread (`protocol/src/openai_models.rs:527-538`).
 - **The sign-in**: Codex's login stays the user's. `CODEX_HOME` of Flottille's holds `auth.json`,
   a link the daemon makes to the user's own login file (`$CODEX_HOME/auth.json` of the user, or
   `~/.codex/auth.json`), which Flottille never opens: Codex reads it there, and rewrites it in
   place when it refreshes its tokens (`login/src/auth/storage.rs:214-231`), so the user's own
-  `codex` and Flottille's share one login, its refresh tokens included. A login kept in the
-  system's keyring is tied to the `CODEX_HOME` it was made in (`login/src/auth/storage.rs:243-257`)
-  and does not reach Flottille's agents; `CODEX_ACCESS_TOKEN` is the variable the app server takes
+  `codex` and Flottille's share one login, its refresh tokens included. Those tokens rotate, a
+  refresh making the last one void: each Codex reads the file again before it refreshes and when
+  a request is refused (`login/src/auth/manager.rs:1856-1858,2841-2870`), so the two go on with
+  whichever refreshed last. A login kept in the system's keyring is tied to the `CODEX_HOME` it
+  was made in (`login/src/auth/storage.rs:243-257`) and does not reach Flottille's agents; `CODEX_ACCESS_TOKEN` is the variable the app server takes
   (`login/src/auth/manager.rs:1536`; it ignores `CODEX_API_KEY`, `app-server/src/lib.rs:550`).
   Release builds of Codex refuse a `CODEX_HOME` in the temporary folder
   (`arg0/src/lib.rs:341-356`): Flottille's data folder must not be there.
 - **What it keeps**: its threads, state and logs are in `<data>/agents/codex/codex`, apart from the
-  user's.
+  user's: each thread's rollout under `sessions/` (or `archived_sessions/`), with the raw output of
+  its tools, and its rows in `state_5.sqlite` and `logs_2.sqlite`. When Flottille forgets a session
+  (replaced, or its agent ended), the daemon starts `codex app-server` once more, bare, to delete
+  the thread with Codex's own `thread/delete`, which removes its rollouts and then its rows under
+  Codex's locks (`app-server/src/request_processors/thread_delete.rs`,
+  `thread-store/src/local/delete_thread.rs:95-140`, `state/src/runtime/threads.rs:1164-1208`). A
+  thread stays when Codex's agents cannot run at that moment (not enabled or not ready, above).
 
 ## The Claude bridge
 
@@ -550,13 +568,15 @@ servers are Flottille's HTTP one alone). One bridge runs one session.
 - **What `codex` says**, mapped to ACP updates: `item/agentMessage/delta` becomes
   `agent_message_chunk`; `item/reasoning/summaryTextDelta` and `item/reasoning/textDelta`
   `agent_thought_chunk`; a call of Flottille's server (`mcpToolCall`) a `tool_call` (`in_progress`,
-  `mcp__flottille__<tool>` as its title, its arguments as `rawInput`) whose id is Codex's item id,
+  `mcp__flottille__<tool>` as its title, or the resource tool's own name, its arguments as
+  `rawInput`) whose id is Codex's item id,
   and its end a `tool_call_update` (`completed` with the result's content, or `failed` with its
   error); a `contextCompaction` a completed `tool_call` with `_meta.contextCompaction`; an `error`
   Codex retries a `session_info_update` with a `jetbrains.air` `sessionFailure` of severity
   `warning`. Any other item is a breach of bare mode (above).
 - **A prompt** is its text blocks, parted by a blank line, sent as one `turn/start` with the model,
-  the effort and `environments: []`; any other block is refused. `turn/completed` ends it: first a
+  the effort (left out when the model has none) and `environments: []`; any other block is
+  refused. `turn/completed` ends it: first a
   `usage_update` (the context of the last request and the model's context window, as
   `thread/tokenUsage/updated` said), then the answer with the turn's tokens and its stop reason:
   `cancelled` for an interrupted turn, `end_turn` otherwise. A failed turn ends `end_turn` too,
@@ -611,6 +631,8 @@ For Codex: the same forge tokens and secret-looking names, except `CODEX_ACCESS_
 sign-in, and every `CODEX_*` variable of the user's (`CODEX_HOME`, which Flottille sets,
 `CODEX_SQLITE_HOME`, `CODEX_API_KEY`…), `OPENAI_*` (a key the app server would use for the
 realtime voice, not for its models), `AWS_*` (a cloud's models) and `OTEL_*`.
+`CODEX_CA_CERTIFICATE` passes: it names a certificate authority, as `SSL_CERT_FILE` does
+(`http-client/src/custom_ca.rs:61`).
 
 ## The conversation
 
@@ -710,8 +732,8 @@ Every 5 seconds, the daemon looks at what only time decides:
 ## For tests and development
 
 - `FLOTTILLE_AGENT_COMMAND`: a program the daemon runs in place of every provider's, with no
-  argument; `FLOTTILLE_AGENT_COMMAND_CLAUDE` and `FLOTTILLE_AGENT_COMMAND_OPENCODE`, in place of
-  one provider's (the tests run two fake agents standing for two providers this way). The
+  argument; `FLOTTILLE_AGENT_COMMAND_CLAUDE`, `FLOTTILLE_AGENT_COMMAND_OPENCODE` and
+  `FLOTTILLE_AGENT_COMMAND_CODEX`, in place of one provider's (the tests run two fake agents standing for two providers this way). The
   provider's bare environment is still set; the program stands for the provider's program and
   sign-in, so the provider is ready when it is enabled, and its version is never asked. The tests run the fake ACP agent this way (`crates/flottille-fake-agent`, whose
   script format is documented in its source). The bridge itself is tested in front of a fake
@@ -719,6 +741,8 @@ Every 5 seconds, the daemon looks at what only time decides:
 - `FLOTTILLE_BRIDGE_NO_RESUME`: set (to anything), the bridge does not offer `session/resume`, so
   that the daemon loads its sessions; the tests reach the load this way.
 - `FLOTTILLE_IDLE_RELEASE_MS`: the idle release time, in milliseconds, in place of 5 minutes.
+- `FLOTTILLE_CODEX_MACHINE_SETTINGS`: the folder checked in place of `/etc/codex` ("Bare mode for
+  Codex"), so that the tests do not depend on the machine's.
 - `FLOTTILLE_TEST_CLOCK`: set (to anything), the daemon answers `test.advance {"ms"}` on its
   socket: its clock moves that far ahead, and the sweep runs at once. The tests see minutes pass
   this way without waiting for them. Without it, `test.advance` is an unknown method.

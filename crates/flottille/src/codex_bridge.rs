@@ -5,7 +5,8 @@
 //! tools are Flottille's, which its gate judges.
 //!
 //! Codex has no allowlist of tools: should a version of it start a tool of its own all the same,
-//! the bridge interrupts the turn and fails the prompt, which fails the agent.
+//! the bridge interrupts the turn and fails the prompt, which fails the agent. It sees the tool
+//! once it has begun: the watch detects, what prevents is that Codex is not offered the tool.
 //!
 //! One bridge runs one session. Once the session is open, the end of its `codex` is the end of
 //! the bridge, with the same exit code: the daemon sees the agent die.
@@ -40,6 +41,15 @@ const BARE_ITEMS: [&str; 5] = [
     "contextCompaction",
 ];
 
+/// Codex's tools that read the resources of its MCP servers, here Flottille's alone; it reports
+/// the two lists as calls of the server `codex` when the model names none
+/// (`core/src/tools/handlers/mcp_resource/list_mcp_resources.rs:79`).
+const RESOURCE_TOOLS: [&str; 3] = [
+    "list_mcp_resources",
+    "list_mcp_resource_templates",
+    "read_mcp_resource",
+];
+
 pub fn run(paths: &Paths) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -52,6 +62,7 @@ pub fn run(paths: &Paths) -> Result<ExitCode, Box<dyn std::error::Error>> {
         waiting: HashMap::new(),
         next: 0,
         turn: None,
+        breach: None,
     };
     let code = runtime.block_on(bridge.serve())?;
     // The standard input is read on a thread of the runtime that a dead `codex` leaves blocked.
@@ -68,6 +79,8 @@ struct Bridge {
     waiting: HashMap<u64, Waiting>,
     next: u64,
     turn: Option<Turn>,
+    /// Why the thread is no bare one: a tool of Codex's own started outside a prompt.
+    breach: Option<String>,
 }
 
 /// The user's `codex`, running one thread.
@@ -88,7 +101,7 @@ struct Codex {
 /// The prompt being played.
 struct Turn {
     id: Value,
-    /// Codex's id of the turn, once `turn/start` answered.
+    /// Codex's id of the turn, once `turn/started` said it or `turn/start` answered.
     turn: Option<String>,
     cancelled: bool,
     /// Why the turn is no bare one: a tool of Codex's own started.
@@ -111,7 +124,8 @@ enum Waiting {
     Account(Opening),
     Models(Opening),
     Thread(Opening),
-    Turn,
+    /// The answer to the `turn/start` of the prompt of that id.
+    Turn(Value),
     Nothing,
 }
 
@@ -250,6 +264,9 @@ impl Bridge {
                 .as_str()
                 .filter(|id| claude::is_session_id(id))
                 .ok_or_else(|| invalid("not a session id of the Codex bridge".into()))?;
+            if let Ok(breach) = std::fs::read_to_string(codex::breaches(&self.paths).join(thread)) {
+                return Err((INTERNAL, breach));
+            }
             Some(thread.to_owned())
         } else {
             None
@@ -351,6 +368,9 @@ impl Bridge {
         if self.turn.is_some() {
             return Err((INVALID, "a prompt is playing already".into()));
         }
+        if let Some(breach) = &self.breach {
+            return Err((INTERNAL, breach.clone()));
+        }
         let mut texts = Vec::new();
         for block in params["prompt"].as_array().into_iter().flatten() {
             match block["type"].as_str() {
@@ -363,14 +383,17 @@ impl Bridge {
                 }
             }
         }
-        let turn = json!({
+        let mut turn = json!({
             "threadId": codex.thread,
             "input": [{"type": "text", "text": texts.join("\n\n"), "text_elements": []}],
             "model": codex.model,
-            "effort": codex.effort,
             // Every turn again: no environment, so no command, file or image tool.
             "environments": [],
         });
+        // A model without efforts takes none: an empty one is no effort Codex knows.
+        if !codex.effort.is_empty() {
+            turn["effort"] = codex.effort.clone().into();
+        }
         self.turn = Some(Turn {
             id: id.clone(),
             turn: None,
@@ -379,7 +402,8 @@ impl Bridge {
             used: None,
             total: codex.total.clone(),
         });
-        self.request("turn/start", turn, Waiting::Turn).await;
+        self.request("turn/start", turn, Waiting::Turn(id.clone()))
+            .await;
         Ok(None)
     }
 
@@ -457,8 +481,23 @@ impl Bridge {
             "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
                 self.chunk("agent_thought_chunk", params).await;
             }
+            "item/started" | "item/completed" if !is_bare(&params["item"]) => {
+                self.breached(&params["item"], params["turnId"].as_str())
+                    .await;
+            }
             "item/started" => self.item_started(&params["item"]).await,
             "item/completed" => self.item_completed(&params["item"]).await,
+            "turn/started" => {
+                let started = params["turn"]["id"].as_str().map(str::to_owned);
+                // A completion may come before `turn/start`'s answer: the turn is known by then.
+                let Some(turn) = self.turn.as_mut().filter(|t| t.turn.is_none()) else {
+                    return;
+                };
+                turn.turn = started.clone();
+                if let Some(started) = started.filter(|_| turn.cancelled || turn.breach.is_some()) {
+                    self.interrupt(started).await;
+                }
+            }
             "thread/tokenUsage/updated" => {
                 let usage = &params["tokenUsage"];
                 if let Some(turn) = &mut self.turn {
@@ -498,18 +537,13 @@ impl Bridge {
     }
 
     async fn item_started(&mut self, item: &Value) {
-        let kind = item["type"].as_str().unwrap_or("?");
-        let bare =
-            BARE_ITEMS.contains(&kind) && (kind != "mcpToolCall" || item["server"] == MCP_SERVER);
-        if !bare {
-            return self.breached(item).await;
-        }
-        if kind == "mcpToolCall" {
-            let tool = format!(
-                "{}{}",
-                codex::PROVIDER.tool_prefix,
-                item["tool"].as_str().unwrap_or_default()
-            );
+        if item["type"] == "mcpToolCall" {
+            let tool = item["tool"].as_str().unwrap_or_default();
+            let tool = if RESOURCE_TOOLS.contains(&tool) {
+                tool.to_owned()
+            } else {
+                format!("{}{tool}", codex::PROVIDER.tool_prefix)
+            };
             self.update(
                 json!({"sessionUpdate": "tool_call", "toolCallId": item["id"],
                 "title": tool, "kind": "other", "status": "in_progress",
@@ -519,11 +553,9 @@ impl Bridge {
         }
     }
 
-    /// A tool of Codex's own started: the turn is interrupted, and its prompt fails.
-    async fn breached(&mut self, item: &Value) {
-        let Some(turn) = self.turn.as_mut().filter(|t| t.breach.is_none()) else {
-            return;
-        };
+    /// A tool of Codex's own started: its turn is interrupted, and the prompt fails. Outside a
+    /// prompt, the next one fails, and the thread is not resumed: either way, the agent fails.
+    async fn breached(&mut self, item: &Value, turn_id: Option<&str>) {
         let what = match item["type"].as_str() {
             Some("mcpToolCall") => format!(
                 "a tool of the MCP server {}",
@@ -532,18 +564,41 @@ impl Bridge {
             Some(kind) => format!("its own {kind}"),
             None => "an item it did not name".to_owned(),
         };
-        turn.breach = Some(format!(
+        let breach = format!(
             "Codex started {what}, which its bare mode shuts off: the turn was interrupted, and \
              this Codex cannot run Flottille's agents"
-        ));
-        if let Some(started) = turn.turn.clone() {
+        );
+        let started = match self.turn.as_mut() {
+            Some(turn) if turn.breach.is_some() => return,
+            Some(turn) => {
+                turn.breach = Some(breach);
+                // Interrupted once: the answer to `turn/start` finds the turn named.
+                turn.turn = turn.turn.clone().or(turn_id.map(str::to_owned));
+                turn.turn.clone()
+            }
+            None if self.breach.is_some() => return,
+            None => {
+                if let Some(codex) = self
+                    .codex
+                    .as_ref()
+                    .filter(|c| claude::is_session_id(&c.thread))
+                {
+                    let marks = codex::breaches(&self.paths);
+                    let _ = std::fs::create_dir_all(&marks)
+                        .and_then(|()| std::fs::write(marks.join(&codex.thread), &breach));
+                }
+                self.breach = Some(breach);
+                turn_id.map(str::to_owned)
+            }
+        };
+        if let Some(started) = started {
             self.interrupt(started).await;
         }
     }
 
     async fn item_completed(&mut self, item: &Value) {
         match item["type"].as_str() {
-            Some("mcpToolCall") if item["server"] == MCP_SERVER => {
+            Some("mcpToolCall") => {
                 let failed = item["status"] == "failed";
                 let output = if failed {
                     item["error"].clone()
@@ -642,8 +697,9 @@ impl Bridge {
                 | Waiting::Account(o)
                 | Waiting::Models(o)
                 | Waiting::Thread(o) => self.refuse_open(o.id, error).await,
-                Waiting::Turn => {
-                    if let Some(turn) = self.turn.take() {
+                Waiting::Turn(prompt) => {
+                    if self.turn.as_ref().is_some_and(|t| t.id == prompt) {
+                        let turn = self.turn.take().expect("checked");
                         self.fail(turn.id, (INTERNAL, error)).await;
                     }
                 }
@@ -728,8 +784,15 @@ impl Bridge {
                 }
                 self.answer(opening.id, answer).await;
             }
-            Waiting::Turn => {
-                let Some(turn) = &mut self.turn else { return };
+            Waiting::Turn(prompt) => {
+                // Gone already when its completion came first; named already by `turn/started`.
+                let Some(turn) = self
+                    .turn
+                    .as_mut()
+                    .filter(|t| t.id == prompt && t.turn.is_none())
+                else {
+                    return;
+                };
                 let started = result["turn"]["id"].as_str().unwrap_or_default().to_owned();
                 turn.turn = Some(started.clone());
                 if turn.cancelled || turn.breach.is_some() {
@@ -749,6 +812,93 @@ impl Bridge {
         }
         self.fail(id, (INTERNAL, why)).await;
     }
+}
+
+/// Deletes a thread of Flottille's Codex with Codex's own `thread/delete`, which removes its
+/// rollouts and its rows in Codex's databases under Codex's locks: a `codex app-server` started
+/// bare for that alone, with no thread of its own and no turn.
+pub fn delete_thread(program: &std::path::Path, paths: &Paths, thread: &str) -> Result<(), String> {
+    use std::io::{BufRead, Write};
+    let mut command = std::process::Command::new(program);
+    for (name, _) in std::env::vars_os() {
+        if name.to_str().is_some_and(codex::withheld) {
+            command.env_remove(name);
+        }
+    }
+    let mut child = command
+        .args(codex::arguments())
+        .envs(codex::environment(paths))
+        .current_dir(codex::folder(paths).join("home"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("cannot start {}: {e}", program.display()))?;
+    let mut stdin = child.stdin.take().expect("piped");
+    let stdout = child.stdout.take().expect("piped");
+    let (lines, answers) = std::sync::mpsc::channel::<Value>();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if let Ok(message) = serde_json::from_str(&line)
+                && lines.send(message).is_err()
+            {
+                break;
+            }
+        }
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut write = |message: Value| {
+        writeln!(stdin, "{message}")
+            .and_then(|()| stdin.flush())
+            .map_err(|e| format!("codex went: {e}"))
+    };
+    let answer = |id: u64| -> Result<(), String> {
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let message = answers
+                .recv_timeout(left)
+                .map_err(|_| "codex did not answer in time".to_owned())?;
+            if message["id"] == id && message.get("method").is_none() {
+                return match message["error"]["message"].as_str() {
+                    Some(error) => Err(error.to_owned()),
+                    None => Ok(()),
+                };
+            }
+        }
+    };
+    let deleted = write(json!({"id": 1, "method": "initialize", "params": {
+        "clientInfo": {"name": "flottille", "title": "Flottille", "version": VERSION},
+        "capabilities": {"experimentalApi": true}}}))
+    .and_then(|()| answer(1))
+    .and_then(|()| write(json!({"method": "initialized"})))
+    .and_then(|()| {
+        write(json!({"id": 2, "method": "thread/delete", "params": {"threadId": thread}}))
+    })
+    .and_then(|()| answer(2));
+    // Its input closed, `codex` ends by itself; one that does not is killed.
+    drop(stdin);
+    for _ in 0..20 {
+        if child.try_wait().ok().flatten().is_some() {
+            return deleted;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    deleted
+}
+
+/// An item of a bare thread: the prompt, a reply or a thought, a call of Flottille's server, the
+/// two resource lists Codex names as its own server's, or a compaction.
+fn is_bare(item: &Value) -> bool {
+    let kind = item["type"].as_str().unwrap_or("?");
+    if kind != "mcpToolCall" {
+        return BARE_ITEMS.contains(&kind);
+    }
+    let lists = &RESOURCE_TOOLS[..2];
+    item["server"] == MCP_SERVER
+        || item["server"] == "codex" && item["tool"].as_str().is_some_and(|t| lists.contains(&t))
 }
 
 fn initialize() -> Value {

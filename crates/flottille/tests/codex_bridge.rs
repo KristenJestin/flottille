@@ -635,3 +635,150 @@ fn a_death_of_codex_ends_the_bridge_with_its_exit_code() {
 
     assert_eq!(status.code(), Some(3));
 }
+
+#[test]
+fn listing_the_mcp_resources_without_a_server_is_bare_and_shown_by_its_own_name() {
+    let user = User::with_fake_codex();
+    let listed = json!([{"type": "text", "text": "{\"resources\": []}"}]);
+    user.codex_script(json!({"turns": [
+        {"when": "resources", "do": [
+            {"tool": {"id": "r-1", "server": "codex", "tool": "list_mcp_resources",
+                "arguments": {}, "result": listed}},
+            {"tool": {"id": "r-2", "server": "codex", "tool": "list_mcp_resource_templates",
+                "arguments": {}, "result": listed}},
+            {"tool": {"id": "r-3", "server": "flottille", "tool": "read_mcp_resource",
+                "arguments": {"server": "flottille", "uri": "x"}, "error": "no resource"}},
+            {"say": "none"}]},
+        {"when": "other", "do": [
+            {"tool": {"id": "r-4", "server": "codex", "tool": "run", "arguments": {},
+                "result": listed}},
+            {"hang": true}]},
+    ]}));
+    let mut bridge = Bridge::start(&user);
+    let (session, _) = bridge.open(&user, &["mcp__flottille__report"]);
+
+    let (answer, seen) = bridge.prompt(&session, "resources");
+
+    assert_eq!(answer.unwrap()["stopReason"], "end_turn");
+    let titles: Vec<Value> = updates(&seen)
+        .into_iter()
+        .filter(|u| u["sessionUpdate"] == "tool_call")
+        .map(|u| u["title"].clone())
+        .collect();
+    assert_eq!(
+        titles,
+        [
+            "list_mcp_resources",
+            "list_mcp_resource_templates",
+            "read_mcp_resource"
+        ]
+    );
+    // Codex's own server name is taken for those two lists only.
+    let (other, _) = bridge.prompt(&session, "other");
+    let other = other.unwrap_err()["message"].as_str().unwrap().to_owned();
+    assert!(other.contains("a tool of the MCP server codex"), "{other}");
+}
+
+#[test]
+fn an_item_that_only_arrives_completed_is_watched_too() {
+    let user = User::with_fake_codex();
+    user.codex_script(json!({"turns": [{"when": "quiet", "do": [
+        {"completed": {"type": "commandExecution", "id": "c-1", "command": "ls",
+            "status": "completed"}},
+        {"say": "done"}]}]}));
+    let mut bridge = Bridge::start(&user);
+    let (session, _) = bridge.open(&user, &[]);
+
+    let (answer, _) = bridge.prompt(&session, "quiet");
+
+    let message = answer.unwrap_err()["message"].as_str().unwrap().to_owned();
+    assert!(
+        message.contains("Codex started its own commandExecution"),
+        "{message}"
+    );
+}
+
+#[test]
+fn an_item_outside_a_prompt_interrupts_codex_and_fails_the_agent() {
+    let user = User::with_fake_codex();
+    user.codex_script(
+        json!({"turns": [{"when": "first", "do": [{"say": "ok"}], "then": [
+        {"wait": 100},
+        {"item": {"type": "commandExecution", "id": "c-1", "command": "ls"}},
+        {"hang": true}]}]}),
+    );
+    let mut bridge = Bridge::start(&user);
+    let (session, _) = bridge.open(&user, &[]);
+    assert_eq!(
+        bridge.prompt(&session, "first").0.unwrap()["stopReason"],
+        "end_turn"
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while sent(&user, "turn/interrupt").is_empty() {
+        assert!(std::time::Instant::now() < deadline, "no interrupt");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let interrupt = &sent(&user, "turn/interrupt")[0]["params"];
+    assert_eq!(interrupt["threadId"], session.as_str());
+    assert!(
+        interrupt["turnId"].as_str().unwrap().starts_with("own-"),
+        "{interrupt}"
+    );
+    // Its next prompt fails at once, and so does the session once resumed elsewhere.
+    let (next, _) = bridge.prompt(&session, "second");
+    let next = next.unwrap_err()["message"].as_str().unwrap().to_owned();
+    assert!(
+        next.contains("Codex started its own commandExecution"),
+        "{next}"
+    );
+    assert_eq!(sent(&user, "turn/start").len(), 1);
+    assert_eq!(bridge.close(), Some(0));
+    let mut again = Bridge::start(&user);
+    let mut params = new_session(&user, &[]);
+    params["sessionId"] = session.clone().into();
+    let (resumed, _) = again.request("session/resume", params);
+    let resumed = resumed.unwrap_err()["message"].as_str().unwrap().to_owned();
+    assert!(
+        resumed.contains("Codex started its own commandExecution"),
+        "{resumed}"
+    );
+}
+
+#[test]
+fn a_completion_before_the_turn_start_answer_ends_the_prompt() {
+    let user = User::with_fake_codex();
+    user.codex_script(json!({"answer_late": true,
+        "turns": [{"when": "hello", "do": [{"say": "Hello!"}]}]}));
+    let mut bridge = Bridge::start(&user);
+    let (session, _) = bridge.open(&user, &[]);
+
+    let (first, seen) = bridge.prompt(&session, "hello");
+    let (second, _) = bridge.prompt(&session, "hello again");
+
+    assert_eq!(first.unwrap()["stopReason"], "end_turn");
+    assert!(
+        updates(&seen)
+            .iter()
+            .any(|u| u["content"]["text"] == "Hello!")
+    );
+    assert_eq!(second.unwrap()["stopReason"], "end_turn");
+}
+
+#[test]
+fn a_model_without_efforts_gets_its_turns_without_one() {
+    let user = User::with_fake_codex();
+    user.codex_script(json!({"models": [
+        {"id": "gpt-plain", "model": "gpt-plain", "displayName": "GPT Plain", "description": "",
+            "hidden": false, "isDefault": true, "supportedReasoningEfforts": []}]}));
+    let mut bridge = Bridge::start(&user);
+    let (session, opened) = bridge.open(&user, &[]);
+    assert_eq!(current(&opened, "model"), "gpt-plain");
+
+    bridge.prompt(&session, "hello").0.unwrap();
+
+    let turn = &sent(&user, "turn/start")[0]["params"];
+    assert_eq!(turn["model"], "gpt-plain");
+    assert!(turn.get("effort").is_none(), "{turn}");
+}
