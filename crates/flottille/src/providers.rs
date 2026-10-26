@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
 use crate::projects::{self, Failure};
-use crate::{claude, opencode};
+use crate::{claude, codex, opencode};
 
 /// The name of Flottille's MCP server, the only one an agent has.
 pub const MCP_SERVER: &str = "flottille";
@@ -36,6 +36,8 @@ pub struct Provider {
     pub program: &'static str,
     /// The version of `program` this entry was checked against.
     pub checked: &'static str,
+    /// Other versions whose bare mode was qualified as well.
+    pub also_qualified: &'static [&'static str],
     /// What another version may have changed, for the warning that names both.
     pub may_change: &'static str,
     /// What to do when `program` is missing.
@@ -59,6 +61,9 @@ pub struct Provider {
     pub env: fn(&Paths, &Agent) -> Result<Env, String>,
     /// `_meta` of `session/new`, `session/load` and `session/resume`.
     pub session_meta: fn(&str, &[String]) -> Value,
+    /// Why its agents cannot run on this machine whatever the user does in Flottille, as a
+    /// clause after the provider's name; `None` when nothing stops them.
+    pub unready: fn() -> Option<String>,
     /// The process of that pid is gone: what Flottille kept for it goes.
     pub forget_process: fn(&Paths, u32),
     /// A session of the agent is over (replaced, or the agent ended).
@@ -74,7 +79,7 @@ pub type Program = (PathBuf, Vec<OsString>);
 /// Variables set for a process.
 pub type Env = Vec<(OsString, OsString)>;
 
-pub static PROVIDERS: [&Provider; 2] = [&claude::PROVIDER, &opencode::PROVIDER];
+pub static PROVIDERS: [&Provider; 3] = [&claude::PROVIDER, &opencode::PROVIDER, &codex::PROVIDER];
 
 /// The provider of that name.
 pub fn get(name: &str) -> Option<&'static Provider> {
@@ -168,12 +173,17 @@ pub fn startable(paths: &Paths, provider: &'static Provider) -> Result<(), Strin
 }
 
 /// The test override of the provider's agent, when one is set.
-fn overridden(provider: &Provider) -> Option<PathBuf> {
+pub fn overridden(provider: &Provider) -> Option<PathBuf> {
     let own = format!("FLOTTILLE_AGENT_COMMAND_{}", provider.name.to_uppercase());
     std::env::var_os(own)
         .or_else(|| std::env::var_os("FLOTTILLE_AGENT_COMMAND"))
         .filter(|program| !program.is_empty())
         .map(PathBuf::from)
+}
+
+/// Nothing on the machine stops the provider's agents.
+pub fn ready_here() -> Option<String> {
+    None
 }
 
 /// Forge tokens and the folders of their command lines' configuration, and any variable named
@@ -300,22 +310,29 @@ impl Check {
                 provider.program, provider.install
             ));
         }
+        if let Some(why) = (provider.unready)() {
+            return Some(why);
+        }
         if self.version_refused() {
             let allow = format!(
                 "`allow_unqualified_version = true` under [{}] in providers.toml runs it anyway, \
                  at the user's own risk",
                 provider.name
             );
+            let qualified = match provider.also_qualified {
+                [] => format!("{} was", provider.checked),
+                more => format!("{} and {} were", provider.checked, more.join(" and ")),
+            };
             return Some(match &self.version {
                 Some(version) => format!(
-                    "is not ready: {} is {version}, and only {} was qualified for its bare mode \
-                     ({allow})",
-                    provider.program, provider.checked
+                    "is not ready: {} is {version}, and only {qualified} qualified for its bare \
+                     mode ({allow})",
+                    provider.program
                 ),
                 None => format!(
-                    "is not ready: `{} --version` did not say its version, and only {} was \
+                    "is not ready: `{} --version` did not say its version, and only {qualified} \
                      qualified for its bare mode ({allow})",
-                    provider.program, provider.checked
+                    provider.program
                 ),
             });
         }
@@ -330,7 +347,11 @@ impl Check {
         provider::QUALIFIED_ONLY.contains(&self.provider.name)
             && !self.unqualified_allowed
             && self.version_read
-            && self.version.as_deref() != Some(self.provider.checked)
+            && !self.version.as_deref().is_some_and(|v| self.qualified(v))
+    }
+
+    fn qualified(&self, version: &str) -> bool {
+        version == self.provider.checked || self.provider.also_qualified.contains(&version)
     }
 
     pub fn ready(&self) -> bool {
@@ -343,7 +364,7 @@ impl Check {
         let provider = self.provider;
         let mut warnings = Vec::new();
         if let Some(version) = self.version.as_deref()
-            && version != provider.checked
+            && !self.qualified(version)
             && !self.version_refused()
         {
             warnings.push(format!(
@@ -523,14 +544,21 @@ fn models_version(check: &Check) -> Option<String> {
     Some(format!("{program}; keys {}", check.api_keys.join(",")))
 }
 
-/// The models a provider's agents offered, each `{"id", "efforts"}` (`efforts` `null` until the
-/// model was seen chosen) and `"default": true` on the one a new session takes, when they were
-/// read from the version of the provider there is now.
-fn known_models(daemon: &Daemon, check: &Check) -> Option<Vec<Value>> {
+/// The models a provider's agents last offered, each `{"id", "name", "efforts"}` (`efforts`
+/// `null` until the model was seen chosen) and `"default": true` on the one a new session takes,
+/// and whether they were read from the version of the provider there is now.
+fn last_models(daemon: &Daemon, check: &Check) -> Option<(Vec<Value>, bool)> {
     let (version, models) = daemon
         .read(|store| store.provider_models(check.provider.name))
         .ok()??;
-    (version == models_version(check)).then(|| models.as_array().cloned().unwrap_or_default())
+    let current = version == models_version(check);
+    Some((models.as_array().cloned().unwrap_or_default(), current))
+}
+
+/// The models a provider's agents offered, when they were read from the version of the provider
+/// there is now: only these refuse a model or an effort.
+fn known_models(daemon: &Daemon, check: &Check) -> Option<Vec<Value>> {
+    last_models(daemon, check).and_then(|(models, current)| current.then_some(models))
 }
 
 /// What a session of the provider's agent offers in its config options, kept: its models, the
@@ -550,9 +578,9 @@ pub fn learn(daemon: &Daemon, provider: &'static Provider, options: &Value, fres
     let settings = Settings::load(&daemon.paths).unwrap_or_default();
     let check = Check::of(provider, &settings, Version::Skip);
     let before = known_models(daemon, &check).unwrap_or_default();
-    let models: Vec<Value> = values(model)
+    let models: Vec<Value> = named_values(model)
         .into_iter()
-        .map(|id| {
+        .map(|(id, name)| {
             let known = before.iter().find(|m| m["id"] == id.as_str());
             let efforts = if id == current {
                 json!(efforts)
@@ -564,7 +592,7 @@ pub fn learn(daemon: &Daemon, provider: &'static Provider, options: &Value, fres
             } else {
                 known.is_some_and(|m| m["default"] == true)
             };
-            let mut model = json!({"id": id, "efforts": efforts});
+            let mut model = json!({"id": id, "name": name, "efforts": efforts});
             if default {
                 model["default"] = true.into();
             }
@@ -579,10 +607,16 @@ pub fn learn(daemon: &Daemon, provider: &'static Provider, options: &Value, fres
 
 /// The values a select option offers, in order, groups flattened.
 pub fn values(option: &Value) -> Vec<String> {
-    fn collect(values: &Value, out: &mut Vec<String>) {
+    named_values(option).into_iter().map(|(id, _)| id).collect()
+}
+
+/// The values a select option offers and the name each is shown by, its value when it has none.
+fn named_values(option: &Value) -> Vec<(String, String)> {
+    fn collect(values: &Value, out: &mut Vec<(String, String)>) {
         for value in values.as_array().into_iter().flatten() {
             if let Some(id) = value["value"].as_str() {
-                out.push(id.to_owned());
+                let name = value["name"].as_str().unwrap_or(id);
+                out.push((id.to_owned(), name.to_owned()));
             } else {
                 collect(&value["options"], out);
             }
@@ -877,7 +911,8 @@ fn switched(name: &str, enabled: bool, announced: Result<(), String>) -> Value {
 }
 
 /// Every provider as `doctor` reports it, with the models it offers (`null` until a session of
-/// its agent said them), and the project's default provider and model when one is named.
+/// its agent said them; those another version said, outdated, until a session says them again),
+/// and the project's default provider and model when one is named.
 fn list(daemon: &Daemon, project: Option<&Project>) -> Result<Value, Failure> {
     let settings =
         Settings::load(&daemon.paths).map_err(|error| Failure::new("invalid-config", error))?;
@@ -886,7 +921,9 @@ fn list(daemon: &Daemon, project: Option<&Project>) -> Result<Value, Failure> {
         .map(|check| {
             let mut entry = check.to_json();
             entry["warnings"] = json!(check.warnings());
-            entry["models"] = json!(known_models(daemon, check));
+            let last = last_models(daemon, check);
+            entry["models_outdated"] = json!(last.as_ref().is_some_and(|(_, current)| !current));
+            entry["models"] = json!(last.map(|(models, _)| models));
             entry
         })
         .collect();

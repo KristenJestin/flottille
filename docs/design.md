@@ -118,8 +118,10 @@ Flottille is an ACP client. Each agent session is one process speaking ACP on st
 - **OpenCode**: the user's own `opencode acp`, its configuration moved into Flottille's data
   folder and its bare agent given in its environment (`docs/agents.md`, "Bare mode for
   OpenCode").
-- **Codex** comes later (`codex-acp` with the patch described in `reference/hemera.md` §2).
-  Gemini CLI speaks ACP natively too.
+- **Codex**: Flottille's own bridge, `flottille bridge codex`, in front of the user's
+  `codex app-server`, which it starts with Codex's configuration moved into Flottille's data
+  folder, every tool of its own switched off and no environment (`docs/agents.md`, "Bare mode for
+  Codex"). Gemini CLI speaks ACP natively too.
 
 Each is a provider, an entry of its own in the daemon; which are enabled is the user's
 (`providers.toml`), and each agent runs on one for life (`docs/agents.md`, "Providers").
@@ -137,7 +139,11 @@ settings, no skills, no plugins, no user MCP servers, only Flottille's MCP serve
 set by the bridge on `claude` itself: `tools: []`, `settingSources: []`, `strictMcpConfig: true`, `allowedTools` = the exact names of
 the session's Flottille tools, a custom system prompt, and the two MCP timeouts raised. For
 OpenCode, set in its environment: every tool denied but Flottille's, its own agents disabled,
-its prompt the agent's instructions, and no configuration of the user's or the project's.
+its prompt the agent's instructions, and no configuration of the user's or the project's. For
+Codex, set by the bridge on `codex app-server`: its own folder, a list of switches that turn its
+tools off, no environment in any thread, the agent's instructions in place of Codex's, and
+Flottille's server alone; Codex has no allowlist, so the bridge also fails a turn in which a tool
+of Codex's own starts.
 
 This is what makes the rest hold: with no shell and no native sub-agent tool, an agent **cannot**
 start another agent (no `Task`, no `claude --bg`, no background shell) except through

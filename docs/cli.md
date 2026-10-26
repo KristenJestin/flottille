@@ -83,7 +83,7 @@ program, its version and its login (the login file checked for presence, never r
 key set, named, never printed), and whether its agents can run, with why not. Exit code 1 when no
 provider is enabled or an enabled one cannot run; a provider that is not enabled is not a
 failure. A program of another version than the one this Flottille was checked against is a
-warning that names both, not a failure, except OpenCode's, which cannot run unless the user
+warning that names both, not a failure, except OpenCode's and Codex's, which cannot run unless the user
 allows it (`allow_unqualified_version`, `docs/agents.md`); so is a provider with no login file and no API key, which
 may be signed in where Flottille does not look (the macOS Keychain). `--json` prints the report: `{"providers": [{"name",
 "title", "enabled", "ready", "why", "program": {"name", "present", "path", "version", "checked"},
@@ -261,7 +261,7 @@ Removed workspace login of shop: its worktrees and its folder. Its branches are 
 
 ## Agents
 
-An agent is one session of an agent run over ACP on one of its providers, Claude or OpenCode
+An agent is one session of an agent run over ACP on one of its providers, Claude, OpenCode or Codex
 (`docs/agents.md`). You start **root**
 agents and write to them; a root may launch sub-agents of its own, which belong to it (design §5).
 You can read any agent of a tree, never write to a child and stop it only with its root: the
@@ -288,8 +288,9 @@ Follow it with `flottille agent read bd7ed8152969`, or `flottille watch --after 
 ### `flottille agent run <project> <message>`
 
 `start`, then follows the agent and prints its reply until its first turn ends: for trying an
-agent by hand. Same options as `start`, except `--role`. `--json` prints the agent once the turn
-ended, as `agent show --json` does. (It is `start` followed by `watch`, nothing more.) It follows
+agent by hand. Same options as `start`, except `--role`. `--json` prints nothing while the turn
+runs, then the agent alone, the object under `agent` in `agent show --json` (its id is `.id`, not
+`.agent.id`). (It is `start` followed by `watch`, nothing more.) It follows
 the turn as `send --follow` does, below.
 
 ### `flottille agent send <agent> <message>`
@@ -374,7 +375,8 @@ A request waits for you: #4 of agent bd7ed8152969. Answer with `flottille approv
 
 ### `flottille agent read <agent>`
 
-A page of the agent's conversation: what it was sent, what it said, its tool calls, its reports.
+A page of the agent's conversation: what it was sent, what it said (each reply on one line, its
+streamed pieces joined), its tool calls, its reports.
 Any agent of a tree. A page is at most 30,000 characters; its end says how to read on, with
 `--after <n>`. `--json` prints `agent.read`: `{"agent", "name", "lines", "after", "more"}`, where
 `more` says whether the page stopped before the end.
@@ -515,15 +517,18 @@ The settings button of the top bar opens the settings page: every provider, enab
 a switch (`flottille provider enable` and `disable` do the same), how it signs in (its program's
 login file found, or the name of the API key set, never its value), and whether its agents can
 run here, as `flottille doctor` says it. The composer that starts a session offers the providers
-that are enabled and ready, then the chosen one's models (as its sessions said them: until one
-did, its default model), then the model's efforts when it has some. It starts on the project's
+that are enabled and ready, then the chosen one's models by their names (as its sessions said
+them, those of an older version of its program included: until one did, its default model; the
+provider's own `default` entry is "default model"), then the model's efforts when it has some. It starts on the project's
 provider and model, else on those the last session started from the window used. A project that
 names a model and no provider gives it to the first provider enabled, as the daemon does: on that
 provider the composer shows the project's model, marked so, with its efforts, and "default model"
 only on the others. A project's model its provider is known not to offer is said, and the session
 starts once another model is picked. When no provider
 is ready it says why, and links to the settings page. The session page shows each agent's
-provider beside its model.
+provider beside its model; the root's replies carry no name, and its row of the rail is its
+provider and model. Making a workspace happens in a dialog over the page, which Escape, Cancel or a
+click outside closes.
 
 Below 1240 pixels wide, the session page's rail of agents becomes a drawer from the right; below
 860, the tree of projects becomes a drawer from the left, opened by the menu button of the top bar.
@@ -535,6 +540,12 @@ Below 1240 pixels wide, the session page's rail of agents becomes a drawer from 
 Not for you: the program the daemon starts for each Claude agent, hidden from `--help`. It speaks
 ACP on its standard input and output and drives your `claude` in its stream-json mode
 (`docs/agents.md`, "The Claude bridge").
+
+### `flottille bridge codex`
+
+Not for you either: the program the daemon starts for each Codex agent, hidden from `--help`. It
+speaks ACP on its standard input and output and drives your `codex app-server` in bare mode
+(`docs/agents.md`, "The Codex bridge").
 
 ### `flottille mcp`
 

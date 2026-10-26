@@ -19,10 +19,24 @@ pub fn next_read() -> u64 {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Model {
     pub id: String,
+    /// The name its provider shows it by, once a session said it.
+    pub name: Option<String>,
     /// `None` until a session had this model.
     pub efforts: Option<Vec<String>>,
     /// The model a new session takes when none is asked.
     pub default: bool,
+}
+
+impl Model {
+    /// How the window names it: its provider's name for it, and "default model" for the
+    /// provider's own `default` entry, so that it is not said twice.
+    pub fn label(&self) -> String {
+        match &self.name {
+            _ if self.id == "default" => "default model".to_owned(),
+            Some(name) => name.clone(),
+            None => self.id.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -47,6 +61,8 @@ pub struct Provider {
     pub overridden: bool,
     /// `None` until a session of its agent said them.
     pub models: Option<Vec<Model>>,
+    /// The models were said by another version of its program: shown, but they refuse nothing.
+    pub models_outdated: bool,
 }
 
 /// Every provider, in order, or why the daemon could not list them.
@@ -89,6 +105,7 @@ impl Provider {
                     .iter()
                     .map(|model| Model {
                         id: text(&model["id"]).unwrap_or_default(),
+                        name: text(&model["name"]),
                         efforts: model["efforts"]
                             .as_array()
                             .map(|efforts| efforts.iter().filter_map(text).collect()),
@@ -96,6 +113,7 @@ impl Provider {
                     })
                     .collect()
             }),
+            models_outdated: entry["models_outdated"] == true,
         }
     }
 
@@ -268,5 +286,19 @@ mod tests {
             Providers::default().why_none().is_empty(),
             "not before the daemon answered"
         );
+    }
+
+    #[test]
+    fn a_model_is_shown_by_its_name_and_the_provider_s_default_entry_as_default_model() {
+        let providers = Providers::of(Ok(&json!({"providers": [
+            {"name": "claude", "title": "Claude", "enabled": true, "ready": true,
+             "models": [
+                {"id": "default", "name": "Default (recommended)", "efforts": null, "default": true},
+                {"id": "fable", "name": "Fable", "efforts": null},
+                {"id": "haiku", "efforts": null}]}
+        ]})));
+        let claude = providers.get("claude").unwrap();
+        let labels: Vec<String> = claude.models.iter().flatten().map(Model::label).collect();
+        assert_eq!(labels, ["default model", "Fable", "haiku"]);
     }
 }

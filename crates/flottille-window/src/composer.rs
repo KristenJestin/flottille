@@ -1,31 +1,19 @@
-//! The composer that starts a session, in two layers: an outer shell holding the tabs ("New
-//! task", "Running agents"), the field with its own border and focus ring, and the pickers below
-//! it (the place, the agent and model, send). The field is its own view: typing redraws it, never
-//! the page.
+//! The composer that starts a session, in two layers: an outer shell holding its label ("New
+//! task"), the field with its own border and focus ring, and the pickers below it (the place, the
+//! agent and model, send). The field is its own view: typing redraws it, never the page.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::rc::Rc;
-
-use flottille_ui::motion::{Motion, PANEL};
-use flottille_ui::{Button, Icon, ListRow, StateIcon, Status, Type, enter, icon, palette};
+use flottille_ui::{Align, Button, Dropdown, Icon, MenuItem, Type, palette};
 use gpui_kit::base::input::{Input, InputEditorStyle, InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AppContext as _, Bounds, Context, ElementId, Entity, Focusable as _, InteractiveElement,
-    IntoElement, ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, TestSupportExt as _, WeakEntity, Window, canvas, div, px,
+    App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement, IntoElement,
+    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription,
+    TestSupportExt as _, WeakEntity, Window, div, px,
 };
 
 use crate::actions::{Command, Pick, Target};
 use crate::providers::{Provider, Providers};
 use crate::shell::{Selection, Shell};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Tab {
-    NewTask,
-    Running,
-}
 
 /// A place the composer can start a session in.
 #[derive(Clone, Debug, PartialEq)]
@@ -37,18 +25,6 @@ pub struct PlaceChoice {
     pub ready: bool,
 }
 
-/// A session of the "Running agents" list.
-#[derive(Clone, Debug, PartialEq)]
-pub struct RunningSession {
-    pub id: String,
-    pub title: String,
-    pub place: String,
-    pub agents: usize,
-    pub waiting: bool,
-    /// The state its row in the tree reads.
-    pub status: Entity<Status>,
-}
-
 /// The list a picker of the composer opens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Menu {
@@ -56,6 +32,17 @@ pub enum Menu {
     Provider,
     Model,
     Effort,
+}
+
+/// An entry of a picker's list: picked by a click, or a sentence when it picks nothing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Entry {
+    pub id: String,
+    pub label: String,
+    pub note: Option<String>,
+    /// It is the one picked now.
+    pub on: bool,
+    pub pick: Option<Pick>,
 }
 
 /// The provider and the model a project's file gives its agents, each when it gives it.
@@ -161,11 +148,6 @@ pub enum Choice {
 pub struct Composer {
     shell: WeakEntity<Shell>,
     project: String,
-    tab: Tab,
-    /// 0 on "New task", 1 on "Running agents": where the highlight is.
-    slide: Motion,
-    /// Where the row of tabs and each tab were drawn, for the highlight to slide between them.
-    tabs: Rc<RefCell<[Option<Bounds<Pixels>>; 3]>>,
     field: Entity<TextareaState>,
     name: Entity<InputState>,
     has_text: bool,
@@ -184,10 +166,6 @@ pub struct Composer {
     picked: bool,
     /// What the session being started was asked to start on, until the daemon answers.
     sent: Option<Pick>,
-    /// The "Running agents" tab's list and count, views of their own: a session starting or
-    /// ending a turn redraws them, not the composer.
-    running: Entity<RunningList>,
-    count: Entity<RunningCount>,
     /// Where the session being started was asked to start, until the daemon answers.
     sending: Option<Target>,
     error: Option<SharedString>,
@@ -253,20 +231,9 @@ impl Composer {
                 _ => {}
             }),
         ];
-        let running = {
-            let shell = shell.clone();
-            cx.new(|_| RunningList {
-                shell,
-                sessions: Vec::new(),
-                icons: HashMap::new(),
-            })
-        };
         Self {
             shell,
             project,
-            tab: Tab::NewTask,
-            slide: Motion::settled(0.0),
-            tabs: Rc::new(RefCell::new([None, None, None])),
             field,
             name,
             has_text: false,
@@ -280,8 +247,6 @@ impl Composer {
             pick: Pick::default(),
             picked: false,
             sent: None,
-            running,
-            count: cx.new(|_| RunningCount { agents: 0 }),
             sending: None,
             error: None,
             blocked: None,
@@ -305,10 +270,6 @@ impl Composer {
 
     pub fn renders(&self) -> usize {
         self.renders
-    }
-
-    pub fn tab(&self) -> Tab {
-        self.tab
     }
 
     pub fn choice(&self) -> &Choice {
@@ -407,23 +368,29 @@ impl Composer {
         project_model(&self.providers, self.project_default(), provider)
     }
 
-    /// What the model picker shows: the project's model marked so.
+    /// What the model picker shows: the model's name, the project's model marked so.
     pub fn model_shown(&self) -> String {
-        let default = self.provider().and_then(Provider::default_model);
+        let provider = self.provider();
+        let default = provider.and_then(Provider::default_model);
+        let label = |id: &str| match provider.and_then(|p| p.model(id)) {
+            Some(model) => model.label(),
+            None if id == DEFAULT => "default model".to_owned(),
+            None => id.to_owned(),
+        };
         match (&self.pick.model, default) {
             (Some(model), _) if self.projects_model() == Some(model.as_str()) => {
-                format!("{model} · the project's")
+                format!("{} · the project's", label(model))
             }
-            (Some(model), _) => model.clone(),
-            (None, Some(default)) => default.id.clone(),
+            (Some(model), _) => label(model),
+            (None, Some(default)) => default.label(),
             (None, None) => "default model".to_owned(),
         }
     }
 
     /// Why the model picked cannot start: the project's, which its provider is known not to
-    /// offer. Another model picked starts.
+    /// offer. Another model picked starts. Models said by another version refuse nothing.
     pub fn model_refused(&self) -> Option<String> {
-        let provider = self.provider()?;
+        let provider = self.provider().filter(|p| !p.models_outdated)?;
         let model = self.pick.model.as_deref()?;
         let models = provider.models.as_ref()?;
         (self.projects_model() == Some(model) && provider.model(model).is_none()).then(|| {
@@ -456,26 +423,6 @@ impl Composer {
         &self.name
     }
 
-    /// The sessions the "Running agents" tab lists, in order.
-    pub fn running(&self, cx: &gpui_kit::App) -> Vec<RunningSession> {
-        self.running.read(cx).sessions.clone()
-    }
-
-    /// The sessions of the "Running agents" tab, and the agents it counts: their views are
-    /// drawn again when they change, the composer is not.
-    pub fn set_running(&mut self, running: Vec<RunningSession>, cx: &mut Context<Self>) {
-        let agents = running.iter().map(|s| s.agents).sum();
-        if self.count.read(cx).agents != agents {
-            self.count.update(cx, |count, cx| {
-                count.agents = agents;
-                cx.notify();
-            });
-        }
-        if self.running.read(cx).sessions != running {
-            self.running.update(cx, |list, cx| list.set(running, cx));
-        }
-    }
-
     pub fn set_places(&mut self, places: Vec<PlaceChoice>, cx: &mut Context<Self>) {
         if self.places != places {
             if let Choice::Workspace(name) = &self.choice
@@ -494,8 +441,6 @@ impl Composer {
     /// Picks where the next session starts, and puts the caret in the field.
     pub fn choose(&mut self, choice: Choice, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
-        self.tab = Tab::NewTask;
-        self.slide_to(0.0, cx);
         if self.choice != choice {
             self.choice = choice;
             self.error = None;
@@ -507,20 +452,6 @@ impl Composer {
         };
         window.focus(&focus, cx);
         cx.notify();
-    }
-
-    pub fn select_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
-        if self.tab != tab {
-            self.tab = tab;
-            self.menu = None;
-            self.slide_to(if tab == Tab::NewTask { 0.0 } else { 1.0 }, cx);
-            cx.notify();
-        }
-    }
-
-    fn slide_to(&mut self, target: f32, cx: &mut Context<Self>) {
-        let now = cx.background_executor().now();
-        self.slide.animate(target, PANEL, now, cx.reduce_motion());
     }
 
     /// Opens one of its pickers' lists.
@@ -627,90 +558,15 @@ impl Composer {
         cx.notify();
     }
 
-    fn render_tabs(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = palette(cx);
-        let now = cx.background_executor().now();
-        if self.slide.is_running(now) {
-            window.request_animation_frame();
+    /// A handler of the composer, for a picker or one of its entries.
+    fn handler(
+        cx: &Context<Self>,
+        f: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> impl Fn(&mut Window, &mut App) + 'static {
+        let this = cx.entity().downgrade();
+        move |window, cx| {
+            this.update(cx, |this, cx| f(this, window, cx)).ok();
         }
-        let t = self.slide.value(now);
-        let bounds = *self.tabs.borrow();
-        // The highlight slides between the two tabs' places, measured as they were drawn.
-        let pip = match bounds {
-            [Some(row), Some(a), Some(b)] => {
-                let x = |at: Bounds<Pixels>| f32::from(at.origin.x - row.origin.x);
-                let width = |at: Bounds<Pixels>| f32::from(at.size.width);
-                Some(
-                    div()
-                        .absolute()
-                        .top(px(2.))
-                        .left(px(x(a) + (x(b) - x(a)) * t))
-                        .w(px(width(a) + (width(b) - width(a)) * t))
-                        .h(px(26.))
-                        .rounded(px(7.))
-                        .bg(p.sel),
-                )
-            }
-            _ => None,
-        };
-        let has_pip = pip.is_some();
-        let tab =
-            |index: usize, tab: Tab, label: SharedString, count: Option<Entity<RunningCount>>| {
-                let selected = self.tab == tab;
-                let tabs = self.tabs.clone();
-                let id = match tab {
-                    Tab::NewTask => "tab-task",
-                    Tab::Running => "tab-running",
-                };
-                div()
-                    .id(id)
-                    .relative()
-                    .h(px(26.))
-                    .px(px(10.))
-                    .rounded(px(7.))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .text_size(px(12.5))
-                    .text_color(if selected { p.text } else { p.faint })
-                    .when(selected && !has_pip, |d| d.bg(p.sel))
-                    .child(label)
-                    .children(count)
-                    .child(
-                        canvas(
-                            move |b: Bounds<Pixels>, _, _| tabs.borrow_mut()[index + 1] = Some(b),
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .size_full(),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| this.select_tab(tab, cx)))
-                    .test_support()
-            };
-        div()
-            .relative()
-            .flex()
-            .items_center()
-            .gap(px(2.))
-            .p(px(2.))
-            .pb(px(6.))
-            .child({
-                let tabs = self.tabs.clone();
-                canvas(
-                    move |b: Bounds<Pixels>, _, _| tabs.borrow_mut()[0] = Some(b),
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .size_full()
-            })
-            .children(pip)
-            .child(tab(0, Tab::NewTask, "New task".into(), None))
-            .child(tab(
-                1,
-                Tab::Running,
-                "Running agents".into(),
-                Some(self.count.clone()),
-            ))
     }
 
     fn render_pickers(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -729,22 +585,13 @@ impl Composer {
             .pt(px(6.))
             .px(px(2.))
             .child(
-                div()
-                    .id("place-picker")
-                    .h(px(28.))
-                    .px(px(9.))
-                    .rounded(px(7.))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .text_size(px(12.5))
-                    .text_color(p.mute)
-                    .hover(|d| d.bg(p.hover).text_color(p.text))
-                    .child(icon(glyph).size(px(14.)).text_color(p.faint))
-                    .child(SharedString::from(label))
-                    .child(icon(Icon::Choose).size(px(10.)).text_color(p.faint))
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Place, cx)))
-                    .test_support(),
+                Dropdown::new("place-picker", label)
+                    .leading(glyph)
+                    .open(self.menu == Some(Menu::Place))
+                    .on_toggle(Self::handler(cx, |this, _, cx| {
+                        this.toggle_menu(Menu::Place, cx)
+                    }))
+                    .items(self.place_items(cx)),
             )
             .when(self.choice == Choice::New, |d| {
                 d.child(
@@ -771,97 +618,79 @@ impl Composer {
                     .disabled(!can_send)
                     .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
             )
-            .when(self.menu == Some(Menu::Place), |d| {
-                d.child(self.render_menu(cx).into_any_element())
-            })
-            .when_some(self.menu.filter(|m| *m != Menu::Place), |d, menu| {
-                d.child(self.render_agent_menu(menu, cx).into_any_element())
-            })
     }
 
     /// The provider, model and effort pickers: the model's once a provider is picked, the
     /// effort's once the model is known to have efforts.
-    fn render_agent_pickers(&self, cx: &mut Context<Self>) -> Vec<gpui_kit::AnyElement> {
-        let p = palette(cx);
+    fn render_agent_pickers(&self, cx: &mut Context<Self>) -> Vec<Dropdown> {
         let Some(provider) = self.provider() else {
             return Vec::new();
         };
-        let picker = |id: &'static str, menu: Menu, label: String, strong: bool| {
-            div()
-                .id(id)
-                .h(px(28.))
-                .px(px(9.))
-                .rounded(px(7.))
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .text_size(px(12.5))
-                .text_color(if strong { p.text } else { p.mute })
-                .when(strong, |d| d.medium())
-                .when(!strong, |d| d.mono(12.))
-                .hover(|d| d.bg(p.hover).text_color(p.text))
-                .child(SharedString::from(label))
-                .child(icon(Icon::Choose).size(px(10.)).text_color(p.faint))
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle_menu(menu, cx)))
-                .test_support()
-                .into_any_element()
-        };
-        let model = self.model_shown();
-        let mut pickers = vec![
-            picker(
-                "provider-picker",
-                Menu::Provider,
-                provider.title.clone(),
-                true,
-            ),
-            picker("model-picker", Menu::Model, model, false),
+        let mut wanted = vec![
+            ("provider-picker", Menu::Provider, provider.title.clone()),
+            ("model-picker", Menu::Model, self.model_shown()),
         ];
-        if efforts_of(provider, self.pick.model.as_deref()).is_some_and(|e| !e.is_empty()) {
+        if efforts_of(provider, self.pick.model.as_deref())
+            .is_some_and(|e| levels(e).next().is_some())
+        {
             let effort = self
                 .pick
                 .effort
                 .clone()
                 .unwrap_or_else(|| "default effort".into());
-            pickers.push(picker("effort-picker", Menu::Effort, effort, false));
+            wanted.push(("effort-picker", Menu::Effort, effort));
+        }
+        let mut pickers = Vec::new();
+        for (id, menu, label) in wanted {
+            let items = self.agent_items(menu, cx);
+            let picker = Dropdown::new(id, label)
+                .align(Align::End)
+                .width(px(280.))
+                .open(self.menu == Some(menu))
+                .on_toggle(Self::handler(cx, move |this, _, cx| {
+                    this.toggle_menu(menu, cx)
+                }))
+                .items(items);
+            pickers.push(match menu {
+                Menu::Provider => picker.strong(),
+                _ => picker.mono(),
+            });
         }
         pickers
     }
 
-    fn render_agent_menu(&self, menu: Menu, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = palette(cx);
+    fn agent_items(&self, menu: Menu, cx: &mut Context<Self>) -> Vec<MenuItem> {
+        self.entries(menu)
+            .into_iter()
+            .map(|entry| {
+                let item = MenuItem::new(entry.id, entry.label).selected(entry.on);
+                let item = match entry.note {
+                    Some(note) => item.note(note),
+                    None => item,
+                };
+                match entry.pick {
+                    Some(pick) => item.on_click(Self::handler(cx, move |this, _, cx| match menu {
+                        Menu::Provider => {
+                            this.pick_provider(pick.provider.as_deref().unwrap_or_default(), cx)
+                        }
+                        Menu::Model => this.pick_model(pick.model.clone(), cx),
+                        _ => this.pick_effort(pick.effort.clone(), cx),
+                    })),
+                    None => item,
+                }
+            })
+            .collect()
+    }
+
+    /// What the provider, model or effort picker's list offers, in order.
+    pub fn entries(&self, menu: Menu) -> Vec<Entry> {
         let item =
-            |id: String, label: String, note: Option<String>, on: bool, pick: Option<Pick>| {
-                div()
-                    .id(ElementId::Name(id.into()))
-                    .h(px(28.))
-                    .px(px(8.))
-                    .rounded(px(7.))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .text_size(px(12.5))
-                    .text_color(if pick.is_some() { p.text } else { p.faint })
-                    .when(on, |d| d.bg(p.sel))
-                    .when(pick.is_some() && !on, |d| d.hover(|d| d.bg(p.hover)))
-                    .child(div().flex_1().child(SharedString::from(label)))
-                    .when_some(note, |d, note| {
-                        d.child(
-                            div()
-                                .mono(11.)
-                                .text_color(p.faint)
-                                .child(SharedString::from(note)),
-                        )
-                    })
-                    .when_some(pick, |d, pick| {
-                        d.on_click(cx.listener(move |this, _, _, cx| match menu {
-                            Menu::Provider => {
-                                this.pick_provider(pick.provider.as_deref().unwrap_or_default(), cx)
-                            }
-                            Menu::Model => this.pick_model(pick.model.clone(), cx),
-                            _ => this.pick_effort(pick.effort.clone(), cx),
-                        }))
-                    })
-                    .test_support()
+            |id: String, label: String, note: Option<String>, on: bool, pick: Option<Pick>| Entry {
+                id,
+                label,
+                note,
+                on,
+                pick,
             };
         let pick = |provider: Option<&str>, model: Option<&str>, effort: Option<&str>| Pick {
             provider: provider.map(str::to_owned),
@@ -893,11 +722,11 @@ impl Composer {
                         let note = if projects == Some(model.id.as_str()) {
                             Some("the project's".to_owned())
                         } else {
-                            model.default.then(|| "default".to_owned())
+                            (model.default && model.id != DEFAULT).then(|| "default".to_owned())
                         };
                         items.push(item(
                             format!("model-choice-{}", model.id),
-                            model.id.clone(),
+                            model.label(),
                             note,
                             on,
                             Some(pick(None, Some(&model.id), None)),
@@ -947,7 +776,7 @@ impl Composer {
                 ));
                 for effort in efforts_of(provider, self.pick.model.as_deref())
                     .into_iter()
-                    .flatten()
+                    .flat_map(|efforts| levels(efforts))
                 {
                     items.push(item(
                         format!("effort-choice-{effort}"),
@@ -960,22 +789,7 @@ impl Composer {
             }
             _ => {}
         }
-        div()
-            .id("agent-menu")
-            .occlude()
-            .absolute()
-            .top(px(40.))
-            .right(px(0.))
-            .w(px(280.))
-            .p(px(6.))
-            .rounded(px(10.))
-            .bg(p.card)
-            .border_1()
-            .border_color(p.line2)
-            .shadow_lg()
-            .flex()
-            .flex_col()
-            .children(items)
+        items
     }
 
     /// Why no session can start, as the daemon says it, and the way to the settings page.
@@ -1024,35 +838,25 @@ impl Composer {
         )
     }
 
-    fn render_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = palette(cx);
+    fn place_items(&self, cx: &mut Context<Self>) -> Vec<MenuItem> {
         let item = |id: String,
                     glyph: Icon,
                     label: String,
                     note: Option<&'static str>,
                     choice: Option<Choice>| {
-            div()
-                .id(ElementId::Name(id.into()))
-                .h(px(28.))
-                .px(px(8.))
-                .rounded(px(7.))
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .text_size(px(12.5))
-                .text_color(if choice.is_some() { p.text } else { p.faint })
-                .when(choice.is_some(), |d| d.hover(|d| d.bg(p.hover)))
-                .child(icon(glyph).size(px(14.)).text_color(p.faint))
-                .child(div().flex_1().child(SharedString::from(label)))
-                .when_some(note, |d, note| {
-                    d.child(div().mono(11.).text_color(p.faint).child(note))
-                })
-                .when_some(choice, |d, choice| {
-                    d.on_click(cx.listener(move |this, _, window, cx| {
-                        this.choose(choice.clone(), window, cx)
-                    }))
-                })
-                .test_support()
+            let entry = MenuItem::new(id, label)
+                .leading(glyph)
+                .selected(choice.as_ref() == Some(&self.choice));
+            let entry = match note {
+                Some(note) => entry.note(note),
+                None => entry,
+            };
+            match choice {
+                Some(choice) => entry.on_click(Self::handler(cx, move |this, window, cx| {
+                    this.choose(choice.clone(), window, cx)
+                })),
+                None => entry,
+            }
         };
         let mut items = vec![item(
             "place-choice-main".into(),
@@ -1078,23 +882,17 @@ impl Composer {
             None,
             Some(Choice::New),
         ));
-        div()
-            .id("place-menu")
-            .occlude()
-            .absolute()
-            .top(px(40.))
-            .left(px(0.))
-            .w(px(260.))
-            .p(px(6.))
-            .rounded(px(10.))
-            .bg(p.card)
-            .border_1()
-            .border_color(p.line2)
-            .shadow_lg()
-            .flex()
-            .flex_col()
-            .children(items)
+        items
     }
+}
+
+/// The provider's own `default` entry, a model or an effort: the window's "default model" and
+/// "default effort" stand for it.
+pub const DEFAULT: &str = "default";
+
+/// A model's effort levels, less the provider's own `default`: "default effort" is that one.
+pub fn levels(efforts: &[String]) -> impl Iterator<Item = &String> {
+    efforts.iter().filter(|e| e.as_str() != DEFAULT)
 }
 
 pub fn agents_label(n: usize) -> String {
@@ -1105,28 +903,23 @@ pub fn agents_label(n: usize) -> String {
 }
 
 impl Render for Composer {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
         let p = palette(cx);
-        let tabs = self.render_tabs(window, cx).into_any_element();
-        let body = match self.tab {
-            Tab::NewTask => div()
-                .id("composer-field")
-                .min_h(px(64.))
-                .px(px(14.))
-                .py(px(12.))
-                .text_size(px(14.))
-                .line_height(px(21.))
-                .cursor_text()
-                .child(self.field.clone())
-                .on_click(cx.listener(|this, _, window, cx| {
-                    let focus = this.field.read(cx).focus_handle(cx);
-                    window.focus(&focus, cx);
-                }))
-                .test_support()
-                .into_any_element(),
-            Tab::Running => self.running.clone().into_any_element(),
-        };
+        let body = div()
+            .id("composer-field")
+            .min_h(px(64.))
+            .px(px(14.))
+            .py(px(12.))
+            .text_size(px(14.))
+            .line_height(px(21.))
+            .cursor_text()
+            .child(self.field.clone())
+            .on_click(cx.listener(|this, _, window, cx| {
+                let focus = this.field.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
+            }))
+            .test_support();
         div()
             .id("composer")
             .relative()
@@ -1139,7 +932,15 @@ impl Render for Composer {
             .shadow_lg()
             .ui_text()
             .text_color(p.text)
-            .child(tabs)
+            .child(
+                div()
+                    .px(px(10.))
+                    .pt(px(4.))
+                    .pb(px(8.))
+                    .text_size(px(12.5))
+                    .text_color(p.mute)
+                    .child("New task"),
+            )
             .child(
                 div()
                     .rounded(px(11.))
@@ -1214,88 +1015,5 @@ impl Render for Composer {
                         }),
                 )
             })
-    }
-}
-
-/// The sessions of the "Running agents" tab.
-pub struct RunningList {
-    shell: WeakEntity<Shell>,
-    sessions: Vec<RunningSession>,
-    icons: HashMap<String, Entity<StateIcon>>,
-}
-
-impl RunningList {
-    fn set(&mut self, sessions: Vec<RunningSession>, cx: &mut Context<Self>) {
-        self.icons
-            .retain(|id, _| sessions.iter().any(|s| &s.id == id));
-        for session in &sessions {
-            let status = session.status.clone();
-            self.icons
-                .entry(session.id.clone())
-                .or_insert_with(|| cx.new(|cx| StateIcon::new(status, cx)));
-        }
-        self.sessions = sessions;
-        cx.notify();
-    }
-}
-
-impl Render for RunningList {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = palette(cx);
-        let list = div().id("running-list").p(px(6.)).flex().flex_col();
-        if self.sessions.is_empty() {
-            return list.child(
-                div()
-                    .px(px(10.))
-                    .py(px(8.))
-                    .text_color(p.faint)
-                    .child("Nothing running in this project."),
-            );
-        }
-        list.children(self.sessions.iter().enumerate().map(|(index, session)| {
-            let shell = self.shell.clone();
-            let id = session.id.clone();
-            let (label, color) = if session.waiting {
-                ("needs you", p.wait)
-            } else {
-                ("running", p.faint)
-            };
-            enter(
-                ElementId::Name(format!("enter-running-{}", session.id).into()),
-                index,
-                ListRow::new(
-                    ElementId::Name(format!("running-{}", session.id).into()),
-                    SharedString::from(session.title.clone()),
-                )
-                .when_some(self.icons.get(&session.id).cloned(), |row, icon| {
-                    row.leading(icon)
-                })
-                .detail(SharedString::from(format!("· {}", session.place)))
-                .meta(SharedString::from(agents_label(session.agents)))
-                .trailing(div().mono(11.5).text_color(color).child(label))
-                .on_click(move |_, window, cx| {
-                    let session = id.clone();
-                    shell
-                        .update(cx, |shell, cx| {
-                            shell.open(Selection::Session(session), window, cx)
-                        })
-                        .ok();
-                }),
-            )
-        }))
-    }
-}
-
-/// The agents the "Running agents" tab counts.
-pub struct RunningCount {
-    agents: usize,
-}
-
-impl Render for RunningCount {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .mono(11.)
-            .text_color(palette(cx).mute)
-            .child(self.agents.to_string())
     }
 }

@@ -77,7 +77,7 @@ The repositories are put in dependency order (a repository after those it depend
 that are ready, the first of the file first) by `Project::in_dependency_order()`, which preparing
 a workspace and merging use.
 
-`provider` must be one Flottille knows (`claude`, `opencode`) and `model` must not be empty; which
+`provider` must be one Flottille knows (`claude`, `opencode`, `codex`) and `model` must not be empty; which
 providers are enabled is the user's, in `$XDG_CONFIG_HOME/flottille/providers.toml`, beside the
 projects (`docs/agents.md`, "Providers"). An agent keeps the provider and model it started with:
 editing them changes the agents started later only.
