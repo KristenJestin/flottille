@@ -1,0 +1,25 @@
+# A deleted feature branch takes its rolling alpha pre-release with it (docs/releases.md).
+name: alpha-cleanup
+
+on:
+  delete:
+
+permissions:
+  contents: write
+
+jobs:
+  forget:
+    if: github.event.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    # The group of the branch's `publish` (ci.yml): one still running finishes first, and finds
+    # the branch gone or publishes what this then deletes.
+    concurrency:
+      group: publish-${{ github.event.ref }}
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.event.ref }}
+        run: |
+          # Each byte but ASCII letters, digits and dashes is a dash (docs/releases.md).
+          tag="alpha-$(printf '%s' "$BRANCH" | LC_ALL=C tr -c 'A-Za-z0-9-' '-')"
+          gh release delete "$tag" --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || echo "$BRANCH had no alpha release"

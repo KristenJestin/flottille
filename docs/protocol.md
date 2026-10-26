@@ -73,7 +73,7 @@ No parameters. The result:
 
 ```json
 {
-  "version": "0.1.0 (dd939a5ec692)",
+  "version": "0.1.0 (local, dd939a5ec692)",
   "pid": 4242,
   "uptime_s": 192,
   "agents": {"running": 0, "waiting_for_user": 0, "failed": 0}

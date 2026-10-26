@@ -18,8 +18,9 @@ and an agent running outside Flottille drives it through [`flottille mcp`](#the-
 
 ## The `flot` name
 
-`flot` is a second name for the same program, shorter to type. `cargo install` builds one binary,
-`flottille`, and makes no link; add it yourself, once, in a folder of your `PATH`:
+`flot` is a second name for the same program, shorter to type. `install.sh` makes the link
+(`docs/releases.md`); `cargo install` builds one binary, `flottille`, and makes no link: add it
+yourself, once, in a folder of your `PATH`:
 
 ```
 ln -s "$(command -v flottille)" ~/.local/bin/flot
@@ -58,7 +59,7 @@ or a root's question you have not answered), failed. `--json` prints `daemon.sta
 
 ```
 $ flottille status
-Flottille 0.1.0 (f21246dfb458)
+Flottille 0.1.0 (local, f21246dfb458)
 Daemon: pid 2638022, up 5s
 Agents: 0 running, 1 waiting for you, 0 failed
 ```
@@ -71,7 +72,7 @@ resumes with the number of the last event it saw.
 
 ```
 $ flottille watch --after 0
-{"seq":1,"at":1792937111111,"name":"daemon.started","data":{"version":"0.1.0 (f21246dfb458)","pid":2654851}}
+{"seq":1,"at":1792937111111,"name":"daemon.started","data":{"version":"0.1.0 (local, f21246dfb458)","pid":2654851}}
 {"seq":2,"at":1792937111130,"name":"project.added","data":{"name":"shop","folder":"/work/shop"}}
 ```
 
@@ -117,6 +118,22 @@ the next start of its process, saying why.
 ```
 $ flottille provider disable opencode
 opencode is disabled: its agents running now go on, and fail at their next start.
+```
+
+### `flottille update`
+
+Replaces Flottille with the latest build of a channel (`docs/releases.md`): `--channel stable`,
+`beta` or `alpha` (by default the channel this build is on; a local build takes stable), and with
+`--channel alpha`, `--branch <name>` (by default the branch this build came from). The archive's
+SHA-256 sum is checked before anything is replaced. It refuses while the daemon runs: stop it
+first with `flottille daemon stop`. The same version is not installed again and an older one is
+refused, unless `--force`. `flottille --version` says the channel installed.
+
+```
+$ flottille update --channel beta
+~/.local/bin/flottille is now 0.3.0-beta.12.
+$ flottille --version
+flottille 0.3.0-beta.12 (beta, 3f2a9c1d7b44)
 ```
 
 ## Projects
@@ -568,7 +585,7 @@ $ printf '%s\n' \
     '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
     '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"projects_list","arguments":{}}}' \
   | flottille mcp
-{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"flottille","version":"0.1.0 (f21246dfb458)"},"instructions":"Flottille runs coding agents on the user's own machine: …"}}
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"flottille","version":"0.1.0 (local, f21246dfb458)"},"instructions":"Flottille runs coding agents on the user's own machine: …"}}
 {"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"No project is registered yet: the user registers one with `flottille project add <folder>`.\n"}],"isError":false}}
 ```
 
