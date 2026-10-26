@@ -266,7 +266,7 @@ fn an_unknown_model_is_refused_naming_the_provider_s_models() {
     let listed = user.call("provider.list", Value::Null).unwrap();
     assert_eq!(
         listed["providers"][0]["models"][0],
-        json!({"id": "fake-small", "efforts": ["low", "high"], "default": true})
+        json!({"id": "fake-small", "name": "fake-small", "efforts": ["low", "high"], "default": true})
     );
     assert_eq!(listed["providers"][0]["models"][1]["efforts"], Value::Null);
     let (_, message) = start(
@@ -370,8 +370,8 @@ fn the_providers_method_lists_every_provider_enabled_ready_and_why_its_models_an
     assert_eq!(
         listed["providers"][0]["models"],
         json!([
-            {"id": "fake-small", "efforts": ["low", "high"], "default": true},
-            {"id": "fake-large", "efforts": ["low", "high"]}
+            {"id": "fake-small", "name": "fake-small", "efforts": ["low", "high"], "default": true},
+            {"id": "fake-large", "name": "fake-large", "efforts": ["low", "high"]}
         ])
     );
     assert!(listed.get("project").is_none());
@@ -622,27 +622,30 @@ fn opencode_of_the_qualified_version_runs() {
 }
 
 #[test]
-fn the_models_are_forgotten_when_the_api_keys_set_change_and_learned_again_from_a_session() {
+fn the_models_of_other_api_keys_stay_listed_as_outdated_refuse_nothing_and_are_learned_again() {
     let user = User::with_fake_agent();
     user.fake_script(json!({"models": ["fake-small", "fake-large"]}));
     project(&user);
     let first = id(&start(&user, json!({"message": "hello"})).unwrap());
     eventually("the session", || agent(&user, &first)["state"] == "idle");
-    let models = |user: &User| {
-        user.call("provider.list", Value::Null).unwrap()["providers"][0]["models"].clone()
-    };
-    assert!(models(&user).is_array());
+    let claude =
+        |user: &User| user.call("provider.list", Value::Null).unwrap()["providers"][0].clone();
+    assert!(claude(&user)["models"].is_array());
+    assert_eq!(claude(&user)["models_outdated"], false);
 
-    // The daemon again, with an API key of Claude's set: what it offers may differ.
+    // The daemon again, with an API key of Claude's set: what it offers may differ. What the
+    // last session said is still shown, said outdated, and refuses no model.
     assert!(user.run(&["daemon", "stop"]).status.success());
     let user = user.with_env("ANTHROPIC_API_KEY", "sk-ant-invented-0123456789");
-    assert_eq!(models(&user), Value::Null);
-
-    let second = id(&start(&user, json!({"message": "hello"})).unwrap());
+    assert_eq!(claude(&user)["models"][1]["id"], "fake-large");
+    assert_eq!(claude(&user)["models_outdated"], true);
+    user.fake_script(json!({"models": ["fake-small", "fake-new"]}));
+    let second = id(&start(&user, json!({"message": "hello", "model": "fake-new"})).unwrap());
     eventually("the second session", || {
         agent(&user, &second)["state"] == "idle"
     });
-    assert_eq!(models(&user)[1]["id"], "fake-large");
+    assert_eq!(claude(&user)["models"][1]["id"], "fake-new");
+    assert_eq!(claude(&user)["models_outdated"], false);
 }
 
 /// The user's `providers.toml`, as the daemon left it.

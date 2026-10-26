@@ -6,7 +6,8 @@
 use std::collections::HashMap;
 
 use flottille_ui::{
-    AgentState, Button, Card, Icon, ListRow, Pill, StateIcon, Status, Type, enter, icon, palette,
+    AgentState, Button, Card, Icon, ListRow, Modal, Pill, StateIcon, Status, Type, enter, icon,
+    palette,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -779,8 +780,8 @@ impl CardExt for Card {
     }
 }
 
-/// The last cell of the grid: a dashed "New workspace" card, which opens into its name and a
-/// button that creates it.
+/// The last cell of the grid: a dashed "New workspace" card, which opens the new-workspace modal:
+/// its name and a button that creates it.
 pub struct NewWorkspace {
     shell: WeakEntity<Shell>,
     project: String,
@@ -855,11 +856,19 @@ impl NewWorkspace {
         self.error.as_deref()
     }
 
+    /// Opens its modal, the caret in the name.
     pub fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open = true;
         self.error = None;
         let focus = self.name.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    /// Closes its modal: Escape, Cancel or a click outside. A name being made is still made.
+    pub fn close(&mut self, cx: &mut Context<Self>) {
+        self.open = false;
+        self.error = None;
         cx.notify();
     }
 
@@ -900,60 +909,58 @@ impl NewWorkspace {
 impl Render for NewWorkspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        if !self.open {
-            return div()
-                .id("new-workspace-card")
-                .min_h(px(150.))
-                .h_full()
-                .p(px(22.))
-                .rounded(px(12.))
-                .border_1()
-                .border_dashed()
-                .border_color(p.line2)
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .text_color(p.faint)
-                .text_size(px(13.))
-                .hover(|d| d.bg(p.hover).text_color(p.text))
-                .child(icon(Icon::Plus).size(px(18.)).text_color(p.faint))
-                .child(
-                    div()
-                        .mt(px(6.))
-                        .mb(px(2.))
-                        .text_color(p.text)
-                        .medium()
-                        .child("New workspace"),
-                )
-                .child("a branch of its own in every repository")
-                .on_click(cx.listener(|this, _, window, cx| this.open(window, cx)))
-                .test_support()
-                .into_any_element();
-        }
-        let creating = self.creating.is_some();
-        div()
-            .id("new-workspace-form")
+        let card = div()
+            .id("new-workspace-card")
             .min_h(px(150.))
             .h_full()
-            .p(px(14.))
+            .p(px(22.))
             .rounded(px(12.))
             .border_1()
             .border_dashed()
             .border_color(p.line2)
             .flex()
             .flex_col()
-            .gap(px(10.))
-            .child(div().medium().child("New workspace"))
+            .items_center()
+            .justify_center()
+            .text_color(p.faint)
+            .text_size(px(13.))
+            .hover(|d| d.bg(p.hover).text_color(p.text))
+            .child(icon(Icon::Plus).size(px(18.)).text_color(p.faint))
             .child(
                 div()
-                    .id("new-workspace-card-name")
-                    .h(px(30.))
+                    .mt(px(6.))
+                    .mb(px(2.))
+                    .text_color(p.text)
+                    .medium()
+                    .child("New workspace"),
+            )
+            .child("a branch of its own in every repository")
+            .on_click(cx.listener(|this, _, window, cx| this.open(window, cx)))
+            .test_support();
+        if !self.open {
+            return card;
+        }
+        let creating = self.creating.is_some();
+        let this = cx.entity().downgrade();
+        let modal = Modal::new("new-workspace-modal", "New workspace")
+            .on_close(move |_, cx| {
+                this.update(cx, |this, cx| this.close(cx)).ok();
+            })
+            .child(
+                div()
+                    .text_size(px(12.5))
+                    .text_color(p.mute)
+                    .child("A branch of its own in every repository of the project."),
+            )
+            .child(
+                div()
+                    .id("new-workspace-modal-name")
+                    .h(px(32.))
                     .px(px(10.))
                     .rounded(px(8.))
                     .bg(p.field)
                     .border_1()
-                    .border_color(p.field_line)
+                    .border_color(p.focus_line)
                     .flex()
                     .items_center()
                     .mono(12.5)
@@ -969,29 +976,18 @@ impl Render for NewWorkspace {
                         .child(error),
                 )
             })
-            .child(
+            .action(if creating {
                 div()
-                    .flex()
-                    .justify_end()
-                    .gap(px(6.))
-                    .when(creating, |d| {
-                        d.child(div().mono(11.5).text_color(p.faint).child("Creating…"))
-                    })
-                    .when(!creating, |d| {
-                        d.child(Button::quiet("cancel-new-workspace", "Cancel").on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.open = false;
-                                this.error = None;
-                                cx.notify();
-                            }),
-                        ))
-                        .child(
-                            Button::primary("create-workspace", "Create")
-                                .disabled(!self.has_name)
-                                .on_click(cx.listener(|this, _, _, cx| this.create(cx))),
-                        )
-                    }),
-            )
-            .into_any_element()
+                    .mono(11.5)
+                    .text_color(p.faint)
+                    .child("Creating…")
+                    .into_any_element()
+            } else {
+                Button::primary("create-workspace", "Create")
+                    .disabled(!self.has_name)
+                    .on_click(cx.listener(|this, _, _, cx| this.create(cx)))
+                    .into_any_element()
+            });
+        card.child(modal)
     }
 }

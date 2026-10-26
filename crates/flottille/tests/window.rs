@@ -16,7 +16,7 @@ use flottille_ui::omarchy::Environment;
 use flottille_ui::state::icon_id;
 use flottille_window::Shell;
 use flottille_window::actions::Changes;
-use flottille_window::composer::{Choice, Composer, PlaceChoice, Tab};
+use flottille_window::composer::{Choice, Composer, Menu, PlaceChoice};
 use flottille_window::conversation::Block;
 use flottille_window::link::{self, Connect};
 use flottille_window::model::{Place, Preparation};
@@ -798,46 +798,78 @@ fn a_failing_recipe_shows_its_output_on_the_card(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn the_running_agents_tab_lists_a_waiting_session_first(cx: &mut TestAppContext) {
+fn the_project_page_has_no_running_agents_tab(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");
-    let waiting = start(&user, "atlas", None, "Sessions expire too early");
-    send(&user, &waiting, "read the env");
-    let at_rest = start(&user, "atlas", None, "Tidy the aliases");
     let running = start(&user, "atlas", None, "CSV export by tenant");
     send(&user, &running, "work long");
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    until(&shell, cx, "one waits and one runs", |cx| {
-        mark_of(&shell, &waiting, cx) == Some(AgentState::NeedsYou)
-            && mark_of(&shell, &running, cx) == Some(AgentState::Running)
+    until(&shell, cx, "a session runs", |cx| {
+        mark_of(&shell, &running, cx) == Some(AgentState::Running)
     });
-    settle(cx);
+    open_project(&shell, "atlas", cx);
+    cx.update(|window, _| {
+        assert!(window.try_find("composer-field").is_some());
+        for gone in ["tab-task", "tab-running", "running-list"] {
+            assert!(window.try_find(gone).is_none(), "{gone} is shown");
+        }
+        assert!(window.try_find(format!("running-{running}")).is_none());
+    });
+}
 
-    cx.update(|window, cx| window.click("tab-running", cx));
-    let composer = composer_of(&shell, "atlas", cx);
-    assert_eq!(composer.read_with(cx, |c, _| c.tab()), Tab::Running);
-    let listed: Vec<String> = composer.read_with(cx, |c, cx| {
-        c.running(cx).iter().map(|s| s.id.clone()).collect()
-    });
-    assert_eq!(
-        listed,
-        [waiting.clone(), running.clone()],
-        "the waiting session first, though it is the older one; the one at rest not at all"
-    );
+#[gpui_kit::test]
+fn new_workspace_opens_a_modal_and_escape_closes_it(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let form = shell
+        .read_with(cx, |s, _| s.new_workspace_of("atlas").cloned())
+        .unwrap();
+
+    cx.update(|window, cx| window.click("new-workspace", cx));
     settle(cx);
     cx.update(|window, _| {
-        let y = |id: &str| window.find(format!("running-{id}")).bounds().origin.y;
-        assert!(y(&waiting) < y(&running));
-        assert!(window.try_find(format!("running-{at_rest}")).is_none());
+        let modal = window.find("new-workspace-modal").bounds();
+        let viewport = window.viewport_size();
         assert!(
-            window.try_find("composer-field").is_none(),
-            "the list replaces the field"
+            (modal.center().x - viewport.width / 2.).abs() < px(1.),
+            "centred"
+        );
+        assert!(window.find("new-workspace-modal-name").visible());
+        assert!(window.find("new-workspace-modal-cancel").visible());
+        assert!(window.find("create-workspace").visible());
+    });
+    // The caret is in the name: what is typed goes there.
+    cx.simulate_input("login");
+    assert_eq!(
+        form.read_with(cx, |f, cx| f.name_field().read(cx).value().to_string()),
+        "login"
+    );
+    cx.simulate_keystrokes("escape");
+    settle(cx);
+    assert!(!form.read_with(cx, |f, _| f.is_open()));
+    cx.update(|window, _| {
+        assert!(window.try_find("new-workspace-modal").is_none());
+        assert!(
+            window.try_find("new-workspace-card").is_some(),
+            "the card stays in the grid"
         );
     });
-    cx.update(|window, cx| window.click(format!("running-{waiting}"), cx));
-    assert_eq!(
-        shell.read_with(cx, |s, _| s.selected().cloned()),
-        Some(Selection::Session(waiting))
+
+    // The dashed card opens it too, and Cancel closes it.
+    cx.update(|window, cx| window.click("new-workspace-card", cx));
+    settle(cx);
+    assert!(form.read_with(cx, |f, _| f.is_open()));
+    cx.update(|window, cx| window.click("new-workspace-modal-cancel", cx));
+    assert!(!form.read_with(cx, |f, _| f.is_open()));
+    assert!(
+        user.call("workspace.list", json!({"project": "atlas"}))
+            .unwrap()["workspaces"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "nothing was made"
     );
 }
 
@@ -1363,6 +1395,79 @@ fn the_rail_shows_a_lead_and_two_workers(cx: &mut TestAppContext) {
     assert_eq!(
         states,
         [AgentState::Idle, AgentState::Running, AgentState::Running]
+    );
+}
+
+/// The names over the agents' replies of the conversation shown, `None` where there is none.
+fn authors(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Vec<Option<String>> {
+    page.read_with(cx, |page, cx| {
+        page.conversation()
+            .read(cx)
+            .rows()
+            .iter()
+            .map(|row| row.read(cx))
+            .filter(|row| matches!(row.block(), Block::Text { .. }))
+            .map(|row| row.author().map(str::to_owned))
+            .collect()
+    })
+}
+
+#[gpui_kit::test]
+fn a_root_agent_s_reply_has_no_label_while_a_child_s_has_its_name(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, mcp, _) = lead_in_w(&user);
+    let answer = mcp.call(
+        "agent_launch",
+        json!({"title": "draft the notes", "brief": "draft the notes", "workspace": "w"}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    let child = answer
+        .text
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 12 && w.chars().all(|c| c.is_ascii_hexdigit()))
+        .unwrap()
+        .to_owned();
+    eventually("the child replied", || {
+        user.call("agent.show", json!({"agent": child})).unwrap()["agent"]["state"] == "idle"
+    });
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the child is in the rail", |cx| {
+        rail_ids(&page, cx).contains(&child)
+    });
+    settle(cx);
+
+    let root = authors(&page, cx);
+    assert!(!root.is_empty(), "the root replied");
+    assert!(root.iter().all(Option::is_none), "{root:?}");
+    cx.update(|window, _| {
+        assert!(
+            window.try_find(format!("rail-name-{lead}")).is_none(),
+            "no name on the root"
+        );
+        assert!(window.try_find(format!("rail-runs-on-{lead}")).is_some());
+        assert!(
+            window.try_find(format!("rail-name-{child}")).is_some(),
+            "a child keeps its name"
+        );
+    });
+    let runs_on = page.read_with(cx, |p, cx| {
+        let agent = &p.rail().read(cx).agents()[0];
+        flottille_window::session::runs_on(&agent.provider, agent.model.as_deref())
+    });
+    assert!(runs_on.starts_with("claude · "), "{runs_on}");
+
+    cx.update(|window, cx| window.click(format!("rail-row-{child}"), cx));
+    until(&shell, cx, "the child's reply is shown", |cx| {
+        session_page(&shell, cx).read_with(cx, |p, _| p.shown() == child)
+            && !authors(&page, cx).is_empty()
+    });
+    assert!(
+        authors(&page, cx)
+            .iter()
+            .all(|name| name.as_deref() == Some("draft the notes")),
+        "{:?}",
+        authors(&page, cx)
     );
 }
 
@@ -2829,4 +2934,117 @@ fn a_switch_to_what_the_file_already_says_ends_without_an_event_and_without_a_pe
             .all(|e| !(e["name"] == "provider.changed" && e["data"]["name"] == "opencode")),
         "{events:?}"
     );
+}
+
+#[gpui_kit::test]
+fn an_open_dropdown_is_above_the_elements_under_it_and_inside_the_window(cx: &mut TestAppContext) {
+    let user = providers_user();
+    project(&user, "atlas");
+    workspace(&user, "atlas", "login");
+    learn_models(&user, "atlas", "claude", "fake-small");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(560.)));
+    open_project(&shell, "atlas", cx);
+    let composer = composer_of(&shell, "atlas", cx);
+    until(&shell, cx, "the efforts are known", |cx| {
+        composer.read_with(cx, |c, _| !c.entries(Menu::Effort).is_empty())
+    });
+    settle(cx);
+
+    for (picker, menu) in [
+        ("place-picker", "place-picker-menu"),
+        ("provider-picker", "provider-picker-menu"),
+        ("model-picker", "model-picker-menu"),
+        ("effort-picker", "effort-picker-menu"),
+    ] {
+        cx.update(|window, cx| window.click(picker, cx));
+        settle(cx);
+        cx.update(|window, _| {
+            let list = window.find(menu).bounds();
+            let viewport = window.viewport_size();
+            assert!(
+                list.left() >= px(0.)
+                    && list.top() >= px(0.)
+                    && list.right() <= viewport.width
+                    && list.bottom() <= viewport.height,
+                "{menu} {list:?} inside {viewport:?}"
+            );
+        });
+        // A click outside closes it.
+        cx.update(|window, cx| {
+            window.click_at(
+                format!("{picker}-backdrop"),
+                gpui_kit::point(px(4.), px(4.)),
+                cx,
+            )
+        });
+        settle(cx);
+        cx.update(|window, _| assert!(window.try_find(menu).is_none(), "{menu} stays open"));
+    }
+
+    // The effort's list opens over the places' cards and the new-workspace card: what is under
+    // the pointer is the entry, not the card.
+    cx.update(|window, cx| window.click("effort-picker", cx));
+    settle(cx);
+    let covers = cx.update(|window, _| {
+        let list = window.find("effort-picker-menu").bounds();
+        ["place-card-main", "place-card-login", "new-workspace-card"]
+            .iter()
+            .any(|card| {
+                window
+                    .try_find(*card)
+                    .is_some_and(|c| c.bounds().intersects(&list))
+            })
+    });
+    assert!(covers, "the list is drawn over a card");
+    cx.update(|window, cx| window.click("effort-choice-high", cx));
+    assert_eq!(
+        composer
+            .read_with(cx, |c, _| c.pick().effort.clone())
+            .as_deref(),
+        Some("high")
+    );
+    let form = shell
+        .read_with(cx, |s, _| s.new_workspace_of("atlas").cloned())
+        .unwrap();
+    assert!(
+        !form.read_with(cx, |f, _| f.is_open()),
+        "no card took the click"
+    );
+}
+
+#[gpui_kit::test]
+fn the_model_picker_lists_claude_s_models_by_name_with_default_model_once(cx: &mut TestAppContext) {
+    let user = User::with_fake_claude();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    project(&user, "atlas");
+    // A session opened before the window: its models are what the picker offers.
+    start(&user, "atlas", None, "hello");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let composer = composer_of(&shell, "atlas", cx);
+    until(&shell, cx, "claude's models are known", |cx| {
+        composer.read_with(cx, |c, _| {
+            c.entries(Menu::Model)
+                .iter()
+                .all(|e| e.id != "models-unknown")
+                && !c.entries(Menu::Model).is_empty()
+        })
+    });
+
+    let labels = |menu: Menu, cx: &mut VisualTestContext| -> Vec<String> {
+        composer.read_with(cx, |c, _| {
+            c.entries(menu).into_iter().map(|e| e.label).collect()
+        })
+    };
+    assert_eq!(model_shown(&composer, cx), "default model");
+    assert_eq!(labels(Menu::Model, cx), ["default model", "Fable", "Haiku"]);
+    assert_eq!(
+        labels(Menu::Effort, cx),
+        ["default effort", "low", "medium", "high", "xhigh"],
+        "one default entry"
+    );
+    cx.update(|window, cx| window.click("model-picker", cx));
+    cx.update(|window, cx| window.click("model-choice-fable", cx));
+    assert_eq!(model_shown(&composer, cx), "Fable");
 }

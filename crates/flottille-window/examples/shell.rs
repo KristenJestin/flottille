@@ -3,13 +3,13 @@
 //! compositor.
 //!
 //! ```text
-//! cargo run -p flottille-window --example shell [--features frames] -- [--session <id> [--agent <id>]] [--tree] [--rail] [--running] [--settings] [--menu provider|model|effort]
+//! cargo run -p flottille-window --example shell [--features frames] -- [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace]
 //! ```
 //!
 //! `--session` opens a session's page (`--agent` then reads one of its sub-agents), `--tree` the
 //! left drawer (in a narrow window), `--rail` the session page's drawer (in a window narrower than
-//! three columns), `--running` the project page's "Running agents" tab, `--settings` the settings page, `--menu` one of the
-//! project page composer's pickers. The daemon is found on
+//! three columns), `--settings` the settings page, `--menu` one of the project page composer's
+//! pickers, `--new-workspace` the project page's new-workspace modal. The daemon is found on
 //! `$XDG_RUNTIME_DIR/flottille/daemon.sock`; it is not started.
 
 use std::os::unix::net::UnixStream;
@@ -19,13 +19,13 @@ use std::time::Duration;
 use flottille_core::paths::Paths;
 use flottille_ui::Icons;
 use flottille_window::Shell;
-use flottille_window::composer::{Menu, Tab};
+use flottille_window::composer::Menu;
 use flottille_window::shell::Selection;
 use gpui_kit::{AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
 
 fn main() {
     let (mut session, mut agent) = (None, None);
-    let (mut tree, mut rail, mut running, mut settings) = (false, false, false, false);
+    let (mut tree, mut rail, mut new_workspace, mut settings) = (false, false, false, false);
     let mut menu = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -34,10 +34,11 @@ fn main() {
             "--agent" => agent = Some(args.next().expect("an agent id")),
             "--tree" => tree = true,
             "--rail" => rail = true,
-            "--running" => running = true,
+            "--new-workspace" => new_workspace = true,
             "--settings" => settings = true,
             "--menu" => {
                 menu = Some(match args.next().as_deref() {
+                    Some("place") => Menu::Place,
                     Some("provider") => Menu::Provider,
                     Some("model") => Menu::Model,
                     Some("effort") => Menu::Effort,
@@ -86,11 +87,13 @@ fn main() {
                                 composer.update(cx, |c, cx| c.open_menu(menu, cx));
                             }
                         }
-                        if running {
+                        if new_workspace {
                             let open = shell.main().read(cx).project_page().cloned();
                             if let Some(page) = open {
-                                let composer = page.read(cx).composer().clone();
-                                composer.update(cx, |c, cx| c.select_tab(Tab::Running, cx));
+                                let name = page.read(cx).name().to_owned();
+                                if let Some(form) = shell.new_workspace_of(&name).cloned() {
+                                    form.update(cx, |f, cx| f.open(window, cx));
+                                }
                             }
                         }
                         let page = shell.main().read(cx).session_page().cloned();

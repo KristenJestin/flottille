@@ -643,14 +643,13 @@ impl Render for SessionPage {
             .child(self.pill.clone())
             .child(div().flex_1())
             .child(
-                Button::icon(
-                    "open-in-editor",
-                    Icon::OpenInEditor,
-                    format!("Open {} in your editor", place_name(&place)),
-                )
-                .on_click(move |_, _, cx| {
-                    editor.update(cx, |page, _| page.open_in_editor()).ok();
-                }),
+                // Said in words: an arrow alone did not say what it opens.
+                Button::quiet("open-in-editor", "Open in editor")
+                    .leading(Icon::OpenInEditor)
+                    .tooltip(format!("Open {} in your editor", place_name(&place)))
+                    .on_click(move |_, _, cx| {
+                        editor.update(cx, |page, _| page.open_in_editor()).ok();
+                    }),
             )
             .when(!wide, |d| {
                 let mut agents = Button::icon("open-rail", Icon::Agents, "Agents")
@@ -855,7 +854,8 @@ impl ConversationView {
             self.specials.push(at);
         }
         let me = self.model.me().to_owned();
-        let row = Row::view(at, block, me, page, self.page.clone(), cx);
+        let root = self.id == page.id();
+        let row = Row::view(at, block, me, root, page, self.page.clone(), cx);
         self.rows.push(row);
         self.touched += 1;
     }
@@ -1027,6 +1027,8 @@ pub struct Row {
     at: usize,
     /// The agent whose conversation it is, as the page names it.
     me: String,
+    /// It is the root's: a conversation with one agent needs no name over its replies.
+    root: bool,
     page: WeakEntity<SessionPage>,
     /// Shared with nothing: a piece streamed is appended to it in place.
     block: Rc<Block>,
@@ -1048,6 +1050,7 @@ impl Row {
         at: usize,
         block: Block,
         me: String,
+        root: bool,
         page: &SessionPage,
         weak: WeakEntity<SessionPage>,
         cx: &mut gpui_kit::App,
@@ -1064,6 +1067,7 @@ impl Row {
             let mut row = Row {
                 at,
                 me,
+                root,
                 page: weak,
                 block: Rc::new(Block::Text {
                     text: String::new(),
@@ -1086,6 +1090,14 @@ impl Row {
 
     pub fn block(&self) -> &Block {
         &self.block
+    }
+
+    /// The name over an agent's reply: none for the root's.
+    pub fn author(&self) -> Option<&str> {
+        match *self.block {
+            Block::Text { .. } if !self.root => Some(&self.me),
+            _ => None,
+        }
     }
 
     pub fn renders(&self) -> usize {
@@ -1293,34 +1305,41 @@ impl Render for Row {
                     .into_any_element()
             }
             Block::Text { text } => {
-                let me = self.me.clone();
-                let letter = me.chars().next().unwrap_or('?').to_uppercase().to_string();
+                let author = self.author().map(|me| {
+                    let letter = me.chars().next().unwrap_or('?').to_uppercase().to_string();
+                    (
+                        SharedString::from(me.to_owned()),
+                        SharedString::from(letter),
+                    )
+                });
                 div()
                     .id(id("text"))
                     .max_w(px(680.))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .mb(px(5.))
-                            .mono(11.5)
-                            .text_color(p.faint)
-                            .child(
-                                div()
-                                    .size(px(20.))
-                                    .rounded(px(6.))
-                                    .bg(p.text)
-                                    .text_color(p.bg)
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .mono(10.)
-                                    .semibold()
-                                    .child(SharedString::from(letter)),
-                            )
-                            .child(SharedString::from(me)),
-                    )
+                    .when_some(author, |d, (me, letter)| {
+                        d.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .mb(px(5.))
+                                .mono(11.5)
+                                .text_color(p.faint)
+                                .child(
+                                    div()
+                                        .size(px(20.))
+                                        .rounded(px(6.))
+                                        .bg(p.text)
+                                        .text_color(p.bg)
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .mono(10.)
+                                        .semibold()
+                                        .child(letter),
+                                )
+                                .child(div().id(id("author")).child(me).test_support()),
+                        )
+                    })
                     .child(SharedString::from(text.clone()))
                     .test_support()
                     .into_any_element()
@@ -1810,24 +1829,35 @@ impl Render for SessionRail {
                                 .min_w_0()
                                 .overflow_hidden()
                                 .whitespace_nowrap()
+                                // The root has no name on screen: what it runs on says it.
+                                .when(kid, |d| {
+                                    d.child(
+                                        div()
+                                            .id(ElementId::Name(
+                                                format!("rail-name-{}", agent.id).into(),
+                                            ))
+                                            .medium()
+                                            .text_size(px(13.))
+                                            .text_ellipsis()
+                                            .overflow_hidden()
+                                            .child(SharedString::from(agent.name.clone()))
+                                            .test_support(),
+                                    )
+                                })
                                 .child(
                                     div()
-                                        .medium()
-                                        .text_size(px(13.))
-                                        .text_ellipsis()
-                                        .overflow_hidden()
-                                        .child(SharedString::from(agent.name.clone())),
-                                )
-                                .child(
-                                    div()
-                                        .mono(11.)
-                                        .text_color(p.faint)
+                                        .id(ElementId::Name(
+                                            format!("rail-runs-on-{}", agent.id).into(),
+                                        ))
+                                        .when(kid, |d| d.mono(11.).text_color(p.faint))
+                                        .when(!kid, |d| d.mono(12.).text_color(p.text))
                                         .text_ellipsis()
                                         .overflow_hidden()
                                         .child(SharedString::from(runs_on(
                                             &agent.provider,
                                             agent.model.as_deref(),
-                                        ))),
+                                        )))
+                                        .test_support(),
                                 ),
                         )
                         .child(div().flex_none().child(pill))
@@ -2181,7 +2211,11 @@ impl Render for Reply {
 
 /// What an agent runs on, as a line: its provider and its model.
 pub fn runs_on(provider: &str, model: Option<&str>) -> String {
-    format!("{provider} · {}", model.unwrap_or("default model"))
+    let model = match model {
+        None | Some(crate::composer::DEFAULT) => "default model",
+        Some(model) => model,
+    };
+    format!("{provider} · {model}")
 }
 
 /// The root's provider and model and the context it used, below the field.
