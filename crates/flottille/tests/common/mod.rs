@@ -10,7 +10,7 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -31,6 +31,11 @@ pub struct User {
     dir: TempDir,
     /// More variables for every command, and so for the daemon the first one starts.
     env: Vec<(String, String)>,
+    /// True once the user is dropped, its daemon stopped and its folder about to go: a client the
+    /// test still holds (the window's link, which outlives the test function) must not start a
+    /// daemon again in a folder that is removed (issue #54). Held by a connector for as long as
+    /// it connects, so that the drop waits for it.
+    closed: Arc<Mutex<bool>>,
 }
 
 impl User {
@@ -48,6 +53,7 @@ impl User {
         User {
             dir,
             env: Vec::new(),
+            closed: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -188,11 +194,16 @@ impl User {
 
     /// Connects to this user's daemon as a client that starts it when nobody listens (the
     /// command line's `connect_or_start`): `flottille status` starts it, then the socket is
-    /// opened. Usable from any thread, for as long as the user lives.
+    /// opened. Usable from any thread; once the user is dropped it fails and starts nothing.
     pub fn connector(&self) -> impl Fn() -> std::io::Result<UnixStream> + Send + Sync + 'static {
         let dir = self.dir.path().to_owned();
         let env = self.env.clone();
+        let closed = self.closed.clone();
         move || {
+            let closed = closed.lock().unwrap();
+            if *closed {
+                return Err(std::io::Error::other("the user was dropped"));
+            }
             let output = command_of(&dir, &env, &["status", "--json"]).output()?;
             if !output.status.success() {
                 return Err(std::io::Error::other(
@@ -356,8 +367,35 @@ fn command_for(program: &Path, dir: &Path, env: &[(String, String)], args: &[&st
 
 impl Drop for User {
     fn drop(&mut self) {
+        *self.closed.lock().unwrap() = true;
         let _ = self.run(&["daemon", "stop"]);
     }
+}
+
+/// The processes (pids) whose environment points into `folder`: a throwaway user's daemon, its
+/// agents. Only the processes this one may read, which are its own.
+pub fn processes_of(folder: &Path) -> Vec<u32> {
+    let runtime = format!("XDG_RUNTIME_DIR={}", folder.join("runtime").display());
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(environ) = std::fs::read(entry.path().join("environ")) else {
+            continue;
+        };
+        if environ
+            .split(|byte| *byte == 0)
+            .any(|var| var == runtime.as_bytes())
+        {
+            found.push(pid);
+        }
+    }
+    found
 }
 
 /// A running `flottille watch`, its output read line by line.

@@ -5,7 +5,7 @@ mod common;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::time::Duration;
 
-use common::{User, mode};
+use common::{User, mode, processes_of};
 
 #[test]
 fn the_first_command_starts_a_daemon() {
@@ -182,4 +182,38 @@ fn stopping_when_no_daemon_runs_starts_none() {
 
     assert!(output.status.success());
     assert!(!user.path("runtime/flottille/daemon.sock").exists());
+}
+
+/// Waits up to `seconds` for `done`, polling.
+fn within(seconds: u64, what: &str, done: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(seconds);
+    while !done() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "not within {seconds} s: {what}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn a_dropped_user_leaves_no_daemon_and_no_folder_whatever_client_it_handed_out() {
+    let user = User::new();
+    let folder = user.path("");
+    // A client the test still holds after the user, as the window's link is.
+    let connect = user.connector();
+    connect().unwrap();
+    assert!(!processes_of(&folder).is_empty());
+
+    drop(user);
+
+    assert!(
+        connect().is_err(),
+        "a client of a dropped user started a daemon again"
+    );
+    assert!(!folder.exists(), "the folder came back");
+    assert!(
+        processes_of(&folder).is_empty(),
+        "a process of the dropped user is alive"
+    );
 }
