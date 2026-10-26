@@ -217,3 +217,34 @@ fn a_dropped_user_leaves_no_daemon_and_no_folder_whatever_client_it_handed_out()
         "a process of the dropped user is alive"
     );
 }
+
+#[test]
+fn a_daemon_whose_runtime_folder_was_removed_exits() {
+    let user = User::new();
+    let pid = user.status()["pid"].as_u64().unwrap();
+    let alive = || std::path::Path::new(&format!("/proc/{pid}")).exists();
+
+    std::fs::remove_dir_all(user.path("runtime")).unwrap();
+
+    within(10, "the daemon exits", || !alive());
+}
+
+#[test]
+fn a_daemon_whose_socket_leads_to_another_daemon_exits_and_leaves_that_one_alone() {
+    let user = User::new();
+    let first = user.status()["pid"].as_u64().unwrap();
+    let alive = |pid: u64| std::path::Path::new(&format!("/proc/{pid}")).exists();
+
+    // The runtime folder is replaced under it, and a second daemon takes its place.
+    std::fs::remove_dir_all(user.path("runtime")).unwrap();
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(user.path("runtime"))
+        .unwrap();
+    let second = user.status()["pid"].as_u64().unwrap();
+    assert_ne!(first, second);
+
+    within(10, "the first daemon exits", || !alive(first));
+    assert!(alive(second));
+    assert_eq!(user.status()["pid"].as_u64().unwrap(), second);
+}

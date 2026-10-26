@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{ErrorKind, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -36,6 +36,8 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const PAGE: usize = 500;
 /// How long the connections have, once the daemon stops, to send what they still hold.
 const GRACE: Duration = Duration::from_secs(2);
+/// How often the daemon checks that its socket is still the one at its path.
+const SOCKET_CHECK: Duration = Duration::from_secs(2);
 
 pub fn run(paths: &Paths) -> Result<()> {
     ensure_private_dir(&paths.runtime)?;
@@ -183,6 +185,12 @@ impl Daemon {
     }
 }
 
+/// Which file the socket path leads to now: `None` when there is none.
+fn socket_identity(socket: &std::path::Path) -> Option<(u64, u64)> {
+    let metadata = std::fs::symlink_metadata(socket).ok()?;
+    Some((metadata.dev(), metadata.ino()))
+}
+
 async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     let socket = paths.socket();
     // Holding the lock, a socket already there is one a dead daemon left.
@@ -191,6 +199,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         _ => {}
     }
     let listener = UnixListener::bind(&socket)?;
+    let ours = socket_identity(&socket).ok_or("the socket is gone as soon as it is bound")?;
     // This machine only, on a port of the system's choosing.
     let tools = TcpListener::bind(("127.0.0.1", 0)).await?;
     let (bus, _) = broadcast::channel(1024);
@@ -213,6 +222,10 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut stop_requested = daemon.stopping.subscribe();
+    // A runtime folder removed under the daemon leaves nobody able to reach it, or to ask it to
+    // stop: it ends itself.
+    let mut socket_check =
+        tokio::time::interval_at(tokio::time::Instant::now() + SOCKET_CHECK, SOCKET_CHECK);
     daemon.emit(
         "daemon.started",
         json!({"version": VERSION, "pid": std::process::id()}),
@@ -243,13 +256,21 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
             },
             Some(_) = connections.join_next(), if !connections.is_empty() => {}
             _ = stop_requested.wait_for(|stopping| *stopping) => break "request",
+            _ = socket_check.tick() => {
+                if socket_identity(&socket) != Some(ours) {
+                    break "socket";
+                }
+            }
             _ = terminate.recv() => break "signal",
             _ = interrupt.recv() => break "signal",
         }
     };
 
     drop(listener);
-    std::fs::remove_file(&socket)?;
+    // Not the socket of another daemon that took the path since.
+    if socket_identity(&socket) == Some(ours) {
+        std::fs::remove_file(&socket)?;
+    }
     agents::stop_all(&daemon).await;
     runs::stop_all(&daemon).await;
     daemon.emit("daemon.stopping", json!({"reason": reason}))?;

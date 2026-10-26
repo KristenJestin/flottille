@@ -36,7 +36,7 @@ subscribers have this event.
 
 | Field | |
 |---|---|
-| `reason` | `request` (`flottille daemon stop`) or `signal` (`SIGTERM`, `SIGINT`). |
+| `reason` | `request` (`flottille daemon stop`), `signal` (`SIGTERM`, `SIGINT`), or `socket` (the socket at its path is gone or is another daemon's: its runtime folder was removed; checked every 2 seconds). |
 
 ### `project.added`
 

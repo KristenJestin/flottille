@@ -11,6 +11,9 @@ it (`docs/design.md` §3, §11).
   to other users is refused.
 - The daemon holds an exclusive lock on `$XDG_RUNTIME_DIR/flottille/daemon.lock`, which holds its
   process id, for its whole life. A second daemon finds the lock taken and refuses to start.
+- A daemon whose socket is gone, or whose path now leads to another socket (its runtime folder was
+  removed), stops itself within a few seconds, as `daemon stop` does (`daemon.stopping`, reason
+  `socket`): nobody could reach it.
 - Any command but `flottille daemon` starts the daemon in the background when nobody listens on
   the socket, then talks to it. The daemon started this way writes its output to
   `$XDG_STATE_HOME/flottille/daemon.log`.
