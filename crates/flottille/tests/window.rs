@@ -6,7 +6,7 @@ mod common;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use common::User;
@@ -2436,4 +2436,324 @@ fn the_pickers_start_on_the_project_s_default_then_on_the_last_ones_used(cx: &mu
                 && pick.model.as_deref() == Some("open/medium")
         })
     });
+}
+
+// Providers' follow-ups (#48).
+
+/// What the composer's model picker shows.
+fn model_shown(composer: &Entity<Composer>, cx: &mut VisualTestContext) -> String {
+    composer.read_with(cx, |c, _| c.model_shown())
+}
+
+/// Starts a session on that provider and model and waits for its first turn: its sessions then
+/// say the models they offer, and that model's efforts.
+fn learn_models(user: &User, project: &str, provider: &str, model: &str) {
+    let id = user
+        .call(
+            "agent.start",
+            json!({"project": project, "provider": provider, "model": model, "message": "hello"}),
+        )
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    eventually("its first turn ends", || {
+        user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["state"] == "idle"
+    });
+}
+
+#[gpui_kit::test]
+fn a_project_with_a_model_and_no_provider_shows_that_model_and_its_efforts_and_starts_on_it(
+    cx: &mut TestAppContext,
+) {
+    let user = providers_user();
+    project(&user, "atlas");
+    learn_models(&user, "atlas", "claude", "fake-large");
+    let file = user.project_file("atlas");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, format!("model = \"fake-large\"\n{text}")).unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let composer = composer_of(&shell, "atlas", cx);
+    until(
+        &shell,
+        cx,
+        "the composer starts on the project's model",
+        |cx| {
+            composer.read_with(cx, |c, _| {
+                let pick = c.pick();
+                pick.provider.as_deref() == Some("claude")
+                    && pick.model.as_deref() == Some("fake-large")
+            })
+        },
+    );
+    assert_eq!(model_shown(&composer, cx), "fake-large · the project's");
+    cx.update(|window, cx| window.click("model-picker", cx));
+    cx.update(|window, _| {
+        assert!(window.try_find("model-choice-fake-large").is_some());
+    });
+    cx.update(|window, cx| window.click("model-choice-fake-large", cx));
+    cx.update(|window, cx| window.click("effort-picker", cx));
+    cx.update(|window, cx| window.click("effort-choice-high", cx));
+
+    // Another provider is not the one the project's model goes to: its own default there.
+    cx.update(|window, cx| window.click("provider-picker", cx));
+    cx.update(|window, cx| window.click("provider-choice-opencode", cx));
+    assert_eq!(model_shown(&composer, cx), "default model");
+    cx.update(|window, cx| window.click("provider-picker", cx));
+    cx.update(|window, cx| window.click("provider-choice-claude", cx));
+    assert_eq!(model_shown(&composer, cx), "fake-large · the project's");
+
+    type_task("A first task", cx);
+    cx.simulate_keystrokes("enter");
+    until(&shell, cx, "the session's page opens", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+    });
+    let page = session_page(&shell, cx);
+    let lead = page.read_with(cx, |p, _| p.id().to_owned());
+    let shown = user.call("agent.show", json!({"agent": lead})).unwrap()["agent"].clone();
+    assert_eq!(shown["provider"], "claude");
+    assert_eq!(shown["chosen"]["model"], "fake-large");
+}
+
+#[gpui_kit::test]
+fn a_project_model_its_provider_is_known_not_to_offer_is_said_instead_of_dropped(
+    cx: &mut TestAppContext,
+) {
+    let user = providers_user();
+    project(&user, "atlas");
+    learn_models(&user, "atlas", "opencode", "open/small");
+    let file = user.project_file("atlas");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(
+        &file,
+        format!("provider = \"opencode\"\nmodel = \"open/huge\"\n{text}"),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let composer = composer_of(&shell, "atlas", cx);
+    until(
+        &shell,
+        cx,
+        "the composer says the model is not offered",
+        |cx| composer.read_with(cx, |c, _| c.model_refused().is_some()),
+    );
+    assert_eq!(
+        composer.read_with(cx, |c, _| c.model_refused()).unwrap(),
+        "provider opencode offers no model open/huge, the project's: it offers open/small, \
+         open/medium"
+    );
+    assert_eq!(
+        composer
+            .read_with(cx, |c, _| c.pick().model.clone())
+            .as_deref(),
+        Some("open/huge")
+    );
+    type_task("A first task", cx);
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    assert!(!composer.read_with(cx, |c, _| c.is_sending()));
+
+    // Another model picked, it starts.
+    cx.update(|window, cx| window.click("model-picker", cx));
+    cx.update(|window, cx| window.click("model-choice-open/medium", cx));
+    assert!(composer.read_with(cx, |c, _| c.model_refused()).is_none());
+}
+
+/// Connects to the user's daemon through a relay that holds back the answer to the `n`th
+/// `provider.list` asked (from 0, over every connection) for `hold(n)`. Also how many were asked,
+/// and how many held answers were let through.
+fn holding_provider_lists(
+    user: &User,
+    hold: impl Fn(usize) -> Option<Duration> + Send + Sync + 'static,
+) -> (Connect, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    use std::collections::HashMap;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+    use std::sync::Mutex;
+    let connect = user.connector();
+    let asked = Arc::new(AtomicUsize::new(0));
+    let released = Arc::new(AtomicUsize::new(0));
+    let hold = Arc::new(hold);
+    let (counted, let_through) = (asked.clone(), released.clone());
+    let relay: Connect = Arc::new(move || {
+        let daemon = connect()?;
+        let (window_side, relay_side) = UnixStream::pair()?;
+        let held: Arc<Mutex<HashMap<String, Duration>>> = Arc::default();
+        let (mut to_daemon, from_window) = (daemon.try_clone()?, relay_side.try_clone()?);
+        let (asked, hold, marks) = (counted.clone(), hold.clone(), held.clone());
+        std::thread::spawn(move || {
+            for line in BufReader::new(from_window).lines() {
+                let Ok(line) = line else { return };
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+                if request["method"] == "provider.list" {
+                    let n = asked.fetch_add(1, Ordering::SeqCst);
+                    if let Some(delay) = hold(n) {
+                        marks
+                            .lock()
+                            .unwrap()
+                            .insert(request["id"].to_string(), delay);
+                    }
+                }
+                if writeln!(to_daemon, "{line}").is_err() {
+                    return;
+                }
+            }
+        });
+        let (mut to_window, released) = (relay_side, let_through.clone());
+        std::thread::spawn(move || {
+            for line in BufReader::new(daemon).lines() {
+                let Ok(line) = line else { return };
+                let answer: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+                let delay = held.lock().unwrap().remove(&answer["id"].to_string());
+                if let Some(delay) = delay {
+                    std::thread::sleep(delay);
+                }
+                if writeln!(to_window, "{line}").is_err() {
+                    return;
+                }
+                if delay.is_some() {
+                    released.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+        Ok(window_side)
+    });
+    (relay, asked, released)
+}
+
+#[gpui_kit::test]
+fn a_slow_provider_list_answer_that_arrives_after_a_newer_one_changes_nothing(
+    cx: &mut TestAppContext,
+) {
+    let user = providers_user();
+    project(&user, "atlas");
+    // The link's first read is held: what it answers is the file as it was then.
+    let (connect, asked, released) =
+        holding_provider_lists(&user, |n| (n == 0).then_some(Duration::from_secs(3)));
+    let (shell, cx) = window(&user, connect, 1280., cx);
+    until(&shell, cx, "the link asked for the providers", |_| {
+        asked.load(Ordering::SeqCst) >= 1
+    });
+    user.write_providers("[opencode]\nenabled = false\n");
+    let page = open_settings(&shell, cx);
+    until(&shell, cx, "the newer read shows opencode disabled", |cx| {
+        said_of(&page, "opencode", cx)
+            .iter()
+            .any(|line| line.starts_with("opencode is not enabled"))
+    });
+
+    until(&shell, cx, "the held answer arrived", |_| {
+        released.load(Ordering::SeqCst) == 1
+    });
+    for _ in 0..10 {
+        until(&shell, cx, "a frame", |_| true);
+    }
+    assert!(
+        said_of(&page, "opencode", cx)
+            .iter()
+            .any(|line| line.starts_with("opencode is not enabled")),
+        "{:?}",
+        said_of(&page, "opencode", cx)
+    );
+}
+
+#[gpui_kit::test]
+fn the_providers_read_after_a_session_opened_does_not_hold_the_link_s_events(
+    cx: &mut TestAppContext,
+) {
+    let user = providers_user();
+    project(&user, "atlas");
+    let (connect, asked, _) = holding_provider_lists(&user, |_| Some(Duration::from_secs(15)));
+    let (shell, cx) = window(&user, connect, 1280., cx);
+    until(&shell, cx, "the project is shown", |cx| {
+        shell.read_with(cx, |s, _| s.project("atlas").is_some())
+    });
+    until(&shell, cx, "the link asked for the providers", |_| {
+        asked.load(Ordering::SeqCst) >= 1
+    });
+    let first = start(&user, "atlas", None, "hello");
+    until(
+        &shell,
+        cx,
+        "the link read the providers after it started",
+        |_| asked.load(Ordering::SeqCst) >= 2,
+    );
+
+    let begun = Instant::now();
+    let second = start(&user, "atlas", None, "hello again");
+    until(&shell, cx, "both sessions are shown", |cx| {
+        shell.read_with(cx, |s, _| {
+            s.session(&first).is_some() && s.session(&second).is_some()
+        })
+    });
+    assert!(
+        begun.elapsed() < Duration::from_secs(8),
+        "{:?}",
+        begun.elapsed()
+    );
+}
+
+/// Whether the settings page's switch of that provider shows it on.
+fn switch_on(page: &Entity<SettingsPage>, name: &str, cx: &mut VisualTestContext) -> bool {
+    page.read_with(cx, |page, _| page.switch_on(name))
+}
+
+#[gpui_kit::test]
+fn a_switch_the_daemon_refuses_goes_back_and_shows_the_daemon_s_sentence(cx: &mut TestAppContext) {
+    let user = providers_user();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_settings(&shell, cx);
+    until(&shell, cx, "opencode is shown on", |cx| {
+        switch_on(&page, "opencode", cx)
+    });
+    // The file can be read, not written: the daemon refuses the switch.
+    let config = user.path("config/flottille");
+    let mode = |mode| std::os::unix::fs::PermissionsExt::from_mode(mode);
+    std::fs::set_permissions(&config, mode(0o500)).unwrap();
+
+    cx.update(|window, cx| window.click("provider-switch-opencode", cx));
+    until(&shell, cx, "the daemon's sentence is shown", |cx| {
+        said_of(&page, "opencode", cx)
+            .iter()
+            .any(|line| line.starts_with("providers.toml: Permission denied"))
+    });
+    std::fs::set_permissions(&config, mode(0o700)).unwrap();
+    assert!(switch_on(&page, "opencode", cx), "the switch went back");
+    assert!(!page.read_with(cx, |page, _| page.is_pending("opencode")));
+}
+
+#[gpui_kit::test]
+fn a_switch_to_what_the_file_already_says_ends_without_an_event_and_without_a_pending_state(
+    cx: &mut TestAppContext,
+) {
+    let user = providers_user();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_settings(&shell, cx);
+    until(&shell, cx, "opencode is shown on", |cx| {
+        switch_on(&page, "opencode", cx)
+    });
+    // Disabled by hand: the page does not know yet.
+    user.write_providers("[opencode]\nenabled = false\n");
+
+    cx.update(|window, cx| window.click("provider-switch-opencode", cx));
+    until(&shell, cx, "the page shows it off, nothing pending", |cx| {
+        !switch_on(&page, "opencode", cx)
+            && !page.read_with(cx, |page, _| page.is_pending("opencode"))
+            && said_of(&page, "opencode", cx)
+                .iter()
+                .any(|line| line.starts_with("opencode is not enabled"))
+    });
+    // A change after it, to read every event up to it.
+    user.call("provider.disable", json!({"name": "claude"}))
+        .unwrap();
+    let watch = user.watch(&["--after", "0"]);
+    let events = watch.until(|e| e["name"] == "provider.changed" && e["data"]["name"] == "claude");
+    assert!(
+        events
+            .iter()
+            .all(|e| !(e["name"] == "provider.changed" && e["data"]["name"] == "opencode")),
+        "{events:?}"
+    );
 }

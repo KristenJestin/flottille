@@ -32,8 +32,9 @@ pub enum Update {
     Disconnected(String),
     /// What came of something the window asked (`actions`).
     Done(Outcome),
-    /// A fresh read of the providers (`provider.list`).
-    Providers(crate::providers::Providers),
+    /// A fresh read of the providers (`provider.list`), with the read's number
+    /// (`providers::next_read`).
+    Providers(u64, crate::providers::Providers),
     /// What the open session page's link read or saw, with the link's token.
     Session {
         token: u64,
@@ -90,7 +91,7 @@ fn run(connect: Connect, updates: UnboundedSender<Update>, seen: Arc<Seen>) {
             Ok(stream) => {
                 seen.connections.fetch_add(1, Ordering::Relaxed);
                 retry = FIRST_RETRY;
-                match follow(stream, &updates, &seen, &mut briefs) {
+                match follow(stream, &connect, &updates, &seen, &mut briefs) {
                     Ok(()) => return,
                     Err(why) => why,
                 }
@@ -108,6 +109,7 @@ fn run(connect: Connect, updates: UnboundedSender<Update>, seen: Arc<Seen>) {
 /// Follows one connection until it breaks (an error) or the window is gone (`Ok`).
 fn follow(
     stream: UnixStream,
+    connect: &Connect,
     updates: &UnboundedSender<Update>,
     seen: &Seen,
     briefs: &mut HashMap<String, String>,
@@ -146,10 +148,7 @@ fn follow(
                     }
                 }
                 if providers.take().is_some() {
-                    let listed = read_providers(&mut conn)?;
-                    if updates.unbounded_send(Update::Providers(listed)).is_err() {
-                        return Ok(());
-                    }
+                    read_providers(connect, updates);
                 }
                 // Events that came while it read are queued: they make it stale again.
                 while let Some(event) = conn.queued.pop() {
@@ -166,13 +165,21 @@ fn about_providers(event: &Event) -> bool {
     event.name.starts_with("provider.") || event.name == "agent.started"
 }
 
-/// The providers, or the daemon's sentence when it cannot list them. The outer error is the
-/// connection's.
-pub(crate) fn read_providers(conn: &mut Conn) -> Result<crate::providers::Providers> {
-    let answer = conn.ask("provider.list", json!({}))?;
-    Ok(crate::providers::Providers::of(
-        answer.as_ref().map_err(Clone::clone),
-    ))
+/// Reads the providers on a thread and a connection of their own, with a bounded wait, so that
+/// the events are never held behind them (`--version` may take seconds).
+fn read_providers(connect: &Connect, updates: &UnboundedSender<Update>) {
+    let (connect, updates) = (connect.clone(), updates.clone());
+    let read = crate::providers::next_read();
+    std::thread::Builder::new()
+        .name("flottille-providers".into())
+        .spawn(move || {
+            if let Some(listed) =
+                crate::actions::read_providers(&connect, crate::actions::BOUNDS.quick)
+            {
+                let _ = updates.unbounded_send(Update::Providers(read, listed));
+            }
+        })
+        .expect("a thread for the providers' read");
 }
 
 fn note(seen: &Seen, event: &Event) {

@@ -58,46 +58,77 @@ pub enum Menu {
     Effort,
 }
 
-/// The provider, the model and the effort a new session starts on, when the user has not picked
-/// one: the project's own provider (and its model), else the last ones used, else the first
-/// provider offered; each only when it is offered now.
-pub fn first_pick(
+/// The provider and the model a project's file gives its agents, each when it gives it.
+pub type ProjectDefault<'a> = (Option<&'a str>, Option<&'a str>);
+
+/// The provider the daemon applies the project's model to: the project's own, else the first one
+/// enabled, ready or not, as the daemon picks it.
+fn project_provider<'a>(providers: &'a Providers, project: ProjectDefault<'a>) -> Option<&'a str> {
+    project.0.or_else(|| {
+        providers
+            .list
+            .iter()
+            .find(|p| p.enabled)
+            .map(|p| p.name.as_str())
+    })
+}
+
+/// The project's model, when a session started on `provider` without a model takes it.
+fn project_model<'a>(
     providers: &Providers,
-    project: (Option<&str>, Option<&str>),
-    last: Option<&Pick>,
-) -> Pick {
+    project: ProjectDefault<'a>,
+    provider: &str,
+) -> Option<&'a str> {
+    project
+        .1
+        .filter(|_| project_provider(providers, project) == Some(provider))
+}
+
+/// The provider, the model and the effort a new session starts on, when the user has not picked
+/// one: the project's provider (its own, else the one its model goes to) with its model, else the
+/// last ones used, else the first provider offered; each only when it is offered now.
+pub fn first_pick(providers: &Providers, project: ProjectDefault, last: Option<&Pick>) -> Pick {
     let offered = |name: &str| providers.get(name).is_some_and(Provider::offered);
-    if let (Some(provider), model) = project
+    if project != (None, None)
+        && let Some(provider) = project_provider(providers, project)
         && offered(provider)
     {
         return Pick {
             provider: Some(provider.to_owned()),
-            model: model.map(str::to_owned),
-            effort: None,
+            ..Pick::default()
         }
-        .kept(providers);
+        .kept(providers, project);
     }
     if let Some(last) = last
         && last.provider.as_deref().is_some_and(offered)
     {
-        return last.clone().kept(providers);
+        return last.clone().kept(providers, project);
     }
     Pick {
         provider: providers.offered().next().map(|p| p.name.clone()),
         ..Pick::default()
     }
+    .kept(providers, project)
 }
 
 impl Pick {
-    /// The pick, less a model or an effort its provider is known not to offer.
-    pub fn kept(mut self, providers: &Providers) -> Pick {
+    /// The pick, less a model or an effort its provider is known not to offer, and with the
+    /// project's model when it has none and the daemon would give it the project's. The project's
+    /// model stays even when its provider does not offer it: the composer says so
+    /// (`Composer::model_refused`).
+    pub fn kept(mut self, providers: &Providers, project: ProjectDefault) -> Pick {
         let Some(provider) = self.provider.as_deref().and_then(|p| providers.get(p)) else {
             return Pick::default();
         };
+        let projects = project_model(providers, project, &provider.name);
         if let (Some(model), Some(_)) = (&self.model, &provider.models)
             && provider.model(model).is_none()
+            && projects != Some(model.as_str())
         {
             self.model = None;
+        }
+        if self.model.is_none() {
+            self.model = projects.map(str::to_owned);
         }
         if let Some(effort) = &self.effort
             && efforts_of(provider, self.model.as_deref())
@@ -145,6 +176,8 @@ pub struct Composer {
     menu: Option<Menu>,
     /// The providers as the daemon last listed them.
     providers: Providers,
+    /// The provider and the model the project's file gives its agents.
+    default: (Option<String>, Option<String>),
     /// What the next session starts on, and whether the user picked its provider: a provider
     /// picked is kept while it is offered.
     pick: Pick,
@@ -243,6 +276,7 @@ impl Composer {
             choice: Choice::Main,
             menu: None,
             providers: Providers::default(),
+            default: (None, None),
             pick: Pick::default(),
             picked: false,
             sent: None,
@@ -301,7 +335,7 @@ impl Composer {
     pub fn set_providers(
         &mut self,
         providers: &Providers,
-        project: (Option<&str>, Option<&str>),
+        project: ProjectDefault,
         last: Option<&Pick>,
         cx: &mut Context<Self>,
     ) {
@@ -312,19 +346,26 @@ impl Composer {
             .and_then(|name| providers.get(name))
             .is_some_and(Provider::offered);
         let pick = if self.picked && still {
-            self.pick.clone().kept(providers)
+            self.pick.clone().kept(providers, project)
         } else {
             self.picked = false;
             first_pick(providers, project, last)
         };
-        if self.providers != *providers || self.pick != pick {
+        let default = (project.0.map(str::to_owned), project.1.map(str::to_owned));
+        if self.providers != *providers || self.pick != pick || self.default != default {
             self.providers = providers.clone();
+            self.default = default;
             self.pick = pick;
             cx.notify();
         }
     }
 
-    /// Picks the provider; its model and effort go back to its defaults.
+    fn project_default(&self) -> ProjectDefault<'_> {
+        (self.default.0.as_deref(), self.default.1.as_deref())
+    }
+
+    /// Picks the provider; its model and effort go back to its defaults (the project's model, when
+    /// it is the provider the daemon gives it to).
     pub fn pick_provider(&mut self, name: &str, cx: &mut Context<Self>) {
         self.menu = None;
         if self.providers.get(name).is_some_and(Provider::offered) {
@@ -333,7 +374,8 @@ impl Composer {
                 self.pick = Pick {
                     provider: Some(name.to_owned()),
                     ..Pick::default()
-                };
+                }
+                .kept(&self.providers, self.project_default());
             }
         }
         cx.notify();
@@ -344,7 +386,10 @@ impl Composer {
         self.menu = None;
         self.picked = true;
         self.pick.model = model;
-        self.pick = self.pick.clone().kept(&self.providers);
+        self.pick = self
+            .pick
+            .clone()
+            .kept(&self.providers, self.project_default());
         cx.notify();
     }
 
@@ -354,6 +399,41 @@ impl Composer {
         self.picked = true;
         self.pick.effort = effort;
         cx.notify();
+    }
+
+    /// The project's model, when a session on the provider picked takes it.
+    fn projects_model(&self) -> Option<&str> {
+        let provider = self.pick.provider.as_deref()?;
+        project_model(&self.providers, self.project_default(), provider)
+    }
+
+    /// What the model picker shows: the project's model marked so.
+    pub fn model_shown(&self) -> String {
+        let default = self.provider().and_then(Provider::default_model);
+        match (&self.pick.model, default) {
+            (Some(model), _) if self.projects_model() == Some(model.as_str()) => {
+                format!("{model} · the project's")
+            }
+            (Some(model), _) => model.clone(),
+            (None, Some(default)) => default.id.clone(),
+            (None, None) => "default model".to_owned(),
+        }
+    }
+
+    /// Why the model picked cannot start: the project's, which its provider is known not to
+    /// offer. Another model picked starts.
+    pub fn model_refused(&self) -> Option<String> {
+        let provider = self.provider()?;
+        let model = self.pick.model.as_deref()?;
+        let models = provider.models.as_ref()?;
+        (self.projects_model() == Some(model) && provider.model(model).is_none()).then(|| {
+            let offered: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+            format!(
+                "provider {} offers no model {model}, the project's: it offers {}",
+                provider.name,
+                offered.join(", ")
+            )
+        })
     }
 
     fn provider(&self) -> Option<&Provider> {
@@ -484,6 +564,7 @@ impl Composer {
         self.blocked.is_none()
             // Before the daemon listed the providers, it picks one itself, or says why not.
             && (self.provider().is_some_and(Provider::offered) || !self.providers.known)
+            && self.model_refused().is_none()
             && self.sending.is_none()
             && self.has_text
             && (self.choice != Choice::New || self.has_name)
@@ -725,11 +806,7 @@ impl Composer {
                 .test_support()
                 .into_any_element()
         };
-        let model = match (&self.pick.model, provider.default_model()) {
-            (Some(model), _) => model.clone(),
-            (None, Some(default)) => default.id.clone(),
-            (None, None) => "default model".to_owned(),
-        };
+        let model = self.model_shown();
         let mut pickers = vec![
             picker(
                 "provider-picker",
@@ -793,6 +870,7 @@ impl Composer {
         };
         let mut items = Vec::new();
         let provider = self.provider();
+        let projects = self.projects_model();
         match (menu, provider) {
             (Menu::Provider, _) => {
                 for offered in self.providers.offered() {
@@ -812,10 +890,15 @@ impl Composer {
                             Some(picked) => picked == &model.id,
                             None => model.default,
                         };
+                        let note = if projects == Some(model.id.as_str()) {
+                            Some("the project's".to_owned())
+                        } else {
+                            model.default.then(|| "default".to_owned())
+                        };
                         items.push(item(
                             format!("model-choice-{}", model.id),
                             model.id.clone(),
-                            model.default.then(|| "default".to_owned()),
+                            note,
                             on,
                             Some(pick(None, Some(&model.id), None)),
                         ));
@@ -823,18 +906,21 @@ impl Composer {
                 }
                 // No agent is run just to list them: the first session of the provider says them.
                 None => {
-                    items.push(item(
-                        "model-choice-default".into(),
-                        "default model".into(),
-                        None,
-                        self.pick.model.is_none(),
-                        Some(pick(None, None, None)),
-                    ));
+                    // Without a model, the daemon gives the project's: no other default to pick.
+                    if projects.is_none() {
+                        items.push(item(
+                            "model-choice-default".into(),
+                            "default model".into(),
+                            None,
+                            self.pick.model.is_none(),
+                            Some(pick(None, None, None)),
+                        ));
+                    }
                     if let Some(model) = &self.pick.model {
                         items.push(item(
                             format!("model-choice-{model}"),
                             model.clone(),
-                            Some("the project's".into()),
+                            (projects == Some(model.as_str())).then(|| "the project's".into()),
                             true,
                             Some(pick(None, Some(model), None)),
                         ));
@@ -1078,6 +1164,18 @@ impl Render for Composer {
             )
             .child(self.render_pickers(cx).into_any_element())
             .children(self.render_not_ready(cx))
+            .when_some(self.model_refused(), |d, why| {
+                d.child(
+                    div()
+                        .id("composer-model-refused")
+                        .px(px(10.))
+                        .pt(px(6.))
+                        .pb(px(2.))
+                        .text_size(px(12.5))
+                        .text_color(p.faint)
+                        .child(SharedString::from(why)),
+                )
+            })
             .when_some(self.blocked.clone(), |d, why| {
                 d.child(
                     div()
