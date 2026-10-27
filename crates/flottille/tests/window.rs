@@ -1578,7 +1578,7 @@ fn selecting_a_worker_shows_its_conversation_with_no_composer_and_nothing_can_se
 
     match &blocks(&page, cx)[0] {
         Block::Message { from, text } => {
-            assert_eq!(from, "lead → build the form");
+            assert_eq!(from, "the conversation → build the form");
             assert!(text.contains("HANG and build the form"), "{text}");
         }
         other => panic!("the brief comes first, not {other:?}"),
@@ -1687,12 +1687,15 @@ fn a_worker_s_request_held_by_the_lead_waits_on_it_then_forwarded_needs_me_with_
     assert_eq!(card.asked.as_deref(), Some("Read .env"));
     let why = card.why.unwrap();
     assert!(
-        why.contains("lead forwards it: the form needs the database name"),
+        why.contains("the conversation forwards it: the form needs the database name"),
         "{why}"
     );
     assert_eq!(
         card.source.as_deref(),
-        Some(format!("asked by read the settings · forwarded by lead · #{number}").as_str())
+        Some(
+            format!("asked by read the settings · forwarded by the conversation · #{number}")
+                .as_str()
+        )
     );
 }
 
@@ -1723,7 +1726,10 @@ fn approving_once_from_the_card_performs_the_call_and_leaves_the_record(cx: &mut
             .iter()
             .find_map(|row| row.read(cx).card().and_then(|c| c.record()))
     });
-    assert_eq!(record.as_deref(), Some("Allowed once · Read .env · lead"));
+    assert_eq!(
+        record.as_deref(),
+        Some("Allowed once · Read .env · the conversation")
+    );
     assert!(
         user.call("approval.list", json!({})).unwrap()["requests"]
             .as_array()
@@ -2085,7 +2091,7 @@ fn an_answered_request_keeps_its_record_when_the_page_is_opened_again(cx: &mut T
         records,
         [
             "Denied · Read .env · read the settings",
-            "Allowed once · Read .env · lead"
+            "Allowed once · Read .env · the conversation"
         ]
     );
 }
@@ -3093,4 +3099,361 @@ fn a_token_streamed_over_three_pieces_never_shows_in_clear_in_the_window_s_conve
         shown.contains(&"the token is [masked], keep it quiet".to_owned()),
         "{shown:?}"
     );
+}
+
+// The conversation as it reads (#68): Markdown replies, no "you" or "lead" on screen, folded
+// reports, and no empty thought.
+
+/// Gives the open page these events of the shown agent, as its link would have read them.
+fn read_events(
+    page: &Entity<SessionPage>,
+    events: Vec<flottille_core::protocol::Event>,
+    cx: &mut VisualTestContext,
+) {
+    page.update(cx, |p, cx| {
+        let token = p.token().unwrap();
+        p.apply(
+            token,
+            flottille_window::session_link::SessionUpdate::History {
+                events,
+                earlier: false,
+            },
+            cx,
+        )
+    });
+}
+
+/// Gives the open page one event of the shown agent, live.
+fn live(
+    page: &Entity<SessionPage>,
+    event: flottille_core::protocol::Event,
+    cx: &mut VisualTestContext,
+) {
+    page.update(cx, |p, cx| {
+        let token = p.token().unwrap();
+        p.apply(
+            token,
+            flottille_window::session_link::SessionUpdate::Live(event),
+            cx,
+        )
+    });
+}
+
+/// The text the row `at` shows, its Markdown drawn.
+fn rendered(page: &Entity<SessionPage>, at: usize, cx: &mut VisualTestContext) -> String {
+    page.read_with(cx, |p, cx| {
+        p.conversation().read(cx).rows()[at]
+            .read(cx)
+            .rendered(cx)
+            .unwrap_or_default()
+    })
+}
+
+/// The lines drawn over the rows of the conversation shown.
+fn labels(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Vec<String> {
+    page.read_with(cx, |p, cx| {
+        p.conversation()
+            .read(cx)
+            .rows()
+            .iter()
+            .filter_map(|row| row.read(cx).label())
+            .collect()
+    })
+}
+
+/// Draws a frame and runs what it started, the Markdown parsed in the background included.
+fn frame(cx: &mut VisualTestContext) {
+    cx.run_until_parked();
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+}
+
+const MARKDOWN: &str = "Here is **the plan**:\n\n- read the form\n- write the tests\n\n```rust\nfn main() {}\n```\n\nSee `cargo test` and [the docs](https://example.com/docs).";
+
+#[gpui_kit::test]
+fn a_reply_with_bold_a_list_and_a_code_block_renders_them_not_their_marks(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    settle(cx);
+
+    read_events(
+        &page,
+        vec![
+            made_up(
+                1,
+                "agent.prompted",
+                json!({"text": "[flottille:user]\nplan it"}),
+            ),
+            made_up(2, "agent.message", json!({"text": MARKDOWN})),
+        ],
+        cx,
+    );
+    frame(cx);
+
+    let shown = rendered(&page, 1, cx);
+    for said in [
+        "the plan",
+        "read the form",
+        "write the tests",
+        "fn main() {}",
+        "cargo test",
+        "the docs",
+    ] {
+        assert!(shown.contains(said), "{said} in {shown:?}");
+    }
+    for mark in ["**", "```", "- read", "`cargo", "](https"] {
+        assert!(!shown.contains(mark), "{mark} in {shown:?}");
+    }
+
+    // A reply still streamed renders as it grows.
+    for (seq, piece) in [(3, "\n\nThen **ship"), (4, " it**.")] {
+        live(
+            &page,
+            made_up(seq, "agent.message", json!({"text": piece})),
+            cx,
+        );
+        frame(cx);
+    }
+    let shown = rendered(&page, 1, cx);
+    assert!(shown.trim_end().ends_with("Then ship it."), "{shown:?}");
+    assert!(!shown.contains("**"), "{shown:?}");
+}
+
+#[gpui_kit::test]
+fn a_user_message_has_no_you_label(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    settle(cx);
+
+    assert_eq!(
+        blocks(&page, cx)[0],
+        Block::Message {
+            from: "you".into(),
+            text: "lead the work".into()
+        }
+    );
+    assert_eq!(
+        page.read_with(cx, |p, cx| p.conversation().read(cx).rows()[0]
+            .read(cx)
+            .label()),
+        None
+    );
+    cx.update(|window, _| {
+        assert!(window.try_find("row-0-message").is_some());
+        assert!(window.try_find("row-0-message-from").is_none());
+    });
+}
+
+#[gpui_kit::test]
+fn a_report_is_folded_until_clicked(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    settle(cx);
+
+    read_events(
+        &page,
+        vec![made_up(
+            1,
+            "agent.prompted",
+            json!({"text": "[flottille:child-report]\nThe form is **built**; the tests were not run."}),
+        )],
+        cx,
+    );
+    frame(cx);
+
+    assert_eq!(labels(&page, cx), ["Report from a sub-agent"]);
+    cx.update(|window, _| {
+        assert!(window.try_find("row-0-report-toggle").is_some());
+        assert!(window.try_find("row-0-report-text").is_none(), "folded");
+    });
+
+    cx.update(|window, cx| window.click("row-0-report-toggle", cx));
+    frame(cx);
+    cx.update(|window, _| assert!(window.try_find("row-0-report-text").is_some()));
+
+    cx.update(|window, cx| window.click("row-0-report-toggle", cx));
+    frame(cx);
+    cx.update(|window, _| assert!(window.try_find("row-0-report-text").is_none()));
+}
+
+#[gpui_kit::test]
+fn no_visible_text_of_a_session_holds_lead(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, mcp, _) = lead_in_w(&user);
+    let (worker_id, _worker) = worker(&user, &mcp, "build the form");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the worker is in the rail", |cx| {
+        rail_ids(&page, cx).contains(&worker_id)
+    });
+    settle(cx);
+    let mut said = labels(&page, cx);
+    assert!(
+        said.contains(&"launched by the conversation".to_owned()),
+        "{said:?}"
+    );
+    said.push(flottille_window::session::REPLY_PLACEHOLDER.to_owned());
+    said.push(flottille_window::session::SEND.to_owned());
+    assert_eq!(page.read_with(cx, |p, _| p.read_only_text()), None);
+
+    cx.update(|window, cx| window.click(format!("rail-row-{worker_id}"), cx));
+    until(&shell, cx, "the worker's brief is shown", |cx| {
+        session_page(&shell, cx).read_with(cx, |p, _| p.shown() == worker_id)
+            && !blocks(&page, cx).is_empty()
+    });
+    settle(cx);
+    let child = labels(&page, cx);
+    assert_eq!(child[0], "the conversation → build the form");
+    said.extend(child);
+    let (bar, back) = page.read_with(cx, |p, _| p.read_only_text()).unwrap();
+    assert_eq!(
+        bar,
+        "Reading build the form. It belongs to the conversation: only the conversation takes \
+         your messages."
+    );
+    assert_eq!(back, "Back to the conversation");
+    said.extend([bar, back]);
+
+    assert!(said.iter().all(|text| !text.contains("lead")), "{said:?}");
+    assert!(said.contains(&"Reply…".to_owned()) && said.contains(&"Send".to_owned()));
+}
+
+#[gpui_kit::test]
+fn a_thought_s_text_reaches_the_window_and_one_claude_sent_without_text_shows_nothing(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_claude();
+    user.claude_script(json!({"turns": [{"when": "hello", "do": [
+        {"think_hidden": true},
+        {"say": "Looking."},
+        {"think": "weighing **two** options"},
+        {"say": "Done."}
+    ]}]}));
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    project(&user, "app");
+    let lead = start(&user, "app", None, "hello");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the reply is shown", |cx| {
+        blocks(&page, cx).iter().any(|b| {
+            *b == Block::Text {
+                text: "Done.".into(),
+            }
+        })
+    });
+    settle(cx);
+
+    let thoughts: Vec<(usize, String)> = blocks(&page, cx)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(at, block)| match block {
+            Block::Thought { text, .. } => Some((at, text)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(thoughts.len(), 1, "{thoughts:?}");
+    let (at, text) = &thoughts[0];
+    assert_eq!(text, "weighing **two** options");
+
+    cx.update(|window, cx| window.click(format!("row-{at}-thought-toggle"), cx));
+    frame(cx);
+    cx.update(|window, _| assert!(window.try_find(format!("row-{at}-thought-text")).is_some()));
+    assert_eq!(rendered(&page, *at, cx).trim_end(), "weighing two options");
+}
+
+#[gpui_kit::test]
+fn a_thought_with_no_text_shows_its_duration_and_opens_on_nothing(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    settle(cx);
+
+    read_events(
+        &page,
+        vec![
+            made_up(1, "agent.thought", json!({"text": ""})),
+            made_up(2, "agent.message", json!({"text": "ok"})),
+        ],
+        cx,
+    );
+    frame(cx);
+
+    assert!(matches!(
+        blocks(&page, cx)[0],
+        Block::Thought { until: Some(_), .. }
+    ));
+    cx.update(|window, _| {
+        assert!(window.try_find("row-0-thought").is_some(), "its duration");
+        assert!(
+            window.try_find("row-0-thought-toggle").is_none(),
+            "nothing to open"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn a_reply_of_thousands_of_lines_streams_in_pieces_that_stay_cheap(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    settle(cx);
+    read_events(
+        &page,
+        vec![made_up(
+            1,
+            "agent.message",
+            json!({"text": "# A long reply\n"}),
+        )],
+        cx,
+    );
+    frame(cx);
+
+    // 3,000 lines in 100 pieces of 30: a list item with bold and code on each.
+    let (mut applied, mut whole) = (Vec::new(), Vec::new());
+    for piece in 0..100u64 {
+        let text: String = (0..30)
+            .map(|line| {
+                let n = piece * 30 + line;
+                format!("- line **{n}** of the reply, with `code {n}`\n")
+            })
+            .collect();
+        let started = Instant::now();
+        live(
+            &page,
+            made_up(2 + piece, "agent.message", json!({"text": text})),
+            cx,
+        );
+        applied.push(started.elapsed());
+        // The parse, in the background in the window, runs here before the frame.
+        frame(cx);
+        whole.push(started.elapsed());
+    }
+
+    let shown = rendered(&page, 0, cx);
+    assert!(
+        shown.contains("line 2999 of the reply, with code 2999"),
+        "the last line is drawn"
+    );
+    assert!(!shown.contains("**"));
+    let mean = |costs: &[Duration]| costs.iter().sum::<Duration>() / costs.len() as u32;
+    eprintln!(
+        "a piece of 30 lines, on the window's thread then with its parse and frame: \
+         {:?}, {:?} at the start; {:?}, {:?} past 2,700 lines",
+        mean(&applied[..10]),
+        mean(&whole[..10]),
+        mean(&applied[90..]),
+        mean(&whole[90..])
+    );
+    // Generous bounds for a debug build on a busy machine: what matters is that the cost does
+    // not grow with the reply (4.8 s a piece past 2,700 lines when the reply was one view).
+    assert!(mean(&applied[90..]) < Duration::from_millis(50));
+    assert!(mean(&whole[90..]) < Duration::from_millis(600));
 }
