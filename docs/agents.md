@@ -677,7 +677,10 @@ each other into one line, led by the number of the first, and mask the joined te
 
 Two messages in a row are not one. A piece carries the id of its message when its source gives
 one (`message_id` of `agent.message`, from ACP's `messageId`): the joining stops where the id
-changes. Codex's bridge gives the id of the item, so a reply and then a question of
+changes, and goes on across the events the daemon records itself meanwhile (a tool it serves
+through MCP, a question, a report, a delivery, an approval), whose lines follow the reply: an MCP
+call may land before the provider's last pieces of the reply that led to it. Codex's bridge gives
+the id of the item, so a reply and then a question of
 `request_user_input_async` read as two lines. A source that gives none (Claude's bridge,
 OpenCode's adapter today) is joined as before: its pieces follow each other until a tool call,
 the end of a turn or any other event comes between, a thought or a tool-call update included.
@@ -685,7 +688,8 @@ the end of a turn or any other event comes between, a thought or a tool-call upd
 Known limits: a word with no whitespace is held back 4 KiB at most, unless a secret crosses that
 bound: a token, a JWT or a URL's password is held whole however long, so a very long one delays
 the rest of its reply until it ends. A secret in a thought or in the user's own message (seen in
-a replay) is masked piece by piece, as before.
+a replay) is masked piece by piece, as before. A reply with no id that an event of the daemon
+comes between reads as two lines.
 
 ## The tree
 
