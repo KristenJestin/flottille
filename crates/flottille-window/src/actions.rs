@@ -78,6 +78,14 @@ pub enum Command {
         session: String,
         message: String,
     },
+    /// Stops a session's root agent and its tree.
+    Stop {
+        session: String,
+    },
+    /// Interrupts the turn the session's root agent runs; the agent stays.
+    Interrupt {
+        session: String,
+    },
     /// The user's answer to a request they hold, given on the page of the session of `session`
     /// (its root agent).
     Answer {
@@ -156,6 +164,16 @@ pub enum Outcome {
     },
     /// A message to the session's root was taken, or refused with why.
     Replied {
+        session: String,
+        refused: Option<String>,
+    },
+    /// The session's tree was stopped, or the daemon refused with why.
+    Stopped {
+        session: String,
+        refused: Option<String>,
+    },
+    /// The session's turn was interrupted (or none ran), or the daemon refused with why.
+    Interrupted {
         session: String,
         refused: Option<String>,
     },
@@ -400,6 +418,30 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 refused: Some(why),
             },
         },
+        Command::Stop { session } => {
+            let refused = match ask_alone(
+                connect,
+                "agent.stop",
+                json!({"agent": session}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::Stopped { session, refused }
+        }
+        Command::Interrupt { session } => {
+            let refused = match ask_alone(
+                connect,
+                "agent.cancel",
+                json!({"agent": session}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::Interrupted { session, refused }
+        }
         Command::Answer {
             session,
             number,

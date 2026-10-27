@@ -4787,3 +4787,238 @@ fn alt_left_with_a_menu_open_closes_it_and_goes_nowhere(cx: &mut TestAppContext)
         "the key only closed the menu"
     );
 }
+
+// Stopping and interrupting (#100): a session's tree stopped from the header or the rail, after a
+// confirmation that counts the agents; a turn interrupted by the composer's Stop or Escape, the
+// agent staying alive.
+
+fn tree_states(user: &User, lead: &str) -> Vec<(String, String)> {
+    user.call("agent.tree", json!({"agent": lead})).unwrap()["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| {
+            (
+                entry["agent"]["id"].as_str().unwrap().to_owned(),
+                entry["agent"]["state"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// A lead with two workers kept mid-turn, and the window on its session.
+fn lead_with_two_workers<'a>(
+    user: &User,
+    cx: &'a mut TestAppContext,
+) -> (String, Entity<Shell>, &'a mut VisualTestContext) {
+    let (lead, mcp, _) = lead_in_w(user);
+    worker(user, &mcp, "first");
+    worker(user, &mcp, "second");
+    let (shell, cx) = open_session(user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the rail shows the three agents", |cx| {
+        rail_ids(&page, cx).len() == 3
+    });
+    settle(cx);
+    (lead, shell, cx)
+}
+
+#[gpui_kit::test]
+fn stopping_from_the_header_asks_first_naming_the_agents_that_stop_then_ends_the_tree(
+    cx: &mut TestAppContext,
+) {
+    let user = team_user();
+    let (lead, shell, cx) = lead_with_two_workers(&user, cx);
+    let page = session_page(&shell, cx);
+    assert_eq!(page.read_with(cx, |p, _| p.stop_question()), None);
+
+    cx.update(|window, cx| window.click("session-stop", cx));
+    settle(cx);
+    let asked = page.read_with(cx, |p, _| p.stop_question()).unwrap();
+    assert!(asked.contains("3 agents"), "{asked}");
+    cx.update(|window, _| assert!(window.find("session-stop-confirm").visible()));
+
+    // Cancel stops nothing.
+    cx.update(|window, cx| window.click("session-stop-modal-cancel", cx));
+    settle(cx);
+    assert_eq!(page.read_with(cx, |p, _| p.stop_question()), None);
+    assert!(
+        tree_states(&user, &lead).iter().all(|(_, s)| s != "ended"),
+        "nothing stopped"
+    );
+
+    // Confirmed: the parent and its children end, and the rail shows them stopped.
+    cx.update(|window, cx| window.click("session-stop", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("session-stop-confirm", cx));
+    until(&shell, cx, "the tree is stopped", |cx| {
+        page.read_with(cx, |p, cx| {
+            p.tree().len() == 3
+                && p.tree()
+                    .iter()
+                    .all(|a| p.state(&a.id, cx) == Some(AgentState::Stopped))
+        })
+    });
+    let states = tree_states(&user, &lead);
+    assert_eq!(states.len(), 3);
+    assert!(states.iter().all(|(_, s)| s == "ended"), "{states:?}");
+    cx.update(|window, _| {
+        assert!(
+            window.try_find("session-stop").is_none(),
+            "an ended session has nothing to stop"
+        )
+    });
+}
+
+#[gpui_kit::test]
+fn the_lead_s_row_menu_in_the_rail_stops_the_tree_after_the_same_confirmation(
+    cx: &mut TestAppContext,
+) {
+    let user = team_user();
+    let (lead, shell, cx) = lead_with_two_workers(&user, cx);
+    let page = session_page(&shell, cx);
+
+    cx.update(|window, cx| window.click("rail-agent-menu", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("rail-agent-stop", cx));
+    settle(cx);
+    let asked = page.read_with(cx, |p, _| p.stop_question()).unwrap();
+    assert!(asked.contains("3 agents"), "{asked}");
+    cx.update(|window, cx| window.click("session-stop-confirm", cx));
+    until(&shell, cx, "the tree is stopped", |_| {
+        tree_states(&user, &lead).iter().all(|(_, s)| s == "ended")
+    });
+}
+
+#[gpui_kit::test]
+fn a_sub_agent_has_no_stop_of_its_own(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (_lead, shell, cx) = lead_with_two_workers(&user, cx);
+    let page = session_page(&shell, cx);
+    let worker = rail_ids(&page, cx)[1].clone();
+    cx.update(|window, cx| window.click(format!("rail-row-{worker}"), cx));
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(
+            window
+                .try_find(format!("rail-agent-menu-{worker}"))
+                .is_none()
+                && window.try_find("reply-stop").is_none(),
+            "only the root is stopped, and the daemon refuses a child"
+        )
+    });
+}
+
+#[gpui_kit::test]
+fn stop_and_escape_cancel_the_turn_that_runs_and_the_agent_stays_alive(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let reply = shell
+        .read_with(cx, |s, _| s.reply_of(&lead).cloned())
+        .unwrap();
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(
+            window.try_find("reply-stop").is_none(),
+            "no Stop while no turn runs"
+        )
+    });
+    let cancels = |user: &User| user.received_requests("session/cancel").len();
+
+    // Escape with no turn running does nothing.
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_keystrokes("escape");
+    settle(cx);
+    assert_eq!(cancels(&user), 0);
+
+    // The Stop button.
+    send(&user, &lead, "HANG");
+    until(
+        &shell,
+        cx,
+        "the turn runs and the composer offers Stop",
+        |cx| {
+            reply.read_with(cx, |r, _| r.is_running())
+                && cx.update(|window, _| window.try_find("reply-stop").is_some())
+        },
+    );
+    cx.update(|window, cx| window.click("reply-stop", cx));
+    until(&shell, cx, "the turn ends", |cx| {
+        !reply.read_with(cx, |r, _| r.is_running())
+    });
+    assert_eq!(cancels(&user), 1);
+    let agent = user.call("agent.show", json!({"agent": lead})).unwrap();
+    assert_eq!(agent["agent"]["state"], "idle", "the agent stays alive");
+
+    // Escape in the composer.
+    send(&user, &lead, "HANG");
+    until(&shell, cx, "the second turn runs", |cx| {
+        reply.read_with(cx, |r, _| r.is_running())
+    });
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_keystrokes("escape");
+    until(&shell, cx, "the second turn ends", |cx| {
+        !reply.read_with(cx, |r, _| r.is_running())
+    });
+    assert_eq!(cancels(&user), 2);
+    let agent = user.call("agent.show", json!({"agent": lead})).unwrap();
+    assert_eq!(agent["agent"]["state"], "idle");
+    cx.update(|window, _| assert!(window.try_find("reply-stop").is_none()));
+}
+
+// The WORKSPACE section names each repository's forge as the daemon reads it.
+
+#[gpui_kit::test]
+fn the_workspace_section_names_each_repository_s_forge(cx: &mut TestAppContext) {
+    let user = team_user().with_fake_gh();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    user.git(
+        &user.path("work/app"),
+        &["remote", "set-url", "origin", "git@github.com:acme/app.git"],
+    );
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the forge in the rail", |cx| {
+        page.read_with(cx, |p, cx| {
+            p.rail()
+                .read(cx)
+                .place()
+                .is_some_and(|p| !p.forges.is_empty())
+        })
+    });
+    let forges = page.read_with(cx, |p, cx| {
+        p.rail().read(cx).place().unwrap().forges.clone()
+    });
+    assert_eq!(forges, [(".".to_owned(), "github · acme/app".to_owned())]);
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find("rail-forge-app").is_some()));
+}
+
+#[gpui_kit::test]
+fn a_repository_with_no_forge_says_why_in_the_workspace_section(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the forge in the rail", |cx| {
+        page.read_with(cx, |p, cx| {
+            p.rail()
+                .read(cx)
+                .place()
+                .is_some_and(|p| !p.forges.is_empty())
+        })
+    });
+    let forges = page.read_with(cx, |p, cx| {
+        p.rail().read(cx).place().unwrap().forges.clone()
+    });
+    assert_eq!(
+        forges,
+        [(
+            ".".to_owned(),
+            "no forge support yet: origin is not on a forge".to_owned()
+        )]
+    );
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find("rail-forge-app").is_some()));
+}
