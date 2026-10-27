@@ -89,7 +89,7 @@ const REPLACED: &str = "refused: this session has been replaced: a new session o
 
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
 /// the order frozen in the agent.
-const SERVED: [Definition; 22] = [
+const SERVED: [Definition; 23] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -317,9 +317,10 @@ const SERVED: [Definition; 22] = [
             this workspace's branch in one of its repositories (pr-create, with a title and a \
             body, into the repository's base), merges it by squash (pr-merge-squash), or re-runs \
             the failed jobs of the pipelines of its branch's last commit (pipeline-rerun). Run \
-            by Flottille with the user's own forge sign-in. Refused outside a procedure and for \
-            an action the procedure does not grant; held for the user when it grants it with \
-            ask.",
+            by Flottille with the user's own forge sign-in, with the project's reviewers. Refused \
+            outside a procedure and for an action the procedure does not grant; held for the \
+            user when it grants it with ask. A merge is refused while the pull request's checks \
+            fail or run, or a review asks for changes, unless the user waives it.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -329,9 +330,23 @@ const SERVED: [Definition; 22] = [
                 "repository": {"type": "string", "description": "One of the workspace's repositories, by its path."},
                 "title": {"type": "string", "description": "pr-create: the pull request's title."},
                 "body": {"type": "string", "description": "pr-create: its description."},
-                "draft": {"type": "boolean", "description": "pr-create: opened as a draft."}
+                "draft": {"type": "boolean", "description": "pr-create: opened as a draft."},
+                "waive": {"type": "string", "description": "pr-merge-squash: the user's words letting a pull request whose checks fail or run, or whose review asks for changes, be merged as it is; the merge is then held for their approval."}
             }, "required": ["action", "repository"], "additionalProperties": false})
         },
+    },
+    Definition {
+        name: "workspace_remove",
+        title: "Remove the workspace",
+        description: "Inside a procedure that grants it, and only then: removes this agent's own \
+            workspace, as `flottille workspace remove` does. It refuses, touching nothing, while a \
+            repository holds uncommitted work or commits on no remote, and names them; otherwise \
+            it removes every worktree and the folder, and deletes the branches that hold no \
+            commit of their own. Nothing is left to work in afterwards: report next.",
+        read_only: false,
+        idempotent: false,
+        destructive: true,
+        schema: || json!({"type": "object", "properties": {}, "additionalProperties": false}),
     },
     Definition {
         name: "agent_launch",
@@ -1250,6 +1265,7 @@ async fn perform(
         "forge_read" => crate::forge::forge_read(daemon, &grant.place, args).await,
         "ticket_read" => crate::tickets::ticket_read(daemon, &grant.place, args).await,
         "forge_write" => crate::forge::forge_write(daemon, &grant.place, args).await,
+        "workspace_remove" => crate::workspaces::workspace_remove(daemon, &grant.place, args).await,
         tool if tree::TOOLS.contains(&tool) => tree::call(daemon, grant, tool, args).await,
         _ => {
             // The file tools read and write the disk: off the daemon's thread.
@@ -1344,7 +1360,7 @@ mod tests {
     #[test]
     fn a_grant_holds_the_agent_s_served_tools_in_its_own_order() {
         let mut leaf = claude::PROVIDER.tools(false, true, true);
-        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 15);
+        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 16);
         leaf.reverse();
         leaf.retain(|tool| !tool.ends_with("__search"));
         leaf.push("fs_read".into());
@@ -1352,7 +1368,7 @@ mod tests {
         assert_eq!(served.first(), Some(&"ask_parent"));
         assert_eq!(served.last(), Some(&"fs_read"));
         assert!(!served.contains(&"search"));
-        assert_eq!(served.len(), 14);
+        assert_eq!(served.len(), 15);
     }
 
     #[test]

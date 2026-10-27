@@ -30,6 +30,8 @@ use tokio::sync::oneshot;
 use crate::daemon::Daemon;
 use crate::forge;
 use crate::git::{self, Class};
+use crate::mcp::{Outcome, arguments};
+use crate::place::Place;
 use crate::projects::{self, Failure};
 
 type Answer = Result<Value, Failure>;
@@ -1337,6 +1339,104 @@ async fn remove_held(daemon: &Daemon, workspace: &Workspace) -> Answer {
             .map(|event| ((), event))
     })?;
     Ok(json!({"removed": workspace.name, "project": workspace.project}))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceRemove {}
+
+/// `workspace_remove`, once the gate let it through by a procedure's grant: the agent's own
+/// workspace removed as `workspace.remove` removes it, then the branches of it that hold no commit
+/// of their own deleted from their repositories (`docs/procedures.md`).
+pub async fn workspace_remove(daemon: &Arc<Daemon>, place: &Place, args: Value) -> Outcome {
+    if let Err(refusal) = arguments::<WorkspaceRemove>("workspace_remove", args) {
+        return refusal;
+    }
+    let Some(name) = &place.workspace else {
+        return Outcome::Refused(
+            "refused: this agent works in the project folder, not in a workspace: there is no \
+             workspace to remove"
+                .into(),
+        );
+    };
+    let asked = WorkspaceName {
+        project: place.project.clone(),
+        name: name.clone(),
+    };
+    let workspace = match find(daemon, &asked) {
+        Ok(workspace) => workspace,
+        Err(failure) => return Outcome::Failed(failure.message),
+    };
+    if let Err(failure) = remove(daemon.clone(), asked).await {
+        return match failure.code {
+            "refused" => Outcome::Refused(format!("refused: {}", failure.message)),
+            _ => Outcome::Failed(failure.message),
+        };
+    }
+    let (mut deleted, mut kept, mut failed) = (Vec::new(), Vec::new(), Vec::new());
+    for worktree in &workspace.repositories {
+        let main = main_checkout(&workspace.project_folder, &worktree.path);
+        match delete_if_empty(&main, &workspace.branch, &worktree.base.reference).await {
+            Ok(true) => deleted.push(worktree.path.as_str()),
+            Ok(false) => kept.push(worktree.path.as_str()),
+            Err(error) => failed.push(format!("{}: {error}", worktree.path)),
+        }
+    }
+    let mut said = format!(
+        "Workspace {} of project {} is removed: its worktrees and its folder are gone.",
+        workspace.name, workspace.project
+    );
+    if !deleted.is_empty() {
+        said.push_str(&format!(
+            " Its branch {}, empty, was deleted in {}.",
+            workspace.branch,
+            deleted.join(", ")
+        ));
+    }
+    if !kept.is_empty() {
+        said.push_str(&format!(
+            " Its branch {}, which holds commits of its own, is kept in {}.",
+            workspace.branch,
+            kept.join(", ")
+        ));
+    }
+    if !failed.is_empty() {
+        said.push_str(&format!(
+            " Its empty branch could not be deleted in {}.",
+            failed.join("; ")
+        ));
+    }
+    Outcome::Done(said)
+}
+
+/// Deletes the branch from the repository when every commit of it is in its base (`git branch
+/// -D` once `merge-base --is-ancestor` said so, since a squash merge leaves `-d` unsure); true when
+/// it did.
+async fn delete_if_empty(main: &Path, branch: &str, base: &str) -> Result<bool, String> {
+    let local = format!("refs/heads/{branch}");
+    let empty = git::output(
+        main,
+        &[
+            "merge-base",
+            "--is-ancestor",
+            "--end-of-options",
+            &local,
+            base,
+        ],
+        Class::Read,
+    )
+    .await
+    .is_ok();
+    if !empty {
+        return Ok(false);
+    }
+    git::output(
+        main,
+        &["branch", "-D", "--end-of-options", branch],
+        Class::Work,
+    )
+    .await?;
+    Ok(true)
 }
 
 fn cannot_check(repository: &str, error: &str) -> Failure {

@@ -75,6 +75,26 @@ pub struct Reference {
     pub path: String,
 }
 
+/// How the project's pull requests are opened (`docs/procedures.md`, "The project's pull
+/// requests"): the title's format, told to the agent that opens them, and the reviewers Flottille
+/// asks for each one it opens.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PullRequests {
+    /// The format of a title, in the project's words: `type(TICKET): subject`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// The forge's names of the people asked to review each pull request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviewers: Vec<String>,
+}
+
+impl PullRequests {
+    pub fn is_empty(&self) -> bool {
+        self.title.is_none() && self.reviewers.is_empty()
+    }
+}
+
 /// A named command of the project, for the user and for agents.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -258,6 +278,8 @@ pub struct Project {
     /// Named actions run by an agent in a workspace, with their grants (`docs/procedures.md`).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub procedures: BTreeMap<String, Procedure>,
+    #[serde(skip_serializing_if = "PullRequests::is_empty")]
+    pub pull_requests: PullRequests,
 }
 
 /// What `projects/<name>.toml` holds: the keys as written, before the defaults and the checks.
@@ -290,6 +312,8 @@ struct File {
     references: BTreeMap<String, Reference>,
     #[serde(default)]
     procedures: BTreeMap<String, Procedure>,
+    #[serde(default)]
+    pull_requests: PullRequests,
 }
 
 fn all_repositories() -> RepositorySet {
@@ -334,6 +358,7 @@ impl Project {
             recipe: Vec::new(),
             references: BTreeMap::new(),
             procedures: BTreeMap::new(),
+            pull_requests: PullRequests::default(),
         }
     }
 
@@ -344,6 +369,35 @@ impl Project {
         // None are left for a project that was read from a file: a cycle is refused there.
         order.extend(left);
         order.into_iter().map(|i| &self.repositories[i]).collect()
+    }
+
+    /// These repositories of the project by dependency level, leaves first: a repository is in
+    /// the level after the deepest of those it depends on among them, and a level keeps the order
+    /// of `in_dependency_order`. For merging a stack, a level at a time. A path the project does
+    /// not have is left out.
+    pub fn dependency_levels(&self, paths: &[String]) -> Vec<Vec<String>> {
+        let mut levels: Vec<(String, usize)> = Vec::new();
+        for repository in self.in_dependency_order() {
+            if !paths.contains(&repository.path) {
+                continue;
+            }
+            let level = repository
+                .depends_on
+                .iter()
+                .filter_map(|dependency| levels.iter().find(|(path, _)| path == dependency))
+                .map(|(_, level)| level + 1)
+                .max()
+                .unwrap_or(0);
+            levels.push((repository.path.clone(), level));
+        }
+        let mut grouped: Vec<Vec<String>> = Vec::new();
+        for (path, level) in levels {
+            if grouped.len() <= level {
+                grouped.resize(level + 1, Vec::new());
+            }
+            grouped[level].push(path);
+        }
+        grouped
     }
 
     /// Reads and checks the text of `projects/<name>.toml`. `data` is Flottille's data folder,
@@ -525,6 +579,26 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
     for (name, procedure) in &file.procedures {
         procedure.check(name)?;
     }
+    if file
+        .pull_requests
+        .title
+        .as_ref()
+        .is_some_and(|title| title.trim().is_empty())
+    {
+        return Err("pull_requests.title: must not be empty".into());
+    }
+    for (index, reviewer) in file.pull_requests.reviewers.iter().enumerate() {
+        // Each is one `--reviewer` of the forge's command line, never an option of its own.
+        if reviewer.is_empty()
+            || reviewer.starts_with('-')
+            || reviewer.contains(|c: char| c == ',' || c.is_whitespace())
+        {
+            return Err(format!(
+                "pull_requests.reviewers[{index}]: must be one name of the forge, without spaces \
+                 nor commas, not starting with -"
+            ));
+        }
+    }
 
     for (reference, entry) in &file.references {
         check_reference(reference, entry)
@@ -548,6 +622,7 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
         recipe: file.recipe,
         references: file.references,
         procedures: file.procedures,
+        pull_requests: file.pull_requests,
     })
 }
 
@@ -1023,6 +1098,66 @@ mod tests {
                 "e2e-tests"
             ]
         );
+    }
+
+    #[test]
+    fn the_repositories_of_a_workspace_come_in_dependency_levels_for_a_merge() {
+        let project = parse(include_str!("../tests/fixtures/multi-repo-case.toml")).unwrap();
+        let all: Vec<String> = project
+            .repositories
+            .iter()
+            .map(|r| r.path.clone())
+            .collect();
+
+        assert_eq!(
+            project.dependency_levels(&all),
+            [
+                vec![".", "lib-core", "e2e-tests"],
+                vec!["lib-app", "lib-api"],
+                vec!["app-web", "app-api"],
+            ]
+        );
+        // A dependency the workspace does not take orders nothing.
+        let some = ["app-api".to_owned(), "lib-api".to_owned()];
+        assert_eq!(
+            project.dependency_levels(&some),
+            [vec!["lib-api"], vec!["app-api"]]
+        );
+        assert_eq!(
+            project.dependency_levels(&["app-api".to_owned()]),
+            [vec!["app-api"]]
+        );
+    }
+
+    #[test]
+    fn the_pull_requests_title_and_reviewers_are_read_and_checked() {
+        let project = parse(&format!(
+            "{MINIMAL}\n[pull_requests]\ntitle = \"type(TICKET): subject\"\n\
+             reviewers = [\"alice\", \"bob\"]\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            project.pull_requests.title.as_deref(),
+            Some("type(TICKET): subject")
+        );
+        assert_eq!(project.pull_requests.reviewers, ["alice", "bob"]);
+        assert!(parse(MINIMAL).unwrap().pull_requests.is_empty());
+
+        for (body, said) in [
+            ("title = \" \"", "pull_requests.title: must not be empty"),
+            (
+                "reviewers = [\"a,b\"]",
+                "pull_requests.reviewers[0]: must be one name",
+            ),
+            (
+                "reviewers = [\"ok\", \"--admin\"]",
+                "pull_requests.reviewers[1]",
+            ),
+            ("labels = []", "pull_requests"),
+        ] {
+            let refused = refusal(&format!("{MINIMAL}\n[pull_requests]\n{body}\n"));
+            assert!(refused.contains(said), "{body}: {refused}");
+        }
     }
 
     #[test]

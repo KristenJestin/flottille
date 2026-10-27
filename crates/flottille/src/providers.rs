@@ -127,6 +127,7 @@ impl Provider {
         if in_workspace {
             names.push("ticket_read");
             names.push("forge_write");
+            names.push("workspace_remove");
         }
         if !at_depth_limit {
             names.extend(AGENT_TOOLS);
@@ -1049,14 +1050,16 @@ mod tests {
         assert!(!main.contains(&"forge_read".to_owned()));
         assert!(!main.contains(&"ticket_read".to_owned()));
         assert!(!main.contains(&"forge_write".to_owned()));
+        assert!(!main.contains(&"workspace_remove".to_owned()));
         let workspace = short(claude::PROVIDER.tools(true, false, true));
-        assert_eq!(workspace.len(), 21);
+        assert_eq!(workspace.len(), 22);
         assert_eq!(workspace[9], "forge_read", "after the command tools");
         assert_eq!(workspace[10], "reference_read", "after forge_read");
         assert_eq!(workspace[11], "ticket_read", "after reference_read");
         assert_eq!(workspace[12], "forge_write", "after ticket_read");
+        assert_eq!(workspace[13], "workspace_remove", "after forge_write");
         let leaf = short(claude::PROVIDER.tools(false, true, true));
-        assert_eq!(leaf.len(), 15);
+        assert_eq!(leaf.len(), 16);
     }
 
     #[test]

@@ -806,3 +806,544 @@ fn an_agent_s_commands_run_of_flottille_procedure_start_starts_no_run() {
     );
     assert!(!remote_branches(&user, &remote).contains("app/login"));
 }
+
+/// A project `app` whose folder holds the repositories `lib`, `api` and `web`, `api` and `web`
+/// built on `lib`, each pushed to its bare remote `remotes/<name>.git`, with `more` at the end of
+/// its file; its ready workspace `login`, on `app/login`. On GitHub's `acme/<name>` when `github`
+/// (the bare remote still taking the pushes, as the push URL), the workspace then made offline.
+/// The workspace's folder.
+fn stack(user: &User, github: bool, more: &str) -> PathBuf {
+    let folder = user.path("work/app");
+    for name in ["lib", "api", "web"] {
+        let repository = folder.join(name);
+        user.git_init(&repository);
+        std::fs::write(repository.join("README.md"), format!("{name}\n")).unwrap();
+        user.git(&repository, &["add", "."]);
+        user.git(&repository, &["commit", "--quiet", "-m", "start"]);
+        let remote = bare(user, name);
+        let remote = remote.to_str().unwrap();
+        user.git(&repository, &["remote", "add", "origin", remote]);
+        user.git(&repository, &["push", "--quiet", "origin", "main"]);
+        if github {
+            let url = format!("git@github.com:acme/{name}.git");
+            user.git(&repository, &["remote", "set-url", "origin", &url]);
+            user.git(
+                &repository,
+                &["remote", "set-url", "--push", "origin", remote],
+            );
+        }
+    }
+    user.write_project_file(
+        "app",
+        &format!(
+            "folder = \"{}\"\n\n[[repositories]]\npath = \"lib\"\n\n[[repositories]]\npath = \
+             \"api\"\ndepends_on = [\"lib\"]\n\n[[repositories]]\npath = \"web\"\ndepends_on = \
+             [\"lib\"]\n{more}",
+            folder.display()
+        ),
+    );
+    let workspace = user
+        .call(
+            "workspace.create",
+            json!({"project": "app", "name": "login", "offline": github}),
+        )
+        .unwrap();
+    assert_eq!(workspace["state"], "ready", "{workspace}");
+    PathBuf::from(workspace["folder"].as_str().unwrap())
+}
+
+/// A commit of the user's in that worktree.
+fn committed(user: &User, worktree: &Path, file: &str) {
+    std::fs::write(worktree.join(file), "change\n").unwrap();
+    user.git(worktree, &["add", file]);
+    user.git(
+        worktree,
+        &["commit", "--quiet", "-m", &format!("add {file}")],
+    );
+}
+
+/// A line run in one repository of the workspace.
+fn line_in(mcp: &Mcp, repository: &str, line: &str) -> Answer {
+    mcp.call(
+        "commands_run",
+        json!({"line": line, "repository": repository, "timeout": 30}),
+    )
+}
+
+/// Adopts the template with the CLI, as the user does.
+fn adopt(user: &User, template: &str) {
+    let added = user.run(&["procedure", "add", "app", "--template", template]);
+    assert!(added.status.success(), "{}", stderr(&added));
+}
+
+/// The first prompt of the run's root: its brief.
+fn brief_of(user: &User, what: &str) -> String {
+    eventually("the brief", || {
+        user.received_requests("session/prompt")
+            .iter()
+            .any(|prompt| prompt.to_string().contains(what))
+    });
+    let prompts = user.received_requests("session/prompt");
+    let prompt = prompts
+        .iter()
+        .find(|prompt| prompt.to_string().contains(what))
+        .unwrap();
+    prompt["params"]["prompt"][0]["text"]
+        .as_str()
+        .map_or_else(|| prompt.to_string(), str::to_owned)
+}
+
+/// The requests waiting for the user, oldest first.
+fn waiting(user: &User) -> Vec<Value> {
+    user.call("approval.list", json!({})).unwrap()["requests"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+fn approve(user: &User, request: &Value) {
+    user.call("approval.approve", json!({"number": request["number"]}))
+        .unwrap();
+}
+
+#[test]
+fn a_template_is_adopted_with_one_command_into_the_project_s_file_where_the_user_edits_it() {
+    let user = User::new();
+    fixture(&user);
+    let file = user.project_file("app");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, format!("# kept by hand\n{text}")).unwrap();
+
+    adopt(&user, "open-prs");
+    let named = user.run(&["procedure", "add", "app", "finish", "--template", "close"]);
+    assert!(named.status.success(), "{}", stderr(&named));
+    assert!(
+        stdout(&named).contains(
+            "Added procedure finish to project app: it grants \
+             workspace-remove (allow)"
+        ),
+        "{}",
+        stdout(&named)
+    );
+    adopt(&user, "merge-stack");
+
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.starts_with("# kept by hand\n"), "{text}");
+    for table in [
+        "[procedures.open-prs]",
+        "[procedures.finish]",
+        "[procedures.merge-stack]",
+    ] {
+        assert!(text.contains(table), "{text}");
+    }
+    // The instructions are written over several lines, as the user would edit them.
+    assert!(
+        text.contains("\"\"\"\nOpen the pull requests of this workspace"),
+        "{text}"
+    );
+    let shown = user
+        .call(
+            "procedure.show",
+            json!({"project": "app", "name": "open-prs"}),
+        )
+        .unwrap();
+    assert_eq!(shown["grants"], json!({"push": "ask", "pr-create": "ask"}));
+    assert!(
+        shown["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Report before anything else"),
+        "{shown}"
+    );
+    let merge = user
+        .call(
+            "procedure.show",
+            json!({"project": "app", "name": "merge-stack"}),
+        )
+        .unwrap();
+    assert_eq!(
+        merge["grants"],
+        json!({"rebase": "allow", "push-force-with-lease": "allow",
+            "pr-merge-squash": "allow", "pipeline-rerun": "allow"})
+    );
+
+    // Edited by hand, it is the project's own.
+    let text = std::fs::read_to_string(&file)
+        .unwrap()
+        .replace("Report before anything else.", "Report first.");
+    std::fs::write(&file, text).unwrap();
+    let shown = user
+        .call(
+            "procedure.show",
+            json!({"project": "app", "name": "open-prs"}),
+        )
+        .unwrap();
+    assert!(
+        shown["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Report first."),
+        "{shown}"
+    );
+
+    let unknown = user.run(&["procedure", "add", "app", "--template", "deploy"]);
+    assert!(!unknown.status.success());
+    assert!(
+        stderr(&unknown).contains(
+            "there is no template deploy: the templates are open-prs, \
+             merge-stack, close"
+        ),
+        "{}",
+        stderr(&unknown)
+    );
+    let twice = user.run(&["procedure", "add", "app", "--template", "open-prs"]);
+    assert!(!twice.status.success());
+    assert!(
+        stderr(&twice).contains("already has a procedure named open-prs"),
+        "{}",
+        stderr(&twice)
+    );
+    let mixed = user
+        .call(
+            "procedure.add",
+            json!({"project": "app", "name": "other", "template": "close",
+                "grants": {"push": "allow"}}),
+        )
+        .unwrap_err();
+    assert!(
+        mixed.1.contains("a template is added as it is"),
+        "{mixed:?}"
+    );
+}
+
+#[test]
+fn open_the_pull_requests_reports_first_opens_nothing_before_the_confirmation_then_one_pull_request_per_repository_with_commits()
+ {
+    let user = User::with_fake_agent().with_fake_gh();
+    let workspace = stack(
+        &user,
+        true,
+        "\n[pull_requests]\ntitle = \"type(TICKET): subject\"\nreviewers = [\"alice\", \"bob\"]\n",
+    );
+    user.gh_script(json!({"created": 31}));
+    // The work of the workspace: commits in api only.
+    committed(&user, &workspace.join("api"), "login.ts");
+    adopt(&user, "open-prs");
+
+    let (_, mcp) = run(&user, "open-prs");
+
+    let brief = brief_of(&user, "You run the procedure open-prs");
+    for said in [
+        "in workspace login (branch app/login)",
+        "- level 1: lib (base main, on origin)\n- level 2: api (base main, on origin), web (base \
+         main, on origin)",
+        "A pull request's title follows the project's format: type(TICKET): subject",
+        "Flottille asks alice, bob to review each pull request it opens.",
+        "- push: push the workspace's branch to its remote (git push) (each one held for the \
+         user's approval)",
+        "Report before anything else.",
+    ] {
+        assert!(brief.contains(said), "{said}\n---\n{brief}");
+    }
+
+    // The report: read only, and allowed at once.
+    for repository in ["lib", "api", "web"] {
+        for read in [
+            "git status --porcelain",
+            "git log --oneline HEAD --not --remotes",
+            "git log --oneline origin/main..HEAD",
+        ] {
+            let answer = line_in(&mcp, repository, read);
+            assert!(
+                !answer.error && answer.text.contains("exited with code 0"),
+                "{repository}: {read}: {}",
+                answer.text
+            );
+        }
+    }
+    let ahead = line_in(&mcp, "api", "git log --oneline origin/main..HEAD");
+    assert!(ahead.text.contains("add login.ts"), "{}", ahead.text);
+    let read = mcp.call("forge_read", json!({}));
+    assert!(!read.error, "{}", read.text);
+    let asked = mcp.call(
+        "ask_user",
+        json!({"question": "api: 1 commit ahead of main, none pushed. lib, web: nothing. I will \
+            push app/login in api and open its pull request \"feat(LOGIN-1): add the login\"."}),
+    );
+    assert!(!asked.error, "{}", asked.text);
+
+    // Nothing leaves before the user's confirmation of each operation.
+    let pushed = line_in(&mcp, "api", "git push origin app/login");
+    assert!(
+        pushed.text.contains("Waiting for the user's approval"),
+        "{}",
+        pushed.text
+    );
+    assert!(!remote_branches(&user, &user.path("remotes/api.git")).contains("app/login"));
+    let create = json!({"action": "pr-create", "repository": "api",
+        "title": "feat(LOGIN-1): add the login", "body": "Adds the login page."});
+    let opened = mcp.call("forge_write", create);
+    assert!(
+        opened.text.contains("Waiting for the user's approval"),
+        "{}",
+        opened.text
+    );
+    assert_eq!(creates(&user), 0);
+    let requests = waiting(&user);
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert!(requests.iter().all(|r| r["sensitive"] == true));
+
+    for request in &requests {
+        approve(&user, request);
+    }
+    eventually("the push", || {
+        remote_branches(&user, &user.path("remotes/api.git")).contains("app/login")
+    });
+    eventually("the pull request", || creates(&user) == 1);
+    let calls = gh_calls(&user);
+    let created = calls.iter().find(|c| c.starts_with("pr create")).unwrap();
+    assert_eq!(
+        created,
+        "pr create -R acme/api --head app/login --base main --title feat(LOGIN-1): add the login \
+         --body Adds the login page. --reviewer alice --reviewer bob"
+    );
+    // The repositories with no commit of their own get nothing.
+    for name in ["lib", "web"] {
+        assert!(
+            !remote_branches(&user, &user.path(&format!("remotes/{name}.git")))
+                .contains("app/login")
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c.starts_with(&format!("pr create -R acme/{name} ")))
+        );
+    }
+}
+
+/// A pull request of `app/login` into `main` in the repository, with these checks.
+fn pull(number: u64, name: &str, checks: Value) -> Value {
+    json!({"number": number, "title": format!("Change {name}"), "state": "OPEN",
+        "isDraft": false, "baseRefName": "main", "isCrossRepository": false,
+        "url": format!("https://github.com/acme/{name}/pull/{number}"),
+        "reviewDecision": "APPROVED", "statusCheckRollup": checks})
+}
+
+fn check(conclusion: &str) -> Value {
+    match conclusion {
+        "RUNNING" => json!([{"__typename": "CheckRun", "name": "build", "status": "IN_PROGRESS"}]),
+        done => json!([{"__typename": "CheckRun", "name": "build", "status": "COMPLETED",
+            "conclusion": done}]),
+    }
+}
+
+fn pulls(lib: &str, api: &str, web: &str) -> Value {
+    json!({"pulls": {
+        "acme/lib": {"app/login": pull(1, "lib", check(lib))},
+        "acme/api": {"app/login": pull(2, "api", check(api))},
+        "acme/web": {"app/login": pull(3, "web", check(web))},
+    }})
+}
+
+fn merged(user: &User) -> Vec<String> {
+    gh_calls(user)
+        .into_iter()
+        .filter(|call| call.starts_with("pr merge"))
+        .collect()
+}
+
+#[test]
+fn merge_a_stack_refuses_while_a_check_is_failing_and_merges_the_levels_in_order() {
+    let user = User::with_fake_agent().with_fake_gh();
+    stack(&user, true, "");
+    adopt(&user, "merge-stack");
+    user.gh_script(pulls("FAILURE", "SUCCESS", "FAILURE"));
+    let (_, mcp) = run(&user, "merge-stack");
+    let brief = brief_of(&user, "You run the procedure merge-stack");
+    assert!(
+        brief.contains("- level 1: lib (base main, on origin)\n- level 2: api"),
+        "{brief}"
+    );
+    let merge = |repository: &str| {
+        mcp.call(
+            "forge_write",
+            json!({"action": "pr-merge-squash", "repository": repository}),
+        )
+    };
+
+    // The first level's check fails, then runs: nothing is merged.
+    let answer = merge("lib");
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains(
+            "the pull request #1 of app/login in acme/lib is not merged: its checks \
+                 fail (build)"
+        ),
+        "{}",
+        answer.text
+    );
+    user.gh_script(pulls("RUNNING", "SUCCESS", "FAILURE"));
+    let answer = merge("lib");
+    assert!(
+        answer.error && answer.text.contains("its checks are still running (build)"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(merged(&user), Vec::<String>::new());
+
+    // Passing, the levels are merged in order, the second one's repositories together.
+    user.gh_script(pulls("SUCCESS", "SUCCESS", "FAILURE"));
+    let answer = merge("lib");
+    assert!(!answer.error, "{}", answer.text);
+    let answer = merge("api");
+    assert!(!answer.error, "{}", answer.text);
+    // web's check still fails: refused, until the user waives it and allows that very merge.
+    let answer = merge("web");
+    assert!(answer.error, "{}", answer.text);
+    let waived = mcp.call(
+        "forge_write",
+        json!({"action": "pr-merge-squash", "repository": "web",
+            "waive": "the build of web fails on a known flaky test"}),
+    );
+    assert!(
+        waived.text.contains("Waiting for the user's approval"),
+        "{}",
+        waived.text
+    );
+    let requests = waiting(&user);
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert!(
+        requests[0]
+            .to_string()
+            .contains("waived: the build of web fails"),
+        "{requests:?}"
+    );
+    assert_eq!(merged(&user).len(), 2);
+    approve(&user, &requests[0]);
+    eventually("the waived merge", || merged(&user).len() == 3);
+
+    assert_eq!(
+        merged(&user),
+        [
+            "pr merge 1 -R acme/lib --squash",
+            "pr merge 2 -R acme/api --squash",
+            "pr merge 3 -R acme/web --squash",
+        ]
+    );
+}
+
+#[test]
+fn close_stops_on_unpushed_work_and_removes_a_workspace_whose_branches_are_merged_or_empty() {
+    let user = User::with_fake_agent();
+    let workspace = stack(&user, false, "");
+    let main = user.path("work/app");
+    committed(&user, &workspace.join("api"), "login.ts");
+    adopt(&user, "close");
+    let (_, mcp) = run(&user, "close");
+    let brief = brief_of(&user, "You run the procedure close");
+    assert!(brief.contains("call `workspace_remove`"), "{brief}");
+
+    // api's commit is on no remote: refused, and nothing is touched.
+    let answer = mcp.call("workspace_remove", json!({}));
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("api has commits on no remote"),
+        "{}",
+        answer.text
+    );
+    assert!(workspace.join("api/login.ts").exists());
+    user.call("workspace.show", json!({"project": "app", "name": "login"}))
+        .unwrap();
+    let uncommitted = workspace.join("web/notes.txt");
+    std::fs::write(&uncommitted, "notes\n").unwrap();
+    let answer = mcp.call("workspace_remove", json!({}));
+    assert!(
+        answer.error
+            && answer
+                .text
+                .contains("web/notes.txt holds work that is not committed"),
+        "{}",
+        answer.text
+    );
+    std::fs::remove_file(&uncommitted).unwrap();
+
+    // Pushed (and its pull request merged on the forge): removed, the empty branches deleted.
+    user.git(
+        &workspace.join("api"),
+        &["push", "--quiet", "origin", "app/login"],
+    );
+    let answer = mcp.call("workspace_remove", json!({}));
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("Its branch app/login, empty, was deleted in lib, web."),
+        "{}",
+        answer.text
+    );
+    assert!(answer.text.contains("is kept in api"), "{}", answer.text);
+    assert!(!workspace.exists());
+    assert_eq!(
+        user.call("workspace.show", json!({"project": "app", "name": "login"}))
+            .unwrap_err()
+            .0,
+        "not-found"
+    );
+    for (name, kept) in [("lib", false), ("api", true), ("web", false)] {
+        let branches = user.git_output(&main.join(name), &["branch", "--list", "app/login"]);
+        assert_eq!(branches.contains("app/login"), kept, "{name}: {branches}");
+    }
+    // The run's agent still reports.
+    let reported = mcp.call("report", json!({"text": "Closed."}));
+    assert!(!reported.error, "{}", reported.text);
+}
+
+#[test]
+fn workspace_remove_is_refused_outside_a_run_that_grants_it_and_for_any_other_workspace() {
+    let user = User::with_fake_agent();
+    let workspace = stack(&user, false, "");
+    procedure(&user, "push", json!({"push": "allow"}), false);
+    procedure(&user, "tree", json!({"workspace-remove": "allow"}), true);
+
+    let outside = plain_agent(&user);
+    assert!(outside.names().contains(&"workspace_remove".to_owned()));
+    let answer = outside.call("workspace_remove", json!({}));
+    assert!(
+        answer.error
+            && answer
+                .text
+                .contains("only inside a procedure that grants it"),
+        "{}",
+        answer.text
+    );
+    let (_, push) = run(&user, "push");
+    let answer = push.call("workspace_remove", json!({}));
+    assert!(
+        answer.error && answer.text.contains("does not grant workspace-remove"),
+        "{}",
+        answer.text
+    );
+
+    // A child of a run that gives its grants, working in a workspace of its own: refused there.
+    let (_, root) = run(&user, "tree");
+    let opened = user.received_requests("session/new").len();
+    let launched = root.call(
+        "agent_launch",
+        json!({"title": "elsewhere", "brief": "Remove your workspace.",
+            "workspace": {"new": {"name": "other"}}}),
+    );
+    assert!(!launched.error, "{}", launched.text);
+    let (url, authorization) = server_of(&user, opened);
+    let child = Mcp::initialize(&url, &authorization);
+    let answer = child.call("workspace_remove", json!({}));
+    assert!(
+        answer.error && answer.text.contains("only inside a procedure"),
+        "{}",
+        answer.text
+    );
+    assert!(workspace.exists());
+    for name in ["login", "other"] {
+        user.call("workspace.show", json!({"project": "app", "name": name}))
+            .unwrap();
+    }
+}

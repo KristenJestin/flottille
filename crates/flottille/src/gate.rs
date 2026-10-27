@@ -140,6 +140,9 @@ pub fn decide(call: &Call) -> Verdict {
     if call.tool == "forge_write" {
         return forge_write(call);
     }
+    if call.tool == "workspace_remove" {
+        return workspace_remove(call);
+    }
     let layers = if run && !call.words.is_empty() {
         match layers(call.words) {
             Ok(layers) => layers,
@@ -1068,6 +1071,53 @@ fn forge_write(call: &Call) -> Verdict {
              or runs a procedure for it"
         ));
     };
+    let verdict = by_grant(run, grant);
+    let Some(waived) = call.args.get("waive").filter(|w| !w.is_null()) else {
+        return verdict;
+    };
+    if matches!(verdict, Verdict::Deny(_)) {
+        return verdict;
+    }
+    if grant != procedure::Grant::PrMergeSquash {
+        return Verdict::Deny(
+            "refused: waive is for pr-merge-squash only: it merges a pull request whose checks \
+             or review block it, once the user allows it"
+                .into(),
+        );
+    }
+    let Some(why) = waived.as_str().map(str::trim).filter(|w| !w.is_empty()) else {
+        return Verdict::Deny(
+            "refused: waive says why the user lets the pull request be merged as it is: give \
+             their words"
+                .into(),
+        );
+    };
+    // Merging what the checks or a review block is the user's own decision, whatever the grant's
+    // mode: `forge_write` merges it so only once they allowed this very call.
+    Verdict::Ask(Ask {
+        reasons: vec![format!(
+            "it merges a pull request whose checks or review block it, waived: {why}"
+        )],
+        sensitive: true,
+    })
+}
+
+/// The verdict on `workspace_remove`: only inside a procedure run that grants it, which applies
+/// to the run's own workspace alone (`procedures::run_of`).
+fn workspace_remove(call: &Call) -> Verdict {
+    let Some(run) = call.run else {
+        return Verdict::Deny(
+            "refused: workspace_remove removes a workspace only inside a procedure that grants \
+             it, and this agent runs in none: say that the workspace can be removed, and the \
+             user removes it (flottille workspace remove) or runs a procedure for it"
+                .into(),
+        );
+    };
+    by_grant(run, procedure::Grant::WorkspaceRemove)
+}
+
+/// The verdict the run's grant gives: refused without it, at once or held by its mode.
+fn by_grant(run: &Run, grant: procedure::Grant) -> Verdict {
     match run.grants.get(&grant) {
         None => Verdict::Deny(format!(
             "refused: the procedure {} does not grant {grant}: {}; say what should be done, and \
@@ -2304,7 +2354,9 @@ mod tests {
             ["~/notes.txt is outside this agent's place".to_owned()]
         );
     }
-    use procedure::Grant::{Commit, PrCreate, PrMergeSquash, Push, PushForceWithLease, Rebase};
+    use procedure::Grant::{
+        Commit, PrCreate, PrMergeSquash, Push, PushForceWithLease, Rebase, WorkspaceRemove,
+    };
 
     /// Every grant, allowed.
     fn every_grant() -> Vec<(procedure::Grant, Mode)> {
@@ -2533,6 +2585,56 @@ mod tests {
             "{verdict:?}"
         );
         assert!(denied(&fixture.forge("pr-close")));
+    }
+
+    #[test]
+    fn a_merge_whose_checks_block_it_is_waived_only_by_the_user_s_approval_of_it() {
+        let waived = |fixture: &Fixture, action: &str, waive: Value| {
+            fixture.judge(
+                "forge_write",
+                json!({"action": action, "repository": ".", "waive": waive}),
+                Some(&fixture.never),
+            )
+        };
+        let allowed = Fixture::workspace().in_run(&every_grant());
+        assert!(asked_by(
+            &waived(
+                &allowed,
+                "pr-merge-squash",
+                json!("the lint job is known flaky")
+            ),
+            "it merges a pull request whose checks or review block it, waived: the lint job"
+        ));
+        assert!(denied(&waived(&allowed, "pr-merge-squash", json!(" "))));
+        assert!(denied(&waived(&allowed, "pr-create", json!("why"))));
+        // Not granted stays refused, waived or not.
+        let none = Fixture::workspace().in_run(&[(PrCreate, Mode::Allow)]);
+        assert!(denied(&waived(&none, "pr-merge-squash", json!("why"))));
+    }
+
+    #[test]
+    fn workspace_remove_follows_the_run_s_grant_and_is_refused_outside_a_run() {
+        let remove =
+            |fixture: &Fixture| fixture.judge("workspace_remove", json!({}), Some(&fixture.never));
+        let verdict = remove(&Fixture::workspace());
+        assert!(
+            matches!(&verdict, Verdict::Deny(why) if why.contains("only inside a procedure")),
+            "{verdict:?}"
+        );
+        let verdict = remove(&Fixture::workspace().in_run(&[(Push, Mode::Allow)]));
+        assert!(
+            matches!(&verdict, Verdict::Deny(why) if why.contains("does not grant workspace-remove")),
+            "{verdict:?}"
+        );
+        assert!(denied(&remove(&Fixture::new(None))));
+        assert_eq!(
+            remove(&Fixture::workspace().in_run(&[(WorkspaceRemove, Mode::Allow)])),
+            Verdict::Allow
+        );
+        assert!(asked_by(
+            &remove(&Fixture::workspace().in_run(&[(WorkspaceRemove, Mode::Ask)])),
+            "the procedure ship grants workspace-remove"
+        ));
     }
 
     #[test]
