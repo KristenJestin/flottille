@@ -778,6 +778,7 @@ fn git_refusal(args: &[String]) -> Option<String> {
             "branch"
         }
         "config" if !config_reads(rest) => "config",
+        "remote" if !remote_reads(rest) => "remote",
         "symbolic-ref" if symbolic_ref_writes(rest) => "history",
         // Plumbing that writes the history or the index without `commit` or `reset`.
         "fast-import" | "update-index" => "history",
@@ -806,6 +807,9 @@ fn git_refusal(args: &[String]) -> Option<String> {
             .into(),
         "branch" => "refused: git branch deletes a branch, and agents never do: say which branch \
                      should go, and the user removes it"
+            .into(),
+        "remote" => "refused: git remote changes where the repository's remotes lead, and agents \
+                     never do: git remote -v, git remote show and git remote get-url read them"
             .into(),
         _ => "refused: git config changes git's configuration, and agents only read it (--get, \
               --get-all, --get-regexp, --list)"
@@ -836,6 +840,18 @@ fn symbolic_ref_writes(rest: &[String]) -> bool {
         }
     }
     refs > 1
+}
+
+/// Whether `git remote` with these words only reads: it lists, shows or gives a URL. Anything else
+/// is taken for a write: a push and `forge_write` trust where the remote leads.
+fn remote_reads(rest: &[String]) -> bool {
+    match rest
+        .iter()
+        .find(|w| !["-v", "--verbose"].contains(&w.as_str()))
+    {
+        None => true,
+        Some(word) => ["show", "get-url"].contains(&word.as_str()),
+    }
 }
 
 /// Whether `git replace` with these words only lists.
@@ -1286,9 +1302,14 @@ fn push_grant(call: &Call, run: &Run, args: &[String]) -> Result<procedure::Gran
         if source.is_empty() {
             return Err(refuse(&format!("{refspec} deletes a branch on the remote")));
         }
+        if target == "HEAD" {
+            return Err(refuse(&format!(
+                "{refspec} pushes to the branch HEAD is on, which may not be the workspace's: \
+                 name it, HEAD:{branch}"
+            )));
+        }
         let source_ours = source == "HEAD" || ours(source);
-        let target_ours = ours(target) || (target == "HEAD" && source == "HEAD");
-        if !source_ours || !target_ours {
+        if !source_ours || !ours(target) {
             return Err(refuse(&format!("{refspec} is not the workspace's branch")));
         }
     }
@@ -1300,28 +1321,51 @@ fn push_grant(call: &Call, run: &Run, args: &[String]) -> Result<procedure::Gran
 }
 
 /// A `git commit` a procedure's `commit` grant lets through: never rewriting the last commit, never
-/// skipping the repository's hooks.
+/// with `--no-verify`. Git takes any unambiguous start of a long option and groups short ones, so
+/// both are read as git reads them.
 fn commit_check(args: &[String]) -> Result<(), String> {
-    for word in args {
+    let amend =
+        || {
+            Err("refused: git commit --amend rewrites a commit, and a procedure's commit makes new \
+             ones only: commit the change on its own"
+            .into())
+        };
+    let no_verify = || {
+        Err(
+            "refused: git commit --no-verify is refused inside a procedure: commit without it"
+                .into(),
+        )
+    };
+    let rewrites = |value: &str| value.starts_with("amend:") || value.starts_with("reword:");
+    let mut words = args.iter().map(String::as_str);
+    while let Some(word) = words.next() {
         if word == "--" {
             break;
         }
-        if word == "--amend"
-            || word.starts_with("--fixup=amend:")
-            || word.starts_with("--fixup=reword:")
-        {
-            return Err(
-                "refused: git commit --amend rewrites a commit, and a procedure's commit makes new \
-                 ones only: commit the change on its own"
-                    .into(),
-            );
-        }
-        if ["--no-verify", "-n"].contains(&word.as_str()) {
-            return Err(
-                "refused: git commit --no-verify skips the repository's hooks, which a procedure's \
-                 commit keeps: commit without it"
-                    .into(),
-            );
+        if let Some(long) = word.strip_prefix("--") {
+            let (name, value) = long
+                .split_once('=')
+                .map_or((long, None), |(n, v)| (n, Some(v)));
+            let abbreviates = |option: &str| !name.is_empty() && option.starts_with(name);
+            if abbreviates("amend") {
+                return amend();
+            }
+            if abbreviates("no-verify") {
+                return no_verify();
+            }
+            if abbreviates("fixup") && value.or_else(|| words.next()).is_some_and(rewrites) {
+                return amend();
+            }
+        } else if let Some(group) = word.strip_prefix('-') {
+            for letter in group.chars() {
+                if letter == 'n' {
+                    return no_verify();
+                }
+                // What follows an option that takes a value is that value.
+                if "mFcCtuS".contains(letter) {
+                    break;
+                }
+            }
         }
     }
     Ok(())
@@ -2265,7 +2309,6 @@ mod tests {
             "git push -u origin app/login",
             "git push --set-upstream origin HEAD:app/login",
             "git push origin refs/heads/app/login:refs/heads/app/login",
-            "git push origin HEAD",
             "git --no-pager push -q origin app/login",
         ] {
             assert_eq!(allowed.run(line), Verdict::Allow, "{line}");
@@ -2448,5 +2491,103 @@ mod tests {
             "{verdict:?}"
         );
         assert!(denied(&fixture.forge("pr-close")));
+    }
+
+    #[test]
+    fn an_agent_never_changes_where_a_remote_leads_even_with_every_grant() {
+        for fixture in [
+            Fixture::workspace(),
+            Fixture::workspace().in_run(&every_grant()),
+        ] {
+            for line in [
+                "git remote add evil https://evil.example/x.git",
+                "git remote set-url origin https://evil.example/x.git",
+                "git remote set-url --push origin https://evil.example/x.git",
+                "git remote rename origin old",
+                "git remote remove origin",
+                "git remote rm origin",
+                "git remote set-branches origin main",
+                "git remote set-head origin main",
+                "git remote -v add evil https://evil.example/x.git",
+                "git config remote.origin.url https://evil.example/x.git",
+                "git config set remote.origin.pushurl https://evil.example/x.git",
+                "git config --add remote.origin.pushurl https://evil.example/x.git",
+                "git config url.https://evil.example/.insteadOf git@github.com:",
+            ] {
+                assert!(
+                    denied(&fixture.run(line)),
+                    "{line}: {:?}",
+                    fixture.run(line)
+                );
+            }
+            for line in [
+                "git remote",
+                "git remote -v",
+                "git remote --verbose",
+                "git remote show origin",
+                "git remote get-url origin",
+                "git remote get-url --push --all origin",
+            ] {
+                assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_push_of_a_bare_head_is_refused_since_head_may_be_another_branch() {
+        let fixture = Fixture::workspace().in_run(&every_grant());
+        for line in [
+            "git push origin HEAD",
+            "git push -u origin HEAD",
+            "git push origin HEAD:HEAD",
+            "git push --force-with-lease origin HEAD",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(
+                matches!(&verdict, Verdict::Deny(why) if why.contains("HEAD:app/login")),
+                "{line}: {verdict:?}"
+            );
+        }
+        // Named, the branch it goes to is known whatever HEAD is.
+        assert_eq!(
+            fixture.run("git push origin HEAD:app/login"),
+            Verdict::Allow
+        );
+    }
+
+    #[test]
+    fn abbreviated_or_grouped_options_that_amend_or_skip_hooks_are_refused() {
+        let fixture = Fixture::workspace().in_run(&[(Commit, Mode::Allow)]);
+        for line in [
+            "git commit --amen -m change",
+            "git commit --ame -m change",
+            "git commit --am -m change",
+            "git commit --no-verif -m change",
+            "git commit --no-ver -m change",
+            "git commit -anm change",
+            "git commit -na -m change",
+            "git commit -an -m change",
+            "git commit --fixup=amend:HEAD",
+            "git commit --fixu=amend:HEAD",
+            "git commit --fix=reword:HEAD",
+            "git commit --fixup amend:HEAD",
+            "git commit --fixup reword:HEAD",
+        ] {
+            assert!(
+                denied(&fixture.run(line)),
+                "{line}: {:?}",
+                fixture.run(line)
+            );
+        }
+        for line in [
+            "git commit -am change",
+            "git commit -m nothing-to-see",
+            "git commit -mnote",
+            "git commit --fixup HEAD",
+            "git commit --no-edit -m change",
+            "git commit --verbose -m change",
+        ] {
+            assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
+        }
     }
 }

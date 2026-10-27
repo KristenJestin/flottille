@@ -241,7 +241,9 @@ the call reaches, the project's never list and Flottille's own folders, and answ
      `--short`, `-q`) reads; `replace` but listing (`-l`, `--list`); `notes` but listing and
      showing (no subcommand, `list`, `show`, `get-ref`); `tag` but listing (no argument, `-l`,
      `--list`); `checkout` but `checkout -- <paths>`; `branch -d`, `-D`, `--delete`; `config` but
-     its reads (`--get`, `--get-all`, `--get-regexp`, `--list`, `-l`, `get`, `list`);
+     its reads (`--get`, `--get-all`, `--get-regexp`, `--list`, `-l`, `get`, `list`); `remote` but
+     its reads (no subcommand, `-v`, `show`, `get-url`), since a procedure's push and
+     `forge_write` trust where a remote leads;
    - the forge command lines beyond their reads: for `gh`, `pr view/list/diff/checks/status`,
      `issue view/list`, `run view/list`; for `glab`, `mr view/list/diff`, `issue view/list`,
      `ci view/list/status`; for `bkt`, `pr view/list/diff`, `issue view/list`,

@@ -38,8 +38,8 @@ gate refuses to agents otherwise:
 
 | Grant | What the agents of a run may do |
 |---|---|
-| `commit` | `git commit`, never with `--amend` (nor `--fixup=amend:`/`reword:`), `--no-verify` or `-n`. |
-| `push` | `git push <remote> <refspec>…` of the workspace's own branch: the remote is the one the repository's configuration names (`origin` by default), every refspec is the branch (`app/login`, `refs/heads/app/login`, `HEAD`, `HEAD:app/login`). |
+| `commit` | `git commit`, never with `--amend` (nor `--fixup=amend:`/`reword:`), `--no-verify` or `-n`, written whole, shortened (`--amen`, `--no-ver`) or in a group (`-an`). |
+| `push` | `git push <remote> <refspec>…` of the workspace's own branch: the remote is the one the repository's configuration names (`origin` by default), every refspec is the branch (`app/login`, `refs/heads/app/login`, `HEAD:app/login`); a bare `HEAD` is refused, since the branch it is on may not be the workspace's. |
 | `push-force-with-lease` | The same push with `--force-with-lease` (on the branch only, `--force-with-lease=<branch>[:<sha>]`), and `--force-if-includes`. A plain push needs `push`. |
 | `rebase` | `git rebase [--onto <base>] <upstream>`, `--continue`, `--abort`, `--skip`, `--quit`, `--keep-base`: the branch checked out, never `-i`, `--exec`, `--autostash` nor a second branch. |
 | `pr-create` | `forge_write` `pr-create`: opens the pull request of the workspace's branch into the repository's base. |
