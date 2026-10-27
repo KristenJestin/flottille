@@ -169,6 +169,15 @@ impl ProjectPage {
             .collect()
     }
 
+    /// Whether the daemon has answered both lists the page asks for as it opens, with a list or
+    /// with a problem: an answer redraws the page, so the tests wait for it as they do for `chips`.
+    pub fn has_read(&self, cx: &gpui_kit::App) -> bool {
+        let procedures = self.procedures.read(cx);
+        let references = self.references.read(cx);
+        (procedures.procedures().is_some() || procedures.problem().is_some())
+            && (references.references().is_some() || references.problem().is_some())
+    }
+
     pub fn set_narrow(&mut self, narrow: bool, cx: &mut Context<Self>) {
         if self.narrow != narrow {
             self.narrow = narrow;

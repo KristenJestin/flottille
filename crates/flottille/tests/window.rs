@@ -343,9 +343,12 @@ fn one_session_changing_state_redraws_its_row_and_not_the_others(cx: &mut TestAp
     until(&shell, cx, "the sessions are shown", |cx| {
         cx.update(|window, _| window.try_find(session_id(&busy)).is_some())
     });
-    // Atlas's page is open, its details read.
+    // Atlas's page is open, its details and its lists read: an answer that lands later draws it.
     until(&shell, cx, "the page has its details", |cx| {
         page_of(&shell, cx).read_with(cx, |page, _| page.chips()) == ["atlas · main"]
+    });
+    until(&shell, cx, "the page has its lists", |cx| {
+        page_of(&shell, cx).read_with(cx, |page, cx| page.has_read(cx))
     });
     settle(cx);
     let renders = |id: &str, cx: &mut VisualTestContext| {
