@@ -42,8 +42,20 @@ const GRACE: Duration = Duration::from_secs(2);
 const RUNTIME_FILE: u32 = 0o1600;
 /// How often the daemon checks that its socket is still the one at its path.
 const SOCKET_CHECK: Duration = Duration::from_secs(2);
+/// What a client an agent started is answered, whatever it asks.
+const REFUSED_CLIENT: &str =
+    "refused: this client was started by an agent; agents act only through their tools";
+/// How long a refused client is answered before it is let go.
+const REFUSED_FOR: Duration = Duration::from_secs(10);
 
 pub fn run(paths: &Paths) -> Result<()> {
+    // What the daemon's descendants leave behind when their parent ends is taken in by the
+    // daemon, not by init: a process an agent started stays its descendant, however it detached,
+    // and so is recognised when it connects (`started_by_an_agent`).
+    // SAFETY: prctl with these arguments only sets a flag of this process.
+    if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == -1 {
+        return Err(std::io::Error::last_os_error().into());
+    }
     ensure_private_dir(&paths.runtime)?;
     ensure_private_dir(&paths.state)?;
     let _lock = take_lock(paths)?;
@@ -278,6 +290,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     });
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut child_ended = signal(SignalKind::child())?;
     let mut stop_requested = daemon.stopping.subscribe();
     // A runtime folder removed under the daemon leaves nobody able to reach it, or to ask it to
     // stop: it ends itself.
@@ -306,17 +319,28 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     let reason = loop {
         tokio::select! {
             accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => {
-                    connections.spawn(connection(daemon.clone(), stream));
-                }
+                Ok((stream, _)) => match started_by_an_agent(&stream) {
+                    Some(pid) => {
+                        eprintln!(
+                            "flottille daemon: refused a client started by an agent (pid {pid})"
+                        );
+                        connections.spawn(refuse(stream));
+                    }
+                    None => {
+                        connections.spawn(connection(daemon.clone(), stream));
+                    }
+                },
                 Err(error) => eprintln!("flottille daemon: accept: {error}"),
             },
             Some(_) = connections.join_next(), if !connections.is_empty() => {}
             _ = stop_requested.wait_for(|stopping| *stopping) => break "request",
+            _ = child_ended.recv() => reap_strays(),
             _ = socket_check.tick() => {
                 if judge(socket_identity(&socket), ours) == Socket::Gone {
                     break "socket";
                 }
+                // `/proc`'s list of children may miss one that changed while it was read.
+                reap_strays();
             }
             _ = terminate.recv() => break "signal",
             _ = interrupt.recv() => break "signal",
@@ -339,6 +363,126 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     .await;
     eprintln!("flottille daemon stopped ({reason})");
     Ok(())
+}
+
+/// The fields of `/proc/<pid>/stat` the daemon reads.
+struct Stat {
+    state: char,
+    parent: u32,
+    group: u32,
+    session: u32,
+    /// In clock ticks after boot.
+    started: u64,
+}
+
+fn stat(pid: u32) -> Option<Stat> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name, field 2, is in parentheses and may hold spaces.
+    let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
+    Some(Stat {
+        state: fields.first()?.chars().next()?,
+        parent: fields.get(1)?.parse().ok()?,
+        group: fields.get(2)?.parse().ok()?,
+        session: fields.get(3)?.parse().ok()?,
+        started: fields.get(19)?.parse().ok()?,
+    })
+}
+
+/// The pid of a client that descends from the daemon. Everything the daemon starts is an agent,
+/// a command of one, or a program of the daemon's own (git, a forge's command line, a provider's
+/// `--version`), and none of them is a client of the daemon: such a client was started by an
+/// agent. A client whose ancestry cannot be read is refused too.
+fn started_by_an_agent(stream: &UnixStream) -> Option<u32> {
+    let pid = stream
+        .peer_cred()
+        .ok()
+        .and_then(|credentials| credentials.pid())
+        .and_then(|pid| u32::try_from(pid).ok())
+        .unwrap_or(0);
+    descends_from(pid, std::process::id()).then_some(pid)
+}
+
+/// Whether `pid` is `ancestor` or one of its descendants, walking up the parents; a process that
+/// cannot be read (gone already, or out of sight) counts as one.
+fn descends_from(pid: u32, ancestor: u32) -> bool {
+    let mut pid = pid;
+    let Some(mut process) = stat(pid) else {
+        return true;
+    };
+    loop {
+        if pid == ancestor {
+            return true;
+        }
+        // Up to init, or to a process with no parent in sight.
+        if process.parent == 0 {
+            return false;
+        }
+        let Some(parent) = stat(process.parent) else {
+            return true;
+        };
+        // A parent that started after its child is another process under the pid of one that
+        // ended: the child was taken in since, and its ancestry is not known.
+        if parent.started > process.started {
+            return true;
+        }
+        pid = process.parent;
+        process = parent;
+    }
+}
+
+/// Answers each request of a refused client with the refusal, until it leaves or `REFUSED_FOR`
+/// ends: nothing it sends is done, and it reads why rather than a closed connection.
+async fn refuse(stream: UnixStream) {
+    let (read, mut write) = stream.into_split();
+    let mut lines = BufReader::new(read).lines();
+    let _ = tokio::time::timeout(REFUSED_FOR, async {
+        while let Ok(Some(line)) = lines.next_line().await {
+            let id = serde_json::from_str::<Value>(&line)
+                .ok()
+                .and_then(|request| request.get("id")?.as_str().map(str::to_owned));
+            let answer = Message::error(id, "refused", REFUSED_CLIENT);
+            let mut line = serde_json::to_vec(&answer).expect("a message is always JSON");
+            line.push(b'\n');
+            if write.write_all(&line).await.is_err() {
+                break;
+            }
+        }
+    })
+    .await;
+}
+
+/// Waits for the processes the daemon took in as their subreaper and that ended, which nobody
+/// else waits for. The children the daemon started are waited for by whoever started them
+/// (tokio, `std::process`), by their pid: waiting for one of them here would take its status
+/// away. Each of those leads its own process group (agents, runs, git, the forges' command lines)
+/// or stays in the daemon's (a provider's `--version`), in the daemon's session; a process taken
+/// in is in another session (it detached), or in a group led by another (the group of the command
+/// it came from). One that made a group of its own in the daemon's session is not told apart, and
+/// stays a zombie until the daemon exits.
+fn reap_strays() {
+    let daemon = std::process::id();
+    let Some(own) = stat(daemon) else { return };
+    let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
+        return;
+    };
+    for task in tasks.flatten() {
+        let Ok(children) = std::fs::read_to_string(task.path().join("children")) else {
+            continue;
+        };
+        for pid in children
+            .split_whitespace()
+            .filter_map(|pid| pid.parse().ok())
+        {
+            if let Some(child) = stat(pid)
+                && child.state == 'Z'
+                && (child.session != own.session
+                    || (child.group != pid && child.group != own.group))
+            {
+                // SAFETY: waitpid has no memory precondition with a null status.
+                unsafe { libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), libc::WNOHANG) };
+            }
+        }
+    }
 }
 
 async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
@@ -552,6 +696,20 @@ mod tests {
     use super::*;
 
     const OURS: (u64, u64) = (1, 2);
+
+    #[test]
+    fn a_process_descends_from_its_parents_not_from_its_children_and_one_gone_counts_as_one() {
+        let own = std::process::id();
+        let parent = stat(own).unwrap().parent;
+
+        assert!(descends_from(own, own));
+        assert!(descends_from(own, parent));
+        assert!(!descends_from(parent, own));
+        assert!(!descends_from(1, own));
+        // No such process: refused rather than guessed.
+        assert!(descends_from(u32::MAX, own));
+        assert!(descends_from(0, own));
+    }
 
     #[test]
     fn only_a_socket_path_that_is_not_found_or_leads_elsewhere_is_gone() {

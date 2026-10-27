@@ -352,8 +352,8 @@ fn wait_for_end(daemon: &Daemon, id: &str) -> impl Future<Output = ()> + use<> {
     }
 }
 
-/// The environment of a run in the place: the daemon's, the place's variables filled, and the
-/// forges kept out of reach.
+/// The environment of a run in the place: the daemon's, the place's variables filled, the forges
+/// and the daemon kept out of reach.
 fn environment(
     daemon: &Daemon,
     place: &Place,
@@ -374,6 +374,8 @@ fn environment(
     let empty = daemon.paths.state.join("empty");
     flottille_core::paths::ensure_private_dir(&empty).map_err(|e| e.to_string())?;
     defend(&mut env, &empty);
+    // Where the daemon's socket is: a client a run starts is refused anyway (`daemon.rs`).
+    env.remove(&OsString::from("XDG_RUNTIME_DIR"));
     Ok(env)
 }
 
