@@ -28,9 +28,9 @@ use gpui_kit::base::input::{InputEditorStyle, InputEvent, TextareaState};
 use gpui_kit::base::text::{TextView, TextViewState, TextViewStyle};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, AppContext as _, Bounds, Context, ElementId, Entity, Focusable as _, FollowMode,
-    ImageCacheError, ImageSource, InteractiveElement, IntoElement, ListAlignment, ListState,
-    ParentElement, PathBuilder, Pixels, Render, SharedString, SharedUri,
+    AnyElement, AppContext as _, Bounds, Context, ElementId, Entity, EventEmitter, Focusable as _,
+    FollowMode, ImageCacheError, ImageSource, InteractiveElement, IntoElement, ListAlignment,
+    ListState, ParentElement, PathBuilder, Pixels, Render, SharedString, SharedUri,
     StatefulInteractiveElement, Styled, Subscription, Task, TestSupportExt as _, Transformation,
     WeakEntity, Window, canvas, div, list, point, px, radians,
 };
@@ -125,6 +125,8 @@ pub struct SessionPage {
     shown: String,
     link: Option<SessionLink>,
     tree: Vec<TreeAgent>,
+    /// An agent was shown before the tree was read: `set_tree` checks that it is in it.
+    unchecked: bool,
     /// One state per agent, read by its rail row and its line in the sub-agents list.
     statuses: HashMap<String, Entity<Status>>,
     conversation: Entity<ConversationView>,
@@ -143,6 +145,11 @@ pub struct SessionPage {
     renders: usize,
     _status: Subscription,
 }
+
+/// Emitted when the user chooses the conversation of an agent of the session.
+pub struct Chose(pub String);
+
+impl EventEmitter<Chose> for SessionPage {}
 
 impl SessionPage {
     pub fn new(
@@ -178,6 +185,7 @@ impl SessionPage {
             shown,
             link: None,
             tree: Vec::new(),
+            unchecked: false,
             statuses: HashMap::new(),
             conversation,
             rail,
@@ -325,12 +333,29 @@ impl SessionPage {
         cx.notify();
     }
 
-    /// Shows an agent's conversation: the root's, with the composer, or a sub-agent's, read only.
+    /// The user chose an agent's conversation: the root's, with the composer, or a sub-agent's,
+    /// read only. The window's history keeps the choice.
     pub fn select(&mut self, agent: &str, cx: &mut Context<Self>) {
+        self.show(agent, cx);
+        cx.emit(Chose(agent.to_owned()));
+    }
+
+    /// [`SessionPage::select`], for the window's history going back to a place: it does not
+    /// record it again.
+    pub fn show(&mut self, agent: &str, cx: &mut Context<Self>) {
         self.drawer.update(cx, |drawer, cx| drawer.close(cx));
+        // An agent that left the tree has no conversation to show: the session's is. Before the
+        // tree is read nothing is known, and `set_tree` looks again.
+        let known = self.tree.is_empty() || self.tree.iter().any(|a| a.id == agent);
+        let agent = match known {
+            true => agent.to_owned(),
+            false => self.opened.id.clone(),
+        };
+        self.unchecked = self.tree.is_empty() && agent != self.opened.id;
         if self.shown == agent {
             return;
         }
+        let agent = agent.as_str();
         self.shown = agent.to_owned();
         self.pages = 1;
         let parent = self.parent_of(agent).map(|p| self.said_name(&p));
@@ -506,6 +531,10 @@ impl SessionPage {
         self.rail.update(cx, |rail, cx| rail.set_agents(rows, cx));
         let changed = self.tree != tree;
         self.tree = tree;
+        if std::mem::take(&mut self.unchecked) && !self.tree.iter().any(|a| a.id == self.shown) {
+            let root = self.opened.id.clone();
+            self.show(&root, cx);
+        }
         if changed {
             let conversation = self.conversation.clone();
             conversation.update(cx, |view, _| view.model.set_names(names));

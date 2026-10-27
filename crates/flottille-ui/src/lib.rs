@@ -28,6 +28,7 @@ pub use card::Card;
 pub use drawer::{Drawer, Side};
 pub use dropdown::{Align, Dropdown, MenuItem};
 pub use icons::{Icon, Icons, icon};
+pub use interact::{dismiss_on_navigate, dismiss_top_overlay, forget_overlays, open_overlay};
 pub use menu::Menu;
 pub use modal::Modal;
 pub use omarchy::Environment;

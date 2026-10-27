@@ -7,26 +7,29 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use flottille_ui::{
-    AgentState, Badge, Button, Drawer, Icon, ListRow, Side, StateIcon, Status, Type, icon, palette,
+    AgentState, Badge, Button, Drawer, Icon, ListRow, Side, StateIcon, Status, Type,
+    dismiss_on_navigate, dismiss_top_overlay, forget_overlays, icon, open_overlay, palette,
 };
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Bounds, Context, ElementId, Entity, InteractiveElement, IntoElement,
-    ParentElement, PathBuilder, Pixels, Render, SharedString, StatefulInteractiveElement, Styled,
+    App, AppContext as _, Bounds, Context, ElementId, Entity, FocusHandle, InteractiveElement,
+    IntoElement, KeyDownEvent, Modifiers, MouseButton, NavigationDirection, ParentElement,
+    PathBuilder, Pixels, Render, SharedString, StatefulInteractiveElement, Styled, Subscription,
     Task, WeakEntity, Window, canvas, div, point, px,
 };
 
 use crate::actions::{Actions, Command, Outcome, Pick};
 use crate::composer::{Choice, Composer, PlaceChoice};
+use crate::history::{History, Way};
 use crate::link::{self, Connect, Seen, Update};
 use crate::model::{BellItem, Place, Preparation, Snapshot};
 use crate::open::Opener;
 use crate::page::{MainArea, Page};
 use crate::project::{NewWorkspace, PlaceData, ProjectData, SessionLine, repository_label};
 use crate::providers::Providers;
-use crate::session::{Follow, Opened, Reply, SessionPage};
+use crate::session::{Chose, Follow, Opened, Reply, SessionPage};
 use crate::settings::SettingsPage;
 use crate::tree::{PlaceNode, ProjectNode, SessionRow, Sidebar};
 
@@ -74,6 +77,11 @@ pub struct Shell {
     snapshot: Snapshot,
     layout: Layout,
     selected: Option<Selection>,
+    /// The pages shown in this window, for the mouse's back and forward buttons.
+    history: History,
+    /// Held by the window's root when nothing inside has the focus (a click anywhere gives it),
+    /// so that Alt+Left and Alt+Right reach the root: a key goes to the focused element's path.
+    focus: FocusHandle,
     top: Entity<TopBar>,
     sidebar: Entity<Sidebar>,
     main: Entity<MainArea>,
@@ -95,6 +103,8 @@ pub struct Shell {
     follow: Follow,
     /// The open session's page; it follows its session while it is open.
     session_page: Option<Entity<SessionPage>>,
+    /// The agent the user chooses in the open session's page, for the history.
+    _chose: Option<Subscription>,
     /// Each session's composer, made when its page first opens: a draft and a send belong to
     /// their session.
     replies: HashMap<String, Entity<Reply>>,
@@ -184,6 +194,8 @@ impl Shell {
             snapshot: Snapshot::default(),
             layout: Layout::Wide,
             selected: None,
+            history: History::default(),
+            focus: cx.focus_handle(),
             top,
             sidebar,
             main,
@@ -199,6 +211,7 @@ impl Shell {
             details_asked: 0,
             follow,
             session_page: None,
+            _chose: None,
             replies: HashMap::new(),
             providers: Providers::default(),
             providers_read: 0,
@@ -209,6 +222,8 @@ impl Shell {
             _clock,
         };
         shell.relayout(true, window, cx);
+        // Given once the window is built: a root built after would take it back.
+        cx.defer_in(window, |this, window, cx| window.focus(&this.focus, cx));
         shell
     }
 
@@ -315,6 +330,10 @@ impl Shell {
             .clone();
         let (follow, layout, status) = (self.follow.clone(), self.layout, status.clone());
         let page = cx.new(|cx| SessionPage::new(this, opened, status, reply, follow, layout, cx));
+        self._chose = Some(cx.subscribe(&page, |shell, page, Chose(agent), cx| {
+            let session = page.read(cx).id().to_owned();
+            shell.history.show_agent(&session, agent);
+        }));
         self.session_page = Some(page.clone());
         Some(page)
     }
@@ -794,6 +813,37 @@ impl Shell {
     }
 
     fn select(&mut self, selection: Selection, window: &mut Window, cx: &mut Context<Self>) {
+        self.history.open(selection.clone());
+        self.show_selection(selection, window, cx);
+    }
+
+    /// The mouse's back and forward buttons, Alt+Left and Alt+Right: the nearest page that way
+    /// which still exists. A session's page shows the agent that was shown there.
+    pub fn go(&mut self, way: Way, window: &mut Window, cx: &mut Context<Self>) {
+        let exists =
+            |visit: &crate::history::Visit| self.page_of(&visit.selection, cx) != Page::Empty;
+        let Some(at) = self.history.find(way, exists) else {
+            return;
+        };
+        let visit = self.history.move_to(at);
+        self.show_selection(visit.selection.clone(), window, cx);
+        if let (Selection::Session(id), Some(page)) = (&visit.selection, self.session_page.clone())
+        {
+            let agent = visit.agent.unwrap_or_else(|| id.clone());
+            page.update(cx, |page, cx| page.show(&agent, cx));
+        }
+        self.left.update(cx, |drawer, cx| drawer.close(cx));
+        self.set_bell(false, cx);
+        // The page that held the focus is gone.
+        window.focus(&self.focus, cx);
+    }
+
+    fn show_selection(
+        &mut self,
+        selection: Selection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(Selection::Session(old)) = &self.selected
             && let Some(row) = self.sessions.get(old)
         {
@@ -930,8 +980,26 @@ impl Render for Shell {
             })
             .child(div().flex_1().min_w_0().h_full().child(self.main.clone()))
             .when(side.is_none(), |d| d.child(self.left.clone()));
+        let shell = cx.entity().downgrade();
+        // The overlays drawn from here on say they are open: Alt+Left closes the topmost.
+        forget_overlays(cx);
+        if self.bell_open {
+            let shell = shell.clone();
+            open_overlay(
+                "bell-scrim".into(),
+                // A key reaches this while the shell handles it: the update waits.
+                move |_, cx| {
+                    let shell = shell.clone();
+                    cx.defer(move |cx| {
+                        shell.update(cx, |this, cx| this.set_bell(false, cx)).ok();
+                    });
+                },
+                cx,
+            );
+        }
         div()
             .id("shell")
+            .track_focus(&self.focus)
             .size_full()
             .relative()
             .bg(p.bg)
@@ -939,16 +1007,44 @@ impl Render for Shell {
             .ui_text()
             .flex()
             .flex_col()
+            // An open list, modal or drawer takes the buttons first (`dismiss_on_navigate`): what
+            // reaches here is a press with nothing open under the pointer.
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Back),
+                cx.listener(|this, _, window, cx| this.go(Way::Back, window, cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Forward),
+                cx.listener(|this, _, window, cx| this.go(Way::Forward, window, cx)),
+            )
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let way = match event.keystroke.key.as_str() {
+                    "left" => Way::Back,
+                    "right" => Way::Forward,
+                    _ => return,
+                };
+                if event.keystroke.modifiers == Modifiers::alt() {
+                    cx.stop_propagation();
+                    // Like the mouse's buttons: an open overlay closes first and that is all.
+                    if dismiss_top_overlay(window, cx) {
+                        // Whatever held the focus in it is going: the next key must still arrive.
+                        window.focus(&this.focus, cx);
+                    } else {
+                        this.go(way, window, cx);
+                    }
+                }
+            }))
             .child(self.top.clone())
             .child(body)
             .when(self.bell_open, |d| {
-                d.child(
-                    div()
-                        .id("bell-scrim")
-                        .absolute()
-                        .inset_0()
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_bell(cx))),
-                )
+                let scrim = div()
+                    .id("bell-scrim")
+                    .absolute()
+                    .inset_0()
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_bell(cx)));
+                d.child(dismiss_on_navigate(scrim, move |_, cx| {
+                    shell.update(cx, |this, cx| this.set_bell(false, cx)).ok();
+                }))
                 .child(
                     div()
                         .absolute()
@@ -1154,6 +1250,10 @@ impl Render for BellList {
             .border_color(p.line2)
             .flex()
             .flex_col();
+        let shell = self.shell.clone();
+        let list = dismiss_on_navigate(list, move |_, cx| {
+            shell.update(cx, |shell, cx| shell.set_bell(false, cx)).ok();
+        });
         if self.items.is_empty() {
             return list.child(
                 div()

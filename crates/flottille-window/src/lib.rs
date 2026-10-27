@@ -5,6 +5,7 @@
 pub mod actions;
 pub mod composer;
 pub mod conversation;
+pub mod history;
 pub mod link;
 pub mod model;
 pub mod open;
