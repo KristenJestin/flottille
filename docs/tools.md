@@ -4,8 +4,8 @@ The tools of the agents Flottille runs, and the MCP server that serves them: the
 `docs/design.md` §1. It follows `docs/reference/hemera.md` §3, with the rules of
 `docs/reference/mcp.md` §4 where they differ. A session lists the tools of its agent, which
 depend on what it can do (`docs/agents.md`): the file and command tools below for every agent,
-`reference_read`, and the tree's tools (`agent_*`, `report`, `ask_user` or `ask_parent`,
-`approval_answer`).
+`forge_read` for an agent in a workspace, `reference_read`, and the tree's tools (`agent_*`,
+`report`, `ask_user` or `ask_parent`, `approval_answer`).
 
 ## The server
 
@@ -193,6 +193,15 @@ not a lock: a swap between it and the rename is not seen.
   daemon started after a crash kills the groups a previous one left (only while their leader is
   the process it started) and marks their runs interrupted. A daemon that stops stops its runs,
   interrupted. When a run's own process ends, what it left in its group is killed with it.
+
+## The forge
+
+| Tool | |
+|---|---|
+| `forge_read {repository?}` | The pull request of the workspace's branch in each of its repositories, or the one named: number, state, base, link, review, checks with their states, comments and reviews. Read only, through the user's own `gh`, run by the daemon; an agent has no forge sign-in of its own. A repository the workspace does not take is refused (`refused: X is not a repository of this agent's workspace: it has …`). Only an agent in a workspace has it. |
+
+It goes through the gate like every call, which allows it. How the forge is read, and what it
+never touches (a token, `gh auth token`), is in [`forges.md`](forges.md).
 
 ## The tree's tools
 

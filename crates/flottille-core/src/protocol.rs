@@ -121,6 +121,18 @@ pub struct WorkspaceName {
     pub name: String,
 }
 
+/// The parameters of `workspace.forge`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceForge {
+    pub project: String,
+    pub name: String,
+    /// The connection watches the workspace: its forge state is read again about once a minute
+    /// for as long as the connection stays open.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub watch: bool,
+}
+
 /// The parameters of `workspace.list`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -239,6 +239,7 @@ fn a_session_sees_only_its_tools() {
             "commands_run",
             "commands_output",
             "commands_stop",
+            "forge_read",
             "reference_read",
             "agent_launch",
             "agent_send",

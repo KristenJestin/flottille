@@ -102,16 +102,7 @@ impl Client {
 
     /// Sends a request and returns its result; events arriving meanwhile are not for a request.
     pub fn request(&mut self, method: &str, params: Value) -> Result<Value> {
-        let id = self.next_id.to_string();
-        self.next_id += 1;
-        let request = Request {
-            id: id.clone(),
-            method: method.to_owned(),
-            params,
-        };
-        let mut line = serde_json::to_string(&request)?;
-        line.push('\n');
-        self.writer.write_all(line.as_bytes())?;
+        let id = self.send(method, params)?;
         loop {
             let message = self.read()?.ok_or("the daemon closed the connection")?;
             if message.id.as_deref() != Some(&id) {
@@ -125,6 +116,21 @@ impl Client {
             }
             return Ok(message.result.unwrap_or(Value::Null));
         }
+    }
+
+    /// Sends a request without waiting for its answer: its id.
+    pub fn send(&mut self, method: &str, params: Value) -> Result<String> {
+        let id = self.next_id.to_string();
+        self.next_id += 1;
+        let request = Request {
+            id: id.clone(),
+            method: method.to_owned(),
+            params,
+        };
+        let mut line = serde_json::to_string(&request)?;
+        line.push('\n');
+        self.writer.write_all(line.as_bytes())?;
+        Ok(id)
     }
 
     /// The next event of a subscription, `None` when the daemon closed the connection.

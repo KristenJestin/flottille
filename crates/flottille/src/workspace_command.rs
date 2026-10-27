@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use clap::Subcommand;
 use flottille_core::paths::Paths;
-use flottille_core::protocol::{WorkspaceCreate, WorkspaceList, WorkspaceName};
+use flottille_core::protocol::{WorkspaceCreate, WorkspaceForge, WorkspaceList, WorkspaceName};
 use flottille_core::store::now_ms;
 use serde_json::Value;
 
@@ -38,7 +38,8 @@ pub enum WorkspaceAction {
         #[arg(long)]
         json: bool,
     },
-    /// One workspace: its repositories and where its preparation stands
+    /// One workspace: its repositories, where its preparation stands, and each repository's
+    /// pull request with its checks
     Show {
         project: String,
         name: String,
@@ -112,7 +113,15 @@ pub fn run(paths: &Paths, action: WorkspaceAction) -> Result<ExitCode> {
             name,
             json,
         } => {
-            let workspace = ask("workspace.show", named(project, name)?)?;
+            let mut workspace = ask("workspace.show", named(project.clone(), name.clone())?)?;
+            workspace["forge"] = ask(
+                "workspace.forge",
+                serde_json::to_value(WorkspaceForge {
+                    project,
+                    name,
+                    watch: false,
+                })?,
+            )?;
             let text = show_text(&workspace);
             (workspace, (json, text))
         }
@@ -282,6 +291,53 @@ fn show_text(workspace: &Value) -> String {
     }
     if workspace["state"] == "failed" {
         shown.push_str(&failure_text(workspace));
+    }
+    shown.push_str(&forge_text(&workspace["forge"]));
+    shown
+}
+
+/// Each repository's pull request and its checks, or why there is none.
+fn forge_text(forge: &Value) -> String {
+    let mut shown = "Pull requests:\n".to_owned();
+    if let Some(problem) = forge["problem"].as_str() {
+        shown.push_str(&format!("  {problem}.\n"));
+    }
+    for repository in forge["repositories"].as_array().into_iter().flatten() {
+        let named = match repository["repository"].as_str() {
+            Some(slug) => format!("{} ({slug})", text(repository, "path")),
+            None => text(repository, "path").to_owned(),
+        };
+        let pull = &repository["pull_request"];
+        let said = if let Some(note) = repository["note"].as_str() {
+            note.to_owned()
+        } else if let Some(error) = repository["error"].as_str() {
+            format!("the forge could not be read: {error}")
+        } else if !forge["problem"].is_null() {
+            continue;
+        } else if pull.is_null() {
+            "no pull request".to_owned()
+        } else {
+            let mut said = format!(
+                "#{} {} into {}",
+                pull["number"],
+                text(pull, "state"),
+                text(pull, "base")
+            );
+            said.push_str(&match pull["mark"].as_str() {
+                Some(mark) => format!(", checks {mark}"),
+                None => ", no checks".to_owned(),
+            });
+            if let Some(review) = pull["review"].as_str() {
+                said.push_str(&format!(", {review}"));
+            }
+            match pull["comments"].as_u64().unwrap_or(0) {
+                0 => {}
+                1 => said.push_str(", 1 comment"),
+                n => said.push_str(&format!(", {n} comments")),
+            }
+            format!("{said}: {}\n    {}", text(pull, "title"), text(pull, "url"))
+        };
+        shown.push_str(&format!("  {named}: {said}\n"));
     }
     shown
 }

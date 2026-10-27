@@ -1,4 +1,4 @@
-//! Opening a folder in the user's editor, with the system's default handler (`docs/design.md`
+//! Opening a folder in the user's editor, or a link, with the system's default handler (`docs/design.md`
 //! §10): spawned without a shell, the path as one argument. The tests give their own opener and
 //! look at what it was given.
 

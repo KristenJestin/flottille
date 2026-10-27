@@ -129,6 +129,13 @@ a workspace was preparing).
 | `redone` | Done steps whose result is gone from the disk. |
 | `retried` | Failed or running steps. |
 
+### `workspace.forge`
+
+What the forges say of the workspace changed: a pull request, its state or its checks, or what
+stops them being read ([`forges.md`](forges.md)). Its data is the whole state, as
+`workspace.forge` answers it (`docs/protocol.md`), `project` and `workspace` included. A first read
+that finds no forge says nothing.
+
 ### `workspace.removed`
 
 The workspace's worktrees, folder and record are gone. Its branches are kept.

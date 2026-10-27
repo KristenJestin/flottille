@@ -269,6 +269,11 @@ impl Shell {
         self.follow.opener = opener;
     }
 
+    /// Opens a link (a pull request) with the system's default handler.
+    pub fn open_link(&self, url: &str) {
+        (self.follow.opener)(std::path::Path::new(url));
+    }
+
     /// The composer of a session whose page was opened.
     pub fn reply_of(&self, session: &str) -> Option<&Entity<Reply>> {
         self.replies.get(session)

@@ -13,6 +13,7 @@ mod daemon;
 mod deliveries;
 mod files;
 mod follow;
+mod forge;
 mod gate;
 mod git;
 mod inbox;
@@ -156,6 +157,10 @@ enum Command {
         /// Print the stored events numbered after this one first
         #[arg(long, value_name = "N")]
         after: Option<u64>,
+        /// Watch this workspace too: its pull requests are read again about once a minute while
+        /// this runs
+        #[arg(long, num_args = 2, value_names = ["PROJECT", "WORKSPACE"])]
+        forge: Vec<String>,
     },
 }
 
@@ -271,9 +276,17 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                     .map_err(|error| std::io::Error::other(error.to_string()))
             }));
         }
-        Command::Watch { after } => {
+        Command::Watch { after, forge } => {
             let mut client = Client::connect_or_start(&paths)?;
             client.request("events.watch", serde_json::to_value(WatchParams { after })?)?;
+            // Not waited for: its answer is not an event, and the events of its read come
+            // meanwhile.
+            if let [project, name] = &forge[..] {
+                client.send(
+                    "workspace.forge",
+                    serde_json::json!({"project": project, "name": name, "watch": true}),
+                )?;
+            }
             let mut stdout = std::io::stdout().lock();
             while let Some(event) = client.next_event()? {
                 // A closed pipe (`watch | head`) ends the watch quietly.

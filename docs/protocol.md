@@ -282,6 +282,41 @@ cannot read the worktree (not made yet, or gone). `workspace.list` leaves it out
 (`docs/events.md`), kept with the workspace; `null` while it is not `ready`. `workspace.list`
 leaves it out too.
 
+#### `workspace.forge`
+
+`{"project", "name", "watch"?}`. The forge state of the workspace's repositories
+([`forges.md`](forges.md)): the last one read when it is less than a minute old, else read now.
+With `watch: true`, the connection watches the workspace: the daemon reads it again about once a
+minute (less often while `gh` fails) for as long as the connection is open, and emits
+`workspace.forge` when it changed (`docs/events.md`). A connection watches a workspace once, however
+often it asks.
+
+```json
+{
+  "project": "app",
+  "workspace": "login",
+  "branch": "app/login",
+  "read_at": 1792843730808,
+  "problem": null,
+  "repositories": [
+    {"path": "api", "remote": "origin", "forge": "github", "repository": "acme/api", "note": null,
+     "pull_request": {"number": 12, "title": "Add the login page", "state": "open", "base": "develop",
+       "url": "https://github.com/acme/api/pull/12", "review": "approved",
+       "checks": [{"name": "build", "state": "passing"}], "mark": "passing", "comments": 2},
+     "error": null},
+    {"path": "web", "remote": "origin", "forge": null, "repository": null,
+     "note": "no forge support yet: origin is on git.example.com", "pull_request": null, "error": null}
+  ]
+}
+```
+
+`problem` says, with what to do, why no forge can be read (`gh` missing, not signed in), else
+`null`. For each repository, `forge` is `github` or `null` (then `note` says why), `pull_request`
+is `null` when its branch has none, and `error` says why its forge could not be read. A pull
+request's `state` is `open`, `draft`, `merged` or `closed`; `review` `approved`, `changes
+requested`, `review required` or `null`; a check's `state` `passing`, `failing`, `pending` or
+`skipped`; `mark` the checks as one (`failing`, `pending`, `passing`), `null` without checks.
+
 #### `workspace.prepare`
 
 `{"project", "name"}`. Resumes the preparation (`docs/workspaces.md`) and answers the workspace

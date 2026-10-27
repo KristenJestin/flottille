@@ -159,6 +159,8 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
   temp file + rename, all-or-nothing edits);
 - commands: `commands_list`, `commands_run` (catalogue command or one line, **never a shell**),
   `commands_output`, `commands_stop`;
+- forges (an agent in a workspace): `forge_read`, the pull requests of its workspace's
+  repositories and their checks, read only (`forges.md`);
 - references: `reference_read`, one of the project's references, documents read when relevant
   (`docs/projects.md`, "References");
 
@@ -185,7 +187,8 @@ Flottille's own tools:
 The tool list of a session is fixed for its whole life (prompt cache, `reference/hemera.md` §7)
 and depends on what the agent can do, known when it starts: a root gets `ask_user`, a child
 `ask_parent`; an agent at the depth limit gets no `agent_*` tools and no `approval_answer`. A lead
-has about 17 tools, a leaf worker 11 (`reference/mcp.md` §4).
+has about 18 tools, a leaf worker 12, one more each in a workspace (`forge_read`)
+(`reference/mcp.md` §4).
 
 ### 4.4 Roles
 
@@ -415,7 +418,8 @@ The plan is cut into GitHub milestones; each ends on something the user can use.
 4. **Forges and tickets**: GitHub and Bitbucket (pull requests, checks, pipelines),
    issue trackers (GitHub issues, Jira read-only), linked to workspaces; procedures with scoped
    authorizations (open the pull requests of a workspace, merge a stack in dependency order,
-   close a workspace).
+   close a workspace). Reading a workspace's GitHub pull requests and checks is in
+   [`forges.md`](forges.md).
 5. **Remote**: network transport, phone, other machines.
 
 ## 14. Defaults taken, to confirm

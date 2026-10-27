@@ -68,7 +68,9 @@ Agents: 0 running, 1 waiting for you, 0 failed
 
 Prints the daemon's events (`docs/events.md`), one JSON object per line, until it is interrupted.
 `--after <n>` prints the stored events numbered after `n` first: a client that lost its connection
-resumes with the number of the last event it saw.
+resumes with the number of the last event it saw. `--forge <project> <workspace>` watches that
+workspace too: while it runs, the daemon reads its pull requests again about once a minute, and
+`workspace.forge` says when they changed ([`forges.md`](forges.md)).
 
 ```
 $ flottille watch --after 0
@@ -263,7 +265,9 @@ shop     login  shop/login  ready
 
 ### `flottille workspace show <project> <name>`
 
-The workspace's repositories and where its preparation stands. `--json` prints the workspace.
+The workspace's repositories, where its preparation stands, and each repository's pull request
+with its checks ([`forges.md`](forges.md)). `--json` prints the workspace, with the forge state
+(`workspace.forge`, `docs/protocol.md`) under `forge`.
 
 ```
 $ flottille workspace show shop login
@@ -274,6 +278,9 @@ Repositories:
   .: main, c9eba53c33ef, fetched
 Steps:
    1. done     git worktree add .
+Pull requests:
+  . (acme/shop): #12 open into main, checks passing, approved, 2 comments: Add the login page
+    https://github.com/acme/shop/pull/12
 ```
 
 ### `flottille workspace prepare <project> <name>`
