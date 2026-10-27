@@ -3747,8 +3747,9 @@ fn a_reply_of_thousands_of_lines_streams_in_pieces_that_stay_cheap(cx: &mut Test
     // What matters is that the cost does not grow with the reply (4.8 s a piece past 2,700
     // lines when the reply was one view). An absolute bound fails on a slower machine, so the
     // cost past 2,700 lines is compared with the start of the same run, which is floored at a
-    // few milliseconds so a very fast start cannot make the test fail.
-    let bound = |start: &[Duration]| mean(start).max(Duration::from_millis(5)) * 4;
+    // few milliseconds so a very fast start cannot make the test fail. A spike reached 6 times the
+    // start on a busy machine; the regression was over a hundred.
+    let bound = |start: &[Duration]| mean(start).max(Duration::from_millis(5)) * 10;
     assert!(mean(&applied[90..]) <= bound(&applied[..10]));
     assert!(mean(&whole[90..]) <= bound(&whole[..10]));
 }
