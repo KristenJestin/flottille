@@ -3938,6 +3938,67 @@ fn a_reply_of_thousands_of_lines_streams_in_pieces_that_stay_cheap(cx: &mut Test
     assert!(mean(&whole[90..]) <= bound(&whole[..10]));
 }
 
+// Forges (#75): each repository's pull request in the session's WORKSPACE section and on the
+// place's card, read through the fake `gh`.
+
+#[gpui_kit::test]
+fn the_workspace_section_shows_the_pull_request_and_its_checks_mark_and_opens_it_on_a_click(
+    cx: &mut TestAppContext,
+) {
+    let user = team_user().with_fake_gh();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    user.git(
+        &user.path("work/app"),
+        &["remote", "set-url", "origin", "git@github.com:acme/app.git"],
+    );
+    let url = "https://github.com/acme/app/pull/7";
+    user.gh_script(json!({"pulls": {"acme/app": {"app/w": {
+        "number": 7, "title": "Add the form", "state": "OPEN", "isDraft": false,
+        "baseRefName": "main", "url": url, "reviewDecision": null,
+        "statusCheckRollup": [
+            {"__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "FAILURE"}
+        ],
+        "comments": [], "reviews": []
+    }}}}));
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let given: Arc<std::sync::Mutex<Vec<PathBuf>>> = Arc::default();
+    let opened = given.clone();
+    shell.update(cx, |s, _| {
+        s.set_opener(Arc::new(move |path: &std::path::Path| {
+            opened.lock().unwrap().push(path.to_owned())
+        }))
+    });
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&lead)).is_some())
+    });
+    cx.update(|window, cx| window.click(session_id(&lead), cx));
+
+    until(&shell, cx, "the pull request in the rail", |cx| {
+        cx.update(|window, _| window.try_find("rail-pull-app").is_some())
+    });
+    let page = session_page(&shell, cx);
+    let pulls = page.read_with(cx, |p, cx| p.rail().read(cx).place().unwrap().pulls.clone());
+    assert_eq!(pulls.len(), 1);
+    assert_eq!(pulls[0].label(), "#7 open");
+    assert_eq!(pulls[0].mark.as_deref(), Some("failing"));
+    // The session page watches the workspace while it is open: the daemon reads it again.
+    settle(cx);
+    cx.update(|window, cx| window.click("rail-pull-app", cx));
+    settle(cx);
+    assert_eq!(*given.lock().unwrap(), [PathBuf::from(url)]);
+
+    // The place's card on the project page shows it too, and opens it the same way.
+    open_project(&shell, "app", cx);
+    until(&shell, cx, "the pull request on the card", |cx| {
+        card_of(&shell, Some("w"), cx)
+            .is_some_and(|card| card.read_with(cx, |c, _| !c.pulls().is_empty()))
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("pull-w-app", cx));
+    settle(cx);
+    assert_eq!(given.lock().unwrap().len(), 2);
+}
+
 // The window's history (#73): the mouse's back and forward buttons and Alt+Left / Alt+Right.
 
 /// A press of the mouse's back or forward button with the pointer at `(x, 400)`: the pointer

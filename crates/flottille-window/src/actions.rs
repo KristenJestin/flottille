@@ -16,6 +16,7 @@ use futures::channel::mpsc::UnboundedSender;
 use serde_json::{Value, json};
 
 use crate::link::{Conn, Connect, Update};
+use crate::session_link::{PullRequest, pull_requests};
 
 /// Where a session is started.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,6 +95,8 @@ pub struct Details {
     pub branches: Vec<(String, Option<String>)>,
     /// The lines changed in each workspace, all its repositories together.
     pub changes: HashMap<String, Changes>,
+    /// The pull requests of each workspace's repositories.
+    pub pulls: HashMap<String, Vec<PullRequest>>,
 }
 
 /// The lines added and removed in a workspace.
@@ -488,6 +491,7 @@ fn details(
     .ok()?
     .ok()?;
     let mut changes = HashMap::new();
+    let mut pulls = HashMap::new();
     for workspace in listed["workspaces"].as_array().into_iter().flatten() {
         let name = workspace["name"].as_str().unwrap_or_default();
         let Ok(Ok(shown)) = ask(
@@ -507,11 +511,21 @@ fn details(
             total.capped |= changes["capped"] == true;
         }
         changes.insert(name.to_owned(), total);
+        if let Ok(Ok(forge)) = ask(
+            connect,
+            conn,
+            "workspace.forge",
+            json!({"project": project, "name": name}),
+            bound,
+        ) {
+            pulls.insert(name.to_owned(), pull_requests(&forge).0);
+        }
     }
     Some(Details {
         project: project.to_owned(),
         branches,
         changes,
+        pulls,
     })
 }
 

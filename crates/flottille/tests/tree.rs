@@ -631,7 +631,9 @@ fn a_lead_lists_the_agent_tools_ask_user_and_approval_answer_and_a_worker_at_the
         assert!(names.iter().any(|n| n == tool), "{tool} in {names:?}");
     }
     assert!(!names.iter().any(|n| n == "ask_parent"));
-    assert_eq!(names.len(), 17);
+    // In a workspace, it reads its pull requests too.
+    assert!(names.iter().any(|n| n == "forge_read"));
+    assert_eq!(names.len(), 18);
 
     let names = worker.names();
     assert!(names.iter().any(|n| n == "ask_parent"));
@@ -639,7 +641,7 @@ fn a_lead_lists_the_agent_tools_ask_user_and_approval_answer_and_a_worker_at_the
     assert!(!names.iter().any(|n| n == "ask_user"));
 
     let names = leaf.names();
-    assert_eq!(names.len(), 11, "{names:?}");
+    assert_eq!(names.len(), 12, "{names:?}");
     assert!(!names.iter().any(|n| n.starts_with("agent_")));
     assert!(!names.iter().any(|n| n == "approval_answer"));
     assert!(!names.iter().any(|n| n == "ask_user"));

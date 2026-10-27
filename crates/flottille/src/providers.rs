@@ -116,9 +116,12 @@ impl Provider {
     /// The exact tool names an agent gets, as the provider names them: what it can do decides
     /// (`docs/design.md` §4.3, `docs/reference/mcp.md` §4 rule 9). A root asks the user, a child
     /// its parent; an agent at the depth limit cannot have children, so it has no `agent_*` tool
-    /// and nobody's request to answer.
-    pub fn tools(&self, root: bool, at_depth_limit: bool) -> Vec<String> {
+    /// and nobody's request to answer. Only an agent in a workspace reads its pull requests.
+    pub fn tools(&self, root: bool, at_depth_limit: bool, in_workspace: bool) -> Vec<String> {
         let mut names: Vec<&str> = FILE_AND_COMMAND_TOOLS.to_vec();
+        if in_workspace {
+            names.push("forge_read");
+        }
         if !at_depth_limit {
             names.extend(AGENT_TOOLS);
         }
@@ -990,7 +993,7 @@ mod tests {
 
     #[test]
     fn a_root_agent_gets_ask_user_the_agent_tools_and_approval_answer() {
-        let tools = short(claude::PROVIDER.tools(true, false));
+        let tools = short(claude::PROVIDER.tools(true, false, false));
         assert_eq!(
             tools,
             [
@@ -1017,7 +1020,7 @@ mod tests {
 
     #[test]
     fn the_tools_follow_what_the_agent_can_do() {
-        let leaf = short(claude::PROVIDER.tools(false, true));
+        let leaf = short(claude::PROVIDER.tools(false, true, false));
         assert_eq!(leaf.len(), 11);
         assert!(leaf.contains(&"ask_parent".to_owned()));
         assert!(
@@ -1026,20 +1029,31 @@ mod tests {
                 .any(|t| t.starts_with("agent_") || t == "ask_user")
         );
         assert!(!leaf.contains(&"approval_answer".to_owned()));
-        let lead_child = short(claude::PROVIDER.tools(false, false));
+        let lead_child = short(claude::PROVIDER.tools(false, false, false));
         assert!(lead_child.contains(&"ask_parent".to_owned()));
         assert!(lead_child.contains(&"approval_answer".to_owned()));
         assert!(!lead_child.contains(&"ask_user".to_owned()));
     }
 
     #[test]
+    fn an_agent_in_a_workspace_reads_its_pull_requests_and_one_in_the_project_folder_does_not() {
+        let main = short(claude::PROVIDER.tools(true, false, false));
+        assert!(!main.contains(&"forge_read".to_owned()));
+        let workspace = short(claude::PROVIDER.tools(true, false, true));
+        assert_eq!(workspace.len(), 18);
+        assert_eq!(workspace[9], "forge_read", "after the command tools");
+        let leaf = short(claude::PROVIDER.tools(false, true, true));
+        assert_eq!(leaf.len(), 12);
+    }
+
+    #[test]
     fn each_provider_names_flottille_s_tools_its_own_way() {
         assert_eq!(
-            claude::PROVIDER.tools(true, false)[0],
+            claude::PROVIDER.tools(true, false, false)[0],
             "mcp__flottille__fs_read"
         );
         assert_eq!(
-            opencode::PROVIDER.tools(true, false)[0],
+            opencode::PROVIDER.tools(true, false, false)[0],
             "flottille_fs_read"
         );
         assert_eq!(

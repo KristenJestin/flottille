@@ -20,6 +20,8 @@ use gpui_kit::{
 use crate::actions::{Changes, Command, Details};
 use crate::composer::{Choice, Composer, agents_label};
 use crate::model::{Place, Preparation, ago};
+use crate::session::pull_row;
+use crate::session_link::PullRequest;
 use crate::shell::{Selection, Shell, now_ms};
 use crate::tree::place_name;
 
@@ -205,6 +207,16 @@ impl ProjectPage {
                     cx.notify();
                 });
             }
+            let pulls = match &card.read(cx).data.place {
+                None => Vec::new(),
+                Some(name) => details.pulls.get(name).cloned().unwrap_or_default(),
+            };
+            if card.read(cx).pulls != pulls {
+                card.update(cx, |card, cx| {
+                    card.pulls = pulls;
+                    cx.notify();
+                });
+            }
         }
     }
 
@@ -371,6 +383,8 @@ pub struct PlaceCard {
     data: PlaceData,
     /// Lines added and removed, once the daemon said.
     changes: Option<Changes>,
+    /// Its repositories' pull requests, once the daemon said.
+    pulls: Vec<PullRequest>,
     confirming: bool,
     busy: Option<Busy>,
     error: Option<SharedString>,
@@ -398,6 +412,7 @@ impl PlaceCard {
                 ..data.clone()
             },
             changes: None,
+            pulls: Vec::new(),
             confirming: false,
             busy: None,
             error: None,
@@ -417,6 +432,10 @@ impl PlaceCard {
 
     pub fn changes(&self) -> Option<Changes> {
         self.changes
+    }
+
+    pub fn pulls(&self) -> &[PullRequest] {
+        &self.pulls
     }
 
     pub fn error(&self) -> Option<&str> {
@@ -589,6 +608,32 @@ impl Render for PlaceCard {
                 .test_support()
         });
 
+        // Each repository's pull request, opened in the browser on a click.
+        let pulls = (!self.pulls.is_empty()).then(|| {
+            let project = self.project.clone();
+            div()
+                .px(px(14.))
+                .pl(px(30.))
+                .pb(px(10.))
+                .flex()
+                .flex_wrap()
+                .gap(px(4.))
+                .children(self.pulls.iter().map(|pull| {
+                    let (shell, url) = (self.shell.clone(), pull.url.clone());
+                    let label = repository_label(&project, &pull.repository);
+                    pull_row(
+                        ElementId::Name(format!("pull-{name}-{label}").into()),
+                        pull,
+                        cx,
+                    )
+                    .child(div().text_color(p.faint).child(SharedString::from(label)))
+                    .on_click(move |_, _, cx| {
+                        shell.update(cx, |shell, _| shell.open_link(&url)).ok();
+                    })
+                    .test_support()
+                }))
+        });
+
         let status = match &self.data.preparation {
             Preparation::Preparing { done, total, doing } => Some(
                 div()
@@ -752,6 +797,7 @@ impl Render for PlaceCard {
                 Card::new()
                     .title(title)
                     .children_opt(meta.map(|meta| div().pt(px(10.)).child(meta)))
+                    .children_opt(pulls)
                     .children_opt(status)
                     .children_opt(busy)
                     .children_opt(error)

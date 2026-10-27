@@ -120,7 +120,7 @@ and the 2026 practice around it:
    - only an agent that can have children gets `approval_answer`;
    - a root gets `ask_user`, a child gets `ask_parent`.
 
-   A lead has about 17 tools, a leaf worker 11.
+   A lead has about 17 tools, a leaf worker 11, one more each in a workspace (`forge_read`).
 10. **The idempotency key** of a call is read from the call's `_meta` (`claudecode/toolUseId` for
     Claude). `claude` calls Flottille's server itself and sends it with every call; the bridge
     never sees MCP calls. Check that the `claude` version Flottille pins still sends it, and fall

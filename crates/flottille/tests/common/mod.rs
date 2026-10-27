@@ -186,6 +186,37 @@ impl User {
         records(&self.path("codex/received.jsonl"))
     }
 
+    /// This user with the fake `gh` (`crates/flottille-fake-gh`) first in its `PATH`, its folder
+    /// `gh`: no test ever calls GitHub nor uses anyone's sign-in.
+    pub fn with_fake_gh(self) -> User {
+        std::fs::create_dir(self.path("gh")).unwrap();
+        std::fs::create_dir(self.path("gh-bin")).unwrap();
+        std::os::unix::fs::symlink(fake_gh(), self.path("gh-bin/gh")).unwrap();
+        let path = format!(
+            "{}:{}",
+            self.path("gh-bin").display(),
+            self.env
+                .iter()
+                .rev()
+                .find(|(name, _)| name == "PATH")
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default())
+        );
+        let dir = self.path("gh");
+        self.with_env("PATH", &path)
+            .with_env("FLOTTILLE_FAKE_GH_DIR", dir.to_str().unwrap())
+    }
+
+    /// The fake `gh`'s script, read again at each of its calls.
+    pub fn gh_script(&self, script: Value) {
+        std::fs::write(self.path("gh/script.json"), script.to_string()).unwrap();
+    }
+
+    /// Every call of the fake `gh`, the first first: `{"args", "env"}`.
+    pub fn gh_received(&self) -> Vec<Value> {
+        records(&self.path("gh/received.jsonl"))
+    }
+
     /// The fake agent's script (`crates/flottille-fake-agent`).
     pub fn fake_script(&self, script: Value) {
         std::fs::write(self.path("fake/script.json"), script.to_string()).unwrap();
@@ -464,6 +495,17 @@ pub fn fake_claude() -> PathBuf {
     assert!(
         path.exists(),
         "{} is missing: run the tests from the workspace's root, or `cargo build -p flottille-fake-claude` first",
+        path.display()
+    );
+    path
+}
+
+/// The fake `gh`'s binary, built beside Flottille's as the fake agent is.
+pub fn fake_gh() -> PathBuf {
+    let path = Path::new(env!("CARGO_BIN_EXE_flottille")).with_file_name("flottille-fake-gh");
+    assert!(
+        path.exists(),
+        "{} is missing: run the tests from the workspace's root, or `cargo build -p flottille-fake-gh` first",
         path.display()
     );
     path

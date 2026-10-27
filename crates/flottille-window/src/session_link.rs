@@ -128,6 +128,46 @@ impl Request {
     }
 }
 
+/// A repository's pull request, as `workspace.forge` gives it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PullRequest {
+    /// The repository's path in the project.
+    pub repository: String,
+    pub number: u64,
+    /// `open`, `draft`, `merged` or `closed`.
+    pub state: String,
+    /// Its checks as one mark: `passing`, `failing` or `pending`; none without checks.
+    pub mark: Option<String>,
+    pub url: String,
+}
+
+impl PullRequest {
+    /// `#12 open`.
+    pub fn label(&self) -> String {
+        format!("#{} {}", self.number, self.state)
+    }
+}
+
+/// The pull requests of a `workspace.forge` answer, and what stops the daemon from reading them.
+pub fn pull_requests(forge: &Value) -> (Vec<PullRequest>, Option<String>) {
+    let pulls = forge["repositories"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|repository| {
+            let pull = &repository["pull_request"];
+            Some(PullRequest {
+                repository: repository["path"].as_str()?.to_owned(),
+                number: pull["number"].as_u64()?,
+                state: pull["state"].as_str().unwrap_or_default().to_owned(),
+                mark: pull["mark"].as_str().map(str::to_owned),
+                url: pull["url"].as_str().unwrap_or_default().to_owned(),
+            })
+        })
+        .collect();
+    (pulls, forge["problem"].as_str().map(str::to_owned))
+}
+
 /// What a place shows in the rail: each repository and its lines changed, and its facts.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PlaceFacts {
@@ -138,6 +178,10 @@ pub struct PlaceFacts {
     pub bases: Vec<String>,
     /// How long its preparation took, once it is ready.
     pub prepared_ms: Option<u64>,
+    /// Each repository's pull request (a workspace).
+    pub pulls: Vec<PullRequest>,
+    /// Why the forges cannot be read (`gh` missing, not signed in), with what to do.
+    pub forge_problem: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -500,6 +544,14 @@ impl Link {
                         RepositoryFacts::Changes(changes),
                     ));
                 }
+                // Watched for as long as this connection lasts: the daemon reads the forges again
+                // about once a minute, and says when they changed.
+                let forge = conn.ask(
+                    "workspace.forge",
+                    json!({"project": self.place.project, "name": name, "watch": true}),
+                )?;
+                let (pulls, forge_problem) =
+                    forge.as_ref().map_or((Vec::new(), None), pull_requests);
                 PlaceFacts {
                     repositories,
                     branch: shown["branch"].as_str().map(str::to_owned),
@@ -507,6 +559,8 @@ impl Link {
                     prepared_ms: shown["ready_at"].as_u64().map(|ready| {
                         ready.saturating_sub(shown["created_at"].as_u64().unwrap_or(0))
                     }),
+                    pulls,
+                    forge_problem,
                 }
             }
             None => {
