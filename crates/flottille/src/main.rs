@@ -222,8 +222,9 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         } => match Client::connect(&paths)? {
             None => println!("No daemon is running."),
             Some(mut client) => {
+                let pid = client::locked_by(&paths);
                 client.request("daemon.stop", Value::Null)?;
-                client::wait_until_stopped(&paths)?;
+                client::wait_until_stopped(&paths, &pid)?;
                 println!("The daemon stopped.");
             }
         },
