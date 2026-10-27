@@ -1,9 +1,8 @@
-//! The composer that starts a session, in two layers: an outer shell holding its label ("New
-//! task"), the field with its own border and focus ring, and the pickers below it (the place, the
-//! agent and model, send). The field is its own view: typing redraws it, never the page.
+//! The composer that starts a session, in two layers: an outer shell, the field with its own
+//! border and focus ring, and the pickers below it (the place, the agent and model, send). The field is its own view: typing redraws it, never the page.
 
 use flottille_ui::{Align, Button, Dropdown, Icon, MenuItem, Type, palette};
-use gpui_kit::base::input::{Input, InputEditorStyle, InputEvent, InputState, TextareaState};
+use gpui_kit::base::input::{InputEditorStyle, InputEvent, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement, IntoElement,
@@ -141,20 +140,18 @@ pub fn efforts_of<'a>(provider: &'a Provider, model: Option<&str>) -> Option<&'a
 pub enum Choice {
     Main,
     Workspace(String),
-    /// A new workspace, named in the field beside the picker.
-    New,
 }
 
 pub struct Composer {
     shell: WeakEntity<Shell>,
     project: String,
     field: Entity<TextareaState>,
-    name: Entity<InputState>,
     has_text: bool,
-    has_name: bool,
     focused: bool,
     places: Vec<PlaceChoice>,
     choice: Choice,
+    /// A workspace made from the picker, which becomes the place once the daemon lists it.
+    wanted: Option<String>,
     menu: Option<Menu>,
     /// The providers as the daemon last listed them.
     providers: Providers,
@@ -174,6 +171,11 @@ pub struct Composer {
     renders: usize,
     _subscriptions: Vec<Subscription>,
 }
+
+/// The field is as tall as its text, a line at a time, from one line up to this many, then it
+/// scrolls: no empty room is left under the text.
+const MIN_ROWS: usize = 1;
+const MAX_ROWS: usize = 8;
 
 fn editor_style(cx: &gpui_kit::App) -> InputEditorStyle {
     let p = palette(cx);
@@ -197,50 +199,35 @@ impl Composer {
     ) -> Self {
         let field = cx.new(|cx| {
             let mut field = TextareaState::new(window, cx)
+                .auto_grow(MIN_ROWS, MAX_ROWS)
                 .submit_on_enter(true)
                 .placeholder("Describe a task, a bug to fix, an idea to try…");
             field.set_editor_style(editor_style(cx));
             field
         });
-        let name = cx.new(|cx| {
-            let mut name = InputState::new(window, cx).placeholder("workspace name");
-            name.set_editor_style(editor_style(cx));
-            name
-        });
-        let subscriptions = vec![
-            cx.subscribe_in(
-                &field,
-                window,
-                |this, field, event, window, cx| match event {
-                    InputEvent::Change => {
-                        let has_text = !field.read(cx).value().trim().is_empty();
-                        this.set_flag(|this| &mut this.has_text, has_text, cx);
-                    }
-                    InputEvent::PressEnter { shift: false, .. } => this.send(window, cx),
-                    InputEvent::Focus => this.set_flag(|this| &mut this.focused, true, cx),
-                    InputEvent::Blur => this.set_flag(|this| &mut this.focused, false, cx),
-                    _ => {}
-                },
-            ),
-            cx.subscribe_in(&name, window, |this, name, event, window, cx| match event {
+        let subscriptions = vec![cx.subscribe_in(
+            &field,
+            window,
+            |this, field, event, window, cx| match event {
                 InputEvent::Change => {
-                    let has_name = !name.read(cx).value().trim().is_empty();
-                    this.set_flag(|this| &mut this.has_name, has_name, cx);
+                    let has_text = !field.read(cx).value().trim().is_empty();
+                    this.set_flag(|this| &mut this.has_text, has_text, cx);
                 }
-                InputEvent::PressEnter { .. } => this.send(window, cx),
+                InputEvent::PressEnter { shift: false, .. } => this.send(window, cx),
+                InputEvent::Focus => this.set_flag(|this| &mut this.focused, true, cx),
+                InputEvent::Blur => this.set_flag(|this| &mut this.focused, false, cx),
                 _ => {}
-            }),
-        ];
+            },
+        )];
         Self {
             shell,
             project,
             field,
-            name,
             has_text: false,
-            has_name: false,
             focused: false,
             places: Vec::new(),
             choice: Choice::Main,
+            wanted: None,
             menu: None,
             providers: Providers::default(),
             default: (None, None),
@@ -419,10 +406,6 @@ impl Composer {
         &self.field
     }
 
-    pub fn name_field(&self) -> &Entity<InputState> {
-        &self.name
-    }
-
     pub fn set_places(&mut self, places: Vec<PlaceChoice>, cx: &mut Context<Self>) {
         if self.places != places {
             if let Choice::Workspace(name) = &self.choice
@@ -433,23 +416,43 @@ impl Composer {
                 self.choice = Choice::Main;
             }
             self.places = places;
+            self.take_wanted();
             self.set_blocked();
             cx.notify();
+        }
+    }
+
+    /// The workspace just made from the picker is the place from now on: at once if the daemon
+    /// already lists it, else as soon as it does. Picking another place first drops it.
+    pub fn choose_when_listed(&mut self, name: String, cx: &mut Context<Self>) {
+        self.wanted = Some(name);
+        self.take_wanted();
+        self.set_blocked();
+        cx.notify();
+    }
+
+    fn take_wanted(&mut self) {
+        let listed = self.wanted.as_deref().is_some_and(|name| {
+            self.places
+                .iter()
+                .any(|p| p.workspace.as_deref() == Some(name))
+        });
+        if listed && let Some(name) = self.wanted.take() {
+            self.choice = Choice::Workspace(name);
+            self.error = None;
         }
     }
 
     /// Picks where the next session starts, and puts the caret in the field.
     pub fn choose(&mut self, choice: Choice, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
+        self.wanted = None;
         if self.choice != choice {
             self.choice = choice;
             self.error = None;
             self.set_blocked();
         }
-        let focus = match self.choice {
-            Choice::New => self.name.read(cx).focus_handle(cx),
-            _ => self.field.read(cx).focus_handle(cx),
-        };
+        let focus = self.field.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
         cx.notify();
     }
@@ -498,7 +501,6 @@ impl Composer {
             && self.model_refused().is_none()
             && self.sending.is_none()
             && self.has_text
-            && (self.choice != Choice::New || self.has_name)
     }
 
     /// Starts a session with what the field holds, where the picker says.
@@ -511,7 +513,6 @@ impl Composer {
         let target = match &self.choice {
             Choice::Main => Target::Main,
             Choice::Workspace(name) => Target::Workspace(name.clone()),
-            Choice::New => Target::New(self.name.read(cx).value().trim().to_owned()),
         };
         let command = Command::Start {
             project: self.project.clone(),
@@ -532,20 +533,11 @@ impl Composer {
     /// The session started: the field is emptied for the next one. What it started on.
     pub fn started(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<Pick> {
         let used = self.sent.take();
-        let sent = self.sending.take();
+        self.sending = None;
         self.error = None;
         self.field
             .update(cx, |field, cx| field.set_value("", window, cx));
         self.has_text = false;
-        // The name was the new workspace's, made now: what the picker says since does not matter.
-        if matches!(sent, Some(Target::New(_))) {
-            self.name
-                .update(cx, |name, cx| name.set_value("", window, cx));
-            self.has_name = false;
-            if self.choice == Choice::New {
-                self.choice = Choice::Main;
-            }
-        }
         cx.notify();
         used
     }
@@ -570,11 +562,9 @@ impl Composer {
     }
 
     fn render_pickers(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = palette(cx);
         let (glyph, label) = match &self.choice {
             Choice::Main => (Icon::Folder, "main".to_owned()),
             Choice::Workspace(name) => (Icon::Branch, name.clone()),
-            Choice::New => (Icon::Branch, "New workspace".to_owned()),
         };
         let can_send = self.can_send();
         div()
@@ -593,24 +583,6 @@ impl Composer {
                     }))
                     .items(self.place_items(cx)),
             )
-            .when(self.choice == Choice::New, |d| {
-                d.child(
-                    div()
-                        .id("new-workspace-name")
-                        .w(px(170.))
-                        .h(px(26.))
-                        .px(px(8.))
-                        .rounded(px(7.))
-                        .bg(p.field)
-                        .border_1()
-                        .border_color(p.field_line)
-                        .flex()
-                        .items_center()
-                        .mono(12.)
-                        .child(Input::new(&self.name))
-                        .test_support(),
-                )
-            })
             .child(div().flex_1())
             .children(self.render_agent_pickers(cx))
             .child(
@@ -875,13 +847,25 @@ impl Composer {
                 place.ready.then(|| Choice::Workspace(name.clone())),
             ));
         }
-        items.push(item(
-            "place-choice-new".into(),
-            Icon::Plus,
-            "New workspace".into(),
-            None,
-            Some(Choice::New),
-        ));
+        // Not a place: it opens the page's new-workspace modal, the one its own button opens.
+        items.push(
+            MenuItem::new("place-choice-new", "New workspace")
+                .leading(Icon::Plus)
+                .on_click(Self::handler(cx, |this, window, cx| {
+                    this.menu = None;
+                    let form = this
+                        .shell
+                        .update(cx, |shell, _| {
+                            shell.new_workspace_of(&this.project).cloned()
+                        })
+                        .ok()
+                        .flatten();
+                    if let Some(form) = form {
+                        form.update(cx, |form, cx| form.open_for_composer(window, cx));
+                    }
+                    cx.notify();
+                })),
+        );
         items
     }
 }
@@ -908,7 +892,6 @@ impl Render for Composer {
         let p = palette(cx);
         let body = div()
             .id("composer-field")
-            .min_h(px(64.))
             .px(px(14.))
             .py(px(12.))
             .text_size(px(14.))
@@ -932,15 +915,7 @@ impl Render for Composer {
             .shadow_lg()
             .ui_text()
             .text_color(p.text)
-            .child(
-                div()
-                    .px(px(10.))
-                    .pt(px(4.))
-                    .pb(px(8.))
-                    .text_size(px(12.5))
-                    .text_color(p.mute)
-                    .child("New task"),
-            )
+            .test_support()
             .child(
                 div()
                     .rounded(px(11.))
@@ -1009,10 +984,7 @@ impl Render for Composer {
                         .pb(px(2.))
                         .mono(11.5)
                         .text_color(p.faint)
-                        .child(match self.choice {
-                            Choice::New => "Preparing the workspace, then starting…",
-                            _ => "Starting…",
-                        }),
+                        .child("Starting…"),
                 )
             })
     }

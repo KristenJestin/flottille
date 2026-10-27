@@ -17,6 +17,9 @@ pub const HOVER: Duration = Duration::from_millis(140);
 /// A button pressed.
 pub const PRESS: Duration = Duration::from_millis(90);
 
+/// A modal and its scrim come or go.
+pub const MODAL: Duration = Duration::from_millis(180);
+
 /// The gap between siblings that arrive together.
 pub const STAGGER: Duration = Duration::from_millis(70);
 /// How far an entrance rises while it fades in, in pixels.

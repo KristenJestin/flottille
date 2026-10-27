@@ -2,10 +2,10 @@
 
 mod common;
 
-use common::{Desktop, init};
+use common::{Desktop, advance, init, pending_frames};
+use flottille_ui::motion::MODAL;
 use flottille_ui::{Align, Dropdown, MenuItem, Modal};
 use gpui_kit::base::input::{Input, InputState};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
@@ -161,29 +161,28 @@ impl Render for Dialog {
                     .on_click(cx.listener(|this, _, _, _| this.under += 1))
                     .test_support(),
             )
-            .when(self.open, |d| {
-                d.child(
-                    Modal::new("dialog", "New workspace")
-                        .child(
-                            div()
-                                .id("dialog-field")
-                                .h(px(30.))
-                                .child(Input::new(&self.field)),
-                        )
-                        .action(div().id("dialog-action").child("Create"))
-                        .on_close({
-                            let this = cx.entity().downgrade();
-                            move |_, cx| {
-                                this.update(cx, |d, cx| {
-                                    d.open = false;
-                                    d.closed += 1;
-                                    cx.notify();
-                                })
-                                .ok();
-                            }
-                        }),
-                )
-            })
+            .child(
+                Modal::new("dialog", "New workspace")
+                    .open(self.open)
+                    .child(
+                        div()
+                            .id("dialog-field")
+                            .h(px(30.))
+                            .child(Input::new(&self.field)),
+                    )
+                    .action(div().id("dialog-action").child("Create"))
+                    .on_close({
+                        let this = cx.entity().downgrade();
+                        move |_, cx| {
+                            this.update(cx, |d, cx| {
+                                d.open = false;
+                                d.closed += 1;
+                                cx.notify();
+                            })
+                            .ok();
+                        }
+                    }),
+            )
     }
 }
 
@@ -199,7 +198,14 @@ fn dialog(cx: &mut TestAppContext) -> (Entity<Dialog>, &mut VisualTestContext) {
     (dialog, cx)
 }
 
+/// Opens it and lets its entrance end.
 fn open(dialog: &Entity<Dialog>, cx: &mut VisualTestContext) {
+    start_opening(dialog, cx);
+    advance(cx, MODAL * 2);
+}
+
+/// Opens it and draws the first frame of its entrance.
+fn start_opening(dialog: &Entity<Dialog>, cx: &mut VisualTestContext) {
     cx.update(|window, cx| {
         dialog.update(cx, |d, cx| {
             d.open = true;
@@ -243,5 +249,83 @@ fn a_modal_closes_on_cancel_and_on_a_click_outside_which_goes_no_further(cx: &mu
     dialog.read_with(cx, |d, _| {
         assert_eq!(d.closed, 2);
         assert_eq!(d.under, 0, "the page under the scrim never saw the click");
+    });
+}
+
+/// How far the panel is from where it rests, which is its place once the entrance has ended.
+fn panel_top(cx: &mut VisualTestContext) -> gpui_kit::Pixels {
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        window.find("dialog").bounds().origin.y
+    })
+}
+
+#[gpui_kit::test]
+fn a_modal_and_its_scrim_move_in_when_opened_and_stop_asking_for_frames(cx: &mut TestAppContext) {
+    let (dialog, cx) = dialog(cx);
+    start_opening(&dialog, cx);
+    let first = panel_top(cx);
+    advance(cx, MODAL / 2);
+    let part_way = panel_top(cx);
+    advance(cx, MODAL * 2);
+    let rested = panel_top(cx);
+
+    assert!(first > part_way, "it rises: {first:?} then {part_way:?}");
+    assert!(
+        part_way > rested,
+        "and keeps rising: {part_way:?} then {rested:?}"
+    );
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn once it rests");
+    cx.update(|window, _| assert!(window.find("dialog-scrim").visible()));
+}
+
+#[gpui_kit::test]
+fn a_modal_stays_until_its_close_animation_ends_then_goes(cx: &mut TestAppContext) {
+    let (dialog, cx) = dialog(cx);
+    open(&dialog, cx);
+    let rested = panel_top(cx);
+
+    cx.update(|window, cx| window.press("escape", cx));
+    assert_eq!(dialog.read_with(cx, |d, _| d.closed), 1);
+    advance(cx, MODAL / 2);
+    cx.update(|window, _| {
+        assert!(
+            window.try_find("dialog").is_some(),
+            "still on screen, leaving"
+        );
+        assert!(window.try_find("dialog-scrim").is_some());
+    });
+    assert!(panel_top(cx) > rested, "it moves out as it fades");
+
+    advance(cx, MODAL * 2);
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find("dialog").is_none(),
+            "gone once the animation ended"
+        );
+        assert!(window.try_find("dialog-scrim").is_none());
+    });
+    assert_eq!(pending_frames(cx), 0);
+
+    // And it opens again from the start.
+    open(&dialog, cx);
+    assert_eq!(panel_top(cx), rested);
+}
+
+#[gpui_kit::test]
+fn with_reduced_motion_a_modal_comes_and_goes_at_once(cx: &mut TestAppContext) {
+    let (dialog, cx) = dialog(cx);
+    cx.update(|_, cx| cx.set_reduce_motion(true));
+    start_opening(&dialog, cx);
+    let first = panel_top(cx);
+    assert_eq!(pending_frames(cx), 0);
+    advance(cx, MODAL * 2);
+    assert_eq!(first, panel_top(cx), "it was in place at the first frame");
+
+    cx.update(|window, cx| window.press("escape", cx));
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("dialog").is_none());
     });
 }

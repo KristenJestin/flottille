@@ -486,7 +486,12 @@ impl Shell {
         if let Some(form) = self.new_workspace_of(project).cloned()
             && form.read(cx).creating() == Some(name)
         {
-            form.update(cx, |form, cx| form.answered(refused, window, cx));
+            let for_composer = form.update(cx, |form, cx| form.answered(refused, window, cx));
+            if for_composer && let Some(composer) = self.composer_of(project).cloned() {
+                composer.update(cx, |composer, cx| {
+                    composer.choose_when_listed(name.to_owned(), cx)
+                });
+            }
         } else if let Some(page) = self.main.read(cx).project_page().cloned()
             && page.read(cx).name() == project
             && let Some(card) = page.read(cx).card(&Some(name.to_owned()), cx)
@@ -532,14 +537,9 @@ impl Shell {
                 status: row.read(cx).status(),
             })
         };
-        let labels: Vec<String> = project
-            .repositories
-            .iter()
-            .map(|path| repository_label(&name, path))
-            .collect();
         let mut places = vec![PlaceData {
             place: None,
-            meta: format!("the project folder · {}", labels.join(", ")),
+            meta: None,
             preparation: Preparation::Ready,
             sessions: self
                 .snapshot
@@ -564,11 +564,11 @@ impl Shell {
                 .map(|path| repository_label(&name, path))
                 .collect();
             places.push(PlaceData {
-                meta: format!(
+                meta: Some(format!(
                     "from {} · {}",
                     workspace.bases.join(", "),
                     repositories.join(", ")
-                ),
+                )),
                 preparation: workspace.preparation.clone(),
                 sessions: self
                     .snapshot
