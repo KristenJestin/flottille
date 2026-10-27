@@ -26,9 +26,9 @@ use gpui_kit::base::input::{InputEditorStyle, InputEvent, TextareaState};
 use gpui_kit::base::text::{TextView, TextViewState, TextViewStyle};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, AppContext as _, Bounds, Context, ElementId, Entity, Focusable as _, FollowMode,
-    ImageCacheError, ImageSource, InteractiveElement, IntoElement, ListAlignment, ListState,
-    ParentElement, PathBuilder, Pixels, Render, SharedString, SharedUri,
+    AnyElement, App, AppContext as _, Bounds, Context, Div, ElementId, Entity, Focusable as _,
+    FollowMode, ImageCacheError, ImageSource, InteractiveElement, IntoElement, ListAlignment,
+    ListState, ParentElement, PathBuilder, Pixels, Render, SharedString, SharedUri, Stateful,
     StatefulInteractiveElement, Styled, Subscription, Task, TestSupportExt as _, Transformation,
     WeakEntity, Window, canvas, div, list, point, px, radians,
 };
@@ -39,7 +39,8 @@ use crate::link::{Connect, Update};
 use crate::model::Place;
 use crate::open::Opener;
 use crate::session_link::{
-    self, PlaceFacts, RepositoryFacts, Request, SessionLink, SessionUpdate, TreeAgent, Where,
+    self, PlaceFacts, PullRequest, RepositoryFacts, Request, SessionLink, SessionUpdate, TreeAgent,
+    Where,
 };
 use crate::shell::{Layout, Shell, now_ms};
 use crate::tree::place_name;
@@ -347,6 +348,11 @@ impl SessionPage {
         if let Some(folder) = &self.opened.folder {
             (self.follow.opener)(folder);
         }
+    }
+
+    /// Opens a link (a pull request) with the system's default handler.
+    pub fn open_link(&self, url: &str) {
+        (self.follow.opener)(std::path::Path::new(url));
     }
 
     /// What the page's link read or saw; what an older link sends is not for it.
@@ -2312,7 +2318,14 @@ impl Render for SessionRail {
                 } => Some(ended_row(&parent, count, open).into_any_element()),
             })
             .collect();
-        let repositories: Vec<(String, String)> = self
+        let pull_of = |path: &str| {
+            self.place
+                .iter()
+                .flat_map(|place| place.pulls.iter())
+                .find(|pull| pull.repository == path)
+                .cloned()
+        };
+        let repositories: Vec<(String, String, Option<PullRequest>)> = self
             .place
             .iter()
             .flat_map(|place| place.repositories.iter())
@@ -2331,9 +2344,14 @@ impl Render for SessionRail {
                     RepositoryFacts::Branch(Some(branch)) => branch.clone(),
                     RepositoryFacts::Branch(None) => "no branch".to_owned(),
                 };
-                (crate::project::repository_label(&self.project, path), said)
+                (
+                    crate::project::repository_label(&self.project, path),
+                    said,
+                    pull_of(path),
+                )
             })
             .collect();
+        let forge_problem = self.place.as_ref().and_then(|p| p.forge_problem.clone());
         let mut facts: Vec<(&str, String)> = Vec::new();
         match (&self.workspace, &self.place) {
             (Some(_), Some(place)) => {
@@ -2368,8 +2386,8 @@ impl Render for SessionRail {
                     .child(div().flex_1().child(section_label("Workspace", cx)))
                     .child(self.menu.clone()),
             )
-            .children(repositories.into_iter().map(|(path, said)| {
-                div()
+            .children(repositories.into_iter().map(|(path, said, pull)| {
+                let row = div()
                     .id(ElementId::Name(format!("rail-repository-{path}").into()))
                     .flex()
                     .items_center()
@@ -2378,7 +2396,7 @@ impl Render for SessionRail {
                     .py(px(6.))
                     .text_size(px(12.5))
                     .child(icon(Icon::Repository).size(px(13.)).text_color(p.faint))
-                    .child(SharedString::from(path))
+                    .child(SharedString::from(path.clone()))
                     .child(
                         div()
                             .ml_auto()
@@ -2386,6 +2404,31 @@ impl Render for SessionRail {
                             .text_color(p.faint)
                             .child(SharedString::from(said)),
                     )
+                    .test_support();
+                let pull = pull.map(|pull| {
+                    let page = self.page.clone();
+                    let url = pull.url.clone();
+                    pull_row(
+                        ElementId::Name(format!("rail-pull-{path}").into()),
+                        &pull,
+                        cx,
+                    )
+                    .pl(px(29.))
+                    .on_click(move |_, _, cx| {
+                        page.update(cx, |page, _| page.open_link(&url)).ok();
+                    })
+                    .test_support()
+                });
+                div().child(row).children(pull)
+            }))
+            .children(forge_problem.map(|problem| {
+                div()
+                    .id("rail-forge-problem")
+                    .px(px(8.))
+                    .py(px(4.))
+                    .text_size(px(11.5))
+                    .text_color(p.faint)
+                    .child(SharedString::from(problem))
                     .test_support()
             }))
             .child(div().h(px(1.)).bg(p.line).mx(px(6.)).my(px(16.)))
@@ -2407,6 +2450,33 @@ impl Render for SessionRail {
                     .test_support(),
             )
     }
+}
+
+/// A pull request's row: its number and state, and its checks' mark, drawn by shape as well as
+/// colour. The place card draws the same.
+pub(crate) fn pull_row(id: ElementId, pull: &PullRequest, cx: &App) -> Stateful<Div> {
+    let p = palette(cx);
+    let (glyph, color, said) = match pull.mark.as_deref() {
+        Some("passing") => ("✓", p.ok, "checks passing"),
+        Some("failing") => ("✗", p.fail, "checks failing"),
+        Some(_) => ("●", p.run, "checks pending"),
+        None => ("", p.faint, "no checks"),
+    };
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .px(px(8.))
+        .py(px(3.))
+        .rounded(px(6.))
+        .cursor_pointer()
+        .mono(11.)
+        .text_color(p.mute)
+        .hover(|s| s.bg(p.hover).text_color(p.text))
+        .aria_label(SharedString::from(format!("{}, {said}", pull.label())))
+        .child(SharedString::from(pull.label()))
+        .child(div().text_color(color).child(glyph))
 }
 
 /// The drawn link from a parent to its child in the rail: down, then right, with a round corner.
