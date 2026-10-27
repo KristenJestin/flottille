@@ -763,17 +763,21 @@ fn pr_merge_squash_merges_only_the_workspace_s_own_pull_request_into_its_base() 
     );
 }
 
-/// Holds once the daemon refuses the clients its agents start and the gate refuses `flottille`
-/// (#91): until then an agent reaches the daemon's socket through `commands_run`.
+/// The gate refuses `flottille`, and the daemon the clients its agents start (#93): without
+/// them, an agent reaches the daemon's socket through `commands_run`. The agent names the socket's
+/// folder itself, which a run's environment no longer says.
 #[test]
-#[ignore = "needs #91"]
 fn an_agent_s_commands_run_of_flottille_procedure_start_starts_no_run() {
     let user = User::with_fake_agent();
     let (_, remote) = fixture(&user);
     procedure(&user, "plain", json!({}), false);
     let (_, mcp) = run(&user, "plain");
     let before = agents(&user);
-    let flottille = env!("CARGO_BIN_EXE_flottille");
+    let flottille = format!(
+        "env XDG_RUNTIME_DIR={} {}",
+        user.path("runtime").display(),
+        env!("CARGO_BIN_EXE_flottille")
+    );
 
     for done in [
         format!(
@@ -782,7 +786,16 @@ fn an_agent_s_commands_run_of_flottille_procedure_start_starts_no_run() {
         ),
         format!("{flottille} procedure run app ship --workspace login --yes"),
     ] {
-        line(&mcp, &done);
+        let answer = line(&mcp, &done);
+        // Approved by the user, the line changes nothing either.
+        if answer.text.contains("Waiting for the user's approval") {
+            let requests = user.call("approval.list", json!({})).unwrap()["requests"].clone();
+            let number = requests.as_array().unwrap().last().unwrap()["number"].clone();
+            user.call("approval.approve", json!({"number": number}))
+                .unwrap();
+            user.watch(&["--after", "0"])
+                .until(|e| e["name"] == "approval.settled" && e["data"]["number"] == number);
+        }
     }
 
     std::thread::sleep(Duration::from_millis(500));
