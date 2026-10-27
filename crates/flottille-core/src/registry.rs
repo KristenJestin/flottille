@@ -110,7 +110,8 @@ impl Registry {
         }
     }
 
-    fn file(&self, name: &str) -> PathBuf {
+    /// The file of the project of that name.
+    pub fn file(&self, name: &str) -> PathBuf {
         self.dir.join(format!("{name}.toml"))
     }
 }

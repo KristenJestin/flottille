@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize, Serializer};
 
+use crate::procedure::Procedure;
+
 /// Children running at once per project: the bounds of `max_children`.
 pub const CHILDREN_CAP: std::ops::RangeInclusive<u8> = 1..=6;
 const DEFAULT_CHILDREN_CAP: u8 = 3;
@@ -239,6 +241,9 @@ pub struct Project {
     /// The steps that prepare a new workspace, in order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub recipe: Vec<RecipeStep>,
+    /// Named actions run by an agent in a workspace, with their grants (`docs/procedures.md`).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub procedures: BTreeMap<String, Procedure>,
 }
 
 /// What `projects/<name>.toml` holds: the keys as written, before the defaults and the checks.
@@ -267,6 +272,8 @@ struct File {
     commands: BTreeMap<String, CatalogueCommand>,
     #[serde(default)]
     recipe: Vec<RecipeStep>,
+    #[serde(default)]
+    procedures: BTreeMap<String, Procedure>,
 }
 
 fn all_repositories() -> RepositorySet {
@@ -309,6 +316,7 @@ impl Project {
             variables: BTreeMap::new(),
             commands: BTreeMap::new(),
             recipe: Vec::new(),
+            procedures: BTreeMap::new(),
         }
     }
 
@@ -497,6 +505,9 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
     for (index, step) in file.recipe.iter().enumerate() {
         check_step(&format!("recipe[{index}]"), step, &known, &file.commands)?;
     }
+    for (name, procedure) in &file.procedures {
+        procedure.check(name)?;
+    }
 
     Ok(Project {
         name: name.to_owned(),
@@ -513,6 +524,7 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
         variables: file.variables,
         commands: file.commands,
         recipe: file.recipe,
+        procedures: file.procedures,
     })
 }
 
@@ -1370,5 +1382,59 @@ mod tests {
         assert_eq!(slug("--a..b--"), "a-b");
         assert_eq!(slug("Été"), "t");
         assert_eq!(slug("..."), "");
+    }
+    #[test]
+    fn a_procedure_is_read_with_its_grants_from_the_fixed_vocabulary() {
+        let project = parse(&format!(
+            "{MINIMAL}\n[procedures.open-prs]\ndescription = \"Open the pull requests\"\n\
+             instructions = \"Push, then open one per repository.\"\nchildren = true\n\
+             [procedures.open-prs.grants]\npush = \"allow\"\npr-create = \"ask\"\n"
+        ))
+        .unwrap();
+
+        let procedure = &project.procedures["open-prs"];
+        assert_eq!(procedure.description, "Open the pull requests");
+        assert!(procedure.children);
+        assert_eq!(
+            procedure.grants,
+            crate::procedure::Grants::from([
+                (crate::procedure::Grant::Push, crate::procedure::Mode::Allow),
+                (
+                    crate::procedure::Grant::PrCreate,
+                    crate::procedure::Mode::Ask
+                ),
+            ])
+        );
+        assert_eq!(
+            parse(&project.to_toml().unwrap()).unwrap().procedures,
+            project.procedures
+        );
+    }
+
+    #[test]
+    fn a_grant_outside_the_vocabulary_or_an_empty_procedure_is_refused() {
+        let with = |body: &str| format!("{MINIMAL}\n[procedures.p]\n{body}");
+        let refused = refusal(&with(
+            "description = \"d\"\ninstructions = \"i\"\n[procedures.p.grants]\nshell = \"allow\"\n",
+        ));
+        assert!(
+            refused.starts_with("projects/app.toml: procedures.p.grants")
+                && refused.contains("shell"),
+            "{refused}"
+        );
+        let refused = refusal(&with(
+            "description = \"d\"\ninstructions = \"i\"\n[procedures.p.grants]\npush = \"always\"\n",
+        ));
+        assert!(refused.contains("procedures.p.grants"), "{refused}");
+        assert_eq!(
+            refusal(&with("description = \"d\"\ninstructions = \" \"\n")),
+            "projects/app.toml: procedures.p.instructions: must not be empty"
+        );
+        assert!(
+            refusal(&with(
+                "description = \"d\"\ninstructions = \"i\"\nwhat = 1\n"
+            ))
+            .contains("procedures.p"),
+        );
     }
 }
