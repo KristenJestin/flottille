@@ -31,7 +31,7 @@ pub use icons::{Icon, Icons, icon};
 pub use menu::Menu;
 pub use modal::Modal;
 pub use omarchy::Environment;
-pub use reveal::{Fold, PulsingLabel, enter};
+pub use reveal::{Fold, PulsingLabel, enter, fold_frame};
 pub use rows::{ListRow, TreeLevel, TreeRow, meta, section_label, tree_children};
 pub use state::{AgentState, Pill, StateIcon, Status};
 pub use switch::Switch;
