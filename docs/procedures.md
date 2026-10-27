@@ -76,6 +76,14 @@ the workspace's), what the project says of its pull requests when the run grants
 (below), the workspace's ticket when it is linked to one, then its instructions. The run is a session like any other: it shows in the tree, the user writes to its
 root, its requests reach the user.
 
+**A procedure that writes to a forge needs every forge declared.** When it grants `pr-create`,
+`pr-merge-squash` or `pipeline-rerun` and a repository of the workspace has no forge in the
+project's file (`docs/forges.md`, "The forge of a repository"), it refuses to start, naming them:
+`procedure open-prs writes to the forge (pr-create), and no forge is set for api, web of workspace
+login: choose it in the project's Settings (the window), or write its `forge` in the project's
+file; nothing was started`. Nothing is guessed from a remote's host. A procedure granting only git
+actions starts as before.
+
 The grants **belong to the run**: they are frozen when the user confirms them, held by the daemon
 for the run's root agent, and no tool nor argument of an agent changes them. Editing the procedure
 later changes no run that started. They apply:
@@ -116,7 +124,8 @@ its run grants the action:
 `forge_write {action, repository, title?, body?, draft?, waive?}`
 
 - `action`: `pr-create`, `pr-merge-squash` or `pipeline-rerun`, each the grant of its name;
-- `repository`: one of the workspace's repositories, by its path; another is refused;
+- `repository`: one of the workspace's repositories, by its path; another is refused, and so is
+  one with no forge declared, or whose declared forge is not where its remote leads;
 - `pr-create` needs `title`, takes `body` and `draft`: `gh pr create -R <owner/name> --head <branch>
   --base <base> --title … --body …`, the base the one the workspace's repository started from, and
   a `--reviewer` for each of the project's reviewers (below), on Bitbucket as on GitHub (`draft` is

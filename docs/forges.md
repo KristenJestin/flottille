@@ -14,7 +14,8 @@ Flottille talks to a forge through the command line the user installed and signe
 GitHub, `bkt` for Bitbucket (below). It is spawned without a shell, as `git` is, with the daemon's
 environment (the user's), so that the user's own sign-in works; `GH_PROMPT_DISABLED=1` keeps `gh`
 from waiting for an answer, and a call is cut after 30 s. Every call names the repository (`-R
-owner/name`, from the remote's URL; for `bkt`, `--workspace` or `--project` and `--repo`):
+owner/name`, from the repository's declared forge; for `bkt`, `--workspace` or `--project` and
+`--repo`):
 nothing depends on the daemon's working folder.
 
 - **Flottille never reads, keeps nor prints a token.** It never runs `gh auth token` nor
@@ -29,33 +30,46 @@ nothing depends on the daemon's working folder.
 
 ## The forge of a repository
 
-For each repository of a workspace, the daemon reads the URL of its remote (the repository's
-`remote`, `origin` by default) with `git remote get-url`:
-
-| URL | Forge |
-|---|---|
-| `git@github.com:owner/name.git`, `ssh://git@github.com/owner/name`, `https://github.com/owner/name.git` | GitHub, `owner/name` |
-| `git@bitbucket.org:workspace/name.git`, `https://bitbucket.org/workspace/name.git` | Bitbucket Cloud, `workspace/name` |
-| on a host the project names in `[forges] bitbucket`: `ssh://git@host:7999/PROJECT/name.git`, `https://host/scm/PROJECT/name.git` | Bitbucket Data Center, `PROJECT/name` |
-| any other host | none: `no forge support yet: origin is on <host>` |
-| a path on this machine | none: `no forge support yet: origin is not on a forge` |
-| no such remote | none: `it has no remote origin` |
-
-A repository with no forge support is said as such, never as an error.
-
-A Data Center host cannot be told from any other by its name, so the project says it, in its file
-(`docs/projects.md`), and nothing else is configured:
+**Each repository declares its forge, and nothing is guessed.** The project's file says it, per
+repository (`docs/projects.md`), written by the project's Settings in the window or by hand:
 
 ```toml
-[forges]
-bitbucket = ["bitbucket.example.com"]   # host names alone: no scheme, port or path
+[[repositories]]
+path = "api"
+forge = { kind = "github", repository = "acme/api" }
+# forge = { kind = "bitbucket-cloud", repository = "acme/api" }
+# forge = { kind = "bitbucket-data-center", host = "git.example.com", repository = "PROJ/api" }
 ```
 
-`bitbucket.org` is Cloud and is never listed. The Data Center forms of an address are
-`ssh://git@host:7999/PROJECT/name.git`, `https://host/scm/PROJECT/name.git` (with a context path
-before `scm` when the server has one) and the `projects/PROJECT/repos/name` page's. A name that
-could pass for a flag or a path (a leading `-`, anything but letters, digits, `.`, `_`, `~` and
-`-`) is no repository.
+A repository with no `forge` is never read nor written on a forge: no `gh` nor `bkt` is run for
+it, and it is said as `no forge set for this repository: choose it in the project's Settings (the
+window), or write its `forge` in the project's file; Flottille never guesses it`, never as an
+error. A project registered before forges were declared reads nothing until they are set; its old
+`[forges]` table is ignored and said (`… (the project's [forges] table is no longer read)`).
+
+The remote's address (the repository's `remote`, `origin` by default, from `git remote get-url`)
+serves two things, and only those:
+
+- **Pre-filling the Settings.** The window proposes, for a repository with no forge, what its
+  address says: `github.com` is GitHub `owner/name`, `bitbucket.org` is Bitbucket Cloud
+  `workspace/name`, and another host is proposed as Bitbucket Data Center `PROJECT/name` only when
+  the address has a Data Center form (`ssh://git@host:7999/PROJECT/name.git`,
+  `https://host/scm/PROJECT/name.git`, with a context path before `scm` when the server has one, or
+  the `projects/PROJECT/repos/name` page's). Anything else is proposed as no forge. The proposal is
+  active only once the user saves.
+- **The safety check.** Before anything is read or written, the declared forge must agree with the
+  remote: the same host and the same repository path (case aside). A repository whose remote leads
+  elsewhere is refused with its reason, for example `refused: api is declared on GitHub acme/api,
+  and its remote origin: it leads to github.com/other/api, not to GitHub acme/api; nothing was asked
+  of the forge: …`; Saving such a forge is refused the same way. A declared forge never silently
+  wins over the remote, nor the remote over it.
+
+A name that could pass for a flag or a path (a leading `-`, anything but letters, digits, `.`, `_`,
+`~` and `-`) is no repository, and a host is a name alone (no scheme, port or path).
+
+**A procedure that writes to a forge refuses to start** (`procedure.run`, and a session started
+with one) when a repository of its workspace has no forge declared, naming the repositories
+(`docs/procedures.md`). `forge_write` refuses the same for the repository it names.
 
 ## What is read
 

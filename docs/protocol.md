@@ -200,6 +200,33 @@ changing nothing: `{"name", "folder", "new", "missing"}`, `new` the repositories
 configured, `missing` the ones configured and no longer there. `refused` when the folder no longer
 exists.
 
+#### `project.settings`
+
+`{"name"}`. The project's forges and tracker as its Settings show them (`docs/forges.md`, "The
+forge of a repository"): `{"name", "folder", "repositories": [{"path", "remote", "url", "forge",
+"proposal", "disagrees"}], "tracker", "obsolete"}`. `url` is the remote's address (credentials taken
+out, masked; `null` when it has none), `forge` the one declared (`null` when none), `proposal` what
+the address proposes (`null` when nothing), `disagrees` why the declared forge is not where the
+remote leads (`null` when it is). `obsolete` lists the keys of the file that are no longer read
+(the old `[forges]`), each with what replaces it. Nothing is asked of a forge.
+
+#### `project.set_settings`
+
+`{"name", "repositories": [{"path", "forge"}], "tracker"}`. Writes each listed repository's `forge`
+(removed when `null`; a repository left out is unchanged) and the project's `[tracker]` (removed
+when `null` or left out) in its file, where they stand, what is around them kept, and answers as
+`project.settings`. `refused`, with nothing written, when a path is not one of the project's, a
+forge or the tracker cannot be used (naming its key), or a forge is not where its repository's
+remote leads (`api cannot be declared on GitHub acme/api: its remote origin: it leads to
+github.com/other/api, not to GitHub acme/api; nothing was saved`).
+
+#### `project.ticket`
+
+`{"project", "ticket"}`. Reads a ticket of the project's tracker before any workspace has it, for
+the new-workspace form's preview (`docs/tickets.md`): `{"project", "ticket", "tracker",
+"tracker_said", "problem"}` and, once read, the fields of `workspace.ticket`. `problem` says why it
+is not taken or not read; it is not a refusal.
+
 ### The reference methods
 
 A project's references (`docs/projects.md`, "References"). The daemon edits the project's file in
@@ -320,7 +347,7 @@ often it asks.
        "checks": [{"name": "build", "state": "passing"}], "mark": "passing", "comments": 2},
      "error": null},
     {"path": "web", "remote": "origin", "forge": null, "repository": null,
-     "note": "no forge support yet: origin is on git.example.com", "pull_request": null, "error": null}
+     "note": "no forge set for this repository: choose it in the project's Settings (the window), or write its `forge` in the project's file; Flottille never guesses it", "pull_request": null, "error": null}
   ]
 }
 ```

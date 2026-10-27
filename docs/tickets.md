@@ -10,25 +10,29 @@ through Atlassian's own command line, `acli`.
 
 ## Linking a workspace to a ticket
 
-A workspace has at most one ticket, kept with it in the store. It is written as the tracker
-writes it:
+A workspace has at most one ticket, kept with it in the store. **The project's tracker says which
+tickets it takes**, and nothing is guessed: `[tracker]` in the project's file, set in the project's
+Settings in the window (`docs/projects.md`):
 
-| Written | Tracker | Reads |
+| Tracker | Written | Reads |
 |---|---|---|
-| `#123` (or `123`) | GitHub issues | issue 123 of the first repository of the workspace that is on GitHub |
-| `ABC-123` (any case, kept in upper case) | Jira | the work item `ABC-123` |
+| `kind = "github"`, `repository = "api"` | `#123` (or `123`) | issue 123 of that repository, on its declared GitHub forge |
+| `kind = "jira"`, `site`, `projects = ["ABC"]` | `ABC-123` (any case, kept in upper case), its project one of `projects` | the work item `ABC-123` on that site |
 
-`123` is accepted because a shell takes a word starting with `#` for a comment. Anything else is
-refused when it is typed (`refused: x is not a ticket: write #123 … or a Jira key such as
-ABC-123`), so that what reaches a command line is always a number or a key and never an option.
-Linking checks the writing of the reference, not that the ticket exists: reading says that.
+`123` is accepted because a shell takes a word starting with `#` for a comment. A ticket is
+accepted only in its tracker's form: `ABC-1 is a Jira key, and this project's tracker is GitHub
+issues of api: write an issue number, #123`, `#4 is a GitHub issue, and this project's tracker is
+Jira on acme.atlassian.net (ABC)`, `XYZ-1 is not in a Jira project of this project's tracker …`.
+A project with no tracker takes no ticket: `no tracker set for this project: choose it in the
+project's Settings (the window), or write its [tracker] in the project's file; Flottille never
+guesses it`. Anything that is neither form is refused when it is typed (`refused: x is not a
+ticket …`), so that what reaches a command line is always a number or a key and never an option.
+Linking checks the writing of the reference and its tracker, not that the ticket exists: reading
+says that.
 
-The repository of `#123` is the first of the workspace's repositories (the root one first, then
-in dependency order) whose remote is on GitHub (`forges.md`, "The forge of a repository").
-Simplest rule that works, and the answer says which repository it took (`acme/api`). A project
-cannot yet name the repository its issues are in; if that is wanted, it is a key of the project's
-file, later. A workspace with no repository on GitHub has no `#123` to read, and says so; a Jira
-key needs no repository.
+A GitHub tracker's repository must be one of the project's whose forge is declared on GitHub
+(`forges.md`, "The forge of a repository"); its issues are read with `-R` its declared
+`owner/name`, once the forge agrees with the repository's remote.
 
 It is linked:
 
@@ -49,9 +53,9 @@ Both are spawned without a shell, as `git` and `gh` are, with the daemon's envir
 user's), so that the user's own sign-in works; a call is cut after 30 s.
 
 - **Flottille never reads, keeps nor prints a token.** It never runs `gh auth token` nor
-  `--show-token`, never reads `gh`'s or `acli`'s configuration folder. Of each one's sign-in
-  status (`gh auth status --hostname github.com`, `acli jira auth status`) it reads the exit
-  code alone: 0 is signed in.
+  `--show-token`, never reads `gh`'s or `acli`'s configuration folder. Of `gh auth status --hostname
+  github.com` it reads the exit code alone: 0 is signed in. Of `acli jira auth status` it reads
+  the exit code and the `Site:` line, nothing else (an e-mail there is never kept).
 - **What a tracker says is masked** before it is shown or stored (titles, descriptions, comments,
   errors), as every output is (`flottille_core::secrets`).
 - **Only reads are reachable.** The whole of what Flottille runs is `gh issue view <n> -R
@@ -64,6 +68,15 @@ user's), so that the user's own sign-in works; a call is cut after 30 s.
   `GH_CONFIG_DIR` pointed at an empty folder (`docs/tools.md`), so `gh` has no login there.
   `acli`'s sign-in lives in the user's home, which no variable of ours moves, so **the gate refuses
   every `acli` line an agent runs, reads included**; an agent reads a ticket with `ticket_read`.
+
+## The Jira site
+
+**A Jira read is refused when `acli`'s active sign-in is not on the tracker's site**, since `acli`
+reads from the site it is signed in to and a key such as `ABC-1` may exist on several: `acli is
+signed in to other.atlassian.net, and this project's tracker is Jira on acme.atlassian.net:
+nothing was read; switch acli to it (`acli jira auth switch --site acme.atlassian.net`) or correct
+the project's tracker`. A status with no `Site:` line is refused the same way. Nothing is asked of
+Jira then.
 
 ## What is read
 
@@ -103,7 +116,8 @@ item as `acli … --json` is expected to print it,
             "comment": {"comments": [{"author": {"displayName": "…"}, "created": "…", "body": {"type": "doc", "…": "…"}}]}}}
 ```
 
-Also assumed: `--fields summary,status,description,comment` returns the comments (the
+Also assumed: `acli jira auth status` prints the active site on a line `Site: <host>` (the
+site check above reads it, and refuses when it is missing), `--fields summary,status,description,comment` returns the comments (the
 documentation's own example is `--fields summary,comment`), and `acli jira auth status` ends with 0
 when signed in and non-zero when not (its page does not document its exit codes). The reading
 tolerates a description that is a string and `fields.comment` being the array itself. **The
@@ -134,6 +148,10 @@ memory or in the store but the reference: a ticket is as fresh as the call.
 - `workspace.link_ticket {project, name, ticket}` links, or unlinks when `ticket` is null, and
   answers as `workspace.ticket` does.
 - `workspace.create {…, ticket?}` links at creation.
+- `project.ticket {project, ticket}` reads a ticket before any workspace has it, for the
+  new-workspace form's preview: `{project, ticket, tracker, tracker_said, problem, …}` with the
+  fields of `workspace.ticket`; `problem` says why it cannot be taken or read (no tracker, another
+  tracker's form, another Jira site, a read that fails).
 - `flottille workspace show <project> <name>` prints the ticket after the steps, and `--json`
   holds what `workspace.ticket` answered under `ticket_read` (the reference itself is
   `ticket`, in `workspace list` too) (`docs/cli.md`).
@@ -143,15 +161,15 @@ memory or in the store but the reference: a ticket is as fresh as the call.
 The session page's `WORKSPACE` section shows the ticket under the repositories: its reference,
 its state and its title, which open the ticket on its tracker with the system's default handler
 on a click, or what stops it from being read. Beside it, a field links another ticket (Enter),
-and a button unlinks it. The form that makes a workspace has an optional ticket field.
+and a button unlinks it. The form that makes a workspace has an optional ticket field, and **previews the ticket as it is
+typed**: once typing rests (300 ms) it asks `project.ticket` and shows the tracker and the title,
+or why the ticket is not taken, before anything is created.
 
 ## The agent's tool `ticket_read`
 
 `ticket_read {ticket?}` (`docs/tools.md`): the workspace's ticket, or `ticket`, another ticket of
-the same tracker by its key. The tracker is that of the workspace's ticket: GitHub issues for
-`#123`, Jira for `ABC-123`; a workspace linked to none has GitHub's (the issues of its own
-repositories), so a Jira key is refused until a Jira ticket is linked. A key of the other tracker
-is refused, and nothing is asked of any tracker. Read only, through the gate like every call (it
+the project's tracker by its key. A key the tracker does not take is refused, and nothing is asked
+of any tracker. Read only, through the gate like every call (it
 allows it). Only an agent working in a workspace has the tool, whether a ticket is linked or not
 (the tool list of a session is fixed when it starts).
 
@@ -160,5 +178,6 @@ allows it). Only an agent working in a workspace has the tool, whether a ticket 
 Tests never call GitHub or Jira nor use anyone's sign-in: a fake `gh` (`crates/flottille-fake-gh`,
 which answers `issue view` too) and a fake `acli` (`crates/flottille-fake-acli`), first on the
 `PATH` of the test's daemon, answer from a script and record every call; the repositories are
-throwaway ones whose `origin` is set to a GitHub URL after their workspace is made
+throwaway ones whose `origin` is set to a GitHub URL after their workspace is made, and whose
+forge and tracker are declared with `project.set_settings`
 (`crates/flottille/tests/tickets.rs`).

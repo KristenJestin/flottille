@@ -20,6 +20,10 @@ Unknown keys are refused too, so a typo is never silently ignored.
 | `flottille project remove <name>` | Forgets the project, never its folder. |
 | `flottille project check <name>` | Detects the repositories again; fails when they differ from the configuration. |
 
+The window does the same from the sidebar's **+** beside "Projects" (or the empty window's "Add a
+project"): a folder, typed or picked, the repositories detected in it shown before anything is
+registered, then the new project's Settings, where it can be checked again or removed.
+
 All of them take `--json` and print what the daemon answered (`docs/protocol.md`).
 
 ## Detecting repositories
@@ -49,6 +53,7 @@ path = "."                            # relative to the folder; "." is the folde
 remote = "origin"                     # default
 base = ["develop", "main"]            # the first that exists on the remote wins; default ["main"]
 depends_on = ["lib-core"]             # paths of repositories of the project, leaves first; no cycle
+forge = { kind = "github", repository = "acme/app" }   # its forge (docs/forges.md); none when left out
 
 [variables]                           # name -> templated value, for every command run in a workspace
 STORE = "{workspace.path}/.store"
@@ -72,8 +77,10 @@ root_entries = true                   # the project folder's other entries, link
 run = "npm install"                   # one line, its words templated, never run by a shell
 for_each_repository = true
 
-[forges]                              # hosts a remote's name does not say are a forge (docs/forges.md)
-bitbucket = ["bitbucket.example.com"] # Bitbucket Data Center hosts, by name; bitbucket.org is Cloud and needs none
+[tracker]                             # where its tickets are (docs/tickets.md); none when left out
+kind = "jira"
+site = "acme.atlassian.net"
+projects = ["ABC", "OPS"]
 
 [procedures.open-prs]                 # a named action run by an agent in a workspace (docs/procedures.md)
 description = "Open the pull requests"
@@ -103,10 +110,31 @@ checks that their names are those of environment variables and that their templa
 `{workspace}`, `{workspace.path}`, `{project}`, `{branch}` and `{repository}` (`{{` and `}}` are a
 literal brace).
 
-`[forges] bitbucket` lists the Bitbucket Data Center hosts the project's repositories are on, by
-name (`bitbucket.example.com`: no scheme, port or path), since a name alone does not say a host is
-one; `bitbucket.org` is Cloud and is refused there. A repository whose remote is on a listed host
-is read and written through `bkt` (`docs/forges.md`). Unknown keys of the table are refused.
+A repository's `forge` says where its pull requests and issues are, and nothing else does: a
+repository with none is never read nor written on a forge (`docs/forges.md`, "The forge of a
+repository"). It is one of:
+
+| `kind` | Keys | |
+|---|---|---|
+| `github` | `repository = "owner/repo"` | GitHub, through `gh` |
+| `bitbucket-cloud` | `repository = "workspace/repo"` | Bitbucket Cloud, through `bkt` |
+| `bitbucket-data-center` | `host = "git.example.com"`, `repository = "PROJ/repo"` | a Bitbucket Data Center server, through `bkt` |
+
+`[tracker]` says where the project's tickets are (`docs/tickets.md`): `kind = "github"` with
+`repository`, the path of one of the project's repositories whose forge is GitHub (its issues), or
+`kind = "jira"` with `site` (the Jira Cloud site, `acme.atlassian.net`) and `projects`, the keys of
+its Jira projects (at least one). A project with no `[tracker]` takes no ticket.
+
+The forges and the tracker are set in the project's **Settings** in the window (the project page's
+header): each repository's forge is pre-filled from its remote's address, nothing is active until
+Save, and Save writes the file where it stands, its comments kept. A forge whose repository is not
+the one its remote leads to (another host, another path) is refused with the reason, and nothing
+is saved.
+
+The `[forges]` table of earlier versions (Bitbucket Data Center hosts by name) is no longer read:
+a file that still has it is accepted, the table is ignored and said (`project show` lists it under
+"Not read", the window under the settings), and its repositories have no forge until one is set.
+Nothing is converted on its own.
 
 A procedure's keys, its grants' vocabulary and what a run of it may do are in
 [`procedures.md`](procedures.md); `flottille procedure add`, `edit` and `remove` write them in the

@@ -180,8 +180,13 @@ shop
   workspaces take: all repositories
   children at once: 3
 Repositories:
-  .: remote origin, base main
+  .: remote origin, base main, on GitHub acme/shop
+Tickets: no tracker set
 ```
+
+A repository with no forge declared ends with `, no forge set`, and a key of the file that is no
+longer read (the old `[forges]`) is listed on a `Not read:` line (`docs/forges.md`). The forges
+and the tracker are set in the project's Settings in the window, or in its file.
 
 ### `flottille project check <name>`
 
