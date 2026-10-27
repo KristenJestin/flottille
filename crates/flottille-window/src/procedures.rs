@@ -676,19 +676,25 @@ impl ProceduresSection {
                 let grants = Grant::ALL.into_iter().map(|grant| {
                     let word = grant.word();
                     let mode = self.grants.get(&grant).copied();
-                    let choice = |label: &'static str, this: Option<Mode>| {
-                        let button = ElementId::Name(
-                            format!("grant-{word}-{}", this.map_or("off", Mode::word)).into(),
-                        );
-                        let button = if mode == this {
-                            Button::secondary(button, label)
-                        } else {
-                            Button::quiet(button, label)
+                    let choice =
+                        |label: &'static str, this: Option<Mode>| {
+                            let button = ElementId::Name(
+                                format!("grant-{word}-{}", this.map_or("off", Mode::word)).into(),
+                            );
+                            let button = if mode == this {
+                                Button::secondary(button, label)
+                            } else {
+                                Button::quiet(button, label)
+                            };
+                            // One width each, so that the columns stay aligned whichever is chosen.
+                            div()
+                                .w(px(56.))
+                                .flex()
+                                .justify_center()
+                                .child(button.on_click(cx.listener(move |this_, _, _, cx| {
+                                    this_.set_grant(grant, this, cx)
+                                })))
                         };
-                        button.on_click(
-                            cx.listener(move |this_, _, _, cx| this_.set_grant(grant, this, cx)),
-                        )
-                    };
                     div()
                         .id(ElementId::Name(format!("grant-{word}").into()))
                         .flex()
