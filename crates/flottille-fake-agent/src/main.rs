@@ -64,6 +64,7 @@
 //! | `{"permission": {"title": "x", "untyped": true}}` | the same with no `_meta.claudeCode.toolName`: a request that has only a title |
 //! | `{"mcp": {"tool": "fs_list", "arguments": {}}}` | calls the tool on the session's first HTTP MCP server (initialize, then `tools/call`), as a tool call; the answer recorded |
 //! | `{"mcp": {"tool": "agent_launch", "arguments": {…}, "keep": "w1"}}` | the same, and keeps the first agent id (12 hexadecimal digits) of the answer's text under that name |
+//! | `{"mcp": {"tool": "fs_list", "arguments": {}, "quiet": true}}` | the same without its tool call's session updates: an MCP call that lands before the updates around it |
 //!
 //! In the texts of an `mcp` step's arguments, `{kept:w1}` is replaced by the value kept under
 //! `w1`, `{prompt:request}` by the first request number (`#3`) of the turn's prompt (a number
@@ -525,11 +526,14 @@ impl Agent {
         let tool = call["tool"].as_str().unwrap_or_default();
         let call_id = format!("mcp-{}", self.next_request);
         self.next_request += 1;
-        self.notify(
-            session,
-            json!({"sessionUpdate": "tool_call", "toolCallId": call_id, "title": tool,
-                "kind": "other", "status": "in_progress", "rawInput": call["arguments"]}),
-        );
+        let quiet = call["quiet"] == true;
+        if !quiet {
+            self.notify(
+                session,
+                json!({"sessionUpdate": "tool_call", "toolCallId": call_id, "title": tool,
+                    "kind": "other", "status": "in_progress", "rawInput": call["arguments"]}),
+            );
+        }
         let servers = self.options[session]["mcpServers"].clone();
         let server = servers
             .as_array()
@@ -552,11 +556,13 @@ impl Agent {
                 self.keep(name, &id);
             }
         }
-        self.notify(
-            session,
-            json!({"sessionUpdate": "tool_call_update", "toolCallId": call_id,
-                "status": if status == 200 { "completed" } else { "failed" }, "rawOutput": body}),
-        );
+        if !quiet {
+            self.notify(
+                session,
+                json!({"sessionUpdate": "tool_call_update", "toolCallId": call_id,
+                    "status": if status == 200 { "completed" } else { "failed" }, "rawOutput": body}),
+            );
+        }
     }
 
     fn say(&self, session: &str, text: &str, message: Option<&str>) {
