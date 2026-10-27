@@ -158,7 +158,7 @@ async fn github_of(workspace: &Workspace) -> Result<Forge, String> {
         )
         .await;
         if let Ok(url) = url
-            && let Remote::Forge(forge) = forge::remote_of(&url)
+            && let Remote::Forge(forge @ Forge::GitHub { .. }) = forge::remote_of(&url, &[])
         {
             return Ok(forge);
         }

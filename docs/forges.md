@@ -5,25 +5,27 @@ and the pull request's checks. The first step of the milestone "Forges and ticke
 (`docs/design.md` §13). **Reading**, and the writes an agent makes with `forge_write` only inside a
 procedure that grants them, through the gate ([`procedures.md`](procedures.md)).
 
-GitHub is the only forge read yet. Bitbucket and others will sit beside it: in the code a forge is
-one member of `forge::Forge`, read through its own command line.
+GitHub and Bitbucket (Cloud and Data Center) are the forges read. In the code a forge is one member
+of `forge::Forge`, read through its own command line (`gh`, `bkt`); others will sit beside them.
 
 ## The user's own command line
 
 Flottille talks to a forge through the command line the user installed and signed in to: `gh` for
-GitHub. It is spawned without a shell, as `git` is, with the daemon's environment (the user's), so
-that the user's own sign-in works; `GH_PROMPT_DISABLED=1` keeps it from waiting for an answer, and
-a call is cut after 30 s. Every call names the repository (`-R owner/name`, from the remote's
-URL): nothing depends on the daemon's working folder.
+GitHub, `bkt` for Bitbucket (below). It is spawned without a shell, as `git` is, with the daemon's
+environment (the user's), so that the user's own sign-in works; `GH_PROMPT_DISABLED=1` keeps `gh`
+from waiting for an answer, and a call is cut after 30 s. Every call names the repository (`-R
+owner/name`, from the remote's URL; for `bkt`, `--workspace` or `--project` and `--repo`):
+nothing depends on the daemon's working folder.
 
 - **Flottille never reads, keeps nor prints a token.** It never runs `gh auth token` nor
   `--show-token`, never reads `gh`'s configuration folder. Of `gh auth status --hostname
   github.com` it reads the exit code alone: 0 is signed in.
-- **What `gh` prints is masked** before it is shown or stored (titles, comments, errors), as every
-  output is (`flottille_core::secrets`).
+- **What `gh` and `bkt` print is masked** before it is shown or stored (titles, comments, errors),
+  as every output is (`flottille_core::secrets`).
 - **Agents never get that environment.** An agent's process and its command runs have the forge
-  tokens emptied and `GH_CONFIG_DIR` pointed at an empty folder (`docs/tools.md`); an agent reads
-  the forge only through `forge_read` below, never by running `gh` itself.
+  tokens emptied and `GH_CONFIG_DIR` and `BKT_CONFIG_DIR` pointed at an empty folder
+  (`docs/tools.md`); an agent reads the forge only through `forge_read` below, never by running
+  `gh` itself, and **never by running `bkt`, reads included** (see "Bitbucket").
 
 ## The forge of a repository
 
@@ -33,11 +35,27 @@ For each repository of a workspace, the daemon reads the URL of its remote (the 
 | URL | Forge |
 |---|---|
 | `git@github.com:owner/name.git`, `ssh://git@github.com/owner/name`, `https://github.com/owner/name.git` | GitHub, `owner/name` |
+| `git@bitbucket.org:workspace/name.git`, `https://bitbucket.org/workspace/name.git` | Bitbucket Cloud, `workspace/name` |
+| on a host the project names in `[forges] bitbucket`: `ssh://git@host:7999/PROJECT/name.git`, `https://host/scm/PROJECT/name.git` | Bitbucket Data Center, `PROJECT/name` |
 | any other host | none: `no forge support yet: origin is on <host>` |
 | a path on this machine | none: `no forge support yet: origin is not on a forge` |
 | no such remote | none: `it has no remote origin` |
 
 A repository with no forge support is said as such, never as an error.
+
+A Data Center host cannot be told from any other by its name, so the project says it, in its file
+(`docs/projects.md`), and nothing else is configured:
+
+```toml
+[forges]
+bitbucket = ["bitbucket.example.com"]   # host names alone: no scheme, port or path
+```
+
+`bitbucket.org` is Cloud and is never listed. The Data Center forms of an address are
+`ssh://git@host:7999/PROJECT/name.git`, `https://host/scm/PROJECT/name.git` (with a context path
+before `scm` when the server has one) and the `projects/PROJECT/repos/name` page's. A name that
+could pass for a flag or a path (a leading `-`, anything but letters, digits, `.`, `_`, `~` and
+`-`) is no repository.
 
 ## What is read
 
@@ -54,7 +72,9 @@ itself (`gh pr view <n> -R owner/name --json …`):
 
 **`gh` missing or not signed in** is said once for the workspace, in `problem`, with what to do
 (install it, `gh auth login`), and in the daemon's log once when it starts being so. Nothing else
-is asked of `gh` then, and the rest of Flottille works as before.
+is asked of `gh` then, and the rest of Flottille works as before. The same for `bkt` (below): each
+command line's problem is said once, and stops only the repositories it would have read, so that a
+workspace with a GitHub repository and a Bitbucket one still shows the one that works.
 
 ## When it is read
 
@@ -88,6 +108,106 @@ and state, and its checks as one mark drawn by shape as well as colour (`✓` pa
 pull request with the system's default handler. The session page watches its workspace while it is
 open.
 
+## Bitbucket
+
+Read and written through the user's own `bkt`
+(<https://github.com/avivsinai/bitbucket-cli>, Go), the same way, and shown the same way (CLI,
+window, `forge_read`): a pull request has its number, title, state, base, link, review, checks and
+comments, as above, and, for Bitbucket, its reviewers (`reviewers`: each name with `approved`,
+`changes requested` or `pending`), which GitHub's reviews say otherwise.
+
+**The release read is v0.9.0**, commit `f70c9c50e4496f1fa2ae40ced62061eeb905a00a`. What follows is
+what its source says; a newer release may print otherwise, which the maintainer checks on a real
+server (nothing here calls Bitbucket). Files are the repository's, lines those of that commit.
+
+| What Flottille runs | What it reads of the answer | Source |
+|---|---|---|
+| `bkt context list --json` | `contexts[].name`, `.host`, `.active` (no secret in it) | `pkg/cmd/context/context.go:169-262` |
+| `bkt pr list --context C --workspace W --repo R --state all --limit 100 --json` (Cloud), `--project P` instead of `--workspace` (Data Center) | `pull_requests[]`: Cloud `id`, `title`, `state`, `source.branch.name`, `source.repository.full_name`, `destination.branch.name`, `destination.repository.full_name`, `links.html.href`; Data Center `id`, `title`, `state`, `fromRef.displayId`, `fromRef.repository.slug` and `.project.key`, `toRef` the same, `participants[]` (`user`, `role`, `status`, `approved`), `links.self[0].href` | `pkg/cmd/pr/pr.go:78-91` (flags), `:153` and `:218` (`pull_requests`); `pkg/bbcloud/pullrequests.go:14-60` (shape), `:87` (`state=all` is no filter); `pkg/bbdc/client.go:96-122` and `pkg/bbdc/pullrequests.go:17-22` (shape), `pkg/bbdc/client.go:265-267` (`state` as given, uppercased) |
+| `bkt pr checks <id> --context C … --json` | `statuses[]`: `state`, `name`, `key` | `pkg/cmd/pr/pr.go:1754-1809` (flags), `:1998` (`statuses`), `:2198` (the states); `pkg/types/commit_status.go:5-11` |
+| `bkt api <path> --context C [--param k=v]` (GET) | the server's own JSON, unchanged | `pkg/cmd/api/api.go:23-48`, `:138-140` |
+| `bkt pr create --context C … --source <branch> --target <base> --title T --description D` | `✓ Created pull request #<id>` | `pkg/cmd/pr/pr.go:597-615`, `:664`, `:696` |
+| `bkt pr merge <id> --context C … --strategy squash --close-source=false` | the exit code | `pkg/cmd/pr/pr.go:1314-1334`; `pkg/bbcloud/pullrequests.go:351-388` (`squash` is a Cloud strategy); `pkg/bbdc/pullrequests.go:108-132` (`mergeStrategyId`) |
+| `bkt pipeline list --context C --workspace W --repo R --limit 50 --json` | `pipelines[]`: `build_number`, `state.result.name`, `target.ref.name` | `pkg/cmd/pipeline/pipeline.go:177-210`; `pkg/bbcloud/client.go:100-120`, `:145` (newest first: `sort=-created_on`) |
+| `bkt pipeline run --context C --workspace W --repo R --ref <branch>` | the exit code | `pkg/cmd/pipeline/pipeline.go:60-91`, `:135-175`; `pkg/bbcloud/client.go:330-357` |
+
+### What is chosen, and why
+
+- **The host comes from a context.** `bkt` has no `-R`: it takes its host from `--context` or else
+  from the context the user left active (`pkg/cmdutil/context.go:22-58`), and takes the
+  workspace or project and repository from `--workspace`/`--project`/`--repo` first
+  (`pkg/cmd/pr/pr.go:110-111`, `:175-176`). Flottille lists the contexts once per read, picks the active one
+  when it is on the repository's host, else the first that is, and always names it, so that the
+  user's active context never decides which server is asked. A Data Center context's host key
+  carries the port (`pkg/cmdutil/url.go:33-42`): it is compared by host name. `bkt` also reads the
+  working folder's remote to fill what is missing (`pkg/cmdutil/context.go:191-215`): every call
+  here names all of it.
+- **Signed in is "a context for the host exists".** `bkt auth status` is not asked: it ends with 0
+  whether or not a host is configured, and checks no token (`pkg/cmd/auth/auth.go:314-410`, its
+  token source is a label, `:620`). Whether the token itself is there is known at the first call,
+  which then fails with `bkt`'s own sentence (`credentials for host … not found; run bkt auth
+  login`), shown as that repository's error, masked. With no context for the host the problem
+  says what to do: `bkt auth login https://<host>`, then `bkt context create <name> --host
+  <host>`. Flottille reads no token, never runs `bkt auth`, and never prints `bkt`'s
+  configuration.
+- **There is no branch filter.** `bkt pr list` filters by state alone, so the 100 newest pull
+  requests are listed (`--state all`) and the workspace's branch is picked among them, the
+  highest id when there are several. A branch whose pull request is older than the hundred newest
+  of its repository is shown as having none.
+- **Reviewers and comments are not in what `bkt` models.** Its pull request structs hold no
+  comment and, on Cloud, no participant. They are read with `bkt api`, which passes the server's
+  answer through, from Atlassian's REST documentation: Cloud
+  `/repositories/{workspace}/{repo}/pullrequests/{id}` (`participants[]`: `role`, `approved`,
+  `state`, `user.display_name`) and its `/comments?pagelen=100` (`values[]`: `content.raw`,
+  `user.display_name`, `deleted`); Data Center
+  `/rest/api/1.0/projects/{key}/repos/{repo}/pull-requests/{id}/activities?limit=100`
+  (`values[]` whose `action` is `COMMENTED`: `comment.text`, `comment.author.displayName`,
+  replies in `comment.comments`). **These shapes are assumed, and the maintainer checks them**:
+  nothing in `bkt`'s source prints them. Only the first 100 comments are read.
+- **The review is the reviewers' verdicts as one**: `changes requested` when one reviewer asks
+  for it (Cloud `state: changes_requested`, Data Center `status: NEEDS_WORK`), else `review
+  required` while one has not decided, else `approved`; none when nobody was asked. It is not
+  Bitbucket's merge check.
+- **A check is a commit status of the pull request's source commit**, which is where Pipelines
+  and the other build tools report: `SUCCESSFUL` is `passing`, `FAILED`, `STOPPED` and the like
+  are `failing`, anything else (`INPROGRESS`) is `pending`. Pipelines are on Cloud only
+  (`pkg/cmd/pipeline/pipeline.go:20-27`).
+- **Draft is not modelled.** A pull request is `open`, `merged` (`MERGED`) or `closed`
+  (`DECLINED`, `SUPERSEDED`); `bkt` has no draft flag, so none is shown, and `forge_write` refuses
+  `draft: true` for Bitbucket.
+
+### `forge_write` on Bitbucket
+
+The three actions of [`procedures.md`](procedures.md), under the same grants and the same checks
+(the remote leads where it led when the workspace was created; the repository is one of the
+workspace's; the pull request is the workspace's own branch's, from the repository itself, into
+the base the repository started from):
+
+- `pr-create`: `bkt pr create … --source <branch> --target <base>`; it prints no link, so the
+  pull request is read back by its number for the answer.
+- `pr-merge-squash`: the open pull request of the branch, not from a fork (Cloud: source and
+  destination repositories are the same; Data Center: the same slug and project key), into the
+  base: `bkt pr merge <id> --strategy squash --close-source=false`. `--close-source=false` because
+  `bkt` closes the source branch by default (`pkg/cmd/pr/pr.go:1334`) and `gh pr merge --squash`
+  does not. A Data Center repository whose project does not allow squash answers with the
+  server's own refusal, which is the result.
+- `pipeline-rerun`: **Cloud only**; `bkt` has no re-run of one pipeline, only `pipeline run --ref
+  <branch>`, which runs the branch again. It is done when the newest pipeline of the branch (the
+  highest `build_number` whose `target.ref.name` is the branch) ended `FAILED` or `ERROR`;
+  otherwise it is refused. A Data Center repository is refused: it has no pipelines for `bkt`.
+
+### Agents never run `bkt`
+
+The gate refuses every `bkt` line an agent runs, reads included, as it does `acli`
+(`docs/tools.md`). `bkt`'s token is in the OS keychain, or in an encrypted file under the user's
+configuration folder (`internal/secret/store.go:17`, `:295`, `:404`), keyed by the host
+(`host/<host>/token`); no variable of ours moves either. `BKT_CONFIG_DIR` moves only the file
+that lists hosts and contexts (`internal/config/config.go:245-253`), and a configuration that
+names the host is all it takes to use the user's token, `bkt api` with any method included. Unlike
+`gh`, whose sign-in an empty configuration folder hides, a `bkt` read would run with the user's own
+token. The tokens (`BKT_TOKEN`, `BITBUCKET_*`) and `BKT_CONFIG_DIR` are still emptied from an
+agent's environment (`docs/tools.md`), which keeps them out of anything it runs.
+
 ## The agent's tool `forge_read`
 
 `forge_read {repository?}` (`docs/tools.md`): the pull requests of the agent's own workspace's
@@ -100,10 +220,10 @@ agent working in a workspace has the tool.
 ## The agent's tool `forge_write`
 
 `forge_write {action, repository, …}` opens the pull request of the workspace's branch, merges it
-by squash, or re-runs the failed pipelines of its last commit, with the same `gh` and the same
-rules (spawned by the daemon, `-R owner/name`, its output masked, no token to the agent). It is
-refused unless the agent works in a procedure's run that grants the action: see
-[`procedures.md`](procedures.md).
+by squash, or re-runs the failed pipelines of its last commit, with the same `gh` (or `bkt`, for a
+Bitbucket repository) and the same rules (spawned by the daemon, the repository named, its output
+masked, no token to the agent). It is refused unless the agent works in a procedure's run that
+grants the action: see [`procedures.md`](procedures.md).
 
 ## Tickets
 
@@ -114,7 +234,9 @@ line, spawned without a shell, nothing written, everything masked), are in
 
 ## Tests
 
-Tests never call GitHub nor use anyone's sign-in: a fake `gh` (`crates/flottille-fake-gh`), first
-on the `PATH` of the test's daemon, answers from a script and records every call, and the
-repositories are throwaway ones whose `origin` is set to a GitHub URL after their workspace is
-made.
+Tests never call GitHub nor Bitbucket nor use anyone's sign-in: a fake `gh`
+(`crates/flottille-fake-gh`) and a fake `bkt` (`crates/flottille-fake-bkt`), first on the `PATH` of
+the test's daemon, answer from a script and record every call, and the repositories are throwaway
+ones whose `origin` is set to a GitHub or Bitbucket URL after their workspace is made. The fake
+`bkt` answers in the shapes of the table above, needs `--context` and the repository's flags as
+the real one does, and is itself tested (`crates/flottille-fake-bkt/tests`).
