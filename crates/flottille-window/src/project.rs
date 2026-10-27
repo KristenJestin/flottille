@@ -838,6 +838,8 @@ pub struct NewWorkspace {
     open: bool,
     name: Entity<InputState>,
     has_name: bool,
+    /// The ticket it is linked to, if one is typed: `#123` or a Jira key.
+    ticket: Entity<InputState>,
     /// The name asked for, while the daemon makes it.
     creating: Option<String>,
     /// Opened from the composer's picker: the workspace made becomes the composer's place.
@@ -868,26 +870,44 @@ impl NewWorkspace {
             });
             name
         });
-        let subscriptions =
-            vec![
-                cx.subscribe_in(&name, window, |this, name, event, _, cx| match event {
-                    InputEvent::Change => {
-                        let has = !name.read(cx).value().trim().is_empty();
-                        if this.has_name != has {
-                            this.has_name = has;
-                            cx.notify();
-                        }
+        let ticket = cx.new(|cx| {
+            let p = palette(cx);
+            let mut ticket =
+                InputState::new(window, cx).placeholder("ticket (optional): #123 or ABC-123");
+            ticket.set_editor_style(gpui_kit::base::input::InputEditorStyle {
+                foreground: p.text,
+                muted_foreground: p.faint,
+                selection: p.run.opacity(0.35),
+                caret: p.text,
+                ..Default::default()
+            });
+            ticket
+        });
+        let subscriptions = vec![
+            cx.subscribe_in(&ticket, window, |this, _, event, _, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    this.create(cx)
+                }
+            }),
+            cx.subscribe_in(&name, window, |this, name, event, _, cx| match event {
+                InputEvent::Change => {
+                    let has = !name.read(cx).value().trim().is_empty();
+                    if this.has_name != has {
+                        this.has_name = has;
+                        cx.notify();
                     }
-                    InputEvent::PressEnter { .. } => this.create(cx),
-                    _ => {}
-                }),
-            ];
+                }
+                InputEvent::PressEnter { .. } => this.create(cx),
+                _ => {}
+            }),
+        ];
         Self {
             shell,
             project,
             open: false,
             name,
             has_name: false,
+            ticket,
             creating: None,
             for_composer: false,
             creating_for_composer: false,
@@ -898,6 +918,10 @@ impl NewWorkspace {
 
     pub fn name_field(&self) -> &Entity<InputState> {
         &self.name
+    }
+
+    pub fn ticket_field(&self) -> &Entity<InputState> {
+        &self.ticket
     }
 
     pub fn is_open(&self) -> bool {
@@ -947,9 +971,11 @@ impl NewWorkspace {
         self.creating = Some(name.clone());
         self.creating_for_composer = self.for_composer;
         self.error = None;
+        let ticket = self.ticket.read(cx).value().trim().to_owned();
         let command = Command::CreateWorkspace {
             project: self.project.clone(),
             name,
+            ticket: (!ticket.is_empty()).then_some(ticket),
         };
         self.shell
             .update(cx, |shell, _| shell.perform(command))
@@ -974,6 +1000,8 @@ impl NewWorkspace {
                 self.name
                     .update(cx, |name, cx| name.set_value("", window, cx));
                 self.has_name = false;
+                self.ticket
+                    .update(cx, |ticket, cx| ticket.set_value("", window, cx));
             }
             Some(why) => self.error = Some(SharedString::from(why.to_owned())),
         }
@@ -1039,6 +1067,21 @@ impl Render for NewWorkspace {
                     .items_center()
                     .mono(12.5)
                     .child(Input::new(&self.name))
+                    .test_support(),
+            )
+            .child(
+                div()
+                    .id("new-workspace-modal-ticket")
+                    .h(px(32.))
+                    .px(px(10.))
+                    .rounded(px(8.))
+                    .bg(p.field)
+                    .border_1()
+                    .border_color(p.line2)
+                    .flex()
+                    .items_center()
+                    .mono(12.5)
+                    .child(Input::new(&self.ticket))
                     .test_support(),
             )
             .when_some(self.error.clone(), |d, error| {
