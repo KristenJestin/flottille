@@ -243,6 +243,7 @@ fn a_session_sees_only_its_tools() {
             "reference_read",
             "ticket_read",
             "forge_write",
+            "workspace_remove",
             "agent_launch",
             "agent_send",
             "agent_status",

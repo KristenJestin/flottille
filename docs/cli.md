@@ -363,13 +363,23 @@ Instructions:
 `--description <line>`, the instructions with `--instructions <text>` or `--instructions-file
 <file>`, a `--grant <grant>=<mode>` per grant (`push=allow`, `pr-create=ask`; the grants are
 `commit`, `push`, `push-force-with-lease`, `rebase`, `pr-create`, `pr-merge-squash`,
-`pipeline-rerun`) and `--children` to give the grants to the run's children too. Written in the
-project's file, what is around it kept.
+`pipeline-rerun`, `workspace-remove`) and `--children` to give the grants to the run's children
+too. Written in the project's file, what is around it kept.
 
 ```
 $ flottille procedure add shop open-prs --description "Open the pull requests of the workspace" \
     --instructions-file open-prs.md --grant push=allow --grant pr-create=ask
-Added procedure open-prs to project shop.
+Added procedure open-prs to project shop: it grants push (allow), pr-create (ask). Edit it in the project's file, or with `flottille procedure edit`.
+```
+
+`--template <template> [<name>]` writes one of Flottille's procedures instead, as it is, under its
+own name unless one is given: `open-prs`, `merge-stack` or `close` (`docs/procedures.md`,
+"Templates"). It takes none of the options above: the procedure is the project's once written,
+edited in the file or with `procedure edit`.
+
+```
+$ flottille procedure add shop --template close
+Added procedure close to project shop: it grants workspace-remove (allow). Edit it in the project's file, or with `flottille procedure edit`.
 ```
 
 ### `flottille procedure edit <project> <name>`

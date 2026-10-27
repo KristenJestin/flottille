@@ -126,7 +126,7 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
 | `bkt pr list --context C --workspace W --repo R --state all --limit 100 --json` (Cloud), `--project P` instead of `--workspace` (Data Center) | `pull_requests[]`: Cloud `id`, `title`, `state`, `source.branch.name`, `source.repository.full_name`, `destination.branch.name`, `destination.repository.full_name`, `links.html.href`; Data Center `id`, `title`, `state`, `fromRef.displayId`, `fromRef.repository.slug` and `.project.key`, `toRef` the same, `participants[]` (`user`, `role`, `status`, `approved`), `links.self[0].href` | `pkg/cmd/pr/pr.go:78-91` (flags), `:153` and `:218` (`pull_requests`); `pkg/bbcloud/pullrequests.go:14-60` (shape), `:87` (`state=all` is no filter); `pkg/bbdc/client.go:96-122` and `pkg/bbdc/pullrequests.go:17-22` (shape), `pkg/bbdc/client.go:265-267` (`state` as given, uppercased) |
 | `bkt pr checks <id> --context C … --json` | `statuses[]`: `state`, `name`, `key` | `pkg/cmd/pr/pr.go:1754-1809` (flags), `:1998` (`statuses`), `:2198` (the states); `pkg/types/commit_status.go:5-11` |
 | `bkt api <path> --context C [--param k=v]` (GET) | the server's own JSON, unchanged | `pkg/cmd/api/api.go:23-48`, `:138-140` |
-| `bkt pr create --context C … --source <branch> --target <base> --title T --description D` | `✓ Created pull request #<id>` | `pkg/cmd/pr/pr.go:597-615`, `:664`, `:696` |
+| `bkt pr create --context C … --source <branch> --target <base> --title T --description D [--reviewer N]…` | `✓ Created pull request #<id>` | `pkg/cmd/pr/pr.go:597-615`, `:664`, `:696`; `--reviewer` at `:614`, sent as `{"username": N}` on Cloud (`pkg/bbcloud/pullrequests.go:232-237`) and `{"user": {"name": N}}` on Data Center (`pkg/bbdc/pullrequests.go:75-82`) |
 | `bkt pr merge <id> --context C … --strategy squash --close-source=false` | the exit code | `pkg/cmd/pr/pr.go:1314-1334`; `pkg/bbcloud/pullrequests.go:351-388` (`squash` is a Cloud strategy); `pkg/bbdc/pullrequests.go:108-132` (`mergeStrategyId`) |
 | `bkt pipeline list --context C --workspace W --repo R --limit 50 --json` | `pipelines[]`: `build_number`, `state.result.name`, `target.ref.name` | `pkg/cmd/pipeline/pipeline.go:177-210`; `pkg/bbcloud/client.go:100-120`, `:145` (newest first: `sort=-created_on`) |
 | `bkt pipeline run --context C --workspace W --repo R --ref <branch>` | the exit code | `pkg/cmd/pipeline/pipeline.go:60-91`, `:135-175`; `pkg/bbcloud/client.go:330-357` |
@@ -183,14 +183,19 @@ The three actions of [`procedures.md`](procedures.md), under the same grants and
 workspace's; the pull request is the workspace's own branch's, from the repository itself, into
 the base the repository started from):
 
-- `pr-create`: `bkt pr create … --source <branch> --target <base>`; it prints no link, so the
-  pull request is read back by its number for the answer.
+- `pr-create`: `bkt pr create … --source <branch> --target <base>`, a `--reviewer` for each of
+  the project's reviewers; it prints no link, so the pull request is read back by its number for
+  the answer. A reviewer is the name Bitbucket knows them by (Cloud: the username; Data Center: the
+  user's slug).
 - `pr-merge-squash`: the open pull request of the branch, not from a fork (Cloud: source and
   destination repositories are the same; Data Center: the same slug and project key), into the
   base: `bkt pr merge <id> --strategy squash --close-source=false`. `--close-source=false` because
   `bkt` closes the source branch by default (`pkg/cmd/pr/pr.go:1334`) and `gh pr merge --squash`
   does not. A Data Center repository whose project does not allow squash answers with the
-  server's own refusal, which is the result.
+  server's own refusal, which is the result. Before it, as for GitHub, it is refused while a check
+  of the pull request (`bkt pr checks`) fails or runs, or while the review is `changes requested`
+  (Data Center: a reviewer's `NEEDS_WORK` in the list; Cloud: a participant's `changes_requested`
+  on the pull request's own page, read with `bkt api`), unless the user waives it.
 - `pipeline-rerun`: **Cloud only**; `bkt` has no re-run of one pipeline, only `pipeline run --ref
   <branch>`, which runs the branch again. It is done when the newest pipeline of the branch (the
   highest `build_number` whose `target.ref.name` is the branch) ended `FAILED` or `ERROR`;
@@ -219,11 +224,12 @@ agent working in a workspace has the tool.
 
 ## The agent's tool `forge_write`
 
-`forge_write {action, repository, …}` opens the pull request of the workspace's branch, merges it
-by squash, or re-runs the failed pipelines of its last commit, with the same `gh` (or `bkt`, for a
-Bitbucket repository) and the same rules (spawned by the daemon, the repository named, its output
-masked, no token to the agent). It is refused unless the agent works in a procedure's run that
-grants the action: see [`procedures.md`](procedures.md).
+`forge_write {action, repository, …}` opens the pull request of the workspace's branch (with the
+project's reviewers), merges it by squash (never while its checks fail or run or a review asks for
+changes, unless the user waives it), or re-runs the failed pipelines of its last commit, with the
+same `gh` (or `bkt`, for a Bitbucket repository) and the same rules (spawned by the daemon, the
+repository named, its output masked, no token to the agent). It is refused unless the agent works
+in a procedure's run that grants the action: see [`procedures.md`](procedures.md).
 
 ## Tickets
 

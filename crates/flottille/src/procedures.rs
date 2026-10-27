@@ -10,6 +10,7 @@ use flottille_core::approval;
 use flottille_core::procedure::{self, Grants, Procedure};
 use flottille_core::project::Project;
 use flottille_core::store::{ProcedureRun, Store, now_ms};
+use flottille_core::workspace::Workspace;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -43,13 +44,59 @@ struct Named {
 #[serde(deny_unknown_fields)]
 struct Add {
     project: String,
-    name: String,
-    description: String,
-    instructions: String,
-    #[serde(default)]
-    grants: Grants,
-    #[serde(default)]
-    children: bool,
+    /// The template's name when it is left out.
+    name: Option<String>,
+    description: Option<String>,
+    instructions: Option<String>,
+    grants: Option<Grants>,
+    children: Option<bool>,
+    /// One of Flottille's procedures, written as it is (`procedure::TEMPLATES`).
+    template: Option<String>,
+}
+
+impl Add {
+    /// The procedure it adds, with its name.
+    fn procedure(self) -> Result<(String, Procedure), Failure> {
+        let Some(template) = self.template else {
+            let (Some(name), Some(description), Some(instructions)) =
+                (self.name, self.description, self.instructions)
+            else {
+                return Err(Failure::refused(
+                    "a procedure is added with its name, its description and its instructions, \
+                     or from a template",
+                ));
+            };
+            return Ok((
+                name,
+                Procedure {
+                    description,
+                    instructions,
+                    grants: self.grants.unwrap_or_default(),
+                    children: self.children.unwrap_or_default(),
+                },
+            ));
+        };
+        if self.description.is_some()
+            || self.instructions.is_some()
+            || self.grants.is_some()
+            || self.children.is_some()
+        {
+            return Err(Failure::refused(
+                "a template is added as it is: edit the procedure once it is in the project's \
+                 file",
+            ));
+        }
+        let procedure = procedure::template(&template).ok_or_else(|| {
+            Failure::new(
+                "not-found",
+                format!(
+                    "there is no template {template}: the templates are {}",
+                    procedure::TEMPLATES.join(", ")
+                ),
+            )
+        })?;
+        Ok((self.name.unwrap_or(template), procedure))
+    }
 }
 
 #[derive(Deserialize)]
@@ -102,15 +149,10 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         }
         "procedure.add" => {
             let asked: Add = serde_json::from_value(params)?;
-            let procedure = Procedure {
-                description: asked.description,
-                instructions: asked.instructions,
-                grants: asked.grants,
-                children: asked.children,
-            };
-            procedure.check(&asked.name).map_err(Failure::refused)?;
-            let name = asked.name.clone();
-            let project = projects::rewrite(&daemon, &asked.project, |project, document| {
+            let project_name = asked.project.clone();
+            let (name, procedure) = asked.procedure()?;
+            procedure.check(&name).map_err(Failure::refused)?;
+            let project = projects::rewrite(&daemon, &project_name, |project, document| {
                 if project.procedures.contains_key(&name) {
                     return Err(Failure::refused(format!(
                         "project {} already has a procedure named {name}: edit it, or remove it \
@@ -120,7 +162,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 }
                 write(document, &project.name, &name, &procedure)
             })?;
-            Ok(to_json(&asked.name, find(&project, &asked.name)?, true))
+            Ok(to_json(&name, find(&project, &name)?, true))
         }
         "procedure.edit" => {
             let asked: Edit = serde_json::from_value(params)?;
@@ -194,10 +236,9 @@ fn runnable(daemon: &Daemon, project: &str, name: &str) -> Result<(Project, Proc
     Ok((project, procedure))
 }
 
-fn workspace_of(daemon: &Daemon, project: &Project, name: &str) -> Result<(), Failure> {
+fn workspace_of(daemon: &Daemon, project: &Project, name: &str) -> Result<Workspace, Failure> {
     daemon
         .read(|store| store.workspace(&project.name, name))?
-        .map(|_| ())
         .ok_or_else(|| {
             Failure::new(
                 "not-found",
@@ -276,9 +317,9 @@ fn start(daemon: &Arc<Daemon>, asked: Start) -> Answer {
             procedure::shown(&procedure.grants)
         )));
     }
-    workspace_of(daemon, &project, &asked.workspace)?;
+    let workspace = workspace_of(daemon, &project, &asked.workspace)?;
     let after = daemon.read(Store::last_seq)?;
-    let brief = brief(&project.name, &asked.workspace, &asked.name, &procedure);
+    let brief = brief(&project, &workspace, &asked.name, &procedure);
     let agent = agents::create(
         daemon,
         &project,
@@ -320,10 +361,15 @@ fn start(daemon: &Arc<Daemon>, asked: Start) -> Answer {
     )
 }
 
-/// The first message of a run's agent: what it runs, what it is granted, then the instructions.
-fn brief(project: &str, workspace: &str, name: &str, procedure: &Procedure) -> String {
+/// The first message of a run's agent: what it runs, what it is granted, the workspace's
+/// repositories by dependency level and what the project says of its pull requests, then the
+/// instructions.
+fn brief(project: &Project, workspace: &Workspace, name: &str, procedure: &Procedure) -> String {
     let mut text = format!(
-        "You run the procedure {name} of project {project}, in workspace {workspace}: {}\n\n",
+        "You run the procedure {name} of project {}, in workspace {} (branch {}): {}\n\n",
+        project.name,
+        workspace.name,
+        workspace.branch,
         procedure.description.trim()
     );
     if procedure.grants.is_empty() {
@@ -346,8 +392,59 @@ fn brief(project: &str, workspace: &str, name: &str, procedure: &Procedure) -> S
             "Everything else is decided as for any agent, and the grants end when you report.\n",
         );
     }
+    text.push_str(&repositories_text(project, workspace));
+    if procedure.grants.contains_key(&procedure::Grant::PrCreate) {
+        text.push_str(&pull_requests_text(project));
+    }
+    if let Some(ticket) = &workspace.ticket {
+        text.push_str(&format!(
+            "\nThe workspace is linked to the ticket {ticket} (ticket_read).\n"
+        ));
+    }
     text.push_str("\n---\n\n");
     text.push_str(procedure.instructions.trim());
+    text
+}
+
+/// The workspace's repositories by dependency level, as the project declares them
+/// (`depends_on`), each with its base and its remote.
+fn repositories_text(project: &Project, workspace: &Workspace) -> String {
+    let paths: Vec<String> = workspace
+        .repositories
+        .iter()
+        .map(|r| r.path.clone())
+        .collect();
+    let mut text = String::from(
+        "\nIts repositories, by dependency level (a level is built on the levels before it):\n",
+    );
+    for (at, level) in project.dependency_levels(&paths).iter().enumerate() {
+        let each: Vec<String> = level
+            .iter()
+            .filter_map(|path| workspace.repositories.iter().find(|r| r.path == *path))
+            .map(|r| format!("{} (base {}, on {})", r.path, r.base.branch, r.base.remote))
+            .collect();
+        text.push_str(&format!("- level {}: {}\n", at + 1, each.join(", ")));
+    }
+    text
+}
+
+/// What the project's file says of its pull requests (`[pull_requests]`).
+fn pull_requests_text(project: &Project) -> String {
+    let settings = &project.pull_requests;
+    let mut text = String::new();
+    if let Some(title) = &settings.title {
+        text.push_str(&format!(
+            "\nA pull request's title follows the project's format: {}\n",
+            title.trim()
+        ));
+    }
+    if !settings.reviewers.is_empty() {
+        text.push_str(&format!(
+            "{}Flottille asks {} to review each pull request it opens.\n",
+            if settings.title.is_some() { "" } else { "\n" },
+            settings.reviewers.join(", ")
+        ));
+    }
     text
 }
 

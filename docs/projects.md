@@ -82,11 +82,16 @@ children = false                      # the run's children get its grants; defau
 [procedures.open-prs.grants]          # from a fixed vocabulary, each "allow" or "ask"
 push = "allow"
 pr-create = "ask"
+
+[pull_requests]                       # how its pull requests are opened (docs/procedures.md)
+title = "type(TICKET): subject"       # the title's format, told to the agent that writes it
+reviewers = ["alice", "bob"]          # asked to review each pull request Flottille opens
 ```
 
 The repositories are put in dependency order (a repository after those it depends on; among those
 that are ready, the first of the file first) by `Project::in_dependency_order()`, which preparing
-a workspace and merging use.
+a workspace uses, and in dependency levels by `Project::dependency_levels()`, which a procedure's
+run is told for merging a level at a time.
 
 `provider` must be one Flottille knows (`claude`, `opencode`, `codex`) and `model` must not be empty; which
 providers are enabled is the user's, in `$XDG_CONFIG_HOME/flottille/providers.toml`, beside the

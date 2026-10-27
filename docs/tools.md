@@ -4,7 +4,8 @@ The tools of the agents Flottille runs, and the MCP server that serves them: the
 `docs/design.md` §1. It follows `docs/reference/hemera.md` §3, with the rules of
 `docs/reference/mcp.md` §4 where they differ. A session lists the tools of its agent, which
 depend on what it can do (`docs/agents.md`): the file and command tools below for every agent,
-`reference_read`, then `forge_read`, `ticket_read` and `forge_write` for an agent in a workspace,
+`reference_read`, then `forge_read`, `ticket_read`, `forge_write` and `workspace_remove` for an
+agent in a workspace,
 and the tree's tools (`agent_*`, `report`, `ask_user` or `ask_parent`,
 `approval_answer`).
 
@@ -210,10 +211,18 @@ not a lock: a swap between it and the rename is not seen.
 |---|---|
 | `forge_read {repository?}` | The pull request of the workspace's branch in each of its repositories, or the one named: number, state, base, link, review, checks with their states, comments and reviews. Read only, through the user's own `gh`, run by the daemon; an agent has no forge sign-in of its own. A repository the workspace does not take is refused (`refused: X is not a repository of this agent's workspace: it has …`). Only an agent in a workspace has it. |
 
-| `forge_write {action, repository, title?, body?, draft?}` | Opens the pull request of the workspace's branch (`pr-create`), merges it by squash (`pr-merge-squash`) or re-runs the failed jobs of its last commit's pipelines (`pipeline-rerun`), in one of the workspace's repositories, through the user's own `gh` run by the daemon. Only inside a procedure's run that grants the action (`docs/procedures.md`): refused otherwise (`refused: forge_write writes to the forge only inside a procedure that grants it…`, `refused: the procedure P does not grant pr-create: it grants …`), held for the user when the grant is `ask`. Only an agent in a workspace has it. |
+| `forge_write {action, repository, title?, body?, draft?, waive?}` | Opens the pull request of the workspace's branch (`pr-create`, with the project's reviewers), merges it by squash (`pr-merge-squash`; refused while its checks fail or run or a review asks for changes, unless `waive` gives the user's words, which holds the merge for their approval) or re-runs the failed jobs of its last commit's pipelines (`pipeline-rerun`), in one of the workspace's repositories, through the user's own `gh` run by the daemon. Only inside a procedure's run that grants the action (`docs/procedures.md`): refused otherwise (`refused: forge_write writes to the forge only inside a procedure that grants it…`, `refused: the procedure P does not grant pr-create: it grants …`), held for the user when the grant is `ask`. Only an agent in a workspace has it. |
 
 `forge_read` goes through the gate like every call, which allows it; `forge_write` is allowed,
-asked or refused by its run's grants. How the forge is read, and what it never touches (a token,
+asked or refused by its run's grants.
+
+## The workspace
+
+| Tool | |
+|---|---|
+| `workspace_remove {}` | Removes the agent's own workspace as `flottille workspace remove` does (`docs/workspaces.md`, "Removal"): refused, nothing touched, while a repository holds uncommitted work or commits on no remote, or while an agent outside the run's tree works in the workspace or a command run not the run's own runs there (`refused: workspace … is not removed, nothing was touched: the agent …, outside this run, works in it…`), each named; then deletes, in each repository, the workspace's branch when it holds no commit of its own (every commit of it is in its base's tracking ref), and keeps the others. Only inside a procedure's run that grants `workspace-remove`, and so only for the run's own workspace (`docs/procedures.md`): refused otherwise (`refused: workspace_remove removes a workspace only inside a procedure that grants it…`). Only an agent in a workspace has it. |
+
+ How the forge is read, and what it never touches (a token,
 `gh auth token`), is in [`forges.md`](forges.md).
 
 ## The tickets

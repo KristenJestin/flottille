@@ -8,7 +8,8 @@ written in the procedure, shown before it runs, confirmed by the user, and appli
 the agents of that run only. Outside a run the gate decides as it always does (`docs/tools.md`).
 
 This document is the mechanism; the procedures themselves (open the pull requests of a workspace,
-merge a stack, close a workspace) are a project's own.
+merge a stack, close a workspace) are a project's own, which it can start from Flottille's
+templates (below).
 
 ## The file
 
@@ -45,6 +46,7 @@ gate refuses to agents otherwise:
 | `pr-create` | `forge_write` `pr-create`: opens the pull request of the workspace's branch into the repository's base. |
 | `pr-merge-squash` | `forge_write` `pr-merge-squash`: merges the open pull request of the workspace's branch, by squash. |
 | `pipeline-rerun` | `forge_write` `pipeline-rerun`: re-runs the failed jobs of the pipelines of the branch's last commit. |
+| `workspace-remove` | `workspace_remove`: removes the run's own workspace, as `flottille workspace remove` does, and deletes its empty branches; refused while an agent or a command run outside the run works in it. |
 
 Each grant is `allow` (let through at once) or `ask` (held for the user every time, as the gate
 holds a call today: the agent is answered at once that the request waits, and the result comes
@@ -67,8 +69,11 @@ everything the gate refuses that no grant names (`docs/tools.md`).
 `flottille procedure run <project> <name> --workspace <workspace>` shows the procedure, its grants
 and whether its children get them, and asks for a yes on the standard input (`--yes` for scripts;
 no answer is a refusal): nothing starts before. Once confirmed, a root agent starts in the
-workspace, its first message the procedure's: what it runs, what it is granted, then its
-instructions. The run is a session like any other: it shows in the tree, the user writes to its
+workspace, its first message the procedure's: what it runs, what it is granted, the workspace's
+repositories by dependency level (each with its base and its remote, the levels read from the
+project's `depends_on`: a repository is one level after the deepest of those it depends on among
+the workspace's), what the project says of its pull requests when the run grants `pr-create`
+(below), the workspace's ticket when it is linked to one, then its instructions. The run is a session like any other: it shows in the tree, the user writes to its
 root, its requests reach the user.
 
 The grants **belong to the run**: they are frozen when the user confirms them, held by the daemon
@@ -108,16 +113,21 @@ granted push nor forge write.
 The tool through which an agent writes to its workspace's forge (`docs/forges.md`), refused unless
 its run grants the action:
 
-`forge_write {action, repository, title?, body?, draft?}`
+`forge_write {action, repository, title?, body?, draft?, waive?}`
 
 - `action`: `pr-create`, `pr-merge-squash` or `pipeline-rerun`, each the grant of its name;
 - `repository`: one of the workspace's repositories, by its path; another is refused;
 - `pr-create` needs `title`, takes `body` and `draft`: `gh pr create -R <owner/name> --head <branch>
-  --base <base> --title … --body …`, the base the one the workspace's repository started from
-  (`draft` is refused for Bitbucket, whose `bkt` opens none);
+  --base <base> --title … --body …`, the base the one the workspace's repository started from, and
+  a `--reviewer` for each of the project's reviewers (below), on Bitbucket as on GitHub (`draft` is
+  refused for Bitbucket, whose `bkt` opens none);
 - `pr-merge-squash`: the open pull request of the workspace's branch from the repository itself
   (not from a fork, which can have a branch of the same name) into its base,
-  `gh pr merge <n> -R … --squash`; none is refused;
+  `gh pr merge <n> -R … --squash`; none is refused. So is one whose checks fail or are still
+  running, or whose review asks for changes (`refused: the pull request #n of … is not merged: its
+  checks fail (build)…`), on Bitbucket as on GitHub (`docs/forges.md`), unless `waive` gives the user's words for merging it as it is: the gate
+  then holds the call for the user, whatever the grant's mode, and the merge goes without looking
+  at the checks once they allow it;
 - `pipeline-rerun`: the failed runs of the branch's last commit (`gh run list -R … --branch <branch>`),
   each `gh run rerun <id> -R … --failed`; none failed is refused.
 
@@ -131,6 +141,44 @@ from `gh`, is in [`forges.md`](forges.md#bitbucket).
 Every agent in a workspace lists it (its tool list is fixed when it starts); outside a run it
 answers `refused: forge_write writes to the forge only inside a procedure that grants it…`.
 
+## The project's pull requests
+
+What a project's pull requests look like is said once, in its file, for every procedure that
+opens them:
+
+```toml
+[pull_requests]
+title = "type(TICKET): subject"     # the title's format, in the project's words; told to the agent
+reviewers = ["alice", "bob"]        # the forge's names, asked to review each pull request opened
+```
+
+The title's format is told to the run's agent, which writes the titles; the reviewers are added by
+Flottille to every `pr-create`, so that no agent forgets one. A reviewer is one name of the forge
+(no space, no comma, not starting with `-`). Both are read as the file is when they are used.
+
+## Templates
+
+Flottille ships three procedures, written generically, which a project adopts with
+`flottille procedure add <project> --template <template> [<name>]`: written into its file as they
+are, under the template's name unless another is given, they are the project's own from then on,
+to edit like any other (its instructions are a multi-line string). They are what
+`docs/reference/multi-repo-case.md` runs by hand with slash commands. Their agents use Flottille's
+tools only (`forge_read`, `forge_write`, `workspace_remove`, the git lines the grants let through),
+never a forge's command line, so they work on every forge Flottille writes to.
+
+| Template | What its agent does | Grants |
+|---|---|---|
+| `open-prs` | Reports each repository first (uncommitted work, commits on no remote, commits ahead of its base, its pull request) to the user with `ask_user`, and stops if one holds uncommitted work; then, for each repository with commits of its own and no open pull request, pushes its branch and opens its pull request, its title in the project's format. None for the others. It makes no commit. | `push` (ask), `pr-create` (ask): one confirmation per operation, the user's approval of exactly that push or that pull request. |
+| `merge-stack` | Checks every pull request first (reviews, comments, checks) and sends the user what blocks; then merges by dependency levels, the repositories of one level together, rebasing a branch behind its base and pushing it with a lease, waiting between levels for what the project says follows a merge (its pipelines, a release), re-running a pipeline failed outside the change once. A merge the checks or a review block goes only when the user waives it. | `rebase`, `push-force-with-lease`, `pr-merge-squash`, `pipeline-rerun` (all allow: what running it authorizes; Flottille refuses a blocked merge itself). |
+| `close` | Audits each repository (uncommitted work, commits on no remote, commits of its own, its pull request): uncommitted or unpushed work, or a branch with commits whose pull request is not merged, stops it and is told to the user; otherwise `workspace_remove`, which checks again, removes the workspace and deletes its empty branches. | `workspace-remove` (allow). |
+
+A run never waits inside a tool call: when a template's agent must wait for something outside (a
+pipeline, a release), it tells the user with `ask_user` what it waits for and ends its turn, and
+goes on when it is written to. Their children get none of their grants.
+
+The order of the levels is the project's `depends_on`: a repository that must be merged after
+another (an end-to-end harness after the applications it observes) says so there.
+
 ## The command line and the protocol
 
 | Command | |
@@ -138,6 +186,7 @@ answers `refused: forge_write writes to the forge only inside a procedure that g
 | `flottille procedure list <project>` | The procedures, with their grants. |
 | `flottille procedure show <project> <name>` | One procedure: its grants, its instructions. |
 | `flottille procedure add <project> <name> --description <d> (--instructions <t> \| --instructions-file <f>) [--grant <grant>=<mode>]… [--children]` | Adds it to the project's file. |
+| `flottille procedure add <project> [<name>] --template <template>` | Adds one of Flottille's templates, as it is. |
 | `flottille procedure edit <project> <name> [--description] [--instructions \| --instructions-file] [--grant …]… [--no-grants] [--children true\|false]` | Changes what is given; the grants given replace all of them. |
 | `flottille procedure remove <project> <name>` | Removes it from the file. |
 | `flottille procedure run <project> <name> --workspace <w> [--yes]` | Shows the grants, asks, starts the run. |
@@ -154,4 +203,6 @@ The gate's rules are tested on their own (`gate::tests`), with and without a run
 run the fake agent's sessions through their MCP server, push to throwaway bare repositories and
 write to the fake `gh` (`crates/flottille-fake-gh`), which answers `pr create`, `pr merge`,
 `run list` and `run rerun`, and to the fake `bkt` (`crates/flottille-fake-bkt`), which answers
-`pr create`, `pr merge`, `pipeline list` and `pipeline run`; both record every call.
+`pr create`, `pr merge`, `pipeline list` and `pipeline run`; both record every call. Each template
+has its scenario, the fake agent's session doing what its instructions say, on throwaway
+repositories with bare remotes.

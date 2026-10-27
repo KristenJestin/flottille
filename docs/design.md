@@ -164,6 +164,8 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
 - forges (an agent in a workspace): `forge_read`, the pull requests of its workspace's
   repositories and their checks, read only (`forges.md`), and `forge_write`, which opens or merges
   them or re-runs a failed pipeline only inside a procedure that grants it (`procedures.md`);
+- the workspace (an agent in a workspace): `workspace_remove`, which removes the agent's own
+  workspace once nothing in it would be lost, only inside a procedure that grants it;
 - references: `reference_read`, one of the project's references, documents read when relevant
   (`docs/projects.md`, "References");
 - tickets (an agent in a workspace): `ticket_read`, the ticket its workspace is linked to, or
@@ -192,8 +194,8 @@ Flottille's own tools:
 The tool list of a session is fixed for its whole life (prompt cache, `reference/hemera.md` §7)
 and depends on what the agent can do, known when it starts: a root gets `ask_user`, a child
 `ask_parent`; an agent at the depth limit gets no `agent_*` tools and no `approval_answer`. A lead
-has about 18 tools, a leaf worker 12, three more each in a workspace (`forge_read`, `ticket_read`,
-`forge_write`)
+has about 18 tools, a leaf worker 12, four more each in a workspace (`forge_read`, `ticket_read`,
+`forge_write`, `workspace_remove`)
 (`reference/mcp.md` §4).
 
 ### 4.4 Roles

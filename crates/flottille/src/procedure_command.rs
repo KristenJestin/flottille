@@ -30,18 +30,23 @@ pub enum ProcedureAction {
         #[arg(long)]
         json: bool,
     },
-    /// Add a procedure to the project's configuration
+    /// Add a procedure to the project's configuration, or one of Flottille's templates
     Add {
         project: String,
-        name: String,
+        /// Its name; the template's when it is left out
+        #[arg(required_unless_present = "template")]
+        name: Option<String>,
+        /// Write one of Flottille's procedures: open-prs, merge-stack or close
+        #[arg(long, conflicts_with_all = ["description", "instructions", "instructions_file", "grants", "children"])]
+        template: Option<String>,
         /// One line: what it does
-        #[arg(long)]
-        description: String,
+        #[arg(long, required_unless_present = "template")]
+        description: Option<String>,
         /// What the agent of a run is told to do
         #[arg(
             long,
             conflicts_with = "instructions_file",
-            required_unless_present = "instructions_file"
+            required_unless_present_any = ["instructions_file", "template"]
         )]
         instructions: Option<String>,
         /// The instructions, read from this file
@@ -135,6 +140,7 @@ pub fn run(paths: &Paths, action: ProcedureAction) -> Result<ExitCode> {
         ProcedureAction::Add {
             project,
             name,
+            template,
             description,
             instructions,
             instructions_file,
@@ -142,18 +148,27 @@ pub fn run(paths: &Paths, action: ProcedureAction) -> Result<ExitCode> {
             children,
             json,
         } => {
-            let instructions = instructions_of(instructions, instructions_file)?
-                .ok_or("give the instructions, with --instructions or --instructions-file")?;
-            let added = ask(
-                "procedure.add",
-                json!({"project": project, "name": name, "description": description,
-                    "instructions": instructions, "grants": grants_of(&grants)?,
-                    "children": children}),
-            )?;
+            let mut params = json!({"project": project, "name": name});
+            if let Some(template) = template {
+                params["template"] = template.into();
+            } else {
+                let instructions = instructions_of(instructions, instructions_file)?
+                    .ok_or("give the instructions, with --instructions or --instructions-file")?;
+                params["description"] = description.into();
+                params["instructions"] = instructions.into();
+                params["grants"] = serde_json::to_value(grants_of(&grants)?)?;
+                params["children"] = children.into();
+            }
+            let added = ask("procedure.add", params)?;
             if json {
                 println!("{added}");
             } else {
-                println!("Added procedure {name} to project {project}.");
+                println!(
+                    "Added procedure {} to project {project}: it grants {}. Edit it in the \
+                     project's file, or with `flottille procedure edit`.",
+                    text(&added["name"]),
+                    grants_line(&added)
+                );
             }
         }
         ProcedureAction::Edit {
@@ -326,6 +341,21 @@ fn children_text(procedure: &Value) -> &'static str {
     }
 }
 
+/// The grants in one line: `push (allow), pr-create (ask)`, or `none`.
+fn grants_line(procedure: &Value) -> String {
+    let grants: Vec<String> = procedure["says"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|each| format!("{} ({})", text(&each["grant"]), text(&each["mode"])))
+        .collect();
+    if grants.is_empty() {
+        "none".to_owned()
+    } else {
+        grants.join(", ")
+    }
+}
+
 fn list_text(list: &Value) -> String {
     let procedures = list["procedures"].as_array().map_or(&[][..], Vec::as_slice);
     if procedures.is_empty() {
@@ -337,21 +367,11 @@ fn list_text(list: &Value) -> String {
     procedures
         .iter()
         .map(|procedure| {
-            let grants: Vec<String> = procedure["says"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|each| format!("{} ({})", text(&each["grant"]), text(&each["mode"])))
-                .collect();
-            let grants = if grants.is_empty() {
-                "none".to_owned()
-            } else {
-                grants.join(", ")
-            };
             format!(
-                "{}  {}\n    grants: {grants}\n",
+                "{}  {}\n    grants: {}\n",
                 text(&procedure["name"]),
-                text(&procedure["description"])
+                text(&procedure["description"]),
+                grants_line(procedure)
             )
         })
         .collect()

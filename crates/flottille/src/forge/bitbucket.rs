@@ -9,7 +9,7 @@
 
 use serde_json::Value;
 
-use super::{Comment, Forge, ForgeWrite, Gh, Pull, masked, run};
+use super::{Comment, Forge, ForgeWrite, Gh, Pull, blocks, masked, run};
 use crate::mcp::Outcome;
 
 /// How many pull requests one list asks for: the newest ones.
@@ -289,24 +289,9 @@ pub(super) async fn pull_of(
         return Ok(None);
     };
     let id = found.id.to_string();
-    let statuses = json(&command(
-        forge,
-        context,
-        &["pr", "checks", &id],
-        &["--json"],
-    ))
-    .await?;
-    let checks = statuses["statuses"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(check_of)
-        .collect();
+    let checks = checks_of(forge, context, &id).await?;
     let (reviewers, comments) = if cloud(forge) {
-        let Forge::Bitbucket { owner, name, .. } = forge else {
-            unreachable!()
-        };
-        let base = format!("/repositories/{owner}/{name}/pullrequests/{id}");
+        let base = cloud_page(forge, &id);
         let pull = json(&["api", &base, "--context", context]).await?;
         let comments = json(&[
             "api",
@@ -345,6 +330,29 @@ pub(super) async fn pull_of(
         reviews: Vec::new(),
         reviewers,
     }))
+}
+
+/// The checks of the pull request `id`: the commit statuses of its source commit.
+async fn checks_of(
+    forge: &Forge,
+    context: &str,
+    id: &str,
+) -> Result<Vec<(String, &'static str)>, String> {
+    let statuses = json(&command(forge, context, &["pr", "checks", id], &["--json"])).await?;
+    Ok(statuses["statuses"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(check_of)
+        .collect())
+}
+
+/// The path of a Cloud pull request's own page, for `bkt api`.
+fn cloud_page(forge: &Forge, id: &str) -> String {
+    let Forge::Bitbucket { owner, name, .. } = forge else {
+        unreachable!()
+    };
+    format!("/repositories/{owner}/{name}/pullrequests/{id}")
 }
 
 /// The reviewers' verdicts as one: `changes requested` when one asks for it, else `approved` when
@@ -440,7 +448,13 @@ fn dc_comments(page: &Value) -> Vec<Comment> {
 /// `forge_write` for a Bitbucket repository, once the gate let it through by a procedure's grant
 /// and the remote was found where the workspace was created: the same actions and the same
 /// checks as for GitHub, through `bkt`.
-pub(super) async fn write(forge: &Forge, branch: &str, base: &str, asked: ForgeWrite) -> Outcome {
+pub(super) async fn write(
+    forge: &Forge,
+    branch: &str,
+    base: &str,
+    reviewers: &[String],
+    asked: ForgeWrite,
+) -> Outcome {
     let slug = forge.slug();
     let context = match Contexts::default().of(forge).await {
         Ok(context) => context,
@@ -462,21 +476,20 @@ pub(super) async fn write(forge: &Forge, branch: &str, base: &str, asked: ForgeW
                 );
             }
             let body = asked.body.unwrap_or_default();
-            let args = command(
-                forge,
-                context,
-                &["pr", "create"],
-                &[
-                    "--source",
-                    branch,
-                    "--target",
-                    base,
-                    "--title",
-                    &title,
-                    "--description",
-                    &body,
-                ],
-            );
+            let mut flags = vec![
+                "--source",
+                branch,
+                "--target",
+                base,
+                "--title",
+                &title,
+                "--description",
+                &body,
+            ];
+            for reviewer in reviewers {
+                flags.extend(["--reviewer", reviewer.as_str()]);
+            }
+            let args = command(forge, context, &["pr", "create"], &flags);
             let said = match text(&args).await {
                 Ok(said) => said,
                 Err(why) => return Outcome::Failed(why),
@@ -511,7 +524,7 @@ pub(super) async fn write(forge: &Forge, branch: &str, base: &str, asked: ForgeW
             let on_branch: Vec<&Listed> = open.iter().filter(|p| p.branch == branch).collect();
             // The branch's name is also that of a branch in any fork of the repository.
             let ours = |pull: &&&Listed| pull.own && pull.base == base;
-            let Some(number) = on_branch.iter().find(ours).map(|pull| pull.id) else {
+            let Some(pull) = on_branch.iter().find(ours) else {
                 let why = match on_branch.first() {
                     None => format!("{branch} has no open pull request in {slug}: open it first"),
                     Some(pull) if !pull.own => format!(
@@ -530,7 +543,30 @@ pub(super) async fn write(forge: &Forge, branch: &str, base: &str, asked: ForgeW
                      its base is merged"
                 ));
             };
-            let number = number.to_string();
+            let number = pull.id.to_string();
+            if asked.waive.is_none() {
+                let checks = match checks_of(forge, context, &number).await {
+                    Ok(checks) => checks,
+                    Err(why) => return Outcome::Failed(why),
+                };
+                // Data Center says the reviewers in the list; Cloud on the pull request's page.
+                let reviewers = if cloud(forge) {
+                    let page = cloud_page(forge, &number);
+                    match json(&["api", &page, "--context", context]).await {
+                        Ok(page) => cloud_reviewers(&page),
+                        Err(why) => return Outcome::Failed(why),
+                    }
+                } else {
+                    pull.reviewers.clone()
+                };
+                if let Some(blocks) = blocks(&checks, decision(&reviewers)) {
+                    return Outcome::Refused(format!(
+                        "refused: the pull request #{number} of {branch} in {slug} is not \
+                         merged: {blocks}; wait for its checks, or have it waived by the user \
+                         (waive, with their words)"
+                    ));
+                }
+            }
             // `bkt` closes the source branch unless told not to; `gh pr merge --squash` leaves it.
             let args = command(
                 forge,
