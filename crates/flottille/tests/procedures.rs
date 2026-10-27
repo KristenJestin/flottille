@@ -92,14 +92,7 @@ fn run(user: &User, name: &str) -> (String, Mcp) {
 
 /// A root agent started in `login` outside any procedure.
 fn plain_agent(user: &User) -> Mcp {
-    let opened = user.received_requests("session/new").len();
-    user.call(
-        "agent.run",
-        json!({"project": "app", "workspace": "login", "message": "hello"}),
-    )
-    .unwrap();
-    let (url, authorization) = server_of(user, opened);
-    Mcp::initialize(&url, &authorization)
+    plain_agent_with_id(user).1
 }
 
 fn line(mcp: &Mcp, line: &str) -> Answer {
@@ -1866,4 +1859,78 @@ fn a_data_center_pull_request_a_reviewer_marked_needs_work_is_not_merged() {
     let answer = mcp.call("forge_write", merge);
     assert!(!answer.error, "{}", answer.text);
     assert_eq!(bkt_calls_starting(&user, "pr merge"), 1);
+}
+
+/// A root agent started in `login` outside any procedure: its id and MCP session.
+fn plain_agent_with_id(user: &User) -> (String, Mcp) {
+    let opened = user.received_requests("session/new").len();
+    let started = user
+        .call(
+            "agent.run",
+            json!({"project": "app", "workspace": "login", "message": "hello"}),
+        )
+        .unwrap();
+    let (url, authorization) = server_of(user, opened);
+    (
+        started["agent"]["id"].as_str().unwrap().to_owned(),
+        Mcp::initialize(&url, &authorization),
+    )
+}
+
+/// Starts `sleep 300` and answers once it is going: the command run's id.
+fn sleeping(mcp: &Mcp) -> String {
+    let answer = mcp.call("commands_run", json!({"line": "sleep 300", "timeout": 1}));
+    assert!(!answer.error, "{}", answer.text);
+    answer
+        .text
+        .strip_prefix("run ")
+        .and_then(|rest| rest.split(':').next())
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn workspace_remove_is_refused_while_an_agent_outside_the_run_or_a_command_not_the_run_s_works_in_the_workspace()
+ {
+    let user = User::with_fake_agent();
+    let workspace = stack(&user, false, "");
+    adopt(&user, "close");
+    let (outsider, outside) = plain_agent_with_id(&user);
+    let theirs = sleeping(&outside);
+    let (_, mcp) = run(&user, "close");
+    // The run's own command is no obstacle.
+    let ours = sleeping(&mcp);
+
+    let answer = mcp.call("workspace_remove", json!({}));
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains(&format!(
+            "the agent {outsider}, outside this run, works in it"
+        )),
+        "{}",
+        answer.text
+    );
+    assert!(
+        answer
+            .text
+            .contains(&format!("the command run {theirs} (sleep 300) runs in it")),
+        "{}",
+        answer.text
+    );
+    assert!(!answer.text.contains(&ours), "{}", answer.text);
+    assert!(workspace.exists());
+
+    let stopped = outside.call("commands_stop", json!({"run": theirs}));
+    assert!(!stopped.error, "{}", stopped.text);
+    let answer = mcp.call("workspace_remove", json!({}));
+    assert!(answer.error, "{}", answer.text);
+    assert!(!answer.text.contains(&theirs), "{}", answer.text);
+    assert!(workspace.exists());
+
+    user.call("agent.stop", json!({"agent": outsider})).unwrap();
+    let answer = mcp.call("workspace_remove", json!({}));
+    assert!(!answer.error, "{}", answer.text);
+    assert!(!workspace.exists());
+    let stopped = mcp.call("commands_stop", json!({"run": ours}));
+    assert!(!stopped.error, "{}", stopped.text);
 }

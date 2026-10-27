@@ -17,7 +17,7 @@ use flottille_core::glob;
 use flottille_core::project::{Project, RecipeStep, RepositorySet, StepKind, valid_name};
 use flottille_core::protocol::{WorkspaceCreate, WorkspaceList, WorkspaceName};
 use flottille_core::secrets;
-use flottille_core::store::now_ms;
+use flottille_core::store::{Store, now_ms};
 use flottille_core::ticket::Key;
 use flottille_core::variables::{self, Names};
 use flottille_core::workspace::{
@@ -33,6 +33,7 @@ use crate::git::{self, Class};
 use crate::mcp::{Outcome, arguments};
 use crate::place::Place;
 use crate::projects::{self, Failure};
+use crate::tree;
 
 type Answer = Result<Value, Failure>;
 
@@ -1188,6 +1189,34 @@ async fn remove(daemon: Arc<Daemon>, asked: WorkspaceName) -> Answer {
     removed
 }
 
+/// What works in the workspace outside the tree whose root is `ours`: its agents not ended and
+/// its command runs still running (`docs/design.md` §5.1), each as a sentence.
+fn in_use(daemon: &Daemon, workspace: &Workspace, ours: &str) -> Result<Vec<String>, Failure> {
+    let theirs = |agent: &str| tree::root_of(daemon, agent) != ours;
+    let mut used = Vec::new();
+    for agent in daemon.read(Store::agents)? {
+        if agent.project == workspace.project
+            && agent.workspace.as_deref() == Some(workspace.name.as_str())
+            && !agent.state.is_final()
+            && theirs(&agent.id)
+        {
+            used.push(format!(
+                "the agent {}, outside this run, works in it",
+                agent.id
+            ));
+        }
+    }
+    for run in daemon.read(Store::running_runs)? {
+        if run.folder.starts_with(&workspace.folder) && theirs(&run.agent) {
+            used.push(format!(
+                "the command run {} ({}) runs in it",
+                run.id, run.line
+            ));
+        }
+    }
+    Ok(used)
+}
+
 async fn remove_held(daemon: &Daemon, workspace: &Workspace) -> Answer {
     let made: Vec<&Worktree> = workspace
         .repositories
@@ -1348,7 +1377,12 @@ struct WorkspaceRemove {}
 /// `workspace_remove`, once the gate let it through by a procedure's grant: the agent's own
 /// workspace removed as `workspace.remove` removes it, then the branches of it that hold no commit
 /// of their own deleted from their repositories (`docs/procedures.md`).
-pub async fn workspace_remove(daemon: &Arc<Daemon>, place: &Place, args: Value) -> Outcome {
+pub async fn workspace_remove(
+    daemon: &Arc<Daemon>,
+    agent: &str,
+    place: &Place,
+    args: Value,
+) -> Outcome {
     if let Err(refusal) = arguments::<WorkspaceRemove>("workspace_remove", args) {
         return refusal;
     }
@@ -1367,6 +1401,19 @@ pub async fn workspace_remove(daemon: &Arc<Daemon>, place: &Place, args: Value) 
         Ok(workspace) => workspace,
         Err(failure) => return Outcome::Failed(failure.message),
     };
+    let used = match in_use(daemon, &workspace, &tree::root_of(daemon, agent)) {
+        Ok(used) => used,
+        Err(failure) => return Outcome::Failed(failure.message),
+    };
+    if !used.is_empty() {
+        return Outcome::Refused(format!(
+            "refused: workspace {} of project {} is not removed, nothing was touched: {}; they \
+             end first",
+            workspace.name,
+            workspace.project,
+            used.join("; ")
+        ));
+    }
     if let Err(failure) = remove(daemon.clone(), asked).await {
         return match failure.code {
             "refused" => Outcome::Refused(format!("refused: {}", failure.message)),

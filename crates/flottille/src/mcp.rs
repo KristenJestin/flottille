@@ -1265,7 +1265,9 @@ async fn perform(
         "forge_read" => crate::forge::forge_read(daemon, &grant.place, args).await,
         "ticket_read" => crate::tickets::ticket_read(daemon, &grant.place, args).await,
         "forge_write" => crate::forge::forge_write(daemon, &grant.place, args).await,
-        "workspace_remove" => crate::workspaces::workspace_remove(daemon, &grant.place, args).await,
+        "workspace_remove" => {
+            crate::workspaces::workspace_remove(daemon, &grant.agent, &grant.place, args).await
+        }
         tool if tree::TOOLS.contains(&tool) => tree::call(daemon, grant, tool, args).await,
         _ => {
             // The file tools read and write the disk: off the daemon's thread.
