@@ -659,7 +659,9 @@ impl Bridge {
                 ("user_message_chunk", text)
             } else if let Some(text) = entry["agent"].as_str() {
                 ("agent_message_chunk", text)
-            } else if let Some(text) = entry["thought"].as_str() {
+            } else if let Some(text) = entry["thought"].as_str()
+                && !text.is_empty()
+            {
                 ("agent_thought_chunk", text)
             } else {
                 continue;
@@ -755,6 +757,11 @@ impl Bridge {
                 _ => continue,
             };
             let text = text.as_str().unwrap_or_default();
+            // A thought whose display Claude omitted has its signature and no text: nothing to
+            // show or keep.
+            if kind == "agent_thought_chunk" && text.is_empty() {
+                continue;
+            }
             // The history keeps the whole message, one line, never its stream's pieces.
             if let Some(claude) = &self.claude {
                 remember(&claude.history, key, text, &self.env);
@@ -1028,6 +1035,9 @@ fn arguments(options: &Options, config: &Path, new: bool, session: &str) -> Vec<
         "--input-format",
         "stream-json",
         "--include-partial-messages",
+        // Without it, Claude Code in this mode leaves the API's default, which omits the text of
+        // the thoughts of recent models: each would come as a signature with no text.
+        "--thinking-display=summarized",
         "--permission-prompt-tool=stdio",
         "--tools=",
         "--setting-sources=",
