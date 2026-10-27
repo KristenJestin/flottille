@@ -74,3 +74,28 @@ fn an_issue_is_answered_from_the_script_and_one_it_does_not_hold_is_not_found() 
     );
     assert_eq!(missing.code(), Some(1));
 }
+
+#[test]
+fn the_host_comes_from_r_first_then_from_gh_host_as_the_real_gh_takes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        json!({"issues": {
+            "acme/api": {"12": {"number": 12, "title": "On GitHub"}},
+            "ghe.example.com/acme/api": {"12": {"number": 12, "title": "Elsewhere"}}
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let title = |repository: &str| {
+        let output = fake(dir.path())
+            .env("GH_HOST", "ghe.example.com")
+            .args(["issue", "view", "12", "-R", repository, "--json", "title"])
+            .output()
+            .unwrap();
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["title"].clone()
+    };
+
+    assert_eq!(title("acme/api"), "Elsewhere");
+    assert_eq!(title("github.com/acme/api"), "On GitHub");
+}

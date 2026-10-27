@@ -707,3 +707,71 @@ fn a_forge_its_remote_does_not_lead_to_is_never_saved() {
         before
     );
 }
+
+#[test]
+fn a_saved_forge_is_written_as_checked_not_as_typed() {
+    let user = User::new();
+    settings_fixture(&user);
+    user.git(
+        &user.path("work/app/lib"),
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "ssh://git@bitbucket.example.com:7999/PROJ/lib.git",
+        ],
+    );
+
+    user.call(
+        "project.set_settings",
+        json!({"name": "app", "repositories": [{"path": "lib", "forge": {
+            "kind": "bitbucket-data-center", "host": " Bitbucket.Example.COM ", "repository": "PROJ/lib"
+        }}]}),
+    )
+    .unwrap();
+
+    let text = std::fs::read_to_string(user.project_file("app")).unwrap();
+    assert!(
+        text.contains(
+            "forge = { kind = \"bitbucket-data-center\", host = \"bitbucket.example.com\", \
+             repository = \"PROJ/lib\" }"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_forge_is_checked_against_the_real_remote_and_shown_against_the_masked_one() {
+    let user = User::new().with_env("APP_SECRET", "apisecret1");
+    settings_fixture(&user);
+    user.git(
+        &user.path("work/app/api"),
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@github.com:acme/apisecret1.git",
+        ],
+    );
+
+    let settings = user
+        .call("project.settings", json!({"name": "app"}))
+        .unwrap();
+    let saved = user.call(
+        "project.set_settings",
+        json!({"name": "app", "repositories": [
+            {"path": "api", "forge": {"kind": "github", "repository": "acme/apisecret1"}}
+        ]}),
+    );
+
+    assert_eq!(
+        settings_repository(&settings, "api")["url"],
+        "git@github.com:acme/[masked].git"
+    );
+    let saved = saved.unwrap();
+    assert_eq!(
+        settings_repository(&saved, "api")["disagrees"],
+        Value::Null,
+        "{saved}"
+    );
+}

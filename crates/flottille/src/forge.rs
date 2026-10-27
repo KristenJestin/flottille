@@ -15,7 +15,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use flottille_core::declared::RepositoryForge;
+use flottille_core::declared::{self, RepositoryForge};
 use flottille_core::project::Project;
 use flottille_core::protocol::WorkspaceForge;
 use flottille_core::secrets;
@@ -38,6 +38,8 @@ pub const EVERY_MS: u64 = 60_000;
 const LONGEST_MS: u64 = 16 * 60_000;
 /// A call of `gh` is cut after this.
 const GH_TIME: Duration = Duration::from_secs(30);
+/// A call of `ssh -G` is cut after this.
+const SSH_TIME: Duration = Duration::from_secs(5);
 /// What `forge_read` shows of one comment at most.
 const COMMENT_CHARS: usize = 2000;
 /// What `gh pr view` is asked for.
@@ -76,6 +78,12 @@ impl Forge {
                 format!("{owner}/{name}")
             }
         }
+    }
+
+    /// What `gh -R` is given: the host first, so that `GH_HOST` in the user's environment never
+    /// sends the call to another host than the one the declaration was checked against.
+    pub fn gh_repository(&self) -> String {
+        format!("{}/{}", declared::GITHUB, self.slug())
     }
 }
 
@@ -116,27 +124,82 @@ pub async fn declared_forge(checkout: &Checkout) -> Result<Forge, Option<String>
     let Some(declared) = &checkout.declared else {
         return Err(None);
     };
-    let remote = &checkout.remote;
-    let url = git::output(
-        &checkout.folder,
-        &["remote", "get-url", remote],
-        Class::Read,
-    )
-    .await;
-    let agrees = match url {
-        Err(_) => Err(format!("it has no remote {remote}")),
-        Ok(url) => declared
-            .agrees(&url)
-            .map_err(|why| format!("its remote {remote}: {why}")),
-    };
-    match agrees {
-        Ok(()) => Ok(Forge::from(declared)),
-        Err(why) => Err(Some(format!(
+    match disagreement(declared, &checkout.folder, &checkout.remote).await {
+        None => Ok(Forge::from(declared)),
+        Some(why) => Err(Some(format!(
             "refused: {} is declared on {}, and {why}; nothing was asked of the forge: correct the \
              repository's remote or its forge in the project's settings",
             checkout.path,
             declared.said()
         ))),
+    }
+}
+
+/// Why the remote `remote` of the repository in `folder` does not lead to `declared`, masked;
+/// none when every one of its fetch and push URLs does, since git fetches from one and pushes to
+/// another while the forge is asked of the declared repository.
+pub async fn disagreement(
+    declared: &RepositoryForge,
+    folder: &Path,
+    remote: &str,
+) -> Option<String> {
+    let urls = urls_of(folder, remote).await;
+    if urls.is_empty() {
+        return Some(format!("it has no remote {remote}"));
+    }
+    for url in &urls {
+        let agrees = match declared::address(url) {
+            Some((host, path)) if host != declared.host() && declared::over_ssh(url) => {
+                match ssh_host(&host).await {
+                    Ok(real) if real == host => declared.agrees_at(&host, &path),
+                    Ok(real) => declared
+                        .agrees_at(&real, &path)
+                        .map_err(|why| format!("{why} ({host} is an SSH alias of {real})")),
+                    Err(not) => declared
+                        .agrees_at(&host, &path)
+                        .map_err(|why| format!("{why} ({not})")),
+                }
+            }
+            _ => declared.agrees(url),
+        };
+        if let Err(why) = agrees {
+            return Some(masked(&format!("its remote {remote}: {why}")));
+        }
+    }
+    None
+}
+
+/// The host `ssh` connects to for `host`, an alias of the user's SSH configuration or not: the
+/// `hostname` line of `ssh -G <host>`, and nothing else of what it prints.
+async fn ssh_host(host: &str) -> Result<String, String> {
+    let not = |why: String| format!("ssh -G {host} did not say its host: {why}");
+    // A name that could pass for an option is never given to `ssh`.
+    if host.starts_with('-')
+        || !host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || ".-_".contains(c))
+    {
+        return Err(not("it is not a host name".into()));
+    }
+    match run_for("ssh", SSH_TIME, &[], &[], &["-G", host]).await {
+        Ok((true, stdout, _)) => stdout
+            .lines()
+            .find_map(|line| {
+                let (key, value) = line.trim().split_once(char::is_whitespace)?;
+                key.eq_ignore_ascii_case("hostname")
+                    .then(|| value.trim().to_ascii_lowercase())
+            })
+            .filter(|real| !real.is_empty())
+            .ok_or_else(|| not("no hostname line".into())),
+        Ok((false, _, stderr)) => Err(not(stderr
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("it failed")
+            .chars()
+            .take(200)
+            .collect())),
+        Err(Gh::Missing) => Err(not("ssh is not on the daemon's PATH".into())),
+        Err(Gh::Failed(why)) => Err(not(why)),
     }
 }
 
@@ -162,17 +225,7 @@ pub async fn urls_of(folder: &Path, remote: &str) -> Vec<String> {
     urls
 }
 
-/// The URL without what may come before its host: a user, a password or a token.
-pub(crate) fn without_credentials(url: &str) -> String {
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return url.to_owned();
-    };
-    let authority = rest.split('/').next().unwrap_or(rest);
-    match authority.rsplit_once('@') {
-        Some((_, host)) => format!("{scheme}://{host}{}", &rest[authority.len()..]),
-        None => url.to_owned(),
-    }
-}
+pub(crate) use flottille_core::declared::without_credentials;
 
 /// Refuses unless the repository's remote leads where it led when the workspace was created: an
 /// agent never changes it, and a push or a forge write that a procedure grants goes nowhere else.
@@ -192,11 +245,11 @@ pub async fn remote_kept(folder: &Path, base: &Base) -> Result<(), String> {
              ({}): it leads to {}; nothing was sent: say so, and the user checks the \
              repository's remotes",
             base.remote,
-            base.urls.join(", "),
+            masked(&base.urls.join(", ")),
             if now.is_empty() {
                 "nothing".to_owned()
             } else {
-                now.join(", ")
+                masked(&now.join(", "))
             }
         ));
     }
@@ -467,9 +520,9 @@ pub(crate) async fn signed_in() -> Result<(), String> {
 
 /// The pull request of `branch`, the newest when there are several; none when there is none.
 async fn pull_of(forge: &Forge, branch: &str) -> Result<Option<Pull>, String> {
-    let slug = forge.slug();
+    let repo = forge.gh_repository();
     let listed = gh_json(&[
-        "pr", "list", "-R", &slug, "--head", branch, "--state", "all", "--limit", "1", "--json",
+        "pr", "list", "-R", &repo, "--head", branch, "--state", "all", "--limit", "1", "--json",
         "number",
     ])
     .await?;
@@ -477,7 +530,7 @@ async fn pull_of(forge: &Forge, branch: &str) -> Result<Option<Pull>, String> {
         return Ok(None);
     };
     let number = number.to_string();
-    let viewed = gh_json(&["pr", "view", &number, "-R", &slug, "--json", FIELDS]).await?;
+    let viewed = gh_json(&["pr", "view", &number, "-R", &repo, "--json", FIELDS]).await?;
     Pull::of(&viewed)
         .map(Some)
         .ok_or_else(|| format!("gh pr view {number} answered no pull request"))
@@ -513,6 +566,17 @@ async fn run(
     remove: &[&str],
     args: &[&str],
 ) -> Result<(bool, String, String), Gh> {
+    run_for(program, GH_TIME, set, remove, args).await
+}
+
+/// `run`, cut after `time`.
+async fn run_for(
+    program: &str,
+    time: Duration,
+    set: &[(&str, &str)],
+    remove: &[&str],
+    args: &[&str],
+) -> Result<(bool, String, String), Gh> {
     let mut command = tokio::process::Command::new(program);
     command.args(args).envs(set.iter().copied());
     for name in remove {
@@ -528,7 +592,7 @@ async fn run(
         std::io::ErrorKind::NotFound => Gh::Missing,
         _ => Gh::Failed(error.to_string()),
     })?;
-    match tokio::time::timeout(GH_TIME, child.wait_with_output()).await {
+    match tokio::time::timeout(time, child.wait_with_output()).await {
         Ok(Ok(output)) => Ok((
             output.status.success(),
             String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -538,7 +602,7 @@ async fn run(
         Err(_) => Err(Gh::Failed(format!(
             "{program} {} took more than {} s",
             args[..2].join(" "),
-            GH_TIME.as_secs()
+            time.as_secs()
         ))),
     }
 }
@@ -913,6 +977,7 @@ pub async fn forge_write(daemon: &Daemon, place: &Place, args: Value) -> Outcome
         return Outcome::Failed(problem);
     }
     let slug = forge.slug();
+    let repo = forge.gh_repository();
     match asked.action.as_str() {
         "pr-create" => {
             let Some(title) = asked.title.filter(|t| !t.trim().is_empty()) else {
@@ -923,7 +988,7 @@ pub async fn forge_write(daemon: &Daemon, place: &Place, args: Value) -> Outcome
             let base = &repository.base.branch;
             let body = asked.body.unwrap_or_default();
             let mut args = vec![
-                "pr", "create", "-R", &slug, "--head", branch, "--base", base, "--title", &title,
+                "pr", "create", "-R", &repo, "--head", branch, "--base", base, "--title", &title,
                 "--body", &body,
             ];
             if asked.draft {
@@ -946,7 +1011,7 @@ pub async fn forge_write(daemon: &Daemon, place: &Place, args: Value) -> Outcome
                 "pr",
                 "list",
                 "-R",
-                &slug,
+                &repo,
                 "--head",
                 branch,
                 "--state",
@@ -986,7 +1051,7 @@ pub async fn forge_write(daemon: &Daemon, place: &Place, args: Value) -> Outcome
             let number = number.to_string();
             if asked.waive.is_none() {
                 let viewed =
-                    match gh_json(&["pr", "view", &number, "-R", &slug, "--json", FIELDS]).await {
+                    match gh_json(&["pr", "view", &number, "-R", &repo, "--json", FIELDS]).await {
                         Ok(viewed) => viewed,
                         Err(why) => return Outcome::Failed(why),
                     };
@@ -998,7 +1063,7 @@ pub async fn forge_write(daemon: &Daemon, place: &Place, args: Value) -> Outcome
                     ));
                 }
             }
-            match gh_text(&["pr", "merge", &number, "-R", &slug, "--squash"]).await {
+            match gh_text(&["pr", "merge", &number, "-R", &repo, "--squash"]).await {
                 Ok(_) => Outcome::Done(format!(
                     "The pull request #{number} of {branch} was merged by squash into {base} in \
                      {slug}."
@@ -1011,7 +1076,7 @@ pub async fn forge_write(daemon: &Daemon, place: &Place, args: Value) -> Outcome
                 "run",
                 "list",
                 "-R",
-                &slug,
+                &repo,
                 "--branch",
                 branch,
                 "--limit",
@@ -1040,7 +1105,7 @@ pub async fn forge_write(daemon: &Daemon, place: &Place, args: Value) -> Outcome
             let mut done = Vec::new();
             for run in failed {
                 let id = run["databaseId"].as_u64().unwrap_or(0).to_string();
-                if let Err(why) = gh_text(&["run", "rerun", &id, "-R", &slug, "--failed"]).await {
+                if let Err(why) = gh_text(&["run", "rerun", &id, "-R", &repo, "--failed"]).await {
                     return Outcome::Failed(why);
                 }
                 done.push(format!(

@@ -331,21 +331,38 @@ pub async fn show(daemon: Arc<Daemon>, params: Value) -> std::result::Result<Val
     Ok(project)
 }
 
-/// The address a repository's remote leads to, credentials taken out and masked; none when it
-/// has no such remote.
-async fn remote_url(project: &Project, path: &str, remote: &str) -> Option<String> {
+/// The folder of a repository of the project; none when it is not its own repository: git would
+/// answer for the one around it.
+fn checkout_of(project: &Project, path: &str) -> Option<PathBuf> {
     let folder = match path {
         "." => project.folder.clone(),
         path => project.folder.join(path),
     };
-    // A folder that is not its own repository: git would answer for the one around it.
-    if !folder.join(".git").exists() {
-        return None;
-    }
+    folder.join(".git").exists().then_some(folder)
+}
+
+/// The address a repository's remote leads to, credentials taken out and masked; none when it
+/// has no such remote. It is shown, never checked: the check reads the remote itself.
+async fn remote_url(project: &Project, path: &str, remote: &str) -> Option<String> {
+    let folder = checkout_of(project, path)?;
     git::output(&folder, &["remote", "get-url", remote], Class::Read)
         .await
         .ok()
         .map(|url| crate::forge::masked(&crate::forge::without_credentials(url.trim())))
+}
+
+/// Why `forge` is not where the repository's remote leads (`forge::disagreement`), masked; none
+/// when it is.
+async fn disagreement(
+    project: &Project,
+    path: &str,
+    remote: &str,
+    forge: &RepositoryForge,
+) -> Option<String> {
+    match checkout_of(project, path) {
+        None => Some(format!("it has no remote {remote}")),
+        Some(folder) => crate::forge::disagreement(forge, &folder, remote).await,
+    }
 }
 
 /// What the project's settings show (`project.settings`): for each repository its remote's
@@ -356,10 +373,9 @@ async fn settings_of(project: &Project) -> Value {
     for repository in &project.repositories {
         let url = remote_url(project, &repository.path, &repository.remote).await;
         let proposal = url.as_deref().and_then(RepositoryForge::proposed);
-        let disagrees = match (&repository.forge, &url) {
-            (Some(forge), Some(url)) => forge.agrees(url).err(),
-            (Some(_), None) => Some(format!("it has no remote {}", repository.remote)),
-            (None, _) => None,
+        let disagrees = match &repository.forge {
+            Some(forge) => disagreement(project, &repository.path, &repository.remote, forge).await,
+            None => None,
         };
         repositories.push(json!({
             "path": repository.path,
@@ -394,6 +410,8 @@ pub async fn set_settings(
 ) -> std::result::Result<Value, Failure> {
     let asked: ProjectSettings = serde_json::from_value(params)?;
     let project = load_project(&daemon, &asked.name)?;
+    // Each forge as checked (its host in lowercase), which is what the file gets.
+    let mut checked_forges = BTreeMap::new();
     for setting in &asked.repositories {
         let Some(repository) = project.repositories.iter().find(|r| r.path == setting.path) else {
             return Err(Failure::refused(format!(
@@ -408,19 +426,15 @@ pub async fn set_settings(
         checked
             .check()
             .map_err(|error| Failure::refused(format!("the forge of {}{error}", setting.path)))?;
-        let url = remote_url(&project, &setting.path, &repository.remote).await;
-        let agrees = match &url {
-            None => Err(format!("it has no remote {}", repository.remote)),
-            Some(url) => checked.agrees(url),
-        };
-        if let Err(why) = agrees {
+        if let Some(why) = disagreement(&project, &setting.path, &repository.remote, &checked).await
+        {
             return Err(Failure::refused(format!(
-                "{} cannot be declared on {}: its remote {}: {why}; nothing was saved",
+                "{} cannot be declared on {}: {why}; nothing was saved",
                 setting.path,
                 checked.said(),
-                repository.remote
             )));
         }
+        checked_forges.insert(setting.path.clone(), checked);
     }
     let saved = rewrite(&daemon, &asked.name, |_, document| {
         let not_an_array = || {
@@ -441,7 +455,7 @@ pub async fn set_settings(
                 if entry.get("path").and_then(|p| p.as_str()) != Some(setting.path.as_str()) {
                     continue;
                 }
-                match &setting.forge {
+                match checked_forges.get(&setting.path) {
                     None => {
                         entry.remove("forge");
                     }

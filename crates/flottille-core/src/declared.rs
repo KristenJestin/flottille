@@ -111,16 +111,21 @@ impl RepositoryForge {
         let Some((host, path)) = address(url) else {
             return Err(format!(
                 "it leads to {}, which is not on a forge",
-                url.trim()
+                without_credentials(url.trim())
             ));
         };
+        self.agrees_at(&host, &path)
+    }
+
+    /// `agrees`, for an address already read as its host and path (`address`).
+    pub fn agrees_at(&self, host: &str, path: &str) -> Result<(), String> {
         let found = if host != self.host() {
             None
         } else {
             match self {
-                RepositoryForge::Github { .. } => two_names(&path),
-                RepositoryForge::BitbucketCloud { .. } => bitbucket_names(true, &path),
-                RepositoryForge::BitbucketDataCenter { .. } => bitbucket_names(false, &path),
+                RepositoryForge::Github { .. } => two_names(path),
+                RepositoryForge::BitbucketCloud { .. } => bitbucket_names(true, path),
+                RepositoryForge::BitbucketDataCenter { .. } => bitbucket_names(false, path),
             }
         };
         let (owner, name) = self.owner_and_name();
@@ -316,6 +321,28 @@ pub fn address(url: &str) -> Option<(String, String)> {
     Some((host, path.to_owned()))
 }
 
+/// Whether git reaches the address over SSH, whose host may be an alias of the SSH configuration:
+/// `ssh://`, `git+ssh://`, `ssh+git://`, or the `host:path` form.
+pub fn over_ssh(url: &str) -> bool {
+    let url = url.trim();
+    match url.split_once("://") {
+        Some((scheme, _)) => ["ssh", "git+ssh", "ssh+git"].contains(&scheme),
+        None => address(url).is_some(),
+    }
+}
+
+/// The URL without what may come before its host: a user, a password or a token.
+pub fn without_credentials(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_owned();
+    };
+    let authority = rest.split('/').next().unwrap_or(rest);
+    match authority.rsplit_once('@') {
+        Some((_, host)) => format!("{scheme}://{host}{}", &rest[authority.len()..]),
+        None => url.to_owned(),
+    }
+}
+
 /// `owner/name`, exactly two names.
 fn two_names(path: &str) -> Option<(String, String)> {
     match path.split('/').collect::<Vec<_>>()[..] {
@@ -454,6 +481,28 @@ mod tests {
             github("acme/api").agrees("/srv/git/api.git"),
             Err("it leads to /srv/git/api.git, which is not on a forge".into())
         );
+        assert_eq!(
+            github("acme/api").agrees("https://alice:secret@/acme/api.git"),
+            Err("it leads to https:///acme/api.git, which is not on a forge".into())
+        );
+    }
+
+    #[test]
+    fn an_address_over_ssh_is_told_from_the_others() {
+        for url in [
+            "git@gh-work:acme/api.git",
+            "ssh://git@gh-work/acme/api.git",
+            "git+ssh://gh-work/acme/api.git",
+        ] {
+            assert!(over_ssh(url), "{url}");
+        }
+        for url in [
+            "https://github.com/acme/api.git",
+            "/srv/git/api.git",
+            "file:///srv/git/api.git",
+        ] {
+            assert!(!over_ssh(url), "{url}");
+        }
     }
 
     #[test]

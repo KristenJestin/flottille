@@ -296,14 +296,15 @@ fn a_branch_with_a_pull_request_shows_it_with_its_checks_and_one_without_says_no
     let calls = gh_calls(&user);
     assert!(
         calls.contains(
-            &"pr list -R acme/api --head app/login --state all --limit 1 --json number".to_owned()
+            &"pr list -R github.com/acme/api --head app/login --state all --limit 1 --json number"
+                .to_owned()
         ),
         "{calls:?}"
     );
     assert!(
         calls
             .iter()
-            .any(|call| call.starts_with("pr view 12 -R acme/api --json ")),
+            .any(|call| call.starts_with("pr view 12 -R github.com/acme/api --json ")),
         "{calls:?}"
     );
 }
@@ -1136,4 +1137,218 @@ fn no_token_reaches_an_agent_and_the_daemon_never_asks_bkt_for_one() {
         assert!(!call.starts_with("auth"), "{call}");
         assert!(!call.contains("token"), "{call}");
     }
+}
+
+#[test]
+fn gh_host_in_the_daemon_s_environment_never_moves_a_github_call() {
+    let user = User::new()
+        .with_fake_gh()
+        .with_env("GH_HOST", "ghe.example.com");
+    fixture(&user);
+    user.gh_script(json!({"pulls": {
+        "acme/api": {"app/login": pull(12, "Add the login page")},
+        "ghe.example.com/acme/api": {"app/login": pull(99, "Elsewhere")}
+    }}));
+
+    let forge = forge(&user);
+
+    let api = repository(&forge, "api");
+    assert_eq!(api["pull_request"]["number"], 12, "{api}");
+    assert_eq!(api["repository"], "acme/api");
+    let calls = gh_calls(&user);
+    assert!(
+        calls.iter().any(|call| call.starts_with("pr ")),
+        "{calls:?}"
+    );
+    for call in calls.iter().filter(|call| !call.starts_with("auth status")) {
+        assert!(call.contains(" -R github.com/acme/"), "{call}");
+    }
+}
+
+#[test]
+fn a_push_url_or_a_second_url_elsewhere_is_refused_with_its_reason() {
+    let user = User::new().with_fake_gh();
+    let folder = fixture(&user);
+    one_pull_request(&user, pull(12, "Add the login page"));
+    user.git(
+        &folder.join("api"),
+        &[
+            "config",
+            "remote.origin.pushurl",
+            "git@github.com:someone/api.git",
+        ],
+    );
+    user.git(
+        &folder.join("web"),
+        &[
+            "remote",
+            "set-url",
+            "--add",
+            "origin",
+            "https://github.com/other/web.git",
+        ],
+    );
+
+    let forge = forge(&user);
+
+    for (path, error) in [
+        (
+            "api",
+            "refused: api is declared on GitHub acme/api, and its remote origin: it leads to \
+             github.com/someone/api, not to GitHub acme/api; nothing was asked of the forge",
+        ),
+        (
+            "web",
+            "refused: web is declared on GitHub acme/web, and its remote origin: it leads to \
+             github.com/other/web, not to GitHub acme/web; nothing was asked of the forge",
+        ),
+    ] {
+        let found = repository(&forge, path);
+        assert_eq!(found["forge"], Value::Null, "{found}");
+        let said = found["error"].as_str().unwrap_or_default();
+        assert!(said.starts_with(error), "{said}");
+    }
+    assert!(
+        !gh_calls(&user).iter().any(|call| call.starts_with("pr ")),
+        "{:?}",
+        gh_calls(&user)
+    );
+}
+
+#[test]
+fn a_refusal_never_shows_a_remote_url_unmasked() {
+    let user = User::new()
+        .with_fake_gh()
+        .with_env("ACME_TOKEN", "leakedvalue123");
+    let folder = fixture(&user);
+    // No host: the address is not on a forge, and is said without its credentials.
+    user.git(
+        &folder.join("api"),
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://alice:hunter2secret@/acme/api.git",
+        ],
+    );
+    // A host, and a secret of the daemon's environment in its path.
+    user.git(
+        &folder.join("web"),
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://bob:pa55word99@github.com/leakedvalue123/web.git",
+        ],
+    );
+    let secrets = [
+        "alice",
+        "hunter2secret",
+        "bob",
+        "pa55word99",
+        "leakedvalue123",
+    ];
+    let clean = |text: &str| {
+        for secret in secrets {
+            assert!(!text.contains(secret), "{secret} in {text}");
+        }
+    };
+
+    let forge = forge(&user);
+    let settings = user
+        .call("project.settings", json!({"name": "app"}))
+        .unwrap();
+    let (code, saving) = user
+        .call(
+            "project.set_settings",
+            json!({"name": "app", "repositories": [
+                {"path": "api", "forge": {"kind": "github", "repository": "acme/api"}}
+            ]}),
+        )
+        .unwrap_err();
+
+    for path in ["api", "web"] {
+        let error = repository(&forge, path)["error"].as_str().unwrap();
+        assert!(
+            error.starts_with(&format!("refused: {path} is declared")),
+            "{error}"
+        );
+        clean(error);
+    }
+    let api = repository(&forge, "api")["error"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        api.contains("it leads to https:///acme/api.git, which is not on a forge"),
+        "{api}"
+    );
+    clean(&settings.to_string());
+    assert!(
+        settings.to_string().contains("which is not on a forge"),
+        "{settings}"
+    );
+    assert_eq!(code, "refused");
+    assert!(saving.starts_with("api cannot be declared"), "{saving}");
+    clean(&saving);
+}
+
+#[test]
+fn an_ssh_alias_is_resolved_by_ssh_and_its_real_host_checked() {
+    let user = User::new()
+        .with_fake_gh()
+        .with_fake_ssh(&[("gh-work", "github.com"), ("gh-other", "gitlab.com")]);
+    let folder = fixture(&user);
+    one_pull_request(&user, pull(12, "Add the login page"));
+    user.git(
+        &folder.join("api"),
+        &["remote", "set-url", "origin", "git@gh-work:acme/api.git"],
+    );
+    user.git(
+        &folder.join("web"),
+        &["remote", "set-url", "origin", "git@gh-other:acme/web.git"],
+    );
+    user.git(
+        &folder.join("lib"),
+        &["remote", "set-url", "origin", "git@gh-unknown:acme/lib.git"],
+    );
+    let declare = |path: &str, repository: &str| {
+        user.call(
+            "project.set_settings",
+            json!({"name": "app", "repositories": [
+                {"path": path, "forge": {"kind": "github", "repository": repository}}
+            ]}),
+        )
+    };
+
+    let saved = declare("api", "acme/api");
+    let (_, other) = declare("web", "acme/web").unwrap_err();
+    let (_, unknown) = declare("lib", "acme/lib").unwrap_err();
+    let forge = forge(&user);
+
+    saved.unwrap();
+    assert_eq!(
+        other,
+        "web cannot be declared on GitHub acme/web: its remote origin: it leads to \
+         gitlab.com/acme/web, not to GitHub acme/web (gh-other is an SSH alias of gitlab.com); \
+         nothing was saved"
+    );
+    assert!(
+        unknown.starts_with(
+            "lib cannot be declared on GitHub acme/lib: its remote origin: it leads to \
+             gh-unknown/acme/lib, not to GitHub acme/lib (ssh -G gh-unknown did not say its \
+             host: "
+        ),
+        "{unknown}"
+    );
+    let api = repository(&forge, "api");
+    assert_eq!(api["error"], Value::Null, "{api}");
+    assert_eq!(api["pull_request"]["number"], 12, "{api}");
+    // Of `ssh`, only `-G` is asked, and only for a host that is not the declared one.
+    let calls = user.ssh_calls();
+    assert!(calls.contains(&"-G gh-work".to_owned()), "{calls:?}");
+    assert!(
+        calls.iter().all(|call| call.starts_with("-G gh-")),
+        "{calls:?}"
+    );
 }

@@ -572,7 +572,7 @@ fn forge_write_creates_a_pull_request_with_the_fake_gh_only_when_granted() {
     let created = calls.iter().find(|c| c.starts_with("pr create")).unwrap();
     assert_eq!(
         created,
-        "pr create -R acme/app --head app/login --base main --title Add the login page --body \
+        "pr create -R github.com/acme/app --head app/login --base main --title Add the login page --body \
          What it does"
     );
     assert_eq!(creates(&user), 1);
@@ -841,7 +841,7 @@ fn pr_merge_squash_merges_only_the_workspace_s_own_pull_request_into_its_base() 
     let answer = mcp.call("forge_write", merge);
     assert!(!answer.error, "{}", answer.text);
     assert!(
-        gh_calls(&user).contains(&"pr merge 12 -R acme/app --squash".to_owned()),
+        gh_calls(&user).contains(&"pr merge 12 -R github.com/acme/app --squash".to_owned()),
         "{:?}",
         gh_calls(&user)
     );
@@ -894,7 +894,8 @@ fn an_agent_s_commands_run_of_flottille_procedure_start_starts_no_run() {
 /// A project `app` whose folder holds the repositories `lib`, `api` and `web`, `api` and `web`
 /// built on `lib`, each pushed to its bare remote `remotes/<name>.git`, with `more` at the end of
 /// its file; its ready workspace `login`, on `app/login`. On GitHub's `acme/<name>` when `github`
-/// (the bare remote still taking the pushes, as the push URL), the workspace then made offline.
+/// (the bare remote still taking the pushes, through the user's fake `ssh`), the workspace then
+/// made offline.
 /// The workspace's folder.
 fn stack(user: &User, github: bool, more: &str) -> PathBuf {
     let folder = user.path("work/app");
@@ -911,10 +912,6 @@ fn stack(user: &User, github: bool, more: &str) -> PathBuf {
         if github {
             let url = format!("git@github.com:acme/{name}.git");
             user.git(&repository, &["remote", "set-url", "origin", &url]);
-            user.git(
-                &repository,
-                &["remote", "set-url", "--push", "origin", remote],
-            );
         }
     }
     // On GitHub, each repository's forge is declared, as the user does in the settings.
@@ -1111,7 +1108,7 @@ fn a_template_is_adopted_with_one_command_into_the_project_s_file_where_the_user
 #[test]
 fn open_the_pull_requests_reports_first_opens_nothing_before_the_confirmation_then_one_pull_request_per_repository_with_commits()
  {
-    let user = User::with_fake_agent().with_fake_gh();
+    let user = User::with_fake_agent().with_fake_gh().with_fake_ssh(&[]);
     let workspace = stack(
         &user,
         true,
@@ -1196,7 +1193,7 @@ fn open_the_pull_requests_reports_first_opens_nothing_before_the_confirmation_th
     let created = calls.iter().find(|c| c.starts_with("pr create")).unwrap();
     assert_eq!(
         created,
-        "pr create -R acme/api --head app/login --base main --title feat(LOGIN-1): add the login \
+        "pr create -R github.com/acme/api --head app/login --base main --title feat(LOGIN-1): add the login \
          --body Adds the login page. --reviewer alice --reviewer bob"
     );
     // The repositories with no commit of their own get nothing.
@@ -1208,7 +1205,7 @@ fn open_the_pull_requests_reports_first_opens_nothing_before_the_confirmation_th
         assert!(
             !calls
                 .iter()
-                .any(|c| c.starts_with(&format!("pr create -R acme/{name} ")))
+                .any(|c| c.starts_with(&format!("pr create -R github.com/acme/{name} ")))
         );
     }
 }
@@ -1246,7 +1243,7 @@ fn merged(user: &User) -> Vec<String> {
 
 #[test]
 fn merge_a_stack_refuses_while_a_check_is_failing_and_merges_the_levels_in_order() {
-    let user = User::with_fake_agent().with_fake_gh();
+    let user = User::with_fake_agent().with_fake_gh().with_fake_ssh(&[]);
     stack(&user, true, "");
     adopt(&user, "merge-stack");
     user.gh_script(pulls("FAILURE", "SUCCESS", "FAILURE"));
@@ -1317,9 +1314,9 @@ fn merge_a_stack_refuses_while_a_check_is_failing_and_merges_the_levels_in_order
     assert_eq!(
         merged(&user),
         [
-            "pr merge 1 -R acme/lib --squash",
-            "pr merge 2 -R acme/api --squash",
-            "pr merge 3 -R acme/web --squash",
+            "pr merge 1 -R github.com/acme/lib --squash",
+            "pr merge 2 -R github.com/acme/api --squash",
+            "pr merge 3 -R github.com/acme/web --squash",
         ]
     );
 }
