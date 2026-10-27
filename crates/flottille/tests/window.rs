@@ -895,6 +895,68 @@ fn the_place_picker_s_new_workspace_opens_the_same_modal_as_the_page_s_action(
     );
 }
 
+#[gpui_kit::test]
+fn a_workspace_made_from_the_composer_s_picker_becomes_its_place(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let form = shell
+        .read_with(cx, |s, _| s.new_workspace_of("atlas").cloned())
+        .unwrap();
+    let composer = composer_of(&shell, "atlas", cx);
+
+    cx.update(|window, cx| window.click("place-picker", cx));
+    cx.update(|window, cx| window.click("place-choice-new", cx));
+    settle(cx);
+    cx.simulate_input("from-picker");
+    cx.simulate_keystrokes("enter");
+    until(
+        &shell,
+        cx,
+        "the composer's place is the workspace it asked for",
+        |cx| {
+            composer.read_with(cx, |c, _| c.choice().clone())
+                == Choice::Workspace("from-picker".into())
+        },
+    );
+    assert!(!form.read_with(cx, |f, _| f.is_open()), "the modal closed");
+}
+
+#[gpui_kit::test]
+fn a_workspace_made_from_the_page_s_action_leaves_the_composer_s_place(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let form = shell
+        .read_with(cx, |s, _| s.new_workspace_of("atlas").cloned())
+        .unwrap();
+    let composer = composer_of(&shell, "atlas", cx);
+
+    // Opened from the picker first, then closed: the page's own action must not inherit it.
+    cx.update(|window, cx| window.click("place-picker", cx));
+    cx.update(|window, cx| window.click("place-choice-new", cx));
+    settle(cx);
+    cx.simulate_keystrokes("escape");
+    settle(cx);
+    cx.update(|window, cx| window.click("new-workspace", cx));
+    settle(cx);
+    cx.simulate_input("from-page");
+    cx.simulate_keystrokes("enter");
+    until(&shell, cx, "the workspace is made", |cx| {
+        !form.read_with(cx, |f, _| f.is_open())
+    });
+    until(&shell, cx, "the card of the workspace is shown", |cx| {
+        cx.update(|window, _| window.try_find("place-card-from-page").is_some())
+    });
+    assert_eq!(
+        composer.read_with(cx, |c, _| c.choice().clone()),
+        Choice::Main,
+        "the composer's place did not move"
+    );
+}
+
 /// The height of the composer's field once its text is `text`.
 fn field_height(composer: &Entity<Composer>, text: &str, cx: &mut VisualTestContext) -> f32 {
     let field = composer.read_with(cx, |c, _| c.field().clone());

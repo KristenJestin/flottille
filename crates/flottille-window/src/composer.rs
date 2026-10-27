@@ -150,6 +150,8 @@ pub struct Composer {
     focused: bool,
     places: Vec<PlaceChoice>,
     choice: Choice,
+    /// A workspace made from the picker, which becomes the place once the daemon lists it.
+    wanted: Option<String>,
     menu: Option<Menu>,
     /// The providers as the daemon last listed them.
     providers: Providers,
@@ -225,6 +227,7 @@ impl Composer {
             focused: false,
             places: Vec::new(),
             choice: Choice::Main,
+            wanted: None,
             menu: None,
             providers: Providers::default(),
             default: (None, None),
@@ -413,14 +416,37 @@ impl Composer {
                 self.choice = Choice::Main;
             }
             self.places = places;
+            self.take_wanted();
             self.set_blocked();
             cx.notify();
+        }
+    }
+
+    /// The workspace just made from the picker is the place from now on: at once if the daemon
+    /// already lists it, else as soon as it does. Picking another place first drops it.
+    pub fn choose_when_listed(&mut self, name: String, cx: &mut Context<Self>) {
+        self.wanted = Some(name);
+        self.take_wanted();
+        self.set_blocked();
+        cx.notify();
+    }
+
+    fn take_wanted(&mut self) {
+        let listed = self.wanted.as_deref().is_some_and(|name| {
+            self.places
+                .iter()
+                .any(|p| p.workspace.as_deref() == Some(name))
+        });
+        if listed && let Some(name) = self.wanted.take() {
+            self.choice = Choice::Workspace(name);
+            self.error = None;
         }
     }
 
     /// Picks where the next session starts, and puts the caret in the field.
     pub fn choose(&mut self, choice: Choice, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
+        self.wanted = None;
         if self.choice != choice {
             self.choice = choice;
             self.error = None;
@@ -835,7 +861,7 @@ impl Composer {
                         .ok()
                         .flatten();
                     if let Some(form) = form {
-                        form.update(cx, |form, cx| form.open(window, cx));
+                        form.update(cx, |form, cx| form.open_for_composer(window, cx));
                     }
                     cx.notify();
                 })),
