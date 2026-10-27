@@ -401,9 +401,11 @@ the project's file cannot be used.
 
 #### `procedure.add`
 
-`{"project", "name", "description", "instructions", "grants"?, "children"?}`. Writes
+`{"project", "name", "description", "instructions", "grants"?, "children"?}`, or `{"project",
+"template", "name"?}` for one of Flottille's templates as it is (`open-prs`, `merge-stack`,
+`close`; `name` the template's when left out, and nothing else given). Writes
 `[procedures.<name>]` in the project's file, what is around it kept, and answers the procedure.
-`refused` when the project has one of that name.
+`refused` when the project has one of that name, `not-found` for a template Flottille has not.
 
 #### `procedure.edit`
 

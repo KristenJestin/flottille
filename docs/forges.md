@@ -99,8 +99,9 @@ agent working in a workspace has the tool.
 
 ## The agent's tool `forge_write`
 
-`forge_write {action, repository, …}` opens the pull request of the workspace's branch, merges it
-by squash, or re-runs the failed pipelines of its last commit, with the same `gh` and the same
+`forge_write {action, repository, …}` opens the pull request of the workspace's branch (with the
+project's reviewers), merges it by squash (never while its checks fail or run or a review asks for
+changes, unless the user waives it), or re-runs the failed pipelines of its last commit, with the same `gh` and the same
 rules (spawned by the daemon, `-R owner/name`, its output masked, no token to the agent). It is
 refused unless the agent works in a procedure's run that grants the action: see
 [`procedures.md`](procedures.md).
