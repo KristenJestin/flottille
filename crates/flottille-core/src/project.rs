@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize, Serializer};
 
+use crate::declared::{ProjectTracker, RepositoryForge};
 use crate::procedure::Procedure;
 
 /// Children running at once per project: the bounds of `max_children`.
@@ -54,6 +55,9 @@ pub struct Repository {
     /// preparing and merging.
     #[serde(default)]
     pub depends_on: Vec<String>,
+    /// The forge it is on, as the user declared it; none is read nor written without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forge: Option<RepositoryForge>,
 }
 
 fn default_remote() -> String {
@@ -280,26 +284,20 @@ pub struct Project {
     pub procedures: BTreeMap<String, Procedure>,
     #[serde(skip_serializing_if = "PullRequests::is_empty")]
     pub pull_requests: PullRequests,
-    /// What the project says of its forges, besides what a remote's host already tells.
-    #[serde(skip_serializing_if = "Forges::is_empty")]
-    pub forges: Forges,
+    /// The tracker of its tickets, as the user declared it; none is read without one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracker: Option<ProjectTracker>,
+    /// Keys of the file that are no longer read, each with what replaces it: said, never
+    /// followed nor refused.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub obsolete: Vec<String>,
 }
 
-/// `[forges]`: the hosts Flottille cannot tell are a forge by themselves (`docs/forges.md`).
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Forges {
-    /// The Bitbucket Data Center hosts, by name (`bitbucket.example.com`), lowercase;
-    /// `bitbucket.org` is Cloud and is never listed.
-    #[serde(default)]
-    pub bitbucket: Vec<String>,
-}
-
-impl Forges {
-    fn is_empty(&self) -> bool {
-        self.bitbucket.is_empty()
-    }
-}
+/// What is said of a `[forges]` table, which named Bitbucket Data Center hosts before each
+/// repository declared its forge.
+pub const OBSOLETE_FORGES: &str = "forges: no longer read: each repository declares its forge \
+     (its `forge` key, or the project's Settings in the window), and Flottille never guesses it \
+     from a host";
 
 /// What `projects/<name>.toml` holds: the keys as written, before the defaults and the checks.
 #[derive(Deserialize)]
@@ -333,8 +331,9 @@ struct File {
     procedures: BTreeMap<String, Procedure>,
     #[serde(default)]
     pull_requests: PullRequests,
-    #[serde(default)]
-    forges: Forges,
+    tracker: Option<ProjectTracker>,
+    /// Obsolete: read as nothing, and said (`OBSOLETE_FORGES`).
+    forges: Option<toml::Value>,
 }
 
 fn all_repositories() -> RepositorySet {
@@ -372,6 +371,7 @@ impl Project {
                     remote: default_remote(),
                     base: default_base(),
                     depends_on: Vec::new(),
+                    forge: None,
                 })
                 .collect(),
             variables: BTreeMap::new(),
@@ -380,7 +380,8 @@ impl Project {
             references: BTreeMap::new(),
             procedures: BTreeMap::new(),
             pull_requests: PullRequests::default(),
-            forges: Forges::default(),
+            tracker: None,
+            obsolete: Vec::new(),
         }
     }
 
@@ -627,29 +628,34 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
             .map_err(|error| format!("references.{reference}{error}"))?;
     }
 
-    let mut forges = file.forges;
-    for (index, host) in forges.bitbucket.iter_mut().enumerate() {
-        *host = host.trim().to_ascii_lowercase();
-        let key = format!("forges.bitbucket[{index}]");
-        if host.is_empty() {
-            return Err(format!("{key}: must not be empty"));
-        }
-        if !host
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
-        {
-            return Err(format!(
-                "{key}: must be a host name (bitbucket.example.com), without a scheme, a port or \
-                 a path"
-            ));
-        }
-        if host == "bitbucket.org" {
-            return Err(format!(
-                "{key}: bitbucket.org is Bitbucket Cloud, which needs no listing"
-            ));
+    let mut repositories = file.repositories;
+    for (index, repository) in repositories.iter_mut().enumerate() {
+        if let Some(forge) = &mut repository.forge {
+            forge
+                .check()
+                .map_err(|error| format!("repositories[{index}].forge{error}"))?;
         }
     }
-    forges.bitbucket.dedup();
+    let mut tracker = file.tracker;
+    if let Some(tracker) = &mut tracker {
+        tracker.check().map_err(|error| format!("tracker{error}"))?;
+        if let ProjectTracker::Github { repository } = tracker {
+            match repositories.iter().find(|r| &r.path == repository) {
+                None => return Err(unknown("tracker.repository".into(), repository)),
+                Some(found) if !matches!(found.forge, Some(RepositoryForge::Github { .. })) => {
+                    return Err(format!(
+                        "tracker.repository: {repository} is not declared on GitHub: its issues \
+                         are read on the GitHub repository its forge names"
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    let obsolete = match file.forges {
+        Some(_) => vec![OBSOLETE_FORGES.to_owned()],
+        None => Vec::new(),
+    };
 
     Ok(Project {
         name: name.to_owned(),
@@ -662,14 +668,15 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
         provider: file.provider,
         model: file.model,
         never: file.never,
-        repositories: file.repositories,
+        repositories,
         variables: file.variables,
         commands: file.commands,
         recipe: file.recipe,
         references: file.references,
         procedures: file.procedures,
         pull_requests: file.pull_requests,
-        forges,
+        tracker,
+        obsolete,
     })
 }
 
@@ -1610,50 +1617,94 @@ mod tests {
     }
 
     #[test]
-    fn the_bitbucket_data_center_hosts_a_project_names_are_read_and_lowercased() {
-        let project = parse(&format!(
-            "{MINIMAL}\n[forges]\nbitbucket = [\"Bitbucket.Example.com\", \"git.internal\"]\n"
-        ))
+    fn each_repository_declares_its_forge_and_the_project_its_tracker() {
+        let project = parse(
+            r#"
+            folder = "/work/app"
+            [[repositories]]
+            path = "api"
+            forge = { kind = "github", repository = "acme/api" }
+            [[repositories]]
+            path = "web"
+            forge = { kind = "bitbucket-data-center", host = "Bitbucket.Example.com", repository = "PROJ/web" }
+            [[repositories]]
+            path = "lib"
+            [tracker]
+            kind = "jira"
+            site = "example.atlassian.net"
+            projects = ["abc"]
+        "#,
+        )
         .unwrap();
 
         assert_eq!(
-            project.forges.bitbucket,
-            ["bitbucket.example.com", "git.internal"]
+            project.repositories[0].forge,
+            Some(RepositoryForge::Github {
+                repository: "acme/api".into()
+            })
         );
-        assert!(parse(MINIMAL).unwrap().forges.bitbucket.is_empty());
-        // Not shown when there are none: `project show` keeps its shape.
+        assert_eq!(
+            project.repositories[1].forge.as_ref().map(|f| f.host()),
+            Some("bitbucket.example.com")
+        );
+        assert_eq!(project.repositories[2].forge, None);
+        assert_eq!(
+            project.tracker,
+            Some(ProjectTracker::Jira {
+                site: "example.atlassian.net".into(),
+                projects: vec!["ABC".into()]
+            })
+        );
+        // What is read is written back the same.
+        assert_eq!(parse(&project.to_toml().unwrap()).unwrap(), project);
+        // Nothing declared, nothing shown: `project show` keeps its shape.
         let shown = serde_json::to_value(parse(MINIMAL).unwrap()).unwrap();
-        assert!(shown.get("forges").is_none(), "{shown}");
+        assert!(shown.get("tracker").is_none(), "{shown}");
+        assert!(shown["repositories"][0].get("forge").is_none(), "{shown}");
     }
 
     #[test]
-    fn a_bitbucket_host_is_a_bare_host_name_and_never_bitbucket_org() {
-        for (hosts, wrong) in [
-            ("\"\"", "forges.bitbucket[0]: must not be empty"),
+    fn a_forge_or_a_tracker_that_cannot_be_used_is_refused_with_its_key() {
+        for (text, wrong) in [
             (
-                "\"https://bitbucket.example.com\"",
-                "forges.bitbucket[0]: must be a host name",
+                "[[repositories]]\npath = \".\"\nforge = { kind = \"gitlab\", repository = \"a/b\" }",
+                "repositories[0].forge.kind: unknown variant",
             ),
             (
-                "\"bitbucket.example.com:7990\"",
-                "forges.bitbucket[0]: must be a host name",
+                "[[repositories]]\npath = \".\"\nforge = { kind = \"github\", repository = \"a\" }",
+                "repositories[0].forge.repository: must be owner/name",
             ),
-            ("\"a b\"", "forges.bitbucket[0]: must be a host name"),
             (
-                "\"git.internal\", \"bitbucket.org\"",
-                "forges.bitbucket[1]: bitbucket.org is Bitbucket Cloud",
+                "[[repositories]]\npath = \".\"\n[tracker]\nkind = \"github\"\nrepository = \".\"",
+                "tracker.repository: . is not declared on GitHub",
+            ),
+            (
+                "[[repositories]]\npath = \".\"\n[tracker]\nkind = \"github\"\nrepository = \"x\"",
+                "tracker.repository: unknown repository \"x\"",
+            ),
+            (
+                "[[repositories]]\npath = \".\"\n[tracker]\nkind = \"jira\"\nsite = \"x.atlassian.net\"\nprojects = []",
+                "tracker.projects: must name",
             ),
         ] {
-            let said = refusal(&format!("{MINIMAL}\n[forges]\nbitbucket = [{hosts}]\n"));
+            let said = refusal(&format!("folder = \"/work/app\"\n{text}\n"));
             assert!(
                 said.starts_with(&format!("projects/app.toml: {wrong}")),
-                "{hosts}: {said}"
+                "{text}: {said}"
             );
         }
-        assert!(
-            refusal(&format!("{MINIMAL}\n[forges]\ngithub = []\n")).contains("unknown field"),
-            "a key the table does not know is refused"
-        );
+    }
+
+    #[test]
+    fn an_old_forges_table_is_read_as_nothing_and_said() {
+        let project = parse(&format!(
+            "{MINIMAL}\n[forges]\nbitbucket = [\"bitbucket.example.com\"]\n"
+        ))
+        .unwrap();
+
+        assert_eq!(project.obsolete, [OBSOLETE_FORGES]);
+        assert_eq!(project.repositories[0].forge, None);
+        assert!(parse(MINIMAL).unwrap().obsolete.is_empty());
     }
 
     #[test]

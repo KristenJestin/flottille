@@ -42,6 +42,11 @@ The project's default set (`default_repositories`, all of them unless the file s
 or `--repositories`. They come in dependency order, leaves first, with the root repository first
 of all.
 
+The window's New workspace form offers the same: the project's repositories as chips, the default
+set taken (at least one stays taken), a branch field (`<branch prefix>/<name>` when empty), the
+offline switch (`--offline`), and the optional ticket, previewed as it is typed
+(`docs/tickets.md`).
+
 ## The base of each branch
 
 For each repository, before anything is written, the base rule (`base = ["develop", "main"]`) is

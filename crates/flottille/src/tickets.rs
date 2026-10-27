@@ -12,7 +12,9 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use flottille_core::protocol::{WorkspaceName, WorkspaceTicket};
+use flottille_core::declared::ProjectTracker;
+use flottille_core::project::Project;
+use flottille_core::protocol::{ProjectTicket, WorkspaceName, WorkspaceTicket};
 use flottille_core::store::now_ms;
 use flottille_core::ticket::{Key, Tracker};
 use flottille_core::workspace::Workspace;
@@ -20,11 +22,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
-use crate::forge::{self, Forge, Gh, Remote, masked};
-use crate::git::{self, Class};
+use crate::forge::{self, Checkout, Forge, Gh, masked};
 use crate::mcp::{Outcome, arguments};
 use crate::place::Place;
-use crate::projects::Failure;
+use crate::projects::{self, Failure};
 
 /// A call of `acli` is cut after this.
 const ACLI_TIME: Duration = Duration::from_secs(30);
@@ -131,43 +132,59 @@ fn said(value: &Value) -> String {
     masked(value.as_str().unwrap_or_default().trim())
 }
 
-/// Reads `key`, the ticket of `workspace`, on its tracker. `Err` says why it cannot be read, masked,
-/// with what to do.
-pub async fn read(workspace: &Workspace, key: &Key) -> Result<Ticket, String> {
-    match key {
-        Key::Issue(number) => {
-            let forge = github_of(workspace).await?;
+/// What is said of a project whose tracker is not declared: no ticket is linked nor read.
+pub const NO_TRACKER: &str = "no tracker set for this project: choose it in the project's \
+    Settings (the window), or write its [tracker] in the project's file; Flottille never guesses it";
+
+/// The ticket `text` as the project's tracker takes it (`#123`, `ABC-123`), or why it is not one
+/// of its tickets: written otherwise, of another tracker, of another Jira project, or no tracker.
+pub fn accepted(project: &Project, text: &str) -> Result<Key, String> {
+    let key = Key::parse(text)?;
+    let tracker = project.tracker.as_ref().ok_or(NO_TRACKER)?;
+    tracker.accepts(&key)?;
+    Ok(key)
+}
+
+/// Reads `key` on the project's tracker. `Err` says why it cannot be read, masked, with what to
+/// do.
+pub async fn read(project: &Project, key: &Key) -> Result<Ticket, String> {
+    let tracker = project.tracker.as_ref().ok_or(NO_TRACKER)?;
+    tracker.accepts(key)?;
+    match (tracker, key) {
+        (ProjectTracker::Github { repository }, Key::Issue(number)) => {
+            let forge = github_of(project, repository).await?;
             read_issue(&forge, *number).await
         }
-        Key::Jira(key) => read_work_item(key).await,
+        (ProjectTracker::Jira { site, .. }, Key::Jira(key)) => read_work_item(key, site).await,
+        _ => unreachable!("a key the tracker accepts"),
     }
 }
 
-/// The repository whose issues `#123` names: the first repository of the workspace that is on
-/// GitHub.
-async fn github_of(workspace: &Workspace) -> Result<Forge, String> {
-    for repository in &workspace.repositories {
-        let folder = match repository.path.as_str() {
-            "." => workspace.project_folder.clone(),
-            path => workspace.project_folder.join(path),
-        };
-        let url = git::output(
-            &folder,
-            &["remote", "get-url", repository.base.remote.as_str()],
-            Class::Read,
-        )
-        .await;
-        if let Ok(url) = url
-            && let Remote::Forge(forge @ Forge::GitHub { .. }) = forge::remote_of(&url, &[])
-        {
-            return Ok(forge);
-        }
+/// The GitHub repository whose issues the tracker reads: the forge the project declares for its
+/// repository `path`, once the remote of its main checkout is checked to lead there.
+async fn github_of(project: &Project, path: &str) -> Result<Forge, String> {
+    let repository = project
+        .repositories
+        .iter()
+        .find(|r| r.path == path)
+        .ok_or_else(|| format!("the tracker's repository {path} is not one of the project's"))?;
+    let checkout = Checkout {
+        path: path.to_owned(),
+        folder: match path {
+            "." => project.folder.clone(),
+            path => project.folder.join(path),
+        },
+        remote: repository.remote.clone(),
+        declared: repository.forge.clone(),
+    };
+    match forge::declared_forge(&checkout).await {
+        Ok(forge @ Forge::GitHub { .. }) => Ok(forge),
+        Ok(_) | Err(None) => Err(format!(
+            "the tracker's repository {path} is not declared on GitHub: set its forge in the \
+             project's settings"
+        )),
+        Err(Some(why)) => Err(why),
     }
-    Err(format!(
-        "no repository of workspace {} is on GitHub, so there are no issues to read for #<n>; \
-         a Jira key (ABC-123) does not need one",
-        workspace.name
-    ))
 }
 
 async fn read_issue(forge: &Forge, number: u64) -> Result<Ticket, String> {
@@ -212,8 +229,22 @@ fn newest(mut comments: Vec<Comment>) -> Vec<Comment> {
     comments
 }
 
-async fn read_work_item(key: &str) -> Result<Ticket, String> {
-    match acli(&["jira", "auth", "status"]).await {
+/// The site `acli`'s active sign-in is on: the `Site:` line of `acli jira auth status`, nothing
+/// else of what it prints (an e-mail may be there: never kept).
+fn signed_in_site(status: &str) -> Option<String> {
+    status.lines().find_map(|line| {
+        let (label, site) = line.trim().split_once(':')?;
+        let site = site
+            .trim()
+            .trim_start_matches("https://")
+            .trim_end_matches('/');
+        (label.trim().eq_ignore_ascii_case("site") && !site.is_empty())
+            .then(|| site.to_ascii_lowercase())
+    })
+}
+
+async fn read_work_item(key: &str, site: &str) -> Result<Ticket, String> {
+    let status = match acli(&["jira", "auth", "status"]).await {
         Err(Gh::Missing) => {
             return Err(
                 "acli, Atlassian's command line, is not on the daemon's PATH: install it \
@@ -230,7 +261,24 @@ async fn read_work_item(key: &str) -> Result<Ticket, String> {
                     .into(),
             );
         }
-        Ok((true, _, _)) => {}
+        Ok((true, stdout, _)) => stdout,
+    };
+    match signed_in_site(&status) {
+        Some(active) if active == site => {}
+        Some(active) => {
+            return Err(format!(
+                "acli is signed in to {}, and this project's tracker is Jira on {site}: nothing \
+                 was read; switch acli to it (`acli jira auth switch --site {site}`) or correct \
+                 the project's tracker",
+                masked(&active)
+            ));
+        }
+        None => {
+            return Err(format!(
+                "acli did not say which site it is signed in to (no Site: line in `acli jira \
+                 auth status`), so it cannot be checked to be {site}: nothing was read"
+            ));
+        }
     }
     let (ok, stdout, stderr) = match acli(&[
         "jira",
@@ -416,7 +464,7 @@ fn find(daemon: &Daemon, project: &str, name: &str) -> Result<Workspace, Failure
 }
 
 /// What the protocol shows of a workspace's ticket (`workspace.ticket`).
-async fn state_of(workspace: &Workspace) -> Value {
+async fn state_of(daemon: &Daemon, workspace: &Workspace) -> Value {
     let mut state = json!({
         "project": workspace.project,
         "workspace": workspace.name,
@@ -427,9 +475,12 @@ async fn state_of(workspace: &Workspace) -> Value {
     let Some(text) = &workspace.ticket else {
         return state;
     };
-    let read = match Key::parse(text) {
-        Ok(key) => read(workspace, &key).await,
-        Err(why) => Err(why),
+    let read = match projects::load_project(daemon, &workspace.project) {
+        Err(failure) => Err(failure.message),
+        Ok(project) => match Key::parse(text) {
+            Ok(key) => read(&project, &key).await,
+            Err(why) => Err(why),
+        },
     };
     match read {
         Ok(ticket) => {
@@ -446,17 +497,18 @@ async fn state_of(workspace: &Workspace) -> Value {
 pub async fn call(daemon: Arc<Daemon>, params: Value) -> Result<Value, Failure> {
     let asked: WorkspaceName = serde_json::from_value(params)?;
     let workspace = find(&daemon, &asked.project, &asked.name)?;
-    Ok(state_of(&workspace).await)
+    Ok(state_of(&daemon, &workspace).await)
 }
 
 /// `workspace.link_ticket`: links the workspace to a ticket, or to none; an event says it.
 pub async fn link(daemon: Arc<Daemon>, params: Value) -> Result<Value, Failure> {
     let asked: WorkspaceTicket = serde_json::from_value(params)?;
     let workspace = find(&daemon, &asked.project, &asked.name)?;
+    let project = projects::load_project(&daemon, &asked.project)?;
     let ticket = asked
         .ticket
         .as_deref()
-        .map(|text| Key::parse(text).map(|key| key.text()))
+        .map(|text| accepted(&project, text).map(|key| key.text()))
         .transpose()
         .map_err(Failure::refused)?;
     let event = json!({
@@ -470,7 +522,37 @@ pub async fn link(daemon: Arc<Daemon>, params: Value) -> Result<Value, Failure> 
         Ok(((), event))
     })?;
     let workspace = find(&daemon, &asked.project, &asked.name)?;
-    Ok(state_of(&workspace).await)
+    Ok(state_of(&daemon, &workspace).await)
+}
+
+/// `project.ticket`: a ticket of the project's tracker, read now, before any workspace is linked
+/// to it: what the new-workspace form shows as the user types.
+pub async fn preview(daemon: Arc<Daemon>, params: Value) -> Result<Value, Failure> {
+    let asked: ProjectTicket = serde_json::from_value(params)?;
+    let project = projects::load_project(&daemon, &asked.project)?;
+    let mut state = json!({
+        "project": project.name,
+        "ticket": asked.ticket,
+        "tracker": project.tracker.as_ref().map(ProjectTracker::kind),
+        "tracker_said": project.tracker.as_ref().map(ProjectTracker::said),
+        "problem": null,
+    });
+    let read = match accepted(&project, &asked.ticket) {
+        Ok(key) => {
+            state["ticket"] = key.text().into();
+            read(&project, &key).await
+        }
+        Err(why) => Err(why),
+    };
+    match read {
+        Ok(ticket) => {
+            if let (Value::Object(state), Value::Object(read)) = (&mut state, ticket.to_json()) {
+                state.extend(read);
+            }
+        }
+        Err(problem) => state["problem"] = problem.into(),
+    }
+    Ok(state)
 }
 
 #[derive(Deserialize)]
@@ -498,35 +580,24 @@ pub async fn ticket_read(daemon: &Daemon, place: &Place, args: Value) -> Outcome
         Ok(None) => return Outcome::Failed(format!("the workspace {name} is gone")),
         Err(error) => return Outcome::Failed(error.to_string()),
     };
-    let linked = workspace.ticket.as_deref().and_then(|t| Key::parse(t).ok());
-    let key = match (&asked.ticket, &linked) {
-        (Some(text), _) => match Key::parse(text) {
+    let project = match projects::load_project(daemon, &place.project) {
+        Ok(project) => project,
+        Err(failure) => return Outcome::Failed(failure.message),
+    };
+    let key = match (&asked.ticket, &workspace.ticket) {
+        (Some(text), _) | (None, Some(text)) => match accepted(&project, text) {
             Ok(key) => key,
             Err(why) => return Outcome::Refused(format!("refused: {why}")),
         },
-        (None, Some(key)) => key.clone(),
         (None, None) => {
             return Outcome::Refused(format!(
-                "refused: workspace {} is linked to no ticket: name one (#123 or ABC-123), or ask \
-                 the user to link it",
+                "refused: workspace {} is linked to no ticket: name one of the project's tracker, \
+                 or ask the user to link it",
                 workspace.name
             ));
         }
     };
-    // The workspace's tracker: its ticket's, GitHub's (its own repositories') when it has none.
-    let tracker = linked.as_ref().map_or(Tracker::GitHub, Key::tracker);
-    if key.tracker() != tracker {
-        let (said, other) = match tracker {
-            Tracker::GitHub => ("GitHub issues (#123)", "Jira"),
-            Tracker::Jira => ("Jira (ABC-123)", "GitHub issues"),
-        };
-        return Outcome::Refused(format!(
-            "refused: {} is a {other} ticket, and this workspace's tracker is {said}: ticket_read \
-             reads the workspace's ticket and others of the same tracker",
-            key.text()
-        ));
-    }
-    match read(&workspace, &key).await {
+    match read(&project, &key).await {
         Ok(ticket) => Outcome::Done(ticket.text()),
         Err(problem) => Outcome::Failed(format!(
             "the ticket {} could not be read: {problem}",
@@ -568,6 +639,21 @@ mod tests {
             "plain <b>text</b>"
         );
         assert_eq!(document_text(&Value::Null), "");
+    }
+
+    #[test]
+    fn the_site_of_acli_s_sign_in_is_its_site_line_alone() {
+        let status =
+            "✓ Authenticated\n  Site: Example.atlassian.net\n  Email: someone@example.com\n";
+        assert_eq!(
+            signed_in_site(status).as_deref(),
+            Some("example.atlassian.net")
+        );
+        assert_eq!(
+            signed_in_site("  site: https://other.atlassian.net/").as_deref(),
+            Some("other.atlassian.net")
+        );
+        assert_eq!(signed_in_site("✓ Authenticated\n"), None);
     }
 
     #[test]

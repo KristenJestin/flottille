@@ -70,6 +70,36 @@ pub struct ProjectName {
     pub name: String,
 }
 
+/// The parameters of `project.ticket`: a ticket of the project's tracker, read before any
+/// workspace is linked to it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectTicket {
+    pub project: String,
+    pub ticket: String,
+}
+
+/// The parameters of `project.set_settings`: the forge declared for each repository named (none
+/// to declare none; a repository left out keeps its own), and the project's tracker (none for
+/// none).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectSettings {
+    pub name: String,
+    #[serde(default)]
+    pub repositories: Vec<RepositorySetting>,
+    #[serde(default)]
+    pub tracker: Option<crate::declared::ProjectTracker>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositorySetting {
+    pub path: String,
+    #[serde(default)]
+    pub forge: Option<crate::declared::RepositoryForge>,
+}
+
 /// The parameters of `reference.list`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

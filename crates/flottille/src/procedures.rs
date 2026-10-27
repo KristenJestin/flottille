@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use flottille_core::approval;
-use flottille_core::procedure::{self, Grants, Procedure};
+use flottille_core::procedure::{self, Grant, Grants, Procedure};
 use flottille_core::project::Project;
 use flottille_core::store::{ProcedureRun, Store, now_ms};
 use flottille_core::workspace::Workspace;
@@ -212,7 +212,8 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         "procedure.run" => {
             let asked: Run = serde_json::from_value(params)?;
             let (project, procedure) = runnable(&daemon, &asked.project, &asked.name)?;
-            workspace_of(&daemon, &project, &asked.workspace)?;
+            let workspace = workspace_of(&daemon, &project, &asked.workspace)?;
+            forges_set(&project, &workspace, &asked.name, &procedure)?;
             let mut shown = to_json(&asked.name, &procedure, false);
             shown["project"] = project.name.clone().into();
             shown["workspace"] = asked.workspace.into();
@@ -261,6 +262,52 @@ fn workspace_of(daemon: &Daemon, project: &Project, name: &str) -> Result<Worksp
                 format!("project {} has no workspace named {name}", project.name),
             )
         })
+}
+
+/// A procedure that writes to the forge starts only when a forge is declared for each repository
+/// of its workspace: none is guessed, and the run would stop halfway otherwise.
+fn forges_set(
+    project: &Project,
+    workspace: &Workspace,
+    name: &str,
+    procedure: &Procedure,
+) -> Result<(), Failure> {
+    let writes: Vec<&str> = procedure
+        .grants
+        .keys()
+        .filter(|grant| {
+            matches!(
+                grant,
+                Grant::PrCreate | Grant::PrMergeSquash | Grant::PipelineRerun
+            )
+        })
+        .map(|grant| grant.word())
+        .collect();
+    if writes.is_empty() {
+        return Ok(());
+    }
+    let unset: Vec<&str> = workspace
+        .repositories
+        .iter()
+        .filter(|taken| {
+            !project
+                .repositories
+                .iter()
+                .any(|r| r.path == taken.path && r.forge.is_some())
+        })
+        .map(|taken| taken.path.as_str())
+        .collect();
+    if unset.is_empty() {
+        return Ok(());
+    }
+    Err(Failure::refused(format!(
+        "procedure {name} writes to the forge ({}), and no forge is set for {} of workspace {}: \
+         choose it in the project's Settings (the window), or write its `forge` in the project's \
+         file; nothing was started",
+        writes.join(", "),
+        unset.join(", "),
+        workspace.name
+    )))
 }
 
 fn not_a_table(project: &str) -> Failure {
@@ -340,6 +387,7 @@ fn start(daemon: &Arc<Daemon>, asked: Start) -> Answer {
         )));
     }
     let workspace = workspace_of(daemon, &project, &asked.workspace)?;
+    forges_set(&project, &workspace, &asked.name, &procedure)?;
     let after = daemon.read(Store::last_seq)?;
     let brief = brief(&project, &workspace, &asked.name, &procedure);
     let agent = agents::create(

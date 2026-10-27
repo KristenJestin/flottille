@@ -3,6 +3,7 @@
 //! daemon gives, as the daemon gives it.
 
 pub mod actions;
+pub mod add_project;
 pub mod composer;
 pub mod conversation;
 pub mod history;
@@ -12,6 +13,7 @@ pub mod open;
 pub mod page;
 pub mod procedures;
 pub mod project;
+pub mod project_settings;
 pub mod providers;
 pub mod references;
 pub mod session;

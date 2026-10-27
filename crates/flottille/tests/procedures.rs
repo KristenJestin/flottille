@@ -45,6 +45,25 @@ fn prepared(user: &User, prepare: impl FnOnce(&Path), offline: bool) -> (PathBuf
     (folder, remote)
 }
 
+/// Saves the forges the project's settings propose from the remotes, as the user does in the
+/// window: nothing is declared otherwise.
+fn declare_proposed(user: &User) {
+    let settings = user
+        .call("project.settings", json!({"name": "app"}))
+        .unwrap();
+    let repositories: Vec<Value> = settings["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| json!({"path": r["path"], "forge": r["proposal"]}))
+        .collect();
+    user.call(
+        "project.set_settings",
+        json!({"name": "app", "repositories": repositories}),
+    )
+    .unwrap();
+}
+
 /// A throwaway bare repository `remotes/<name>.git`.
 fn bare(user: &User, name: &str) -> PathBuf {
     let remote = user.path(&format!("remotes/{name}.git"));
@@ -234,7 +253,7 @@ fn running_one_shows_its_grants_and_starts_nothing_until_confirmed() {
     procedure(
         &user,
         "ship",
-        json!({"push": "allow", "pr-create": "ask"}),
+        json!({"push": "allow", "commit": "ask"}),
         false,
     );
 
@@ -251,7 +270,7 @@ fn running_one_shows_its_grants_and_starts_nothing_until_confirmed() {
             shown.contains("  push (allow): push the workspace's branch"),
             "{shown}"
         );
-        assert!(shown.contains("  pr-create (ask): open the workspace's pull requests"));
+        assert!(shown.contains("  commit (ask): make commits"));
         assert!(shown.contains("Its children get none of them."), "{shown}");
         assert!(shown.contains("not started"), "{shown}");
     }
@@ -264,10 +283,7 @@ fn running_one_shows_its_grants_and_starts_nothing_until_confirmed() {
         )
         .unwrap();
     assert_eq!(shown["started"], false);
-    assert_eq!(
-        shown["grants"],
-        json!({"push": "allow", "pr-create": "ask"})
-    );
+    assert_eq!(shown["grants"], json!({"push": "allow", "commit": "ask"}));
     assert_eq!(agents(&user), 0);
     // Grants that are no longer the procedure's are refused: what is shown is what is granted.
     let (code, message) = user
@@ -396,15 +412,56 @@ fn inside_a_run_a_granted_push_of_the_workspace_s_branch_goes_through_an_ask_one
 }
 
 #[test]
+fn a_procedure_that_writes_to_the_forge_refuses_to_start_on_a_repository_with_none() {
+    let user = User::with_fake_agent().with_fake_gh();
+    fixture(&user);
+    procedure(&user, "open", json!({"pr-create": "ask"}), false);
+    procedure(&user, "push", json!({"push": "ask"}), false);
+
+    let shown = user
+        .call(
+            "procedure.run",
+            json!({"project": "app", "name": "open", "workspace": "login"}),
+        )
+        .unwrap_err();
+    let started = user
+        .call(
+            "procedure.start",
+            json!({"project": "app", "name": "open", "workspace": "login",
+                "grants": {"pr-create": "ask"}, "children": false}),
+        )
+        .unwrap_err();
+
+    for (code, message) in [shown, started] {
+        assert_eq!(code, "refused");
+        assert!(
+            message.starts_with(
+                "procedure open writes to the forge (pr-create), and no forge is set for . of \
+                 workspace login"
+            ),
+            "{message}"
+        );
+    }
+    assert_eq!(agents(&user), 0);
+    assert!(user.gh_received().is_empty());
+    // A procedure that writes nothing to the forge needs none.
+    user.call(
+        "procedure.run",
+        json!({"project": "app", "name": "push", "workspace": "login"}),
+    )
+    .unwrap();
+}
+
+#[test]
 fn reset_hard_stash_and_a_force_push_without_lease_are_refused_even_with_every_grant() {
     let user = User::with_fake_agent();
     let (_, remote) = fixture(&user);
     procedure(
         &user,
         "all",
+        // Every grant of git lines: those of the forge need a declared forge, and run no line.
         json!({"commit": "allow", "push": "allow", "push-force-with-lease": "allow",
-            "rebase": "allow", "pr-create": "allow", "pr-merge-squash": "allow",
-            "pipeline-rerun": "allow"}),
+            "rebase": "allow"}),
         false,
     );
     let (_, mcp) = run(&user, "all");
@@ -447,6 +504,7 @@ fn on_github(user: &User) -> PathBuf {
         },
         true,
     );
+    declare_proposed(user);
     folder
 }
 
@@ -573,7 +631,7 @@ fn a_run_s_grants_are_read_from_its_agent_while_it_goes_on_and_none_for_another(
     procedure(
         &user,
         "ship",
-        json!({"push": "allow", "pr-create": "ask"}),
+        json!({"push": "allow", "commit": "ask"}),
         true,
     );
     let (agent, root) = run(&user, "ship");
@@ -586,7 +644,7 @@ fn a_run_s_grants_are_read_from_its_agent_while_it_goes_on_and_none_for_another(
     assert_eq!(held["run"]["ended"], false);
     assert_eq!(
         held["run"]["grants"],
-        json!({"push": "allow", "pr-create": "ask"})
+        json!({"push": "allow", "commit": "ask"})
     );
     assert_eq!(held["run"]["says"].as_array().unwrap().len(), 2);
     let plain = user
@@ -859,13 +917,21 @@ fn stack(user: &User, github: bool, more: &str) -> PathBuf {
             );
         }
     }
+    // On GitHub, each repository's forge is declared, as the user does in the settings.
+    let forge = |name: &str| match github {
+        true => format!("forge = {{ kind = \"github\", repository = \"acme/{name}\" }}\n"),
+        false => String::new(),
+    };
     user.write_project_file(
         "app",
         &format!(
-            "folder = \"{}\"\n\n[[repositories]]\npath = \"lib\"\n\n[[repositories]]\npath = \
-             \"api\"\ndepends_on = [\"lib\"]\n\n[[repositories]]\npath = \"web\"\ndepends_on = \
-             [\"lib\"]\n{more}",
-            folder.display()
+            "folder = \"{}\"\n\n[[repositories]]\npath = \"lib\"\n{}\n[[repositories]]\npath = \
+             \"api\"\ndepends_on = [\"lib\"]\n{}\n[[repositories]]\npath = \"web\"\ndepends_on = \
+             [\"lib\"]\n{}{more}",
+            folder.display(),
+            forge("lib"),
+            forge("api"),
+            forge("web"),
         ),
     );
     let workspace = user
@@ -1385,15 +1451,8 @@ fn on_bitbucket(user: &User, url: &str) -> PathBuf {
         |folder| user.git(folder, &["remote", "set-url", "origin", url]),
         true,
     );
+    declare_proposed(user);
     folder
-}
-
-/// `[forges] bitbucket = ["bitbucket.example.com"]` in the project's file.
-fn name_the_data_center(user: &User) {
-    let file = user.project_file("app");
-    let mut text = std::fs::read_to_string(&file).unwrap();
-    text.push_str("\n[forges]\nbitbucket = [\"bitbucket.example.com\"]\n");
-    std::fs::write(file, text).unwrap();
 }
 
 fn bkt_calls(user: &User) -> Vec<String> {
@@ -1506,7 +1565,6 @@ fn a_bitbucket_pull_request_is_never_a_draft_and_needs_its_title() {
 fn forge_write_names_a_data_center_repository_by_its_project() {
     let user = User::with_fake_agent().with_fake_bkt();
     on_bitbucket(&user, "ssh://git@bitbucket.example.com:7999/APP/app.git");
-    name_the_data_center(&user);
     user.bkt_script(json!({"contexts": [
             {"name": "cloud", "host": "bitbucket.org"},
             {"name": "work", "host": "bitbucket.example.com:7990"}],
@@ -1529,7 +1587,7 @@ fn forge_write_names_a_data_center_repository_by_its_project() {
         "{:?}",
         bkt_calls(&user)
     );
-    // A host the project does not name is not a forge Flottille writes to.
+    // A declared host the remote does not lead to is refused, and nothing is written.
     let file = user.project_file("app");
     let text = std::fs::read_to_string(&file).unwrap();
     std::fs::write(
@@ -1543,9 +1601,10 @@ fn forge_write_names_a_data_center_repository_by_its_project() {
     );
     assert!(answer.error, "{}", answer.text);
     assert!(
-        answer
-            .text
-            .contains("is not on a forge Flottille writes to"),
+        answer.text.starts_with(
+            "refused: . is declared on Bitbucket Data Center APP/app on other.example.com, and \
+             its remote origin: it leads to bitbucket.example.com/APP/app"
+        ),
         "{}",
         answer.text
     );
@@ -1699,7 +1758,6 @@ fn bitbucket_pipeline_rerun_starts_the_branch_s_pipeline_again_only_when_its_las
 fn a_data_center_repository_has_no_pipeline_bkt_can_run() {
     let user = User::with_fake_agent().with_fake_bkt();
     on_bitbucket(&user, "ssh://git@bitbucket.example.com:7999/APP/app.git");
-    name_the_data_center(&user);
     user.bkt_script(json!({"contexts": [{"name": "work", "host": "bitbucket.example.com:7990"}]}));
     procedure(&user, "rerun", json!({"pipeline-rerun": "allow"}), false);
     let (_, mcp) = run(&user, "rerun");
@@ -1857,7 +1915,6 @@ fn bitbucket_pr_merge_squash_refuses_while_a_check_fails_or_runs_or_a_reviewer_a
 fn a_data_center_pull_request_a_reviewer_marked_needs_work_is_not_merged() {
     let user = User::with_fake_agent().with_fake_bkt();
     on_bitbucket(&user, "ssh://git@bitbucket.example.com:7999/APP/app.git");
-    name_the_data_center(&user);
     let pull = |status: &str| {
         json!({"id": 5, "title": "Login", "state": "OPEN",
             "fromRef": {"displayId": "app/login",

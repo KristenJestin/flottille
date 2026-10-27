@@ -560,3 +560,150 @@ fn a_file_that_cannot_be_read_is_reported_as_itself_not_as_a_name_taken() {
     assert!(message.contains("ermission denied"), "{message}");
     assert!(!message.contains("already exists"), "{message}");
 }
+
+/// A project `app` of two repositories, `api` whose `origin` is on GitHub and `lib` on a path of
+/// this machine, the project's file holding a comment of its user.
+fn settings_fixture(user: &User) {
+    let app = user.path("work/app");
+    for name in ["api", "lib"] {
+        user.git_init(&app.join(name));
+    }
+    user.git(
+        &app.join("api"),
+        &["remote", "add", "origin", "git@github.com:acme/api.git"],
+    );
+    user.git(
+        &app.join("lib"),
+        &["remote", "add", "origin", "/srv/git/lib.git"],
+    );
+    add(user, &app);
+    let file = user.project_file("app");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, format!("# my project, by hand\n{text}")).unwrap();
+}
+
+fn settings_repository<'a>(settings: &'a Value, path: &str) -> &'a Value {
+    settings["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["path"] == path)
+        .unwrap()
+}
+
+#[test]
+fn the_settings_propose_each_forge_from_its_remote_and_nothing_is_read_before_saving() {
+    let user = User::new().with_fake_gh();
+    settings_fixture(&user);
+
+    let settings = user
+        .call("project.settings", json!({"name": "app"}))
+        .unwrap();
+
+    let api = settings_repository(&settings, "api");
+    assert_eq!(api["url"], "git@github.com:acme/api.git");
+    assert_eq!(
+        api["proposal"],
+        json!({"kind": "github", "repository": "acme/api"})
+    );
+    assert_eq!(api["forge"], Value::Null, "proposed, not declared");
+    let lib = settings_repository(&settings, "lib");
+    assert_eq!(lib["proposal"], Value::Null);
+    assert_eq!(settings["tracker"], Value::Null);
+    let shown = user.call("project.show", json!({"name": "app"})).unwrap();
+    assert_eq!(shown["repositories"][0].get("forge"), None, "{shown}");
+    // Nothing is asked of a forge for a proposal.
+    assert!(user.gh_received().is_empty(), "{:?}", user.gh_received());
+}
+
+#[test]
+fn saving_the_settings_writes_the_file_its_comments_kept() {
+    let user = User::new();
+    settings_fixture(&user);
+
+    let saved = user
+        .call(
+            "project.set_settings",
+            json!({"name": "app",
+                "repositories": [{"path": "api", "forge": {"kind": "github", "repository": "acme/api"}}],
+                "tracker": {"kind": "jira", "site": "Example.atlassian.net", "projects": ["abc"]}}),
+        )
+        .unwrap();
+
+    let text = std::fs::read_to_string(user.project_file("app")).unwrap();
+    assert!(text.starts_with("# my project, by hand\n"), "{text}");
+    assert!(
+        text.contains("forge = { kind = \"github\", repository = \"acme/api\" }"),
+        "{text}"
+    );
+    assert!(text.contains("[tracker]\nkind = \"jira\""), "{text}");
+    assert_eq!(
+        settings_repository(&saved, "api")["forge"],
+        json!({"kind": "github", "repository": "acme/api"})
+    );
+    assert_eq!(
+        saved["tracker"],
+        json!({"kind": "jira", "site": "example.atlassian.net", "projects": ["ABC"]})
+    );
+    let shown = user.call("project.show", json!({"name": "app"})).unwrap();
+    assert_eq!(shown["tracker"]["site"], "example.atlassian.net");
+    let text = String::from_utf8_lossy(&user.run(&["project", "show", "app"]).stdout).into_owned();
+    assert!(
+        text.contains("  api: remote origin, base main, on GitHub acme/api\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("  lib: remote origin, base main, no forge set\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Tickets: Jira on example.atlassian.net (ABC)\n"),
+        "{text}"
+    );
+
+    // None declared again: the key is gone from the file, the comment still there.
+    user.call(
+        "project.set_settings",
+        json!({"name": "app", "repositories": [{"path": "api", "forge": null}], "tracker": null}),
+    )
+    .unwrap();
+    let text = std::fs::read_to_string(user.project_file("app")).unwrap();
+    assert!(!text.contains("forge ="), "{text}");
+    assert!(!text.contains("[tracker]"), "{text}");
+    assert!(text.starts_with("# my project, by hand\n"), "{text}");
+}
+
+#[test]
+fn a_forge_its_remote_does_not_lead_to_is_never_saved() {
+    let user = User::new();
+    settings_fixture(&user);
+    let before = std::fs::read_to_string(user.project_file("app")).unwrap();
+
+    for (path, forge, why) in [
+        (
+            "api",
+            json!({"kind": "github", "repository": "acme/web"}),
+            "api cannot be declared on GitHub acme/web: its remote origin: it leads to \
+             github.com/acme/api, not to GitHub acme/web; nothing was saved",
+        ),
+        (
+            "lib",
+            json!({"kind": "bitbucket-cloud", "repository": "acme/lib"}),
+            "lib cannot be declared on Bitbucket Cloud acme/lib: its remote origin: it leads to \
+             /srv/git/lib.git, which is not on a forge; nothing was saved",
+        ),
+    ] {
+        let (code, message) = user
+            .call(
+                "project.set_settings",
+                json!({"name": "app", "repositories": [{"path": path, "forge": forge}]}),
+            )
+            .unwrap_err();
+        assert_eq!(code, "refused");
+        assert_eq!(message, why);
+    }
+    assert_eq!(
+        std::fs::read_to_string(user.project_file("app")).unwrap(),
+        before
+    );
+}

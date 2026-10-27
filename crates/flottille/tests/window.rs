@@ -21,6 +21,7 @@ use flottille_window::conversation::Block;
 use flottille_window::link::{self, Connect};
 use flottille_window::model::{Place, Preparation};
 use flottille_window::project::{NewWorkspace, PlaceCard, ProjectPage};
+use flottille_window::project_settings::{ForgeKind, ProjectSettingsPage, Said};
 use flottille_window::session::{RailRow, SessionPage};
 use flottille_window::settings::SettingsPage;
 use flottille_window::shell::{Layout, Selection};
@@ -342,9 +343,12 @@ fn one_session_changing_state_redraws_its_row_and_not_the_others(cx: &mut TestAp
     until(&shell, cx, "the sessions are shown", |cx| {
         cx.update(|window, _| window.try_find(session_id(&busy)).is_some())
     });
-    // Atlas's page is open, its details read.
+    // Atlas's page is open, its details and its lists read: an answer that lands later draws it.
     until(&shell, cx, "the page has its details", |cx| {
         page_of(&shell, cx).read_with(cx, |page, _| page.chips()) == ["atlas · main"]
+    });
+    until(&shell, cx, "the page has its lists", |cx| {
+        page_of(&shell, cx).read_with(cx, |page, cx| page.has_read(cx))
     });
     settle(cx);
     let renders = |id: &str, cx: &mut VisualTestContext| {
@@ -738,6 +742,12 @@ fn the_project_page_has_no_running_agents_tab(cx: &mut TestAppContext) {
 fn new_workspace_opens_a_modal_and_escape_closes_it(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");
+    user.call(
+        "project.set_settings",
+        json!({"name": "atlas",
+            "tracker": {"kind": "jira", "site": "example.atlassian.net", "projects": ["ABC"]}}),
+    )
+    .unwrap();
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     open_project(&shell, "atlas", cx);
     let form = shell
@@ -3946,6 +3956,18 @@ fn a_reply_of_thousands_of_lines_streams_in_pieces_that_stay_cheap(cx: &mut Test
 // Forges (#75): each repository's pull request in the session's WORKSPACE section and on the
 // place's card, read through the fake `gh`.
 
+/// Declares `app`'s forge, GitHub's `acme/app`, and its tracker, the issues of it, as the user
+/// does in the project's settings.
+fn declare_on_github(user: &User) {
+    user.call(
+        "project.set_settings",
+        json!({"name": "app",
+            "repositories": [{"path": ".", "forge": {"kind": "github", "repository": "acme/app"}}],
+            "tracker": {"kind": "github", "repository": "."}}),
+    )
+    .unwrap();
+}
+
 #[gpui_kit::test]
 fn the_workspace_section_shows_the_pull_request_and_its_checks_mark_and_opens_it_on_a_click(
     cx: &mut TestAppContext,
@@ -3956,6 +3978,7 @@ fn the_workspace_section_shows_the_pull_request_and_its_checks_mark_and_opens_it
         &user.path("work/app"),
         &["remote", "set-url", "origin", "git@github.com:acme/app.git"],
     );
+    declare_on_github(&user);
     let url = "https://github.com/acme/app/pull/7";
     user.gh_script(json!({"pulls": {"acme/app": {"app/w": {
         "number": 7, "title": "Add the form", "state": "OPEN", "isDraft": false,
@@ -4017,6 +4040,7 @@ fn the_workspace_section_shows_the_ticket_opens_it_on_a_click_and_links_and_unli
         &user.path("work/app"),
         &["remote", "set-url", "origin", "git@github.com:acme/app.git"],
     );
+    declare_on_github(&user);
     let issue = |number: u64, title: &str| {
         json!({"number": number, "title": title, "state": "OPEN", "body": "", "comments": [],
                "url": format!("https://github.com/acme/app/issues/{number}")})
@@ -4114,6 +4138,12 @@ fn the_workspace_section_shows_the_ticket_opens_it_on_a_click_and_links_and_unli
 fn the_form_that_makes_a_workspace_links_the_ticket_typed_in_it(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");
+    user.call(
+        "project.set_settings",
+        json!({"name": "atlas",
+            "tracker": {"kind": "jira", "site": "example.atlassian.net", "projects": ["ABC"]}}),
+    )
+    .unwrap();
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     open_project(&shell, "atlas", cx);
     let form = shell
@@ -4982,6 +5012,7 @@ fn the_workspace_section_names_each_repository_s_forge(cx: &mut TestAppContext) 
         &user.path("work/app"),
         &["remote", "set-url", "origin", "git@github.com:acme/app.git"],
     );
+    declare_on_github(&user);
     let (shell, cx) = open_session(&user, &lead, 1280., cx);
     let page = session_page(&shell, cx);
     until(&shell, cx, "the forge in the rail", |cx| {
@@ -5021,7 +5052,9 @@ fn a_repository_with_no_forge_says_why_in_the_workspace_section(cx: &mut TestApp
         forges,
         [(
             ".".to_owned(),
-            "no forge support yet: origin is not on a forge".to_owned()
+            "no forge set for this repository: choose it in the project's Settings (the \
+             window), or write its `forge` in the project's file; Flottille never guesses it"
+                .to_owned()
         )]
     );
     settle(cx);
@@ -5225,8 +5258,24 @@ fn editing_a_grant_in_the_modal_writes_the_project_s_file_and_a_removal_asks_twi
 /// A project with a ready workspace `login` and the procedure `open-prs`.
 fn user_with_a_procedure() -> User {
     let user = user();
-    project(&user, "atlas");
+    let folder = project(&user, "atlas");
     workspace(&user, "atlas", "login");
+    // `open-prs` writes to the forge: it starts only where one is declared.
+    user.git(
+        &folder,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@github.com:acme/atlas.git",
+        ],
+    );
+    user.call(
+        "project.set_settings",
+        json!({"name": "atlas",
+            "repositories": [{"path": ".", "forge": {"kind": "github", "repository": "acme/atlas"}}]}),
+    )
+    .unwrap();
     user.call(
         "procedure.add",
         json!({"project": "atlas", "template": "open-prs"}),
@@ -5497,5 +5546,320 @@ fn a_reference_the_daemon_refuses_says_why_in_the_modal_and_adds_nothing(cx: &mu
             .as_array()
             .unwrap()
             .is_empty()
+    );
+}
+
+fn settings_of(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+) -> Option<Entity<ProjectSettingsPage>> {
+    shell.read_with(cx, |s, cx| {
+        s.main().read(cx).project_settings_page().cloned()
+    })
+}
+
+/// Opens the project's settings from its page's header, and waits for what the daemon read.
+fn open_project_settings(
+    shell: &Entity<Shell>,
+    project: &str,
+    cx: &mut VisualTestContext,
+) -> Entity<ProjectSettingsPage> {
+    open_project(shell, project, cx);
+    cx.update(|window, cx| window.click("project-settings", cx));
+    until(shell, cx, "the settings are read", |cx| {
+        settings_of(shell, cx).is_some_and(|page| {
+            page.read_with(cx, |page, _| page.name() == project && page.is_loaded())
+        })
+    });
+    settle(cx);
+    settings_of(shell, cx).unwrap()
+}
+
+#[gpui_kit::test]
+fn the_settings_page_proposes_the_remote_s_forge_and_nothing_is_read_until_it_is_saved(
+    cx: &mut TestAppContext,
+) {
+    let user = user().with_fake_gh();
+    let folder = project(&user, "atlas");
+    user.git(
+        &folder,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@github.com:acme/atlas.git",
+        ],
+    );
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_project_settings(&shell, "atlas", cx);
+
+    page.read_with(cx, |page, _| {
+        let row = &page.repositories()[0];
+        assert_eq!(row.kind, ForgeKind::Github);
+        assert!(row.proposed(), "pre-filled from the remote, not declared");
+        assert_eq!(row.declared, None);
+    });
+    cx.update(|window, _| {
+        assert!(window.find("forge-kind-.").visible());
+        assert!(window.find("save-project-settings").visible());
+    });
+    let before = user
+        .call("project.settings", json!({"name": "atlas"}))
+        .unwrap();
+    assert_eq!(before["repositories"][0]["forge"], serde_json::Value::Null);
+    assert!(
+        !std::fs::read_to_string(user.project_file("atlas"))
+            .unwrap()
+            .contains("forge"),
+        "nothing is active before the user saves"
+    );
+    assert!(user.gh_received().is_empty(), "nothing was asked of GitHub");
+
+    cx.update(|window, cx| window.click("save-project-settings", cx));
+    until(&shell, cx, "the settings are saved", |cx| {
+        page.read_with(cx, |page, _| matches!(page.saved(), Some(Said::Fine(_))))
+    });
+    let after = user
+        .call("project.settings", json!({"name": "atlas"}))
+        .unwrap();
+    assert_eq!(
+        after["repositories"][0]["forge"],
+        json!({"kind": "github", "repository": "acme/atlas"}),
+        "{after}"
+    );
+    let file = std::fs::read_to_string(user.project_file("atlas")).unwrap();
+    assert!(file.contains("forge = {"), "{file}");
+    page.read_with(cx, |page, _| {
+        assert!(!page.repositories()[0].proposed(), "now declared");
+    });
+}
+
+#[gpui_kit::test]
+fn a_project_is_added_from_the_window_checked_again_and_removed(cx: &mut TestAppContext) {
+    let user = user();
+    let folder = user.path("work/beta");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "beta\n").unwrap();
+    user.git(&folder, &["add", "README.md"]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    until(&shell, cx, "the window is read", |cx| {
+        cx.update(|window, _| window.try_find("add-first-project").is_some())
+    });
+
+    cx.update(|window, cx| window.click("add-first-project", cx));
+    settle(cx);
+    let form = shell.read_with(cx, |s, _| s.add_project_form().clone());
+    assert!(form.read_with(cx, |f, _| f.is_open()));
+    cx.simulate_input(folder.to_str().unwrap());
+    cx.simulate_keystrokes("enter");
+    until(&shell, cx, "the repositories are detected", |cx| {
+        form.read_with(cx, |f, _| f.detected().is_some())
+    });
+    let detected = form.read_with(cx, |f, _| f.detected().cloned().unwrap());
+    assert_eq!(detected.name, "beta");
+    assert_eq!(detected.repositories, vec![".".to_owned()]);
+    assert!(
+        user.call("project.list", json!({})).unwrap()["projects"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "nothing is registered before Add"
+    );
+    settle(cx);
+    cx.update(|window, _| assert!(window.find("add-project-detected").visible()));
+
+    cx.update(|window, cx| window.click("add-project-next", cx));
+    until(&shell, cx, "its settings open", |cx| {
+        settings_of(&shell, cx).is_some_and(|page| {
+            page.read_with(cx, |page, _| page.name() == "beta" && page.is_loaded())
+        })
+    });
+    assert!(!form.read_with(cx, |f, _| f.is_open()));
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(Selection::ProjectSettings("beta".into()))
+    );
+    let page = settings_of(&shell, cx).unwrap();
+    settle(cx);
+
+    cx.update(|window, cx| window.click("check-project", cx));
+    until(&shell, cx, "the project is checked", |cx| {
+        page.read_with(cx, |page, _| page.checked().is_some())
+    });
+    assert!(
+        matches!(
+            page.read_with(cx, |p, _| p.checked().cloned()),
+            Some(Said::Fine(_))
+        ),
+        "the folder holds the project's repositories"
+    );
+
+    settle(cx);
+    cx.update(|window, cx| window.click("remove-project", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("confirm-remove-project", cx));
+    until(&shell, cx, "the project is gone", |cx| {
+        shell.read_with(cx, |s, _| {
+            !matches!(s.selected(), Some(Selection::ProjectSettings(_)))
+        })
+    });
+    assert!(
+        user.call("project.list", json!({})).unwrap()["projects"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        folder.join("README.md").exists(),
+        "its folder is left as it is"
+    );
+}
+
+#[gpui_kit::test]
+fn the_new_workspace_modal_previews_the_ticket_as_it_is_typed(cx: &mut TestAppContext) {
+    let user = user().with_fake_gh();
+    let folder = project(&user, "atlas");
+    user.git(
+        &folder,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@github.com:acme/atlas.git",
+        ],
+    );
+    user.call(
+        "project.set_settings",
+        json!({"name": "atlas",
+            "repositories": [{"path": ".", "forge": {"kind": "github", "repository": "acme/atlas"}}],
+            "tracker": {"kind": "github", "repository": "."}}),
+    )
+    .unwrap();
+    user.gh_script(json!({"issues": {"acme/atlas": {"12": {
+        "number": 12, "title": "The login fails", "state": "OPEN", "body": "",
+        "url": "https://github.com/acme/atlas/issues/12", "comments": []
+    }}}}));
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let form = shell
+        .read_with(cx, |s, _| s.new_workspace_of("atlas").cloned())
+        .unwrap();
+    cx.update(|window, cx| window.click("new-workspace", cx));
+    settle(cx);
+
+    cx.update(|window, cx| window.click("new-workspace-modal-ticket", cx));
+    cx.simulate_input("12");
+    assert_eq!(
+        form.read_with(cx, |f, _| f.preview().cloned()),
+        Some(("12".to_owned(), None)),
+        "read once typing rests"
+    );
+    cx.executor().advance_clock(Duration::from_millis(400));
+    until(&shell, cx, "the ticket is previewed", |cx| {
+        form.read_with(cx, |f, _| {
+            f.preview().is_some_and(|(_, read)| read.is_some())
+        })
+    });
+    let read = form
+        .read_with(cx, |f, _| f.preview().cloned())
+        .unwrap()
+        .1
+        .unwrap()
+        .unwrap();
+    assert_eq!(read["title"], "The login fails", "{read}");
+    assert_eq!(read["tracker_said"], "GitHub issues of .");
+    settle(cx);
+    cx.update(|window, _| assert!(window.find("new-workspace-ticket-preview").visible()));
+
+    // A key of another tracker says why it is not taken, before anything is created.
+    cx.simulate_keystrokes("backspace backspace");
+    cx.simulate_input("ABC-1");
+    cx.executor().advance_clock(Duration::from_millis(400));
+    until(&shell, cx, "the other key is previewed", |cx| {
+        form.read_with(cx, |f, _| {
+            f.preview()
+                .is_some_and(|(ticket, read)| ticket == "ABC-1" && read.is_some())
+        })
+    });
+    let other = form
+        .read_with(cx, |f, _| f.preview().cloned())
+        .unwrap()
+        .1
+        .unwrap()
+        .unwrap();
+    assert!(
+        other["problem"]
+            .as_str()
+            .unwrap()
+            .starts_with("ABC-1 is a Jira key"),
+        "{other}"
+    );
+}
+
+#[gpui_kit::test]
+fn the_new_workspace_modal_takes_the_chosen_repositories_branch_and_offline(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let folder = user.path("work/duo");
+    for repository in ["api", "web"] {
+        let dir = folder.join(repository);
+        user.git_init(&dir);
+        std::fs::write(dir.join("README.md"), format!("{repository}\n")).unwrap();
+        user.git(&dir, &["add", "."]);
+        user.git(&dir, &["commit", "--quiet", "-m", "start"]);
+        let remote = user.path(&format!("remotes/{repository}.git"));
+        user.git(
+            &user.path(""),
+            &["init", "--quiet", "--bare", remote.to_str().unwrap()],
+        );
+        user.git(&dir, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        user.git(&dir, &["push", "--quiet", "origin", "main"]);
+    }
+    user.call("project.add", json!({"folder": folder, "name": "duo"}))
+        .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "duo", cx);
+    let form = shell
+        .read_with(cx, |s, _| s.new_workspace_of("duo").cloned())
+        .unwrap();
+    assert_eq!(
+        form.read_with(cx, |f, _| f.chosen().to_vec()),
+        vec!["api".to_owned(), "web".to_owned()],
+        "every repository by default"
+    );
+    cx.update(|window, cx| window.click("new-workspace", cx));
+    settle(cx);
+
+    cx.simulate_input("login");
+    cx.update(|window, cx| window.click("new-workspace-take-web", cx));
+    cx.update(|window, cx| window.click("new-workspace-modal-branch", cx));
+    cx.simulate_input("feature/sign-in");
+    cx.update(|window, cx| window.click("new-workspace-offline", cx));
+    assert_eq!(
+        form.read_with(cx, |f, _| f.chosen().to_vec()),
+        vec!["api".to_owned()]
+    );
+    assert!(form.read_with(cx, |f, _| f.offline()));
+
+    cx.update(|window, cx| window.click("create-workspace", cx));
+    until(&shell, cx, "the workspace is made", |cx| {
+        !form.read_with(cx, |f, _| f.is_open() || f.creating().is_some())
+    });
+    let shown = user
+        .call("workspace.show", json!({"project": "duo", "name": "login"}))
+        .unwrap();
+    assert_eq!(shown["branch"], "feature/sign-in", "{shown}");
+    let taken: Vec<&str> = shown["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().or(r["path"].as_str()).unwrap())
+        .collect();
+    assert_eq!(taken, ["api"], "{shown}");
+    assert!(
+        !form.read_with(cx, |f, _| f.offline()),
+        "the form starts afresh"
     );
 }

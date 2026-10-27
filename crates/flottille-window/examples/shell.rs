@@ -3,7 +3,7 @@
 //! compositor.
 //!
 //! ```text
-//! cargo run -p flottille-window --example shell [--features frames] -- [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace] [--add-procedure] [--edit-procedure <name>] [--run <workspace>] [--add-reference] [--size <w>x<h>]
+//! cargo run -p flottille-window --example shell [--features frames] -- [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace] [--add-procedure] [--edit-procedure <name>] [--run <workspace>] [--add-reference] [--project-settings <project>] [--size <w>x<h>]
 //! ```
 //!
 //! `--session` opens a session's page (`--agent` then reads one of its sub-agents), `--tree` the
@@ -11,7 +11,7 @@
 //! three columns), `--settings` the settings page, `--menu` one of the project page composer's
 //! pickers, `--new-workspace` the project page's new-workspace modal, `--add-procedure`,
 //! `--edit-procedure`, `--run` and `--add-reference` the modals of the procedures and references
-//! sections, `--size` the window's size. The daemon is found on
+//! sections, `--project-settings` a project's settings page, `--size` the window's size. The daemon is found on
 //! `$XDG_RUNTIME_DIR/flottille/daemon.sock`; it is not started.
 
 use std::os::unix::net::UnixStream;
@@ -28,7 +28,7 @@ use gpui_kit::{AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
 fn main() {
     let (mut session, mut agent) = (None, None);
     let (mut tree, mut rail, mut new_workspace, mut settings) = (false, false, false, false);
-    let mut menu = None;
+    let (mut menu, mut project_settings) = (None, None);
     let (mut add_procedure, mut add_reference) = (false, false);
     let (mut edit_procedure, mut run) = (None, None);
     let mut dimensions = (1280., 800.);
@@ -41,6 +41,7 @@ fn main() {
             "--rail" => rail = true,
             "--new-workspace" => new_workspace = true,
             "--settings" => settings = true,
+            "--project-settings" => project_settings = Some(args.next().expect("a project")),
             "--add-procedure" => add_procedure = true,
             "--add-reference" => add_reference = true,
             "--edit-procedure" => edit_procedure = Some(args.next().expect("a procedure")),
@@ -90,6 +91,9 @@ fn main() {
                         }
                         if settings {
                             shell.open(Selection::Settings, window, cx);
+                        }
+                        if let Some(name) = project_settings.clone() {
+                            shell.open(Selection::ProjectSettings(name), window, cx);
                         }
                         if tree {
                             shell.open_tree(cx);

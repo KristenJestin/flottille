@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 
 use flottille_ui::{
-    AgentState, Button, Card, Icon, ListRow, Modal, Pill, StateIcon, Status, Type, enter, icon,
-    palette,
+    AgentState, Button, Card, Icon, ListRow, Modal, Pill, StateIcon, Status, Switch, Type, enter,
+    icon, palette,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -169,6 +169,15 @@ impl ProjectPage {
             .collect()
     }
 
+    /// Whether the daemon has answered both lists the page asks for as it opens, with a list or
+    /// with a problem: an answer redraws the page, so the tests wait for it as they do for `chips`.
+    pub fn has_read(&self, cx: &gpui_kit::App) -> bool {
+        let procedures = self.procedures.read(cx);
+        let references = self.references.read(cx);
+        (procedures.procedures().is_some() || procedures.problem().is_some())
+            && (references.references().is_some() || references.problem().is_some())
+    }
+
     pub fn set_narrow(&mut self, narrow: bool, cx: &mut Context<Self>) {
         if self.narrow != narrow {
             self.narrow = narrow;
@@ -286,6 +295,17 @@ impl Render for ProjectPage {
                     .text_color(p.faint)
                     .child(SharedString::from(self.folder.clone())),
             )
+            .child({
+                let (shell, name) = (self.shell.clone(), self.name.clone());
+                Button::quiet("project-settings", "Settings")
+                    .leading(Icon::Settings)
+                    .on_click(move |_, window, cx| {
+                        let selection = Selection::ProjectSettings(name.clone());
+                        shell
+                            .update(cx, |shell, cx| shell.open(selection, window, cx))
+                            .ok();
+                    })
+            })
             .child(
                 Button::secondary("new-workspace", "New workspace")
                     .leading(Icon::Plus)
@@ -870,8 +890,14 @@ impl CardExt for Card {
     }
 }
 
+const OFFLINE: &str = "Offline: fetch nothing, branch from what is here";
+
+/// How long typing rests before the ticket typed is read.
+const PREVIEW_AFTER: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// The last cell of the grid: a dashed "New workspace" card, which opens the new-workspace modal:
-/// its name and a button that creates it.
+/// its name, its ticket (read as it is typed), the repositories it takes, its branch, whether it
+/// fetches, and a button that creates it, as `flottille workspace create` does.
 pub struct NewWorkspace {
     shell: WeakEntity<Shell>,
     project: String,
@@ -880,6 +906,17 @@ pub struct NewWorkspace {
     has_name: bool,
     /// The ticket it is linked to, if one is typed: `#123` or a Jira key.
     ticket: Entity<InputState>,
+    /// The ticket typed and what its tracker said of it; `None` while it is read.
+    preview: Option<(String, Option<Result<serde_json::Value, String>>)>,
+    /// Each ticket typed is read once typing rests: only the last one asked is shown.
+    previews: u64,
+    /// The project's repositories, and the default set a workspace takes (all when none).
+    repositories: Vec<String>,
+    default_set: Option<Vec<String>>,
+    /// The repositories chosen; the project's default set until one is changed.
+    chosen: Vec<String>,
+    branch: Entity<InputState>,
+    offline: bool,
     /// The name asked for, while the daemon makes it.
     creating: Option<String>,
     /// Opened from the composer's picker: the workspace made becomes the composer's place.
@@ -923,8 +960,16 @@ impl NewWorkspace {
             });
             ticket
         });
+        let branch = cx.new(|cx| {
+            crate::project_settings::styled_input("branch (optional): prefix/name", window, cx)
+        });
         let subscriptions = vec![
-            cx.subscribe_in(&ticket, window, |this, _, event, _, cx| {
+            cx.subscribe_in(&ticket, window, |this, _, event, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.create(cx),
+                InputEvent::Change => this.ticket_changed(window, cx),
+                _ => {}
+            }),
+            cx.subscribe_in(&branch, window, |this, _, event, _, cx| {
                 if let InputEvent::PressEnter { .. } = event {
                     this.create(cx)
                 }
@@ -948,6 +993,13 @@ impl NewWorkspace {
             name,
             has_name: false,
             ticket,
+            preview: None,
+            previews: 0,
+            repositories: Vec::new(),
+            default_set: None,
+            chosen: Vec::new(),
+            branch,
+            offline: false,
             creating: None,
             for_composer: false,
             creating_for_composer: false,
@@ -962,6 +1014,102 @@ impl NewWorkspace {
 
     pub fn ticket_field(&self) -> &Entity<InputState> {
         &self.ticket
+    }
+
+    pub fn branch_field(&self) -> &Entity<InputState> {
+        &self.branch
+    }
+
+    /// The ticket typed and what its tracker said of it, once read.
+    pub fn preview(&self) -> Option<&(String, Option<Result<serde_json::Value, String>>)> {
+        self.preview.as_ref()
+    }
+
+    pub fn chosen(&self) -> &[String] {
+        &self.chosen
+    }
+
+    pub fn offline(&self) -> bool {
+        self.offline
+    }
+
+    /// The project's repositories and its default set, as the daemon last listed them.
+    pub fn set_repositories(
+        &mut self,
+        repositories: Vec<String>,
+        default_set: Option<Vec<String>>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.repositories == repositories && self.default_set == default_set {
+            return;
+        }
+        self.chosen = default_set.clone().unwrap_or_else(|| repositories.clone());
+        self.repositories = repositories;
+        self.default_set = default_set;
+        cx.notify();
+    }
+
+    /// Takes the repository, or leaves it out; at least one is taken.
+    pub fn toggle_repository(&mut self, path: &str, cx: &mut Context<Self>) {
+        if let Some(at) = self.chosen.iter().position(|p| p == path) {
+            if self.chosen.len() > 1 {
+                self.chosen.remove(at);
+            }
+        } else {
+            self.chosen.push(path.to_owned());
+            let order = &self.repositories;
+            self.chosen
+                .sort_by_key(|p| order.iter().position(|o| o == p).unwrap_or(usize::MAX));
+        }
+        cx.notify();
+    }
+
+    pub fn toggle_offline(&mut self, cx: &mut Context<Self>) {
+        self.offline = !self.offline;
+        cx.notify();
+    }
+
+    /// The ticket field changed: read what it says once typing rests.
+    fn ticket_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let typed = self.ticket.read(cx).value().trim().to_owned();
+        self.previews += 1;
+        if typed.is_empty() {
+            self.preview = None;
+            cx.notify();
+            return;
+        }
+        self.preview = Some((typed.clone(), None));
+        let asked = self.previews;
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(PREVIEW_AFTER).await;
+            this.update(cx, |this, cx| {
+                if this.previews == asked {
+                    let command = Command::PreviewTicket {
+                        project: this.project.clone(),
+                        ticket: typed,
+                    };
+                    this.shell
+                        .update(cx, |shell, _| shell.perform(command))
+                        .ok();
+                }
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// What the tracker said of a ticket typed; kept only for the ticket the field says now.
+    pub fn previewed(
+        &mut self,
+        ticket: &str,
+        read: Result<serde_json::Value, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.ticket.read(cx).value().trim() == ticket {
+            self.preview = Some((ticket.to_owned(), Some(read)));
+            cx.notify();
+        }
     }
 
     pub fn is_open(&self) -> bool {
@@ -1012,10 +1160,20 @@ impl NewWorkspace {
         self.creating_for_composer = self.for_composer;
         self.error = None;
         let ticket = self.ticket.read(cx).value().trim().to_owned();
+        let branch = self.branch.read(cx).value().trim().to_owned();
+        let default = self
+            .default_set
+            .clone()
+            .unwrap_or_else(|| self.repositories.clone());
         let command = Command::CreateWorkspace {
             project: self.project.clone(),
             name,
             ticket: (!ticket.is_empty()).then_some(ticket),
+            // The daemon's default set unless the user changed it.
+            repositories: (self.chosen != default && !self.chosen.is_empty())
+                .then(|| self.chosen.clone()),
+            branch: (!branch.is_empty()).then_some(branch),
+            offline: self.offline,
         };
         self.shell
             .update(cx, |shell, _| shell.perform(command))
@@ -1042,11 +1200,52 @@ impl NewWorkspace {
                 self.has_name = false;
                 self.ticket
                     .update(cx, |ticket, cx| ticket.set_value("", window, cx));
+                self.branch
+                    .update(cx, |branch, cx| branch.set_value("", window, cx));
+                self.preview = None;
+                self.offline = false;
+                self.chosen = self
+                    .default_set
+                    .clone()
+                    .unwrap_or_else(|| self.repositories.clone());
             }
             Some(why) => self.error = Some(SharedString::from(why.to_owned())),
         }
         cx.notify();
         for_composer
+    }
+}
+
+impl NewWorkspace {
+    /// What the ticket typed is: its tracker and title, or why it cannot be read.
+    fn preview_line(&self, cx: &Context<Self>) -> Option<impl IntoElement> {
+        let p = palette(cx);
+        let (typed, read) = self.preview.as_ref()?;
+        let (text, color) = match read {
+            None => (format!("Reading {typed}…"), p.faint),
+            Some(Err(why)) => (why.clone(), p.fail),
+            Some(Ok(read)) => match read["problem"].as_str() {
+                Some(problem) => (problem.to_owned(), p.fail),
+                None => (
+                    format!(
+                        "{} · {} {}: {}",
+                        read["tracker_said"].as_str().unwrap_or_default(),
+                        read["ticket"].as_str().unwrap_or_default(),
+                        read["state"].as_str().unwrap_or_default(),
+                        read["title"].as_str().unwrap_or_default()
+                    ),
+                    p.mute,
+                ),
+            },
+        };
+        Some(
+            div()
+                .id("new-workspace-ticket-preview")
+                .text_size(px(12.5))
+                .text_color(color)
+                .child(SharedString::from(text))
+                .test_support(),
+        )
     }
 }
 
@@ -1092,7 +1291,7 @@ impl Render for NewWorkspace {
                 div()
                     .text_size(px(12.5))
                     .text_color(p.mute)
-                    .child("A branch of its own in every repository of the project."),
+                    .child("A branch of its own in each repository it takes."),
             )
             .child(
                 div()
@@ -1123,6 +1322,69 @@ impl Render for NewWorkspace {
                     .mono(12.5)
                     .child(Input::new(&self.ticket))
                     .test_support(),
+            )
+            .children(self.preview_line(cx))
+            .when(self.repositories.len() > 1, |d| {
+                d.child(
+                    div()
+                        .id("new-workspace-repositories")
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(6.))
+                        .children(self.repositories.iter().map(|path| {
+                            let taken = self.chosen.contains(path);
+                            let toggled = path.clone();
+                            div()
+                                .id(ElementId::Name(format!("new-workspace-take-{path}").into()))
+                                .h(px(24.))
+                                .px(px(8.))
+                                .rounded(px(6.))
+                                .border_1()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .mono(11.5)
+                                // By shape as well as colour: a tick when it is taken.
+                                .when(taken, |d| {
+                                    d.bg(p.card).border_color(p.focus_line).text_color(p.text)
+                                })
+                                .when(!taken, |d| d.border_color(p.line).text_color(p.faint))
+                                .child(if taken { "✓" } else { "·" })
+                                .child(SharedString::from(repository_label(&self.project, path)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.toggle_repository(&toggled, cx)
+                                }))
+                                .test_support()
+                        })),
+                )
+            })
+            .child(
+                div()
+                    .id("new-workspace-modal-branch")
+                    .h(px(32.))
+                    .px(px(10.))
+                    .rounded(px(8.))
+                    .bg(p.field)
+                    .border_1()
+                    .border_color(p.line2)
+                    .flex()
+                    .items_center()
+                    .mono(12.5)
+                    .child(Input::new(&self.branch))
+                    .test_support(),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .text_size(px(12.5))
+                    .text_color(p.mute)
+                    .child(
+                        Switch::new("new-workspace-offline", self.offline, OFFLINE)
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_offline(cx))),
+                    )
+                    .child(OFFLINE),
             )
             .when_some(self.error.clone(), |d, error| {
                 d.child(

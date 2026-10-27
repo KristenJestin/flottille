@@ -60,6 +60,40 @@ pub enum Command {
         name: String,
         /// The ticket to link it to: `#123` or a Jira key.
         ticket: Option<String>,
+        /// The repositories it takes; the project's default set when none.
+        repositories: Option<Vec<String>>,
+        /// Its branch; `<prefix>/<name>` when none.
+        branch: Option<String>,
+        /// Fetch nothing: base the branches on the tracking refs as they are.
+        offline: bool,
+    },
+    /// What the project's settings show: its declared forges and tracker, and what each
+    /// repository's remote proposes.
+    ReadProjectSettings(String),
+    /// Declares the project's forges and tracker (`project.set_settings`'s parameters).
+    SaveProjectSettings {
+        project: String,
+        settings: Value,
+    },
+    /// Detects the project's repositories again, against its file.
+    CheckProject(String),
+    /// Forgets the project, never its folder.
+    RemoveProject(String),
+    /// What registering a folder would register.
+    DetectProject {
+        folder: String,
+        name: Option<String>,
+    },
+    /// Registers a folder with the repositories shown.
+    AddProject {
+        folder: String,
+        name: Option<String>,
+        repositories: Vec<String>,
+    },
+    /// A ticket of the project's tracker, read as the user types it.
+    PreviewTicket {
+        project: String,
+        ticket: String,
     },
     /// Links a workspace to a ticket, or to none (`ticket` empty of a null).
     LinkTicket {
@@ -216,6 +250,39 @@ pub enum Outcome {
         project: String,
         name: String,
         why: String,
+    },
+    /// The project's settings as the daemon read them, or why not; `saved` when they answer a
+    /// save.
+    ProjectSettings {
+        project: String,
+        read: Result<Value, String>,
+        saved: bool,
+    },
+    /// The project's repositories detected again (`project.check`), or why not.
+    ProjectChecked {
+        project: String,
+        read: Result<Value, String>,
+    },
+    /// The project was forgotten as asked, or the daemon refused, and why.
+    ProjectRemoved {
+        project: String,
+        refused: Option<String>,
+    },
+    /// What a folder would register (`project.detect`), or why it cannot be.
+    ProjectDetected {
+        folder: String,
+        read: Result<Value, String>,
+    },
+    /// A folder was registered (`project.add`'s answer), or why not.
+    ProjectAdded {
+        folder: String,
+        read: Result<Value, String>,
+    },
+    /// A ticket as the project's tracker says it (`project.ticket`'s answer), or why not.
+    TicketPreview {
+        project: String,
+        ticket: String,
+        read: Result<Value, String>,
     },
     /// A workspace was linked to a ticket (or unlinked) as asked, or the daemon refused, and why.
     TicketLinked {
@@ -464,16 +531,91 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             project,
             name,
             ticket,
+            repositories,
+            branch,
+            offline,
         } => workspace_outcome(
             ask_alone(
                 connect,
                 "workspace.create",
-                json!({"project": project, "name": name, "ticket": ticket}),
+                json!({"project": project, "name": name, "ticket": ticket,
+                    "repositories": repositories, "branch": branch, "offline": offline}),
                 bounds.slow,
             ),
             project,
             name,
         ),
+        Command::ReadProjectSettings(project) => Outcome::ProjectSettings {
+            read: answer(ask_alone(
+                connect,
+                "project.settings",
+                json!({"name": project}),
+                bounds.quick,
+            )),
+            project,
+            saved: false,
+        },
+        Command::SaveProjectSettings { project, settings } => Outcome::ProjectSettings {
+            read: answer(ask_alone(
+                connect,
+                "project.set_settings",
+                settings,
+                bounds.quick,
+            )),
+            project,
+            saved: true,
+        },
+        Command::CheckProject(project) => Outcome::ProjectChecked {
+            read: answer(ask_alone(
+                connect,
+                "project.check",
+                json!({"name": project}),
+                bounds.quick,
+            )),
+            project,
+        },
+        Command::RemoveProject(project) => Outcome::ProjectRemoved {
+            refused: answer(ask_alone(
+                connect,
+                "project.remove",
+                json!({"name": project}),
+                bounds.quick,
+            ))
+            .err(),
+            project,
+        },
+        Command::DetectProject { folder, name } => Outcome::ProjectDetected {
+            read: answer(ask_alone(
+                connect,
+                "project.detect",
+                json!({"folder": folder, "name": name}),
+                bounds.quick,
+            )),
+            folder,
+        },
+        Command::AddProject {
+            folder,
+            name,
+            repositories,
+        } => Outcome::ProjectAdded {
+            read: answer(ask_alone(
+                connect,
+                "project.add",
+                json!({"folder": folder, "name": name, "repositories": repositories}),
+                bounds.quick,
+            )),
+            folder,
+        },
+        Command::PreviewTicket { project, ticket } => Outcome::TicketPreview {
+            read: answer(ask_alone(
+                connect,
+                "project.ticket",
+                json!({"project": project, "ticket": ticket}),
+                bounds.quick,
+            )),
+            project,
+            ticket,
+        },
         Command::LinkTicket {
             project,
             name,
@@ -766,6 +908,14 @@ pub(crate) fn read_providers(
             listed.as_ref().map_err(Clone::clone),
         )),
         Err(_) => None,
+    }
+}
+
+/// The daemon's answer, or its sentence (or the window's) when there is none.
+fn answer(asked: Result<Result<Value, String>, String>) -> Result<Value, String> {
+    match asked {
+        Ok(answer) => answer,
+        Err(why) => Err(why),
     }
 }
 

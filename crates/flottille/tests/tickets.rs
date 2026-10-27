@@ -51,6 +51,28 @@ fn fixture(user: &User) -> PathBuf {
     folder
 }
 
+/// Declares `api`'s forge, GitHub, and the project's tracker (`null` for none), as the user does
+/// in the project's settings.
+fn track(user: &User, tracker: Value) {
+    user.call(
+        "project.set_settings",
+        json!({"name": "app",
+            "repositories": [{"path": "api", "forge": {"kind": "github", "repository": "acme/api"}}],
+            "tracker": tracker}),
+    )
+    .unwrap();
+}
+
+/// The issues of `api`.
+fn github_issues() -> Value {
+    json!({"kind": "github", "repository": "api"})
+}
+
+/// Jira on the site the fake `acli` is signed in to, its project ABC.
+fn jira_abc() -> Value {
+    json!({"kind": "jira", "site": "example.atlassian.net", "projects": ["ABC"]})
+}
+
 /// What `gh issue view --json` answers for an issue of `acme/api`.
 fn issue(number: u64, title: &str) -> Value {
     json!({
@@ -151,6 +173,7 @@ fn agent_in(user: &User, workspace: Option<&str>) -> Mcp {
 fn a_workspace_is_linked_to_a_ticket_at_its_creation_and_later_and_unlinked() {
     let user = User::new();
     fixture(&user);
+    track(&user, github_issues());
 
     // At its creation, from the command line, the number typed with or without its hash.
     let output = user.run(&[
@@ -170,22 +193,7 @@ fn a_workspace_is_linked_to_a_ticket_at_its_creation_and_later_and_unlinked() {
     );
     let made: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(made["ticket"], "#123");
-
-    // Later, a Jira key in lower case, kept in upper case.
     assert_eq!(made["name"], "second");
-    let linked = link(&user, Some("abc-7")).unwrap();
-    assert_eq!(linked["ticket"], "ABC-7");
-    let listed = user.call("workspace.list", json!({})).unwrap();
-    let tickets: Vec<(&str, &Value)> = listed["workspaces"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|w| (w["name"].as_str().unwrap(), &w["ticket"]))
-        .collect();
-    assert_eq!(
-        tickets,
-        [("login", &json!("ABC-7")), ("second", &json!("#123"))]
-    );
 
     // From the command line, then unlinked.
     let output = user.run(&["workspace", "ticket", "app", "login", "#9"]);
@@ -205,6 +213,22 @@ fn a_workspace_is_linked_to_a_ticket_at_its_creation_and_later_and_unlinked() {
             .run(&["workspace", "ticket", "app", "login"])
             .status
             .success()
+    );
+
+    // Later, on Jira, a key in lower case, kept in upper case.
+    track(&user, jira_abc());
+    let linked = link(&user, Some("abc-7")).unwrap();
+    assert_eq!(linked["ticket"], "ABC-7");
+    let listed = user.call("workspace.list", json!({})).unwrap();
+    let tickets: Vec<(&str, &Value)> = listed["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| (w["name"].as_str().unwrap(), &w["ticket"]))
+        .collect();
+    assert_eq!(
+        tickets,
+        [("login", &json!("ABC-7")), ("second", &json!("#123"))]
     );
 
     // Each change is an event.
@@ -229,6 +253,7 @@ fn a_workspace_is_linked_to_a_ticket_at_its_creation_and_later_and_unlinked() {
 fn a_reference_that_is_no_ticket_is_refused_at_creation_and_when_linking() {
     let user = User::new();
     fixture(&user);
+    track(&user, github_issues());
 
     for bad in ["", "--web", "ABC", "#0", "ABC-1 --web", "x"] {
         let error = link(&user, Some(bad)).unwrap_err();
@@ -254,9 +279,122 @@ fn a_reference_that_is_no_ticket_is_refused_at_creation_and_when_linking() {
 }
 
 #[test]
+fn a_ticket_of_another_tracker_or_jira_project_is_refused_and_none_without_a_tracker() {
+    let user = User::new().with_fake_gh().with_fake_acli();
+    fixture(&user);
+
+    // No tracker declared: nothing is linked, nothing is read.
+    let error = link(&user, Some("#12")).unwrap_err();
+    assert_eq!(error.0, "refused");
+    assert!(
+        error.1.starts_with("no tracker set for this project"),
+        "{error:?}"
+    );
+
+    track(&user, jira_abc());
+    let error = link(&user, Some("#4")).unwrap_err();
+    assert!(error.1.starts_with("#4 is a GitHub issue"), "{error:?}");
+    let error = link(&user, Some("XYZ-1")).unwrap_err();
+    assert!(
+        error.1.starts_with("XYZ-1 is not in a Jira project"),
+        "{error:?}"
+    );
+    let error = user
+        .call(
+            "workspace.create",
+            json!({"project": "app", "name": "other", "offline": true, "ticket": "XYZ-1"}),
+        )
+        .unwrap_err();
+    assert!(
+        error.1.starts_with("XYZ-1 is not in a Jira project"),
+        "{error:?}"
+    );
+
+    track(&user, github_issues());
+    let error = link(&user, Some("ABC-1")).unwrap_err();
+    assert!(error.1.starts_with("ABC-1 is a Jira key"), "{error:?}");
+    assert!(user.gh_received().is_empty(), "{:?}", user.gh_received());
+    assert!(
+        user.acli_received().is_empty(),
+        "{:?}",
+        user.acli_received()
+    );
+}
+
+#[test]
+fn a_jira_site_other_than_acli_s_sign_in_is_refused_with_its_reason() {
+    let user = User::new().with_fake_acli();
+    fixture(&user);
+    jira(
+        &user,
+        json!({"ABC-123": work_item("ABC-123", "Add the login page")}),
+    );
+    track(
+        &user,
+        json!({"kind": "jira", "site": "other.atlassian.net", "projects": ["ABC"]}),
+    );
+
+    let read = link(&user, Some("ABC-123")).unwrap();
+
+    let problem = read["problem"].as_str().expect("a problem is said");
+    assert!(
+        problem.starts_with(
+            "acli is signed in to example.atlassian.net, and this project's tracker is Jira on \
+             other.atlassian.net: nothing was read"
+        ),
+        "{problem}"
+    );
+    assert_eq!(read["title"], Value::Null);
+    // The work item is never asked of the wrong site.
+    assert_eq!(calls(user.acli_received()), ["jira auth status"]);
+}
+
+#[test]
+fn the_new_workspace_form_s_preview_reads_a_ticket_before_any_workspace_has_it() {
+    let user = User::new().with_fake_gh();
+    fixture(&user);
+    issues(&user, json!({"12": issue(12, "The login fails")}));
+
+    let none = user
+        .call("project.ticket", json!({"project": "app", "ticket": "#12"}))
+        .unwrap();
+    track(&user, github_issues());
+    let read = user
+        .call("project.ticket", json!({"project": "app", "ticket": "12"}))
+        .unwrap();
+    let other = user
+        .call(
+            "project.ticket",
+            json!({"project": "app", "ticket": "ABC-1"}),
+        )
+        .unwrap();
+
+    assert!(
+        none["problem"]
+            .as_str()
+            .unwrap()
+            .starts_with("no tracker set for this project"),
+        "{none}"
+    );
+    assert_eq!(read["problem"], Value::Null, "{read}");
+    assert_eq!(read["ticket"], "#12");
+    assert_eq!(read["tracker"], "github");
+    assert_eq!(read["tracker_said"], "GitHub issues of api");
+    assert_eq!(read["title"], "The login fails");
+    assert!(
+        other["problem"]
+            .as_str()
+            .unwrap()
+            .starts_with("ABC-1 is a Jira key"),
+        "{other}"
+    );
+}
+
+#[test]
 fn a_github_issue_is_read_with_its_title_state_description_and_comments() {
     let user = User::new().with_fake_gh();
     fixture(&user);
+    track(&user, github_issues());
     issues(&user, json!({"12": issue(12, "The login fails")}));
     link(&user, Some("#12")).unwrap();
     // Linking answers with the ticket read: that is one read, the next one is another.
@@ -266,7 +404,7 @@ fn a_github_issue_is_read_with_its_title_state_description_and_comments() {
 
     assert_eq!(read["problem"], Value::Null, "{read}");
     assert_eq!(read["tracker"], "github");
-    // The first repository on GitHub: `lib`, first of the workspace, is on another host.
+    // The tracker's repository, as its forge is declared.
     assert_eq!(read["repository"], "acme/api");
     assert_eq!(read["title"], "The login fails");
     assert_eq!(read["state"], "open");
@@ -287,6 +425,7 @@ fn a_github_issue_is_read_with_its_title_state_description_and_comments() {
 fn a_jira_work_item_is_read_through_acli_and_its_description_comes_as_plain_text() {
     let user = User::new().with_fake_acli();
     fixture(&user);
+    track(&user, jira_abc());
     jira(
         &user,
         json!({"ABC-123": work_item("ABC-123", "Add the login page")}),
@@ -321,6 +460,7 @@ fn a_jira_work_item_is_read_through_acli_and_its_description_comes_as_plain_text
 fn workspace_show_holds_the_ticket_in_its_text_and_its_json() {
     let user = User::new().with_fake_gh();
     fixture(&user);
+    track(&user, github_issues());
     issues(&user, json!({"12": issue(12, "The login fails")}));
     link(&user, Some("#12")).unwrap();
 
@@ -362,6 +502,7 @@ fn what_a_tracker_says_is_masked_like_any_output() {
     let mut item = work_item("ABC-1", "Jira");
     item["fields"]["description"] = document(&format!("use {token} here"));
     jira(&user, json!({"ABC-1": item}));
+    track(&user, github_issues());
     let mcp = {
         link(&user, Some("#12")).unwrap();
         agent_in(&user, Some("login"))
@@ -369,6 +510,7 @@ fn what_a_tracker_says_is_masked_like_any_output() {
 
     let github = ticket(&user);
     let tool = mcp.call("ticket_read", json!({}));
+    track(&user, jira_abc());
     link(&user, Some("ABC-1")).unwrap();
     let jira = ticket(&user);
 
@@ -391,8 +533,10 @@ fn a_missing_or_signed_out_cli_is_said_with_what_to_do_and_nothing_else_breaks()
     let user = user.with_env("PATH", path.to_str().unwrap());
     fixture(&user);
 
+    track(&user, github_issues());
     link(&user, Some("#12")).unwrap();
     let github = ticket(&user);
+    track(&user, jira_abc());
     link(&user, Some("ABC-1")).unwrap();
     let jira = ticket(&user);
 
@@ -424,7 +568,9 @@ fn a_missing_or_signed_out_cli_is_said_with_what_to_do_and_nothing_else_breaks()
     fixture(&user);
     user.acli_script(json!({"signed_in": false}));
     user.gh_script(json!({"signed_in": false}));
+    track(&user, jira_abc());
     let jira = link(&user, Some("ABC-1")).unwrap();
+    track(&user, github_issues());
     let github = link(&user, Some("#12")).unwrap();
     assert!(
         jira["problem"]
@@ -446,14 +592,16 @@ fn a_missing_or_signed_out_cli_is_said_with_what_to_do_and_nothing_else_breaks()
 }
 
 #[test]
-fn a_ticket_the_tracker_does_not_know_or_a_workspace_with_no_github_repository_says_so() {
+fn a_ticket_the_tracker_does_not_know_or_a_tracker_whose_remote_moved_says_so() {
     let user = User::new().with_fake_gh().with_fake_acli();
     let folder = fixture(&user);
     issues(&user, json!({}));
     jira(&user, json!({}));
 
+    track(&user, github_issues());
     link(&user, Some("#99")).unwrap();
     let github = ticket(&user);
+    track(&user, jira_abc());
     link(&user, Some("ABC-99")).unwrap();
     let jira = ticket(&user);
     assert!(
@@ -468,7 +616,9 @@ fn a_ticket_the_tracker_does_not_know_or_a_workspace_with_no_github_repository_s
         "{jira}"
     );
 
-    // No repository of the workspace on GitHub: no issue to read.
+    // The tracker's repository whose remote leads elsewhere now: refused, nothing asked.
+    track(&user, github_issues());
+    link(&user, Some("#1")).unwrap();
     user.git(
         &folder.join("api"),
         &[
@@ -478,12 +628,16 @@ fn a_ticket_the_tracker_does_not_know_or_a_workspace_with_no_github_repository_s
             "https://git.example.com/a/api.git",
         ],
     );
-    link(&user, Some("#1")).unwrap();
-    let none = ticket(&user);
+    let calls = user.gh_received().len();
+    let moved = ticket(&user);
     assert!(
-        none["problem"].as_str().unwrap().contains("is on GitHub"),
-        "{none}"
+        moved["problem"]
+            .as_str()
+            .unwrap()
+            .starts_with("refused: api is declared on GitHub acme/api"),
+        "{moved}"
     );
+    assert_eq!(user.gh_received().len(), calls);
 }
 
 #[test]
@@ -498,6 +652,7 @@ fn ticket_read_returns_the_workspace_s_ticket_or_another_of_its_tracker_and_neve
         &user,
         json!({"ABC-123": work_item("ABC-123", "Add the login page")}),
     );
+    track(&user, github_issues());
     link(&user, Some("#12")).unwrap();
     let mcp = agent_in(&user, Some("login"));
 
@@ -529,7 +684,7 @@ fn ticket_read_returns_the_workspace_s_ticket_or_another_of_its_tracker_and_neve
     assert!(refused.error);
     assert!(
         refused.text.starts_with(
-            "refused: ABC-123 is a Jira ticket, and this workspace's tracker is GitHub issues"
+            "refused: ABC-123 is a Jira key, and this project's tracker is GitHub issues of api"
         ),
         "{}",
         refused.text
@@ -542,7 +697,8 @@ fn ticket_read_returns_the_workspace_s_ticket_or_another_of_its_tracker_and_neve
         refused.text
     );
 
-    // A Jira workspace reads Jira, and not GitHub.
+    // A project on Jira reads Jira, and not GitHub.
+    track(&user, jira_abc());
     link(&user, Some("ABC-123")).unwrap();
     let jira_agent = agent_in(&user, Some("login"));
     let own = jira_agent.call("ticket_read", json!({}));
@@ -559,7 +715,7 @@ fn ticket_read_returns_the_workspace_s_ticket_or_another_of_its_tracker_and_neve
     assert!(refused.error, "{}", refused.text);
     assert_eq!(user.gh_received().len(), github_calls);
 
-    // No ticket linked: nothing to read by default, and GitHub's issues of its repositories by key.
+    // No ticket linked: nothing to read by default, and the tracker's tickets by key.
     link(&user, None).unwrap();
     let none = agent_in(&user, Some("login"));
     let refused = none.call("ticket_read", json!({}));
@@ -569,8 +725,8 @@ fn ticket_read_returns_the_workspace_s_ticket_or_another_of_its_tracker_and_neve
         "{}",
         refused.text
     );
-    assert!(!none.call("ticket_read", json!({"ticket": "#13"})).error);
-    assert!(none.call("ticket_read", json!({"ticket": "ABC-123"})).error);
+    assert!(!none.call("ticket_read", json!({"ticket": "ABC-123"})).error);
+    assert!(none.call("ticket_read", json!({"ticket": "#13"})).error);
 
     // Read only: every call either CLI got is one of the reads, and the gate held nothing.
     for call in calls(user.acli_received()) {
