@@ -566,3 +566,147 @@ fn the_held_tail_of_a_reply_is_kept_when_the_agent_ends() {
     });
     assert_eq!(said_so_far, ["last words", "ok"]);
 }
+
+// The leftovers of the streamed masking (#66).
+
+/// A reply of id `m1` that tells the secret over two pieces, a tool the daemon serves landing
+/// between them, as an MCP call does when it comes before the session updates around it.
+fn a_tool_served_between_the_pieces() -> Value {
+    json!([
+        {"say": "I will look at the files now, then the token is s3cr3t-", "message": "m1"},
+        {"mcp": {"tool": "fs_list", "arguments": {}, "quiet": true}},
+        {"say": "token-value, keep it quiet", "message": "m1"}
+    ])
+}
+
+const THE_REPLY: &str = "I will look at the files now, then the token is [masked], keep it quiet";
+
+#[test]
+fn a_tool_served_between_two_pieces_of_a_reply_does_not_split_it_in_agent_read() {
+    let user = user(json!([{"when": "go", "do": a_tool_served_between_the_pieces()}]));
+    let (id, after) = run(&user, "go");
+    turn_ended(&user, &id, after, 1);
+
+    let lines = lines(&read(&user, &id, 0));
+
+    let text = lines.join("\n");
+    assert!(!text.contains("s3cr3t-"), "{text}");
+    assert_eq!(said(&lines), [THE_REPLY], "{text}");
+    // The reply is led by its first piece; the tool, served after it began, comes after it.
+    let reply = lines.iter().position(|l| l.contains(" said: ")).unwrap();
+    let tool = lines.iter().position(|l| l.contains("fs_list (")).unwrap();
+    assert!(reply < tool, "{text}");
+    assert!(number(&lines[reply]) < number(&lines[tool]), "{text}");
+}
+
+#[test]
+fn a_tool_served_between_two_pieces_of_a_reply_does_not_split_it_in_agent_status() {
+    let user = user(json!([{"when": "go", "do": a_tool_served_between_the_pieces()}]));
+    let (id, after) = run(&user, "go");
+    turn_ended(&user, &id, after, 1);
+
+    let status = user.call("agent.status", json!({"agent": id})).unwrap();
+
+    assert_eq!(status["messages"], json!([THE_REPLY]), "{status}");
+}
+
+#[test]
+fn a_page_after_a_reply_split_by_a_tool_served_reads_neither_again() {
+    let user = user(json!([{"when": "go", "do": a_tool_served_between_the_pieces()}]));
+    let (id, after) = run(&user, "go");
+    turn_ended(&user, &id, after, 1);
+    let first = read(&user, &id, 0);
+
+    let again = read(&user, &id, first["after"].as_u64().unwrap());
+
+    let text = lines(&again).join("\n");
+    assert!(
+        !text.contains(" said: ") && !text.contains("fs_list ("),
+        "{text}"
+    );
+}
+
+/// The pieces of `name` stored for the agent, in order.
+fn stored(user: &User, agent: &str, name: &str) -> Vec<String> {
+    let store =
+        flottille_core::store::Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    store
+        .agent_events(agent, 0, 200)
+        .unwrap()
+        .iter()
+        .filter(|e| e.name == name)
+        .map(|e| e.data["text"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_mask_at_the_line_break_of_a_long_reply_is_never_cut_in_two() {
+    // Masked, the token starts 5 characters before the 2,000th, and enough follows it for it to
+    // be settled with what is around it.
+    let filler = "word ".repeat(399);
+    let rest = " and more".repeat(20);
+    let user = user(json!([{"when": "go", "do": [
+        {"say": format!("{filler}{SECRET}{rest}")}
+    ]}]));
+    let (id, after) = run(&user, "go");
+    turn_ended(&user, &id, after, 1);
+
+    let pieces = stored(&user, &id, "agent.message");
+    let said = said(&lines(&read(&user, &id, 0)));
+
+    let whole = format!("{filler}[masked]{rest}");
+    assert_eq!(pieces.concat(), whole);
+    assert_eq!(said.concat(), whole);
+    for piece in pieces.iter().chain(&said) {
+        assert!(
+            !piece.replace("[masked]", "").contains(['[', ']']),
+            "{pieces:?} {said:?}"
+        );
+    }
+}
+
+#[test]
+fn a_token_streamed_over_three_thoughts_never_shows_in_clear_in_the_store() {
+    let user = user(json!([{"when": "go", "do": [
+        {"think": "the token is s3cr3t-"},
+        {"think": "token-"},
+        {"think": "value, keep it quiet"},
+        {"say": "done"}
+    ]}]));
+    let (id, after) = run(&user, "go");
+    turn_ended(&user, &id, after, 1);
+
+    let thought = stored(&user, &id, "agent.thought");
+
+    let text = thought.concat();
+    assert!(
+        !text.contains("s3cr3t-") && !text.contains("token-"),
+        "{thought:?}"
+    );
+    assert_eq!(text, "the token is [masked], keep it quiet");
+}
+
+#[test]
+fn a_token_streamed_over_three_pieces_of_a_user_message_never_shows_in_clear_in_the_store() {
+    let echo = |text: &str| {
+        json!({"update": {"sessionUpdate": "user_message_chunk",
+            "content": {"type": "text", "text": text}}})
+    };
+    let user = user(json!([{"when": "go", "do": [
+        echo("the token is s3cr3t-"),
+        echo("token-"),
+        echo("value, keep it quiet"),
+        {"say": "done"}
+    ]}]));
+    let (id, after) = run(&user, "go");
+    turn_ended(&user, &id, after, 1);
+
+    let echoed = stored(&user, &id, "agent.user_message");
+
+    let text = echoed.concat();
+    assert!(
+        !text.contains("s3cr3t-") && !text.contains("token-"),
+        "{echoed:?}"
+    );
+    assert_eq!(text, "the token is [masked], keep it quiet");
+}

@@ -10,6 +10,7 @@
 //!
 //! The root agent has no name on screen: where a text names it, it is "the conversation".
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::FRAC_PI_2;
 use std::path::PathBuf;
@@ -17,9 +18,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use flottille_ui::motion::{Motion, PANEL};
 use flottille_ui::{
-    AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Menu, Pill, PulsingLabel, Side,
-    StateIcon, Status, Type, enter, icon, palette, section_label,
+    AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Menu, Palette, Pill, PulsingLabel,
+    Side, StateIcon, Status, Type, enter, fold_frame, icon, palette, section_label,
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{InputEditorStyle, InputEvent, TextareaState};
@@ -1382,25 +1384,33 @@ pub struct MarkdownPiece {
 
 impl Render for MarkdownPiece {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = palette(cx);
-        let style = TextViewStyle::default()
-            .with_foreground(if self.muted { p.mute } else { p.text })
-            .with_muted_foreground(p.mute)
-            .with_link(p.acc)
-            .with_selection(p.sel)
-            .with_code_background(p.card2)
-            .with_code_block(gpui_kit::StyleRefinement::default().mono(12.))
-            .with_inline_code(gpui_kit::HighlightStyle {
-                color: Some(p.text),
-                background_color: Some(p.card2),
-                ..Default::default()
-            })
-            .with_border(p.line)
-            .with_dark(p.bg.l < 0.5);
         TextView::new(&self.state)
-            .style(style)
+            .style(markdown_style(&palette(cx), self.muted))
             .image_source(no_image)
     }
+}
+
+/// How a reply's Markdown is drawn, in Flottille's palette alone: a thought (`muted`) in the muted
+/// ink. A table's frame, header and cells are set here too, or the view draws them on its own
+/// theme's surface, white.
+pub fn markdown_style(p: &Palette, muted: bool) -> TextViewStyle {
+    let ink = if muted { p.mute } else { p.text };
+    TextViewStyle::default()
+        .with_foreground(ink)
+        .with_muted_foreground(p.mute)
+        .with_link(p.acc)
+        .with_selection(p.sel)
+        .with_code_background(p.card2)
+        .with_code_block(gpui_kit::StyleRefinement::default().mono(12.))
+        .with_inline_code(gpui_kit::HighlightStyle {
+            color: Some(p.text),
+            background_color: Some(p.card2),
+            ..Default::default()
+        })
+        .with_table(gpui_kit::StyleRefinement::default().bg(p.card))
+        .with_table_cell(gpui_kit::StyleRefinement::default().text_color(ink))
+        .with_border(p.line)
+        .with_dark(p.bg.l < 0.5)
 }
 
 /// Past this many bytes, a reply is cut into another Markdown piece where a block starts.
@@ -2043,6 +2053,13 @@ fn rail_rows(nodes: &[Node], open: &HashSet<String>) -> Vec<RailRow> {
     rows
 }
 
+/// The fold of the children behind one "ended" row.
+struct EndedFold {
+    motion: Motion,
+    /// The children's height, measured while they are drawn.
+    height: Rc<Cell<Pixels>>,
+}
+
 /// The rail: the session's agents, its workspace and its facts.
 pub struct SessionRail {
     page: WeakEntity<SessionPage>,
@@ -2050,6 +2067,8 @@ pub struct SessionRail {
     marks: HashMap<String, (Entity<StateIcon>, Entity<Pill>)>,
     /// The parents whose "ended" row is open: kept while the window shows the session.
     open_ended: HashSet<String>,
+    /// How far each "ended" row's children are unfolded: they stay drawn until a fold ends.
+    ended_folds: HashMap<String, EndedFold>,
     selected: String,
     workspace: Option<String>,
     project: String,
@@ -2082,6 +2101,7 @@ impl SessionRail {
             agents: Vec::new(),
             marks: HashMap::new(),
             open_ended: HashSet::new(),
+            ended_folds: HashMap::new(),
             menu,
             selected: root,
             workspace: opened.place.clone(),
@@ -2097,6 +2117,11 @@ impl SessionRail {
 
     /// What the rail draws of the agents: the ones in their place, and the folded rows.
     pub fn rows(&self) -> Vec<RailRow> {
+        self.rows_among(&self.open_ended)
+    }
+
+    /// [`SessionRail::rows`] with the "ended" rows of `open` unfolded.
+    fn rows_among(&self, open: &HashSet<String>) -> Vec<RailRow> {
         let nodes: Vec<Node> = self
             .agents
             .iter()
@@ -2106,14 +2131,27 @@ impl SessionRail {
                 ended: a.ended,
             })
             .collect();
-        rail_rows(&nodes, &self.open_ended)
+        rail_rows(&nodes, open)
     }
 
-    /// Opens or folds the row that gathers the ended children of `parent`.
+    /// Opens or folds the row that gathers the ended children of `parent`; they come and go over
+    /// [`PANEL`].
     pub fn toggle_ended(&mut self, parent: &str, cx: &mut Context<Self>) {
-        if !self.open_ended.remove(parent) {
+        let open = !self.open_ended.remove(parent);
+        if open {
             self.open_ended.insert(parent.to_owned());
         }
+        let now = cx.background_executor().now();
+        let reduce = cx.reduce_motion();
+        let fold = self
+            .ended_folds
+            .entry(parent.to_owned())
+            .or_insert_with(|| EndedFold {
+                motion: Motion::settled(0.0),
+                height: Rc::new(Cell::new(px(0.))),
+            });
+        fold.motion
+            .animate(if open { 1.0 } else { 0.0 }, PANEL, now, reduce);
         cx.notify();
     }
 
@@ -2159,9 +2197,20 @@ impl SessionRail {
 }
 
 impl Render for SessionRail {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
         let p = palette(cx);
+        // A folding "ended" row still has its children until the fold ends.
+        let now = cx.background_executor().now();
+        let mut drawn_open = self.open_ended.clone();
+        for (parent, fold) in &mut self.ended_folds {
+            if fold.motion.is_running(now) {
+                window.request_animation_frame();
+                drawn_open.insert(parent.clone());
+            } else {
+                fold.motion.settle(now);
+            }
+        }
         let agent_row = |agent: &RailAgent| {
             let (mark, pill) = self.marks[&agent.id].clone();
             let page = self.page.clone();
@@ -2303,21 +2352,59 @@ impl Render for SessionRail {
                         .test_support(),
                 )
         };
-        let rows: Vec<AnyElement> = self
-            .rows()
-            .into_iter()
-            .filter_map(|row| match row {
+        let mut rows: Vec<AnyElement> = Vec::new();
+        let mut listed = self.rows_among(&drawn_open).into_iter();
+        while let Some(row) = listed.next() {
+            match row {
                 RailRow::Agent(id) => {
-                    let agent = self.agents.iter().find(|a| a.id == id)?;
-                    Some(agent_row(agent).into_any_element())
+                    rows.extend(
+                        self.agents
+                            .iter()
+                            .find(|a| a.id == id)
+                            .map(|agent| agent_row(agent).into_any_element()),
+                    );
                 }
                 RailRow::Ended {
                     parent,
                     count,
                     open,
-                } => Some(ended_row(&parent, count, open).into_any_element()),
-            })
-            .collect();
+                } => {
+                    rows.push(
+                        ended_row(&parent, count, self.open_ended.contains(&parent))
+                            .into_any_element(),
+                    );
+                    if !open {
+                        continue;
+                    }
+                    // The children behind the row follow it, and fold with it.
+                    let children: Vec<AnyElement> = listed
+                        .by_ref()
+                        .take(count)
+                        .filter_map(|row| match row {
+                            RailRow::Agent(id) => {
+                                let agent = self.agents.iter().find(|a| a.id == id)?;
+                                Some(agent_row(agent).into_any_element())
+                            }
+                            RailRow::Ended { .. } => None,
+                        })
+                        .collect();
+                    let Some(fold) = self.ended_folds.get(&parent) else {
+                        continue;
+                    };
+                    rows.push(
+                        fold_frame(
+                            ElementId::Name(format!("rail-ended-children-{parent}").into()),
+                            self.open_ended.contains(&parent),
+                            fold.motion.is_running(now),
+                            fold.motion.value(now),
+                            &fold.height,
+                            div().flex().flex_col().children(children),
+                        )
+                        .into_any_element(),
+                    );
+                }
+            }
+        }
         let pull_of = |path: &str| {
             self.place
                 .iter()
@@ -2805,6 +2892,37 @@ impl Render for ReplyFacts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit::StyleRefinement;
+
+    #[test]
+    fn a_markdown_table_takes_its_surface_and_inks_from_the_palette() {
+        let dark = Palette::base();
+        let mut light = Palette::base();
+        (light.bg, light.card, light.card2, light.text, light.mute) = (
+            flottille_ui::color::hex(0xfafafa),
+            flottille_ui::color::hex(0xf0f0f0),
+            flottille_ui::color::hex(0xe6e6e6),
+            flottille_ui::color::hex(0x1c1c1c),
+            flottille_ui::color::hex(0x555555),
+        );
+        for (p, muted) in [(dark, false), (dark, true), (light, false), (light, true)] {
+            let style = markdown_style(&p, muted);
+            let ink = if muted { p.mute } else { p.text };
+            let reference = StyleRefinement::default();
+            assert_eq!(
+                style.table().background,
+                reference.clone().bg(p.card).background,
+                "the frame is the card colour"
+            );
+            assert_eq!(
+                style.table_cell().text.color,
+                reference.text_color(ink).text.color,
+                "the cells' ink is the reply's"
+            );
+            assert_eq!(style.code_background(), p.card2, "the header row");
+            assert_eq!(style.border(), p.line);
+        }
+    }
 
     fn agent(parent: Option<&str>, state: &str) -> TreeAgent {
         TreeAgent {

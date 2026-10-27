@@ -5,6 +5,8 @@
 //! parent is told everything that matters as deliveries (`deliveries`). Stopping an agent stops
 //! its tree, deepest first.
 
+use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::sync::Arc;
 
 use flottille_core::agent::{Agent, AgentState};
@@ -453,19 +455,32 @@ fn message_id(data: &Value) -> Option<&str> {
     data["message_id"].as_str()
 }
 
+/// Whether the daemon records the event itself, beside the agent's recorder (a tool it serves, a
+/// delivery, an approval): it may come between two pieces of a message the agent is still saying.
+fn beside_the_recorder(name: &str) -> bool {
+    matches!(
+        name,
+        "agent.tool_served" | "agent.asked" | "agent.reported" | "agent.stuck"
+    ) || name.starts_with("delivery.")
+        || name.starts_with("approval.")
+}
+
 /// The agent's last messages, each whole (its pieces joined) and masked, the oldest first.
 fn last_messages(daemon: &Daemon, agent: &str) -> Vec<String> {
     let events = daemon
         .read(|store| store.last_agent_events(agent, "agent.message", 200))
         .unwrap_or_default();
-    // Pieces of one message follow each other and share its id, when it has one: a gap in the
-    // numbers or another id starts another message.
+    // Pieces of one message share its id: an event the daemon recorded between them does not
+    // split it. Without an id, the pieces of one follow each other: a gap in the numbers starts
+    // another message.
     let mut messages: Vec<(u64, Option<&str>, String)> = Vec::new();
     for event in events.iter().rev() {
         let text = event.data["text"].as_str().unwrap_or_default();
         let id = message_id(&event.data);
         match messages.last_mut() {
-            Some((last, current, message)) if event.seq == *last + 1 && id == *current => {
+            Some((last, current, message))
+                if id == *current && (id.is_some() || event.seq == *last + 1) =>
+            {
                 message.push_str(text);
                 *last = event.seq;
             }
@@ -502,7 +517,8 @@ pub struct Page {
 /// The agent's conversation after the event `after`, at most `READ_PAGE` characters of it. A
 /// message streamed in pieces is one line, led by the number of its first piece, and masked once
 /// joined; a long one goes on, whole, on the next lines, each of `LINE_CHARS` at most. A piece
-/// that carries another message id starts another line.
+/// that carries another message id starts another line; one that carries the same id joins it
+/// across the events the daemon recorded meanwhile, whose lines follow it.
 pub fn conversation(daemon: &Daemon, agent: &Agent, after: u64) -> flottille_core::Result<Page> {
     let mut page = Page {
         lines: Vec::new(),
@@ -510,28 +526,26 @@ pub fn conversation(daemon: &Daemon, agent: &Agent, after: u64) -> flottille_cor
         more: false,
     };
     let mut size = 0;
-    // A line, unless the page is full: it ends after the event `last`.
-    let mut add = |page: &mut Page, first: u64, last: u64, line: String| {
-        let line = format!("#{first} {line}");
-        if size + line.len() > READ_PAGE && !page.lines.is_empty() {
+    // Lines that go together, unless the page is full: they end after the event `last`.
+    let mut add = |page: &mut Page, lines: Vec<(u64, String)>, last: u64| {
+        let lines: Vec<String> = lines
+            .into_iter()
+            .map(|(first, line)| format!("#{first} {line}"))
+            .collect();
+        let length: usize = lines.iter().map(|line| line.len() + 1).sum();
+        if size + length > READ_PAGE + 1 && !page.lines.is_empty() {
             page.more = true;
             return false;
         }
-        size += line.len() + 1;
-        page.lines.push(line);
+        size += length;
+        page.lines.extend(lines);
         page.after = last;
         true
     };
-    // The message being joined: the numbers of its first and last pieces, its id and its text.
-    let mut said: Option<(u64, u64, Option<String>, String)> = None;
+    let mut said: Option<Said> = None;
+    let mut between = Between::default();
     // A reply is stored masked whole (`agents::Recorder`); masked again for one stored before.
     let env = std::env::vars_os().collect();
-    let said_line = |text: String| {
-        conversation_line(
-            "agent.message",
-            &json!({"text": secrets::mask(&text, &env)}),
-        )
-    };
     let mut read = after;
     'pages: loop {
         let events = daemon.read(|store| store.agent_events(&agent.id, read, 200))?;
@@ -554,8 +568,8 @@ pub fn conversation(daemon: &Daemon, agent: &Agent, after: u64) -> flottille_cor
                     }
                     _ => {}
                 }
-                if let Some((first, last, _, text)) = said.take()
-                    && !add(&mut page, first, last, said_line(text).unwrap_or_default())
+                if let Some((lines, last)) = joined(&mut said, &mut between, &env)
+                    && !add(&mut page, lines, last)
                 {
                     break 'pages;
                 }
@@ -567,14 +581,23 @@ pub fn conversation(daemon: &Daemon, agent: &Agent, after: u64) -> flottille_cor
                 ));
                 continue;
             }
-            if let Some((first, last, _, text)) = said.take()
-                && !add(&mut page, first, last, said_line(text).unwrap_or_default())
+            if said.as_ref().is_some_and(|said| said.2.is_some())
+                && beside_the_recorder(&event.name)
+            {
+                between.0 = event.seq;
+                between
+                    .1
+                    .extend(conversation_line(&event.name, &event.data).map(|l| (event.seq, l)));
+                continue;
+            }
+            if let Some((lines, last)) = joined(&mut said, &mut between, &env)
+                && !add(&mut page, lines, last)
             {
                 break 'pages;
             }
             match conversation_line(&event.name, &event.data) {
                 Some(line) => {
-                    if !add(&mut page, event.seq, event.seq, line) {
+                    if !add(&mut page, vec![(event.seq, line)], event.seq) {
                         break 'pages;
                     }
                 }
@@ -582,10 +605,36 @@ pub fn conversation(daemon: &Daemon, agent: &Agent, after: u64) -> flottille_cor
             }
         }
     }
-    if let Some((first, last, _, text)) = said.take().filter(|_| !page.more) {
-        add(&mut page, first, last, said_line(text).unwrap_or_default());
+    if !page.more
+        && let Some((lines, last)) = joined(&mut said, &mut between, &env)
+    {
+        add(&mut page, lines, last);
     }
     Ok(page)
+}
+
+/// The message being joined: the numbers of its first and last pieces, its id and its text.
+type Said = (u64, u64, Option<String>, String);
+
+/// The events the daemon recorded between the pieces of a message: the last one's number, and
+/// their lines, each led by its number.
+#[derive(Default)]
+struct Between(u64, Vec<(u64, String)>);
+
+/// The line of the message joined so far, masked, and the lines that came between its pieces:
+/// they go together, after the last event they hold.
+fn joined(
+    said: &mut Option<Said>,
+    between: &mut Between,
+    env: &BTreeMap<OsString, OsString>,
+) -> Option<(Vec<(u64, String)>, u64)> {
+    let (first, last, _, text) = said.take()?;
+    let Between(crossed, lines) = std::mem::take(between);
+    let line = conversation_line("agent.message", &json!({"text": secrets::mask(&text, env)}));
+    let lines = std::iter::once((first, line.unwrap_or_default()))
+        .chain(lines)
+        .collect();
+    Some((lines, last.max(crossed)))
 }
 
 fn read(daemon: &Daemon, caller: &Agent, args: Value) -> Done {

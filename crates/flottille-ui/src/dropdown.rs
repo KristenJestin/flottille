@@ -6,6 +6,7 @@
 //! click anywhere outside it closes it and goes no further.
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -15,7 +16,7 @@ use gpui_kit::{
 };
 
 use crate::icons::{Icon, icon};
-use crate::motion::RISE;
+use crate::motion::{ENTER, HOVER, Motion, RISE};
 use crate::theme::palette;
 use crate::typography::Type;
 
@@ -144,18 +145,37 @@ impl RenderOnce for Dropdown {
             })
             .test_support();
         let root = div().relative().flex_none().child(button);
-        if !self.open {
+        // The list comes and goes like the "⋯" menu's: it stays drawn until its close ends.
+        let fade = window.use_keyed_state(
+            ElementId::NamedChild(Arc::new(self.id.clone()), "fade".into()),
+            cx,
+            |_, _| Motion::settled(0.0),
+        );
+        let now = cx.background_executor().now();
+        let reduce = cx.reduce_motion();
+        let (target, duration) = if self.open {
+            (1.0, ENTER)
+        } else {
+            (0.0, HOVER)
+        };
+        let motion = fade.update(cx, |motion, _| {
+            if motion.target() != target {
+                motion.animate(target, duration, now, reduce);
+            }
+            motion.settle(now);
+            *motion
+        });
+        if motion.is_running(now) {
+            window.request_animation_frame();
+        }
+        let t = motion.value(now);
+        if t == 0.0 && !self.open {
             return root;
         }
+        // While it closes, nothing is over the window to take a click.
+        let dismiss = self.open.then_some(self.on_toggle).flatten();
         root.child(list_overlay(
-            &self.id,
-            self.align,
-            self.width,
-            self.items,
-            self.on_toggle,
-            1.0,
-            window,
-            cx,
+            &self.id, self.align, self.width, self.items, dismiss, t, window, cx,
         ))
     }
 }

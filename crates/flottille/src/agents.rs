@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::OsString;
 use std::process::{ExitStatus, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use flottille_core::agent::{Agent, AgentState, Choices, new_id};
@@ -638,9 +638,8 @@ async fn process(
         agent: agent.id.clone(),
         provider,
         pid,
-        secrets: Secrets::new(&env, &[]),
+        speech: Speech::new(Secrets::new(&env, &[])),
         env,
-        saying: Mutex::new(None),
     });
     let events = recorder.clone();
     let server = acp::Server {
@@ -865,10 +864,8 @@ struct Recorder {
     pid: u32,
     /// Secrets of the daemon's environment are masked out of what the agent says and does.
     env: BTreeMap<OsString, OsString>,
-    /// The secret values of `env`, found once for every piece the agent says.
-    secrets: Secrets,
-    /// The message the agent is saying, while it says it.
-    saying: Mutex<Option<Saying>>,
+    /// What the agent is saying, held back until it is settled.
+    speech: Speech,
 }
 
 /// Events of the session that say nothing of the conversation: they may come between two pieces
@@ -880,12 +877,103 @@ const BOOKKEEPING: [&str; 4] = [
     "agent.provider_wait",
 ];
 
-/// A message the agent is still saying: its id, when its source gives one, its last part, held
-/// back until it is settled (`Secrets::settled`), and the bookkeeping kept after it.
+/// Events that stream a text in pieces: a secret their pieces split is whole only in the text.
+const STREAMED: [&str; 3] = ["agent.message", "agent.thought", "agent.user_message"];
+
+/// What the agent says, thinks or is told, in pieces, masked whole before it is recorded.
+struct Speech {
+    /// The secret values of the daemon's environment, found once for every piece.
+    secrets: Secrets,
+    /// The text being streamed, while it is.
+    saying: Mutex<Option<Saying>>,
+}
+
+/// A text still streaming: its event, its message id when its source gives one, its last part,
+/// held back until it is settled (`Secrets::settled`), and the bookkeeping kept after it.
 struct Saying {
+    name: &'static str,
     id: Option<String>,
     held: String,
     after: Vec<(String, Value, bool)>,
+}
+
+/// Where `Speech` records an event: its name, its data and whether it is activity.
+type Record<'a> = &'a mut dyn FnMut(&str, Value, bool);
+
+impl Speech {
+    fn new(secrets: Secrets) -> Self {
+        Speech {
+            secrets,
+            saying: Mutex::new(None),
+        }
+    }
+
+    /// The text being streamed. A panic while one piece was handled leaves the held text as it
+    /// was: the pieces after it are still kept, masked, rather than each panicking in turn.
+    fn saying(&self) -> MutexGuard<'_, Option<Saying>> {
+        self.saying.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A piece of the `name` text. What of it is settled is recorded, masked, and the rest held
+    /// back until the next piece or its end; a piece of another text ends the one being streamed.
+    fn say(&self, name: &'static str, data: &Value, record: Record) {
+        let mut saying = self.saying();
+        let id = data["message_id"].as_str().map(str::to_owned);
+        if saying
+            .as_ref()
+            .is_some_and(|said| said.name != name || said.id != id)
+        {
+            self.end(saying.take(), record);
+        }
+        let said = saying.get_or_insert(Saying {
+            name,
+            id,
+            held: String::new(),
+            after: Vec::new(),
+        });
+        said.held
+            .push_str(data["text"].as_str().unwrap_or_default());
+        let settled = said.held.drain(..self.secrets.settled(&said.held));
+        self.record_said(name, said.id.as_deref(), settled.as_str(), record);
+    }
+
+    /// Keeps a bookkeeping event after the text being streamed, which stays one; gives it back
+    /// when none is.
+    fn keep(&self, name: &str, data: Value, activity: bool) -> Result<(), Value> {
+        match self.saying().as_mut() {
+            Some(said) => {
+                said.after.push((name.to_owned(), data, activity));
+                Ok(())
+            }
+            None => Err(data),
+        }
+    }
+
+    /// The text being streamed is over: what was held back is recorded.
+    fn said(&self, record: Record) {
+        let mut saying = self.saying();
+        self.end(saying.take(), record);
+    }
+
+    fn end(&self, saying: Option<Saying>, record: Record) {
+        if let Some(said) = saying {
+            self.record_said(said.name, said.id.as_deref(), &said.held, record);
+            for (name, data, activity) in said.after {
+                record(&name, data, activity);
+            }
+        }
+    }
+
+    /// Records `text` of the `name` text `id`, masked, in pieces no line of a reader cuts.
+    fn record_said(&self, name: &str, id: Option<&str>, text: &str, record: Record) {
+        for piece in secrets::pieces(&self.secrets.mask(text), tree::LINE_CHARS) {
+            let mut data = json!({"text": piece, "replay": false});
+            if let Some(id) = id {
+                data["message_id"] = self.secrets.mask(id).into();
+            }
+            record(name, data, true);
+        }
+    }
 }
 
 /// A piece the session handled after its end (a process that died as it spoke) is kept too.
@@ -896,51 +984,14 @@ impl Drop for Recorder {
 }
 
 impl Recorder {
-    /// A piece of what the agent says. A secret its pieces split is whole only in the message:
-    /// what of it is settled is recorded, masked, and the rest held back until the next piece or
-    /// its end.
-    fn say(&self, data: &Value) {
-        let mut saying = self.saying.lock().unwrap();
-        let id = data["message_id"].as_str().map(str::to_owned);
-        if saying.as_ref().is_some_and(|said| said.id != id) {
-            self.end(saying.take());
-        }
-        let said = saying.get_or_insert(Saying {
-            id,
-            held: String::new(),
-            after: Vec::new(),
-        });
-        said.held
-            .push_str(data["text"].as_str().unwrap_or_default());
-        let settled = said.held.drain(..self.secrets.settled(&said.held));
-        self.record_said(said.id.as_deref(), settled.as_str());
+    fn record(&self, name: &str, data: Value, activity: bool) {
+        record(&self.daemon, &self.agent, name, data, activity);
     }
 
-    /// The message the agent was saying is over: what was held back is recorded.
+    /// The text the agent was streaming is over: what was held back is recorded.
     fn said(&self) {
-        let mut saying = self.saying.lock().unwrap();
-        self.end(saying.take());
-    }
-
-    fn end(&self, saying: Option<Saying>) {
-        if let Some(said) = saying {
-            self.record_said(said.id.as_deref(), &said.held);
-            for (name, data, activity) in said.after {
-                record(&self.daemon, &self.agent, &name, data, activity);
-            }
-        }
-    }
-
-    /// Records `text` of the message `id`, masked, in pieces no line of a reader cuts.
-    fn record_said(&self, id: Option<&str>, text: &str) {
-        let masked: Vec<char> = self.secrets.mask(text).chars().collect();
-        for piece in masked.chunks(tree::LINE_CHARS) {
-            let mut data = json!({"text": piece.iter().collect::<String>(), "replay": false});
-            if let Some(id) = id {
-                data["message_id"] = self.secrets.mask(id).into();
-            }
-            record(&self.daemon, &self.agent, "agent.message", data, true);
-        }
+        self.speech
+            .said(&mut |name, data, activity| self.record(name, data, activity));
     }
 }
 
@@ -959,23 +1010,26 @@ impl acp::Events for Recorder {
                 waiting.remove(&self.agent);
             }
         }
-        if name == "agent.message" {
-            self.say(&data);
+        if let Some(&streamed) = STREAMED.iter().find(|&&streamed| streamed == name) {
+            self.speech
+                .say(streamed, &data, &mut |name, data, activity| {
+                    self.record(name, data, activity)
+                });
             return;
         }
-        let data = mask(data, &self.env);
+        let mut data = mask(data, &self.env);
         // Bookkeeping between two pieces of a message does not end it: it is kept after the
-        // message, which stays one. Anything else the agent does (a tool call, a thought, a
-        // compaction…) ends it.
+        // message, which stays one. Anything else the agent does (a tool call, a compaction…)
+        // ends it.
         if BOOKKEEPING.contains(&name) {
-            if let Some(said) = self.saying.lock().unwrap().as_mut() {
-                said.after.push((name.to_owned(), data, activity));
-                return;
+            match self.speech.keep(name, data, activity) {
+                Ok(()) => return,
+                Err(not_kept) => data = not_kept,
             }
         } else {
             self.said();
         }
-        record(&self.daemon, &self.agent, name, data, activity);
+        self.record(name, data, activity);
         if name == "agent.compacted" {
             tree::compacted(&self.daemon, &self.agent);
         }
@@ -1166,6 +1220,44 @@ pub fn settle_at_start(daemon: &Arc<Daemon>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_poisoned_saying_lock_still_keeps_the_pieces_after_it_masked() {
+        let env = BTreeMap::from([("API_TOKEN".into(), "s3cr3t-token-value".into())]);
+        let speech = Speech::new(Secrets::new(&env, &[]));
+        let piece = |text: &str| json!({"text": text});
+        // A recording that panics while the lock is held poisons it.
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            speech.say(
+                "agent.message",
+                &piece("plain words that settle at once and more "),
+                &mut |_, _, _| panic!("the store is gone"),
+            );
+        }));
+        assert!(panicked.is_err() && speech.saying.is_poisoned());
+
+        let mut recorded = String::new();
+        let mut record = |_: &str, data: Value, _| {
+            recorded.push_str(data["text"].as_str().unwrap());
+        };
+        speech.say("agent.message", &piece("the token is s3cr3t-"), &mut record);
+        speech.say(
+            "agent.message",
+            &piece("token-value, keep it quiet"),
+            &mut record,
+        );
+        speech.said(&mut record);
+
+        assert!(
+            !recorded.contains("s3cr3t-"),
+            "{}",
+            recorded.replace("s3cr3t-", "<clear>")
+        );
+        assert!(
+            recorded.ends_with("the token is [masked], keep it quiet"),
+            "{recorded}"
+        );
+    }
 
     fn alive(pid: u32) -> bool {
         std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
