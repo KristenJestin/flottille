@@ -170,7 +170,7 @@ fn read_regular(path: &Path) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn failed(path: &Resolved, error: std::io::Error) -> Outcome {
+pub fn failed(path: &Resolved, error: std::io::Error) -> Outcome {
     match error.kind() {
         ErrorKind::InvalidInput => not_regular(path),
         ErrorKind::NotFound => Outcome::Refused(format!("refused: {} does not exist", path.shown)),
@@ -212,17 +212,14 @@ struct ReadArguments {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Range {
+pub struct Range {
     offset: Option<u64>,
     length: Option<u64>,
 }
 
-pub fn fs_read(cx: &Context, args: Value) -> Outcome {
-    let args: ReadArguments = match arguments("fs_read", args) {
-        Ok(args) => args,
-        Err(refusal) => return refusal,
-    };
-    let (offset, length) = match &args.range {
+/// Where a page starts and how long it is, checked.
+pub fn page_of(range: Option<&Range>) -> Result<(u64, u64), Outcome> {
+    let (offset, length) = match range {
         None => (0, READ_PAGE_BYTES),
         Some(range) => (
             range.offset.unwrap_or(0),
@@ -230,22 +227,41 @@ pub fn fs_read(cx: &Context, args: Value) -> Outcome {
         ),
     };
     if !(1..=READ_PAGE_BYTES).contains(&length) {
-        return Outcome::Refused(format!(
+        return Err(Outcome::Refused(format!(
             "refused: range.length must be 1 to {READ_PAGE_BYTES} bytes: read a longer file a \
              page at a time, each page names the next offset"
-        ));
+        )));
     }
+    Ok((offset, length))
+}
+
+pub fn fs_read(cx: &Context, args: Value) -> Outcome {
+    let args: ReadArguments = match arguments("fs_read", args) {
+        Ok(args) => args,
+        Err(refusal) => return refusal,
+    };
+    let (offset, length) = match page_of(args.range.as_ref()) {
+        Ok(page) => page,
+        Err(refusal) => return refusal,
+    };
     let path = match cx.path(args.repository.as_deref(), &args.path) {
         Ok(path) => path,
         Err(refusal) => return refusal,
     };
-    match read_page(cx, &path, offset, length) {
+    match read_page(Some(cx), &path, offset, length) {
         Ok(outcome) => outcome,
         Err(error) => failed(&path, error),
     }
 }
 
-fn read_page(cx: &Context, path: &Resolved, offset: u64, length: u64) -> std::io::Result<Outcome> {
+/// A page of a file. `cx` is the session that read it, which then knows its fingerprint (what
+/// lets it write the file); `None` for a read that grants nothing, such as a reference's.
+pub fn read_page(
+    cx: Option<&Context>,
+    path: &Resolved,
+    offset: u64,
+    length: u64,
+) -> std::io::Result<Outcome> {
     let metadata = std::fs::metadata(&path.path)?;
     if metadata.is_dir() {
         return Ok(Outcome::Refused(format!(
@@ -263,13 +279,15 @@ fn read_page(cx: &Context, path: &Resolved, offset: u64, length: u64) -> std::io
             path.shown
         )));
     }
-    let sha = sha256_file(&path.path)?;
-    let kept = (size <= KEPT_BYTES)
-        .then(|| read_regular(&path.path).ok())
-        .flatten()
-        .and_then(|bytes| String::from_utf8(bytes).ok());
-    if let Err(outcome) = cx.remember(&path.path, &sha, kept) {
-        return Ok(outcome);
+    if let Some(cx) = cx {
+        let sha = sha256_file(&path.path)?;
+        let kept = (size <= KEPT_BYTES)
+            .then(|| read_regular(&path.path).ok())
+            .flatten()
+            .and_then(|bytes| String::from_utf8(bytes).ok());
+        if let Err(outcome) = cx.remember(&path.path, &sha, kept) {
+            return Ok(outcome);
+        }
     }
 
     let mut file = open_regular(&path.path)?;

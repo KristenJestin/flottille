@@ -26,6 +26,8 @@ mod program;
 mod project_command;
 mod projects;
 mod providers;
+mod reference_command;
+mod references;
 mod roles;
 mod runs;
 mod sweep;
@@ -46,6 +48,7 @@ use serde_json::Value;
 use crate::agent_command::AgentAction;
 use crate::client::Client;
 use crate::project_command::ProjectAction;
+use crate::reference_command::ReferenceAction;
 use crate::workspace_command::WorkspaceAction;
 
 pub const VERSION: &str = env!("FLOTTILLE_VERSION");
@@ -73,6 +76,11 @@ enum Command {
     Project {
         #[command(subcommand)]
         action: ProjectAction,
+    },
+    /// List, add and remove the references of a project: documents its agents read with a tool
+    Reference {
+        #[command(subcommand)]
+        action: ReferenceAction,
     },
     /// Make, follow and remove the workspaces of a project
     Workspace {
@@ -220,6 +228,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             }
         }
         Command::Project { action } => return project_command::run(&paths, action),
+        Command::Reference { action } => return reference_command::run(&paths, action),
         Command::Workspace { action } => return workspace_command::run(&paths, action),
         Command::Agent { action } => return agent_command::run(&paths, action),
         Command::Doctor { json } => return agent_command::doctor(&paths, json),

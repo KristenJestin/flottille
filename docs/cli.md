@@ -201,6 +201,42 @@ $ flottille project remove shop
 Removed project shop. Its folder was not touched.
 ```
 
+## References
+
+The documents of a project that its agents read with a tool when relevant (`docs/projects.md`,
+"References"). The file is edited in place, the rest of it left as written, comments included.
+
+### `flottille reference list <project>`
+
+The references: name, path, description. `--json` prints `reference.list`.
+
+```
+$ flottille reference list shop
+NAME   PATH        DESCRIPTION
+react  docs/react  How we write React components
+```
+
+### `flottille reference add <project> <name> <path> --description <line>`
+
+Adds a reference: `path` is a file or a folder of the project folder, relative to it, and must
+exist. Refused for a name already used, an empty description, a path outside the project folder
+(`..`, an absolute path, a link that leads out) or through a `.git`. Agents started after it see it
+in their instructions.
+
+```
+$ flottille reference add shop react docs/react --description "How we write React components"
+Added reference react to shop: docs/react.
+```
+
+### `flottille reference remove <project> <name>`
+
+Removes the reference; its files are never touched.
+
+```
+$ flottille reference remove shop react
+Removed reference react from shop. Its files were not touched.
+```
+
 ## Workspaces
 
 A workspace is one git worktree per repository, on one branch, prepared by the project's recipe

@@ -138,6 +138,8 @@ struct Turn {
     /// Whether the text of the message under way came as stream events, which its whole message
     /// then repeats.
     streamed: bool,
+    /// The id of the API message being streamed, as its `message_start` named it.
+    message: Option<String>,
     /// The context in use, as the last message or compaction said.
     used: Option<u64>,
     /// The provider refused the turn for a limit: a rate limit rejected, an error or a message
@@ -464,12 +466,13 @@ impl Bridge {
             }
         }
         let text = texts.join("\n\n");
-        remember(&claude.history, "user", &text, &self.env);
+        remember(&claude.history, "user", &text, None, &self.env);
         let session = claude.session.clone();
         self.turn = Some(Turn {
             id: id.clone(),
             cancelled: false,
             streamed: false,
+            message: None,
             used: None,
             limited: false,
             error: None,
@@ -666,8 +669,7 @@ impl Bridge {
             } else {
                 continue;
             };
-            self.update(json!({"sessionUpdate": kind, "content": {"type": "text", "text": text}}))
-                .await;
+            self.chunk(kind, text, entry["id"].as_str()).await;
         }
     }
 
@@ -705,12 +707,23 @@ impl Bridge {
         .await;
     }
 
-    async fn chunk(&mut self, kind: &str, text: &str) {
-        self.update(json!({"sessionUpdate": kind, "content": {"type": "text", "text": text}}))
-            .await;
+    /// A piece of text, of the API message `message` when it is known: the pieces that share an
+    /// id are one message to the readers.
+    async fn chunk(&mut self, kind: &str, text: &str, message: Option<&str>) {
+        let mut update = json!({"sessionUpdate": kind, "content": {"type": "text", "text": text}});
+        if let Some(message) = message {
+            update["messageId"] = message.into();
+        }
+        self.update(update).await;
     }
 
     async fn streamed(&mut self, event: &Value) {
+        if event["type"] == "message_start" {
+            if let Some(turn) = &mut self.turn {
+                turn.message = event["message"]["id"].as_str().map(str::to_owned);
+            }
+            return;
+        }
         if event["type"] != "content_block_delta" {
             return;
         }
@@ -721,10 +734,12 @@ impl Bridge {
             _ => return,
         };
         let Some(text) = text.as_str() else { return };
+        let mut message = None;
         if let Some(turn) = &mut self.turn {
             turn.streamed = true;
+            message = turn.message.clone();
         }
-        self.chunk(kind, text).await;
+        self.chunk(kind, text, message.as_deref()).await;
     }
 
     async fn assistant(&mut self, whole: &Value) {
@@ -738,6 +753,8 @@ impl Bridge {
             }
         }
         let streamed = self.turn.as_ref().is_some_and(|t| t.streamed);
+        // Absent for a message `claude` wrote itself, which no API message is behind.
+        let id = message["id"].as_str();
         for block in message["content"].as_array().into_iter().flatten() {
             let (kind, key, text) = match block["type"].as_str() {
                 Some("text") => ("agent_message_chunk", "agent", &block["text"]),
@@ -764,10 +781,10 @@ impl Bridge {
             }
             // The history keeps the whole message, one line, never its stream's pieces.
             if let Some(claude) = &self.claude {
-                remember(&claude.history, key, text, &self.env);
+                remember(&claude.history, key, text, id, &self.env);
             }
             if !streamed {
-                self.chunk(kind, text).await;
+                self.chunk(kind, text, id).await;
             }
         }
         if let Some(turn) = &mut self.turn {
@@ -1140,10 +1157,19 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     file.write_all(text.as_bytes())
 }
 
-/// One message of the session's history, its secrets masked; a history that cannot be written
-/// only loses its replay.
-fn remember(history: &Path, key: &str, text: &str, env: &BTreeMap<OsString, OsString>) {
-    let entry = json!({key: secrets::mask(text, env)});
+/// One message of the session's history, its secrets masked, with the id of the API message it
+/// comes from when it has one; a history that cannot be written only loses its replay.
+fn remember(
+    history: &Path,
+    key: &str,
+    text: &str,
+    id: Option<&str>,
+    env: &BTreeMap<OsString, OsString>,
+) {
+    let mut entry = json!({key: secrets::mask(text, env)});
+    if let Some(id) = id {
+        entry["id"] = id.into();
+    }
     let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

@@ -122,6 +122,9 @@ impl Provider {
         let mut names: Vec<&str> = FILE_AND_COMMAND_TOOLS.to_vec();
         if in_workspace {
             names.push("forge_read");
+        }
+        names.push("reference_read");
+        if in_workspace {
             names.push("ticket_read");
         }
         if !at_depth_limit {
@@ -875,7 +878,7 @@ fn set_enabled(paths: &Paths, name: &str, enabled: bool) -> Result<bool, Failure
 /// the old file or the new one, never half of one. A symbolic link stays one (its target is
 /// written, the temporary file beside the target, made when the link dangles), the file's mode
 /// is kept, and no temporary file stays when a step fails.
-fn write_in_place(file: &Path, text: &str) -> std::io::Result<()> {
+pub fn write_in_place(file: &Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let real = written_path(file)?;
@@ -1008,6 +1011,7 @@ mod tests {
                 "commands_run",
                 "commands_output",
                 "commands_stop",
+                "reference_read",
                 "agent_launch",
                 "agent_send",
                 "agent_status",
@@ -1023,7 +1027,7 @@ mod tests {
     #[test]
     fn the_tools_follow_what_the_agent_can_do() {
         let leaf = short(claude::PROVIDER.tools(false, true, false));
-        assert_eq!(leaf.len(), 11);
+        assert_eq!(leaf.len(), 12);
         assert!(leaf.contains(&"ask_parent".to_owned()));
         assert!(
             !leaf
@@ -1044,11 +1048,12 @@ mod tests {
         assert!(!main.contains(&"forge_read".to_owned()));
         assert!(!main.contains(&"ticket_read".to_owned()));
         let workspace = short(claude::PROVIDER.tools(true, false, true));
-        assert_eq!(workspace.len(), 19);
+        assert_eq!(workspace.len(), 20);
         assert_eq!(workspace[9], "forge_read", "after the command tools");
-        assert_eq!(workspace[10], "ticket_read", "after the forge's");
+        assert_eq!(workspace[10], "reference_read", "after forge_read");
+        assert_eq!(workspace[11], "ticket_read", "after reference_read");
         let leaf = short(claude::PROVIDER.tools(false, true, true));
-        assert_eq!(leaf.len(), 13);
+        assert_eq!(leaf.len(), 14);
     }
 
     #[test]

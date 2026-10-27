@@ -634,7 +634,7 @@ fn a_lead_lists_the_agent_tools_ask_user_and_approval_answer_and_a_worker_at_the
     // In a workspace, it reads its pull requests and its ticket too.
     assert!(names.iter().any(|n| n == "forge_read"));
     assert!(names.iter().any(|n| n == "ticket_read"));
-    assert_eq!(names.len(), 19);
+    assert_eq!(names.len(), 20);
 
     let names = worker.names();
     assert!(names.iter().any(|n| n == "ask_parent"));
@@ -642,7 +642,7 @@ fn a_lead_lists_the_agent_tools_ask_user_and_approval_answer_and_a_worker_at_the
     assert!(!names.iter().any(|n| n == "ask_user"));
 
     let names = leaf.names();
-    assert_eq!(names.len(), 13, "{names:?}");
+    assert_eq!(names.len(), 14, "{names:?}");
     assert!(!names.iter().any(|n| n.starts_with("agent_")));
     assert!(!names.iter().any(|n| n == "approval_answer"));
     assert!(!names.iter().any(|n| n == "ask_user"));

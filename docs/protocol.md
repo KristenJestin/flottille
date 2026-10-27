@@ -189,6 +189,27 @@ changing nothing: `{"name", "folder", "new", "missing"}`, `new` the repositories
 configured, `missing` the ones configured and no longer there. `refused` when the folder no longer
 exists.
 
+### The reference methods
+
+A project's references (`docs/projects.md`, "References"). The daemon edits the project's file in
+place, the rest of it left as written, and announces `project.changed`. `not-found` for a project
+or a reference that does not exist, `refused` for a reference that cannot be used, with its key.
+
+#### `reference.list`
+
+`{"project"}`. The result is `{"project", "references": [{"name", "description", "path"}]}`, by name.
+
+#### `reference.add`
+
+`{"project", "name", "description", "path"}`. `path` is relative to the project folder; a trailing
+`/` is dropped. `refused` when the name is already used, when `path` does not exist, leaves the
+project folder (a link followed) or goes through a `.git`, or when the name or the description is
+not valid. The result is `{"project", "name", "description", "path"}`.
+
+#### `reference.remove`
+
+`{"project", "name"}`. The result is `{"project", "removed": "<name>"}`.
+
 ### The workspace methods
 
 A workspace is one worktree per repository, on one branch, prepared by the project's recipe
