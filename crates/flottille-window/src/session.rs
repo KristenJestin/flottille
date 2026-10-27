@@ -451,6 +451,18 @@ impl SessionPage {
         }
     }
 
+    /// "Run procedure…": the shell's modal, on this session's workspace.
+    pub fn run_procedure(&self, cx: &mut Context<Self>) {
+        if let Some(workspace) = self.opened.place.clone() {
+            let project = self.opened.project.clone();
+            self.shell
+                .update(cx, |shell, cx| {
+                    shell.run_procedure(&project, &workspace, cx)
+                })
+                .ok();
+        }
+    }
+
     /// Opens a link (a pull request, a ticket) with the system's default handler.
     pub fn open_link(&self, url: &str) {
         (self.follow.opener)(std::path::Path::new(url));
@@ -540,7 +552,8 @@ impl SessionPage {
                 self.refresh_conversation(cx);
             }
             SessionUpdate::Place(facts) => {
-                self.rail.update(cx, |rail, cx| rail.set_place(facts, cx));
+                self.rail
+                    .update(cx, |rail, cx| rail.set_place(facts.map(|facts| *facts), cx));
             }
         }
     }
@@ -2281,15 +2294,26 @@ impl SessionRail {
                 },
             )
         });
+        let procedures = page.clone();
+        let in_workspace = opened.place.is_some();
         let menu = cx.new(|cx| {
-            Menu::new("workspace-menu", "Workspace actions", cx).entry(
+            let menu = Menu::new("workspace-menu", "Workspace actions", cx).entry(
                 "open-in-editor",
                 "Open in editor",
                 Some(Icon::OpenInEditor),
                 move |_, cx| {
                     editor.update(cx, |page, _| page.open_in_editor()).ok();
                 },
-            )
+            );
+            if in_workspace {
+                menu.entry("run-procedure", "Run procedure…", None, move |_, cx| {
+                    procedures
+                        .update(cx, |page, cx| page.run_procedure(cx))
+                        .ok();
+                })
+            } else {
+                menu
+            }
         });
         Self {
             page,
@@ -2885,6 +2909,12 @@ impl Render for SessionRail {
                     .test_support()
             }))
             .children(ticket_row)
+            .children(
+                self.place
+                    .as_ref()
+                    .and_then(|p| p.run.as_ref())
+                    .map(|run| crate::procedures::run_block(run, cx)),
+            )
             .children(ticket_field.map(|field| {
                 div()
                     .id("rail-ticket-field")

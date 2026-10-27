@@ -240,6 +240,8 @@ pub struct PlaceFacts {
     pub forge_problem: Option<String>,
     /// The ticket it is linked to (a workspace).
     pub ticket: Option<TicketFacts>,
+    /// The procedure run the session is the root of, while it goes on.
+    pub run: Option<crate::procedures::RunFacts>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -268,7 +270,7 @@ pub enum SessionUpdate {
         decision: String,
     },
     /// The place's facts; `None` when the daemon has none (the workspace was removed).
-    Place(Option<PlaceFacts>),
+    Place(Option<Box<PlaceFacts>>),
 }
 
 /// Where the session works.
@@ -499,7 +501,7 @@ impl Link {
             stale.mark(
                 TREE_EVENTS.contains(&name) || approval,
                 approval,
-                name == "agent.turn_ended",
+                name == "agent.turn_ended" || name.starts_with("procedure."),
             );
             let decided = match name {
                 "approval.decided" => data["decision"].as_str(),
@@ -642,8 +644,14 @@ impl Link {
                     };
                 }
                 let forges = forge.as_ref().map_or(Vec::new(), forge_lines);
+                // A daemon without the method, or a session with no run: no grants to show.
+                let run = conn
+                    .ask("procedure.of", json!({"agent": self.root}))?
+                    .ok()
+                    .and_then(|held| crate::procedures::RunFacts::of(&held["run"]));
                 PlaceFacts {
                     forges,
+                    run,
                     ticket: ticket.as_ref().map(|(facts, _)| facts.clone()),
                     repositories,
                     branch: shown["branch"].as_str().map(str::to_owned),
@@ -677,7 +685,7 @@ impl Link {
                 }
             }
         };
-        self.send(SessionUpdate::Place(Some(facts)));
+        self.send(SessionUpdate::Place(Some(Box::new(facts))));
         Ok(())
     }
 }

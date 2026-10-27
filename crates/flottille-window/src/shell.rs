@@ -27,6 +27,7 @@ use crate::link::{self, Connect, Seen, Update};
 use crate::model::{BellItem, Place, Preparation, Snapshot};
 use crate::open::Opener;
 use crate::page::{MainArea, Page};
+use crate::procedures::RunProcedure;
 use crate::project::{NewWorkspace, PlaceData, ProjectData, SessionLine, repository_label};
 use crate::providers::Providers;
 use crate::session::{Chose, Follow, Opened, Reply, SessionPage};
@@ -115,6 +116,9 @@ pub struct Shell {
     /// a composer with no project default starts there.
     last_pick: Option<Pick>,
     settings: Entity<SettingsPage>,
+    /// The modal that runs a procedure in a workspace, one for the window: a card and a session's
+    /// menu open it.
+    run: Entity<RunProcedure>,
     /// The link's updates, until a task takes them.
     updates: Option<UnboundedReceiver<Update>>,
     _link: Task<()>,
@@ -173,6 +177,7 @@ impl Shell {
         let top = cx.new(|_| TopBar::new(this.clone()));
         let sidebar = cx.new(|_| Sidebar::new(this.clone()));
         let settings = cx.new(|_| SettingsPage::new(this.clone()));
+        let run = cx.new(|_| RunProcedure::new(this.clone()));
         let main = {
             let (this, settings) = (this.clone(), settings.clone());
             cx.new(|cx| MainArea::new(this, settings, cx))
@@ -217,6 +222,7 @@ impl Shell {
             providers_read: 0,
             last_pick: None,
             settings,
+            run,
             updates: Some(updates),
             _link: Task::ready(()),
             _clock,
@@ -359,6 +365,20 @@ impl Shell {
         if let Some(composer) = self.composer_of(project).cloned() {
             composer.update(cx, |composer, cx| composer.choose(choice, window, cx));
         }
+    }
+
+    /// "Run procedure…" on a workspace: the modal lists the project's procedures and shows what
+    /// the chosen one grants. Nothing starts before Confirm.
+    pub fn run_procedure(&mut self, project: &str, workspace: &str, cx: &mut Context<Self>) {
+        self.run
+            .update(cx, |run, cx| run.open(project, workspace, cx));
+        self.actions.send(Command::Procedures {
+            project: project.to_owned(),
+        });
+    }
+
+    pub fn procedure_run(&self) -> &Entity<RunProcedure> {
+        &self.run
     }
 
     /// What the window shows now, as the daemon last gave it.
@@ -513,6 +533,64 @@ impl Shell {
                     });
                 }
             }
+            Outcome::Procedures { project, listed } => {
+                self.run
+                    .update(cx, |run, cx| run.listed(&project, listed.clone(), cx));
+                if let Some(page) = self.page_of_project(&project, cx) {
+                    let section = page.read(cx).procedures().clone();
+                    section.update(cx, |section, cx| section.listed(listed, cx));
+                }
+            }
+            Outcome::ProcedureRead {
+                project,
+                name,
+                read,
+            } => {
+                if let Some(page) = self.page_of_project(&project, cx) {
+                    let section = page.read(cx).procedures().clone();
+                    section.update(cx, |section, cx| {
+                        section.read_whole(&name, read, window, cx)
+                    });
+                }
+            }
+            Outcome::ProcedureWritten { project, refused } => {
+                if let Some(page) = self.page_of_project(&project, cx) {
+                    let section = page.read(cx).procedures().clone();
+                    section.update(cx, |section, cx| section.written(refused, cx));
+                }
+            }
+            Outcome::ProcedureShown {
+                project,
+                name,
+                workspace,
+                shown,
+            } => self.run.update(cx, |run, cx| {
+                run.shown_by_daemon(&project, &name, &workspace, shown, cx)
+            }),
+            // The run opens as a session, wherever the user is.
+            Outcome::ProcedureStarted { project, started } => {
+                let (agent, refused) = match started {
+                    Ok(agent) => (Some(agent), None),
+                    Err(why) => (None, Some(why)),
+                };
+                self.run
+                    .update(cx, |run, cx| run.started(&project, refused, cx));
+                if let Some(agent) = agent {
+                    self.open(Selection::Session(agent), window, cx);
+                }
+            }
+            Outcome::References { project, listed } => {
+                if let Some(page) = self.page_of_project(&project, cx) {
+                    let section = page.read(cx).references().clone();
+                    section.update(cx, |section, cx| section.listed(listed, cx));
+                }
+            }
+            Outcome::ReferenceWritten { project, refused } => {
+                if let Some(page) = self.page_of_project(&project, cx) {
+                    let section = page.read(cx).references().clone();
+                    section.update(cx, |section, cx| section.written(refused, cx));
+                }
+            }
             Outcome::WorkspaceDone { project, name } => {
                 self.workspace_answered(&project, &name, None, window, cx)
             }
@@ -520,6 +598,19 @@ impl Shell {
                 self.workspace_answered(&project, &name, Some(&why), window, cx)
             }
         }
+    }
+
+    /// The open page, when it is `project`'s.
+    fn page_of_project(
+        &self,
+        project: &str,
+        cx: &App,
+    ) -> Option<Entity<crate::project::ProjectPage>> {
+        self.main
+            .read(cx)
+            .project_page()
+            .filter(|page| page.read(cx).name() == project)
+            .cloned()
     }
 
     fn workspace_answered(
@@ -830,6 +921,12 @@ impl Shell {
         }
         if let Some(page) = self.main.read(cx).project_page().cloned() {
             crate::project::ProjectPage::tick(&page, now, cx);
+            // The project's file is the user's to edit by hand too.
+            let project = page.read(cx).name().to_owned();
+            self.actions.send(Command::Procedures {
+                project: project.clone(),
+            });
+            self.actions.send(Command::References { project });
         }
     }
 
@@ -1064,6 +1161,7 @@ impl Render for Shell {
             }))
             .child(self.top.clone())
             .child(body)
+            .child(self.run.clone())
             .when(self.bell_open, |d| {
                 let scrim = div()
                     .id("bell-scrim")

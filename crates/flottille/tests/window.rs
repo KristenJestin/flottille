@@ -5022,3 +5022,475 @@ fn a_repository_with_no_forge_says_why_in_the_workspace_section(cx: &mut TestApp
     settle(cx);
     cx.update(|window, _| assert!(window.try_find("rail-forge-app").is_some()));
 }
+
+// ── Procedures and references on the project page (#99) ───────────────────────────────────────
+
+fn procedures_listed(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+) -> Vec<flottille_window::procedures::ProcedureInfo> {
+    page_of(shell, cx)
+        .read_with(cx, |page, _| page.procedures().clone())
+        .read_with(cx, |section, _| {
+            section.procedures().unwrap_or_default().to_vec()
+        })
+}
+
+fn text_of(id: &str, cx: &mut VisualTestContext) -> Option<String> {
+    let id = id.to_owned();
+    cx.update(|window, _| {
+        window
+            .try_find(id)
+            .and_then(|found| found.label().map(str::to_owned))
+    })
+}
+
+/// How many agents the daemon has, started or not.
+fn agents_started(user: &User) -> usize {
+    user.call("agent.list", json!({})).unwrap()["agents"]
+        .as_array()
+        .unwrap()
+        .len()
+}
+
+#[gpui_kit::test]
+fn a_procedure_added_from_a_template_appears_on_the_page_with_its_grants(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    until(&shell, cx, "the empty list is shown", |cx| {
+        cx.update(|window, _| window.try_find("no-procedures").is_some())
+    });
+
+    cx.update(|window, cx| window.click("add-procedure", cx));
+    settle(cx);
+    cx.update(|window, _| {
+        for template in ["open-prs", "merge-stack", "close"] {
+            assert!(window.find(format!("template-{template}")).visible());
+        }
+        assert!(window.find("blank-procedure").visible());
+    });
+    cx.update(|window, cx| window.click("template-open-prs", cx));
+    until(&shell, cx, "the procedure is listed", |cx| {
+        !procedures_listed(&shell, cx).is_empty()
+    });
+    settle(cx);
+
+    let listed = procedures_listed(&shell, cx);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].name, "open-prs");
+    assert_eq!(listed[0].mode_of("push"), Some("ask"));
+    assert_eq!(listed[0].mode_of("pr-create"), Some("ask"));
+    assert!(
+        text_of("procedure-grants-open-prs", cx)
+            .unwrap()
+            .contains("push (ask)")
+    );
+    assert!(
+        text_of("procedure-description-open-prs", cx)
+            .unwrap()
+            .contains("pull requests")
+    );
+    // The daemon wrote it into the project's file, as the command line does.
+    assert!(
+        std::fs::read_to_string(user.project_file("atlas"))
+            .unwrap()
+            .contains("[procedures.open-prs]")
+    );
+}
+
+#[gpui_kit::test]
+fn a_blank_procedure_is_written_from_the_form_and_a_refusal_says_why(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let section = page_of(&shell, cx).read_with(cx, |page, _| page.procedures().clone());
+
+    cx.update(|window, cx| window.click("add-procedure", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("blank-procedure", cx));
+    settle(cx);
+    // Nothing typed: the daemon refuses and the form says why, staying open.
+    cx.update(|window, cx| window.click("save-procedure", cx));
+    until(&shell, cx, "the refusal is shown", |cx| {
+        section.read_with(cx, |s, _| s.form_error().is_some())
+    });
+    assert!(section.read_with(cx, |s, _| s.is_open()));
+
+    cx.simulate_input("tidy");
+    let description = section.read_with(cx, |s, _| s.description_field().unwrap().clone());
+    cx.update(|window, cx| {
+        description.update(cx, |f, cx| f.set_value("Tidy the branch", window, cx))
+    });
+    let instructions = section.read_with(cx, |s, _| s.instructions_field().unwrap().clone());
+    cx.update(|window, cx| {
+        instructions.update(cx, |f, cx| f.set_value("Remove the dead code.", window, cx))
+    });
+    cx.update(|window, cx| window.click("grant-commit-allow", cx));
+    cx.update(|window, cx| window.click("save-procedure", cx));
+    until(&shell, cx, "the procedure is listed", |cx| {
+        !procedures_listed(&shell, cx).is_empty()
+    });
+
+    let listed = procedures_listed(&shell, cx);
+    assert_eq!(listed[0].name, "tidy");
+    assert_eq!(listed[0].mode_of("commit"), Some("allow"));
+    assert!(
+        !section.read_with(cx, |s, _| s.is_open()),
+        "the modal closed"
+    );
+}
+
+#[gpui_kit::test]
+fn editing_a_grant_in_the_modal_writes_the_project_s_file_and_a_removal_asks_twice(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    user.call(
+        "procedure.add",
+        json!({"project": "atlas", "template": "close"}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    until(&shell, cx, "the procedure is listed", |cx| {
+        !procedures_listed(&shell, cx).is_empty()
+    });
+    settle(cx);
+
+    cx.update(|window, cx| window.click("edit-procedure-close", cx));
+    until(&shell, cx, "the form is open on it", |cx| {
+        page_of(&shell, cx)
+            .read_with(cx, |page, _| page.procedures().clone())
+            .read_with(cx, |s, _| s.is_open())
+    });
+    settle(cx);
+    let section = page_of(&shell, cx).read_with(cx, |page, _| page.procedures().clone());
+    use flottille_core::procedure::{Grant, Mode};
+    assert_eq!(
+        section.read_with(cx, |s, _| s.grant_in_form(Grant::WorkspaceRemove)),
+        Some(Mode::Allow),
+        "the form starts from what the file says"
+    );
+    // The grants are longer than the window is high: the form scrolls to the last of them.
+    cx.update(|window, cx| {
+        window.scroll(
+            "procedure-form",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-600.))),
+            cx,
+        )
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("grant-workspace-remove-ask", cx));
+    cx.update(|window, cx| window.click("grant-commit-allow", cx));
+    cx.update(|window, cx| window.click("save-procedure", cx));
+    until(&shell, cx, "the file says so", |_| {
+        let file = std::fs::read_to_string(user.project_file("atlas")).unwrap();
+        file.contains("workspace-remove = \"ask\"") && file.contains("commit = \"allow\"")
+    });
+    until(&shell, cx, "the list follows", |cx| {
+        procedures_listed(&shell, cx)
+            .first()
+            .is_some_and(|p| p.mode_of("workspace-remove") == Some("ask"))
+    });
+    settle(cx);
+
+    // A removal needs a second click.
+    cx.update(|window, cx| window.click("remove-procedure-close", cx));
+    settle(cx);
+    assert!(
+        std::fs::read_to_string(user.project_file("atlas"))
+            .unwrap()
+            .contains("[procedures.close]")
+    );
+    cx.update(|window, cx| window.click("confirm-remove-procedure-close", cx));
+    until(&shell, cx, "the list is empty", |cx| {
+        procedures_listed(&shell, cx).is_empty()
+    });
+    assert!(
+        !std::fs::read_to_string(user.project_file("atlas"))
+            .unwrap()
+            .contains("procedures.close")
+    );
+}
+
+/// A project with a ready workspace `login` and the procedure `open-prs`.
+fn user_with_a_procedure() -> User {
+    let user = user();
+    project(&user, "atlas");
+    workspace(&user, "atlas", "login");
+    user.call(
+        "procedure.add",
+        json!({"project": "atlas", "template": "open-prs"}),
+    )
+    .unwrap();
+    user
+}
+
+#[gpui_kit::test]
+fn run_procedure_shows_the_grants_in_words_and_starts_nothing_until_confirm_then_opens_the_session(
+    cx: &mut TestAppContext,
+) {
+    let user = user_with_a_procedure();
+    let before = agents_started(&user);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    until(&shell, cx, "the workspace's card has the action", |cx| {
+        cx.update(|window, _| window.try_find("run-procedure-login").is_some())
+    });
+
+    cx.update(|window, cx| window.click("run-procedure-login", cx));
+    let run = shell.read_with(cx, |s, _| s.procedure_run().clone());
+    until(&shell, cx, "the grants are shown", |cx| {
+        run.read_with(cx, |run, _| run.shown().is_some())
+    });
+    settle(cx);
+
+    run.read_with(cx, |run, _| {
+        assert_eq!(run.workspace(), "login");
+        assert_eq!(
+            run.chosen(),
+            Some("open-prs"),
+            "the only procedure is chosen"
+        );
+    });
+    let said = text_of("run-grant-push", cx).unwrap();
+    assert!(said.contains("push"), "{said}");
+    assert!(
+        said.contains("held for your answer"),
+        "ask is said in words: {said}"
+    );
+    assert!(
+        text_of("run-grant-pr-create", cx)
+            .unwrap()
+            .contains("held for your answer")
+    );
+    assert!(
+        text_of("run-children", cx)
+            .unwrap()
+            .contains("none of them")
+    );
+    assert!(
+        text_of("run-notice", cx)
+            .unwrap()
+            .contains("until you confirm")
+    );
+    assert_eq!(
+        agents_started(&user),
+        before,
+        "nothing started: only Confirm starts"
+    );
+    // Cancel starts nothing either.
+    cx.update(|window, cx| window.click("run-procedure-modal-cancel", cx));
+    settle(cx);
+    assert!(!run.read_with(cx, |run, _| run.is_open()));
+    assert_eq!(agents_started(&user), before);
+
+    cx.update(|window, cx| window.click("run-procedure-login", cx));
+    until(&shell, cx, "the grants are shown again", |cx| {
+        run.read_with(cx, |run, _| run.shown().is_some())
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("run-confirm", cx));
+    until(&shell, cx, "the run's session is open", |cx| {
+        matches!(selected(&shell, cx), Some(Selection::Session(_)))
+    });
+
+    assert_eq!(agents_started(&user), before + 1);
+    let Some(Selection::Session(agent)) = selected(&shell, cx) else {
+        unreachable!()
+    };
+    let held = user.call("procedure.of", json!({"agent": agent})).unwrap();
+    assert_eq!(held["run"]["procedure"], "open-prs");
+    assert_eq!(
+        held["run"]["grants"],
+        json!({"pr-create": "ask", "push": "ask"})
+    );
+    assert!(
+        !run.read_with(cx, |run, _| run.is_open()),
+        "the modal closed"
+    );
+
+    // Its grants are shown in the WORKSPACE section while it runs.
+    until(&shell, cx, "the rail shows the grants", |cx| {
+        cx.update(|window, _| window.try_find("rail-run-grant-push").is_some())
+    });
+    assert!(text_of("rail-run-title", cx).unwrap().contains("open-prs"));
+    assert!(
+        text_of("rail-run-grant-pr-create", cx)
+            .unwrap()
+            .contains("held for your answer")
+    );
+}
+
+#[gpui_kit::test]
+fn the_session_s_workspace_menu_runs_a_procedure_in_its_workspace_and_main_has_no_such_entry(
+    cx: &mut TestAppContext,
+) {
+    let user = user_with_a_procedure();
+    let in_workspace = start(&user, "atlas", Some("login"), "Fix the login");
+    let in_main = start(&user, "atlas", None, "Read the notes");
+    let before = agents_started(&user);
+    let (shell, cx) = open_session(&user, &in_workspace, 1280., cx);
+
+    cx.update(|window, cx| window.click("workspace-menu", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("run-procedure", cx));
+    let run = shell.read_with(cx, |s, _| s.procedure_run().clone());
+    until(&shell, cx, "the grants are shown", |cx| {
+        run.read_with(cx, |run, _| run.shown().is_some())
+    });
+    run.read_with(cx, |run, _| {
+        assert_eq!((run.project(), run.workspace()), ("atlas", "login"));
+    });
+    assert_eq!(
+        agents_started(&user),
+        before,
+        "nothing started before Confirm"
+    );
+    cx.update(|window, cx| window.click("run-procedure-modal-cancel", cx));
+    settle(cx);
+
+    // The project folder is not a workspace: nothing to run a procedure in.
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::Session(in_main.clone()), window, cx)
+    });
+    until(&shell, cx, "main's session is open", |cx| {
+        selected(&shell, cx) == Some(Selection::Session(in_main.clone()))
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("workspace-menu", cx));
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(window.try_find("open-in-editor").is_some());
+        assert!(window.try_find("run-procedure").is_none());
+    });
+}
+
+#[gpui_kit::test]
+fn a_reference_is_added_with_a_path_picked_in_the_project_folder_and_removed(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let folder = project(&user, "atlas");
+    std::fs::create_dir_all(folder.join("docs")).unwrap();
+    std::fs::write(folder.join("docs/react.md"), "How we write components.\n").unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let section = page_of(&shell, cx).read_with(cx, |page, _| page.references().clone());
+    until(&shell, cx, "the empty list is shown", |cx| {
+        cx.update(|window, _| window.try_find("no-references").is_some())
+    });
+
+    cx.update(|window, cx| window.click("add-reference", cx));
+    settle(cx);
+    cx.simulate_input("react");
+    let description = section.read_with(cx, |s, _| s.description_field().unwrap().clone());
+    cx.update(|window, cx| {
+        description.update(cx, |f, cx| {
+            f.set_value("How we write components", window, cx)
+        })
+    });
+    // The picker lists the project folder (never `.git`): a folder opens and is picked, a file
+    // inside it is picked.
+    cx.update(|window, _| {
+        assert!(window.try_find("reference-entry-docs").is_some());
+        assert!(window.try_find("reference-entry-README.md").is_some());
+        assert!(window.try_find("reference-entry-.git").is_none());
+    });
+    cx.update(|window, cx| window.click("reference-entry-docs", cx));
+    settle(cx);
+    assert_eq!(section.read_with(cx, |s, cx| s.picked(cx)), "docs");
+    cx.update(|window, cx| window.click("reference-entry-react.md", cx));
+    settle(cx);
+    assert_eq!(section.read_with(cx, |s, cx| s.picked(cx)), "docs/react.md");
+    cx.update(|window, cx| window.click("save-reference", cx));
+    until(&shell, cx, "the reference is listed", |cx| {
+        section.read_with(cx, |s, _| s.references().is_some_and(|r| !r.is_empty()))
+    });
+    settle(cx);
+
+    let listed = section.read_with(cx, |s, _| s.references().unwrap().to_vec());
+    assert_eq!(
+        (listed[0].name.as_str(), listed[0].path.as_str()),
+        ("react", "docs/react.md")
+    );
+    assert!(
+        text_of("reference-path-react", cx)
+            .unwrap()
+            .contains("docs/react.md")
+    );
+    assert!(
+        text_of("reference-description-react", cx)
+            .unwrap()
+            .contains("components")
+    );
+    assert!(!section.read_with(cx, |s, _| s.is_open()));
+    assert!(
+        std::fs::read_to_string(user.project_file("atlas"))
+            .unwrap()
+            .contains("[references.react]")
+    );
+
+    cx.update(|window, cx| window.click("remove-reference-react", cx));
+    settle(cx);
+    assert_eq!(
+        section.read_with(cx, |s, _| s.references().unwrap().len()),
+        1,
+        "the first click asks"
+    );
+    cx.update(|window, cx| window.click("confirm-remove-reference-react", cx));
+    until(&shell, cx, "the list is empty", |cx| {
+        section.read_with(cx, |s, _| s.references().is_some_and(<[_]>::is_empty))
+    });
+    assert!(
+        !std::fs::read_to_string(user.project_file("atlas"))
+            .unwrap()
+            .contains("references.react")
+    );
+}
+
+#[gpui_kit::test]
+fn a_reference_the_daemon_refuses_says_why_in_the_modal_and_adds_nothing(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let section = page_of(&shell, cx).read_with(cx, |page, _| page.references().clone());
+
+    cx.update(|window, cx| window.click("add-reference", cx));
+    settle(cx);
+    cx.simulate_input("elsewhere");
+    let description = section.read_with(cx, |s, _| s.description_field().unwrap().clone());
+    let path = section.read_with(cx, |s, _| s.path_field().unwrap().clone());
+    cx.update(|window, cx| {
+        description.update(cx, |f, cx| f.set_value("Outside", window, cx));
+        path.update(cx, |f, cx| f.set_value("../outside", window, cx));
+    });
+    cx.update(|window, cx| window.click("save-reference", cx));
+    until(&shell, cx, "the refusal is shown", |cx| {
+        section.read_with(cx, |s, _| s.form_error().is_some())
+    });
+    settle(cx);
+
+    assert!(
+        section.read_with(cx, |s, _| s.is_open()),
+        "the modal stays open"
+    );
+    let why = section.read_with(cx, |s, _| s.form_error().unwrap().to_owned());
+    assert!(
+        why.contains("../outside"),
+        "the daemon's sentence names the path: {why}"
+    );
+    assert!(cx.update(|window, _| window.try_find("reference-error").is_some()));
+    assert!(
+        user.call("reference.list", json!({"project": "atlas"}))
+            .unwrap()["references"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
