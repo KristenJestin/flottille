@@ -284,26 +284,7 @@ impl Pull {
     /// What blocks its merge: its checks failing or still running, or a review asking for
     /// changes; none when nothing does.
     pub fn blocks(&self) -> Option<String> {
-        let named = |state: &str| {
-            let names: Vec<&str> = self
-                .checks
-                .iter()
-                .filter(|(_, s)| *s == state)
-                .map(|(name, _)| name.as_str())
-                .collect();
-            (!names.is_empty()).then(|| names.join(", "))
-        };
-        let mut blocks = Vec::new();
-        if let Some(names) = named("failing") {
-            blocks.push(format!("its checks fail ({names})"));
-        }
-        if let Some(names) = named("pending") {
-            blocks.push(format!("its checks are still running ({names})"));
-        }
-        if self.review == Some("changes requested") {
-            blocks.push("a review asks for changes".to_owned());
-        }
-        (!blocks.is_empty()).then(|| blocks.join(", "))
+        blocks(&self.checks, self.review)
     }
 
     fn to_json(&self) -> Value {
@@ -882,6 +863,30 @@ struct ForgeWrite {
     waive: Option<String>,
 }
 
+/// What blocks the merge of a pull request with these checks and this review; none when nothing
+/// does.
+fn blocks(checks: &[(String, &'static str)], review: Option<&str>) -> Option<String> {
+    let named = |state: &str| {
+        let names: Vec<&str> = checks
+            .iter()
+            .filter(|(_, s)| *s == state)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        (!names.is_empty()).then(|| names.join(", "))
+    };
+    let mut blocks = Vec::new();
+    if let Some(names) = named("failing") {
+        blocks.push(format!("its checks fail ({names})"));
+    }
+    if let Some(names) = named("pending") {
+        blocks.push(format!("its checks are still running ({names})"));
+    }
+    if review == Some("changes requested") {
+        blocks.push("a review asks for changes".to_owned());
+    }
+    (!blocks.is_empty()).then(|| blocks.join(", "))
+}
+
 /// `forge_write`, once the gate let it through by a procedure's grant: one write to the forge of
 /// one repository of the agent's own workspace, for the workspace's branch only, through the
 /// user's own `gh`.
@@ -935,8 +940,14 @@ pub async fn forge_write(daemon: &Daemon, place: &Place, args: Value) -> Outcome
         }
     };
     let branch = workspace.branch.as_str();
+    // The project's reviewers, as its file says them now.
+    let reviewers = match projects::load_project(daemon, &place.project) {
+        Ok(project) => project.pull_requests.reviewers,
+        Err(failure) => return Outcome::Failed(failure.message),
+    };
     if matches!(forge, Forge::Bitbucket { .. }) {
-        return bitbucket::write(&forge, branch, &repository.base.branch, asked).await;
+        let base = &repository.base.branch;
+        return bitbucket::write(&forge, branch, base, &reviewers, asked).await;
     }
     if let Err(problem) = signed_in().await {
         return Outcome::Failed(problem);
@@ -951,11 +962,6 @@ pub async fn forge_write(daemon: &Daemon, place: &Place, args: Value) -> Outcome
             };
             let base = &repository.base.branch;
             let body = asked.body.unwrap_or_default();
-            // The project's reviewers, as its file says them now.
-            let reviewers = match projects::load_project(daemon, &place.project) {
-                Ok(project) => project.pull_requests.reviewers,
-                Err(failure) => return Outcome::Failed(failure.message),
-            };
             let mut args = vec![
                 "pr", "create", "-R", &slug, "--head", branch, "--base", base, "--title", &title,
                 "--body", &body,

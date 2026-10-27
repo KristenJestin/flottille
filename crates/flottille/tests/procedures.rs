@@ -1555,7 +1555,11 @@ fn bitbucket_pr_merge_squash_merges_only_the_workspace_s_own_pull_request_into_i
     procedure(&user, "merge", json!({"pr-merge-squash": "allow"}), false);
     let (_, mcp) = run(&user, "merge");
     let merge = json!({"action": "pr-merge-squash", "repository": "."});
-    let pulls = |pulls: Value| user.bkt_script(json!({"pulls": {"acme/app": pulls}}));
+    // Its own page names no reviewer, and it has no check: nothing blocks the merge.
+    let pulls = |pulls: Value| {
+        user.bkt_script(json!({"pulls": {"acme/app": pulls},
+            "api": {"/repositories/acme/app/pullrequests/12": cloud_page(&[])}}))
+    };
 
     // None open.
     pulls(json!([]));
@@ -1716,4 +1720,150 @@ fn a_bitbucket_write_is_refused_when_the_remote_leads_elsewhere_than_when_the_wo
         answer.text
     );
     assert!(user.bkt_received().is_empty());
+}
+
+/// `[pull_requests] reviewers` in the project's file.
+fn name_the_reviewers(user: &User) {
+    let file = user.project_file("app");
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    text.push_str("\n[pull_requests]\nreviewers = [\"alice\", \"bob\"]\n");
+    std::fs::write(file, text).unwrap();
+}
+
+#[test]
+fn bitbucket_pr_create_asks_the_project_s_reviewers() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
+    name_the_reviewers(&user);
+    user.bkt_script(json!({"created": 12}));
+    procedure(&user, "open", json!({"pr-create": "allow"}), false);
+    let (_, open) = run(&user, "open");
+
+    let answer = open.call(
+        "forge_write",
+        json!({"action": "pr-create", "repository": ".", "title": "Login", "body": "Adds it"}),
+    );
+
+    assert!(!answer.error, "{}", answer.text);
+    let calls = bkt_calls(&user);
+    let created = calls.iter().find(|c| c.starts_with("pr create")).unwrap();
+    assert_eq!(
+        created,
+        "pr create --context cloud --workspace acme --repo app --source app/login --target main \
+         --title Login --description Adds it --reviewer alice --reviewer bob"
+    );
+}
+
+/// The Cloud pull request #12's own page, with its reviewers in `states`.
+fn cloud_page(states: &[&str]) -> Value {
+    let participants: Vec<Value> = states
+        .iter()
+        .enumerate()
+        .map(|(at, state)| {
+            json!({"role": "REVIEWER", "approved": *state == "approved", "state": state,
+                "user": {"display_name": format!("Reviewer {at}")}})
+        })
+        .collect();
+    json!({"id": 12, "participants": participants})
+}
+
+#[test]
+fn bitbucket_pr_merge_squash_refuses_while_a_check_fails_or_runs_or_a_reviewer_asks_for_changes_until_the_user_waives_it()
+ {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
+    procedure(&user, "merge", json!({"pr-merge-squash": "allow"}), false);
+    let (_, mcp) = run(&user, "merge");
+    let merge = json!({"action": "pr-merge-squash", "repository": "."});
+    let page = "/repositories/acme/app/pullrequests/12";
+    let script = |checks: Value, reviewers: &[&str]| {
+        user.bkt_script(json!({
+            "pulls": {"acme/app": [cloud_pull(12, "acme/app", "acme/app", "main")]},
+            "checks": {"acme/app": {"12": checks}},
+            "api": {page: cloud_page(reviewers)}}));
+    };
+    let refused = |what: &str| {
+        let answer = mcp.call("forge_write", merge.clone());
+        assert!(answer.error, "{}", answer.text);
+        assert!(answer.text.contains(what), "{what}: {}", answer.text);
+    };
+
+    script(json!([{"state": "FAILED", "name": "build"}]), &[]);
+    refused("its checks fail (build)");
+    script(json!([{"state": "INPROGRESS", "name": "build"}]), &[]);
+    refused("its checks are still running (build)");
+    script(
+        json!([{"state": "SUCCESSFUL", "name": "build"}]),
+        &["approved", "changes_requested"],
+    );
+    refused("a review asks for changes");
+    assert_eq!(bkt_calls_starting(&user, "pr merge"), 0);
+
+    // Waived: held for the user, and merged once they allow that very merge.
+    let waived = mcp.call(
+        "forge_write",
+        json!({"action": "pr-merge-squash", "repository": ".",
+            "waive": "the reviewer's request is already answered"}),
+    );
+    assert!(
+        waived.text.contains("Waiting for the user's approval"),
+        "{}",
+        waived.text
+    );
+    let requests = waiting(&user);
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    approve(&user, &requests[0]);
+    eventually("the waived merge", || {
+        bkt_calls_starting(&user, "pr merge") == 1
+    });
+
+    // Passing checks and approving reviewers: merged without a word from the user.
+    script(
+        json!([{"state": "SUCCESSFUL", "name": "build"}]),
+        &["approved"],
+    );
+    let answer = mcp.call("forge_write", merge);
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(bkt_calls_starting(&user, "pr merge"), 2);
+}
+
+#[test]
+fn a_data_center_pull_request_a_reviewer_marked_needs_work_is_not_merged() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user, "ssh://git@bitbucket.example.com:7999/APP/app.git");
+    name_the_data_center(&user);
+    let pull = |status: &str| {
+        json!({"id": 5, "title": "Login", "state": "OPEN",
+            "fromRef": {"displayId": "app/login",
+                "repository": {"slug": "app", "project": {"key": "APP"}}},
+            "toRef": {"displayId": "main",
+                "repository": {"slug": "app", "project": {"key": "APP"}}},
+            "participants": [{"role": "REVIEWER", "status": status, "approved": false,
+                "user": {"displayName": "Alice"}}],
+            "links": {"self": [{"href": "https://bitbucket.example.com/projects/APP/repos/app/pull-requests/5"}]}})
+    };
+    let script = |status: &str| {
+        user.bkt_script(json!({
+            "contexts": [{"name": "work", "host": "bitbucket.example.com:7990"}],
+            "pulls": {"APP/app": [pull(status)]},
+            "checks": {"APP/app": {"5": [{"state": "SUCCESSFUL", "name": "build"}]}}}));
+    };
+    procedure(&user, "merge", json!({"pr-merge-squash": "allow"}), false);
+    let (_, mcp) = run(&user, "merge");
+    let merge = json!({"action": "pr-merge-squash", "repository": "."});
+
+    script("NEEDS_WORK");
+    let answer = mcp.call("forge_write", merge.clone());
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("a review asks for changes"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(bkt_calls_starting(&user, "pr merge"), 0);
+
+    script("APPROVED");
+    let answer = mcp.call("forge_write", merge);
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(bkt_calls_starting(&user, "pr merge"), 1);
 }
