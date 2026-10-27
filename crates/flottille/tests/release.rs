@@ -403,14 +403,18 @@ fn sha256(bytes: &[u8]) -> String {
 #[test]
 fn the_archive_holds_the_binary_and_both_licences_with_its_sum_beside_it() {
     let out = tempfile::tempdir().unwrap();
-    let binary = Path::new(env!("CARGO_BIN_EXE_flottille"));
+    let programs = tempfile::tempdir().unwrap();
+    let binary = standing_for(programs.path(), "0.4.0-beta.2");
 
-    let output = package("0.4.0-beta.2", binary, out.path());
+    let output = package("0.4.0-beta.2", &binary, out.path());
 
     assert!(output.status.success(), "{output:?}");
     let archive = out
         .path()
         .join("flottille-0.4.0-beta.2-x86_64-linux.tar.gz");
+    // The archive only moves bytes: the real binary (a gigabyte in a debug build) would fill a
+    // small /tmp for nothing.
+    assert!(std::fs::metadata(&archive).unwrap().len() < 1 << 20);
     let sum = std::fs::read_to_string(archive.with_extension("gz.sha256")).unwrap();
     assert_eq!(
         sum,
@@ -962,7 +966,7 @@ fn the_branch_name_is_sanitised_the_same_way_everywhere() {
         &["--channel", "alpha", "--branch", branch],
     );
     let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
-    let binary = installed(&user);
+    let binary = installed();
     user.command_through(
         &binary,
         &["update", "--channel", "alpha", "--branch", branch],
@@ -1000,20 +1004,69 @@ fn the_branch_name_is_sanitised_the_same_way_everywhere() {
 
 // `flottille update`.
 
-/// A copy of Flottille's binary in the user's folder, the one `update` replaces.
-fn installed(user: &User) -> PathBuf {
-    let bin = user.path("home/.local/bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let path = bin.join("flottille");
-    // Copied by `cp`, not by this process: a file it held open for writing would be inherited by
-    // what another test spawns at that moment, and running it would fail with "Text file busy".
-    let copied = Command::new("cp")
-        .arg(env!("CARGO_BIN_EXE_flottille"))
-        .arg(&path)
-        .status()
+/// Flottille's binary in a folder of its own, the one `update` replaces.
+struct Installed {
+    _folder: tempfile::TempDir,
+    path: PathBuf,
+}
+
+impl std::ops::Deref for Installed {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for Installed {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<std::ffi::OsStr> for Installed {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.path.as_os_str()
+    }
+}
+
+/// The binary `update` replaces, linked to the real one rather than copied: it weighs a gigabyte
+/// in a debug build, and /tmp may be a small tmpfs. `update` renames the new binary over this
+/// name, so the real one is left as it is. The folder is where cargo keeps the tests' scratch
+/// files, on the file system of the build: a link cannot cross to /tmp.
+fn installed() -> Installed {
+    let folder = tempfile::Builder::new()
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
         .unwrap();
-    assert!(copied.success());
-    path
+    let path = folder.path().join("flottille");
+    if std::fs::hard_link(env!("CARGO_BIN_EXE_flottille"), &path).is_err() {
+        // Copied by `cp`, not by this process: a file it held open for writing would be
+        // inherited by what another test spawns at that moment, and running it would fail with
+        // "Text file busy".
+        let copied = Command::new("cp")
+            .arg(env!("CARGO_BIN_EXE_flottille"))
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(copied.success());
+    }
+    Installed {
+        _folder: folder,
+        path,
+    }
+}
+
+#[test]
+fn the_installed_binary_is_a_link_to_the_real_one_not_a_copy() {
+    use std::os::unix::fs::MetadataExt;
+
+    let binary = installed();
+
+    let (linked, real) = (
+        std::fs::metadata(&binary).unwrap(),
+        std::fs::metadata(env!("CARGO_BIN_EXE_flottille")).unwrap(),
+    );
+    assert_eq!((linked.dev(), linked.ino()), (real.dev(), real.ino()));
 }
 
 #[test]
@@ -1022,7 +1075,7 @@ fn flottille_update_replaces_the_binary_from_a_local_fake_release() {
     let programs = tempfile::tempdir().unwrap();
     three_channels(&releases, programs.path());
     let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
-    let binary = installed(&user);
+    let binary = installed();
 
     let output = user
         .command_through(&binary, &["update", "--channel", "beta"])
@@ -1061,7 +1114,7 @@ fn flottille_update_refuses_a_wrong_sum_and_keeps_the_binary() {
         stable.to_string().into_bytes(),
     );
     let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
-    let binary = installed(&user);
+    let binary = installed();
     let before = std::fs::read(&binary).unwrap();
 
     let output = user
@@ -1108,7 +1161,7 @@ fn flottille_update_refuses_while_an_agent_runs_and_says_how_to_stop_it() {
         assert!(std::time::Instant::now() < deadline, "the agent never ran");
         std::thread::sleep(Duration::from_millis(50));
     }
-    let binary = installed(&user);
+    let binary = installed();
     let before = std::fs::read(&binary).unwrap();
 
     let output = user
@@ -1144,7 +1197,7 @@ fn flottille_update_refuses_while_a_daemon_runs_and_says_to_stop_it_first() {
     let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
     // Started by any command; no agent runs.
     user.status();
-    let binary = installed(&user);
+    let binary = installed();
     let before = std::fs::read(&binary).unwrap();
 
     let output = user
@@ -1170,7 +1223,7 @@ fn flottille_update_picks_the_newest_beta_by_version_not_by_date() {
     let programs = tempfile::tempdir().unwrap();
     betas_out_of_order(&releases, programs.path());
     let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
-    let binary = installed(&user);
+    let binary = installed();
 
     let output = user
         .command_through(&binary, &["update", "--channel", "beta"])
@@ -1219,7 +1272,7 @@ fn flottille_update_says_it_is_already_on_that_version_and_reinstalls_only_with_
     let version = this_version();
     stable_at(&releases, programs.path(), &version);
     let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
-    let binary = installed(&user);
+    let binary = installed();
     let before = std::fs::read(&binary).unwrap();
 
     let output = user
@@ -1253,7 +1306,7 @@ fn flottille_update_refuses_an_older_version_without_force() {
     let programs = tempfile::tempdir().unwrap();
     stable_at(&releases, programs.path(), "0.0.1");
     let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
-    let binary = installed(&user);
+    let binary = installed();
     let before = std::fs::read(&binary).unwrap();
 
     let output = user
@@ -1288,7 +1341,7 @@ fn flottille_update_says_a_network_failure_is_not_a_missing_release() {
         format!("http://{}/repos/o/r", listener.local_addr().unwrap())
     };
     let user = User::new().with_env("FLOTTILLE_RELEASES", &api);
-    let binary = installed(&user);
+    let binary = installed();
 
     for channel in ["stable", "beta", "alpha"] {
         let mut args = vec!["update", "--channel", channel];
@@ -1308,7 +1361,7 @@ fn flottille_update_says_a_network_failure_is_not_a_missing_release() {
 fn flottille_update_refuses_a_branch_without_the_alpha_channel() {
     let releases = Releases::serve();
     let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
-    let binary = installed(&user);
+    let binary = installed();
 
     for args in [
         vec!["update", "--branch", "feat/x"],
@@ -1334,7 +1387,7 @@ fn flottille_update_picks_the_highest_archive_of_an_alpha_being_replaced() {
     let programs = tempfile::tempdir().unwrap();
     alpha_with_two_archives(&releases, programs.path());
     let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
-    let binary = installed(&user);
+    let binary = installed();
 
     let output = user
         .command_through(
