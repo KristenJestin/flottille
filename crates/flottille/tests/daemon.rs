@@ -178,6 +178,44 @@ fn a_stopped_daemon_is_restarted_by_the_next_command() {
 }
 
 #[test]
+fn a_daemon_started_while_the_stop_waits_does_not_make_the_stop_fail() {
+    let user = User::new();
+    let first = user.status()["pid"].as_u64().unwrap();
+    let asked = std::time::Instant::now();
+    let stop = user
+        .command(&["daemon", "stop"])
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Another client (the window reconnecting) starts a daemon as soon as the stopped one lets go
+    // of the lock: this test stands for it, taking the lock and writing a pid of its own.
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(user.path("runtime/flottille/daemon.lock"))
+        .unwrap();
+    while lock.try_lock().is_err() {
+        assert!(
+            asked.elapsed() < Duration::from_secs(10),
+            "the daemon never stopped"
+        );
+        std::thread::yield_now();
+    }
+    lock.set_len(0).unwrap();
+    std::io::Write::write_all(&mut &lock, format!("{}\n", std::process::id()).as_bytes()).unwrap();
+
+    let stopped = stop.wait_with_output().unwrap();
+    assert!(
+        stopped.status.success(),
+        "daemon stop failed after {:?}: {}",
+        asked.elapsed(),
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    assert!(!alive(first));
+}
+
+#[test]
 fn stopping_when_no_daemon_runs_starts_none() {
     let user = User::new();
 
