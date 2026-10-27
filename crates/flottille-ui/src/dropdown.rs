@@ -15,6 +15,7 @@ use gpui_kit::{
 };
 
 use crate::icons::{Icon, icon};
+use crate::motion::RISE;
 use crate::theme::palette;
 use crate::typography::Type;
 
@@ -30,7 +31,7 @@ pub enum Align {
     End,
 }
 
-type Handler = Rc<dyn Fn(&mut Window, &mut App) + 'static>;
+pub(crate) type Handler = Rc<dyn Fn(&mut Window, &mut App) + 'static>;
 
 #[derive(IntoElement)]
 pub struct Dropdown {
@@ -146,65 +147,89 @@ impl RenderOnce for Dropdown {
         if !self.open {
             return root;
         }
-        let viewport = window.viewport_size();
-        let dismiss = self.on_toggle.clone();
-        let backdrop = anchored().position(point(px(0.), px(0.))).child(
+        root.child(list_overlay(
+            &self.id,
+            self.align,
+            self.width,
+            self.items,
+            self.on_toggle,
+            1.0,
+            window,
+            cx,
+        ))
+    }
+}
+
+/// The list a button opens, drawn after everything else: below the button, or above it when the
+/// window has no room below, on the opaque card colour. With a `dismiss`, a backdrop over the
+/// whole window takes the click that closes it. `fade` is how far into view it is (1 at rest):
+/// an entering list rises into place while it grows opaque.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn list_overlay(
+    id: &ElementId,
+    align: Align,
+    width: Pixels,
+    items: Vec<AnyElement>,
+    dismiss: Option<Handler>,
+    fade: f32,
+    window: &mut Window,
+    cx: &mut App,
+) -> impl IntoElement {
+    let p = palette(cx);
+    let viewport = window.viewport_size();
+    let backdrop = dismiss.map(|dismiss| {
+        anchored().position(point(px(0.), px(0.))).child(
             div()
-                .id(ElementId::Name(
-                    format!("{}-backdrop", id_text(&self.id)).into(),
-                ))
+                .id(ElementId::Name(format!("{}-backdrop", id_text(id)).into()))
                 .w(viewport.width)
                 .h(viewport.height)
                 .occlude()
-                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                    if let Some(dismiss) = &dismiss {
-                        dismiss(window, cx);
-                    }
-                })
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| dismiss(window, cx))
                 .test_support(),
-        );
-        let menu = ElementId::Name(format!("{}-menu", id_text(&self.id)).into());
-        let panel = div()
-            .id(menu)
-            .occlude()
-            .w(self.width)
-            .p(px(6.))
-            .rounded(px(10.))
-            .bg(p.card)
-            .border_1()
-            .border_color(p.line2)
-            .shadow(vec![BoxShadow {
-                color: hsla(0., 0., 0., 0.5),
-                offset: point(px(0.), px(8.)),
-                blur_radius: px(24.),
-                spread_radius: px(-4.),
-                inset: false,
-            }])
-            .ui_text()
-            .text_color(p.text)
-            .flex()
-            .flex_col()
-            .children(self.items)
-            .test_support();
-        // Below the button, or above it when the window has no room below; the padding is the
-        // gap on either side.
-        let list = anchored()
-            .anchor(match self.align {
-                Align::Start => Anchor::TopLeft,
-                Align::End => Anchor::TopRight,
-            })
-            .offset(point(px(0.), px(TRIGGER - GAP)))
-            .child(div().py(px(GAP)).child(panel));
-        let corner = div()
-            .absolute()
-            .top_0()
-            .map(|d| match self.align {
-                Align::Start => d.left_0(),
-                Align::End => d.right_0(),
-            })
-            .child(deferred(div().child(backdrop).child(list)).priority(1));
-        root.child(corner)
-    }
+        )
+    });
+    let menu = ElementId::Name(format!("{}-menu", id_text(id)).into());
+    let panel = div()
+        .id(menu)
+        .occlude()
+        .when(fade < 1.0, |d| {
+            d.relative().top(px(RISE * (1.0 - fade))).opacity(fade)
+        })
+        .w(width)
+        .p(px(6.))
+        .rounded(px(10.))
+        .bg(p.card)
+        .border_1()
+        .border_color(p.line2)
+        .shadow(vec![BoxShadow {
+            color: hsla(0., 0., 0., 0.5),
+            offset: point(px(0.), px(8.)),
+            blur_radius: px(24.),
+            spread_radius: px(-4.),
+            inset: false,
+        }])
+        .ui_text()
+        .text_color(p.text)
+        .flex()
+        .flex_col()
+        .children(items)
+        .test_support();
+    // The padding is the gap on either side.
+    let list = anchored()
+        .anchor(match align {
+            Align::Start => Anchor::TopLeft,
+            Align::End => Anchor::TopRight,
+        })
+        .offset(point(px(0.), px(TRIGGER - GAP)))
+        .child(div().py(px(GAP)).child(panel));
+    div()
+        .absolute()
+        .top_0()
+        .map(|d| match align {
+            Align::Start => d.left_0(),
+            Align::End => d.right_0(),
+        })
+        .child(deferred(div().children(backdrop).child(list)).priority(1))
 }
 
 fn id_text(id: &ElementId) -> String {

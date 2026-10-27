@@ -21,7 +21,7 @@ use flottille_window::conversation::Block;
 use flottille_window::link::{self, Connect};
 use flottille_window::model::{Place, Preparation};
 use flottille_window::project::{NewWorkspace, PlaceCard, ProjectPage};
-use flottille_window::session::SessionPage;
+use flottille_window::session::{RailRow, SessionPage};
 use flottille_window::settings::SettingsPage;
 use flottille_window::shell::{Layout, Selection};
 use flottille_window::tree::{place_id, project_id, session_id};
@@ -1205,11 +1205,14 @@ fn a_chosen_workspace_that_stops_being_ready_cannot_take_the_task(cx: &mut TestA
 // fake agent would (`tests/tree.rs`), while the fake agent plays the turns (`HANG` keeps a worker
 // mid-turn).
 
-/// A user whose fake agent keeps a worker mid-turn when its brief says `HANG`, and answers "ok"
-/// otherwise.
+/// A user whose fake agent keeps a worker mid-turn when its brief says `HANG`, has it report when
+/// the brief says `REPORT` (it then ends), and answers "ok" otherwise.
 fn team_user() -> User {
     let user = User::with_fake_agent();
-    user.fake_script(json!({"turns": [{"when": "HANG", "do": [{"hang": true}]}]}));
+    user.fake_script(json!({"turns": [
+        {"when": "HANG", "do": [{"hang": true}]},
+        {"when": "REPORT", "do": [{"mcp": {"tool": "report", "arguments": {"text": "done"}}}]}
+    ]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     user
 }
@@ -1267,19 +1270,24 @@ fn mcp_session(user: &User, which: impl Fn(&str) -> bool) -> Mcp {
 
 /// Launches a worker of the lead's in `w`, kept mid-turn: its id and its MCP session.
 fn worker(user: &User, lead: &Mcp, title: &str) -> (String, Mcp) {
+    let id = worker_doing(lead, "HANG", title);
+    let task = format!("Your task: {title}.");
+    (id, mcp_session(user, |prompt| prompt.contains(&task)))
+}
+
+/// Launches a worker of the lead's in `w` whose brief starts with `what`: its id.
+fn worker_doing(lead: &Mcp, what: &str, title: &str) -> String {
     let answer = lead.call(
         "agent_launch",
-        json!({"title": title, "brief": format!("HANG and {title}"), "workspace": "w"}),
+        json!({"title": title, "brief": format!("{what} and {title}"), "workspace": "w"}),
     );
     assert!(!answer.error, "{}", answer.text);
-    let id = answer
+    answer
         .text
         .split(|c: char| !c.is_ascii_alphanumeric())
         .find(|w| w.len() == 12 && w.chars().all(|c| c.is_ascii_hexdigit()))
         .unwrap()
-        .to_owned();
-    let task = format!("Your task: {title}.");
-    (id, mcp_session(user, |prompt| prompt.contains(&task)))
+        .to_owned()
 }
 
 /// The number of the request a held call's answer names.
@@ -1787,7 +1795,9 @@ fn a_child_appearing_adds_its_row_to_the_rail_and_the_sub_agents_list(cx: &mut T
 }
 
 #[gpui_kit::test]
-fn the_editor_button_opens_the_place_s_folder_with_the_system_handler(cx: &mut TestAppContext) {
+fn the_header_has_no_editor_button_and_the_workspace_menu_opens_the_place_s_folder_and_closes_on_escape(
+    cx: &mut TestAppContext,
+) {
     let user = team_user();
     let (lead, _mcp, folder) = lead_in_w(&user);
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
@@ -1804,9 +1814,119 @@ fn the_editor_button_opens_the_place_s_folder_with_the_system_handler(cx: &mut T
     cx.update(|window, cx| window.click(session_id(&lead), cx));
     settle(cx);
 
-    cx.update(|window, cx| window.click("open-in-editor", cx));
+    cx.update(|window, _| {
+        assert!(window.try_find("session-header").is_some());
+        assert!(
+            window.try_find("open-in-editor").is_none(),
+            "no editor button, in the header or anywhere while the menu is shut"
+        );
+        assert!(window.try_find("workspace-menu").is_some(), "the ⋯ button");
+    });
 
+    // It opens animated: it starts below its place and rises into it.
+    cx.update(|window, cx| window.click("workspace-menu", cx));
+    let entering = cx.update(|window, _| window.find("workspace-menu-menu").bounds().origin.y);
+    settle(cx);
+    let at_rest = cx.update(|window, _| window.find("workspace-menu-menu").bounds().origin.y);
+    assert!(entering > at_rest, "{entering:?} then {at_rest:?}");
+    cx.update(|window, _| assert!(window.find("open-in-editor").visible()));
+
+    // Escape closes it, animated too, and nothing was opened.
+    cx.simulate_keystrokes("escape");
+    cx.update(|window, _| {
+        assert!(
+            window.try_find("open-in-editor").is_some(),
+            "still on its way out"
+        )
+    });
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find("open-in-editor").is_none()));
+    assert!(given.lock().unwrap().is_empty());
+
+    // A click outside it closes it too.
+    cx.update(|window, cx| window.click("workspace-menu", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("session-header", cx));
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find("open-in-editor").is_none()));
+
+    // The entry opens the place's folder with the system's handler, and shuts the menu.
+    cx.update(|window, cx| window.click("workspace-menu", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("open-in-editor", cx));
+    settle(cx);
     assert_eq!(*given.lock().unwrap(), [folder]);
+    cx.update(|window, _| assert!(window.try_find("open-in-editor").is_none()));
+}
+
+#[gpui_kit::test]
+fn ended_children_are_gathered_under_a_folded_row_that_opens_on_a_click(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, mcp, _) = lead_in_w(&user);
+    let done = worker_doing(&mcp, "REPORT", "write the notes");
+    let (stopped, _s) = worker(&user, &mcp, "try the idea");
+    let (running, _r) = worker(&user, &mcp, "build the form");
+    let stop = mcp.call("agent_stop", json!({"agent_id": stopped}));
+    assert!(!stop.error, "{}", stop.text);
+    eventually("both have ended", || {
+        [&done, &stopped].iter().all(|id| {
+            user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["state"] == "ended"
+        })
+    });
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the rail knows the three children", |cx| {
+        rail_ids(&page, cx).len() == 4
+            && page.read_with(cx, |p, cx| {
+                [&done, &stopped].iter().all(|id| {
+                    matches!(
+                        p.state(id, cx),
+                        Some(AgentState::Completed | AgentState::Stopped)
+                    )
+                })
+            })
+    });
+    settle(cx);
+
+    // The running child keeps its place; the two ended ones are behind one folded row.
+    cx.update(|window, _| {
+        assert!(window.try_find(format!("rail-row-{lead}")).is_some());
+        assert!(window.try_find(format!("rail-row-{running}")).is_some());
+        assert!(window.try_find(format!("rail-row-{done}")).is_none());
+        assert!(window.try_find(format!("rail-row-{stopped}")).is_none());
+        assert!(window.try_find(format!("rail-ended-{lead}")).is_some());
+    });
+    assert_eq!(
+        page.read_with(cx, |p, cx| p.rail().read(cx).rows()),
+        [
+            RailRow::Agent(lead.clone()),
+            RailRow::Agent(running.clone()),
+            RailRow::Ended {
+                parent: lead.clone(),
+                count: 2,
+                open: false
+            }
+        ]
+    );
+
+    // A click opens it, and the ended children come back; a second click folds it again.
+    cx.update(|window, cx| window.click(format!("rail-ended-{lead}"), cx));
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(window.try_find(format!("rail-row-{done}")).is_some());
+        assert!(window.try_find(format!("rail-row-{stopped}")).is_some());
+    });
+    cx.update(|window, cx| window.click(format!("rail-ended-{lead}"), cx));
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find(format!("rail-row-{done}")).is_none()));
+
+    // An ended child shown in the conversation stays reachable from the row.
+    cx.update(|window, cx| window.click(format!("rail-ended-{lead}"), cx));
+    settle(cx);
+    cx.update(|window, cx| window.click(format!("rail-row-{stopped}"), cx));
+    until(&shell, cx, "the ended child's conversation", |cx| {
+        session_page(&shell, cx).read_with(cx, |p, _| p.shown() == stopped)
+    });
 }
 
 fn row_ids(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Vec<gpui_kit::EntityId> {
