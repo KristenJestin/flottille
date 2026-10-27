@@ -226,8 +226,17 @@ fn program_to_start(exe: PathBuf) -> PathBuf {
     }
 }
 
-/// Waits until the daemon has let go of its lock, so that the next command starts a new one.
-pub fn wait_until_stopped(paths: &Paths) -> Result<()> {
+/// The process id the daemon holding the lock wrote in it; empty when there is none.
+pub fn locked_by(paths: &Paths) -> String {
+    std::fs::read_to_string(paths.lock())
+        .unwrap_or_default()
+        .trim()
+        .to_owned()
+}
+
+/// Waits until the daemon `pid` (`locked_by`, read before it was asked to stop) has let go of its
+/// lock, so that the next command starts a new one.
+pub fn wait_until_stopped(paths: &Paths, pid: &str) -> Result<()> {
     let lock = match File::open(paths.lock()) {
         Ok(lock) => lock,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
@@ -235,6 +244,11 @@ pub fn wait_until_stopped(paths: &Paths) -> Result<()> {
     };
     let deadline = Instant::now() + START_TIMEOUT;
     while lock.try_lock().is_err() {
+        // A client that connected meanwhile (a window reconnecting) may have started a daemon,
+        // which took the lock as soon as it was free: the stopped one is gone.
+        if locked_by(paths) != pid {
+            return Ok(());
+        }
         if Instant::now() > deadline {
             return Err("the daemon was asked to stop but is still running".into());
         }
