@@ -59,7 +59,7 @@ user's), so that the user's own sign-in works; a call is cut after 30 s.
 - **What a tracker says is masked** before it is shown or stored (titles, descriptions, comments,
   errors), as every output is (`flottille_core::secrets`).
 - **Only reads are reachable.** The whole of what Flottille runs is `gh issue view <n> -R
-  owner/name --json number,title,state,body,comments,url`, `acli jira auth status` and `acli
+  github.com/owner/name --json number,title,state,body,comments,url`, `acli jira auth status` and `acli
   jira workitem view <KEY> --json --fields summary,status,description,comment`. The key is
   parsed first, so it is a number or `ABC-123`; no write command of either (`issue create`,
   `workitem create`, `comment`, `transition`, …) appears anywhere in the code, and the tests
@@ -77,6 +77,12 @@ signed in to other.atlassian.net, and this project's tracker is Jira on acme.atl
 nothing was read; switch acli to it (`acli jira auth switch --site acme.atlassian.net`) or correct
 the project's tracker`. A status with no `Site:` line is refused the same way. Nothing is asked of
 Jira then.
+
+**The work item must come from that site too.** The `Site:` line is what `acli` says of its
+sign-in; the item it prints says where it came from, in its `self` link. When that link's host is
+not the tracker's site, or the item has none, nothing of it is shown: `acli answered ABC-123 from
+other.atlassian.net, and this project's tracker is Jira on acme.atlassian.net: nothing of it is
+shown; check the site acli is signed in to (`acli jira auth status`)`.
 
 ## What is read
 

@@ -104,7 +104,7 @@ fn work_item(key: &str, summary: &str) -> Value {
     json!({
         "key": key,
         "id": "10001",
-        "self": "https://acme.atlassian.net/rest/api/3/issue/10001",
+        "self": "https://example.atlassian.net/rest/api/3/issue/10001",
         "fields": {
             "summary": summary,
             "status": {"name": "In Progress", "statusCategory": {"key": "indeterminate"}},
@@ -350,6 +350,35 @@ fn a_jira_site_other_than_acli_s_sign_in_is_refused_with_its_reason() {
 }
 
 #[test]
+fn a_jira_work_item_read_from_another_site_than_the_declared_one_is_refused() {
+    let user = User::new().with_fake_acli();
+    fixture(&user);
+    let mut elsewhere = work_item("ABC-123", "Add the login page");
+    elsewhere["self"] = json!("https://other.atlassian.net/rest/api/3/issue/10001");
+    let mut nowhere = work_item("ABC-124", "Add the logout page");
+    nowhere.as_object_mut().unwrap().remove("self");
+    jira(&user, json!({"ABC-123": elsewhere, "ABC-124": nowhere}));
+    track(&user, jira_abc());
+
+    let read = link(&user, Some("ABC-123")).unwrap();
+    let unsaid = link(&user, Some("ABC-124")).unwrap();
+
+    assert_eq!(
+        read["problem"],
+        "acli answered ABC-123 from other.atlassian.net, and this project's tracker is \
+         Jira on example.atlassian.net: nothing of it is shown; check the site acli is signed in \
+         to (`acli jira auth status`)"
+    );
+    assert_eq!(read["title"], Value::Null, "{read}");
+    assert_eq!(
+        unsaid["problem"],
+        "acli answered ABC-124 without saying its site (no self link), so it cannot be \
+         checked to be example.atlassian.net: nothing of it is shown"
+    );
+    assert_eq!(unsaid["title"], Value::Null, "{unsaid}");
+}
+
+#[test]
 fn the_new_workspace_form_s_preview_reads_a_ticket_before_any_workspace_has_it() {
     let user = User::new().with_fake_gh();
     fixture(&user);
@@ -416,7 +445,7 @@ fn a_github_issue_is_read_with_its_title_state_description_and_comments() {
         calls(user.gh_received())[linked..],
         [
             "auth status --hostname github.com",
-            "issue view 12 -R acme/api --json number,title,state,body,comments,url"
+            "issue view 12 -R github.com/acme/api --json number,title,state,body,comments,url"
         ]
     );
 }
@@ -440,7 +469,7 @@ fn a_jira_work_item_is_read_through_acli_and_its_description_comes_as_plain_text
     assert_eq!(read["repository"], Value::Null);
     assert_eq!(read["title"], "Add the login page");
     assert_eq!(read["state"], "In Progress");
-    assert_eq!(read["url"], "https://acme.atlassian.net/browse/ABC-123");
+    assert_eq!(read["url"], "https://example.atlassian.net/browse/ABC-123");
     assert_eq!(
         read["description"],
         "Let users log in.\n\n- a form\n- a session"

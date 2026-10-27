@@ -14,9 +14,10 @@ Flottille talks to a forge through the command line the user installed and signe
 GitHub, `bkt` for Bitbucket (below). It is spawned without a shell, as `git` is, with the daemon's
 environment (the user's), so that the user's own sign-in works; `GH_PROMPT_DISABLED=1` keeps `gh`
 from waiting for an answer, and a call is cut after 30 s. Every call names the repository (`-R
-owner/name`, from the repository's declared forge; for `bkt`, `--workspace` or `--project` and
-`--repo`):
-nothing depends on the daemon's working folder.
+github.com/owner/name`, from the repository's declared forge; for `bkt`, `--workspace` or
+`--project` and `--repo`): nothing depends on the daemon's working folder. The host is named in
+`-R` because `gh` otherwise takes it from `GH_HOST` when the user's environment sets it, which
+would send a read or a write to another host than the one the declaration was checked against.
 
 - **Flottille never reads, keeps nor prints a token.** It never runs `gh auth token` nor
   `--show-token`, never reads `gh`'s configuration folder. Of `gh auth status --hostname
@@ -58,11 +59,26 @@ serves two things, and only those:
   the `projects/PROJECT/repos/name` page's). Anything else is proposed as no forge. The proposal is
   active only once the user saves.
 - **The safety check.** Before anything is read or written, the declared forge must agree with the
-  remote: the same host and the same repository path (case aside). A repository whose remote leads
-  elsewhere is refused with its reason, for example `refused: api is declared on GitHub acme/api,
-  and its remote origin: it leads to github.com/other/api, not to GitHub acme/api; nothing was asked
-  of the forge: …`; Saving such a forge is refused the same way. A declared forge never silently
-  wins over the remote, nor the remote over it.
+  remote: the same host and the same repository path (case aside), for **every** URL of the
+  remote, fetch and push (`git remote get-url --all`, and again with `--push`, `insteadOf`
+  applied): a `pushurl` or a second `url` that leads elsewhere would send the push there while the
+  pull request opens on the declared repository. A repository whose remote leads elsewhere is
+  refused with its reason, for example `refused: api is declared on GitHub acme/api, and its
+  remote origin: it leads to github.com/other/api, not to GitHub acme/api; nothing was asked of
+  the forge: …`; Saving such a forge is refused the same way. A declared forge never silently wins
+  over the remote, nor the remote over it. A refusal shows a remote's address without what comes
+  before its host (a user, a password, a token) and masked, as every output is, an address
+  without a host included.
+
+**An SSH host alias** (`git@gh-work:acme/api.git`, `gh-work` being a `Host` of the user's
+`~/.ssh/config`) is resolved the way `ssh` resolves it: when an address reached over SSH has
+another host than the declared one, Flottille runs `ssh -G <host>` (spawned without a shell, cut
+after 5 s) and reads the `hostname` line of what it prints, nothing else of the SSH
+configuration. The declaration is checked against that host; a refusal names both (`… (gh-work
+is an SSH alias of gitlab.com)`). When `ssh` is missing or cannot say the host, the alias stays
+unresolved and the repository is refused, saying why. A host that is the declared one is never
+resolved, and a host that could pass for an option is never given to `ssh`. The window proposes no
+forge from an alias: the user chooses it in the Settings, and saving it is checked as above.
 
 A name that could pass for a flag or a path (a leading `-`, anything but letters, digits, `.`, `_`,
 `~` and `-`) is no repository, and a host is a name alone (no scheme, port or path).
@@ -74,8 +90,8 @@ with one) when a repository of its workspace has no forge declared, naming the r
 ## What is read
 
 For each GitHub repository, the pull request of the workspace's branch, the newest when there are
-several (`gh pr list -R owner/name --head <branch> --state all --limit 1`), then the pull request
-itself (`gh pr view <n> -R owner/name --json …`):
+several (`gh pr list -R github.com/owner/name --head <branch> --state all --limit 1`), then the pull request
+itself (`gh pr view <n> -R github.com/owner/name --json …`):
 
 - its number, title, state (`open`, `draft`, `merged`, `closed`), base branch and URL;
 - its review decision (`approved`, `changes requested`, `review required`, or none);
@@ -257,6 +273,8 @@ line, spawned without a shell, nothing written, everything masked), are in
 Tests never call GitHub nor Bitbucket nor use anyone's sign-in: a fake `gh`
 (`crates/flottille-fake-gh`) and a fake `bkt` (`crates/flottille-fake-bkt`), first on the `PATH` of
 the test's daemon, answer from a script and record every call, and the repositories are throwaway
-ones whose `origin` is set to a GitHub or Bitbucket URL after their workspace is made. The fake
+ones whose `origin` is set to a GitHub or Bitbucket URL after their workspace is made. A fake `ssh`,
+a script first on the same `PATH`, resolves the SSH aliases a test names and serves git's pushes
+from the throwaway bare repositories, so that no test reads the user's SSH configuration. The fake
 `bkt` answers in the shapes of the table above, needs `--context` and the repository's flags as
 the real one does, and is itself tested (`crates/flottille-fake-bkt/tests`).

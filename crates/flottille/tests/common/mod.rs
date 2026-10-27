@@ -269,6 +269,59 @@ impl User {
             .with_env("FLOTTILLE_FAKE_ACLI_DIR", dir.to_str().unwrap())
     }
 
+    /// This user with a fake `ssh` first in its `PATH`, so that no test reads the user's SSH
+    /// configuration nor reaches a server: `ssh -G <alias>` prints the resolved configuration of
+    /// each alias of `aliases` (its `hostname` among other lines) and ends with 255 for any other
+    /// name; git's own calls (`ssh <host> "git-receive-pack 'acme/api.git'"`) are served by the
+    /// bare repository of the same name in the user's `remotes`, whatever the host. Every call's
+    /// words are a line of `ssh-calls`.
+    pub fn with_fake_ssh(self, aliases: &[(&str, &str)]) -> User {
+        std::fs::create_dir(self.path("ssh-bin")).unwrap();
+        let cases: String = aliases
+            .iter()
+            .map(|(alias, host)| format!("  {alias}) host={host} ;;\n"))
+            .collect();
+        let script = format!(
+            "#!/bin/sh\n\
+             echo \"$*\" >> '{calls}'\n\
+             if [ \"$1\" = -G ]; then\n\
+             case \"$2\" in\n{cases}  *) echo \"ssh: Could not resolve hostname $2\" >&2; exit 255 ;;\n\
+             esac\n\
+             printf 'host %s\\nuser git\\nhostname %s\\nport 22\\nidentityfile ~/.ssh/id_work\\n' \"$2\" \"$host\"\n\
+             exit 0\n\
+             fi\n\
+             for last; do :; done\n\
+             service=${{last%% *}}\n\
+             repository=$(basename \"$(echo \"${{last#* }}\" | tr -d \"'\")\")\n\
+             exec git \"${{service#git-}}\" '{remotes}'/\"$repository\"\n",
+            calls = self.path("ssh-calls").display(),
+            remotes = self.path("remotes").display(),
+        );
+        let ssh = self.path("ssh-bin/ssh");
+        std::fs::write(&ssh, script).unwrap();
+        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!(
+            "{}:{}",
+            self.path("ssh-bin").display(),
+            self.env
+                .iter()
+                .rev()
+                .find(|(name, _)| name == "PATH")
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default())
+        );
+        self.with_env("PATH", &path)
+    }
+
+    /// The words of every call of the fake `ssh`, the first first.
+    pub fn ssh_calls(&self) -> Vec<String> {
+        std::fs::read_to_string(self.path("ssh-calls"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
     /// The fake `acli`'s script, read again at each of its calls.
     pub fn acli_script(&self, script: Value) {
         std::fs::write(self.path("acli/script.json"), script.to_string()).unwrap();

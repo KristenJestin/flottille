@@ -195,7 +195,7 @@ async fn read_issue(forge: &Forge, number: u64) -> Result<Ticket, String> {
         "view",
         &number.to_string(),
         "-R",
-        &slug,
+        &forge.gh_repository(),
         "--json",
         GH_FIELDS,
     ])
@@ -304,7 +304,30 @@ async fn read_work_item(key: &str, site: &str) -> Result<Ticket, String> {
     }
     let item: Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("acli jira workitem view answered what is not JSON: {error}"))?;
-    Ok(work_item(key, &item))
+    // The `Site:` line said where the sign-in is; the item itself says where it came from.
+    match site_of(&item) {
+        Some(from) if from == site => Ok(work_item(key, &item)),
+        Some(from) => Err(format!(
+            "acli answered {key} from {}, and this project's tracker is Jira on {site}: nothing \
+             of it is shown; check the site acli is signed in to (`acli jira auth status`)",
+            masked(&from)
+        )),
+        None => Err(format!(
+            "acli answered {key} without saying its site (no self link), so it cannot be checked \
+             to be {site}: nothing of it is shown"
+        )),
+    }
+}
+
+/// The site a work item comes from: the host of its `self` link, its REST address, lowercase.
+fn site_of(item: &Value) -> Option<String> {
+    item["self"]
+        .as_str()?
+        .strip_prefix("https://")?
+        .split('/')
+        .next()
+        .filter(|host| !host.is_empty())
+        .map(str::to_ascii_lowercase)
 }
 
 /// A Jira work item as `acli jira workitem view --json` prints it: Jira's REST shape (`key`,
@@ -328,12 +351,7 @@ fn work_item(key: &str, item: &Value) -> Ticket {
         repository: None,
         title: said(&fields["summary"]),
         state: said(&fields["status"]["name"]),
-        // The site is the host of `self`, the REST address of the item.
-        url: item["self"]
-            .as_str()
-            .and_then(|own| own.strip_prefix("https://"))
-            .and_then(|rest| rest.split('/').next())
-            .map(|host| masked(&format!("https://{host}/browse/{key}"))),
+        url: site_of(item).map(|host| masked(&format!("https://{host}/browse/{key}"))),
         description: cut(
             &masked(&document_text(&fields["description"])),
             DESCRIPTION_CHARS,

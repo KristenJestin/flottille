@@ -126,7 +126,7 @@ its run grants the action:
 - `action`: `pr-create`, `pr-merge-squash` or `pipeline-rerun`, each the grant of its name;
 - `repository`: one of the workspace's repositories, by its path; another is refused, and so is
   one with no forge declared, or whose declared forge is not where its remote leads;
-- `pr-create` needs `title`, takes `body` and `draft`: `gh pr create -R <owner/name> --head <branch>
+- `pr-create` needs `title`, takes `body` and `draft`: `gh pr create -R github.com/<owner/name> --head <branch>
   --base <base> --title … --body …`, the base the one the workspace's repository started from, and
   a `--reviewer` for each of the project's reviewers (below), on Bitbucket as on GitHub (`draft` is
   refused for Bitbucket, whose `bkt` opens none);

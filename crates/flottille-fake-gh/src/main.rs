@@ -10,7 +10,8 @@
 //! - `script.json`, written by the test (optional: without it, signed in with no pull request);
 //!   read again at every call, so that a test changes what the next call answers;
 //! - `received.jsonl`, written by the fake: one `{"args": [...], "env": {...}}` per call, `env`
-//!   holding the forge variables it was given (`GH_TOKEN`, `GITHUB_TOKEN`, `GH_CONFIG_DIR`).
+//!   holding the forge variables it was given (`GH_TOKEN`, `GITHUB_TOKEN`, `GH_CONFIG_DIR`,
+//!   `GH_HOST`).
 //!
 //! # The script
 //!
@@ -27,6 +28,10 @@
 //! `gh issue view --json` answers; an issue it does not hold is not found. `fail` makes `issue`
 //! calls fail the same way.
 //!
+//! As the real `gh` does, `-R` names the host first (`github.com/acme/app`) or takes it from
+//! `GH_HOST`, else `github.com`. The script's keys are `owner/name` on `github.com`, and
+//! `host/owner/name` on any other host.
+//!
 //! The writes answer as `gh` does when they work: `pr create` prints the new pull request's URL
 //! (numbered `created`, 1 by default), `pr merge` and `run rerun` print nothing, and `run list`
 //! prints `runs` of the repository (`{"runs": {"acme/app": [{"databaseId": 7, …}]}}`), `[]`
@@ -41,7 +46,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir =
         PathBuf::from(std::env::var_os("FLOTTILLE_FAKE_GH_DIR").expect("FLOTTILLE_FAKE_GH_DIR"));
-    let env: Map<String, Value> = ["GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR"]
+    let env: Map<String, Value> = ["GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR", "GH_HOST"]
         .iter()
         .filter_map(|name| Some((name.to_string(), Value::from(std::env::var(name).ok()?))))
         .collect();
@@ -67,6 +72,16 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             .position(|word| *word == name)
             .and_then(|at| words.get(at + 1).copied())
     };
+    // The repository as the script names it: its host first unless it is `github.com`.
+    let repository = option("-R").map(|asked| match asked.split('/').collect::<Vec<_>>()[..] {
+        ["github.com", owner, name] => format!("{owner}/{name}"),
+        [_, _, _] => asked.to_owned(),
+        _ => match std::env::var("GH_HOST") {
+            Ok(host) if !host.is_empty() && host != "github.com" => format!("{host}/{asked}"),
+            _ => asked.to_owned(),
+        },
+    });
+    let repository = repository.as_deref();
     match words.as_slice() {
         ["auth", "status", ..] => {
             if script["signed_in"] == false {
@@ -79,7 +94,7 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             0
         }
         ["issue", "view", number, ..] => {
-            let Some(repository) = option("-R") else {
+            let Some(repository) = repository else {
                 eprintln!("fake gh: no -R");
                 return 2;
             };
@@ -101,7 +116,7 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             }
         }
         ["pr", "create" | "merge", ..] | ["run", "list" | "rerun", ..] => {
-            let Some(repository) = option("-R") else {
+            let Some(repository) = repository else {
                 eprintln!("fake gh: no -R");
                 return 2;
             };
@@ -123,7 +138,7 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             0
         }
         ["pr", sub @ ("list" | "view"), rest @ ..] => {
-            let Some(repository) = option("-R") else {
+            let Some(repository) = repository else {
                 eprintln!("fake gh: no -R");
                 return 2;
             };
