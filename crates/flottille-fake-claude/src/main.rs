@@ -31,11 +31,12 @@
 //!
 //! | Step | What the fake does |
 //! |---|---|
-//! | `{"say": "text"}` | a `text_delta` stream event, then an `assistant` message with the text |
+//! | `{"say": "text"}` | a `message_start` stream event, a `text_delta` stream event, then an `assistant` message with the text |
 //! | `{"stream": ["a", "b"]}` | a `text_delta` stream event for each part, then one `assistant` message with them all |
 //! | `{"think": "text"}` | the same with a `thinking_delta` and a thinking block |
 //! | `{"think_hidden": true}` | a `signature_delta`, then a thinking block with no text and its signature, as Claude sends a thought whose display is omitted |
 //! | `{"tool": {"id", "name", "input", "result"}}` | an `assistant` message with the `tool_use`, then a `user` message with its `tool_result` |
+//! | `{"mcp": {"tool": "fs_list", "arguments": {}}}` | calls the tool on the HTTP MCP server `--mcp-config` named (initialize, then `tools/call`), as `claude` does; the answer recorded |
 //! | `{"permission": {"tool": "Bash", "input": {}}}` | a `can_use_tool` control request, the answer recorded |
 //! | `{"compaction": true}` | a `compacting` status, then a `compact_boundary` |
 //! | `{"retry": true}` | an `api_retry` message: the provider is overloaded |
@@ -44,9 +45,16 @@
 //! | `{"wait": 500}` | waits that many milliseconds; an interrupt ends the turn |
 //! | `{"hang": true}` | goes silent until an interrupt |
 //! | `{"die": 3}` | exits at once with that code |
+//!
+//! Each of the steps that say something is a message of the API, with an id of its own
+//! (`msg_fake_1`, `msg_fake_2`…) that its `message_start` stream event and its `assistant`
+//! message carry; `"message": "m1"` on a step gives it that id instead, so that steps with the
+//! same id are the blocks of one message (its `message_start` comes once, as the API's does).
 
+use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -130,6 +138,9 @@ fn main() {
         script,
         interrupted,
         next_request: 0,
+        mcp: mcp_config.map(|config| config["mcpServers"]["flottille"].clone()),
+        next_message: 0,
+        started: None,
     };
     for prompt in incoming {
         fake.play(&prompt, &answered);
@@ -231,6 +242,11 @@ struct Fake {
     script: Value,
     interrupted: Arc<Mutex<bool>>,
     next_request: u64,
+    /// The `flottille` server of the MCP configuration `--mcp-config` named.
+    mcp: Option<Value>,
+    next_message: u64,
+    /// The message of the API whose `message_start` was sent last.
+    started: Option<String>,
 }
 
 impl Fake {
@@ -242,10 +258,34 @@ impl Fake {
         *self.interrupted.lock().unwrap()
     }
 
-    fn assistant(&self, block: Value) {
+    /// The id of the message a step is a block of: the one it names, or a new one.
+    fn message(&mut self, step: &Value) -> String {
+        step["message"].as_str().map_or_else(
+            || {
+                self.next_message += 1;
+                format!("msg_fake_{}", self.next_message)
+            },
+            str::to_owned,
+        )
+    }
+
+    /// The `message_start` of the API message `id`, unless it was sent already.
+    fn start(&mut self, id: &str) {
+        if self.started.as_deref() == Some(id) {
+            return;
+        }
+        self.started = Some(id.to_owned());
+        self.send(
+            json!({"type": "stream_event", "parent_tool_use_id": null, "session_id": self.session,
+            "event": {"type": "message_start",
+                "message": {"id": id, "role": "assistant", "model": MODEL, "content": []}}}),
+        );
+    }
+
+    fn assistant(&self, id: &str, block: Value) {
         self.send(
             json!({"type": "assistant", "parent_tool_use_id": null, "session_id": self.session,
-            "message": {"model": MODEL, "role": "assistant", "content": [block],
+            "message": {"id": id, "model": MODEL, "role": "assistant", "content": [block],
                 "usage": {"input_tokens": 100, "output_tokens": 20,
                     "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 50}}}),
         );
@@ -292,24 +332,40 @@ impl Fake {
                 break;
             }
             if let Some(text) = step["say"].as_str() {
+                let id = self.message(step);
                 said.push_str(text);
+                self.start(&id);
                 self.delta(json!({"type": "text_delta", "text": text}));
-                self.assistant(json!({"type": "text", "text": text}));
+                self.assistant(&id, json!({"type": "text", "text": text}));
             } else if let Some(parts) = step["stream"].as_array() {
+                let id = self.message(step);
                 let parts: Vec<&str> = parts.iter().filter_map(Value::as_str).collect();
+                self.start(&id);
                 for part in &parts {
                     self.delta(json!({"type": "text_delta", "text": part}));
                 }
                 said.push_str(&parts.concat());
-                self.assistant(json!({"type": "text", "text": parts.concat()}));
+                self.assistant(&id, json!({"type": "text", "text": parts.concat()}));
             } else if let Some(text) = step["think"].as_str() {
+                let id = self.message(step);
+                self.start(&id);
                 self.delta(json!({"type": "thinking_delta", "thinking": text}));
-                self.assistant(json!({"type": "thinking", "thinking": text, "signature": "x"}));
-            } else if step.get("think_hidden").is_some() {
-                self.delta(json!({"type": "signature_delta", "signature": "x"}));
-                self.assistant(json!({"type": "thinking", "thinking": "", "signature": "x"}));
-            } else if let Some(tool) = step.get("tool") {
                 self.assistant(
+                    &id,
+                    json!({"type": "thinking", "thinking": text, "signature": "x"}),
+                );
+            } else if step.get("think_hidden").is_some() {
+                let id = self.message(step);
+                self.start(&id);
+                self.delta(json!({"type": "signature_delta", "signature": "x"}));
+                self.assistant(
+                    &id,
+                    json!({"type": "thinking", "thinking": "", "signature": "x"}),
+                );
+            } else if let Some(tool) = step.get("tool") {
+                let id = self.message(step);
+                self.assistant(
+                    &id,
                     json!({"type": "tool_use", "id": tool["id"], "name": tool["name"],
                     "input": tool["input"]}),
                 );
@@ -319,6 +375,8 @@ impl Fake {
                         "tool_use_id": tool["id"], "content": tool["result"],
                         "is_error": tool["error"] == true}]}}),
                 );
+            } else if let Some(call) = step.get("mcp") {
+                self.call_mcp(call);
             } else if let Some(asked) = step.get("permission") {
                 let answer = self.ask_permission(asked, answered);
                 self.record.write(json!({"permission": answer}));
@@ -388,6 +446,24 @@ impl Fake {
         self.send(result);
     }
 
+    /// A call on the MCP server, as `claude` makes it. What it said before travels through the
+    /// bridge, so the call waits a little for it to reach the daemon first: the call lands
+    /// between the pieces of the message under way.
+    fn call_mcp(&self, call: &Value) {
+        std::thread::sleep(Duration::from_millis(300));
+        let tool = call["tool"].as_str().unwrap_or_default();
+        let outcome = match &self.mcp {
+            None => Err("no MCP server was configured".to_owned()),
+            Some(server) => mcp_call(server, tool, &call["arguments"]),
+        };
+        let (status, body) = match outcome {
+            Ok((status, body)) => (status, body),
+            Err(error) => (0, json!({"error": error})),
+        };
+        self.record
+            .write(json!({"mcp": {"status": status, "body": body}}));
+    }
+
     fn ask_permission(&mut self, asked: &Value, answered: &Receiver<Value>) -> Value {
         let id = format!("permission-{}", self.next_request);
         self.next_request += 1;
@@ -408,4 +484,137 @@ impl Fake {
             }
         }
     }
+}
+
+/// A tool called on an HTTP MCP server: the status and the answer of its `tools/call`.
+fn mcp_call(server: &Value, tool: &str, arguments: &Value) -> Result<(u16, Value), String> {
+    let url = server["url"].as_str().ok_or("the MCP server has no url")?;
+    let mut headers: Vec<(String, String)> = server["headers"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(name, value)| (name.clone(), value.as_str().unwrap_or_default().to_owned()))
+        .collect();
+    let (_, _, response_headers) = post(
+        url,
+        &headers,
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "flottille-fake-claude", "version": VERSION}}}),
+    )?;
+    if let Some(session) = response_headers.get("mcp-session-id") {
+        headers.push(("Mcp-Session-Id".into(), session.clone()));
+    }
+    post(
+        url,
+        &headers,
+        &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+    )?;
+    let (status, body, _) = post(
+        url,
+        &headers,
+        &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": tool, "arguments": arguments}}),
+    )?;
+    Ok((status, body))
+}
+
+/// One HTTP/1.1 POST of a JSON body: the status, the JSON answer (from a JSON body or the last
+/// `data:` line of an event stream) and the headers, by lowercase name.
+fn post(
+    url: &str,
+    headers: &[(String, String)],
+    body: &Value,
+) -> Result<(u16, Value, HashMap<String, String>), String> {
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or("only http:// MCP servers are supported")?;
+    let (host, path) = match rest.find('/') {
+        Some(at) => (&rest[..at], &rest[at..]),
+        None => (rest, "/"),
+    };
+    let mut stream = TcpStream::connect(host).map_err(|e| format!("connect {host}: {e}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .map_err(|e| e.to_string())?;
+    let body = body.to_string();
+    let mut request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\n\
+         Accept: application/json, text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n",
+        body.len()
+    );
+    for (name, value) in headers {
+        request.push_str(&format!("{name}: {value}\r\n"));
+    }
+    request.push_str("\r\n");
+    request.push_str(&body);
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let mut reader = BufReader::new(stream);
+    let mut status_line = String::new();
+    reader
+        .read_line(&mut status_line)
+        .map_err(|e| e.to_string())?;
+    let status: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| format!("not an HTTP answer: {status_line}"))?;
+    let mut response_headers = HashMap::new();
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).map_err(|e| e.to_string())?;
+        let line = line.trim_end();
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            response_headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_owned());
+        }
+    }
+    let mut raw = Vec::new();
+    reader.read_to_end(&mut raw).map_err(|e| e.to_string())?;
+    if response_headers
+        .get("transfer-encoding")
+        .is_some_and(|v| v.eq_ignore_ascii_case("chunked"))
+    {
+        raw = dechunk(&raw);
+    }
+    let text = String::from_utf8_lossy(&raw);
+    let json_text = if response_headers
+        .get("content-type")
+        .is_some_and(|v| v.starts_with("text/event-stream"))
+    {
+        text.lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .next_back()
+            .unwrap_or_default()
+            .trim()
+            .to_owned()
+    } else {
+        text.trim().to_owned()
+    };
+    let answer = if json_text.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(&json_text).unwrap_or(Value::String(json_text))
+    };
+    Ok((status, answer, response_headers))
+}
+
+fn dechunk(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut rest = raw;
+    while let Some(end) = rest.windows(2).position(|w| w == b"\r\n") {
+        let size =
+            usize::from_str_radix(String::from_utf8_lossy(&rest[..end]).trim(), 16).unwrap_or(0);
+        rest = &rest[end + 2..];
+        if size == 0 || rest.len() < size {
+            break;
+        }
+        out.extend_from_slice(&rest[..size]);
+        rest = rest.get(size + 2..).unwrap_or_default();
+    }
+    out
 }

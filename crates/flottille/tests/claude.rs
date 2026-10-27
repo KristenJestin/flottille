@@ -65,7 +65,8 @@ fn argv(start: &Value) -> Vec<&str> {
 fn through_the_bridge_a_session_is_opened_and_a_prompt_gets_its_reply() {
     let user = User::with_fake_claude();
     user.claude_script(json!({"turns": [{"when": "hello", "do": [
-        {"think": "a greeting"}, {"say": "Hello"}, {"say": " there!"}
+        {"think": "a greeting"},
+        {"say": "Hello", "message": "msg_a"}, {"say": " there!", "message": "msg_a"}
     ]}]}));
     let folder = project(&user);
 
@@ -617,5 +618,43 @@ fn an_agent_is_refused_while_claude_is_not_on_path() {
         !refused.1.contains("flottille agent install"),
         "{}",
         refused.1
+    );
+}
+
+#[test]
+fn through_the_bridge_a_reply_split_by_a_tool_served_reads_as_one_line() {
+    // The first piece ends on the start of a secret, which is held back: what came before it is
+    // recorded, then the tool, then the rest.
+    let user = User::with_fake_claude().with_env("API_TOKEN", "s3cr3t-token-value");
+    user.claude_script(json!({"turns": [{"when": "go", "do": [
+        {"say": "I will look at the files now, the token is s3cr3t-", "message": "msg_a"},
+        {"mcp": {"tool": "fs_list", "arguments": {}}},
+        {"say": "token-value, keep it quiet", "message": "msg_a"}
+    ]}]}));
+    project(&user);
+    let (id, after) = run(&user, "go");
+    events_until(&user, &id, after, "agent.turn_ended");
+
+    let page = user
+        .call("agent.read", json!({"agent": id, "after": 0}))
+        .unwrap();
+
+    let lines: Vec<&str> = page["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|line| line.as_str().unwrap())
+        .collect();
+    let text = lines.join("\n");
+    // The tool was served between the two pieces, and they are still one line.
+    assert!(lines.iter().any(|l| l.contains("fs_list (")), "{text}");
+    let replies: Vec<&str> = lines
+        .iter()
+        .filter_map(|line| Some(line.split_once(" said: ")?.1))
+        .collect();
+    assert_eq!(
+        replies,
+        ["I will look at the files now, the token is [masked], keep it quiet"],
+        "{text}"
     );
 }
