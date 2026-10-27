@@ -380,6 +380,11 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         new.workspace.is_some(),
     );
     let files = roles::project_files(&project.folder, &repositories);
+    let references: Vec<(String, String)> = project
+        .references
+        .iter()
+        .map(|(name, reference)| (name.clone(), reference.description.clone()))
+        .collect();
     let instructions = roles::instructions(
         new.role,
         &roles::Session {
@@ -388,6 +393,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
             folder: &folder,
             title: new.title.as_deref(),
             at_depth_limit,
+            references: &references,
         },
         &files,
     );

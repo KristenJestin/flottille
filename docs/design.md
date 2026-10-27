@@ -161,6 +161,8 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
   `commands_output`, `commands_stop`;
 - forges (an agent in a workspace): `forge_read`, the pull requests of its workspace's
   repositories and their checks, read only (`forges.md`);
+- references: `reference_read`, one of the project's references, documents read when relevant
+  (`docs/projects.md`, "References");
 
 Flottille's own tools:
 
@@ -185,7 +187,7 @@ Flottille's own tools:
 The tool list of a session is fixed for its whole life (prompt cache, `reference/hemera.md` §7)
 and depends on what the agent can do, known when it starts: a root gets `ask_user`, a child
 `ask_parent`; an agent at the depth limit gets no `agent_*` tools and no `approval_answer`. A lead
-has about 17 tools, a leaf worker 11, one more each in a workspace (`forge_read`)
+has about 18 tools, a leaf worker 12, one more each in a workspace (`forge_read`)
 (`reference/mcp.md` §4).
 
 ### 4.4 Roles
@@ -340,9 +342,13 @@ repository and for the project folder: `CLAUDE.md` or `AGENTS.md` (the agent's o
 **and the local files `CLAUDE.local.md` / `AGENTS.local.md` when present** (they hold rules the
 user keeps out of the repository).
 
-Later (milestone "Forges and tickets"), a project gains **references** (documents an agent reads with a tool:
-what skills hold today) and **procedures** (named multi-step actions with their own scoped
-authorizations: what slash commands hold today), see `reference/multi-repo-case.md`.
+After the per-session part, before the project layer, comes the list of the project's **references** (documents an agent reads
+with the tool `reference_read`: what knowledge skills hold today): a name and one line each, never
+the content (`docs/projects.md`).
+
+Later (milestone "Forges and tickets"), a project gains **procedures** (named multi-step actions
+with their own scoped authorizations: what slash commands hold today), see
+`reference/multi-repo-case.md`.
 
 ## 9. The built-in orchestration standard
 
