@@ -46,7 +46,7 @@ gate refuses to agents otherwise:
 | `pr-create` | `forge_write` `pr-create`: opens the pull request of the workspace's branch into the repository's base. |
 | `pr-merge-squash` | `forge_write` `pr-merge-squash`: merges the open pull request of the workspace's branch, by squash. |
 | `pipeline-rerun` | `forge_write` `pipeline-rerun`: re-runs the failed jobs of the pipelines of the branch's last commit. |
-| `workspace-remove` | `workspace_remove`: removes the run's own workspace, as `flottille workspace remove` does, and deletes its empty branches. |
+| `workspace-remove` | `workspace_remove`: removes the run's own workspace, as `flottille workspace remove` does, and deletes its empty branches; refused while an agent or a command run outside the run works in it. |
 
 Each grant is `allow` (let through at once) or `ask` (held for the user every time, as the gate
 holds a call today: the agent is answered at once that the request waits, and the result comes

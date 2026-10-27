@@ -220,7 +220,7 @@ asked or refused by its run's grants.
 
 | Tool | |
 |---|---|
-| `workspace_remove {}` | Removes the agent's own workspace as `flottille workspace remove` does (`docs/workspaces.md`, "Removal"): refused, nothing touched, while a repository holds uncommitted work or commits on no remote, each named; then deletes, in each repository, the workspace's branch when it holds no commit of its own (every commit of it is in its base's tracking ref), and keeps the others. Only inside a procedure's run that grants `workspace-remove`, and so only for the run's own workspace (`docs/procedures.md`): refused otherwise (`refused: workspace_remove removes a workspace only inside a procedure that grants it…`). Only an agent in a workspace has it. |
+| `workspace_remove {}` | Removes the agent's own workspace as `flottille workspace remove` does (`docs/workspaces.md`, "Removal"): refused, nothing touched, while a repository holds uncommitted work or commits on no remote, or while an agent outside the run's tree works in the workspace or a command run not the run's own runs there (`refused: workspace … is not removed, nothing was touched: the agent …, outside this run, works in it…`), each named; then deletes, in each repository, the workspace's branch when it holds no commit of its own (every commit of it is in its base's tracking ref), and keeps the others. Only inside a procedure's run that grants `workspace-remove`, and so only for the run's own workspace (`docs/procedures.md`): refused otherwise (`refused: workspace_remove removes a workspace only inside a procedure that grants it…`). Only an agent in a workspace has it. |
 
  How the forge is read, and what it never touches (a token,
 `gh auth token`), is in [`forges.md`](forges.md).
