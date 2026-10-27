@@ -410,7 +410,7 @@ fn forge_text(forge: &Value) -> String {
             note.to_owned()
         } else if let Some(error) = repository["error"].as_str() {
             format!("the forge could not be read: {error}")
-        } else if !forge["problem"].is_null() {
+        } else if !forge["problem"].is_null() && pull.is_null() {
             continue;
         } else if pull.is_null() {
             "no pull request".to_owned()

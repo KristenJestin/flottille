@@ -258,6 +258,25 @@ pub struct Project {
     /// Named actions run by an agent in a workspace, with their grants (`docs/procedures.md`).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub procedures: BTreeMap<String, Procedure>,
+    /// What the project says of its forges, besides what a remote's host already tells.
+    #[serde(skip_serializing_if = "Forges::is_empty")]
+    pub forges: Forges,
+}
+
+/// `[forges]`: the hosts Flottille cannot tell are a forge by themselves (`docs/forges.md`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Forges {
+    /// The Bitbucket Data Center hosts, by name (`bitbucket.example.com`), lowercase;
+    /// `bitbucket.org` is Cloud and is never listed.
+    #[serde(default)]
+    pub bitbucket: Vec<String>,
+}
+
+impl Forges {
+    fn is_empty(&self) -> bool {
+        self.bitbucket.is_empty()
+    }
 }
 
 /// What `projects/<name>.toml` holds: the keys as written, before the defaults and the checks.
@@ -290,6 +309,8 @@ struct File {
     references: BTreeMap<String, Reference>,
     #[serde(default)]
     procedures: BTreeMap<String, Procedure>,
+    #[serde(default)]
+    forges: Forges,
 }
 
 fn all_repositories() -> RepositorySet {
@@ -334,6 +355,7 @@ impl Project {
             recipe: Vec::new(),
             references: BTreeMap::new(),
             procedures: BTreeMap::new(),
+            forges: Forges::default(),
         }
     }
 
@@ -531,6 +553,30 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
             .map_err(|error| format!("references.{reference}{error}"))?;
     }
 
+    let mut forges = file.forges;
+    for (index, host) in forges.bitbucket.iter_mut().enumerate() {
+        *host = host.trim().to_ascii_lowercase();
+        let key = format!("forges.bitbucket[{index}]");
+        if host.is_empty() {
+            return Err(format!("{key}: must not be empty"));
+        }
+        if !host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        {
+            return Err(format!(
+                "{key}: must be a host name (bitbucket.example.com), without a scheme, a port or \
+                 a path"
+            ));
+        }
+        if host == "bitbucket.org" {
+            return Err(format!(
+                "{key}: bitbucket.org is Bitbucket Cloud, which needs no listing"
+            ));
+        }
+    }
+    forges.bitbucket.dedup();
+
     Ok(Project {
         name: name.to_owned(),
         folder: file.folder,
@@ -548,6 +594,7 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
         recipe: file.recipe,
         references: file.references,
         procedures: file.procedures,
+        forges,
     })
 }
 
@@ -1424,6 +1471,53 @@ mod tests {
         assert!(
             message.starts_with("projects/a b.toml: name: "),
             "{message}"
+        );
+    }
+
+    #[test]
+    fn the_bitbucket_data_center_hosts_a_project_names_are_read_and_lowercased() {
+        let project = parse(&format!(
+            "{MINIMAL}\n[forges]\nbitbucket = [\"Bitbucket.Example.com\", \"git.internal\"]\n"
+        ))
+        .unwrap();
+
+        assert_eq!(
+            project.forges.bitbucket,
+            ["bitbucket.example.com", "git.internal"]
+        );
+        assert!(parse(MINIMAL).unwrap().forges.bitbucket.is_empty());
+        // Not shown when there are none: `project show` keeps its shape.
+        let shown = serde_json::to_value(parse(MINIMAL).unwrap()).unwrap();
+        assert!(shown.get("forges").is_none(), "{shown}");
+    }
+
+    #[test]
+    fn a_bitbucket_host_is_a_bare_host_name_and_never_bitbucket_org() {
+        for (hosts, wrong) in [
+            ("\"\"", "forges.bitbucket[0]: must not be empty"),
+            (
+                "\"https://bitbucket.example.com\"",
+                "forges.bitbucket[0]: must be a host name",
+            ),
+            (
+                "\"bitbucket.example.com:7990\"",
+                "forges.bitbucket[0]: must be a host name",
+            ),
+            ("\"a b\"", "forges.bitbucket[0]: must be a host name"),
+            (
+                "\"git.internal\", \"bitbucket.org\"",
+                "forges.bitbucket[1]: bitbucket.org is Bitbucket Cloud",
+            ),
+        ] {
+            let said = refusal(&format!("{MINIMAL}\n[forges]\nbitbucket = [{hosts}]\n"));
+            assert!(
+                said.starts_with(&format!("projects/app.toml: {wrong}")),
+                "{hosts}: {said}"
+            );
+        }
+        assert!(
+            refusal(&format!("{MINIMAL}\n[forges]\ngithub = []\n")).contains("unknown field"),
+            "a key the table does not know is refused"
         );
     }
 

@@ -302,7 +302,7 @@ leaves it out too.
 `{"project", "name", "watch"?}`. The forge state of the workspace's repositories
 ([`forges.md`](forges.md)): the last one read when it is less than a minute old, else read now.
 With `watch: true`, the connection watches the workspace: the daemon reads it again about once a
-minute (less often while `gh` fails) for as long as the connection is open, and emits
+minute (less often while `gh` or `bkt` fails) for as long as the connection is open, and emits
 `workspace.forge` when it changed (`docs/events.md`). A connection watches a workspace once, however
 often it asks.
 
@@ -325,12 +325,16 @@ often it asks.
 }
 ```
 
-`problem` says, with what to do, why no forge can be read (`gh` missing, not signed in), else
-`null`. For each repository, `forge` is `github` or `null` (then `note` says why), `pull_request`
-is `null` when its branch has none, and `error` says why its forge could not be read. A pull
-request's `state` is `open`, `draft`, `merged` or `closed`; `review` `approved`, `changes
-requested`, `review required` or `null`; a check's `state` `passing`, `failing`, `pending` or
-`skipped`; `mark` the checks as one (`failing`, `pending`, `passing`), `null` without checks.
+`problem` says, with what to do, why a forge cannot be read (`gh` or `bkt` missing, not signed in;
+several are joined by `; `), else `null`; the repositories it stops have no `pull_request`. For
+each repository, `forge` is `github`, `bitbucket` or `null` (then `note` says why), `repository`
+is `owner/name` (a Bitbucket Cloud workspace and name, or a Data Center project key and name),
+`pull_request` is `null` when its branch has none, and `error` says why its forge could not be
+read. A pull request's `state` is `open`, `draft`, `merged` or `closed`; `review` `approved`,
+`changes requested`, `review required` or `null`; a check's `state` `passing`, `failing`,
+`pending` or `skipped`; `mark` the checks as one (`failing`, `pending`, `passing`), `null` without
+checks. A Bitbucket pull request also has `reviewers`, each `{"name", "state"}` with `state`
+`approved`, `changes requested` or `pending`, when it has any.
 
 #### `workspace.ticket`
 

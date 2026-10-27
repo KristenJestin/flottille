@@ -113,7 +113,8 @@ its run grants the action:
 - `action`: `pr-create`, `pr-merge-squash` or `pipeline-rerun`, each the grant of its name;
 - `repository`: one of the workspace's repositories, by its path; another is refused;
 - `pr-create` needs `title`, takes `body` and `draft`: `gh pr create -R <owner/name> --head <branch>
-  --base <base> --title … --body …`, the base the one the workspace's repository started from;
+  --base <base> --title … --body …`, the base the one the workspace's repository started from
+  (`draft` is refused for Bitbucket, whose `bkt` opens none);
 - `pr-merge-squash`: the open pull request of the workspace's branch from the repository itself
   (not from a fork, which can have a branch of the same name) into its base,
   `gh pr merge <n> -R … --squash`; none is refused;
@@ -121,6 +122,12 @@ its run grants the action:
   each `gh run rerun <id> -R … --failed`; none failed is refused.
 
 It is run by the daemon with the user's own `gh`, as `forge_read` is: the agent never gets a token.
+
+**On Bitbucket** (`bkt`, Cloud and Data Center) the same three actions run under the same grants and
+the same checks (the remote kept, the workspace's own pull request, not a fork's, into the recorded
+base), through `bkt pr create`, `bkt pr merge --strategy squash` and, on Cloud only, `bkt pipeline
+run --ref <branch>` after the branch's newest pipeline failed: what each does, and what differs
+from `gh`, is in [`forges.md`](forges.md#bitbucket).
 Every agent in a workspace lists it (its tool list is fixed when it starts); outside a run it
 answers `refused: forge_write writes to the forge only inside a procedure that grants it…`.
 
@@ -146,4 +153,5 @@ The daemon writes the project's file where it stands: what the user wrote around
 The gate's rules are tested on their own (`gate::tests`), with and without a run. The scenarios
 run the fake agent's sessions through their MCP server, push to throwaway bare repositories and
 write to the fake `gh` (`crates/flottille-fake-gh`), which answers `pr create`, `pr merge`,
-`run list` and `run rerun` and records every call.
+`run list` and `run rerun`, and to the fake `bkt` (`crates/flottille-fake-bkt`), which answers
+`pr create`, `pr merge`, `pipeline list` and `pipeline run`; both record every call.
