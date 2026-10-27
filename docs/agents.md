@@ -657,16 +657,17 @@ activity (`docs/reference/hemera.md` §8.7). The agent's `active_at` is the time
 update outside a replay. Texts are cut at 64 KiB and say how
 much was cut (`‹+N chars›`); secrets of the daemon's environment are masked in everything kept.
 A reply is kept as it streams, so that `watch` and the window show it as it comes, and it is
-masked whole before it is kept: a secret split over several pieces of the provider (a token, for
-Codex) never shows in clear, in the stream, the window, `agent.read` or the store. The daemon
-holds back the end of the message it is receiving, enough to cover the longest secret it knows:
-the last word (a token ends at a whitespace, up to 4 KiB), as many characters as the longest
-secret value of its environment and of the provider's own variables, a token, a JWT or a URL's
-password whole even inside a longer word, and a private key block until its end line (a
-`-----BEGIN ` of another label, or in prose, holds nothing). What can no longer be part of a
-secret is masked and kept at once, as pieces of a line (2,000 characters) at most; what was held
-back is kept when the message ends: another message id, any other event of the agent (a tool
-call, a thought, a permission answer, a compaction…), the end of the turn or of its process.
+masked whole before it is kept, as a thought and an echo of the user's own message are: a secret
+split over several pieces of the provider (a token, for Codex) never shows in clear, in the
+stream, the window, `agent.read` or the store. The daemon holds back the end of the message it
+is receiving, enough to cover the longest secret it knows: the last word (a token ends at a
+whitespace, up to 4 KiB), as many characters as the longest secret value of its environment and
+of the provider's own variables, a token, a JWT or a URL's password whole even inside a longer
+word, and a private key block until its end line (a `-----BEGIN ` of another label, or in prose,
+holds nothing). What can no longer be part of a secret is masked and kept at once, as pieces of
+a line (2,000 characters) at most, never cut inside a `[masked]`; what was held back is kept
+when the message ends: another message id, any other event of the agent (a tool call, a thought
+after a reply, a permission answer, a compaction…), the end of the turn or of its process.
 Bookkeeping that comes between two pieces (`agent.usage`, `agent.mode_changed`,
 `agent.options_changed`, `agent.provider_wait`) does not end the message: it is kept right after
 it. So the stored pieces are not the provider's, and a reply shows about the longest
@@ -687,9 +688,8 @@ the end of a turn or any other event comes between, a thought or a tool-call upd
 
 Known limits: a word with no whitespace is held back 4 KiB at most, unless a secret crosses that
 bound: a token, a JWT or a URL's password is held whole however long, so a very long one delays
-the rest of its reply until it ends. A secret in a thought or in the user's own message (seen in
-a replay) is masked piece by piece, as before. A reply with no id that an event of the daemon
-comes between reads as two lines.
+the rest of its reply until it ends. A reply with no id that an event of the daemon comes
+between reads as two lines.
 
 ## The tree
 

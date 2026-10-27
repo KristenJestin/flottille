@@ -135,6 +135,29 @@ impl Secrets {
     }
 }
 
+/// `masked`, a text `mask` returned, cut in pieces of `chars` characters at most: never inside a
+/// `[masked]`, which a reader of one piece would otherwise see as two strange words.
+pub fn pieces(masked: &str, chars: usize) -> Vec<&str> {
+    let mut pieces = Vec::new();
+    let mut rest = masked;
+    while !rest.is_empty() {
+        let mut cut = rest
+            .char_indices()
+            .nth(chars)
+            .map_or(rest.len(), |(at, _)| at);
+        if let Some((at, _)) = rest
+            .match_indices(MASK)
+            .find(|&(at, _)| at < cut && cut < at + MASK.len())
+        {
+            // A piece too short to hold one mask still holds it whole.
+            cut = if at == 0 { MASK.len() } else { at };
+        }
+        pieces.push(&rest[..cut]);
+        rest = &rest[cut..];
+    }
+    pieces
+}
+
 /// Where the private key block `text` may hold before `cut` starts, a block masked to its end
 /// line (`mask_private_keys`), or `cut`. A `-----BEGIN ` whose label is still coming may start
 /// one; a label of another kind does not.
@@ -447,6 +470,18 @@ mod tests {
         );
         assert!(secret_file(".env") && secret_file(".env.local"));
         assert!(!secret_file("env") && !secret_file(".envrc"));
+    }
+
+    #[test]
+    fn a_masked_text_is_cut_in_pieces_never_inside_a_mask() {
+        let masked = format!("{}{MASK} and more", "w".repeat(1_995));
+
+        let cut = pieces(&masked, 2_000);
+
+        assert_eq!(cut, ["w".repeat(1_995), format!("{MASK} and more")]);
+        assert_eq!(pieces("ab[masked]cd", 4), ["ab", "[masked]", "cd"]);
+        assert_eq!(pieces(&"é".repeat(5), 2), ["éé", "éé", "é"]);
+        assert!(pieces("", 2).is_empty());
     }
 
     /// `text` streamed in the pieces `pieces` cuts it into, each settled part masked as it comes and

@@ -625,3 +625,88 @@ fn a_page_after_a_reply_split_by_a_tool_served_reads_neither_again() {
         "{text}"
     );
 }
+
+/// The pieces of `name` stored for the agent, in order.
+fn stored(user: &User, agent: &str, name: &str) -> Vec<String> {
+    let store =
+        flottille_core::store::Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    store
+        .agent_events(agent, 0, 200)
+        .unwrap()
+        .iter()
+        .filter(|e| e.name == name)
+        .map(|e| e.data["text"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_mask_at_the_line_break_of_a_long_reply_is_never_cut_in_two() {
+    // Masked, the token starts 5 characters before the 2,000th, and enough follows it for it to
+    // be settled with what is around it.
+    let filler = "word ".repeat(399);
+    let rest = " and more".repeat(20);
+    let user = user(json!([{"when": "go", "do": [
+        {"say": format!("{filler}{SECRET}{rest}")}
+    ]}]));
+    let (id, after) = run(&user, "go");
+    turn_ended(&user, &id, after, 1);
+
+    let pieces = stored(&user, &id, "agent.message");
+    let said = said(&lines(&read(&user, &id, 0)));
+
+    let whole = format!("{filler}[masked]{rest}");
+    assert_eq!(pieces.concat(), whole);
+    assert_eq!(said.concat(), whole);
+    for piece in pieces.iter().chain(&said) {
+        assert!(
+            !piece.replace("[masked]", "").contains(['[', ']']),
+            "{pieces:?} {said:?}"
+        );
+    }
+}
+
+#[test]
+fn a_token_streamed_over_three_thoughts_never_shows_in_clear_in_the_store() {
+    let user = user(json!([{"when": "go", "do": [
+        {"think": "the token is s3cr3t-"},
+        {"think": "token-"},
+        {"think": "value, keep it quiet"},
+        {"say": "done"}
+    ]}]));
+    let (id, after) = run(&user, "go");
+    turn_ended(&user, &id, after, 1);
+
+    let thought = stored(&user, &id, "agent.thought");
+
+    let text = thought.concat();
+    assert!(
+        !text.contains("s3cr3t-") && !text.contains("token-"),
+        "{thought:?}"
+    );
+    assert_eq!(text, "the token is [masked], keep it quiet");
+}
+
+#[test]
+fn a_token_streamed_over_three_pieces_of_a_user_message_never_shows_in_clear_in_the_store() {
+    let echo = |text: &str| {
+        json!({"update": {"sessionUpdate": "user_message_chunk",
+            "content": {"type": "text", "text": text}}})
+    };
+    let user = user(json!([{"when": "go", "do": [
+        echo("the token is s3cr3t-"),
+        echo("token-"),
+        echo("value, keep it quiet"),
+        {"say": "done"}
+    ]}]));
+    let (id, after) = run(&user, "go");
+    turn_ended(&user, &id, after, 1);
+
+    let echoed = stored(&user, &id, "agent.user_message");
+
+    let text = echoed.concat();
+    assert!(
+        !text.contains("s3cr3t-") && !text.contains("token-"),
+        "{echoed:?}"
+    );
+    assert_eq!(text, "the token is [masked], keep it quiet");
+}
