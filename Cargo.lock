@@ -1974,6 +1974,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "flottille-fake-acli"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "flottille-fake-agent"
 version = "0.1.0"
 dependencies = [

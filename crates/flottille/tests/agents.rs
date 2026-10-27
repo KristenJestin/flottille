@@ -157,6 +157,7 @@ fn the_exact_claude_code_options_are_sent() {
         "commands_run",
         "commands_output",
         "commands_stop",
+        "reference_read",
         "agent_launch",
         "agent_send",
         "agent_status",

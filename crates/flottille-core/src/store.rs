@@ -224,6 +224,10 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT;
 ",
     "
+    -- The ticket a workspace is linked to (`docs/tickets.md`): `#123` or a Jira key, or none.
+    ALTER TABLE workspaces ADD COLUMN ticket TEXT;
+",
+    "
     -- The runs of procedures (`docs/procedures.md`): the grants each gives, frozen when the user
     -- confirmed them, held for the run's root agent until the run ends.
     CREATE TABLE procedure_runs (
@@ -324,7 +328,7 @@ impl Store {
         let transaction = self.connection.transaction()?;
         let inserted = transaction.execute(
             "INSERT INTO workspaces (project, name, branch, folder, project_folder, created_at, \
-             variables, repositories) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             variables, repositories, ticket) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 workspace.project,
                 workspace.name,
@@ -334,6 +338,7 @@ impl Store {
                 workspace.created_at,
                 serde_json::to_string(&workspace.variables)?,
                 serde_json::to_string(&workspace.repositories)?,
+                workspace.ticket,
             ],
         );
         match inserted {
@@ -391,24 +396,34 @@ impl Store {
     }
 
     pub fn workspace_by_id(&self, id: i64) -> Result<Workspace> {
-        let (project, name, branch, folder, project_folder, created_at, variables, repositories) =
-            self.connection.query_row(
-                "SELECT project, name, branch, folder, project_folder, created_at, variables, \
-             repositories FROM workspaces WHERE id = ?1",
-                params![id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, u64>(5)?,
-                        row.get::<_, String>(6)?,
-                        row.get::<_, String>(7)?,
-                    ))
-                },
-            )?;
+        let (
+            project,
+            name,
+            branch,
+            folder,
+            project_folder,
+            created_at,
+            variables,
+            repositories,
+            ticket,
+        ) = self.connection.query_row(
+            "SELECT project, name, branch, folder, project_folder, created_at, variables, \
+             repositories, ticket FROM workspaces WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, u64>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                ))
+            },
+        )?;
         let mut statement = self.connection.prepare_cached(
             "SELECT position, repository, action, state, failed_doing, failed_output \
              FROM workspace_steps WHERE workspace = ?1 ORDER BY position",
@@ -452,6 +467,7 @@ impl Store {
             variables: serde_json::from_str(&variables)?,
             repositories: serde_json::from_str(&repositories)?,
             steps,
+            ticket,
         })
     }
 
@@ -523,6 +539,23 @@ impl Store {
             params![workspace],
             |row| row.get(0),
         )?)
+    }
+
+    /// Links the workspace to a ticket, or to none, with its event, in one transaction.
+    pub fn set_ticket(
+        &mut self,
+        workspace: i64,
+        ticket: Option<&str>,
+        event: (&str, Value),
+    ) -> Result<Event> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "UPDATE workspaces SET ticket = ?2 WHERE id = ?1",
+            params![workspace, ticket],
+        )?;
+        let event = append_event(&transaction, event.0, event.1)?;
+        transaction.commit()?;
+        Ok(event)
     }
 
     /// Forgets a workspace and its steps, with its event, in one transaction.
@@ -1899,6 +1932,7 @@ mod tests {
                     failure: None,
                 },
             ],
+            ticket: None,
         }
     }
 
@@ -1924,6 +1958,41 @@ mod tests {
     }
 
     #[test]
+    fn a_workspace_keeps_its_ticket_and_forgets_it_when_unlinked() {
+        let mut store = Store::open_in_memory().unwrap();
+        let (id, _) = store
+            .create_workspace(
+                &Workspace {
+                    ticket: Some("#12".into()),
+                    ..a_workspace()
+                },
+                ("workspace.created", json!({})),
+            )
+            .unwrap();
+        assert_eq!(
+            store.workspace_by_id(id).unwrap().ticket.as_deref(),
+            Some("#12")
+        );
+
+        let event = store
+            .set_ticket(
+                id,
+                Some("ABC-1"),
+                ("workspace.ticket", json!({"ticket": "ABC-1"})),
+            )
+            .unwrap();
+        assert_eq!(event.name, "workspace.ticket");
+        assert_eq!(
+            store.workspace_by_id(id).unwrap().ticket.as_deref(),
+            Some("ABC-1")
+        );
+        store
+            .set_ticket(id, None, ("workspace.ticket", json!({"ticket": null})))
+            .unwrap();
+        assert_eq!(store.workspace_by_id(id).unwrap().ticket, None);
+    }
+
+    #[test]
     fn a_workspace_keeps_when_its_preparation_ended() {
         let mut store = Store::open_in_memory().unwrap();
         let (id, _) = store
@@ -1937,6 +2006,35 @@ mod tests {
 
         assert_eq!(event.name, "workspace.ready");
         assert_eq!(store.workspace_ready_at(id).unwrap(), Some(event.at));
+    }
+
+    #[test]
+    fn a_store_before_the_tickets_keeps_its_workspaces_with_no_ticket() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let old = Connection::open(&path).unwrap();
+        let previous = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("ADD COLUMN ticket"))
+            .unwrap();
+        for migration in &MIGRATIONS[..previous] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.pragma_update(None, "user_version", previous).unwrap();
+        old.execute_batch(
+            "INSERT INTO workspaces (project, name, branch, folder, project_folder, created_at, \
+             variables, repositories) VALUES ('app', 'login', 'app/login', '/w', '/p', 100, '{}', '[]');",
+        )
+        .unwrap();
+        drop(old);
+
+        let store = Store::open(&path).unwrap();
+
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len());
+        assert_eq!(
+            store.workspace("app", "login").unwrap().unwrap().ticket,
+            None
+        );
     }
 
     #[test]

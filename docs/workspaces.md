@@ -13,6 +13,7 @@ multi-repository case (`docs/reference/multi-repo-case.md`) needs.
 | `flottille workspace create <project> <name> [--repositories a,b] [--branch <branch>] [--offline]` | Makes the worktrees and answers; the rest of the recipe goes on in the background. Fails when the preparation already failed. |
 | `flottille workspace list [<project>]` | The workspaces with their state. |
 | `flottille workspace show <project> <name>` | Its repositories, their bases, and each step with its state; a failure with its last lines. |
+| `flottille workspace ticket <project> <name> <ticket>` | Links it to a ticket (`#123` or a Jira key), or to none with `--clear` (`docs/tickets.md`). `create` takes `--ticket` too. |
 | `flottille workspace prepare <project> <name>` | Resumes a preparation, from the step that failed. |
 | `flottille workspace remove <project> <name>` | Removes it when all its work is committed and pushed. Never forced. |
 

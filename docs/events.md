@@ -136,6 +136,15 @@ stops them being read ([`forges.md`](forges.md)). Its data is the whole state, a
 `workspace.forge` answers it (`docs/protocol.md`), `project` and `workspace` included. A first read
 that finds no forge says nothing.
 
+### `workspace.ticket`
+
+The workspace was linked to a ticket, or unlinked ([`tickets.md`](tickets.md)).
+
+| Field | |
+|---|---|
+| `project`, `workspace` | |
+| `ticket` | `#123` or `ABC-123`; `null` when unlinked. |
+
 ### `workspace.removed`
 
 The workspace's worktrees, folder and record are gone. Its branches are kept.
@@ -224,7 +233,7 @@ piece (`docs/agents.md` "The conversation").
 |---|---|
 | `agent`, `replay` | |
 | `text` | The piece, cut at 64 KiB (`‹+N chars›` says how much was left out). |
-| `message_id` | Of `agent.message`, when the source gives one (ACP's `messageId`; Codex's item id): the pieces that share it are one message, another id starts another. |
+| `message_id` | Of `agent.message`, when the source gives one (ACP's `messageId`; Codex's item id; the API message's id for Claude): the pieces that share it are one message, another id starts another. |
 
 #### `agent.tool_call`
 

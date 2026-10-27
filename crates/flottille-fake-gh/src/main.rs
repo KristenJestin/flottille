@@ -23,7 +23,9 @@
 //! `signed_in: false` makes `gh auth status` end with 1. `pulls` gives, by repository and branch,
 //! the object `gh pr view --json` answers (`gh pr list --json` answers the fields it asks that the
 //! object has); a branch with none has no pull request. `fail` makes every `pr` call on that
-//! repository end with 1, saying its text.
+//! repository end with 1, saying its text. `issues` gives, by repository and number, the object
+//! `gh issue view --json` answers; an issue it does not hold is not found. `fail` makes `issue`
+//! calls fail the same way.
 //!
 //! The writes answer as `gh` does when they work: `pr create` prints the new pull request's URL
 //! (numbered `created`, 1 by default), `pr merge` and `run rerun` print nothing, and `run list`
@@ -75,6 +77,28 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             }
             eprintln!("github.com\n  ✓ Logged in to github.com account someone (keyring)");
             0
+        }
+        ["issue", "view", number, ..] => {
+            let Some(repository) = option("-R") else {
+                eprintln!("fake gh: no -R");
+                return 2;
+            };
+            if let Some(failure) = script["fail"][repository].as_str() {
+                eprintln!("{failure}");
+                return 1;
+            }
+            match script["issues"][repository].get(*number) {
+                Some(issue) => {
+                    println!("{issue}");
+                    0
+                }
+                None => {
+                    eprintln!(
+                        "GraphQL: Could not resolve to an Issue with the number of {number}."
+                    );
+                    1
+                }
+            }
         }
         ["pr", "create" | "merge", ..] | ["run", "list" | "rerun", ..] => {
             let Some(repository) = option("-R") else {

@@ -7,8 +7,10 @@ use std::sync::Arc;
 
 use flottille_core::detect;
 use flottille_core::paths::Paths;
-use flottille_core::project::{Project, slug, valid_name};
-use flottille_core::protocol::{ProjectFolder, ProjectName};
+use flottille_core::project::{Project, Reference, check_reference, slug, valid_name};
+use flottille_core::protocol::{
+    ProjectFolder, ProjectName, ReferenceAdd, ReferenceList, ReferenceRemove,
+};
 use flottille_core::registry::Registry;
 use flottille_core::{Error, Result};
 use serde_json::{Value, json};
@@ -151,11 +153,152 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> std::result::Result
                 "missing": configured.iter().filter(|path| !detected.contains(path)).collect::<Vec<_>>(),
             }))
         }
+        "reference.list" => {
+            let ReferenceList { project } = serde_json::from_value(params)?;
+            let project = load(projects, &project)?;
+            Ok(
+                json!({"project": project.name, "references": project.references.iter()
+                .map(|(name, r)| json!({"name": name, "description": r.description, "path": r.path}))
+                .collect::<Vec<_>>()}),
+            )
+        }
+        "reference.add" => {
+            let asked: ReferenceAdd = serde_json::from_value(params)?;
+            let project = load(projects, &asked.project)?;
+            let path = match asked.path.trim_end_matches('/') {
+                "" => asked.path.as_str(),
+                trimmed => trimmed,
+            };
+            let reference = Reference {
+                description: asked.description.trim().to_owned(),
+                path: path.to_owned(),
+            };
+            check_reference(&asked.name, &reference)
+                .map_err(|error| Failure::refused(format!("references.{}{error}", asked.name)))?;
+            if project.references.contains_key(&asked.name) {
+                return Err(Failure::refused(format!(
+                    "project {} already has a reference named {}: remove it first",
+                    project.name, asked.name
+                )));
+            }
+            check_reachable(&project, &reference)?;
+            edit_references(daemon, projects, &project, |table| {
+                let mut entry = toml_edit::Table::new();
+                entry.insert(
+                    "description",
+                    toml_edit::value(reference.description.as_str()),
+                );
+                entry.insert("path", toml_edit::value(reference.path.as_str()));
+                table.insert(&asked.name, toml_edit::Item::Table(entry));
+            })?;
+            Ok(json!({"project": project.name, "name": asked.name,
+                "description": reference.description, "path": reference.path}))
+        }
+        "reference.remove" => {
+            let ReferenceRemove { project, name } = serde_json::from_value(params)?;
+            let project = load(projects, &project)?;
+            if !project.references.contains_key(&name) {
+                return Err(Failure::new(
+                    "not-found",
+                    format!("project {} has no reference named {name}", project.name),
+                ));
+            }
+            edit_references(daemon, projects, &project, |table| {
+                table.remove(&name);
+            })?;
+            Ok(json!({"project": project.name, "removed": name}))
+        }
         method => Err(Failure::new(
             "unknown-method",
             format!("unknown method `{method}`"),
         )),
     }
+}
+
+/// A reference is a file or a folder that is there now, and that stays in the project folder
+/// once the links are followed.
+fn check_reachable(project: &Project, reference: &Reference) -> std::result::Result<(), Failure> {
+    let inside = |error: std::io::Error| match error.kind() {
+        std::io::ErrorKind::NotFound => Failure::refused(format!(
+            "{} does not exist in the project folder",
+            reference.path
+        )),
+        _ => Failure::refused(format!("cannot read {}: {error}", reference.path)),
+    };
+    let folder = project.folder.canonicalize().map_err(|error| {
+        Failure::refused(format!(
+            "the folder {} of project {} cannot be read: {error}",
+            project.folder.display(),
+            project.name
+        ))
+    })?;
+    let real = project
+        .folder
+        .join(&reference.path)
+        .canonicalize()
+        .map_err(inside)?;
+    if !real.starts_with(&folder) {
+        return Err(Failure::refused(format!(
+            "{} leads outside the project folder: a reference stays inside it",
+            reference.path
+        )));
+    }
+    Ok(())
+}
+
+/// Changes the `references` table of the project's file and nothing else in it, comments
+/// included, then announces the change. The new text is read back as a project before it is
+/// written.
+fn edit_references(
+    daemon: &Daemon,
+    projects: &mut Projects,
+    project: &Project,
+    change: impl FnOnce(&mut toml_edit::Table),
+) -> std::result::Result<(), Failure> {
+    let file = projects.registry.file(&project.name);
+    let unavailable = |error: std::io::Error| {
+        Failure::new(
+            "unavailable",
+            format!("projects/{}.toml: {error}", project.name),
+        )
+    };
+    let text = std::fs::read_to_string(&file).map_err(unavailable)?;
+    let mut document: toml_edit::DocumentMut =
+        text.parse().map_err(|error: toml_edit::TomlError| {
+            Failure::new(
+                "invalid-config",
+                format!("projects/{}.toml: {}", project.name, error.message()),
+            )
+        })?;
+    let not_a_table = || {
+        Failure::new(
+            "invalid-config",
+            format!("projects/{}.toml: references: not a table", project.name),
+        )
+    };
+    if !document.contains_key("references") {
+        let mut table = toml_edit::Table::new();
+        // Only the entries show: `[references.name]`, never an empty `[references]`.
+        table.set_implicit(true);
+        document.insert("references", toml_edit::Item::Table(table));
+    }
+    let table = document["references"]
+        .as_table_mut()
+        .ok_or_else(not_a_table)?;
+    change(table);
+    if table.is_empty() {
+        document.remove("references");
+    }
+    let text = document.to_string();
+    let edited = Project::parse(&project.name, &text, &projects.data)
+        .map_err(|error| Failure::new("invalid-config", error.to_string()))?;
+    crate::providers::write_in_place(&file, &text).map_err(unavailable)?;
+    projects.known.insert(edited.name.clone(), edited.clone());
+    emit(
+        daemon,
+        "project.changed",
+        json!({"name": edited.name, "folder": edited.folder}),
+    )
 }
 
 /// `project.show`: the project, and the branch each repository's checkout in the project folder

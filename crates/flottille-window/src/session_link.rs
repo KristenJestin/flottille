@@ -168,6 +168,34 @@ pub fn pull_requests(forge: &Value) -> (Vec<PullRequest>, Option<String>) {
     (pulls, forge["problem"].as_str().map(str::to_owned))
 }
 
+/// A workspace's ticket, as `workspace.ticket` gives it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TicketFacts {
+    /// `#123` or `ABC-123`.
+    pub reference: String,
+    pub state: Option<String>,
+    pub title: Option<String>,
+    pub url: Option<String>,
+    /// Why the tracker could not be read (`gh` or `acli` missing, not signed in, no such ticket).
+    pub problem: Option<String>,
+}
+
+/// The ticket of a `workspace.ticket` answer; none when the workspace has none.
+pub fn ticket_facts(read: &Value) -> Option<TicketFacts> {
+    let text = |key: &str| read[key].as_str().map(str::to_owned);
+    Some(TicketFacts {
+        reference: text("ticket")?,
+        state: text("state"),
+        title: text("title"),
+        url: text("url"),
+        problem: text("problem"),
+    })
+}
+
+/// How long a ticket read stays as it is: a ticket is read when the page opens, when it is linked
+/// or unlinked, and again after this, never at every turn.
+const TICKET_FRESH: Duration = Duration::from_secs(300);
+
 /// What a place shows in the rail: each repository and its lines changed, and its facts.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PlaceFacts {
@@ -182,6 +210,8 @@ pub struct PlaceFacts {
     pub pulls: Vec<PullRequest>,
     /// Why the forges cannot be read (`gh` missing, not signed in), with what to do.
     pub forge_problem: Option<String>,
+    /// The ticket it is linked to (a workspace).
+    pub ticket: Option<TicketFacts>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -398,7 +428,8 @@ impl Link {
             }
             resume.read = true;
         }
-        self.read_place(&mut conn)?;
+        let mut ticket = None;
+        self.read_place(&mut conn, &mut ticket)?;
         let mut stale = Stale::default();
         loop {
             if self.stopped() {
@@ -412,7 +443,7 @@ impl Link {
                     self.read_requests(&mut conn)?;
                 }
                 if stale.place {
-                    self.read_place(&mut conn)?;
+                    self.read_place(&mut conn, &mut ticket)?;
                 }
                 stale = Stale::default();
                 continue;
@@ -511,7 +542,12 @@ impl Link {
         Ok(())
     }
 
-    fn read_place(&self, conn: &mut Conn) -> Result<(), String> {
+    /// The place's facts; `ticket` is the last ticket read, kept for [`TICKET_FRESH`].
+    fn read_place(
+        &self,
+        conn: &mut Conn,
+        ticket: &mut Option<(TicketFacts, Instant)>,
+    ) -> Result<(), String> {
         let facts = match &self.place.workspace {
             Some(name) => {
                 let shown = conn.ask(
@@ -552,7 +588,33 @@ impl Link {
                 )?;
                 let (pulls, forge_problem) =
                     forge.as_ref().map_or((Vec::new(), None), pull_requests);
+                let linked = shown["ticket"].as_str();
+                if ticket.as_ref().is_none_or(|(kept, at)| {
+                    Some(kept.reference.as_str()) != linked || at.elapsed() > TICKET_FRESH
+                }) {
+                    *ticket = match linked {
+                        None => None,
+                        Some(reference) => conn
+                            .ask(
+                                "workspace.ticket",
+                                json!({"project": self.place.project, "name": name}),
+                            )?
+                            .ok()
+                            .and_then(|read| ticket_facts(&read))
+                            .or_else(|| {
+                                Some(TicketFacts {
+                                    reference: reference.to_owned(),
+                                    state: None,
+                                    title: None,
+                                    url: None,
+                                    problem: Some("the ticket could not be read".into()),
+                                })
+                            })
+                            .map(|facts| (facts, Instant::now())),
+                    };
+                }
                 PlaceFacts {
+                    ticket: ticket.as_ref().map(|(facts, _)| facts.clone()),
                     repositories,
                     branch: shown["branch"].as_str().map(str::to_owned),
                     bases,

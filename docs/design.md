@@ -147,7 +147,9 @@ of Codex's own starts.
 
 This is what makes the rest hold: with no shell and no native sub-agent tool, an agent **cannot**
 start another agent (no `Task`, no `claude --bg`, no background shell) except through
-`agent_launch`, and it cannot do anything the gate did not see. The agent's own permission
+`agent_launch`, and it cannot do anything the gate did not see. Nor can it drive the daemon from
+a command it runs: the daemon refuses a client that descends from it (`docs/protocol.md`,
+"Transport"). The agent's own permission
 prompts answer themselves: Flottille's tools are allowed, anything else is rejected.
 
 ### 4.3 The tools an agent gets (first milestones)
@@ -162,6 +164,10 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
 - forges (an agent in a workspace): `forge_read`, the pull requests of its workspace's
   repositories and their checks, read only (`forges.md`), and `forge_write`, which opens or merges
   them or re-runs a failed pipeline only inside a procedure that grants it (`procedures.md`);
+- references: `reference_read`, one of the project's references, documents read when relevant
+  (`docs/projects.md`, "References");
+- tickets (an agent in a workspace): `ticket_read`, the ticket its workspace is linked to, or
+  another of the same tracker, read only (`tickets.md`);
 
 Flottille's own tools:
 
@@ -186,7 +192,8 @@ Flottille's own tools:
 The tool list of a session is fixed for its whole life (prompt cache, `reference/hemera.md` §7)
 and depends on what the agent can do, known when it starts: a root gets `ask_user`, a child
 `ask_parent`; an agent at the depth limit gets no `agent_*` tools and no `approval_answer`. A lead
-has about 17 tools, a leaf worker 11, two more each in a workspace (`forge_read`, `forge_write`)
+has about 18 tools, a leaf worker 12, three more each in a workspace (`forge_read`, `ticket_read`,
+`forge_write`)
 (`reference/mcp.md` §4).
 
 ### 4.4 Roles
@@ -347,9 +354,12 @@ repository and for the project folder: `CLAUDE.md` or `AGENTS.md` (the agent's o
 **and the local files `CLAUDE.local.md` / `AGENTS.local.md` when present** (they hold rules the
 user keeps out of the repository).
 
-Later (milestone "Forges and tickets"), a project gains **references** (documents an agent reads with a tool:
-what skills hold today) and **procedures** (named multi-step actions with their own scoped
-authorizations: what slash commands hold today, [`procedures.md`](procedures.md)), see
+After the per-session part, before the project layer, comes the list of the project's **references** (documents an agent reads
+with the tool `reference_read`: what knowledge skills hold today): a name and one line each, never
+the content (`docs/projects.md`).
+
+Later (milestone "Forges and tickets"), a project gains **procedures** (named multi-step actions
+with their own scoped authorizations: what slash commands hold today, [`procedures.md`](procedures.md)), see
 `reference/multi-repo-case.md`. A procedure's instructions are its run's first message, after
 what it grants.
 
@@ -422,7 +432,8 @@ The plan is cut into GitHub milestones; each ends on something the user can use.
    issue trackers (GitHub issues, Jira read-only), linked to workspaces; procedures with scoped
    authorizations (open the pull requests of a workspace, merge a stack in dependency order,
    close a workspace). Reading a workspace's GitHub pull requests and checks is in
-   [`forges.md`](forges.md).
+   [`forges.md`](forges.md), and its ticket (a GitHub issue or a Jira work item) in
+   [`tickets.md`](tickets.md).
 5. **Remote**: network transport, phone, other machines.
 
 ## 14. Defaults taken, to confirm

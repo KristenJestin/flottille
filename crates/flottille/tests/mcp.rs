@@ -240,6 +240,8 @@ fn a_session_sees_only_its_tools() {
             "commands_output",
             "commands_stop",
             "forge_read",
+            "reference_read",
+            "ticket_read",
             "forge_write",
             "agent_launch",
             "agent_send",
@@ -364,7 +366,7 @@ fn a_2026_07_28_client_with_server_discover_lists_and_calls_the_tools() {
     let (_, url, authorization) = agent(&user, json!({}));
 
     let mcp = Mcp::discover(&url, &authorization);
-    assert_eq!(mcp.names().len(), 17);
+    assert_eq!(mcp.names().len(), 18);
     assert!(ok(mcp.call("fs_list", json!({"path": "."}))).contains("README.md"));
 
     let meta = json!({
@@ -1200,4 +1202,138 @@ fn an_agent_calls_a_tool_over_http_from_its_session() {
             .iter()
             .any(|e| e["name"] == "agent.tool_served" && e["data"]["tool"] == "fs_list")
     });
+}
+
+// Clients an agent started (issue #91): the daemon's socket is the user's, never an agent's.
+
+const REFUSED_CLIENT: &str =
+    "refused: this client was started by an agent; agents act only through their tools";
+
+/// A script asking the daemon to stop, as the user's own command line would, from a run: the
+/// gate does not read a script, and the run's environment no longer says where the socket is.
+fn stop_script(user: &User, out: &str) -> String {
+    format!(
+        "XDG_RUNTIME_DIR='{}' exec '{}' daemon stop > {out} 2>&1\n",
+        user.path("runtime").display(),
+        env!("CARGO_BIN_EXE_flottille")
+    )
+}
+
+fn read_when_done(path: &Path) -> String {
+    eventually(&format!("{}", path.display()), || {
+        std::fs::read_to_string(path).is_ok_and(|text| !text.is_empty())
+    });
+    // What the client prints comes in one write before it exits.
+    std::thread::sleep(Duration::from_millis(100));
+    std::fs::read_to_string(path).unwrap()
+}
+
+/// The pid of the process's parent, from its `stat` (`ppid` comes after the name).
+fn parent_of(stat: &str) -> u64 {
+    let (_, after) = stat.rsplit_once(')').unwrap();
+    after.split_whitespace().nth(1).unwrap().parse().unwrap()
+}
+
+/// The daemon's children that ended and that nobody waited for.
+fn zombies_of(daemon: u64) -> Vec<u64> {
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u64>().ok())
+        .filter(|pid| {
+            std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+                let state = stat.rsplit_once(')').unwrap().1.trim_start();
+                state.starts_with('Z') && parent_of(&stat) == daemon
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn a_client_started_through_commands_run_is_refused_and_nothing_it_sent_is_done() {
+    let user = User::with_fake_agent();
+    let (mcp, folder) = session(&user);
+    let pid = user.status()["pid"].as_u64().unwrap();
+    std::fs::write(folder.join("client.sh"), stop_script(&user, "client.out")).unwrap();
+
+    let answer = ok(mcp.call("commands_run", json!({"line": "sh client.sh"})));
+    assert!(answer.contains("exited with code 1"), "{answer}");
+    let said = std::fs::read_to_string(folder.join("client.out")).unwrap();
+    assert!(said.contains(REFUSED_CLIENT), "{said}");
+
+    // It asked the daemon to stop: the same daemon still runs.
+    assert_eq!(user.status()["pid"].as_u64(), Some(pid));
+    // Said once in the daemon's log.
+    let log = std::fs::read_to_string(user.path("state/flottille/daemon.log")).unwrap();
+    assert_eq!(
+        log.matches("refused a client started by an agent").count(),
+        1,
+        "{log}"
+    );
+}
+
+#[test]
+fn a_client_that_outlives_its_command_and_its_parent_is_still_refused() {
+    let user = User::with_fake_agent();
+    let (mcp, folder) = session(&user);
+    let pid = user.status()["pid"].as_u64().unwrap();
+    // A double fork out of the run's session: `setsid -f` starts `late.sh` in a session of its
+    // own, which leaves `connect.sh` behind and ends, and the run ends with them.
+    std::fs::write(folder.join("orphan.sh"), "exec setsid -f sh late.sh\n").unwrap();
+    std::fs::write(folder.join("late.sh"), "sh connect.sh &\n").unwrap();
+    std::fs::write(
+        folder.join("connect.sh"),
+        format!(
+            "sleep 1\ncat /proc/$$/stat > stat\n{}",
+            stop_script(&user, "orphan.out")
+        ),
+    )
+    .unwrap();
+
+    let answer = ok(mcp.call("commands_run", json!({"line": "sh orphan.sh"})));
+    assert!(answer.contains("exited with code 0"), "{answer}");
+    let said = read_when_done(&folder.join("orphan.out"));
+    assert!(said.contains(REFUSED_CLIENT), "{said}");
+    // Orphaned, it was taken in by the daemon, not by init: still its descendant.
+    let stat = std::fs::read_to_string(folder.join("stat")).unwrap();
+    assert_eq!(parent_of(&stat), pid);
+    assert_eq!(user.status()["pid"].as_u64(), Some(pid));
+    // And the daemon waits for what it took in: no child of another's is left a zombie.
+    eventually("the strays reaped", || zombies_of(pid).is_empty());
+}
+
+#[test]
+fn commands_run_flottille_project_list_is_refused_by_the_gate() {
+    let user = User::with_fake_agent();
+    let (mcp, _) = session(&user);
+
+    for line in ["flottille project list", "env flottille daemon stop"] {
+        let text = refused(mcp.call("commands_run", json!({"line": line})));
+        assert!(
+            text.starts_with("refused: flottille drives the daemon"),
+            "{line}: {text}"
+        );
+    }
+}
+
+#[test]
+fn a_run_s_environment_does_not_say_where_the_daemon_is() {
+    let user = User::with_fake_agent();
+    let (mcp, _) = session(&user);
+
+    let answer = ok(mcp.call("commands_run", json!({"line": "env"})));
+    let output = ok(mcp.call("commands_output", json!({"run": run_id(&answer)})));
+    assert!(output.contains("HOME="), "{output}");
+    assert!(!output.contains("XDG_RUNTIME_DIR="), "{output}");
+}
+
+#[test]
+fn a_client_started_outside_the_agents_works_as_before() {
+    let user = User::with_fake_agent();
+    let (mcp, _) = session(&user);
+    ok(mcp.call("commands_run", json!({"line": "true"})));
+
+    assert!(user.call("daemon.status", json!({})).is_ok());
+    let listed = user.run(&["project", "list", "--json"]);
+    assert!(listed.status.success(), "{listed:?}");
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("app"));
 }

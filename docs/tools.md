@@ -4,8 +4,9 @@ The tools of the agents Flottille runs, and the MCP server that serves them: the
 `docs/design.md` §1. It follows `docs/reference/hemera.md` §3, with the rules of
 `docs/reference/mcp.md` §4 where they differ. A session lists the tools of its agent, which
 depend on what it can do (`docs/agents.md`): the file and command tools below for every agent,
-`forge_read` and `forge_write` for an agent in a workspace, and the tree's tools (`agent_*`, `report`, `ask_user` or
-`ask_parent`, `approval_answer`).
+`reference_read`, then `forge_read`, `ticket_read` and `forge_write` for an agent in a workspace,
+and the tree's tools (`agent_*`, `report`, `ask_user` or `ask_parent`,
+`approval_answer`).
 
 ## The server
 
@@ -114,6 +115,26 @@ swapped for a link to the outside meanwhile is refused
 (`refused: X: its folder is no longer inside this agent's place …`, nothing written). A check is
 not a lock: a swap between it and the rename is not seen.
 
+## References
+
+| Tool | Arguments | |
+|---|---|---|
+| `reference_read` | `name`, `path?`, `range? {offset?, length?}` | One of the project's references (`docs/projects.md`, "References"), read-only. A file reference is read by its name alone, a page at a time exactly as `fs_read` does (32 KiB at most, `range` to go on). A folder reference answers with its files and their sizes (`.git`, links and files of secrets left out, 1000 at most); `path`, relative to the reference, then names the file to read, or a folder of it to list. |
+
+- **The list is the only door**: a name not in the agent's list is refused with `refused: no
+  reference named X: the project's references are a, b`; the reference is looked up in the
+  project's file as it is now.
+- **Nothing outside the reference is served**, as `fs_read` serves nothing outside the place: a
+  path that steps out of the reference with `..`, an absolute path, `~`, and a link that leads out
+  once followed are refused with `refused: X is outside the reference Y: it serves its own files
+  only`; a path through a `.git` or naming a file of secrets (`.env`, `.env.*`) is refused; a
+  `path` for a file reference is refused.
+- **The call goes through the gate** like every other and is allowed: it names a reference, not a
+  path of the place, and reads from the project folder whatever the agent's place. The result is
+  masked like a file read, and recorded as an `agent.tool_served` event.
+- **It grants nothing**: unlike `fs_read`, reading a reference does not let the session write the
+  file.
+
 ## Commands
 
 | Tool | Arguments | |
@@ -161,7 +182,9 @@ not a lock: a swap between it and the rename is not seen.
     one exception is a run whose line the gate let through as a push a procedure grants
     (`docs/procedures.md`): that run alone keeps its push URLs;
   - for a line the gate let through by a procedure's grant (a commit, a push, a rebase), no hook:
-    `core.hooksPath=/dev/null` added the same way, since the hooks are files the agent can write.
+    `core.hooksPath=/dev/null` added the same way, since the hooks are files the agent can write;
+  - no `XDG_RUNTIME_DIR`, which says where the daemon's socket is (a client a run starts is
+    refused anyway).
 - **The environment does not stop every push**: `git -c url.<x>.pushInsteadOf=<x> push`,
   `env -u GIT_CONFIG_COUNT git push`, a remote with a push URL of its own
   (`remote.<name>.pushurl`, which git does not rewrite) and a `git config` write all get past it.
@@ -171,7 +194,10 @@ not a lock: a swap between it and the rename is not seen.
   the call's client and the daemon's stop signal the group the run was spawned in (`SIGTERM`,
   then `SIGKILL` after 5 s), and what the run left in its group is killed when its own process
   ends. A process that left the group (`setsid`, a daemon that forks and detaches) escapes all
-  of this and keeps running; Flottille neither sees nor stops it.
+  of this and keeps running; Flottille does not stop it. It stays the daemon's descendant,
+  though: the daemon is the subreaper of what it starts, so a process orphaned there is taken in
+  by the daemon rather than by init, waited for when it ends, and refused if it connects to the
+  socket.
 - **Runs are records**: the store's `runs` (with the end of their output once ended), and the
   `run.started` and `run.ended` events. Each run's process group is recorded while it runs: a
   daemon started after a crash kills the groups a previous one left (only while their leader is
@@ -189,6 +215,15 @@ not a lock: a swap between it and the rename is not seen.
 `forge_read` goes through the gate like every call, which allows it; `forge_write` is allowed,
 asked or refused by its run's grants. How the forge is read, and what it never touches (a token,
 `gh auth token`), is in [`forges.md`](forges.md).
+
+## The tickets
+
+| Tool | |
+|---|---|
+| `ticket_read {ticket?}` | The ticket the agent's workspace is linked to, or `ticket`, another ticket of the same tracker by its key (`#123` or `ABC-123`): its reference, tracker, state, title, link, description and comments (the newest 30), masked. Read only, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own, and none of either's write commands is reachable from it. The tracker is that of the workspace's ticket, or GitHub's (its own repositories' issues) when it has none; a key of the other tracker is refused (`refused: ABC-123 is a Jira ticket, and this workspace's tracker is GitHub issues (#123): …`), and nothing is asked of any tracker. A workspace with no ticket and no key is refused (`refused: workspace X is linked to no ticket: …`). An unreadable ticket (`gh` or `acli` missing or signed out, no such ticket) is an error saying why and what to do. Only an agent in a workspace has it, whether a ticket is linked or not. |
+
+It goes through the gate like every call, which allows it. How a ticket is read, Jira's text
+turned into plain text, and what is assumed of `acli`'s output, is in [`tickets.md`](tickets.md).
 
 ## The tree's tools
 
@@ -252,8 +287,14 @@ the call reaches, the project's never list and Flottille's own folders, and answ
      `pipeline view/list`; for all, `repo view`, `auth status` and `api` with GET, no field, no
      input and not `graphql`; `auth token` and `auth status` with `--show-token` (`-t`) are
      refused, since they print a login;
+   - `acli`, Atlassian's command line: every line, reads included. Its Jira sign-in is the user's,
+     in a place no variable of ours moves, so it cannot be emptied as `gh`'s is; an agent reads a
+     ticket with `ticket_read` and says what should be written to it;
    - publishing: `npm`, `pnpm`, `yarn`, `bun`, `cargo`, `poetry`, `flit`, `hatch`, `uv` with
-     `publish` or `unpublish`, `twine upload`, `gem`, `dotnet` and `nuget` with `push`.
+     `publish` or `unpublish`, `twine upload`, `gem`, `dotnet` and `nuget` with `push`;
+   - `flottille` itself: it drives the daemon, and agents act only through their tools. A copy
+     of it under another name, or any program that speaks to the socket, is refused by the
+     daemon itself (`docs/protocol.md`, "Transport").
 
    These are judged on the line and on every program a wrapper runs, unwrapped in turn (16 at
    most): `env` (its options, `NAME=value` words and `-S` line), `sudo`, `doas`, `nice`, `nohup`,

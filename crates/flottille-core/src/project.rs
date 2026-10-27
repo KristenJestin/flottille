@@ -64,6 +64,17 @@ fn default_base() -> Vec<String> {
     vec!["main".into()]
 }
 
+/// A document an agent reads with a tool when it is relevant, in place of instructions loaded
+/// every time (`docs/projects.md`, "References").
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Reference {
+    /// One line: what the agent is told of it, never the content.
+    pub description: String,
+    /// A file or a folder of files, relative to the project folder.
+    pub path: String,
+}
+
 /// A named command of the project, for the user and for agents.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -241,6 +252,9 @@ pub struct Project {
     /// The steps that prepare a new workspace, in order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub recipe: Vec<RecipeStep>,
+    /// Documents an agent reads with `reference_read`, by name.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub references: BTreeMap<String, Reference>,
     /// Named actions run by an agent in a workspace, with their grants (`docs/procedures.md`).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub procedures: BTreeMap<String, Procedure>,
@@ -272,6 +286,8 @@ struct File {
     commands: BTreeMap<String, CatalogueCommand>,
     #[serde(default)]
     recipe: Vec<RecipeStep>,
+    #[serde(default)]
+    references: BTreeMap<String, Reference>,
     #[serde(default)]
     procedures: BTreeMap<String, Procedure>,
 }
@@ -316,6 +332,7 @@ impl Project {
             variables: BTreeMap::new(),
             commands: BTreeMap::new(),
             recipe: Vec::new(),
+            references: BTreeMap::new(),
             procedures: BTreeMap::new(),
         }
     }
@@ -509,6 +526,11 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
         procedure.check(name)?;
     }
 
+    for (reference, entry) in &file.references {
+        check_reference(reference, entry)
+            .map_err(|error| format!("references.{reference}{error}"))?;
+    }
+
     Ok(Project {
         name: name.to_owned(),
         folder: file.folder,
@@ -524,8 +546,37 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
         variables: file.variables,
         commands: file.commands,
         recipe: file.recipe,
+        references: file.references,
         procedures: file.procedures,
     })
+}
+
+/// What is wrong with a reference, as `<.key>: <what>` to follow `references.<name>`.
+pub fn check_reference(name: &str, reference: &Reference) -> Result<(), String> {
+    if !valid_name(name) {
+        return Err(
+            ": the name must be 1 to 64 letters, digits, dots, dashes or underscores, starting \
+             with a letter or a digit"
+                .into(),
+        );
+    }
+    let description = reference.description.trim();
+    if description.is_empty() {
+        return Err(".description: must not be empty".into());
+    }
+    if description.chars().any(char::is_control) {
+        return Err(".description: must be one line".into());
+    }
+    let path = &reference.path;
+    if !valid_repository_path(path) {
+        return Err(format!(
+            ".path: must be a path inside the project folder like \"docs/react\", not \"{path}\""
+        ));
+    }
+    if path.split('/').any(|part| part == ".git") {
+        return Err(".path: must not go through a .git folder".into());
+    }
+    Ok(())
 }
 
 /// One step of the recipe, `key` being `recipe[i]`.
@@ -1374,6 +1425,75 @@ mod tests {
             message.starts_with("projects/a b.toml: name: "),
             "{message}"
         );
+    }
+
+    #[test]
+    fn references_are_read_with_their_description_and_path() {
+        let project = parse(&format!(
+            "{MINIMAL}\n[references.react]\ndescription = \"The framework guide\"\npath = \"docs/react\"\n\
+             [references.\"test.lib\"]\ndescription = \"Testing\"\npath = \"web/TESTING.md\"\n"
+        ))
+        .unwrap();
+
+        let names: Vec<_> = project.references.keys().map(String::as_str).collect();
+        assert_eq!(names, ["react", "test.lib"]);
+        assert_eq!(
+            project.references["react"].description,
+            "The framework guide"
+        );
+        assert_eq!(project.references["react"].path, "docs/react");
+        assert_eq!(parse(&project.to_toml().unwrap()).unwrap(), project);
+        assert!(parse(MINIMAL).unwrap().references.is_empty());
+    }
+
+    #[test]
+    fn a_reference_that_cannot_be_used_is_refused_with_its_key() {
+        let with = |reference: &str| refusal(&format!("{MINIMAL}\n{reference}"));
+        let cases = [
+            (
+                "[references.\"a b\"]\ndescription = \"d\"\npath = \"x\"",
+                "references.a b: the name",
+            ),
+            (
+                "[references.x]\ndescription = \"\"\npath = \"x\"",
+                "references.x.description: must not be empty",
+            ),
+            (
+                "[references.x]\ndescription = \"two\\nlines\"\npath = \"x\"",
+                "references.x.description: must be one line",
+            ),
+            (
+                "[references.x]\ndescription = \"d\"\npath = \"/etc\"",
+                "references.x.path: must be a path inside the project folder",
+            ),
+            (
+                "[references.x]\ndescription = \"d\"\npath = \"../x\"",
+                "references.x.path: must be a path inside the project folder",
+            ),
+            (
+                "[references.x]\ndescription = \"d\"\npath = \"a/../../x\"",
+                "references.x.path: must be a path inside the project folder",
+            ),
+            (
+                "[references.x]\ndescription = \"d\"\npath = \"\"",
+                "references.x.path: must be a path inside the project folder",
+            ),
+            (
+                "[references.x]\ndescription = \"d\"\npath = \"web/.git/config\"",
+                "references.x.path: must not go through a .git",
+            ),
+            (
+                "[references.x]\ndescription = \"d\"\npath = \"x\"\nextra = 1",
+                "references.x.extra",
+            ),
+        ];
+        for (reference, expected) in cases {
+            let message = with(reference);
+            assert!(
+                message.starts_with("projects/app.toml: ") && message.contains(expected),
+                "{reference}: {message}"
+            );
+        }
     }
 
     #[test]

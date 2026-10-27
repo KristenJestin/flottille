@@ -22,6 +22,17 @@ it (`docs/design.md` §3, §11).
 - The daemon and its agents end with the user's last session, unless `loginctl enable-linger` keeps
   the runtime folder. The socket and the lock carry the sticky bit, so that a cleanup of files
   untouched for 6 hours does not remove them.
+- **A client an agent started is refused.** Everything the daemon starts (agents, their
+  commands, git, the forges' command lines) descends from it, the daemon is the subreaper of all
+  of it (a process orphaned there, even one that detached with `setsid`, is taken in by the
+  daemon, not by init), and nothing it starts is a client of its own. So on each connection the
+  daemon reads the client's process id (`SO_PEERCRED`) and walks up its parents
+  (`/proc/<pid>/stat`): a client that descends from the daemon, or whose ancestry cannot be read
+  (gone already, a parent's pid taken since by another process), gets every request answered
+  with the error `refused`, "refused: this client was started by an agent; agents act only
+  through their tools", for 10 seconds at most, and nothing it sends is done. The daemon's log
+  says it once per connection. The user's own clients (the command line, the window, the pilot
+  door an outside agent starts) do not descend from the daemon and are not affected.
 - Any command but `flottille daemon` starts the daemon in the background when nobody listens on
   the socket, then talks to it. The daemon started this way writes its output to
   `$XDG_STATE_HOME/flottille/daemon.log`.
@@ -189,6 +200,27 @@ changing nothing: `{"name", "folder", "new", "missing"}`, `new` the repositories
 configured, `missing` the ones configured and no longer there. `refused` when the folder no longer
 exists.
 
+### The reference methods
+
+A project's references (`docs/projects.md`, "References"). The daemon edits the project's file in
+place, the rest of it left as written, and announces `project.changed`. `not-found` for a project
+or a reference that does not exist, `refused` for a reference that cannot be used, with its key.
+
+#### `reference.list`
+
+`{"project"}`. The result is `{"project", "references": [{"name", "description", "path"}]}`, by name.
+
+#### `reference.add`
+
+`{"project", "name", "description", "path"}`. `path` is relative to the project folder; a trailing
+`/` is dropped. `refused` when the name is already used, when `path` does not exist, leaves the
+project folder (a link followed) or goes through a `.git`, or when the name or the description is
+not valid. The result is `{"project", "name", "description", "path"}`.
+
+#### `reference.remove`
+
+`{"project", "name"}`. The result is `{"project", "removed": "<name>"}`.
+
 ### The workspace methods
 
 A workspace is one worktree per repository, on one branch, prepared by the project's recipe
@@ -235,13 +267,15 @@ cannot be used.
 
 #### `workspace.create`
 
-`{"project", "name", "repositories"?, "branch"?, "offline"?}`. Fetches the base of each
+`{"project", "name", "repositories"?, "branch"?, "offline"?, "ticket"?}`. Fetches the base of each
 repository, writes the workspace, makes the worktrees and answers the workspace; the rest of the
 recipe goes on in the background. `repositories` is the project's default set when left out,
-`branch` is `<branch prefix>/<name>`, and `offline: true` fetches nothing.
+`branch` is `<branch prefix>/<name>`, `offline: true` fetches nothing, and `ticket` (`#123`, `123`
+or a Jira key) links the workspace to a ticket (`tickets.md`); the workspace's `ticket` says it, in
+every answer that shows a workspace, `null` when it has none.
 
-`refused`, with nothing written nor made, when the name is not one, a repository is not the
-project's, the branch is not one git accepts, the project has a workspace of that name, the folder
+`refused`, with nothing written nor made, when the name is not one, the ticket is not one, a
+repository is not the project's, the branch is not one git accepts, the project has a workspace of that name, the folder
 exists, the branch exists in a repository, no branch of a base rule is on the remote, or **a fetch
 fails** (the message is git's reason). A worktree that cannot be made is not a refusal: the
 workspace is answered `failed`, with the step's failure.
@@ -297,6 +331,41 @@ is `null` when its branch has none, and `error` says why its forge could not be 
 request's `state` is `open`, `draft`, `merged` or `closed`; `review` `approved`, `changes
 requested`, `review required` or `null`; a check's `state` `passing`, `failing`, `pending` or
 `skipped`; `mark` the checks as one (`failing`, `pending`, `passing`), `null` without checks.
+
+#### `workspace.ticket`
+
+`{"project", "name"}`. The workspace's ticket, read now on its tracker ([`tickets.md`](tickets.md)):
+
+```json
+{
+  "project": "app",
+  "workspace": "login",
+  "ticket": "#12",
+  "tracker": "github",
+  "repository": "acme/api",
+  "title": "The login fails",
+  "state": "open",
+  "url": "https://github.com/acme/api/issues/12",
+  "description": "Users cannot sign in.",
+  "comments": [{"author": "alice", "at": "2026-10-01T10:00:00Z", "body": "I can reproduce"}],
+  "older_comments": 0,
+  "read_at": 1792843730808,
+  "problem": null
+}
+```
+
+`ticket` is `null` for a workspace linked to none, and then nothing else but `read_at` and a null
+`problem` is there. `tracker` is `github` or `jira`; `repository` is the GitHub repository the issue
+is in, `null` for Jira; `state` is `open` or `closed` for GitHub and Jira's own status name for
+Jira. When the ticket cannot be read (`gh` or `acli` missing, not signed in, no such ticket, a call
+that failed), `problem` says why and with what to do, and the fields of the ticket are absent. All
+the tracker's text is masked. Nothing is kept: every call reads again.
+
+#### `workspace.link_ticket`
+
+`{"project", "name", "ticket"}`. Links the workspace to a ticket, or to none when `ticket` is
+`null`, and answers as `workspace.ticket` does. `refused` when `ticket` is not `#123`, `123` or a
+Jira key (`ABC-123`, any case). Emits `workspace.ticket` (`docs/events.md`).
 
 #### `workspace.prepare`
 

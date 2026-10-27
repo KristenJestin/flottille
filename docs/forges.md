@@ -105,6 +105,13 @@ rules (spawned by the daemon, `-R owner/name`, its output masked, no token to th
 refused unless the agent works in a procedure's run that grants the action: see
 [`procedures.md`](procedures.md).
 
+## Tickets
+
+The issues of GitHub and Jira, linked to a workspace and read the same way (the user's own command
+line, spawned without a shell, nothing written, everything masked), are in
+[`tickets.md`](tickets.md). Its `#123` reads through the `gh` described here, and the agent's
+`ticket_read` sits beside `forge_read`.
+
 ## Tests
 
 Tests never call GitHub nor use anyone's sign-in: a fake `gh` (`crates/flottille-fake-gh`), first

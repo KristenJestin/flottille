@@ -490,6 +490,17 @@ impl Shell {
                 self.settings
                     .update(cx, |page, cx| page.answered(&name, refused, cx));
             }
+            Outcome::TicketLinked {
+                project,
+                name,
+                refused,
+            } => {
+                if let Some(page) = self.session_page.clone() {
+                    page.update(cx, |page, cx| {
+                        page.ticket_linked(&project, &name, refused, window, cx)
+                    });
+                }
+            }
             Outcome::WorkspaceDone { project, name } => {
                 self.workspace_answered(&project, &name, None, window, cx)
             }
