@@ -112,6 +112,12 @@ struct Edit {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct OfAgent {
+    agent: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Run {
     project: String,
     name: String,
@@ -214,6 +220,16 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             Ok(shown)
         }
         "procedure.start" => start(&daemon, serde_json::from_value(params)?),
+        "procedure.of" => {
+            let asked: OfAgent = serde_json::from_value(params)?;
+            let run = daemon.read(|store| store.procedure_run(&asked.agent))?;
+            Ok(json!({"agent": asked.agent, "run": run.map(|run| json!({
+                "procedure": run.procedure, "project": run.project,
+                "workspace": run.workspace, "grants": run.grants,
+                "children": run.children, "says": says(&run.grants),
+                "ended": run.ended_at.is_some(),
+            }))}))
+        }
         method => Err(Failure::new(
             "unknown-method",
             format!("unknown method `{method}`"),
@@ -287,6 +303,14 @@ fn write(
     Ok(())
 }
 
+/// One sentence per grant, as a client shows them.
+fn says(grants: &Grants) -> Vec<Value> {
+    grants
+        .iter()
+        .map(|(grant, mode)| json!({"grant": grant, "mode": mode, "says": grant.says()}))
+        .collect()
+}
+
 /// A procedure as the protocol shows it; with its instructions when `whole`.
 fn to_json(name: &str, procedure: &Procedure, whole: bool) -> Value {
     let mut shown = json!({
@@ -294,9 +318,7 @@ fn to_json(name: &str, procedure: &Procedure, whole: bool) -> Value {
         "description": procedure.description,
         "grants": procedure.grants,
         "children": procedure.children,
-        "says": procedure.grants.iter().map(|(grant, mode)| json!({
-            "grant": grant, "mode": mode, "says": grant.says(),
-        })).collect::<Vec<_>>(),
+        "says": says(&procedure.grants),
     });
     if whole {
         shown["instructions"] = procedure.instructions.clone().into();

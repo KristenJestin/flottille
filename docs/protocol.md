@@ -434,6 +434,13 @@ meanwhile): nothing starts. Otherwise a root agent starts in the workspace with 
 instructions, as `agent.start` starts one, and its run holds the grants from then on:
 `{"agent", "after", "procedure", "grants"}`, `agent` and `after` as `agent.start` answers them.
 
+#### `procedure.of`
+
+`{"agent"}`: the run whose root is that agent, for a client that shows its grants while it goes on:
+`{"agent", "run"}`, `run` null when the agent has none, else `{"procedure", "project", "workspace",
+"grants", "children", "says", "ended"}` (`grants` and `says` as in a procedure, `ended` once the
+run is over).
+
 ### The agent methods
 
 An agent is one agent session run over ACP (`docs/agents.md`), named by an opaque id. None of

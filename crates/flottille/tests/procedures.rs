@@ -566,6 +566,39 @@ fn the_grants_end_with_the_run() {
     assert!(!remote_branches(&user, &remote).contains("app/login"));
 }
 
+#[test]
+fn a_run_s_grants_are_read_from_its_agent_while_it_goes_on_and_none_for_another() {
+    let user = User::with_fake_agent();
+    fixture(&user);
+    procedure(
+        &user,
+        "ship",
+        json!({"push": "allow", "pr-create": "ask"}),
+        true,
+    );
+    let (agent, root) = run(&user, "ship");
+
+    let held = user.call("procedure.of", json!({"agent": agent})).unwrap();
+
+    assert_eq!(held["run"]["procedure"], "ship");
+    assert_eq!(held["run"]["workspace"], "login");
+    assert_eq!(held["run"]["children"], true);
+    assert_eq!(held["run"]["ended"], false);
+    assert_eq!(
+        held["run"]["grants"],
+        json!({"push": "allow", "pr-create": "ask"})
+    );
+    assert_eq!(held["run"]["says"].as_array().unwrap().len(), 2);
+    let plain = user
+        .call("procedure.of", json!({"agent": "no-such-agent"}))
+        .unwrap();
+    assert!(plain["run"].is_null(), "{plain}");
+
+    root.call("report", json!({"text": "Done."}));
+    let ended = user.call("procedure.of", json!({"agent": agent})).unwrap();
+    assert_eq!(ended["run"]["ended"], true);
+}
+
 /// A hook that leaves a mark in `marks` each time it runs.
 fn marking_hook(user: &User, folder: &Path, name: &str) {
     use std::os::unix::fs::PermissionsExt;
