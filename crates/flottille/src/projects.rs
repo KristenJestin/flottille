@@ -345,6 +345,38 @@ fn load(projects: &Projects, name: &str) -> std::result::Result<Project, Failure
     projects.registry.load(name)?.ok_or_else(|| not_found(name))
 }
 
+/// Edits the project's file where it stands, keeping what the user wrote around the edit, and
+/// writes it only when the result is a configuration the daemon can use. The edit is given the
+/// project as the file says now.
+pub fn rewrite(
+    daemon: &Daemon,
+    name: &str,
+    edit: impl FnOnce(&Project, &mut toml_edit::DocumentMut) -> std::result::Result<(), Failure>,
+) -> std::result::Result<Project, Failure> {
+    let mut projects = daemon.projects.lock().unwrap();
+    let projects = &mut *projects;
+    let project = load(projects, name)?;
+    let file = projects.registry.file(name);
+    let unavailable = |error: std::io::Error| {
+        Failure::new("unavailable", format!("projects/{name}.toml: {error}"))
+    };
+    let text = std::fs::read_to_string(&file).map_err(unavailable)?;
+    let mut document: toml_edit::DocumentMut =
+        text.parse().map_err(|error: toml_edit::TomlError| {
+            Failure::new(
+                "invalid-config",
+                format!("projects/{name}.toml: {}", error.message()),
+            )
+        })?;
+    edit(&project, &mut document)?;
+    let text = document.to_string();
+    let edited = Project::parse(name, &text, &projects.data)
+        .map_err(|error| Failure::new("invalid-config", error.to_string()))?;
+    crate::providers::write_in_place(&file, &text).map_err(unavailable)?;
+    announce_edits(daemon, projects)?;
+    Ok(edited)
+}
+
 /// The project as its file says now.
 pub fn load_project(daemon: &Daemon, name: &str) -> std::result::Result<Project, Failure> {
     load(&daemon.projects.lock().unwrap(), name)

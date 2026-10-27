@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use flottille_core::procedure::{self, Grants, Mode};
 use flottille_core::project::CatalogueCommand;
 use serde_json::{Value, json};
 
@@ -27,6 +28,16 @@ pub struct Call<'a> {
     pub never: Option<&'a [Vec<String>]>,
     /// Flottille's own folders (its data, configuration, state): sensitive places.
     pub own: &'a [PathBuf],
+    /// The procedure run whose grants the agent has, when it has some (`docs/procedures.md`).
+    pub run: Option<&'a Run>,
+}
+
+/// The grants of the procedure run an agent works in, as the gate applies them.
+pub struct Run {
+    pub procedure: String,
+    pub grants: Grants,
+    /// Each repository's folder in the workspace, with the remote its branch goes to.
+    pub remotes: Vec<(PathBuf, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -126,6 +137,9 @@ pub fn decide(call: &Call) -> Verdict {
             ));
         }
     }
+    if call.tool == "forge_write" {
+        return forge_write(call);
+    }
     let layers = if run && !call.words.is_empty() {
         match layers(call.words) {
             Ok(layers) => layers,
@@ -134,14 +148,28 @@ pub fn decide(call: &Call) -> Verdict {
     } else {
         Vec::new()
     };
+    // Inside a procedure run, its grants let through what the rules below refuse to agents;
+    // outside one, nothing here changes them.
+    let granted = match call.run {
+        Some(procedure) if run => match granted(call, procedure, &layers) {
+            Ok(granted) => granted,
+            Err(why) => return Verdict::Deny(why),
+        },
+        _ => None,
+    };
     let reached = reached(call, &layers);
-    if let Some(why) = refusal(call, &layers, &reached) {
+    if let Some(why) = refusal(call, &layers, &reached, granted.is_some()) {
         return Verdict::Deny(why);
     }
     let mut ask = Ask {
         reasons: Vec::new(),
         sensitive: false,
     };
+    if let (Some((grant, Mode::Ask)), Some(procedure)) = (granted, call.run) {
+        ask.reasons
+            .push(asked_by_grant(&procedure.procedure, grant));
+        ask.sensitive = true;
+    }
     for path in &reached {
         let reason = match sensitive(call.own, path) {
             Some(place) => {
@@ -493,8 +521,14 @@ fn in_git(path: &Resolved) -> bool {
     parts.components().any(|part| part.as_os_str() == ".git")
 }
 
-/// The sentence refusing the call, if anything refuses it.
-fn refusal(call: &Call, layers: &[Vec<String>], reached: &[Resolved]) -> Option<String> {
+/// The sentence refusing the call, if anything refuses it. `granted` says a procedure's grant
+/// lets the line's program do what it does: the rules of programs are not applied to it.
+fn refusal(
+    call: &Call,
+    layers: &[Vec<String>],
+    reached: &[Resolved],
+    granted: bool,
+) -> Option<String> {
     if WRITES.contains(&call.tool) {
         return reached.iter().find(|path| in_git(path)).map(|path| {
             format!(
@@ -544,6 +578,9 @@ fn refusal(call: &Call, layers: &[Vec<String>], reached: &[Resolved]) -> Option<
     }
     if let Some(why) = deletion_refusal(call, layers) {
         return Some(why);
+    }
+    if granted {
+        return None;
     }
     layers.iter().find_map(|layer| program_refusal(layer))
 }
@@ -754,6 +791,7 @@ fn git_refusal(args: &[String]) -> Option<String> {
             "branch"
         }
         "config" if !config_reads(rest) => "config",
+        "remote" if !remote_reads(rest) => "remote",
         "symbolic-ref" if symbolic_ref_writes(rest) => "history",
         // Plumbing that writes the history or the index without `commit` or `reset`.
         "fast-import" | "update-index" => "history",
@@ -782,6 +820,9 @@ fn git_refusal(args: &[String]) -> Option<String> {
             .into(),
         "branch" => "refused: git branch deletes a branch, and agents never do: say which branch \
                      should go, and the user removes it"
+            .into(),
+        "remote" => "refused: git remote changes where the repository's remotes lead, and agents \
+                     never do: git remote -v, git remote show and git remote get-url read them"
             .into(),
         _ => "refused: git config changes git's configuration, and agents only read it (--get, \
               --get-all, --get-regexp, --list)"
@@ -812,6 +853,18 @@ fn symbolic_ref_writes(rest: &[String]) -> bool {
         }
     }
     refs > 1
+}
+
+/// Whether `git remote` with these words only reads: it lists, shows or gives a URL. Anything else
+/// is taken for a write: a push and `forge_write` trust where the remote leads.
+fn remote_reads(rest: &[String]) -> bool {
+    match rest
+        .iter()
+        .find(|w| !["-v", "--verbose"].contains(&w.as_str()))
+    {
+        None => true,
+        Some(word) => ["show", "get-url"].contains(&word.as_str()),
+    }
 }
 
 /// Whether `git replace` with these words only lists.
@@ -975,6 +1028,389 @@ fn api_reads(args: &[String]) -> bool {
         .is_some_and(|endpoint| *endpoint != "graphql")
 }
 
+/// The grant a procedure's run lets this `commands_run` line through by, when the gate lets it
+/// through: its environment is then lifted for it alone (`runs::defend`), hooks off, and the push
+/// wall down for a push.
+pub fn lifted(call: &Call) -> Option<procedure::Grant> {
+    let run = call.run?;
+    if call.tool != "commands_run" || call.words.is_empty() {
+        return None;
+    }
+    let layers = layers(call.words).ok()?;
+    let (grant, _) = granted(call, run, &layers).ok()??;
+    matches!(decide(call), Verdict::Allow | Verdict::Ask(_)).then_some(grant)
+}
+
+/// The reason a call is held when the procedure grants it with `ask`.
+fn asked_by_grant(procedure: &str, grant: procedure::Grant) -> String {
+    format!("the procedure {procedure} grants {grant} only with the user's approval of each one")
+}
+
+/// The verdict on `forge_write`: only what the agent's procedure run grants, by the action's
+/// grant.
+fn forge_write(call: &Call) -> Verdict {
+    let action = call.args["action"].as_str().unwrap_or_default();
+    let grant = match action {
+        "pr-create" | "pr-merge-squash" | "pipeline-rerun" => {
+            procedure::Grant::of(action).expect("an action is a grant")
+        }
+        _ => {
+            return Verdict::Deny(format!(
+                "refused: forge_write has no action {action:?}: its actions are pr-create, \
+                 pr-merge-squash and pipeline-rerun"
+            ));
+        }
+    };
+    let Some(run) = call.run else {
+        return Verdict::Deny(format!(
+            "refused: forge_write writes to the forge only inside a procedure that grants it, and \
+             this agent runs in none: say what should be done ({action}), and the user does it \
+             or runs a procedure for it"
+        ));
+    };
+    match run.grants.get(&grant) {
+        None => Verdict::Deny(format!(
+            "refused: the procedure {} does not grant {grant}: {}; say what should be done, and \
+             the user does it",
+            run.procedure,
+            granted_words(run)
+        )),
+        Some(Mode::Allow) => Verdict::Allow,
+        Some(Mode::Ask) => Verdict::Ask(Ask {
+            reasons: vec![asked_by_grant(&run.procedure, grant)],
+            sensitive: true,
+        }),
+    }
+}
+
+/// What a run grants, as a refusal says it.
+fn granted_words(run: &Run) -> String {
+    if run.grants.is_empty() {
+        return "it grants nothing".into();
+    }
+    format!("it grants {}", procedure::shown(&run.grants))
+}
+
+/// What a procedure run's grants decide of a line: `Ok(Some)` when a grant lets it through (it
+/// is then the line's only program, `git` itself, never wrapped), `Ok(None)` when no grant
+/// concerns it, and the refusal of what stays refused even inside a run (`git stash`, `git reset
+/// --hard`, a force push without a lease, a push of another branch or to another remote).
+fn granted(
+    call: &Call,
+    run: &Run,
+    layers: &[Vec<String>],
+) -> Result<Option<(procedure::Grant, Mode)>, String> {
+    use procedure::Grant;
+    for layer in layers {
+        if base(&layer[0]) != "git" {
+            continue;
+        }
+        let (at, _) = git_subcommand(&layer[1..]);
+        let rest = layer.get(at + 2..).unwrap_or_default();
+        match layer.get(at + 1).map(String::as_str) {
+            Some("stash") => {
+                return Err(
+                    "refused: git stash is refused even inside a procedure: it hides work where \
+                     nobody looks; commit it if the procedure grants commit, or leave it in the \
+                     working tree"
+                        .into(),
+                );
+            }
+            Some("reset") if rest.iter().any(|w| w == "--hard") => {
+                return Err(
+                    "refused: git reset --hard is refused even inside a procedure: it throws work \
+                     away; say what should be undone, and the user does it"
+                        .into(),
+                );
+            }
+            _ => {}
+        }
+    }
+    let [layer] = layers else {
+        return Ok(None);
+    };
+    if base(&layer[0]) != "git" {
+        return Ok(None);
+    }
+    let (at, plain) = git_subcommand(&layer[1..]);
+    let Some(command) = layer.get(at + 1).map(String::as_str) else {
+        return Ok(None);
+    };
+    let rest = &layer[at + 2..];
+    let concerned = match command {
+        "push" => [Grant::Push, Grant::PushForceWithLease]
+            .iter()
+            .any(|grant| run.grants.contains_key(grant)),
+        "commit" => run.grants.contains_key(&Grant::Commit),
+        "rebase" => run.grants.contains_key(&Grant::Rebase),
+        _ => false,
+    };
+    if !concerned {
+        return Ok(None);
+    }
+    if !plain {
+        return Err(format!(
+            "refused: inside a procedure, git {command} runs without git's options before it \
+             (-C, --git-dir, -c…): run it in the repository's folder, naming the repository with \
+             commands_run's repository"
+        ));
+    }
+    let grant = match command {
+        "push" => push_grant(call, run, rest)?,
+        "commit" => commit_check(rest).map(|()| Grant::Commit)?,
+        _ => rebase_check(rest).map(|()| Grant::Rebase)?,
+    };
+    match run.grants.get(&grant) {
+        Some(mode) => Ok(Some((grant, *mode))),
+        None => Err(format!(
+            "refused: this git {command} needs the grant {grant}, and the procedure {} does not \
+             give it: {}",
+            run.procedure,
+            granted_words(run)
+        )),
+    }
+}
+
+/// Where git's subcommand is among its arguments, and whether nothing but `--no-pager` comes
+/// before it.
+fn git_subcommand(args: &[String]) -> (usize, bool) {
+    let mut at = 0;
+    let mut plain = true;
+    while let Some(word) = args.get(at) {
+        if !word.starts_with('-') {
+            break;
+        }
+        if word != "--no-pager" {
+            plain = false;
+        }
+        at += if ["-C", "-c", "--git-dir", "--work-tree", "--namespace"].contains(&word.as_str()) {
+            2
+        } else {
+            1
+        };
+    }
+    (at, plain)
+}
+
+/// The grant a `git push` needs, once it is known to push the workspace's own branch to its
+/// repository's remote: `push`, or `push-force-with-lease` with a lease. Anything else is
+/// refused with why.
+fn push_grant(call: &Call, run: &Run, args: &[String]) -> Result<procedure::Grant, String> {
+    let place = &call.grant.place;
+    let branch = place.branch.as_str();
+    let ours = |name: &str| name == branch || name.strip_prefix("refs/heads/") == Some(branch);
+    let refuse = |what: &str| {
+        format!(
+            "refused: {what}; inside a procedure, git push sends the workspace's own branch \
+             ({branch}) to its repository's remote: git push <remote> {branch}, with \
+             --force-with-lease when the procedure grants push-force-with-lease"
+        )
+    };
+    let mut lease = false;
+    let mut operands = Vec::new();
+    let mut options = true;
+    for word in args {
+        let word = word.as_str();
+        if !options || !word.starts_with('-') || word == "-" {
+            operands.push(word);
+            continue;
+        }
+        match word {
+            "--" => options = false,
+            "--force-with-lease" => lease = true,
+            _ if word.starts_with("--force-with-lease=") => {
+                let value = &word["--force-with-lease=".len()..];
+                let named = value.split_once(':').map_or(value, |(name, _)| name);
+                if !ours(named) {
+                    return Err(refuse(&format!(
+                        "{word} leases {named}, which is not the workspace's branch"
+                    )));
+                }
+                lease = true;
+            }
+            "--force-if-includes"
+            | "--set-upstream"
+            | "--quiet"
+            | "--verbose"
+            | "--porcelain"
+            | "--dry-run"
+            | "--atomic"
+            | "--progress"
+            | "--no-progress" => {}
+            "--force" => {
+                return Err(refuse(
+                    "git push --force is refused even inside a procedure",
+                ));
+            }
+            "--delete" | "--prune" => {
+                return Err(refuse(&format!(
+                    "git push {word} deletes branches on the remote"
+                )));
+            }
+            "--mirror" | "--all" | "--branches" | "--tags" | "--follow-tags" => {
+                return Err(refuse(&format!(
+                    "git push {word} pushes more than the workspace's branch"
+                )));
+            }
+            _ if word.starts_with("--") => {
+                return Err(refuse(&format!(
+                    "git push {word} is not an option a procedure's push takes"
+                )));
+            }
+            _ => {
+                for letter in word[1..].chars() {
+                    match letter {
+                        'u' | 'q' | 'v' | 'n' => {}
+                        'f' => {
+                            return Err(refuse("git push -f is refused even inside a procedure"));
+                        }
+                        'd' => return Err(refuse("git push -d deletes branches on the remote")),
+                        _ => {
+                            return Err(refuse(&format!(
+                                "git push -{letter} is not an option a procedure's push takes"
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let Some((remote, refspecs)) = operands.split_first() else {
+        return Err(refuse("this git push names no remote"));
+    };
+    let folder = call.paths.first();
+    let expected = run.remotes.iter().find(|(repository, _)| {
+        folder.is_some_and(|folder| place.resolve(repository, ".").path == folder.path)
+    });
+    let Some((_, expected)) = expected else {
+        return Err(refuse(
+            "this git push does not run in one of the workspace's repositories: name the \
+             repository with commands_run's repository",
+        ));
+    };
+    if remote != expected {
+        return Err(refuse(&format!(
+            "{remote} is not this repository's remote, {expected}"
+        )));
+    }
+    if refspecs.is_empty() {
+        return Err(refuse("this git push names no branch"));
+    }
+    for refspec in refspecs {
+        if refspec.starts_with('+') {
+            return Err(refuse(&format!(
+                "{refspec} forces the push without a lease, which is refused even inside a \
+                 procedure"
+            )));
+        }
+        let (source, target) = refspec.split_once(':').unwrap_or((refspec, refspec));
+        if source.is_empty() {
+            return Err(refuse(&format!("{refspec} deletes a branch on the remote")));
+        }
+        if target == "HEAD" {
+            return Err(refuse(&format!(
+                "{refspec} pushes to the branch HEAD is on, which may not be the workspace's: \
+                 name it, HEAD:{branch}"
+            )));
+        }
+        let source_ours = source == "HEAD" || ours(source);
+        if !source_ours || !ours(target) {
+            return Err(refuse(&format!("{refspec} is not the workspace's branch")));
+        }
+    }
+    Ok(if lease {
+        procedure::Grant::PushForceWithLease
+    } else {
+        procedure::Grant::Push
+    })
+}
+
+/// A `git commit` a procedure's `commit` grant lets through: never rewriting the last commit, never
+/// with `--no-verify`. Git takes any unambiguous start of a long option and groups short ones, so
+/// both are read as git reads them.
+fn commit_check(args: &[String]) -> Result<(), String> {
+    let amend =
+        || {
+            Err("refused: git commit --amend rewrites a commit, and a procedure's commit makes new \
+             ones only: commit the change on its own"
+            .into())
+        };
+    let no_verify = || {
+        Err(
+            "refused: git commit --no-verify is refused inside a procedure: commit without it"
+                .into(),
+        )
+    };
+    let rewrites = |value: &str| value.starts_with("amend:") || value.starts_with("reword:");
+    let mut words = args.iter().map(String::as_str);
+    while let Some(word) = words.next() {
+        if word == "--" {
+            break;
+        }
+        if let Some(long) = word.strip_prefix("--") {
+            let (name, value) = long
+                .split_once('=')
+                .map_or((long, None), |(n, v)| (n, Some(v)));
+            let abbreviates = |option: &str| !name.is_empty() && option.starts_with(name);
+            if abbreviates("amend") {
+                return amend();
+            }
+            if abbreviates("no-verify") {
+                return no_verify();
+            }
+            if abbreviates("fixup") && value.or_else(|| words.next()).is_some_and(rewrites) {
+                return amend();
+            }
+        } else if let Some(group) = word.strip_prefix('-') {
+            for letter in group.chars() {
+                if letter == 'n' {
+                    return no_verify();
+                }
+                // What follows an option that takes a value is that value.
+                if "mFcCtuS".contains(letter) {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A `git rebase` a procedure's `rebase` grant lets through: of the branch checked out (the
+/// workspace's), onto one upstream, never interactive nor running commands.
+fn rebase_check(args: &[String]) -> Result<(), String> {
+    let refuse = |what: String| {
+        format!(
+            "refused: {what}; inside a procedure, git rebase replays the workspace's branch onto \
+             one upstream (git rebase [--onto <base>] <upstream>, --continue, --abort, --skip)"
+        )
+    };
+    let mut operands = 0;
+    let mut at = 0;
+    while let Some(word) = args.get(at) {
+        let word = word.as_str();
+        at += 1;
+        match word {
+            "--onto" => at += 1,
+            _ if word.starts_with("--onto=") => {}
+            "--continue" | "--abort" | "--skip" | "--quit" | "--keep-base" | "--quiet" | "-q"
+            | "--verbose" | "-v" => {}
+            _ if word.starts_with('-') => {
+                return Err(refuse(format!(
+                    "git rebase {word} is not an option a procedure's rebase takes"
+                )));
+            }
+            _ => operands += 1,
+        }
+    }
+    if operands > 1 {
+        return Err(refuse(
+            "git rebase with a branch after the upstream checks that branch out first".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// The sensitive place a path is in, if it is in one: inside the place, only what sits below it
 /// counts.
 fn sensitive(own: &[PathBuf], path: &Resolved) -> Option<String> {
@@ -1041,6 +1477,8 @@ mod tests {
         grant: Grant,
         never: Vec<Vec<String>>,
         commands: BTreeMap<String, CatalogueCommand>,
+        /// The procedure run the agent works in, if any.
+        run: Option<Run>,
     }
 
     impl Fixture {
@@ -1085,11 +1523,32 @@ mod tests {
                     vec!["deploy".into()],
                 ],
                 commands: BTreeMap::new(),
+                run: None,
             }
         }
 
         fn workspace() -> Fixture {
             Fixture::new(Some("w"))
+        }
+
+        /// The workspace, on the branch `app/login` whose remote is `origin`, in a run of the
+        /// procedure `ship` that grants these.
+        fn in_run(mut self, grants: &[(procedure::Grant, Mode)]) -> Fixture {
+            self.grant.place.branch = "app/login".into();
+            self.run = Some(Run {
+                procedure: "ship".into(),
+                grants: grants.iter().copied().collect(),
+                remotes: vec![(self.root.clone(), "origin".into())],
+            });
+            self
+        }
+
+        fn forge(&self, action: &str) -> Verdict {
+            self.judge(
+                "forge_write",
+                json!({"action": action, "repository": "."}),
+                Some(&self.never),
+            )
         }
 
         fn command(mut self, name: &str, line: &str, set: impl Fn(&mut CatalogueCommand)) -> Self {
@@ -1107,6 +1566,26 @@ mod tests {
         }
 
         fn judge(&self, tool: &str, args: Value, never: Option<&[Vec<String>]>) -> Verdict {
+            self.considered(tool, args, never, decide)
+        }
+
+        /// The grant a procedure lifts the line's environment for.
+        fn lifted(&self, line: &str) -> Option<procedure::Grant> {
+            self.considered(
+                "commands_run",
+                json!({"line": line}),
+                Some(&self.never),
+                super::lifted,
+            )
+        }
+
+        fn considered<T>(
+            &self,
+            tool: &str,
+            args: Value,
+            never: Option<&[Vec<String>]>,
+            consider: impl FnOnce(&Call) -> T,
+        ) -> T {
             let place = &self.grant.place;
             let (words, paths, command) = match tool {
                 "commands_run" => {
@@ -1125,7 +1604,7 @@ mod tests {
                     None => (Vec::new(), Vec::new(), None),
                 },
             };
-            decide(&Call {
+            consider(&Call {
                 grant: &self.grant,
                 tool,
                 args: &args,
@@ -1134,6 +1613,7 @@ mod tests {
                 command,
                 never,
                 own: &self.own,
+                run: self.run.as_ref(),
             })
         }
 
@@ -1175,6 +1655,7 @@ mod tests {
                 command: None,
                 never: Some(&self.never),
                 own: &self.own,
+                run: self.run.as_ref(),
             })
         }
     }
@@ -1821,6 +2302,354 @@ mod tests {
         assert_eq!(
             ask.reasons,
             ["~/notes.txt is outside this agent's place".to_owned()]
+        );
+    }
+    use procedure::Grant::{Commit, PrCreate, PrMergeSquash, Push, PushForceWithLease, Rebase};
+
+    /// Every grant, allowed.
+    fn every_grant() -> Vec<(procedure::Grant, Mode)> {
+        procedure::Grant::ALL
+            .iter()
+            .map(|grant| (*grant, Mode::Allow))
+            .collect()
+    }
+
+    #[test]
+    fn outside_a_run_what_a_procedure_could_grant_is_decided_as_before() {
+        let fixture = Fixture::workspace();
+        for line in [
+            "git push origin app/login",
+            "git push --force-with-lease origin app/login",
+            "git commit -m change",
+            "git rebase main",
+            "gh pr create --fill",
+        ] {
+            assert!(
+                denied(&fixture.run(line)),
+                "{line}: {:?}",
+                fixture.run(line)
+            );
+        }
+        // Allowed before procedures, and still.
+        assert_eq!(fixture.run("git stash"), Verdict::Allow);
+        for action in ["pr-create", "pr-merge-squash", "pipeline-rerun"] {
+            let verdict = fixture.forge(action);
+            assert!(denied(&verdict), "{action}: {verdict:?}");
+            assert!(
+                matches!(&verdict, Verdict::Deny(why) if why.contains("only inside a procedure")),
+                "{verdict:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn inside_a_run_a_granted_push_of_the_workspace_s_branch_goes_through_an_ask_one_is_held_and_an_ungranted_one_is_refused()
+     {
+        let allowed = Fixture::workspace().in_run(&[(Push, Mode::Allow)]);
+        for line in [
+            "git push origin app/login",
+            "git push -u origin app/login",
+            "git push --set-upstream origin HEAD:app/login",
+            "git push origin refs/heads/app/login:refs/heads/app/login",
+            "git --no-pager push -q origin app/login",
+        ] {
+            assert_eq!(allowed.run(line), Verdict::Allow, "{line}");
+        }
+
+        let asked = Fixture::workspace().in_run(&[(Push, Mode::Ask)]);
+        let verdict = asked.run("git push origin app/login");
+        // Asked every time: never allowed for the tree.
+        assert!(
+            asked_by(&verdict, "the procedure ship grants push"),
+            "{verdict:?}"
+        );
+
+        let ungranted = Fixture::workspace().in_run(&[(Commit, Mode::Allow)]);
+        assert!(denied(&ungranted.run("git push origin app/login")));
+    }
+
+    fn asked_by(verdict: &Verdict, reason: &str) -> bool {
+        matches!(verdict, Verdict::Ask(ask) if ask.sensitive
+            && ask.reasons.iter().any(|r| r.starts_with(reason)))
+    }
+
+    #[test]
+    fn a_push_of_another_branch_to_another_remote_or_a_deletion_is_refused_even_with_push() {
+        let fixture = Fixture::workspace().in_run(&every_grant());
+        for line in [
+            "git push",
+            "git push origin",
+            "git push origin main",
+            "git push origin app/login:main",
+            "git push origin HEAD:main",
+            "git push origin app/login other",
+            "git push upstream app/login",
+            "git push https://example.com/acme/app.git app/login",
+            "git push origin :app/login",
+            "git push --delete origin app/login",
+            "git push -d origin app/login",
+            "git push --mirror origin",
+            "git push --all origin",
+            "git push --tags origin app/login",
+            "git push --prune origin app/login",
+            "git push -o ci.skip origin app/login",
+            "git push --receive-pack=evil origin app/login",
+            "git push --force-with-lease=main origin app/login",
+            "git -C src push origin app/login",
+            "git -c remote.origin.pushurl=elsewhere push origin app/login",
+            "env git push origin app/login",
+            "sh -c 'git push origin app/login'",
+        ] {
+            assert!(
+                denied(&fixture.run(line)),
+                "{line}: {:?}",
+                fixture.run(line)
+            );
+        }
+    }
+
+    #[test]
+    fn reset_hard_stash_and_a_force_push_without_lease_are_refused_even_with_every_grant() {
+        let fixture = Fixture::workspace().in_run(&every_grant());
+        for line in [
+            "git reset --hard HEAD~1",
+            "git reset --hard",
+            "git stash",
+            "git stash pop",
+            "env git stash",
+            "git push --force origin app/login",
+            "git push -f origin app/login",
+            "git push -uf origin app/login",
+            "git push origin +app/login",
+            "git push origin +HEAD:app/login",
+            "git push --force --force-with-lease origin app/login",
+        ] {
+            assert!(
+                denied(&fixture.run(line)),
+                "{line}: {:?}",
+                fixture.run(line)
+            );
+        }
+        // A run with no grant at all refuses them too.
+        let none = Fixture::workspace().in_run(&[]);
+        assert!(denied(&none.run("git stash")));
+    }
+
+    #[test]
+    fn a_push_with_a_lease_needs_its_own_grant() {
+        let push = Fixture::workspace().in_run(&[(Push, Mode::Allow)]);
+        let verdict = push.run("git push --force-with-lease origin app/login");
+        assert!(
+            matches!(&verdict, Verdict::Deny(why) if why.contains("push-force-with-lease")),
+            "{verdict:?}"
+        );
+        let lease = Fixture::workspace().in_run(&[(PushForceWithLease, Mode::Allow)]);
+        for line in [
+            "git push --force-with-lease origin app/login",
+            "git push --force-with-lease=app/login origin app/login",
+            "git push --force-with-lease=app/login:abc123 --force-if-includes origin app/login",
+        ] {
+            assert_eq!(lease.run(line), Verdict::Allow, "{line}");
+        }
+        // The lease's grant does not give a plain push.
+        assert!(denied(&lease.run("git push origin app/login")));
+    }
+
+    #[test]
+    fn commit_and_rebase_go_through_only_as_their_grants_say() {
+        let fixture = Fixture::workspace().in_run(&[(Commit, Mode::Allow), (Rebase, Mode::Ask)]);
+        assert_eq!(fixture.run("git commit -m change"), Verdict::Allow);
+        assert_eq!(fixture.run("git commit -a -m change"), Verdict::Allow);
+        for line in [
+            "git commit --amend -m change",
+            "git commit --no-verify -m change",
+            "git commit -n -m change",
+        ] {
+            assert!(denied(&fixture.run(line)), "{line}");
+        }
+        for line in [
+            "git rebase main",
+            "git rebase --onto main old",
+            "git rebase --continue",
+            "git rebase --abort",
+        ] {
+            assert!(
+                asked_by(&fixture.run(line), "the procedure ship grants rebase"),
+                "{line}: {:?}",
+                fixture.run(line)
+            );
+        }
+        for line in [
+            "git rebase -i main",
+            "git rebase --interactive main",
+            "git rebase --exec make main",
+            "git rebase -x make main",
+            "git rebase --autostash main",
+            "git rebase main other-branch",
+        ] {
+            assert!(
+                denied(&fixture.run(line)),
+                "{line}: {:?}",
+                fixture.run(line)
+            );
+        }
+        // What no grant covers is decided as without a procedure.
+        for line in [
+            "git merge topic",
+            "git cherry-pick abc123",
+            "git branch -D topic",
+            "git tag v1",
+        ] {
+            assert!(denied(&fixture.run(line)), "{line}");
+        }
+        assert_eq!(fixture.run("git status"), Verdict::Allow);
+    }
+
+    #[test]
+    fn the_project_s_never_list_wins_over_a_grant() {
+        let mut fixture = Fixture::workspace().in_run(&every_grant());
+        fixture.never.push(vec!["git".into(), "push".into()]);
+        let verdict = fixture.run("git push origin app/login");
+        assert!(
+            matches!(&verdict, Verdict::Deny(why) if why.contains("the project never allows git push")),
+            "{verdict:?}"
+        );
+    }
+
+    #[test]
+    fn forge_write_follows_the_run_s_grants() {
+        let fixture =
+            Fixture::workspace().in_run(&[(PrCreate, Mode::Allow), (PrMergeSquash, Mode::Ask)]);
+        assert_eq!(fixture.forge("pr-create"), Verdict::Allow);
+        assert!(asked_by(
+            &fixture.forge("pr-merge-squash"),
+            "the procedure ship grants pr-merge-squash"
+        ));
+        let verdict = fixture.forge("pipeline-rerun");
+        assert!(
+            matches!(&verdict, Verdict::Deny(why)
+                if why.contains("does not grant pipeline-rerun")
+                    && why.contains("pr-create (allow), pr-merge-squash (ask)")),
+            "{verdict:?}"
+        );
+        assert!(denied(&fixture.forge("pr-close")));
+    }
+
+    #[test]
+    fn an_agent_never_changes_where_a_remote_leads_even_with_every_grant() {
+        for fixture in [
+            Fixture::workspace(),
+            Fixture::workspace().in_run(&every_grant()),
+        ] {
+            for line in [
+                "git remote add evil https://evil.example/x.git",
+                "git remote set-url origin https://evil.example/x.git",
+                "git remote set-url --push origin https://evil.example/x.git",
+                "git remote rename origin old",
+                "git remote remove origin",
+                "git remote rm origin",
+                "git remote set-branches origin main",
+                "git remote set-head origin main",
+                "git remote -v add evil https://evil.example/x.git",
+                "git config remote.origin.url https://evil.example/x.git",
+                "git config set remote.origin.pushurl https://evil.example/x.git",
+                "git config --add remote.origin.pushurl https://evil.example/x.git",
+                "git config url.https://evil.example/.insteadOf git@github.com:",
+            ] {
+                assert!(
+                    denied(&fixture.run(line)),
+                    "{line}: {:?}",
+                    fixture.run(line)
+                );
+            }
+            for line in [
+                "git remote",
+                "git remote -v",
+                "git remote --verbose",
+                "git remote show origin",
+                "git remote get-url origin",
+                "git remote get-url --push --all origin",
+            ] {
+                assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_push_of_a_bare_head_is_refused_since_head_may_be_another_branch() {
+        let fixture = Fixture::workspace().in_run(&every_grant());
+        for line in [
+            "git push origin HEAD",
+            "git push -u origin HEAD",
+            "git push origin HEAD:HEAD",
+            "git push --force-with-lease origin HEAD",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(
+                matches!(&verdict, Verdict::Deny(why) if why.contains("HEAD:app/login")),
+                "{line}: {verdict:?}"
+            );
+        }
+        // Named, the branch it goes to is known whatever HEAD is.
+        assert_eq!(
+            fixture.run("git push origin HEAD:app/login"),
+            Verdict::Allow
+        );
+    }
+
+    #[test]
+    fn abbreviated_or_grouped_options_that_amend_or_skip_hooks_are_refused() {
+        let fixture = Fixture::workspace().in_run(&[(Commit, Mode::Allow)]);
+        for line in [
+            "git commit --amen -m change",
+            "git commit --ame -m change",
+            "git commit --am -m change",
+            "git commit --no-verif -m change",
+            "git commit --no-ver -m change",
+            "git commit -anm change",
+            "git commit -na -m change",
+            "git commit -an -m change",
+            "git commit --fixup=amend:HEAD",
+            "git commit --fixu=amend:HEAD",
+            "git commit --fix=reword:HEAD",
+            "git commit --fixup amend:HEAD",
+            "git commit --fixup reword:HEAD",
+        ] {
+            assert!(
+                denied(&fixture.run(line)),
+                "{line}: {:?}",
+                fixture.run(line)
+            );
+        }
+        for line in [
+            "git commit -am change",
+            "git commit -m nothing-to-see",
+            "git commit -mnote",
+            "git commit --fixup HEAD",
+            "git commit --no-edit -m change",
+            "git commit --verbose -m change",
+        ] {
+            assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_granted_commit_push_or_rebase_is_lifted_and_nothing_else_is() {
+        let fixture = Fixture::workspace().in_run(&[
+            (Commit, Mode::Allow),
+            (Push, Mode::Ask),
+            (Rebase, Mode::Allow),
+        ]);
+        assert_eq!(fixture.lifted("git commit -m change"), Some(Commit));
+        assert_eq!(fixture.lifted("git push origin app/login"), Some(Push));
+        assert_eq!(fixture.lifted("git rebase main"), Some(Rebase));
+        for line in ["git status", "git push origin main", "git commit --amend"] {
+            assert_eq!(fixture.lifted(line), None, "{line}");
+        }
+        assert_eq!(
+            Fixture::workspace().lifted("git commit -m change"),
+            None,
+            "outside a run"
         );
     }
 }

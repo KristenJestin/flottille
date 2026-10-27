@@ -7,6 +7,7 @@ pub mod detect;
 pub mod error;
 pub mod glob;
 pub mod paths;
+pub mod procedure;
 pub mod project;
 pub mod protocol;
 pub mod provider;

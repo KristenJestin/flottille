@@ -750,6 +750,8 @@ async fn report(daemon: &Arc<Daemon>, grant: &Grant, caller: &Agent, args: Value
         })
         .map_err(failed)?;
     if caller.parent.is_none() {
+        // A procedure's run ends with its root's report, and its grants with it.
+        crate::procedures::end(daemon, &caller.id, "reported");
         return Ok(Outcome::Done("Your report was shown to the user.".into()));
     }
     let mut body = format!("reported:\n\n{text}\n\n");

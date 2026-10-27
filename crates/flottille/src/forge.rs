@@ -1,7 +1,8 @@
 //! Forges (`docs/forges.md`): what the forge of each repository of a workspace says of the
-//! workspace's branch, its pull request and their checks. Reading only, through the user's own
-//! command line (`gh` for GitHub), spawned without a shell, with the user's own sign-in: Flottille
-//! never reads, keeps nor prints a token, and of `gh auth status` it reads the exit code alone.
+//! workspace's branch, its pull request and their checks, and the writes of `forge_write` that a
+//! procedure grants (`docs/procedures.md`). Through the user's own command line (`gh` for
+//! GitHub), spawned without a shell, with the user's own sign-in: Flottille never reads, keeps
+//! nor prints a token, and of `gh auth status` it reads the exit code alone.
 //!
 //! A workspace is read on demand (`workspace.forge`, the agents' `forge_read`), and again about
 //! once a minute while a client watches it, less often while `gh` fails. Nothing is read while
@@ -9,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,7 +18,7 @@ use std::time::Duration;
 use flottille_core::protocol::WorkspaceForge;
 use flottille_core::secrets;
 use flottille_core::store::now_ms;
-use flottille_core::workspace::Workspace;
+use flottille_core::workspace::{Base, Workspace};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -107,6 +108,69 @@ pub fn remote_of(url: &str) -> Remote {
         }),
         _ => Remote::Elsewhere,
     }
+}
+
+/// Where a repository's remote leads, as a workspace records it and a push and `forge_write`
+/// check it: its fetch and push URLs as git uses them (`insteadOf` applied), credentials taken
+/// out, sorted; empty when git names none.
+pub async fn urls_of(folder: &Path, remote: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    for push in [&[][..], &["--push"][..]] {
+        let args = [&["remote", "get-url", "--all"][..], push, &[remote]].concat();
+        match git::output(folder, &args, Class::Read).await {
+            Ok(said) => urls.extend(
+                said.lines()
+                    .map(str::trim)
+                    .filter(|url| !url.is_empty())
+                    .map(without_credentials),
+            ),
+            Err(_) => return Vec::new(),
+        }
+    }
+    urls.sort();
+    urls.dedup();
+    urls
+}
+
+/// The URL without what may come before its host: a user, a password or a token.
+fn without_credentials(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_owned();
+    };
+    let authority = rest.split('/').next().unwrap_or(rest);
+    match authority.rsplit_once('@') {
+        Some((_, host)) => format!("{scheme}://{host}{}", &rest[authority.len()..]),
+        None => url.to_owned(),
+    }
+}
+
+/// Refuses unless the repository's remote leads where it led when the workspace was created: an
+/// agent never changes it, and a push or a forge write that a procedure grants goes nowhere else.
+pub async fn remote_kept(folder: &Path, base: &Base) -> Result<(), String> {
+    if base.urls.is_empty() {
+        return Err(format!(
+            "refused: this workspace was created before Flottille recorded where its remote {} \
+             leads, and a procedure's push or forge write goes only where that is known: say \
+             what should be done, and the user does it",
+            base.remote
+        ));
+    }
+    let now = urls_of(folder, &base.remote).await;
+    if now != base.urls {
+        return Err(format!(
+            "refused: the remote {} no longer leads where it led when the workspace was created \
+             ({}): it leads to {}; nothing was sent: say so, and the user checks the \
+             repository's remotes",
+            base.remote,
+            base.urls.join(", "),
+            if now.is_empty() {
+                "nothing".to_owned()
+            } else {
+                now.join(", ")
+            }
+        ));
+    }
+    Ok(())
 }
 
 /// A pull request as the forge said it, its texts masked.
@@ -639,6 +703,219 @@ pub async fn forge_read(daemon: &Daemon, place: &Place, args: Value) -> Outcome 
     Outcome::Done(read_text(&workspace, &read))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ForgeWrite {
+    action: String,
+    repository: String,
+    title: Option<String>,
+    body: Option<String>,
+    #[serde(default)]
+    draft: bool,
+}
+
+/// `forge_write`, once the gate let it through by a procedure's grant: one write to the forge of
+/// one repository of the agent's own workspace, for the workspace's branch only, through the
+/// user's own `gh`.
+pub async fn forge_write(daemon: &Daemon, place: &Place, args: Value) -> Outcome {
+    let asked: ForgeWrite = match arguments("forge_write", args) {
+        Ok(asked) => asked,
+        Err(refusal) => return refusal,
+    };
+    let Some(name) = &place.workspace else {
+        return Outcome::Refused(
+            "refused: this agent works in the project folder, not in a workspace: forge_write \
+             writes for a workspace's branch"
+                .into(),
+        );
+    };
+    let workspace = match daemon.read(|store| store.workspace(&place.project, name)) {
+        Ok(Some(workspace)) => workspace,
+        Ok(None) => return Outcome::Failed(format!("the workspace {name} is gone")),
+        Err(error) => return Outcome::Failed(error.to_string()),
+    };
+    let repositories = repositories_of(&workspace);
+    let found = repositories
+        .iter()
+        .zip(&workspace.repositories)
+        .find(|((path, _, _), _)| *path == asked.repository);
+    let Some(((_, folder, remote), repository)) = found else {
+        let names: Vec<&str> = repositories.iter().map(|(p, _, _)| p.as_str()).collect();
+        return Outcome::Refused(format!(
+            "refused: {} is not a repository of this agent's workspace: it has {}; forge_write \
+             writes only for those",
+            asked.repository,
+            names.join(", ")
+        ));
+    };
+    if let Err(refusal) = remote_kept(folder, &repository.base).await {
+        return Outcome::Refused(refusal);
+    }
+    let forge = match git::output(folder, &["remote", "get-url", remote.as_str()], Class::Read)
+        .await
+        .as_deref()
+        .map(remote_of)
+    {
+        Ok(Remote::Forge(forge)) => forge,
+        Ok(_) | Err(_) => {
+            return Outcome::Refused(format!(
+                "refused: {}'s remote {remote} is not on a forge Flottille writes to (GitHub)",
+                asked.repository
+            ));
+        }
+    };
+    if let Err(problem) = signed_in().await {
+        return Outcome::Failed(problem);
+    }
+    let slug = forge.slug();
+    let branch = workspace.branch.as_str();
+    match asked.action.as_str() {
+        "pr-create" => {
+            let Some(title) = asked.title.filter(|t| !t.trim().is_empty()) else {
+                return Outcome::Refused(
+                    "refused: pr-create needs a title: say what the pull request does".into(),
+                );
+            };
+            let base = &repository.base.branch;
+            let body = asked.body.unwrap_or_default();
+            let mut args = vec![
+                "pr", "create", "-R", &slug, "--head", branch, "--base", base, "--title", &title,
+                "--body", &body,
+            ];
+            if asked.draft {
+                args.push("--draft");
+            }
+            match gh_text(&args).await {
+                Ok(said) => Outcome::Done(format!(
+                    "The pull request of {branch} into {base} was opened in {slug}: {}",
+                    said.trim()
+                )),
+                Err(why) => Outcome::Failed(why),
+            }
+        }
+        "pr-merge-squash" => {
+            let base = &repository.base.branch;
+            let listed = match gh_json(&[
+                "pr",
+                "list",
+                "-R",
+                &slug,
+                "--head",
+                branch,
+                "--state",
+                "open",
+                "--json",
+                "number,isCrossRepository,baseRefName",
+            ])
+            .await
+            {
+                Ok(listed) => listed.as_array().cloned().unwrap_or_default(),
+                Err(why) => return Outcome::Failed(why),
+            };
+            // `--head` names a branch, in this repository or in any fork of it.
+            let ours = |pull: &&Value| {
+                pull["isCrossRepository"] == false && pull["baseRefName"].as_str() == Some(base)
+            };
+            let Some(number) = listed.iter().find(ours).and_then(|p| p["number"].as_u64()) else {
+                let why = match listed.first() {
+                    None => format!("{branch} has no open pull request in {slug}: open it first"),
+                    Some(pull) if pull["isCrossRepository"] != false => format!(
+                        "the open pull request #{} of a branch {branch} in {slug} comes from a \
+                         fork, not from the workspace's repository",
+                        pull["number"]
+                    ),
+                    Some(pull) => format!(
+                        "the open pull request #{} of {branch} in {slug} goes into {}, not \
+                         {base}, the workspace's base",
+                        pull["number"],
+                        masked(pull["baseRefName"].as_str().unwrap_or("another branch"))
+                    ),
+                };
+                return Outcome::Refused(format!(
+                    "refused: {why}: only the pull request of the workspace's own branch into \
+                     its base is merged"
+                ));
+            };
+            let number = number.to_string();
+            match gh_text(&["pr", "merge", &number, "-R", &slug, "--squash"]).await {
+                Ok(_) => Outcome::Done(format!(
+                    "The pull request #{number} of {branch} was merged by squash into {base} in \
+                     {slug}."
+                )),
+                Err(why) => Outcome::Failed(why),
+            }
+        }
+        "pipeline-rerun" => {
+            let runs = match gh_json(&[
+                "run",
+                "list",
+                "-R",
+                &slug,
+                "--branch",
+                branch,
+                "--limit",
+                "50",
+                "--json",
+                "databaseId,headSha,conclusion,workflowName",
+            ])
+            .await
+            {
+                Ok(runs) => runs,
+                Err(why) => return Outcome::Failed(why),
+            };
+            let runs = runs.as_array().cloned().unwrap_or_default();
+            // The runs of the branch's last commit, the newest listed first.
+            let head = runs.first().and_then(|run| run["headSha"].as_str());
+            let failed: Vec<&Value> = runs
+                .iter()
+                .filter(|run| run["headSha"].as_str() == head && run["conclusion"] == "failure")
+                .collect();
+            if failed.is_empty() {
+                return Outcome::Refused(format!(
+                    "refused: no pipeline of {branch}'s last commit failed in {slug}: there is \
+                     nothing to re-run"
+                ));
+            }
+            let mut done = Vec::new();
+            for run in failed {
+                let id = run["databaseId"].as_u64().unwrap_or(0).to_string();
+                if let Err(why) = gh_text(&["run", "rerun", &id, "-R", &slug, "--failed"]).await {
+                    return Outcome::Failed(why);
+                }
+                done.push(format!(
+                    "{} ({id})",
+                    masked(run["workflowName"].as_str().unwrap_or("pipeline"))
+                ));
+            }
+            Outcome::Done(format!(
+                "The failed jobs of {} were started again in {slug}.",
+                done.join(", ")
+            ))
+        }
+        action => Outcome::Refused(format!(
+            "refused: forge_write has no action {action:?}: its actions are pr-create, \
+             pr-merge-squash and pipeline-rerun"
+        )),
+    }
+}
+
+/// `gh <args>`'s output, masked, or a sentence saying why it failed.
+async fn gh_text(args: &[&str]) -> Result<String, String> {
+    let shown = args[..2].join(" ");
+    match gh(args).await {
+        Ok((true, stdout, _)) => Ok(masked(&stdout)),
+        Ok((false, _, stderr)) => {
+            let said = stderr.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+            Err(format!(
+                "gh {shown} failed: {}",
+                masked(&said.chars().take(300).collect::<String>())
+            ))
+        }
+        Err(Gh::Missing) => Err("gh is not on the daemon's PATH".into()),
+        Err(Gh::Failed(why)) => Err(format!("gh {shown}: {why}")),
+    }
+}
+
 /// What `forge_read` answers.
 fn read_text(workspace: &Workspace, read: &Read) -> String {
     let mut text = format!(
@@ -723,6 +1000,28 @@ mod tests {
             owner: owner.into(),
             name: name.into(),
         })
+    }
+
+    #[test]
+    fn a_recorded_url_keeps_no_credentials() {
+        for (url, kept) in [
+            (
+                "https://someone:ghp_secret@github.com/acme/app.git",
+                "https://github.com/acme/app.git",
+            ),
+            (
+                "https://ghp_secret@github.com/acme/app.git",
+                "https://github.com/acme/app.git",
+            ),
+            (
+                "ssh://git@github.com/acme/app.git",
+                "ssh://github.com/acme/app.git",
+            ),
+            ("git@github.com:acme/app.git", "git@github.com:acme/app.git"),
+            ("/srv/git/app.git", "/srv/git/app.git"),
+        ] {
+            assert_eq!(without_credentials(url), kept, "{url}");
+        }
     }
 
     #[test]

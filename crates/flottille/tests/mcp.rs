@@ -242,6 +242,7 @@ fn a_session_sees_only_its_tools() {
             "forge_read",
             "reference_read",
             "ticket_read",
+            "forge_write",
             "agent_launch",
             "agent_send",
             "agent_status",

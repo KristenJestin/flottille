@@ -191,8 +191,8 @@ fn decide(daemon: &Arc<Daemon>, number: u64, decision: Decision) -> Answer {
     }
     if decision == Decision::Tree && request.sensitive {
         return Err(Failure::refused(format!(
-            "request #{number} reaches a sensitive place: it can be allowed once, never for the \
-             tree"
+            "request #{number} reaches a sensitive place, or its procedure asks for each one: it \
+             can be allowed once, never for the tree"
         )));
     }
     let tree = tree::root_of(daemon, &request.agent);

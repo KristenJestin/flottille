@@ -162,7 +162,8 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
 - commands: `commands_list`, `commands_run` (catalogue command or one line, **never a shell**),
   `commands_output`, `commands_stop`;
 - forges (an agent in a workspace): `forge_read`, the pull requests of its workspace's
-  repositories and their checks, read only (`forges.md`);
+  repositories and their checks, read only (`forges.md`), and `forge_write`, which opens or merges
+  them or re-runs a failed pipeline only inside a procedure that grants it (`procedures.md`);
 - references: `reference_read`, one of the project's references, documents read when relevant
   (`docs/projects.md`, "References");
 - tickets (an agent in a workspace): `ticket_read`, the ticket its workspace is linked to, or
@@ -191,7 +192,8 @@ Flottille's own tools:
 The tool list of a session is fixed for its whole life (prompt cache, `reference/hemera.md` §7)
 and depends on what the agent can do, known when it starts: a root gets `ask_user`, a child
 `ask_parent`; an agent at the depth limit gets no `agent_*` tools and no `approval_answer`. A lead
-has about 18 tools, a leaf worker 12, two more each in a workspace (`forge_read`, `ticket_read`)
+has about 18 tools, a leaf worker 12, three more each in a workspace (`forge_read`, `ticket_read`,
+`forge_write`)
 (`reference/mcp.md` §4).
 
 ### 4.4 Roles
@@ -338,6 +340,12 @@ as an `approval` delivery; a denied one comes back as a refusal with the why.
 Agent-run commands get an environment without forge tokens and with `git push` neutralised
 (`reference/hemera.md` §3).
 
+**Procedures** are the one way an agent commits, pushes or writes to a forge: a run of a
+procedure grants these, from a fixed vocabulary, `allow` or `ask`, to the agents of that run only,
+in its workspace, until it ends; the user confirms the grants before it starts. Outside a run the
+gate decides as above, and some things stay refused even inside one (`git stash`, `git reset
+--hard`, a push forced without a lease). See [`procedures.md`](procedures.md).
+
 ## 8. Instructions
 
 Built as in `reference/hemera.md` §7: a shared base, the role template, a cache boundary, the
@@ -351,8 +359,9 @@ with the tool `reference_read`: what knowledge skills hold today): a name and on
 the content (`docs/projects.md`).
 
 Later (milestone "Forges and tickets"), a project gains **procedures** (named multi-step actions
-with their own scoped authorizations: what slash commands hold today), see
-`reference/multi-repo-case.md`.
+with their own scoped authorizations: what slash commands hold today, [`procedures.md`](procedures.md)), see
+`reference/multi-repo-case.md`. A procedure's instructions are its run's first message, after
+what it grants.
 
 ## 9. The built-in orchestration standard
 
@@ -433,4 +442,5 @@ The plan is cut into GitHub milestones; each ends on something the user can use.
 - Children cap 3 per project, depth 2, quiet interval 20 min.
 - Claude reached through Flottille's own bridge; `claude` checked at a pinned version, another one
   only warned about.
-- No commit rights for agents unless the project grants them; push always refused for agents.
+- No commit rights for agents unless a procedure's run grants them; push refused for agents
+  outside such a run (`procedures.md`).

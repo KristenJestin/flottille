@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use crate::agent::{Agent, AgentState, Choices};
 use crate::approval::{Decision, Delivery, Forward, Request, RequestState};
+use crate::procedure::Grants;
 use crate::protocol::Event;
 use crate::run::{Run, RunState};
 use crate::workspace::{Action, Failure, Step, StepState, Workspace};
@@ -226,6 +227,20 @@ const MIGRATIONS: &[&str] = &[
     -- The ticket a workspace is linked to (`docs/tickets.md`): `#123` or a Jira key, or none.
     ALTER TABLE workspaces ADD COLUMN ticket TEXT;
 ",
+    "
+    -- The runs of procedures (`docs/procedures.md`): the grants each gives, frozen when the user
+    -- confirmed them, held for the run's root agent until the run ends.
+    CREATE TABLE procedure_runs (
+        agent      TEXT PRIMARY KEY REFERENCES agents (id) ON DELETE CASCADE,
+        project    TEXT NOT NULL,
+        workspace  TEXT NOT NULL,
+        procedure  TEXT NOT NULL,
+        grants     TEXT NOT NULL,
+        children   INTEGER NOT NULL,
+        started_at INTEGER NOT NULL,
+        ended_at   INTEGER
+    ) STRICT;
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -254,6 +269,22 @@ pub struct AgentChange {
     pub reported_at: Option<Option<u64>>,
     pub quiet_turns: Option<u32>,
     pub waiting_on_answer: Option<bool>,
+}
+
+/// A run of a procedure, held for its root agent (`docs/procedures.md`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProcedureRun {
+    /// The run's root agent.
+    pub agent: String,
+    pub project: String,
+    pub workspace: String,
+    pub procedure: String,
+    /// As the user confirmed them: editing the procedure later changes no run.
+    pub grants: Grants,
+    /// Whether the root's children get the grants too.
+    pub children: bool,
+    pub started_at: u64,
+    pub ended_at: Option<u64>,
 }
 
 pub struct Store {
@@ -1410,6 +1441,84 @@ impl Store {
         Ok(())
     }
 
+    /// Starts holding a run's grants for its root agent, with its `procedure.started` event.
+    pub fn start_procedure_run(&mut self, run: &ProcedureRun) -> Result<Event> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO procedure_runs (agent, project, workspace, procedure, grants, children, \
+             started_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                run.agent,
+                run.project,
+                run.workspace,
+                run.procedure,
+                serde_json::to_string(&run.grants)?,
+                run.children,
+                run.started_at
+            ],
+        )?;
+        let event = append_event(
+            &transaction,
+            "procedure.started",
+            json!({"agent": run.agent, "project": run.project, "workspace": run.workspace,
+                "procedure": run.procedure, "grants": run.grants, "children": run.children}),
+        )?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    /// The run whose root is that agent, ended or not.
+    pub fn procedure_run(&self, agent: &str) -> Result<Option<ProcedureRun>> {
+        let row: Option<(ProcedureRun, String)> = self
+            .connection
+            .query_row(
+                "SELECT agent, project, workspace, procedure, grants, children, started_at, \
+                 ended_at FROM procedure_runs WHERE agent = ?1",
+                params![agent],
+                |row| {
+                    Ok((
+                        ProcedureRun {
+                            agent: row.get(0)?,
+                            project: row.get(1)?,
+                            workspace: row.get(2)?,
+                            procedure: row.get(3)?,
+                            grants: Grants::new(),
+                            children: row.get(5)?,
+                            started_at: row.get(6)?,
+                            ended_at: row.get(7)?,
+                        },
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        row.map(|(mut run, grants)| {
+            run.grants = serde_json::from_str(&grants)?;
+            Ok(run)
+        })
+        .transpose()
+    }
+
+    /// Ends the run of that root agent, with its `procedure.ended` event: its grants are no
+    /// longer given. `None` when it has no run, or its run ended already.
+    pub fn end_procedure_run(&mut self, agent: &str, reason: &str) -> Result<Option<Event>> {
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE procedure_runs SET ended_at = ?2 WHERE agent = ?1 AND ended_at IS NULL",
+            params![agent, now_ms()],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let event = append_event(
+            &transaction,
+            "procedure.ended",
+            json!({"agent": agent, "reason": reason}),
+        )?;
+        transaction.commit()?;
+        Ok(Some(event))
+    }
+
     pub fn replacements_since(&self, agent: &str, since: u64) -> Result<usize> {
         let count: u64 = self.connection.query_row(
             "SELECT count(*) FROM agent_replacements WHERE agent = ?1 AND at >= ?2 AND counted",
@@ -1796,6 +1905,7 @@ mod tests {
                 base: Base {
                     branch: "main".into(),
                     remote: "origin".into(),
+                    urls: vec!["https://git.example.com/acme/app.git".into()],
                     reference: "refs/remotes/origin/main".into(),
                     commit: "0123abcd".into(),
                     fetched_now: true,
@@ -2237,6 +2347,55 @@ mod tests {
         assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len());
         assert_eq!(store.workspaces(None).unwrap().len(), 1);
         assert!(store.agents().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_procedure_run_holds_its_grants_until_it_ends_once() {
+        use crate::procedure::{Grant, Mode};
+        let mut store = Store::open_in_memory().unwrap();
+        let agent = an_agent();
+        store
+            .create_agent(&agent, ("agent.created", json!({})))
+            .unwrap();
+        let run = ProcedureRun {
+            agent: agent.id.clone(),
+            project: "app".into(),
+            workspace: "login".into(),
+            procedure: "open-prs".into(),
+            grants: Grants::from([(Grant::Push, Mode::Allow), (Grant::PrCreate, Mode::Ask)]),
+            children: false,
+            started_at: 5,
+            ended_at: None,
+        };
+
+        let started = store.start_procedure_run(&run).unwrap();
+
+        assert_eq!(started.name, "procedure.started");
+        assert_eq!(
+            started.data["grants"],
+            json!({"push": "allow", "pr-create": "ask"})
+        );
+        assert_eq!(store.procedure_run(&agent.id).unwrap(), Some(run));
+        assert_eq!(store.procedure_run("another").unwrap(), None);
+        let ended = store
+            .end_procedure_run(&agent.id, "reported")
+            .unwrap()
+            .unwrap();
+        assert_eq!(ended.name, "procedure.ended");
+        assert!(
+            store
+                .procedure_run(&agent.id)
+                .unwrap()
+                .unwrap()
+                .ended_at
+                .is_some()
+        );
+        assert!(
+            store
+                .end_procedure_run(&agent.id, "reported")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

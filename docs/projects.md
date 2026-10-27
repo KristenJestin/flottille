@@ -71,6 +71,14 @@ root_entries = true                   # the project folder's other entries, link
 [[recipe]]
 run = "npm install"                   # one line, its words templated, never run by a shell
 for_each_repository = true
+
+[procedures.open-prs]                 # a named action run by an agent in a workspace (docs/procedures.md)
+description = "Open the pull requests"
+instructions = "Push the branch, then open one pull request per repository."
+children = false                      # the run's children get its grants; default false
+[procedures.open-prs.grants]          # from a fixed vocabulary, each "allow" or "ask"
+push = "allow"
+pr-create = "ask"
 ```
 
 The repositories are put in dependency order (a repository after those it depends on; among those
@@ -86,6 +94,10 @@ The variables are templates filled for each workspace (`docs/workspaces.md`): th
 checks that their names are those of environment variables and that their templates name only
 `{workspace}`, `{workspace.path}`, `{project}`, `{branch}` and `{repository}` (`{{` and `}}` are a
 literal brace).
+
+A procedure's keys, its grants' vocabulary and what a run of it may do are in
+[`procedures.md`](procedures.md); `flottille procedure add`, `edit` and `remove` write them in the
+file where it stands, keeping what is around them.
 
 ## References
 

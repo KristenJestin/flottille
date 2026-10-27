@@ -2,8 +2,8 @@
 
 What the forge of each repository of a workspace says of the workspace's branch: its pull request
 and the pull request's checks. The first step of the milestone "Forges and tickets"
-(`docs/design.md` §13). **Reading only**: nothing here writes to a forge. Writing will come later,
-only through procedures and the gate.
+(`docs/design.md` §13). **Reading**, and the writes an agent makes with `forge_write` only inside a
+procedure that grants them, through the gate ([`procedures.md`](procedures.md)).
 
 GitHub is the only forge read yet. Bitbucket and others will sit beside it: in the code a forge is
 one member of `forge::Forge`, read through its own command line.
@@ -96,6 +96,14 @@ reviews. Read only, through the gate like every call (it allows it). It never re
 outside the agent's workspace: one the workspace does not take is refused (`refused: X is not a
 repository of this agent's workspace: it has …`), and nothing is asked of the forge. Only an
 agent working in a workspace has the tool.
+
+## The agent's tool `forge_write`
+
+`forge_write {action, repository, …}` opens the pull request of the workspace's branch, merges it
+by squash, or re-runs the failed pipelines of its last commit, with the same `gh` and the same
+rules (spawned by the daemon, `-R owner/name`, its output masked, no token to the agent). It is
+refused unless the agent works in a procedure's run that grants the action: see
+[`procedures.md`](procedures.md).
 
 ## Tickets
 

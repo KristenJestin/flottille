@@ -1,4 +1,5 @@
-//! A scripted `gh` for the tests of Flottille's forge reads (`docs/forges.md`), so that no test
+//! A scripted `gh` for the tests of Flottille's forge reads and writes (`docs/forges.md`,
+//! `docs/procedures.md`), so that no test
 //! ever calls GitHub nor uses anyone's sign-in. It answers the few commands Flottille runs, from a
 //! script, and records every call.
 //!
@@ -20,10 +21,16 @@
 //! ```
 //!
 //! `signed_in: false` makes `gh auth status` end with 1. `pulls` gives, by repository and branch,
-//! the object `gh pr view --json` answers (its `number` is what `gh pr list` answers); a branch
-//! with none has no pull request. `fail` makes every `pr` call on that repository end with 1,
-//! saying its text. `issues` gives, by repository and number, the object `gh issue view --json`
-//! answers; an issue it does not hold is not found. `fail` makes `issue` calls fail the same way.
+//! the object `gh pr view --json` answers (`gh pr list --json` answers the fields it asks that the
+//! object has); a branch with none has no pull request. `fail` makes every `pr` call on that
+//! repository end with 1, saying its text. `issues` gives, by repository and number, the object
+//! `gh issue view --json` answers; an issue it does not hold is not found. `fail` makes `issue`
+//! calls fail the same way.
+//!
+//! The writes answer as `gh` does when they work: `pr create` prints the new pull request's URL
+//! (numbered `created`, 1 by default), `pr merge` and `run rerun` print nothing, and `run list`
+//! prints `runs` of the repository (`{"runs": {"acme/app": [{"databaseId": 7, …}]}}`), `[]`
+//! without.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -93,6 +100,28 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 }
             }
         }
+        ["pr", "create" | "merge", ..] | ["run", "list" | "rerun", ..] => {
+            let Some(repository) = option("-R") else {
+                eprintln!("fake gh: no -R");
+                return 2;
+            };
+            if let Some(failure) = script["fail"][repository].as_str() {
+                eprintln!("{failure}");
+                return 1;
+            }
+            match words[..2] {
+                ["pr", "create"] => println!(
+                    "https://github.com/{repository}/pull/{}",
+                    script["created"].as_u64().unwrap_or(1)
+                ),
+                ["run", "list"] => match &script["runs"][repository] {
+                    Value::Null => println!("[]"),
+                    runs => println!("{runs}"),
+                },
+                _ => {}
+            }
+            0
+        }
         ["pr", sub @ ("list" | "view"), rest @ ..] => {
             let Some(repository) = option("-R") else {
                 eprintln!("fake gh: no -R");
@@ -104,9 +133,19 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             }
             let pulls = &script["pulls"][repository];
             if *sub == "list" {
+                // The fields asked of the branch's pull request that its script gives.
+                let fields = option("--json").unwrap_or("number");
                 let found = option("--head")
-                    .and_then(|branch| pulls[branch]["number"].as_u64())
-                    .map(|number| vec![json!({"number": number})])
+                    .map(|branch| &pulls[branch])
+                    .filter(|pull| pull["number"].is_u64())
+                    .map(|pull| {
+                        let asked: Map<String, Value> = fields
+                            .split(',')
+                            .filter(|field| !pull[field].is_null())
+                            .map(|field| (field.to_owned(), pull[field].clone()))
+                            .collect();
+                        vec![Value::from(asked)]
+                    })
                     .unwrap_or_default();
                 println!("{}", Value::from(found));
                 return 0;
