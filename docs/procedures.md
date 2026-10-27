@@ -119,13 +119,13 @@ its run grants the action:
 - `repository`: one of the workspace's repositories, by its path; another is refused;
 - `pr-create` needs `title`, takes `body` and `draft`: `gh pr create -R <owner/name> --head <branch>
   --base <base> --title … --body …`, the base the one the workspace's repository started from, and
-  a `--reviewer` for each of the project's reviewers (below) (`draft` is refused for Bitbucket,
-  whose `bkt` opens none);
+  a `--reviewer` for each of the project's reviewers (below), on Bitbucket as on GitHub (`draft` is
+  refused for Bitbucket, whose `bkt` opens none);
 - `pr-merge-squash`: the open pull request of the workspace's branch from the repository itself
   (not from a fork, which can have a branch of the same name) into its base,
   `gh pr merge <n> -R … --squash`; none is refused. So is one whose checks fail or are still
   running, or whose review asks for changes (`refused: the pull request #n of … is not merged: its
-  checks fail (build)…`), unless `waive` gives the user's words for merging it as it is: the gate
+  checks fail (build)…`), on Bitbucket as on GitHub (`docs/forges.md`), unless `waive` gives the user's words for merging it as it is: the gate
   then holds the call for the user, whatever the grant's mode, and the merge goes without looking
   at the checks once they allow it;
 - `pipeline-rerun`: the failed runs of the branch's last commit (`gh run list -R … --branch <branch>`),
