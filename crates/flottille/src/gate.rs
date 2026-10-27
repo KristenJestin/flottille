@@ -700,7 +700,18 @@ fn program_refusal(layer: &[String]) -> Option<String> {
     let any = |names: &[&str]| args.iter().any(|w| names.contains(&w.as_str()));
     match program {
         "git" => git_refusal(args),
-        "gh" | "glab" | "bkt" => forge_refusal(program, args),
+        "gh" | "glab" => forge_refusal(program, args),
+        // Bitbucket's sign-in is the user's too: `bkt` keeps its token in the OS keychain, which
+        // no environment variable of ours moves, and any configuration that names the host
+        // reaches it (`BKT_CONFIG_DIR` moves the configuration only). A read, `bkt api`
+        // included, would run with the user's own token, so no word of `bkt` is let through
+        // (`forge_read` reads the pull requests).
+        "bkt" => Some(
+            "refused: bkt is Bitbucket's command line with the user's own sign-in, which agents \
+             never use: read the pull requests with forge_read, and say what should be written \
+             to Bitbucket, and the user does it"
+                .into(),
+        ),
         // Jira's sign-in is the user's, in a place no environment variable of ours moves: no word
         // of `acli` is let through, reads included (`ticket_read` reads a ticket).
         "acli" => Some(
@@ -962,9 +973,6 @@ fn forge_refusal(program: &str, args: &[String]) -> Option<String> {
         | ("glab", ["mr", "view" | "list" | "diff"])
         | ("glab", ["issue", "view" | "list"])
         | ("glab", ["ci" | "pipeline", "view" | "list" | "status"])
-        | ("bkt", ["pr", "view" | "list" | "diff"])
-        | ("bkt", ["issue", "view" | "list"])
-        | ("bkt", ["pipeline", "view" | "list"])
         | (_, ["repo", "view"])
         | (_, ["auth", "status"]) => true,
         _ => false,
@@ -974,8 +982,7 @@ fn forge_refusal(program: &str, args: &[String]) -> Option<String> {
     }
     let reads = match program {
         "gh" => "pr view, list, diff, checks and status; issue view and list; run view and list",
-        "glab" => "mr view, list and diff; issue view and list; ci view, list and status",
-        _ => "pr view, list and diff; issue view and list; pipeline view and list",
+        _ => "mr view, list and diff; issue view and list; ci view, list and status",
     };
     Some(format!(
         "refused: {program} {} writes to the forge, or is not one of its reads, and agents only \
@@ -1892,9 +1899,33 @@ mod tests {
             "glab mr view 1",
             "glab mr list",
             "glab ci status",
-            "bkt pr list",
         ] {
             assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
+        }
+    }
+
+    #[test]
+    fn bkt_is_denied_whatever_it_is_asked_even_to_read() {
+        let fixture = Fixture::workspace();
+        for line in [
+            "bkt",
+            "bkt pr list",
+            "bkt pr view 1 --json",
+            "bkt pr checks 1",
+            "bkt pr create --title x --source a --target main",
+            "bkt pr merge 1",
+            "bkt pipeline list",
+            "bkt pipeline run --ref main",
+            "bkt api /repositories/acme/app/pullrequests",
+            "bkt context list",
+            "bkt auth status",
+            "bkt auth token",
+            "bkt --context work pr list",
+            "env bkt pr list",
+            "nice bkt pr list",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(denied(&verdict), "{line}: {verdict:?}");
         }
     }
 

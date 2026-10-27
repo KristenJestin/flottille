@@ -292,13 +292,17 @@ the call reaches, the project's never list and Flottille's own folders, and answ
      `forge_write` trust where a remote leads;
    - the forge command lines beyond their reads: for `gh`, `pr view/list/diff/checks/status`,
      `issue view/list`, `run view/list`; for `glab`, `mr view/list/diff`, `issue view/list`,
-     `ci view/list/status`; for `bkt`, `pr view/list/diff`, `issue view/list`,
-     `pipeline view/list`; for all, `repo view`, `auth status` and `api` with GET, no field, no
-     input and not `graphql`; `auth token` and `auth status` with `--show-token` (`-t`) are
+     `ci view/list/status`; for both, `repo view`, `auth status` and `api` with GET, no field,
+     no input and not `graphql`; `auth token` and `auth status` with `--show-token` (`-t`) are
      refused, since they print a login;
    - `acli`, Atlassian's command line: every line, reads included. Its Jira sign-in is the user's,
      in a place no variable of ours moves, so it cannot be emptied as `gh`'s is; an agent reads a
      ticket with `ticket_read` and says what should be written to it;
+   - `bkt`, Bitbucket's command line: every line, reads included, for the same reason. Its token
+     is in the OS keychain (or an encrypted file under the user's configuration folder), keyed by
+     the host; `BKT_CONFIG_DIR` moves only the file that lists hosts and contexts, so any
+     configuration that names the host reaches the token, `bkt api` with any method included
+     (`docs/forges.md`, "Bitbucket"). An agent reads the pull requests with `forge_read`;
    - publishing: `npm`, `pnpm`, `yarn`, `bun`, `cargo`, `poetry`, `flit`, `hatch`, `uv` with
      `publish` or `unpublish`, `twine upload`, `gem`, `dotnet` and `nuget` with `push`;
    - `flottille` itself: it drives the daemon, and agents act only through their tools. A copy

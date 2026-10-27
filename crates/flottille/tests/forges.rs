@@ -16,6 +16,18 @@ use serde_json::{Value, json};
 /// repository is pushed to a bare remote of its own first, so that the workspace's fetch works;
 /// its `origin` then says where the forge is.
 fn fixture(user: &User) -> PathBuf {
+    fixture_at(
+        user,
+        &[
+            ("api", "git@github.com:acme/api.git"),
+            ("web", "https://github.com/acme/web.git"),
+            ("lib", "https://git.example.com/acme/lib.git"),
+        ],
+    )
+}
+
+/// The same project and workspace, each repository's `origin` set to the URL given.
+fn fixture_at(user: &User, urls: &[(&str, &str)]) -> PathBuf {
     let folder = user.path("work/app");
     for repository in ["api", "web", "lib"] {
         let dir = folder.join(repository);
@@ -40,11 +52,7 @@ fn fixture(user: &User) -> PathBuf {
         )
         .unwrap();
     assert_eq!(workspace["state"], "ready", "{workspace}");
-    for (repository, url) in [
-        ("api", "git@github.com:acme/api.git"),
-        ("web", "https://github.com/acme/web.git"),
-        ("lib", "https://git.example.com/acme/lib.git"),
-    ] {
+    for (repository, url) in urls {
         user.git(
             &folder.join(repository),
             &["remote", "set-url", "origin", url],
@@ -567,5 +575,482 @@ fn no_token_reaches_an_agent_and_the_daemon_never_asks_gh_for_one() {
         assert!(!call.contains("auth token"), "{call}");
         assert!(!call.contains("--show-token"), "{call}");
         assert!(!call.split(' ').any(|word| word == "-t"), "{call}");
+    }
+}
+
+// Bitbucket, through the user's `bkt` (`docs/forges.md`): `api` on Bitbucket Cloud, `web` on a Data
+// Center host the project names, `lib` elsewhere.
+
+fn bitbucket_fixture(user: &User) -> PathBuf {
+    fixture_at(
+        user,
+        &[
+            ("api", "git@bitbucket.org:acme/api.git"),
+            ("web", "ssh://git@bitbucket.example.com:7999/APP/web.git"),
+            ("lib", "https://git.example.com/acme/lib.git"),
+        ],
+    )
+}
+
+/// `[forges] bitbucket = [...]` in the project's file, as its user writes it.
+fn name_the_data_center(user: &User) {
+    let file = user.project_file("app");
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    text.push_str("\n[forges]\nbitbucket = [\"bitbucket.example.com\"]\n");
+    std::fs::write(file, text).unwrap();
+}
+
+/// The contexts of the user's `bkt`: one on Cloud, one on the Data Center host.
+fn contexts() -> Value {
+    json!([
+        {"name": "cloud", "host": "bitbucket.org", "workspace": "acme", "active": true},
+        {"name": "work", "host": "bitbucket.example.com:7990", "project_key": "APP", "active": false}
+    ])
+}
+
+/// What `bkt pr list --json` prints of a Cloud pull request of `acme/api`.
+fn cloud_pull(id: u64, branch: &str, state: &str) -> Value {
+    json!({
+        "id": id,
+        "title": "Add the login page",
+        "state": state,
+        "author": {"display_name": "Alice", "username": "alice"},
+        "source": {"branch": {"name": branch}, "commit": {"hash": "abc"},
+            "repository": {"slug": "", "full_name": "acme/api"}},
+        "destination": {"branch": {"name": "main"}, "repository": {"slug": "", "full_name": "acme/api"}},
+        "links": {"html": {"href": format!("https://bitbucket.org/acme/api/pull-requests/{id}")}},
+        "summary": {"raw": ""}
+    })
+}
+
+/// What `bkt pr list --json` prints of a Data Center pull request of `APP/web`.
+fn dc_pull(id: u64, branch: &str, state: &str) -> Value {
+    let repository = json!({"slug": "web", "project": {"key": "APP"}});
+    json!({
+        "id": id,
+        "title": "Add the login form",
+        "state": state,
+        "version": 3,
+        "author": {"user": {"name": "alice", "displayName": "Alice"}},
+        "fromRef": {"id": format!("refs/heads/{branch}"), "displayId": branch,
+            "latestCommit": "abc", "repository": repository},
+        "toRef": {"id": "refs/heads/main", "displayId": "main", "latestCommit": "def",
+            "repository": repository},
+        "reviewers": [],
+        "participants": [
+            {"user": {"name": "alice", "displayName": "Alice"}, "role": "AUTHOR",
+             "status": "UNAPPROVED", "approved": false},
+            {"user": {"name": "bob", "displayName": "Bob"}, "role": "REVIEWER",
+             "status": "APPROVED", "approved": true},
+            {"user": {"name": "carol", "displayName": "Carol"}, "role": "REVIEWER",
+             "status": "UNAPPROVED", "approved": false}
+        ],
+        "links": {"self": [{"href": format!("https://bitbucket.example.com/projects/APP/repos/web/pull-requests/{id}")}]}
+    })
+}
+
+/// The fake `bkt`'s script: a Cloud pull request of `app/login` (and others that are not its
+/// own) in `acme/api`, a Data Center one in `APP/web`.
+fn bitbucket_pull_requests(user: &User) {
+    user.bkt_script(json!({
+        "contexts": contexts(),
+        "pulls": {
+            "acme/api": [
+                cloud_pull(9, "app/login", "MERGED"),
+                cloud_pull(12, "app/login", "OPEN"),
+                cloud_pull(13, "app/other", "OPEN")
+            ],
+            "APP/web": [dc_pull(7, "app/login", "OPEN"), dc_pull(8, "app/other", "OPEN")]
+        },
+        "checks": {
+            "acme/api": {"12": [
+                {"state": "SUCCESSFUL", "key": "build", "name": "build", "url": "https://x"},
+                {"state": "INPROGRESS", "key": "lint", "name": "lint", "url": "https://x"}
+            ]},
+            "APP/web": {"7": [{"state": "FAILED", "key": "ci", "name": "Jenkins", "url": "https://x"}]}
+        },
+        "api": {
+            "/repositories/acme/api/pullrequests/12": {"participants": [
+                {"role": "REVIEWER", "approved": false, "state": "changes_requested",
+                 "user": {"display_name": "Bob"}},
+                {"role": "PARTICIPANT", "approved": false, "state": null,
+                 "user": {"display_name": "Carol"}}
+            ]},
+            "/repositories/acme/api/pullrequests/12/comments": {"values": [
+                {"content": {"raw": "Looks good to me"}, "user": {"display_name": "Alice"}, "deleted": false},
+                {"content": {"raw": "Never mind"}, "user": {"display_name": "Bob"}, "deleted": true}
+            ]},
+            "/rest/api/1.0/projects/APP/repos/web/pull-requests/7/activities": {"values": [
+                {"action": "COMMENTED", "comment": {"text": "Rename the form",
+                    "author": {"displayName": "Carol"},
+                    "comments": [{"text": "Done", "author": {"displayName": "Alice"}, "comments": []}]}},
+                {"action": "APPROVED"}
+            ]}
+        }
+    }));
+}
+
+fn bkt_calls(user: &User) -> Vec<String> {
+    user.bkt_received()
+        .iter()
+        .map(|call| {
+            call["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a.as_str().unwrap())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
+}
+
+#[test]
+fn a_bitbucket_remote_is_cloud_and_a_host_the_project_names_is_data_center() {
+    let user = User::new()
+        .with_fake_gh()
+        .with_fake_bkt()
+        .with_env("FLOTTILLE_TEST_CLOCK", "1");
+    bitbucket_fixture(&user);
+    bitbucket_pull_requests(&user);
+
+    let before = forge(&user);
+    name_the_data_center(&user);
+    user.call("test.advance", json!({"ms": 61_000})).unwrap();
+    let after = forge(&user);
+
+    let api = repository(&before, "api");
+    assert_eq!(api["forge"], "bitbucket");
+    assert_eq!(api["repository"], "acme/api");
+    // A Data Center host nobody named is a host with no forge support yet.
+    let web = repository(&before, "web");
+    assert_eq!(web["forge"], Value::Null, "{web}");
+    assert_eq!(
+        web["note"],
+        "no forge support yet: origin is on bitbucket.example.com"
+    );
+    let web = repository(&after, "web");
+    assert_eq!(web["forge"], "bitbucket", "{web}");
+    assert_eq!(web["repository"], "APP/web");
+    let lib = repository(&after, "lib");
+    assert_eq!(lib["forge"], Value::Null);
+    assert_eq!(
+        lib["note"],
+        "no forge support yet: origin is on git.example.com"
+    );
+    // Neither is ever asked of `gh`.
+    assert!(gh_calls(&user).is_empty(), "{:?}", gh_calls(&user));
+}
+
+#[test]
+fn a_cloud_branch_shows_its_newest_own_pull_request_with_reviewers_checks_and_comments() {
+    let user = User::new().with_fake_bkt();
+    bitbucket_fixture(&user);
+    name_the_data_center(&user);
+    bitbucket_pull_requests(&user);
+
+    let forge = forge(&user);
+
+    assert_eq!(forge["problem"], Value::Null, "{forge}");
+    let api = repository(&forge, "api");
+    assert_eq!(api["error"], Value::Null, "{api}");
+    assert_eq!(
+        api["pull_request"],
+        json!({
+            "number": 12,
+            "title": "Add the login page",
+            "state": "open",
+            "base": "main",
+            "url": "https://bitbucket.org/acme/api/pull-requests/12",
+            "review": "changes requested",
+            "checks": [{"name": "build", "state": "passing"}, {"name": "lint", "state": "pending"}],
+            "mark": "pending",
+            "comments": 1,
+            "reviewers": [{"name": "Bob", "state": "changes requested"}]
+        })
+    );
+    // `--context` names the host and the repository is named by flags: the daemon depends on
+    // neither its working folder nor the user's active context.
+    let calls = bkt_calls(&user);
+    for call in [
+        "context list --json",
+        "pr list --context cloud --workspace acme --repo api --state all --limit 100 --json",
+        "pr checks 12 --context cloud --workspace acme --repo api --json",
+        "api /repositories/acme/api/pullrequests/12 --context cloud",
+        "api /repositories/acme/api/pullrequests/12/comments --context cloud --param pagelen=100",
+    ] {
+        assert!(calls.contains(&call.to_owned()), "{call} in {calls:?}");
+    }
+}
+
+#[test]
+fn a_data_center_branch_shows_its_pull_request_with_reviewers_checks_and_comments() {
+    let user = User::new().with_fake_bkt();
+    bitbucket_fixture(&user);
+    name_the_data_center(&user);
+    bitbucket_pull_requests(&user);
+
+    let forge = forge(&user);
+
+    let web = repository(&forge, "web");
+    assert_eq!(web["error"], Value::Null, "{web}");
+    assert_eq!(
+        web["pull_request"],
+        json!({
+            "number": 7,
+            "title": "Add the login form",
+            "state": "open",
+            "base": "main",
+            "url": "https://bitbucket.example.com/projects/APP/repos/web/pull-requests/7",
+            "review": "review required",
+            "checks": [{"name": "Jenkins", "state": "failing"}],
+            "mark": "failing",
+            "comments": 2,
+            "reviewers": [
+                {"name": "Bob", "state": "approved"},
+                {"name": "Carol", "state": "pending"}
+            ]
+        })
+    );
+    let calls = bkt_calls(&user);
+    for call in [
+        "pr list --context work --project APP --repo web --state all --limit 100 --json",
+        "pr checks 7 --context work --project APP --repo web --json",
+        "api /rest/api/1.0/projects/APP/repos/web/pull-requests/7/activities --context work --param limit=100",
+    ] {
+        assert!(calls.contains(&call.to_owned()), "{call} in {calls:?}");
+    }
+    // One list of contexts serves every repository of the read.
+    assert_eq!(
+        calls.iter().filter(|c| *c == "context list --json").count(),
+        1,
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn a_branch_with_no_pull_request_or_only_closed_and_declined_ones_is_said_as_such() {
+    let user = User::new().with_fake_bkt();
+    bitbucket_fixture(&user);
+    name_the_data_center(&user);
+    user.bkt_script(json!({
+        "contexts": contexts(),
+        "pulls": {"APP/web": [dc_pull(7, "app/login", "DECLINED")]},
+        "api": {"/rest/api/1.0/projects/APP/repos/web/pull-requests/7/activities": {"values": []}}
+    }));
+
+    let forge = forge(&user);
+
+    assert_eq!(repository(&forge, "api")["pull_request"], Value::Null);
+    assert_eq!(repository(&forge, "api")["error"], Value::Null);
+    let web = repository(&forge, "web");
+    assert_eq!(web["pull_request"]["state"], "closed", "{web}");
+    assert_eq!(web["pull_request"]["review"], "review required");
+}
+
+#[test]
+fn bkt_missing_is_said_once_for_bitbucket_and_github_is_still_read() {
+    // A PATH with git and the fake `gh` and no `bkt` at all, the machine's own included.
+    let user = User::new().with_fake_gh();
+    std::fs::create_dir(user.path("bin")).unwrap();
+    std::os::unix::fs::symlink(common::program("git"), user.path("bin/git")).unwrap();
+    let path = format!(
+        "{}:{}",
+        user.path("gh-bin").display(),
+        user.path("bin").display()
+    );
+    let user = user.with_env("PATH", &path);
+    fixture_at(
+        &user,
+        &[
+            ("api", "git@github.com:acme/api.git"),
+            ("web", "git@bitbucket.org:acme/web.git"),
+            ("lib", "git@bitbucket.org:acme/lib.git"),
+        ],
+    );
+    one_pull_request(&user, pull(12, "Add the login page"));
+
+    let forge = forge(&user);
+
+    let problem = forge["problem"].as_str().expect("a problem is said");
+    assert!(
+        problem.contains("bkt, Bitbucket's command line, is not on"),
+        "{problem}"
+    );
+    assert!(problem.contains("bkt auth login"), "what to do: {problem}");
+    assert_eq!(problem.matches("bkt, Bitbucket's").count(), 1, "{problem}");
+    assert_eq!(
+        repository(&forge, "api")["pull_request"]["number"],
+        12,
+        "GitHub is read all the same"
+    );
+    assert_eq!(repository(&forge, "web")["error"], Value::Null);
+}
+
+#[test]
+fn a_host_bkt_has_no_context_for_is_said_with_what_to_do_and_nothing_else_is_asked() {
+    let user = User::new().with_fake_bkt();
+    bitbucket_fixture(&user);
+    name_the_data_center(&user);
+    // Only the Cloud host is known to `bkt`.
+    user.bkt_script(
+        json!({"contexts": [{"name": "cloud", "host": "bitbucket.org"}],
+        "pulls": {"acme/api": [cloud_pull(12, "app/login", "OPEN")]},
+        "api": {"/repositories/acme/api/pullrequests/12": {"participants": []},
+            "/repositories/acme/api/pullrequests/12/comments": {"values": []}}}),
+    );
+
+    let forge = forge(&user);
+
+    let problem = forge["problem"].as_str().expect("a problem is said");
+    assert!(
+        problem.contains("bkt has no context for bitbucket.example.com"),
+        "{problem}"
+    );
+    assert!(problem.contains("`bkt auth login"), "{problem}");
+    assert_eq!(
+        repository(&forge, "api")["pull_request"]["number"],
+        12,
+        "the host bkt knows is read"
+    );
+    assert!(
+        !bkt_calls(&user).iter().any(|call| call.contains("APP")),
+        "{:?}",
+        bkt_calls(&user)
+    );
+}
+
+#[test]
+fn a_bkt_call_that_fails_is_the_repository_s_error_and_never_hides_the_others() {
+    let user = User::new().with_fake_bkt();
+    bitbucket_fixture(&user);
+    name_the_data_center(&user);
+    bitbucket_pull_requests(&user);
+    let mut script: Value =
+        serde_json::from_str(&std::fs::read_to_string(user.path("bkt/script.json")).unwrap())
+            .unwrap();
+    script["fail"] = json!({"acme/api": "Error: 502 Bad Gateway"});
+    user.bkt_script(script);
+
+    let forge = forge(&user);
+
+    let api = repository(&forge, "api");
+    assert!(
+        api["error"].as_str().unwrap().contains("502 Bad Gateway"),
+        "{api}"
+    );
+    assert_eq!(repository(&forge, "web")["pull_request"]["number"], 7);
+}
+
+#[test]
+fn forge_read_returns_the_bitbucket_pull_requests_of_the_workspace() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    bitbucket_fixture(&user);
+    name_the_data_center(&user);
+    bitbucket_pull_requests(&user);
+    let (_, mcp) = agent_in(&user, Some("login"));
+
+    let answer = mcp.call("forge_read", json!({}));
+
+    assert!(!answer.error, "{}", answer.text);
+    for said in [
+        "api (acme/api): pull request #12, open, into main: Add the login page",
+        "https://bitbucket.org/acme/api/pull-requests/12",
+        "review: changes requested",
+        "reviewers: Bob changes requested",
+        "checks: pending (build passing, lint pending)",
+        "- Alice: Looks good to me",
+        "web (APP/web): pull request #7, open, into main: Add the login form",
+        "review: review required",
+        "reviewers: Bob approved, Carol pending",
+        "checks: failing (Jenkins failing)",
+        "- Carol: Rename the form",
+        "- Alice: Done",
+        "lib: no forge support yet: origin is on git.example.com.",
+    ] {
+        assert!(answer.text.contains(said), "{said} in {}", answer.text);
+    }
+    assert!(!answer.text.contains("Never mind"), "a deleted comment");
+    // Through the gate, allowed: nothing was held for the user.
+    let listed = user.call("approval.list", json!({})).unwrap();
+    assert!(listed["requests"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn workspace_show_prints_the_bitbucket_pull_request_as_it_does_a_github_one() {
+    let user = User::new().with_fake_bkt();
+    bitbucket_fixture(&user);
+    name_the_data_center(&user);
+    bitbucket_pull_requests(&user);
+
+    let output = user.run(&["workspace", "show", "app", "login"]);
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+
+    assert!(output.status.success(), "{text}");
+    assert!(
+        text.contains(
+            "Pull requests:\n  api (acme/api): #12 open into main, checks pending, changes \
+             requested, 1 comment: Add the login page\n    https://bitbucket.org/acme/api/pull-requests/12\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("  web (APP/web): #7 open into main, checks failing, review required, 2 comments: Add the login form\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn no_token_reaches_an_agent_and_the_daemon_never_asks_bkt_for_one() {
+    let token = "bkt_fakefakefakefakefakefake0078";
+    let user = User::with_fake_agent()
+        .with_fake_bkt()
+        .with_env("BKT_TOKEN", token)
+        .with_env("BKT_CONFIG_DIR", "/the/users/own/bkt");
+    bitbucket_fixture(&user);
+    name_the_data_center(&user);
+    bitbucket_pull_requests(&user);
+    // A title holding the token: what `bkt` prints is masked before it is shown or stored.
+    let mut script: Value =
+        serde_json::from_str(&std::fs::read_to_string(user.path("bkt/script.json")).unwrap())
+            .unwrap();
+    script["pulls"]["acme/api"][1]["title"] = json!(format!("Leak {token}"));
+    user.bkt_script(script);
+    user.fake_script(json!({"turns": [{"when": "hello", "do": [
+        {"say": "token=<"}, {"say_variable": "BKT_TOKEN"}, {"say": ">"},
+        {"say": "dir=<"}, {"say_variable": "BKT_CONFIG_DIR"}, {"say": ">"}
+    ]}]}));
+    let (id, mcp) = agent_in(&user, Some("login"));
+
+    let read = mcp.call("forge_read", json!({}));
+    let state = forge(&user);
+
+    assert!(!read.text.contains(token), "{}", read.text);
+    assert!(read.text.contains("Leak [masked]"), "{}", read.text);
+    assert!(!state.to_string().contains(token), "{state}");
+    // The daemon's `bkt` is the user's own, signed in their way.
+    assert!(
+        user.bkt_received()
+            .iter()
+            .all(|call| call["env"]["BKT_TOKEN"] == token
+                && call["env"]["BKT_CONFIG_DIR"] == "/the/users/own/bkt"),
+        "the daemon runs bkt with the user's own environment"
+    );
+    // The agent's process holds neither the token nor the user's configuration folder.
+    eventually("the agent's turn", || {
+        user.call("agent.read", json!({"agent": id})).unwrap()["lines"]
+            .to_string()
+            .contains("dir=<")
+    });
+    let said = user.call("agent.read", json!({"agent": id})).unwrap()["lines"].to_string();
+    assert!(said.contains("token=<"), "{said}");
+    assert!(!said.contains(token), "{said}");
+    assert!(!said.contains("/the/users/own/bkt"), "{said}");
+    // Never a token asked of `bkt`: of its sign-in, the daemon reads the contexts and no more.
+    let calls = bkt_calls(&user);
+    assert!(!calls.is_empty());
+    for call in &calls {
+        assert!(!call.starts_with("auth"), "{call}");
+        assert!(!call.contains("token"), "{call}");
     }
 }

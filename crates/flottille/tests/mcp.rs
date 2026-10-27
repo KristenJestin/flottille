@@ -1278,13 +1278,34 @@ fn a_client_that_outlives_its_command_and_its_parent_is_still_refused() {
     let (mcp, folder) = session(&user);
     let pid = user.status()["pid"].as_u64().unwrap();
     // A double fork out of the run's session: `setsid -f` starts `late.sh` in a session of its
-    // own, which leaves `connect.sh` behind and ends, and the run ends with them.
-    std::fs::write(folder.join("orphan.sh"), "exec setsid -f sh late.sh\n").unwrap();
-    std::fs::write(folder.join("late.sh"), "sh connect.sh &\n").unwrap();
+    // own, which leaves `connect.sh` behind and ends. The run's group is killed when the command
+    // ends, and `setsid -f` forks before it detaches: `orphan.sh` ends only once `late.sh` runs
+    // (so is detached), and `connect.sh` connects only once the command is gone and `late.sh`
+    // has left it behind, each seen as it happens rather than after a delay.
+    std::fs::write(
+        folder.join("orphan.sh"),
+        "setsid -f sh late.sh $$\n\
+         for i in $(seq 200); do [ -e detached ] && break; sleep 0.05; done\n",
+    )
+    .unwrap();
+    std::fs::write(
+        folder.join("late.sh"),
+        "sh connect.sh $$ $1 &\ntouch detached\n",
+    )
+    .unwrap();
     std::fs::write(
         folder.join("connect.sh"),
         format!(
-            "sleep 1\ncat /proc/$$/stat > stat\n{}",
+            "late=$1\n\
+             command=$2\n\
+             for i in $(seq 200); do [ -e /proc/$command ] || break; sleep 0.05; done\n\
+             for i in $(seq 200); do\n\
+             read -r line < /proc/$$/stat\n\
+             set -- ${{line##*) }}\n\
+             [ \"$2\" != \"$late\" ] && break\n\
+             sleep 0.05\n\
+             done\n\
+             cat /proc/$$/stat > stat\n{}",
             stop_script(&user, "orphan.out")
         ),
     )

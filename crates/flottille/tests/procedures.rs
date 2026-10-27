@@ -1347,3 +1347,373 @@ fn workspace_remove_is_refused_outside_a_run_that_grants_it_and_for_any_other_wo
             .unwrap();
     }
 }
+
+// Bitbucket, through the user's `bkt` (`docs/forges.md`): the same writes, the same grants, the
+// same checks.
+
+/// The fixture's workspace, its remote `url` (created offline: nothing is fetched from it). The
+/// project's folder.
+fn on_bitbucket(user: &User, url: &str) -> PathBuf {
+    let (folder, _) = prepared(
+        user,
+        |folder| user.git(folder, &["remote", "set-url", "origin", url]),
+        true,
+    );
+    folder
+}
+
+/// `[forges] bitbucket = ["bitbucket.example.com"]` in the project's file.
+fn name_the_data_center(user: &User) {
+    let file = user.project_file("app");
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    text.push_str("\n[forges]\nbitbucket = [\"bitbucket.example.com\"]\n");
+    std::fs::write(file, text).unwrap();
+}
+
+fn bkt_calls(user: &User) -> Vec<String> {
+    user.bkt_received()
+        .iter()
+        .map(|call| {
+            call["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a.as_str().unwrap())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
+}
+
+fn bkt_calls_starting(user: &User, start: &str) -> usize {
+    bkt_calls(user)
+        .iter()
+        .filter(|call| call.starts_with(start))
+        .count()
+}
+
+/// What `bkt pr list --json` prints of a Cloud pull request of `acme/app`.
+fn cloud_pull(id: u64, source: &str, destination: &str, base: &str) -> Value {
+    json!({"id": id, "title": "Login", "state": "OPEN",
+        "source": {"branch": {"name": "app/login"}, "repository": {"full_name": source}},
+        "destination": {"branch": {"name": base}, "repository": {"full_name": destination}},
+        "links": {"html": {"href": format!("https://bitbucket.org/acme/app/pull-requests/{id}")}}})
+}
+
+#[test]
+fn forge_write_creates_a_bitbucket_pull_request_with_the_fake_bkt_only_when_granted() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
+    user.bkt_script(json!({"created": 12,
+        "pulls": {"acme/app": [cloud_pull(12, "acme/app", "acme/app", "main")]}}));
+    procedure(&user, "open", json!({"pr-create": "allow"}), false);
+    procedure(&user, "merge", json!({"pr-merge-squash": "allow"}), false);
+    let create = json!({"action": "pr-create", "repository": ".", "title": "Add the login page",
+        "body": "What it does"});
+
+    // Outside a run, and in a run that does not grant it: refused, never asked of the forge.
+    let outside = plain_agent(&user);
+    let answer = outside.call("forge_write", create.clone());
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("only inside a procedure"),
+        "{}",
+        answer.text
+    );
+    let (_, merge) = run(&user, "merge");
+    let answer = merge.call("forge_write", create.clone());
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("does not grant pr-create"),
+        "{}",
+        answer.text
+    );
+    assert!(user.bkt_received().is_empty());
+
+    let (_, open) = run(&user, "open");
+    let answer = open.call("forge_write", create);
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("https://bitbucket.org/acme/app/pull-requests/12"),
+        "{}",
+        answer.text
+    );
+    let calls = bkt_calls(&user);
+    let created = calls.iter().find(|c| c.starts_with("pr create")).unwrap();
+    assert_eq!(
+        created,
+        "pr create --context cloud --workspace acme --repo app --source app/login --target main \
+         --title Add the login page --description What it does"
+    );
+    assert_eq!(bkt_calls_starting(&user, "pr create"), 1);
+    // The daemon's own sign-in: of it, the contexts are all that was read.
+    assert!(!calls.iter().any(|call| call.contains("token")));
+    // No `gh` was asked: the fake `gh` is not even on this user's PATH.
+}
+
+#[test]
+fn a_bitbucket_pull_request_is_never_a_draft_and_needs_its_title() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
+    procedure(&user, "open", json!({"pr-create": "allow"}), false);
+    let (_, open) = run(&user, "open");
+
+    let draft = open.call(
+        "forge_write",
+        json!({"action": "pr-create", "repository": ".", "title": "Login", "draft": true}),
+    );
+    let untitled = open.call(
+        "forge_write",
+        json!({"action": "pr-create", "repository": "."}),
+    );
+
+    assert!(draft.error, "{}", draft.text);
+    assert!(draft.text.contains("draft"), "{}", draft.text);
+    assert!(untitled.error, "{}", untitled.text);
+    assert!(untitled.text.contains("needs a title"), "{}", untitled.text);
+    assert_eq!(bkt_calls_starting(&user, "pr create"), 0);
+}
+
+#[test]
+fn forge_write_names_a_data_center_repository_by_its_project() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user, "ssh://git@bitbucket.example.com:7999/APP/app.git");
+    name_the_data_center(&user);
+    user.bkt_script(json!({"contexts": [
+            {"name": "cloud", "host": "bitbucket.org"},
+            {"name": "work", "host": "bitbucket.example.com:7990"}],
+        "created": 4}));
+    procedure(&user, "open", json!({"pr-create": "allow"}), false);
+    let (_, open) = run(&user, "open");
+
+    let answer = open.call(
+        "forge_write",
+        json!({"action": "pr-create", "repository": ".", "title": "Login"}),
+    );
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        bkt_calls(&user).contains(
+            &"pr create --context work --project APP --repo app --source app/login --target main \
+              --title Login --description "
+                .to_owned()
+        ),
+        "{:?}",
+        bkt_calls(&user)
+    );
+    // A host the project does not name is not a forge Flottille writes to.
+    let file = user.project_file("app");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(
+        &file,
+        text.replace("bitbucket.example.com", "other.example.com"),
+    )
+    .unwrap();
+    let answer = open.call(
+        "forge_write",
+        json!({"action": "pr-create", "repository": ".", "title": "Login"}),
+    );
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("is not on a forge Flottille writes to"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(bkt_calls_starting(&user, "pr create"), 1);
+}
+
+#[test]
+fn a_host_bkt_has_no_context_for_is_a_failure_that_says_what_to_do() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
+    user.bkt_script(json!({"contexts": []}));
+    procedure(&user, "open", json!({"pr-create": "allow"}), false);
+    let (_, open) = run(&user, "open");
+
+    let answer = open.call(
+        "forge_write",
+        json!({"action": "pr-create", "repository": ".", "title": "Login"}),
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("bkt has no context for bitbucket.org"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(bkt_calls(&user), ["context list --json"]);
+}
+
+#[test]
+fn bitbucket_pr_merge_squash_merges_only_the_workspace_s_own_pull_request_into_its_base() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
+    procedure(&user, "merge", json!({"pr-merge-squash": "allow"}), false);
+    let (_, mcp) = run(&user, "merge");
+    let merge = json!({"action": "pr-merge-squash", "repository": "."});
+    let pulls = |pulls: Value| user.bkt_script(json!({"pulls": {"acme/app": pulls}}));
+
+    // None open.
+    pulls(json!([]));
+    let answer = mcp.call("forge_write", merge.clone());
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("no open pull request"),
+        "{}",
+        answer.text
+    );
+    // A fork's pull request of a branch of the same name.
+    pulls(json!([cloud_pull(12, "someone/app", "acme/app", "main")]));
+    let answer = mcp.call("forge_write", merge.clone());
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains("from a fork"), "{}", answer.text);
+    // One into another base.
+    pulls(json!([cloud_pull(12, "acme/app", "acme/app", "release")]));
+    let answer = mcp.call("forge_write", merge.clone());
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("into release, not main"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(bkt_calls_starting(&user, "pr merge"), 0);
+
+    pulls(json!([
+        cloud_pull(12, "acme/app", "acme/app", "main"),
+        cloud_pull(11, "someone/app", "acme/app", "main")
+    ]));
+    let answer = mcp.call("forge_write", merge);
+    assert!(!answer.error, "{}", answer.text);
+    let calls = bkt_calls(&user);
+    assert!(
+        calls.contains(
+            &"pr list --context cloud --workspace acme --repo app --state OPEN --limit 100 --json"
+                .to_owned()
+        ),
+        "{calls:?}"
+    );
+    // By squash, and the source branch is left where it is, as `gh pr merge --squash` leaves it.
+    assert!(
+        calls.contains(
+            &"pr merge 12 --context cloud --workspace acme --repo app --strategy squash \
+              --close-source=false"
+                .to_owned()
+        ),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn bitbucket_pipeline_rerun_starts_the_branch_s_pipeline_again_only_when_its_last_one_failed() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
+    procedure(&user, "rerun", json!({"pipeline-rerun": "allow"}), false);
+    let (_, mcp) = run(&user, "rerun");
+    let rerun = json!({"action": "pipeline-rerun", "repository": "."});
+    let pipeline = |number: u64, branch: &str, result: &str| {
+        json!({"uuid": format!("{{{number}}}"), "build_number": number,
+            "state": {"name": "COMPLETED", "result": {"name": result}},
+            "target": {"ref": {"name": branch}}})
+    };
+    let pipelines =
+        |pipelines: Value| user.bkt_script(json!({"pipelines": {"acme/app": pipelines}}));
+
+    // None for the branch.
+    pipelines(json!([pipeline(9, "main", "FAILED")]));
+    let answer = mcp.call("forge_write", rerun.clone());
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("no pipeline of app/login"),
+        "{}",
+        answer.text
+    );
+    // Its last one went through, after an older one that failed.
+    pipelines(json!([
+        pipeline(8, "app/login", "SUCCESSFUL"),
+        pipeline(7, "app/login", "FAILED")
+    ]));
+    let answer = mcp.call("forge_write", rerun.clone());
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains("nothing to re-run"), "{}", answer.text);
+    assert_eq!(bkt_calls_starting(&user, "pipeline run"), 0);
+
+    pipelines(json!([
+        pipeline(9, "main", "SUCCESSFUL"),
+        pipeline(8, "app/login", "FAILED"),
+        pipeline(7, "app/login", "SUCCESSFUL")
+    ]));
+    let answer = mcp.call("forge_write", rerun);
+    assert!(!answer.error, "{}", answer.text);
+    let calls = bkt_calls(&user);
+    assert!(
+        calls.contains(
+            &"pipeline list --context cloud --workspace acme --repo app --limit 50 --json"
+                .to_owned()
+        ),
+        "{calls:?}"
+    );
+    assert!(
+        calls.contains(
+            &"pipeline run --context cloud --workspace acme --repo app --ref app/login".to_owned()
+        ),
+        "{calls:?}"
+    );
+    assert_eq!(bkt_calls_starting(&user, "pipeline run"), 1);
+}
+
+#[test]
+fn a_data_center_repository_has_no_pipeline_bkt_can_run() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user, "ssh://git@bitbucket.example.com:7999/APP/app.git");
+    name_the_data_center(&user);
+    user.bkt_script(json!({"contexts": [{"name": "work", "host": "bitbucket.example.com:7990"}]}));
+    procedure(&user, "rerun", json!({"pipeline-rerun": "allow"}), false);
+    let (_, mcp) = run(&user, "rerun");
+
+    let answer = mcp.call(
+        "forge_write",
+        json!({"action": "pipeline-rerun", "repository": "."}),
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("Data Center has no pipelines"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(bkt_calls_starting(&user, "pipeline"), 0);
+}
+
+#[test]
+fn a_bitbucket_write_is_refused_when_the_remote_leads_elsewhere_than_when_the_workspace_was_made() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    let folder = on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
+    procedure(&user, "open", json!({"pr-create": "allow"}), false);
+    let (_, open) = run(&user, "open");
+    user.git(
+        &folder,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@bitbucket.org:evil/app.git",
+        ],
+    );
+
+    let answer = open.call(
+        "forge_write",
+        json!({"action": "pr-create", "repository": ".", "title": "Login"}),
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("no longer leads where it led"),
+        "{}",
+        answer.text
+    );
+    assert!(user.bkt_received().is_empty());
+}

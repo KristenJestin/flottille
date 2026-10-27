@@ -217,6 +217,37 @@ impl User {
         records(&self.path("gh/received.jsonl"))
     }
 
+    /// This user with the fake `bkt` (`crates/flottille-fake-bkt`) first in its `PATH`, its folder
+    /// `bkt`: no test ever calls Bitbucket nor uses anyone's sign-in.
+    pub fn with_fake_bkt(self) -> User {
+        std::fs::create_dir(self.path("bkt")).unwrap();
+        std::fs::create_dir(self.path("bkt-bin")).unwrap();
+        std::os::unix::fs::symlink(fake_bkt(), self.path("bkt-bin/bkt")).unwrap();
+        let path = format!(
+            "{}:{}",
+            self.path("bkt-bin").display(),
+            self.env
+                .iter()
+                .rev()
+                .find(|(name, _)| name == "PATH")
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default())
+        );
+        let dir = self.path("bkt");
+        self.with_env("PATH", &path)
+            .with_env("FLOTTILLE_FAKE_BKT_DIR", dir.to_str().unwrap())
+    }
+
+    /// The fake `bkt`'s script, read again at each of its calls.
+    pub fn bkt_script(&self, script: Value) {
+        std::fs::write(self.path("bkt/script.json"), script.to_string()).unwrap();
+    }
+
+    /// Every call of the fake `bkt`, the first first: `{"args", "env"}`.
+    pub fn bkt_received(&self) -> Vec<Value> {
+        records(&self.path("bkt/received.jsonl"))
+    }
+
     /// This user with the fake `acli` (`crates/flottille-fake-acli`) first in its `PATH`, its
     /// folder `acli`: no test ever calls Jira nor uses anyone's sign-in.
     pub fn with_fake_acli(self) -> User {
@@ -537,6 +568,17 @@ pub fn fake_gh() -> PathBuf {
     assert!(
         path.exists(),
         "{} is missing: run the tests from the workspace's root, or `cargo build -p flottille-fake-gh` first",
+        path.display()
+    );
+    path
+}
+
+/// The fake `bkt`'s binary, built beside Flottille's as the fake agent is.
+pub fn fake_bkt() -> PathBuf {
+    let path = Path::new(env!("CARGO_BIN_EXE_flottille")).with_file_name("flottille-fake-bkt");
+    assert!(
+        path.exists(),
+        "{} is missing: run the tests from the workspace's root, or `cargo build -p flottille-fake-bkt` first",
         path.display()
     );
     path

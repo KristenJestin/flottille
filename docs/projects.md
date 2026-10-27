@@ -72,6 +72,9 @@ root_entries = true                   # the project folder's other entries, link
 run = "npm install"                   # one line, its words templated, never run by a shell
 for_each_repository = true
 
+[forges]                              # hosts a remote's name does not say are a forge (docs/forges.md)
+bitbucket = ["bitbucket.example.com"] # Bitbucket Data Center hosts, by name; bitbucket.org is Cloud and needs none
+
 [procedures.open-prs]                 # a named action run by an agent in a workspace (docs/procedures.md)
 description = "Open the pull requests"
 instructions = "Push the branch, then open one pull request per repository."
@@ -99,6 +102,11 @@ The variables are templates filled for each workspace (`docs/workspaces.md`): th
 checks that their names are those of environment variables and that their templates name only
 `{workspace}`, `{workspace.path}`, `{project}`, `{branch}` and `{repository}` (`{{` and `}}` are a
 literal brace).
+
+`[forges] bitbucket` lists the Bitbucket Data Center hosts the project's repositories are on, by
+name (`bitbucket.example.com`: no scheme, port or path), since a name alone does not say a host is
+one; `bitbucket.org` is Cloud and is refused there. A repository whose remote is on a listed host
+is read and written through `bkt` (`docs/forges.md`). Unknown keys of the table are refused.
 
 A procedure's keys, its grants' vocabulary and what a run of it may do are in
 [`procedures.md`](procedures.md); `flottille procedure add`, `edit` and `remove` write them in the
