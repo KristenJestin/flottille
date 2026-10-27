@@ -762,3 +762,34 @@ fn pr_merge_squash_merges_only_the_workspace_s_own_pull_request_into_its_base() 
         gh_calls(&user)
     );
 }
+
+/// Holds once the daemon refuses the clients its agents start and the gate refuses `flottille`
+/// (#91): until then an agent reaches the daemon's socket through `commands_run`.
+#[test]
+#[ignore = "needs #91"]
+fn an_agent_s_commands_run_of_flottille_procedure_start_starts_no_run() {
+    let user = User::with_fake_agent();
+    let (_, remote) = fixture(&user);
+    procedure(&user, "plain", json!({}), false);
+    let (_, mcp) = run(&user, "plain");
+    let before = agents(&user);
+    let flottille = env!("CARGO_BIN_EXE_flottille");
+
+    for done in [
+        format!(
+            "{flottille} procedure add app ship --description Ship --instructions Push \
+             --grant push=allow"
+        ),
+        format!("{flottille} procedure run app ship --workspace login --yes"),
+    ] {
+        line(&mcp, &done);
+    }
+
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(agents(&user), before);
+    assert!(
+        user.call("procedure.show", json!({"project": "app", "name": "ship"}))
+            .is_err()
+    );
+    assert!(!remote_branches(&user, &remote).contains("app/login"));
+}
