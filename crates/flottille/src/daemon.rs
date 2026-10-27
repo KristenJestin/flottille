@@ -30,6 +30,7 @@ use crate::projects::{self, Projects};
 use crate::providers;
 use crate::runs;
 use crate::sweep;
+use crate::tickets;
 use crate::workspaces;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -541,7 +542,13 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
         ]
         .iter()
         .any(|prefix| request.method.starts_with(prefix))
-            || request.method == "project.show"
+            || [
+                "project.show",
+                "project.settings",
+                "project.set_settings",
+                "project.ticket",
+            ]
+            .contains(&request.method.as_str())
         {
             let (daemon, out) = (daemon.clone(), out.clone());
             tokio::spawn(async move {
@@ -557,6 +564,12 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     procedures::call(daemon, &request.method, request.params).await
                 } else if request.method == "project.show" {
                     projects::show(daemon, request.params).await
+                } else if request.method == "project.settings" {
+                    projects::settings(daemon, request.params).await
+                } else if request.method == "project.set_settings" {
+                    projects::set_settings(daemon, request.params).await
+                } else if request.method == "project.ticket" {
+                    tickets::preview(daemon, request.params).await
                 } else {
                     workspaces::call(daemon, &request.method, request.params).await
                 };

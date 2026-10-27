@@ -5,11 +5,12 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use flottille_core::declared::RepositoryForge;
 use flottille_core::detect;
 use flottille_core::paths::Paths;
 use flottille_core::project::{Project, Reference, check_reference, slug, valid_name};
 use flottille_core::protocol::{
-    ProjectFolder, ProjectName, ReferenceAdd, ReferenceList, ReferenceRemove,
+    ProjectFolder, ProjectName, ProjectSettings, ReferenceAdd, ReferenceList, ReferenceRemove,
 };
 use flottille_core::registry::Registry;
 use flottille_core::{Error, Result};
@@ -328,6 +329,165 @@ pub async fn show(daemon: Arc<Daemon>, params: Value) -> std::result::Result<Val
         };
     }
     Ok(project)
+}
+
+/// The address a repository's remote leads to, credentials taken out and masked; none when it
+/// has no such remote.
+async fn remote_url(project: &Project, path: &str, remote: &str) -> Option<String> {
+    let folder = match path {
+        "." => project.folder.clone(),
+        path => project.folder.join(path),
+    };
+    // A folder that is not its own repository: git would answer for the one around it.
+    if !folder.join(".git").exists() {
+        return None;
+    }
+    git::output(&folder, &["remote", "get-url", remote], Class::Read)
+        .await
+        .ok()
+        .map(|url| crate::forge::masked(&crate::forge::without_credentials(url.trim())))
+}
+
+/// What the project's settings show (`project.settings`): for each repository its remote's
+/// address, the forge declared and the one its address proposes, and the tracker. The proposal is
+/// only that: nothing is read nor written for a repository until its forge is declared.
+async fn settings_of(project: &Project) -> Value {
+    let mut repositories = Vec::new();
+    for repository in &project.repositories {
+        let url = remote_url(project, &repository.path, &repository.remote).await;
+        let proposal = url.as_deref().and_then(RepositoryForge::proposed);
+        let disagrees = match (&repository.forge, &url) {
+            (Some(forge), Some(url)) => forge.agrees(url).err(),
+            (Some(_), None) => Some(format!("it has no remote {}", repository.remote)),
+            (None, _) => None,
+        };
+        repositories.push(json!({
+            "path": repository.path,
+            "remote": repository.remote,
+            "url": url,
+            "forge": repository.forge,
+            "proposal": proposal,
+            "disagrees": disagrees,
+        }));
+    }
+    json!({
+        "name": project.name,
+        "folder": project.folder,
+        "repositories": repositories,
+        "tracker": project.tracker,
+        "obsolete": project.obsolete,
+    })
+}
+
+/// `project.settings`.
+pub async fn settings(daemon: Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
+    let ProjectName { name } = serde_json::from_value(params)?;
+    let project = load_project(&daemon, &name)?;
+    Ok(settings_of(&project).await)
+}
+
+/// `project.set_settings`: writes the declared forges and tracker in the project's file, what
+/// is around them kept, once each forge is checked to be the one its remote leads to.
+pub async fn set_settings(
+    daemon: Arc<Daemon>,
+    params: Value,
+) -> std::result::Result<Value, Failure> {
+    let asked: ProjectSettings = serde_json::from_value(params)?;
+    let project = load_project(&daemon, &asked.name)?;
+    for setting in &asked.repositories {
+        let Some(repository) = project.repositories.iter().find(|r| r.path == setting.path) else {
+            return Err(Failure::refused(format!(
+                "project {} has no repository {}",
+                project.name, setting.path
+            )));
+        };
+        let Some(forge) = &setting.forge else {
+            continue;
+        };
+        let mut checked = forge.clone();
+        checked
+            .check()
+            .map_err(|error| Failure::refused(format!("the forge of {}{error}", setting.path)))?;
+        let url = remote_url(&project, &setting.path, &repository.remote).await;
+        let agrees = match &url {
+            None => Err(format!("it has no remote {}", repository.remote)),
+            Some(url) => checked.agrees(url),
+        };
+        if let Err(why) = agrees {
+            return Err(Failure::refused(format!(
+                "{} cannot be declared on {}: its remote {}: {why}; nothing was saved",
+                setting.path,
+                checked.said(),
+                repository.remote
+            )));
+        }
+    }
+    let saved = rewrite(&daemon, &asked.name, |_, document| {
+        let not_an_array = || {
+            Failure::new(
+                "invalid-config",
+                format!(
+                    "projects/{}.toml: repositories: must be an array of tables",
+                    asked.name
+                ),
+            )
+        };
+        let entries = document
+            .get_mut("repositories")
+            .and_then(toml_edit::Item::as_array_of_tables_mut)
+            .ok_or_else(not_an_array)?;
+        for setting in &asked.repositories {
+            for entry in entries.iter_mut() {
+                if entry.get("path").and_then(|p| p.as_str()) != Some(setting.path.as_str()) {
+                    continue;
+                }
+                match &setting.forge {
+                    None => {
+                        entry.remove("forge");
+                    }
+                    Some(forge) => {
+                        entry.insert("forge", toml_edit::value(inline(forge)?));
+                    }
+                }
+            }
+        }
+        match &asked.tracker {
+            None => {
+                document.remove("tracker");
+            }
+            Some(tracker) => {
+                let mut table = toml_edit::Table::new();
+                for (key, value) in inline(tracker)?.iter() {
+                    table.insert(key, toml_edit::value(value.clone()));
+                }
+                document.insert("tracker", toml_edit::Item::Table(table));
+            }
+        }
+        Ok(())
+    })?;
+    Ok(settings_of(&saved).await)
+}
+
+/// A declaration as the TOML inline table it is written as: its keys hold strings and lists of
+/// strings.
+fn inline(value: &impl serde::Serialize) -> std::result::Result<toml_edit::InlineTable, Failure> {
+    let mut table = toml_edit::InlineTable::new();
+    let Value::Object(fields) = serde_json::to_value(value)? else {
+        return Err(Failure::refused("a declaration is a table"));
+    };
+    for (key, field) in fields {
+        let value: toml_edit::Value = match field {
+            Value::String(text) => text.into(),
+            Value::Array(items) => items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<toml_edit::Array>()
+                .into(),
+            _ => continue,
+        };
+        table.insert(&key, value);
+    }
+    Ok(table)
 }
 
 fn emit(daemon: &Daemon, name: &str, data: Value) -> std::result::Result<(), Failure> {

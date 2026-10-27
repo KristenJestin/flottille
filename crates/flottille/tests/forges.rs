@@ -58,7 +58,31 @@ fn fixture_at(user: &User, urls: &[(&str, &str)]) -> PathBuf {
             &["remote", "set-url", "origin", url],
         );
     }
+    declare_proposed(user);
     folder
+}
+
+/// What `lib` and every repository whose forge is not declared says.
+const NO_FORGE: &str = "no forge set for this repository: choose it in the project's Settings \
+    (the window), or write its `forge` in the project's file; Flottille never guesses it";
+
+/// Saves the forges the project's settings propose from the remotes, as the user does in the
+/// window: nothing is declared otherwise.
+fn declare_proposed(user: &User) {
+    let settings = user
+        .call("project.settings", json!({"name": "app"}))
+        .unwrap();
+    let repositories: Vec<Value> = settings["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| json!({"path": r["path"], "forge": r["proposal"]}))
+        .collect();
+    user.call(
+        "project.set_settings",
+        json!({"name": "app", "repositories": repositories}),
+    )
+    .unwrap();
 }
 
 /// What `gh pr view --json` answers for a pull request of `acme/api`.
@@ -146,7 +170,7 @@ fn eventually(what: &str, check: impl Fn() -> bool) {
 }
 
 #[test]
-fn a_github_remote_over_ssh_and_https_is_github_and_another_host_is_no_forge_support_yet() {
+fn a_repository_with_no_declared_forge_is_never_read_and_says_so_and_a_declared_one_is_read() {
     let user = User::new().with_fake_gh();
     fixture(&user);
 
@@ -165,13 +189,79 @@ fn a_github_remote_over_ssh_and_https_is_github_and_another_host_is_no_forge_sup
     let lib = repository(&forge, "lib");
     assert_eq!(lib["forge"], Value::Null, "{lib}");
     assert_eq!(lib["error"], Value::Null, "not an error: {lib}");
-    assert_eq!(
-        lib["note"],
-        "no forge support yet: origin is on git.example.com"
-    );
-    // The other host's repository is never asked of `gh`.
+    assert_eq!(lib["note"], NO_FORGE);
+    // The repository with none is never asked of `gh`.
     assert!(
         !gh_calls(&user).iter().any(|call| call.contains("acme/lib")),
+        "{:?}",
+        gh_calls(&user)
+    );
+}
+
+#[test]
+fn a_github_remote_is_not_read_until_its_forge_is_declared() {
+    let user = User::new().with_fake_gh();
+    let folder = fixture(&user);
+    user.git(
+        &folder.join("lib"),
+        &["remote", "set-url", "origin", "git@github.com:acme/lib.git"],
+    );
+    let file = user.project_file("app");
+    let before = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(
+        &file,
+        before.replace(
+            "forge = { kind = \"github\", repository = \"acme/api\" }\n",
+            "",
+        ),
+    )
+    .unwrap();
+
+    let forge = forge(&user);
+
+    // A remote on GitHub proposes, it never declares.
+    assert_eq!(repository(&forge, "api")["note"], NO_FORGE);
+    assert_eq!(repository(&forge, "lib")["note"], NO_FORGE);
+    assert!(
+        !gh_calls(&user)
+            .iter()
+            .any(|call| call.contains("acme/api") || call.contains("acme/lib")),
+        "{:?}",
+        gh_calls(&user)
+    );
+}
+
+#[test]
+fn a_declared_forge_whose_remote_leads_elsewhere_is_refused_and_never_read() {
+    let user = User::with_fake_agent().with_fake_gh();
+    let folder = fixture(&user);
+    one_pull_request(&user, pull(12, "Add the login page"));
+    user.git(
+        &folder.join("api"),
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@github.com:someone/api.git",
+        ],
+    );
+
+    let forge = forge(&user);
+
+    let api = repository(&forge, "api");
+    assert_eq!(api["forge"], Value::Null, "{api}");
+    let error = api["error"].as_str().unwrap();
+    assert!(
+        error.starts_with(
+            "refused: api is declared on GitHub acme/api, and its remote origin: it leads to \
+             github.com/someone/api, not to GitHub acme/api"
+        ),
+        "{error}"
+    );
+    assert!(
+        !gh_calls(&user)
+            .iter()
+            .any(|call| call.contains("acme/api") || call.contains("someone/api")),
         "{:?}",
         gh_calls(&user)
     );
@@ -437,10 +527,7 @@ fn workspace_show_json_holds_the_pull_request() {
         text.contains("  web (acme/web): no pull request\n"),
         "{text}"
     );
-    assert!(
-        text.contains("  lib: no forge support yet: origin is on git.example.com\n"),
-        "{text}"
-    );
+    assert!(text.contains(&format!("  lib: {NO_FORGE}\n")), "{text}");
 }
 
 /// An agent started in the workspace (the project folder for none): its id and its MCP session.
@@ -485,7 +572,7 @@ fn forge_read_returns_its_workspace_s_pull_requests_and_refuses_another_reposito
         "- alice: Looks good to me",
         "- bob, changes requested: Rename the form",
         "web (acme/web): no pull request for app/login.",
-        "lib: no forge support yet: origin is on git.example.com.",
+        &format!("lib: {NO_FORGE}."),
     ] {
         assert!(text.contains(said), "{said} in {text}");
     }
@@ -590,14 +677,6 @@ fn bitbucket_fixture(user: &User) -> PathBuf {
             ("lib", "https://git.example.com/acme/lib.git"),
         ],
     )
-}
-
-/// `[forges] bitbucket = [...]` in the project's file, as its user writes it.
-fn name_the_data_center(user: &User) {
-    let file = user.project_file("app");
-    let mut text = std::fs::read_to_string(&file).unwrap();
-    text.push_str("\n[forges]\nbitbucket = [\"bitbucket.example.com\"]\n");
-    std::fs::write(file, text).unwrap();
 }
 
 /// The contexts of the user's `bkt`: one on Cloud, one on the Data Center host.
@@ -706,7 +785,7 @@ fn bkt_calls(user: &User) -> Vec<String> {
 }
 
 #[test]
-fn a_bitbucket_remote_is_cloud_and_a_host_the_project_names_is_data_center() {
+fn a_declared_bitbucket_cloud_and_data_center_repository_is_read_and_an_old_forges_table_is_not() {
     let user = User::new()
         .with_fake_gh()
         .with_fake_bkt()
@@ -714,39 +793,50 @@ fn a_bitbucket_remote_is_cloud_and_a_host_the_project_names_is_data_center() {
     bitbucket_fixture(&user);
     bitbucket_pull_requests(&user);
 
-    let before = forge(&user);
-    name_the_data_center(&user);
+    let declared = forge(&user);
+    // The table that named Data Center hosts before, in place of `web`'s declaration.
+    let file = user.project_file("app");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let line = "forge = { kind = \"bitbucket-data-center\", host = \"bitbucket.example.com\", \
+        repository = \"APP/web\" }\n";
+    assert!(text.contains(line), "{text}");
+    let text = text.replace(line, "") + "\n[forges]\nbitbucket = [\"bitbucket.example.com\"]\n";
+    std::fs::write(&file, text).unwrap();
+    let shown = user.call("project.show", json!({"name": "app"})).unwrap();
     user.call("test.advance", json!({"ms": 61_000})).unwrap();
-    let after = forge(&user);
+    let old = forge(&user);
 
-    let api = repository(&before, "api");
+    let api = repository(&declared, "api");
     assert_eq!(api["forge"], "bitbucket");
     assert_eq!(api["repository"], "acme/api");
-    // A Data Center host nobody named is a host with no forge support yet.
-    let web = repository(&before, "web");
+    let web = repository(&declared, "web");
+    assert_eq!(web["forge"], "bitbucket", "{web}");
+    assert_eq!(web["repository"], "APP/web");
+    let lib = repository(&declared, "lib");
+    assert_eq!(lib["forge"], Value::Null);
+    assert_eq!(lib["note"], NO_FORGE);
+    // Neither is ever asked of `gh`.
+    assert!(gh_calls(&user).is_empty(), "{:?}", gh_calls(&user));
+    // An old `[forges]` table is read as nothing set, and said.
+    assert!(
+        shown["obsolete"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("forges: no longer read"),
+        "{shown}"
+    );
+    let web = repository(&old, "web");
     assert_eq!(web["forge"], Value::Null, "{web}");
     assert_eq!(
         web["note"],
-        "no forge support yet: origin is on bitbucket.example.com"
+        format!("{NO_FORGE} (the project's [forges] table is no longer read)")
     );
-    let web = repository(&after, "web");
-    assert_eq!(web["forge"], "bitbucket", "{web}");
-    assert_eq!(web["repository"], "APP/web");
-    let lib = repository(&after, "lib");
-    assert_eq!(lib["forge"], Value::Null);
-    assert_eq!(
-        lib["note"],
-        "no forge support yet: origin is on git.example.com"
-    );
-    // Neither is ever asked of `gh`.
-    assert!(gh_calls(&user).is_empty(), "{:?}", gh_calls(&user));
 }
 
 #[test]
 fn a_cloud_branch_shows_its_newest_own_pull_request_with_reviewers_checks_and_comments() {
     let user = User::new().with_fake_bkt();
     bitbucket_fixture(&user);
-    name_the_data_center(&user);
     bitbucket_pull_requests(&user);
 
     let forge = forge(&user);
@@ -787,7 +877,6 @@ fn a_cloud_branch_shows_its_newest_own_pull_request_with_reviewers_checks_and_co
 fn a_data_center_branch_shows_its_pull_request_with_reviewers_checks_and_comments() {
     let user = User::new().with_fake_bkt();
     bitbucket_fixture(&user);
-    name_the_data_center(&user);
     bitbucket_pull_requests(&user);
 
     let forge = forge(&user);
@@ -832,7 +921,6 @@ fn a_data_center_branch_shows_its_pull_request_with_reviewers_checks_and_comment
 fn a_branch_with_no_pull_request_or_only_closed_and_declined_ones_is_said_as_such() {
     let user = User::new().with_fake_bkt();
     bitbucket_fixture(&user);
-    name_the_data_center(&user);
     user.bkt_script(json!({
         "contexts": contexts(),
         "pulls": {"APP/web": [dc_pull(7, "app/login", "DECLINED")]},
@@ -891,7 +979,6 @@ fn bkt_missing_is_said_once_for_bitbucket_and_github_is_still_read() {
 fn a_host_bkt_has_no_context_for_is_said_with_what_to_do_and_nothing_else_is_asked() {
     let user = User::new().with_fake_bkt();
     bitbucket_fixture(&user);
-    name_the_data_center(&user);
     // Only the Cloud host is known to `bkt`.
     user.bkt_script(
         json!({"contexts": [{"name": "cloud", "host": "bitbucket.org"}],
@@ -924,7 +1011,6 @@ fn a_host_bkt_has_no_context_for_is_said_with_what_to_do_and_nothing_else_is_ask
 fn a_bkt_call_that_fails_is_the_repository_s_error_and_never_hides_the_others() {
     let user = User::new().with_fake_bkt();
     bitbucket_fixture(&user);
-    name_the_data_center(&user);
     bitbucket_pull_requests(&user);
     let mut script: Value =
         serde_json::from_str(&std::fs::read_to_string(user.path("bkt/script.json")).unwrap())
@@ -946,7 +1032,6 @@ fn a_bkt_call_that_fails_is_the_repository_s_error_and_never_hides_the_others() 
 fn forge_read_returns_the_bitbucket_pull_requests_of_the_workspace() {
     let user = User::with_fake_agent().with_fake_bkt();
     bitbucket_fixture(&user);
-    name_the_data_center(&user);
     bitbucket_pull_requests(&user);
     let (_, mcp) = agent_in(&user, Some("login"));
 
@@ -966,7 +1051,7 @@ fn forge_read_returns_the_bitbucket_pull_requests_of_the_workspace() {
         "checks: failing (Jenkins failing)",
         "- Carol: Rename the form",
         "- Alice: Done",
-        "lib: no forge support yet: origin is on git.example.com.",
+        &format!("lib: {NO_FORGE}."),
     ] {
         assert!(answer.text.contains(said), "{said} in {}", answer.text);
     }
@@ -980,7 +1065,6 @@ fn forge_read_returns_the_bitbucket_pull_requests_of_the_workspace() {
 fn workspace_show_prints_the_bitbucket_pull_request_as_it_does_a_github_one() {
     let user = User::new().with_fake_bkt();
     bitbucket_fixture(&user);
-    name_the_data_center(&user);
     bitbucket_pull_requests(&user);
 
     let output = user.run(&["workspace", "show", "app", "login"]);
@@ -1008,7 +1092,6 @@ fn no_token_reaches_an_agent_and_the_daemon_never_asks_bkt_for_one() {
         .with_env("BKT_TOKEN", token)
         .with_env("BKT_CONFIG_DIR", "/the/users/own/bkt");
     bitbucket_fixture(&user);
-    name_the_data_center(&user);
     bitbucket_pull_requests(&user);
     // A title holding the token: what `bkt` prints is masked before it is shown or stored.
     let mut script: Value =

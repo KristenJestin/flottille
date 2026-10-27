@@ -733,6 +733,12 @@ fn the_project_page_has_no_running_agents_tab(cx: &mut TestAppContext) {
 fn new_workspace_opens_a_modal_and_escape_closes_it(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");
+    user.call(
+        "project.set_settings",
+        json!({"name": "atlas",
+            "tracker": {"kind": "jira", "site": "example.atlassian.net", "projects": ["ABC"]}}),
+    )
+    .unwrap();
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     open_project(&shell, "atlas", cx);
     let form = shell
@@ -3941,6 +3947,18 @@ fn a_reply_of_thousands_of_lines_streams_in_pieces_that_stay_cheap(cx: &mut Test
 // Forges (#75): each repository's pull request in the session's WORKSPACE section and on the
 // place's card, read through the fake `gh`.
 
+/// Declares `app`'s forge, GitHub's `acme/app`, and its tracker, the issues of it, as the user
+/// does in the project's settings.
+fn declare_on_github(user: &User) {
+    user.call(
+        "project.set_settings",
+        json!({"name": "app",
+            "repositories": [{"path": ".", "forge": {"kind": "github", "repository": "acme/app"}}],
+            "tracker": {"kind": "github", "repository": "."}}),
+    )
+    .unwrap();
+}
+
 #[gpui_kit::test]
 fn the_workspace_section_shows_the_pull_request_and_its_checks_mark_and_opens_it_on_a_click(
     cx: &mut TestAppContext,
@@ -3951,6 +3969,7 @@ fn the_workspace_section_shows_the_pull_request_and_its_checks_mark_and_opens_it
         &user.path("work/app"),
         &["remote", "set-url", "origin", "git@github.com:acme/app.git"],
     );
+    declare_on_github(&user);
     let url = "https://github.com/acme/app/pull/7";
     user.gh_script(json!({"pulls": {"acme/app": {"app/w": {
         "number": 7, "title": "Add the form", "state": "OPEN", "isDraft": false,
@@ -4012,6 +4031,7 @@ fn the_workspace_section_shows_the_ticket_opens_it_on_a_click_and_links_and_unli
         &user.path("work/app"),
         &["remote", "set-url", "origin", "git@github.com:acme/app.git"],
     );
+    declare_on_github(&user);
     let issue = |number: u64, title: &str| {
         json!({"number": number, "title": title, "state": "OPEN", "body": "", "comments": [],
                "url": format!("https://github.com/acme/app/issues/{number}")})
@@ -4109,6 +4129,12 @@ fn the_workspace_section_shows_the_ticket_opens_it_on_a_click_and_links_and_unli
 fn the_form_that_makes_a_workspace_links_the_ticket_typed_in_it(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");
+    user.call(
+        "project.set_settings",
+        json!({"name": "atlas",
+            "tracker": {"kind": "jira", "site": "example.atlassian.net", "projects": ["ABC"]}}),
+    )
+    .unwrap();
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     open_project(&shell, "atlas", cx);
     let form = shell
@@ -5220,8 +5246,24 @@ fn editing_a_grant_in_the_modal_writes_the_project_s_file_and_a_removal_asks_twi
 /// A project with a ready workspace `login` and the procedure `open-prs`.
 fn user_with_a_procedure() -> User {
     let user = user();
-    project(&user, "atlas");
+    let folder = project(&user, "atlas");
     workspace(&user, "atlas", "login");
+    // `open-prs` writes to the forge: it starts only where one is declared.
+    user.git(
+        &folder,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@github.com:acme/atlas.git",
+        ],
+    );
+    user.call(
+        "project.set_settings",
+        json!({"name": "atlas",
+            "repositories": [{"path": ".", "forge": {"kind": "github", "repository": "acme/atlas"}}]}),
+    )
+    .unwrap();
     user.call(
         "procedure.add",
         json!({"project": "atlas", "template": "open-prs"}),

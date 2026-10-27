@@ -15,6 +15,8 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use flottille_core::declared::RepositoryForge;
+use flottille_core::project::Project;
 use flottille_core::protocol::WorkspaceForge;
 use flottille_core::secrets;
 use flottille_core::store::now_ms;
@@ -77,100 +79,64 @@ impl Forge {
     }
 }
 
-/// Where a remote's URL leads.
-#[derive(Debug, PartialEq)]
-pub enum Remote {
-    Forge(Forge),
-    /// A host Flottille has no forge support for yet.
-    Host(String),
-    /// A path on this machine, or nothing a forge would serve.
-    Elsewhere,
-}
-
-/// The forge of a remote's URL: `git@github.com:owner/name.git`, `ssh://git@github.com/owner/name`
-/// or `https://github.com/owner/name.git`; the same on `bitbucket.org`, or on a Bitbucket Data
-/// Center host of `bitbucket` (`https://host/scm/PROJECT/name.git`, `ssh://git@host:7999/PROJECT/name.git`).
-pub fn remote_of(url: &str, bitbucket: &[String]) -> Remote {
-    let url = url.trim();
-    let (host, path) = if let Some((_, rest)) = url.split_once("://") {
-        let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
-        let host = authority
-            .rsplit_once('@')
-            .map_or(authority, |(_, host)| host);
-        (host.split_once(':').map_or(host, |(host, _)| host), path)
-    } else if let Some((before, path)) = url.split_once(':')
-        && !before.is_empty()
-        && !before.contains('/')
-    {
-        (
-            before.rsplit_once('@').map_or(before, |(_, host)| host),
-            path,
-        )
-    } else {
-        return Remote::Elsewhere;
-    };
-    let host = host.to_ascii_lowercase();
-    if host.is_empty() {
-        return Remote::Elsewhere;
-    }
-    let path = path.trim_matches('/');
-    let path = path.strip_suffix(".git").unwrap_or(path);
-    if host == "bitbucket.org" || bitbucket.contains(&host) {
-        return bitbucket_of(host, path);
-    }
-    if host != "github.com" {
-        return Remote::Host(host);
-    }
-    match path.split('/').collect::<Vec<_>>()[..] {
-        [owner, name] if !owner.is_empty() && !name.is_empty() => Remote::Forge(Forge::GitHub {
-            owner: owner.to_owned(),
-            name: name.to_owned(),
-        }),
-        _ => Remote::Elsewhere,
+impl From<&RepositoryForge> for Forge {
+    fn from(declared: &RepositoryForge) -> Forge {
+        let (owner, name) = declared.owner_and_name();
+        let (owner, name) = (owner.to_owned(), name.to_owned());
+        match declared {
+            RepositoryForge::Github { .. } => Forge::GitHub { owner, name },
+            RepositoryForge::BitbucketCloud { .. }
+            | RepositoryForge::BitbucketDataCenter { .. } => Forge::Bitbucket {
+                host: declared.host().to_owned(),
+                owner,
+                name,
+            },
+        }
     }
 }
 
-/// The Bitbucket repository a remote's path names on `host`: `workspace/name` on Cloud; on Data
-/// Center `PROJECT/name` over SSH, behind `scm/` over HTTPS (after the context path, if any), or a
-/// `projects/PROJECT/repos/name` page's address. Names are what a command line takes as one word.
-fn bitbucket_of(host: String, path: &str) -> Remote {
-    let segments: Vec<&str> = path.split('/').collect();
-    let at = |word: &str| segments.iter().position(|s| s.eq_ignore_ascii_case(word));
-    let found = if host == "bitbucket.org" {
-        match segments[..] {
-            [owner, name] => Some((owner, name)),
-            _ => None,
-        }
-    } else if let [owner, name] = segments[..]
-        && !["scm", "projects"].contains(&owner.to_ascii_lowercase().as_str())
-    {
-        Some((owner, name))
-    } else if let Some(at) = at("scm") {
-        match segments[at + 1..] {
-            [owner, name] => Some((owner, name)),
-            _ => None,
-        }
-    } else if let Some(at) = at("projects") {
-        match segments[at + 1..] {
-            [owner, repos, name, ..] if repos.eq_ignore_ascii_case("repos") => Some((owner, name)),
-            _ => None,
-        }
-    } else {
-        None
+/// What is said of a repository whose forge is not declared: nothing is read nor written for it.
+pub const NO_FORGE: &str = "no forge set for this repository: choose it in the project's \
+    Settings (the window), or write its `forge` in the project's file; Flottille never guesses it";
+
+/// One repository of a workspace as a forge is read for it: its path, the folder of its main
+/// checkout (whose remotes its worktree shares), its remote and the forge the project declares.
+#[derive(Clone, Debug)]
+pub struct Checkout {
+    pub path: String,
+    pub folder: PathBuf,
+    pub remote: String,
+    pub declared: Option<RepositoryForge>,
+}
+
+/// The forge a repository is read and written on: the declared one, once its remote is checked
+/// to lead there. `Err(None)` when none is declared, `Err(Some(why))` when the remote leads
+/// elsewhere: neither the declaration nor the remote wins.
+pub async fn declared_forge(checkout: &Checkout) -> Result<Forge, Option<String>> {
+    let Some(declared) = &checkout.declared else {
+        return Err(None);
     };
-    let word = |s: &str| {
-        !s.is_empty()
-            && !s.starts_with('-')
-            && s.chars()
-                .all(|c| c.is_ascii_alphanumeric() || "._~-".contains(c))
+    let remote = &checkout.remote;
+    let url = git::output(
+        &checkout.folder,
+        &["remote", "get-url", remote],
+        Class::Read,
+    )
+    .await;
+    let agrees = match url {
+        Err(_) => Err(format!("it has no remote {remote}")),
+        Ok(url) => declared
+            .agrees(&url)
+            .map_err(|why| format!("its remote {remote}: {why}")),
     };
-    match found {
-        Some((owner, name)) if word(owner) && word(name) => Remote::Forge(Forge::Bitbucket {
-            host,
-            owner: owner.to_owned(),
-            name: name.to_owned(),
-        }),
-        _ => Remote::Elsewhere,
+    match agrees {
+        Ok(()) => Ok(Forge::from(declared)),
+        Err(why) => Err(Some(format!(
+            "refused: {} is declared on {}, and {why}; nothing was asked of the forge: correct the \
+             repository's remote or its forge in the project's settings",
+            checkout.path,
+            declared.said()
+        ))),
     }
 }
 
@@ -197,7 +163,7 @@ pub async fn urls_of(folder: &Path, remote: &str) -> Vec<String> {
 }
 
 /// The URL without what may come before its host: a user, a password or a token.
-fn without_credentials(url: &str) -> String {
+pub(crate) fn without_credentials(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         return url.to_owned();
     };
@@ -386,7 +352,7 @@ pub struct Repository {
     pub path: String,
     pub remote: String,
     pub forge: Option<Forge>,
-    /// Why there is nothing to read: no forge support yet, no remote.
+    /// Why there is nothing to read: no forge declared, or its remote disagrees.
     pub note: Option<String>,
     pub pull: Option<Pull>,
     /// The forge could not be read.
@@ -409,35 +375,30 @@ impl Read {
     }
 }
 
-/// Reads the forge of each repository, `(path, folder, remote)`, for `branch`; `bitbucket` are the
-/// Data Center hosts the project names.
-pub async fn read(
-    repositories: &[(String, PathBuf, String)],
-    branch: &str,
-    bitbucket: &[String],
-) -> Read {
+/// Reads the forge each repository declares, for `branch`. A repository with none is said as
+/// such; one whose remote leads elsewhere is refused, and its forge is not asked.
+pub async fn read(repositories: &[Checkout], branch: &str, obsolete: bool) -> Read {
     let mut found = Vec::new();
-    for (path, folder, remote) in repositories {
-        let url = git::output(folder, &["remote", "get-url", remote.as_str()], Class::Read).await;
-        let (forge, note) = match url.as_deref().map(|url| remote_of(url, bitbucket)) {
-            Err(_) => (None, Some(format!("it has no remote {remote}"))),
-            Ok(Remote::Forge(forge)) => (Some(forge), None),
-            Ok(Remote::Host(host)) => (
+    for checkout in repositories {
+        let (forge, note, error) = match declared_forge(checkout).await {
+            Ok(forge) => (Some(forge), None, None),
+            Err(None) if obsolete => (
                 None,
-                Some(format!("no forge support yet: {remote} is on {host}")),
-            ),
-            Ok(Remote::Elsewhere) => (
+                Some(format!(
+                    "{NO_FORGE} (the project's [forges] table is no longer read)"
+                )),
                 None,
-                Some(format!("no forge support yet: {remote} is not on a forge")),
             ),
+            Err(None) => (None, Some(NO_FORGE.to_owned()), None),
+            Err(Some(why)) => (None, None, Some(why)),
         };
         found.push(Repository {
-            path: path.clone(),
-            remote: remote.clone(),
+            path: checkout.path.clone(),
+            remote: checkout.remote.clone(),
             forge,
             note,
             pull: None,
-            error: None,
+            error,
             blocked: false,
         });
     }
@@ -626,9 +587,9 @@ fn state_of(workspace: &Workspace, read: &Read) -> Value {
     })
 }
 
-/// The repositories of a workspace, as `read` takes them: their worktree shares the main
-/// checkout's remotes.
-fn repositories_of(workspace: &Workspace) -> Vec<(String, PathBuf, String)> {
+/// The repositories of a workspace, as `read` takes them, with the forges `project` declares
+/// (none when its file cannot be read, which the rest of Flottille says in its own words).
+pub fn repositories_of(workspace: &Workspace, project: Option<&Project>) -> Vec<Checkout> {
     workspace
         .repositories
         .iter()
@@ -637,7 +598,15 @@ fn repositories_of(workspace: &Workspace) -> Vec<(String, PathBuf, String)> {
                 "." => workspace.project_folder.clone(),
                 path => workspace.project_folder.join(path),
             };
-            (r.path.clone(), folder, r.base.remote.clone())
+            let declared = project
+                .and_then(|p| p.repositories.iter().find(|d| d.path == r.path))
+                .and_then(|d| d.forge.clone());
+            Checkout {
+                path: r.path.clone(),
+                folder,
+                remote: r.base.remote.clone(),
+                declared,
+            }
         })
         .collect()
 }
@@ -695,18 +664,12 @@ pub async fn state(daemon: &Daemon, workspace: &Workspace) -> Value {
     refresh(daemon, workspace).await
 }
 
-/// The Bitbucket Data Center hosts a project names (`[forges] bitbucket`); none when its file
-/// cannot be read, which the rest of Flottille says in its own words.
-fn bitbucket_hosts(daemon: &Daemon, project: &str) -> Vec<String> {
-    projects::load_project(daemon, project)
-        .map(|project| project.forges.bitbucket)
-        .unwrap_or_default()
-}
-
 /// Reads the workspace's forges now and keeps what was read; an event says when it changed.
 async fn refresh(daemon: &Daemon, workspace: &Workspace) -> Value {
-    let hosts = bitbucket_hosts(daemon, &workspace.project);
-    let read = read(&repositories_of(workspace), &workspace.branch, &hosts).await;
+    let project = projects::load_project(daemon, &workspace.project).ok();
+    let obsolete = project.as_ref().is_some_and(|p| !p.obsolete.is_empty());
+    let repositories = repositories_of(workspace, project.as_ref());
+    let read = read(&repositories, &workspace.branch, obsolete).await;
     let state = state_of(workspace, &read);
     let now = now_ms();
     let previous = {
@@ -832,20 +795,21 @@ pub async fn forge_read(daemon: &Daemon, place: &Place, args: Value) -> Outcome 
         Ok(None) => return Outcome::Failed(format!("the workspace {name} is gone")),
         Err(error) => return Outcome::Failed(error.to_string()),
     };
-    let mut repositories = repositories_of(&workspace);
+    let project = projects::load_project(daemon, &place.project).ok();
+    let obsolete = project.as_ref().is_some_and(|p| !p.obsolete.is_empty());
+    let mut repositories = repositories_of(&workspace, project.as_ref());
     if let Some(asked) = &asked.repository {
-        if !repositories.iter().any(|(path, _, _)| path == asked) {
-            let names: Vec<&str> = repositories.iter().map(|(p, _, _)| p.as_str()).collect();
+        if !repositories.iter().any(|r| &r.path == asked) {
+            let names: Vec<&str> = repositories.iter().map(|r| r.path.as_str()).collect();
             return Outcome::Refused(format!(
                 "refused: {asked} is not a repository of this agent's workspace: it has {}; \
                  forge_read reads only those",
                 names.join(", ")
             ));
         }
-        repositories.retain(|(path, _, _)| path == asked);
+        repositories.retain(|r| &r.path == asked);
     }
-    let hosts = bitbucket_hosts(daemon, &place.project);
-    let read = read(&repositories, &workspace.branch, &hosts).await;
+    let read = read(&repositories, &workspace.branch, obsolete).await;
     Outcome::Done(read_text(&workspace, &read))
 }
 
@@ -907,13 +871,18 @@ pub async fn forge_write(daemon: &Daemon, place: &Place, args: Value) -> Outcome
         Ok(None) => return Outcome::Failed(format!("the workspace {name} is gone")),
         Err(error) => return Outcome::Failed(error.to_string()),
     };
-    let repositories = repositories_of(&workspace);
+    // The project's reviewers and declared forges, as its file says them now.
+    let project = match projects::load_project(daemon, &place.project) {
+        Ok(project) => project,
+        Err(failure) => return Outcome::Failed(failure.message),
+    };
+    let repositories = repositories_of(&workspace, Some(&project));
     let found = repositories
         .iter()
         .zip(&workspace.repositories)
-        .find(|((path, _, _), _)| *path == asked.repository);
-    let Some(((_, folder, remote), repository)) = found else {
-        let names: Vec<&str> = repositories.iter().map(|(p, _, _)| p.as_str()).collect();
+        .find(|(checkout, _)| checkout.path == asked.repository);
+    let Some((checkout, repository)) = found else {
+        let names: Vec<&str> = repositories.iter().map(|r| r.path.as_str()).collect();
         return Outcome::Refused(format!(
             "refused: {} is not a repository of this agent's workspace: it has {}; forge_write \
              writes only for those",
@@ -921,30 +890,21 @@ pub async fn forge_write(daemon: &Daemon, place: &Place, args: Value) -> Outcome
             names.join(", ")
         ));
     };
-    if let Err(refusal) = remote_kept(folder, &repository.base).await {
+    if let Err(refusal) = remote_kept(&checkout.folder, &repository.base).await {
         return Outcome::Refused(refusal);
     }
-    let hosts = bitbucket_hosts(daemon, &place.project);
-    let forge = match git::output(folder, &["remote", "get-url", remote.as_str()], Class::Read)
-        .await
-        .as_deref()
-        .map(|url| remote_of(url, &hosts))
-    {
-        Ok(Remote::Forge(forge)) => forge,
-        Ok(_) | Err(_) => {
+    let forge = match declared_forge(checkout).await {
+        Ok(forge) => forge,
+        Err(None) => {
             return Outcome::Refused(format!(
-                "refused: {}'s remote {remote} is not on a forge Flottille writes to (GitHub, \
-                 Bitbucket)",
+                "refused: {}: {NO_FORGE}; nothing was written: ask the user to set it",
                 asked.repository
             ));
         }
+        Err(Some(why)) => return Outcome::Refused(why),
     };
     let branch = workspace.branch.as_str();
-    // The project's reviewers, as its file says them now.
-    let reviewers = match projects::load_project(daemon, &place.project) {
-        Ok(project) => project.pull_requests.reviewers,
-        Err(failure) => return Outcome::Failed(failure.message),
-    };
+    let reviewers = project.pull_requests.reviewers;
     if matches!(forge, Forge::Bitbucket { .. }) {
         let base = &repository.base.branch;
         return bitbucket::write(&forge, branch, base, &reviewers, asked).await;
@@ -1204,13 +1164,6 @@ fn read_text(workspace: &Workspace, read: &Read) -> String {
 mod tests {
     use super::*;
 
-    fn github(owner: &str, name: &str) -> Remote {
-        Remote::Forge(Forge::GitHub {
-            owner: owner.into(),
-            name: name.into(),
-        })
-    }
-
     #[test]
     fn a_recorded_url_keeps_no_credentials() {
         for (url, kept) in [
@@ -1230,114 +1183,6 @@ mod tests {
             ("/srv/git/app.git", "/srv/git/app.git"),
         ] {
             assert_eq!(without_credentials(url), kept, "{url}");
-        }
-    }
-
-    #[test]
-    fn a_github_remote_over_ssh_or_https_is_github() {
-        for url in [
-            "git@github.com:acme/app.git",
-            "git@github.com:acme/app",
-            "ssh://git@github.com/acme/app.git",
-            "ssh://git@github.com:22/acme/app",
-            "https://github.com/acme/app.git",
-            "https://github.com/acme/app/",
-            "https://someone@GitHub.com/acme/app",
-        ] {
-            assert_eq!(remote_of(url, &[]), github("acme", "app"), "{url}");
-        }
-    }
-
-    #[test]
-    fn another_host_is_no_forge_support_yet() {
-        assert_eq!(
-            remote_of("git@gitlab.com:acme/app.git", &[]),
-            Remote::Host("gitlab.com".into())
-        );
-        assert_eq!(
-            remote_of("https://git.example.com/acme/app.git", &[]),
-            Remote::Host("git.example.com".into())
-        );
-        for url in ["/srv/git/app.git", "../app.git", "file:///srv/git/app.git"] {
-            assert_eq!(remote_of(url, &[]), Remote::Elsewhere, "{url}");
-        }
-        assert_eq!(remote_of("https://github.com/acme", &[]), Remote::Elsewhere);
-    }
-
-    fn bitbucket(host: &str, owner: &str, name: &str) -> Remote {
-        Remote::Forge(Forge::Bitbucket {
-            host: host.into(),
-            owner: owner.into(),
-            name: name.into(),
-        })
-    }
-
-    #[test]
-    fn a_bitbucket_org_remote_over_ssh_or_https_is_bitbucket_cloud() {
-        for url in [
-            "git@bitbucket.org:acme/app.git",
-            "git@bitbucket.org:acme/app",
-            "ssh://git@bitbucket.org/acme/app.git",
-            "https://bitbucket.org/acme/app.git",
-            "https://someone@Bitbucket.org/acme/app/",
-        ] {
-            assert_eq!(
-                remote_of(url, &[]),
-                bitbucket("bitbucket.org", "acme", "app"),
-                "{url}"
-            );
-        }
-        let forge = Forge::Bitbucket {
-            host: "bitbucket.org".into(),
-            owner: "acme".into(),
-            name: "app".into(),
-        };
-        assert_eq!(forge.kind(), "bitbucket");
-        assert_eq!(forge.slug(), "acme/app");
-    }
-
-    #[test]
-    fn a_data_center_remote_is_bitbucket_on_a_host_the_project_names_and_on_no_other() {
-        let hosts = ["bitbucket.example.com".to_owned()];
-        for url in [
-            "ssh://git@bitbucket.example.com:7999/APP/app.git",
-            "https://bitbucket.example.com/scm/APP/app.git",
-            "https://someone@Bitbucket.Example.com:8443/scm/APP/app.git",
-            "https://bitbucket.example.com/bitbucket/scm/APP/app.git",
-            "https://bitbucket.example.com/projects/APP/repos/app/browse",
-            "https://bitbucket.example.com/projects/APP/repos/app",
-        ] {
-            assert_eq!(
-                remote_of(url, &hosts),
-                bitbucket("bitbucket.example.com", "APP", "app"),
-                "{url}"
-            );
-            assert_eq!(
-                remote_of(url, &[]),
-                Remote::Host("bitbucket.example.com".into()),
-                "not named: {url}"
-            );
-        }
-        // A listed host with a path that says no repository.
-        for url in [
-            "https://bitbucket.example.com/",
-            "https://bitbucket.example.com/scm/APP",
-            "ssh://git@bitbucket.example.com:7999/APP/",
-        ] {
-            assert_eq!(remote_of(url, &hosts), Remote::Elsewhere, "{url}");
-        }
-    }
-
-    #[test]
-    fn a_bitbucket_name_that_could_pass_for_a_flag_or_a_path_is_no_repository() {
-        for url in [
-            "git@bitbucket.org:-x/app.git",
-            "git@bitbucket.org:acme/--app.git",
-            "https://bitbucket.org/acme/app%2Fx.git",
-            "https://bitbucket.org/acme/a b.git",
-            "https://bitbucket.org/acme/app.git?x=y#z",
-        ] {
-            assert_eq!(remote_of(url, &[]), Remote::Elsewhere, "{url}");
         }
     }
 

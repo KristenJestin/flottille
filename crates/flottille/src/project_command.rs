@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Subcommand;
+use flottille_core::declared::{ProjectTracker, RepositoryForge};
 use flottille_core::paths::Paths;
 use flottille_core::protocol::{ProjectFolder, ProjectName};
 use serde_json::Value;
@@ -296,7 +297,20 @@ fn show_text(project: &Value) -> String {
         if !after.is_empty() {
             shown.push_str(&format!(", after {}", after.join(", ")));
         }
+        let forge = serde_json::from_value::<RepositoryForge>(repository["forge"].clone());
+        match forge {
+            Ok(forge) => shown.push_str(&format!(", on {}", forge.said())),
+            Err(_) => shown.push_str(", no forge set"),
+        }
         shown.push('\n');
+    }
+    let tracker = serde_json::from_value::<ProjectTracker>(project["tracker"].clone());
+    shown.push_str(&match tracker {
+        Ok(tracker) => format!("Tickets: {}\n", tracker.said()),
+        Err(_) => "Tickets: no tracker set\n".to_owned(),
+    });
+    for obsolete in list_of(&project["obsolete"]) {
+        shown.push_str(&format!("Not read: {obsolete}\n"));
     }
     if let Some(variables) = project["variables"].as_object() {
         shown.push_str("Variables:\n");

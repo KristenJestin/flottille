@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod approval;
 pub mod command;
+pub mod declared;
 pub mod detect;
 pub mod error;
 pub mod glob;

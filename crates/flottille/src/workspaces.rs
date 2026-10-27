@@ -18,7 +18,6 @@ use flottille_core::project::{Project, RecipeStep, RepositorySet, StepKind, vali
 use flottille_core::protocol::{WorkspaceCreate, WorkspaceList, WorkspaceName};
 use flottille_core::secrets;
 use flottille_core::store::{Store, now_ms};
-use flottille_core::ticket::Key;
 use flottille_core::variables::{self, Names};
 use flottille_core::workspace::{
     Action, Base, Failure as StepFailure, State, Step, StepState, Workspace, Worktree,
@@ -222,7 +221,7 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
     let ticket = asked
         .ticket
         .as_deref()
-        .map(|text| Key::parse(text).map(|key| key.text()))
+        .map(|text| crate::tickets::accepted(&project, text).map(|key| key.text()))
         .transpose()
         .map_err(Failure::refused)?;
     let branch = asked
