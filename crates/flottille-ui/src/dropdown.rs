@@ -15,6 +15,7 @@ use gpui_kit::{
 };
 
 use crate::icons::{Icon, icon};
+use crate::interact::dismiss_on_navigate;
 use crate::motion::RISE;
 use crate::theme::palette;
 use crate::typography::Type;
@@ -177,16 +178,21 @@ pub(crate) fn list_overlay(
 ) -> impl IntoElement {
     let p = palette(cx);
     let viewport = window.viewport_size();
+    let panel_dismiss = dismiss.clone();
     let backdrop = dismiss.map(|dismiss| {
-        anchored().position(point(px(0.), px(0.))).child(
-            div()
-                .id(ElementId::Name(format!("{}-backdrop", id_text(id)).into()))
-                .w(viewport.width)
-                .h(viewport.height)
-                .occlude()
-                .on_mouse_down(MouseButton::Left, move |_, window, cx| dismiss(window, cx))
-                .test_support(),
-        )
+        let on_navigate = dismiss.clone();
+        let backdrop = div()
+            .id(ElementId::Name(format!("{}-backdrop", id_text(id)).into()))
+            .w(viewport.width)
+            .h(viewport.height)
+            .occlude()
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| dismiss(window, cx))
+            .test_support();
+        anchored()
+            .position(point(px(0.), px(0.)))
+            .child(dismiss_on_navigate(backdrop, move |window, cx| {
+                on_navigate(window, cx)
+            }))
     });
     let menu = ElementId::Name(format!("{}-menu", id_text(id)).into());
     let panel = div()
@@ -214,6 +220,10 @@ pub(crate) fn list_overlay(
         .flex_col()
         .children(items)
         .test_support();
+    let panel = match panel_dismiss {
+        Some(dismiss) => dismiss_on_navigate(panel, move |window, cx| dismiss(window, cx)),
+        None => panel,
+    };
     // The padding is the gap on either side.
     let list = anchored()
         .anchor(match align {

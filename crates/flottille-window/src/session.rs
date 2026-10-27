@@ -26,9 +26,9 @@ use gpui_kit::base::input::{InputEditorStyle, InputEvent, TextareaState};
 use gpui_kit::base::text::{TextView, TextViewState, TextViewStyle};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, AppContext as _, Bounds, Context, ElementId, Entity, Focusable as _, FollowMode,
-    ImageCacheError, ImageSource, InteractiveElement, IntoElement, ListAlignment, ListState,
-    ParentElement, PathBuilder, Pixels, Render, SharedString, SharedUri,
+    AnyElement, AppContext as _, Bounds, Context, ElementId, Entity, EventEmitter, Focusable as _,
+    FollowMode, ImageCacheError, ImageSource, InteractiveElement, IntoElement, ListAlignment,
+    ListState, ParentElement, PathBuilder, Pixels, Render, SharedString, SharedUri,
     StatefulInteractiveElement, Styled, Subscription, Task, TestSupportExt as _, Transformation,
     WeakEntity, Window, canvas, div, list, point, px, radians,
 };
@@ -141,6 +141,11 @@ pub struct SessionPage {
     renders: usize,
     _status: Subscription,
 }
+
+/// Emitted when the user chooses the conversation of an agent of the session.
+pub struct Chose(pub String);
+
+impl EventEmitter<Chose> for SessionPage {}
 
 impl SessionPage {
     pub fn new(
@@ -323,8 +328,16 @@ impl SessionPage {
         cx.notify();
     }
 
-    /// Shows an agent's conversation: the root's, with the composer, or a sub-agent's, read only.
+    /// The user chose an agent's conversation: the root's, with the composer, or a sub-agent's,
+    /// read only. The window's history keeps the choice.
     pub fn select(&mut self, agent: &str, cx: &mut Context<Self>) {
+        self.show(agent, cx);
+        cx.emit(Chose(agent.to_owned()));
+    }
+
+    /// [`SessionPage::select`], for the window's history going back to a place: it does not
+    /// record it again.
+    pub fn show(&mut self, agent: &str, cx: &mut Context<Self>) {
         self.drawer.update(cx, |drawer, cx| drawer.close(cx));
         if self.shown == agent {
             return;

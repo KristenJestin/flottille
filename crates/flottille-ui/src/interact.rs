@@ -7,11 +7,28 @@
 use std::sync::Arc;
 
 use gpui_kit::{
-    App, Context, Div, ElementId, Entity, InteractiveElement, MouseButton, Stateful,
-    StatefulInteractiveElement, Window,
+    App, Context, Div, ElementId, Entity, InteractiveElement, MouseButton, NavigationDirection,
+    Stateful, StatefulInteractiveElement, Window,
 };
 
 use crate::motion::{HOVER, Motion, PRESS, PRESSED};
+
+/// The mouse's back and forward buttons dismiss what `element` belongs to, as a click outside
+/// it does: an open list, a modal, a drawer. The window's history does not see them.
+pub fn dismiss_on_navigate<E: InteractiveElement>(
+    element: E,
+    dismiss: impl Fn(&mut Window, &mut App) + Clone + 'static,
+) -> E {
+    [NavigationDirection::Back, NavigationDirection::Forward]
+        .into_iter()
+        .fold(element, |element, direction| {
+            let dismiss = dismiss.clone();
+            element.on_mouse_down(MouseButton::Navigate(direction), move |_, window, cx| {
+                cx.stop_propagation();
+                dismiss(window, cx);
+            })
+        })
+}
 
 pub(crate) struct Feel {
     hover: Motion,
