@@ -99,6 +99,7 @@ impl Render for Sidebar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let shell = self.shell.clone();
+        let adds = self.shell.clone();
         div()
             .size_full()
             .bg(p.side)
@@ -127,7 +128,22 @@ impl Render for Sidebar {
                     .pb(px(14.))
                     .flex()
                     .flex_col()
-                    .child(section_label("Projects", cx))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .pr(px(4.))
+                            .child(section_label("Projects", cx))
+                            .child(
+                                Button::icon("add-project", Icon::Plus, "Add a project").on_click(
+                                    move |_, window, cx| {
+                                        adds.update(cx, |shell, cx| shell.add_project(window, cx))
+                                            .ok();
+                                    },
+                                ),
+                            ),
+                    )
                     .children(self.projects.iter().cloned()),
             )
     }

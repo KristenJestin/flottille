@@ -25,6 +25,8 @@ pub struct Project {
     pub folder: String,
     /// Its repositories' paths, `.` for the folder itself.
     pub repositories: Vec<String>,
+    /// The repositories a workspace takes by default; all of them when none.
+    pub default_repositories: Option<Vec<String>>,
     /// Its workspaces by name; `main`, the project folder, is always there and not listed.
     pub workspaces: Vec<String>,
     /// The provider and the model its file gives its agents, when it gives them.
@@ -321,6 +323,12 @@ impl Snapshot {
                         .iter()
                         .map(|repository| text(repository, "path"))
                         .collect(),
+                    default_repositories: project["default_repositories"].as_array().map(|set| {
+                        set.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    }),
                     name,
                     workspaces,
                     provider: project["provider"].as_str().map(str::to_owned),

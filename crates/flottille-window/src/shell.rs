@@ -21,6 +21,7 @@ use gpui_kit::{
 };
 
 use crate::actions::{Actions, Command, Outcome, Pick};
+use crate::add_project::AddProject;
 use crate::composer::{Choice, Composer, PlaceChoice};
 use crate::history::{History, Way};
 use crate::link::{self, Connect, Seen, Update};
@@ -29,6 +30,7 @@ use crate::open::Opener;
 use crate::page::{MainArea, Page};
 use crate::procedures::RunProcedure;
 use crate::project::{NewWorkspace, PlaceData, ProjectData, SessionLine, repository_label};
+use crate::project_settings::ProjectSettingsPage;
 use crate::providers::Providers;
 use crate::session::{Chose, Follow, Opened, Reply, SessionPage};
 use crate::settings::SettingsPage;
@@ -71,6 +73,8 @@ pub enum Selection {
     Project(String),
     Session(String),
     Settings,
+    /// A project's own settings.
+    ProjectSettings(String),
 }
 
 pub struct Shell {
@@ -119,6 +123,10 @@ pub struct Shell {
     /// The modal that runs a procedure in a workspace, one for the window: a card and a session's
     /// menu open it.
     run: Entity<RunProcedure>,
+    /// The open project's settings page; made again for another project.
+    project_settings: Option<Entity<ProjectSettingsPage>>,
+    /// The form that adds a project, one for the window's life.
+    add_project: Entity<AddProject>,
     /// The link's updates, until a task takes them.
     updates: Option<UnboundedReceiver<Update>>,
     _link: Task<()>,
@@ -184,6 +192,10 @@ impl Shell {
         };
         let left = cx.new(|_| Drawer::new("tree-drawer", Side::Left, px(SIDEBAR), sidebar.clone()));
         let bell = cx.new(|_| BellList::new(this.clone()));
+        let add_project = {
+            let this = this.clone();
+            cx.new(|cx| AddProject::new(this, window, cx))
+        };
         let _clock = cx.spawn(async move |this: WeakEntity<Shell>, cx| {
             loop {
                 cx.background_executor().timer(CLOCK).await;
@@ -223,6 +235,8 @@ impl Shell {
             last_pick: None,
             settings,
             run,
+            project_settings: None,
+            add_project,
             updates: Some(updates),
             _link: Task::ready(()),
             _clock,
@@ -267,7 +281,54 @@ impl Shell {
                 cx.new(|cx| NewWorkspace::new(b, name.clone(), window, cx)),
             )
         });
-        Some(forms.clone())
+        let forms = forms.clone();
+        if let Some(project) = self.snapshot.projects.iter().find(|p| &p.name == name) {
+            let (repositories, default_set) = (
+                project.repositories.clone(),
+                project.default_repositories.clone(),
+            );
+            forms.1.update(cx, |form, cx| {
+                form.set_repositories(repositories, default_set, cx)
+            });
+        }
+        Some(forms)
+    }
+
+    /// The open project's settings page, made the first time, and kept while the same project's
+    /// settings are open; opened, it asks the daemon for them.
+    fn project_settings_for(
+        &mut self,
+        page: &Page,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<ProjectSettingsPage>> {
+        let Page::ProjectSettings { name } = page else {
+            self.project_settings = None;
+            return None;
+        };
+        if let Some(open) = self.project_settings.clone()
+            && open.read(cx).name() == name
+        {
+            return Some(open);
+        }
+        let this = cx.entity().downgrade();
+        let made = cx.new(|cx| ProjectSettingsPage::new(this, name.clone(), window, cx));
+        // The shell is being updated here: it asks the daemon itself, not through the page.
+        self.perform(Command::ReadProjectSettings(name.clone()));
+        self.project_settings = Some(made.clone());
+        Some(made)
+    }
+
+    /// The form that adds a project.
+    pub fn add_project_form(&self) -> &Entity<AddProject> {
+        &self.add_project
+    }
+
+    /// Opens the form that adds a project.
+    pub fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.left.update(cx, |drawer, cx| drawer.close(cx));
+        self.add_project
+            .update(cx, |form, cx| form.open(window, cx));
     }
 
     /// What opens a folder in the user's editor, for the session pages opened from now on.
@@ -521,6 +582,69 @@ impl Shell {
                 }
                 self.settings
                     .update(cx, |page, cx| page.answered(&name, refused, cx));
+            }
+            Outcome::ProjectSettings {
+                project,
+                read,
+                saved,
+            } => {
+                if let Some(page) = self.project_settings.clone()
+                    && page.read(cx).name() == project
+                {
+                    page.update(cx, |page, cx| page.answered(read, saved, window, cx));
+                }
+            }
+            Outcome::ProjectChecked { project, read } => {
+                if let Some(page) = self.project_settings.clone()
+                    && page.read(cx).name() == project
+                {
+                    page.update(cx, |page, cx| page.check_answered(read, cx));
+                }
+            }
+            Outcome::ProjectRemoved { project, refused } => match refused {
+                Some(why) => {
+                    if let Some(page) = self.project_settings.clone()
+                        && page.read(cx).name() == project
+                    {
+                        page.update(cx, |page, cx| page.remove_refused(why, cx));
+                    }
+                }
+                None => {
+                    self.forms.remove(&project);
+                    self.snapshot.projects.retain(|p| p.name != project);
+                    let next = self.snapshot.projects.first().map(|p| p.name.clone());
+                    match next {
+                        Some(next) => self.open(Selection::Project(next), window, cx),
+                        None => {
+                            self.selected = None;
+                            self.project_settings = None;
+                            self.main.update(cx, |main, cx| {
+                                main.show(Page::Empty, None, None, None, cx)
+                            });
+                        }
+                    }
+                }
+            },
+            Outcome::ProjectDetected { read, .. } => {
+                self.add_project
+                    .update(cx, |form, cx| form.detect_answered(read, cx));
+            }
+            Outcome::ProjectAdded { read, .. } => {
+                let added = self
+                    .add_project
+                    .update(cx, |form, cx| form.add_answered(read, window, cx));
+                if let Some(name) = added {
+                    self.open(Selection::ProjectSettings(name), window, cx);
+                }
+            }
+            Outcome::TicketPreview {
+                project,
+                ticket,
+                read,
+            } => {
+                if let Some(form) = self.new_workspace_of(&project).cloned() {
+                    form.update(cx, |form, cx| form.previewed(&ticket, read, cx));
+                }
             }
             Outcome::TicketLinked {
                 project,
@@ -904,8 +1028,9 @@ impl Shell {
                 if self.main.read(cx).page() != &page {
                     let forms = self.forms_for(&page, window, cx);
                     let session = self.session_for(&page, window, cx);
+                    let settings = self.project_settings_for(&page, window, cx);
                     self.main
-                        .update(cx, |main, cx| main.show(page, forms, session, cx));
+                        .update(cx, |main, cx| main.show(page, forms, session, settings, cx));
                 }
                 self.refresh_project(cx);
             }
@@ -987,8 +1112,10 @@ impl Shell {
         self.selected = Some(selection);
         let forms = self.forms_for(&page, window, cx);
         let session = self.session_for(&page, window, cx);
-        self.main
-            .update(cx, |main, cx| main.show(page, forms, session, cx));
+        let project_settings = self.project_settings_for(&page, window, cx);
+        self.main.update(cx, |main, cx| {
+            main.show(page, forms, session, project_settings, cx)
+        });
         self.refresh_project(cx);
     }
 
@@ -996,6 +1123,18 @@ impl Shell {
     fn page_of(&self, selection: &Selection, cx: &App) -> Page {
         match selection {
             Selection::Settings => Page::Settings,
+            // A project just added is not in the daemon's last read yet: its page, open, stays.
+            Selection::ProjectSettings(name) => {
+                let open = self
+                    .project_settings
+                    .as_ref()
+                    .is_some_and(|page| page.read(cx).name() == name);
+                if open || self.snapshot.projects.iter().any(|p| &p.name == name) {
+                    Page::ProjectSettings { name: name.clone() }
+                } else {
+                    Page::Empty
+                }
+            }
             Selection::Project(name) => {
                 match self.snapshot.projects.iter().find(|p| &p.name == name) {
                     Some(project) => Page::Project {
@@ -1036,6 +1175,7 @@ impl Shell {
         let project = match &self.selected {
             Some(Selection::Project(name)) => Some(name.clone()),
             Some(Selection::Session(id)) => self.snapshot.session(id).map(|s| s.project.clone()),
+            Some(Selection::ProjectSettings(name)) => Some(name.clone()),
             Some(Selection::Settings) | None => None,
         }
         .or_else(|| self.snapshot.projects.first().map(|p| p.name.clone()));
@@ -1162,6 +1302,7 @@ impl Render for Shell {
             .child(self.top.clone())
             .child(body)
             .child(self.run.clone())
+            .child(self.add_project.clone())
             .when(self.bell_open, |d| {
                 let scrim = div()
                     .id("bell-scrim")

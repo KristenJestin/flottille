@@ -4,12 +4,13 @@
 use flottille_ui::{Status, Type, palette};
 use gpui_kit::{
     AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
-    Styled, WeakEntity, Window, div,
+    Styled, WeakEntity, Window, div, px,
 };
 
 use crate::composer::Composer;
 use crate::model::Place;
 use crate::project::{NewWorkspace, ProjectPage};
+use crate::project_settings::ProjectSettingsPage;
 use crate::session::SessionPage;
 use crate::settings::SettingsPage;
 use crate::shell::{Layout, Shell};
@@ -28,6 +29,10 @@ pub enum Page {
         status: Entity<Status>,
     },
     Settings,
+    /// A project's own settings: its forges and tracker.
+    ProjectSettings {
+        name: String,
+    },
 }
 
 pub struct MainArea {
@@ -40,6 +45,8 @@ pub struct MainArea {
     session: Option<Entity<SessionPage>>,
     /// The settings page, one for the window's life: it follows the providers while closed too.
     settings: Entity<SettingsPage>,
+    /// The open project's settings page.
+    project_settings: Option<Entity<ProjectSettingsPage>>,
 }
 
 impl MainArea {
@@ -55,6 +62,7 @@ impl MainArea {
             project: None,
             session: None,
             settings,
+            project_settings: None,
         }
     }
 
@@ -67,6 +75,11 @@ impl MainArea {
         &self.page
     }
 
+    /// The project's settings page, when it is the one shown.
+    pub fn project_settings_page(&self) -> Option<&Entity<ProjectSettingsPage>> {
+        self.project_settings.as_ref()
+    }
+
     pub fn project_page(&self) -> Option<&Entity<ProjectPage>> {
         self.project.as_ref()
     }
@@ -76,14 +89,23 @@ impl MainArea {
     }
 
     /// Shows `page`; a project's page gets that project's composer and new workspace form, a
-    /// session's page is the one given.
+    /// session's page and a project's settings page are the ones given.
     pub fn show(
         &mut self,
         page: Page,
         forms: Option<(Entity<Composer>, Entity<NewWorkspace>)>,
         session: Option<Entity<SessionPage>>,
+        project_settings: Option<Entity<ProjectSettingsPage>>,
         cx: &mut Context<Self>,
     ) {
+        self.project_settings = match &page {
+            Page::ProjectSettings { .. } => project_settings,
+            _ => None,
+        };
+        if let Some(settings) = &self.project_settings {
+            let narrow = self.layout == Layout::Narrow;
+            settings.update(cx, |page, cx| page.set_narrow(narrow, cx));
+        }
         // Another project's page is a new one: its content enters, the old one is gone.
         self.project = match (&page, forms) {
             (Page::Project { name }, Some((composer, new_workspace))) => {
@@ -126,6 +148,9 @@ impl MainArea {
             }
             self.settings
                 .update(cx, |page, cx| page.set_narrow(layout == Layout::Narrow, cx));
+            if let Some(page) = &self.project_settings {
+                page.update(cx, |page, cx| page.set_narrow(layout == Layout::Narrow, cx));
+            }
             cx.notify();
         }
     }
@@ -150,11 +175,24 @@ impl Render for MainArea {
                     .items_center()
                     .justify_center()
                     .text_color(p.faint)
-                    .child("No project yet: add one with flottille project add."),
+                    .flex_col()
+                    .gap(px(12.))
+                    .child("No project yet.")
+                    .child({
+                        let shell = self.shell.clone();
+                        flottille_ui::Button::primary("add-first-project", "Add a project")
+                            .leading(flottille_ui::Icon::Plus)
+                            .on_click(move |_, window, cx| {
+                                shell
+                                    .update(cx, |shell, cx| shell.add_project(window, cx))
+                                    .ok();
+                            })
+                    }),
             ),
             Page::Project { .. } => root.children(self.project.clone()),
             Page::Session { .. } => root.children(self.session.clone()),
             Page::Settings => root.child(self.settings.clone()),
+            Page::ProjectSettings { .. } => root.children(self.project_settings.clone()),
         }
     }
 }
