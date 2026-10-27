@@ -159,6 +159,8 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
   temp file + rename, all-or-nothing edits);
 - commands: `commands_list`, `commands_run` (catalogue command or one line, **never a shell**),
   `commands_output`, `commands_stop`;
+- references: `reference_read`, one of the project's references, documents read when relevant
+  (`docs/projects.md`, "References");
 
 Flottille's own tools:
 
@@ -337,9 +339,13 @@ repository and for the project folder: `CLAUDE.md` or `AGENTS.md` (the agent's o
 **and the local files `CLAUDE.local.md` / `AGENTS.local.md` when present** (they hold rules the
 user keeps out of the repository).
 
-Later (milestone "Forges and tickets"), a project gains **references** (documents an agent reads with a tool:
-what skills hold today) and **procedures** (named multi-step actions with their own scoped
-authorizations: what slash commands hold today), see `reference/multi-repo-case.md`.
+After the per-session part, before the project layer, comes the list of the project's **references** (documents an agent reads
+with the tool `reference_read`: what knowledge skills hold today): a name and one line each, never
+the content (`docs/projects.md`).
+
+Later (milestone "Forges and tickets"), a project gains **procedures** (named multi-step actions
+with their own scoped authorizations: what slash commands hold today), see
+`reference/multi-repo-case.md`.
 
 ## 9. The built-in orchestration standard
 

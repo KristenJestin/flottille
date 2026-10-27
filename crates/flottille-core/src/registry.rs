@@ -110,7 +110,8 @@ impl Registry {
         }
     }
 
-    fn file(&self, name: &str) -> PathBuf {
+    /// Where the project's file is, whether it exists or not.
+    pub fn file(&self, name: &str) -> PathBuf {
         self.dir.join(format!("{name}.toml"))
     }
 }

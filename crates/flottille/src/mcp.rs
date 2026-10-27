@@ -47,6 +47,7 @@ use crate::gate;
 use crate::place::{Place, Resolved};
 use crate::projects;
 use crate::providers::{self, Provider};
+use crate::references;
 use crate::runs;
 use crate::tree;
 
@@ -86,7 +87,7 @@ const REPLACED: &str = "refused: this session has been replaced: a new session o
 
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
 /// the order frozen in the agent.
-const SERVED: [Definition; 18] = [
+const SERVED: [Definition; 19] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -248,6 +249,29 @@ const SERVED: [Definition; 18] = [
             json!({"type": "object", "properties": {
                 "run": {"type": "string"}
             }, "required": ["run"], "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "reference_read",
+        title: "Read a reference",
+        description: "Reads one of the project's references, the documents listed in your \
+            instructions (framework guides, test library, design system), when your task needs \
+            them. A file reference is read by its name, a page at a time (32 KiB at most) like \
+            fs_read; a folder reference lists its files, then path names the one to read. Only \
+            the reference's own files are served, never outside it. Refused for a name that is \
+            not in the list.",
+        read_only: true,
+        idempotent: true,
+        destructive: false,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "name": {"type": "string", "description": "A reference of the list in your instructions."},
+                "path": {"type": "string", "description": "A folder reference only: a file of it, relative to the reference."},
+                "range": {"type": "object", "properties": {
+                    "offset": {"type": "integer", "minimum": 0, "description": "The byte to start at; a page names the next one."},
+                    "length": {"type": "integer", "minimum": 1, "maximum": files::READ_PAGE_BYTES}
+                }, "additionalProperties": false}
+            }, "required": ["name"], "additionalProperties": false})
         },
     },
     Definition {
@@ -1159,6 +1183,7 @@ async fn perform(
                     "search" => files::search(&cx, args),
                     "fs_write" => files::fs_write(&cx, args),
                     "fs_edit" => files::fs_edit(&cx, args),
+                    "reference_read" => references::reference_read(&cx, args),
                     other => Outcome::Failed(format!("{other} is not served")),
                 }
             })
@@ -1235,7 +1260,7 @@ mod tests {
     #[test]
     fn a_grant_holds_the_agent_s_served_tools_in_its_own_order() {
         let mut leaf = claude::PROVIDER.tools(false, true);
-        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 11);
+        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 12);
         leaf.reverse();
         leaf.retain(|tool| !tool.ends_with("__search"));
         leaf.push("fs_read".into());
@@ -1243,7 +1268,7 @@ mod tests {
         assert_eq!(served.first(), Some(&"ask_parent"));
         assert_eq!(served.last(), Some(&"fs_read"));
         assert!(!served.contains(&"search"));
-        assert_eq!(served.len(), 10);
+        assert_eq!(served.len(), 11);
     }
 
     #[test]

@@ -376,6 +376,11 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
     let at_depth_limit = depth >= DEPTH_LIMIT;
     let tools = provider.tools(new.parent.is_none(), at_depth_limit);
     let files = roles::project_files(&project.folder, &repositories);
+    let references: Vec<(String, String)> = project
+        .references
+        .iter()
+        .map(|(name, reference)| (name.clone(), reference.description.clone()))
+        .collect();
     let instructions = roles::instructions(
         new.role,
         &roles::Session {
@@ -384,6 +389,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
             folder: &folder,
             title: new.title.as_deref(),
             at_depth_limit,
+            references: &references,
         },
         &files,
     );

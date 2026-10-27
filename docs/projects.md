@@ -87,6 +87,37 @@ checks that their names are those of environment variables and that their templa
 `{workspace}`, `{workspace.path}`, `{project}`, `{branch}` and `{repository}` (`{{` and `}}` are a
 literal brace).
 
+## References
+
+`[references.<name>]` lists documents an agent reads with a tool when its task needs them, in place
+of the knowledge skills (framework guides, a test library, a design system) that other tools load
+every time. Each holds:
+
+| Key | |
+|---|---|
+| `description` | One line, not empty: when the document is worth reading. |
+| `path` | A file or a folder of files, relative to the project folder (a file of a repository is `<repository>/<file>`). It must stay inside the project folder, once the links are followed, and not go through a `.git`. |
+
+```toml
+[references.react]
+description = "How we write React components"
+path = "docs/react"
+
+[references.style]
+description = "The code style"
+path = "docs/STYLE.md"
+```
+
+An agent sees the names and descriptions in its instructions, after the cache boundary, never
+the content (`docs/design.md` §8); it reads one with `reference_read` (`docs/tools.md`). The list
+is frozen in an agent's instructions when the agent is created, so a reference added later is
+seen by the agents started after it; `reference_read` itself follows the file as it is now. A
+reference is read from the project folder, whatever the agent's place: it is the project's, not
+the branch's.
+
+`flottille reference list|add|remove` edits the file for you, the rest of it left as written,
+comments included (`docs/cli.md`).
+
 ## The recipe
 
 `[[recipe]]` lists the steps that prepare a new workspace, done in the order of the file
