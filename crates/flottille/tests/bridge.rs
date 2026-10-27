@@ -199,6 +199,7 @@ fn the_bridge_gives_claude_exactly_the_bare_options_and_environment() {
             "--input-format",
             "stream-json",
             "--include-partial-messages",
+            "--thinking-display=summarized",
             "--permission-prompt-tool=stdio",
             "--tools=",
             "--setting-sources=",
@@ -334,6 +335,33 @@ fn a_prompt_streams_text_thoughts_and_tool_calls_then_the_usage_and_its_stop_rea
             "message": {"role": "user", "content": [{"type": "text", "text": "hello"}]}})
         ]
     );
+}
+
+#[test]
+fn a_thought_claude_sends_without_its_text_gives_no_empty_thought() {
+    let user = User::with_fake_claude();
+    user.claude_script(json!({"turns": [{"when": "hello", "do": [
+        {"think_hidden": true},
+        {"think": "a plan"},
+        {"say": "Done"}
+    ]}]}));
+    let mut bridge = Bridge::start(&user);
+    let session = bridge.open(&user, &[]);
+
+    let (answer, seen) = bridge.prompt(&session, "hello");
+
+    answer.unwrap();
+    let thoughts: Vec<Value> = updates(&seen)
+        .into_iter()
+        .filter(|u| u["sessionUpdate"] == "agent_thought_chunk")
+        .map(|u| u["content"]["text"].clone())
+        .collect();
+    assert_eq!(thoughts, [json!("a plan")]);
+    let history = std::fs::read_to_string(
+        user.path(&format!("state/flottille/bridge/claude/{session}.jsonl")),
+    )
+    .unwrap();
+    assert!(!history.contains(r#"{"thought":""}"#), "{history}");
 }
 
 #[test]

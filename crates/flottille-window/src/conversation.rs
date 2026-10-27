@@ -8,11 +8,14 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use flottille_core::protocol::Event;
 use serde_json::Value;
 
+/// Who sent the user's messages: a role, never drawn (the bubble says it).
+pub const USER: &str = "you";
+
 /// What one row of the conversation shows.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Block {
-    /// A message the agent was sent: the user's (`from` is `you`), or its parent's
-    /// (`lead → web-form`), its brief first.
+    /// A message the agent was sent: the user's (`from` is [`USER`]), or its parent's
+    /// (`the conversation → web-form`), its brief first.
     Message {
         from: String,
         text: String,
@@ -457,7 +460,7 @@ impl Conversation {
     fn delivered(&self, kind: &str, body: String) -> Block {
         match (kind, &self.parent) {
             ("" | "user" | "brief", None) => Block::Message {
-                from: "you".into(),
+                from: USER.into(),
                 text: body,
             },
             ("brief" | "parent", Some(parent)) => Block::Message {

@@ -498,8 +498,8 @@ bridge runs one session.
 - **`claude` is started** without a shell, in the session's `cwd`, with the bridge's environment,
   the options' `env` and `CLAUDE_CODE_ENTRYPOINT=sdk-rs`, and exactly these arguments:
   `--output-format stream-json --verbose --input-format stream-json --include-partial-messages
-  --permission-prompt-tool=stdio --tools= --setting-sources= --strict-mcp-config
-  --allowedTools=<the tools, comma-separated> --mcp-config <file>`, then
+  --thinking-display=summarized --permission-prompt-tool=stdio --tools= --setting-sources=
+  --strict-mcp-config --allowedTools=<the tools, comma-separated> --mcp-config <file>`, then
   `--session-id=<a new UUID>` for `session/new`, or `--resume=<id>` for a resume or a load.
 - **The MCP configuration** (`{"mcpServers": {"flottille": {"type": "http", "url", "headers"}}}`)
   is a file only the user can read, `$XDG_RUNTIME_DIR/flottille/bridge/<the bridge's pid>.mcp.json`,
@@ -512,7 +512,8 @@ bridge runs one session.
   ends before (a resume of a session it does not know) fails the open.
 - **What `claude` says**, mapped to ACP updates: stream deltas of text and thinking become
   `agent_message_chunk` and `agent_thought_chunk`, with no message id (the whole message that
-  follows does not repeat them); a `tool_use` becomes a `tool_call` (`in_progress`, the tool's name as its title and in
+  follows does not repeat them); a thinking block with no text (its display omitted: only its
+  signature) becomes nothing; a `tool_use` becomes a `tool_call` (`in_progress`, the tool's name as its title and in
   `_meta.claudeCode.toolName`, its input as `rawInput`) whose id is the tool use's, the one
   `claude` gives Flottille's MCP server as `claudecode/toolUseId`; a `tool_result` its
   `tool_call_update` (`completed` or `failed`); a `compact_boundary` a completed `tool_call` with

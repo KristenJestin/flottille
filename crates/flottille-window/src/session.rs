@@ -5,12 +5,16 @@
 //!
 //! Every row of the conversation is its own view: a message arriving adds a row or draws one row
 //! again, never the others. What an agent, a file or a command said is shown as the daemon gave
-//! it (masked and escaped), as plain text.
+//! it (masked and escaped): an agent's replies and thoughts drawn as Markdown, whose images are
+//! never loaded, the rest as plain text.
+//!
+//! The root agent has no name on screen: where a text names it, it is "the conversation".
 
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::FRAC_PI_2;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use flottille_ui::{
@@ -19,16 +23,18 @@ use flottille_ui::{
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{InputEditorStyle, InputEvent, TextareaState};
+use gpui_kit::base::text::{TextView, TextViewState, TextViewStyle};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, AppContext as _, Bounds, Context, ElementId, Entity, Focusable as _, FollowMode,
-    InteractiveElement, IntoElement, ListAlignment, ListState, ParentElement, PathBuilder, Pixels,
-    Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
-    TestSupportExt as _, Transformation, WeakEntity, Window, canvas, div, list, point, px, radians,
+    ImageCacheError, ImageSource, InteractiveElement, IntoElement, ListAlignment, ListState,
+    ParentElement, PathBuilder, Pixels, Render, SharedString, SharedUri,
+    StatefulInteractiveElement, Styled, Subscription, Task, TestSupportExt as _, Transformation,
+    WeakEntity, Window, canvas, div, list, point, px, radians,
 };
 
 use crate::actions::{Answer, Command};
-use crate::conversation::{Block, Call, CallState, Change, Conversation, DiffLine};
+use crate::conversation::{Block, Call, CallState, Change, Conversation, DiffLine, USER};
 use crate::link::{Connect, Update};
 use crate::model::Place;
 use crate::open::Opener;
@@ -40,6 +46,13 @@ use crate::tree::place_name;
 
 /// Width of the session page's right rail.
 pub const RAIL: f32 = 290.;
+
+/// How the screen names the root agent, which has no name of its own there.
+pub const THE_CONVERSATION: &str = "the conversation";
+
+/// The reply field's placeholder and its send button's tooltip: the field writes to the root.
+pub const REPLY_PLACEHOLDER: &str = "Reply…";
+pub const SEND: &str = "Send";
 
 /// The state an agent of the tree is drawn with, from what the daemon says of it: only a root can
 /// need the user; a child waiting on its parent is waiting, in grey.
@@ -144,7 +157,8 @@ impl SessionPage {
         let drawer = cx.new(|_| Drawer::new("rail-drawer", Side::Right, px(RAIL), rail.clone()));
         let pill = cx.new(|cx| Pill::new(status.clone(), cx));
         let shown = opened.id.clone();
-        let conversation = cx.new(|_| ConversationView::new(page, &shown, "lead".into(), None));
+        let conversation =
+            cx.new(|_| ConversationView::new(page, &shown, THE_CONVERSATION.into(), None));
         let _status = cx.observe(&status, |this, status, cx| {
             let needs_you = status.read(cx).state() == AgentState::NeedsYou;
             if this.needs_you != needs_you {
@@ -270,6 +284,14 @@ impl SessionPage {
             })
     }
 
+    /// How the screen names an agent: the root is the conversation.
+    fn said_name(&self, id: &str) -> String {
+        match id == self.opened.id {
+            true => THE_CONVERSATION.into(),
+            false => self.name(id),
+        }
+    }
+
     fn parent_of(&self, id: &str) -> Option<String> {
         self.tree
             .iter()
@@ -309,8 +331,8 @@ impl SessionPage {
         }
         self.shown = agent.to_owned();
         self.pages = 1;
-        let parent = self.parent_of(agent).map(|p| self.name(&p));
-        let (page, name) = (cx.entity().downgrade(), self.name(agent));
+        let parent = self.parent_of(agent).map(|p| self.said_name(&p));
+        let (page, name) = (cx.entity().downgrade(), self.said_name(agent));
         let shown = self.shown.clone();
         self.conversation = cx.new(|_| ConversationView::new(page, &shown, name, parent));
         self.rail
@@ -575,18 +597,18 @@ impl SessionPage {
             why: request.map(|r| {
                 let mut why = r.reasons.join(" ");
                 for (by, said) in &r.forwards {
-                    why.push_str(&format!(" {} forwards it: {said}", self.name(by)));
+                    why.push_str(&format!(" {} forwards it: {said}", self.said_name(by)));
                 }
                 why.trim().to_owned()
             }),
             source: request.map(|r| {
-                let mut source = format!("asked by {}", self.name(&r.agent));
+                let mut source = format!("asked by {}", self.said_name(&r.agent));
                 for (by, _) in &r.forwards {
-                    source.push_str(&format!(" · forwarded by {}", self.name(by)));
+                    source.push_str(&format!(" · forwarded by {}", self.said_name(by)));
                 }
                 format!("{source} · #{number}")
             }),
-            asker: request.map(|r| self.name(&r.agent)),
+            asker: request.map(|r| self.said_name(&r.agent)),
             decision,
         })
     }
@@ -696,16 +718,27 @@ impl Render for SessionPage {
 }
 
 impl SessionPage {
-    /// In place of the composer while a sub-agent is read: it belongs to its parent.
+    /// What the bar in place of the composer says while a sub-agent is read, and its button:
+    /// `None` while the root is shown.
+    pub fn read_only_text(&self) -> Option<(String, String)> {
+        if self.shown == self.opened.id {
+            return None;
+        }
+        Some((
+            format!(
+                "Reading {}. It belongs to {THE_CONVERSATION}: only {THE_CONVERSATION} takes \
+                 your messages.",
+                self.name(&self.shown)
+            ),
+            format!("Back to {THE_CONVERSATION}"),
+        ))
+    }
+
+    /// In place of the composer while a sub-agent is read: it belongs to the conversation.
     fn read_only(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let name = self.name(&self.shown);
-        let parent = self
-            .parent_of(&self.shown)
-            .map(|parent| self.name(&parent))
-            .unwrap_or_else(|| "its parent".into());
+        let (said, back) = self.read_only_text().unwrap_or_default();
         let root = self.opened.id.clone();
-        let back = format!("Back to {}", self.name(&root));
         div()
             .id("read-only")
             .flex()
@@ -720,9 +753,7 @@ impl SessionPage {
             .py(px(10.))
             .text_size(px(13.))
             .text_color(p.mute)
-            .child(div().flex_1().min_w_0().child(SharedString::from(format!(
-                "Reading {name}. It belongs to {parent}: only {parent} takes your messages."
-            ))))
+            .child(div().flex_1().min_w_0().child(SharedString::from(said)))
             .child(Button::quiet("back-to-root", back).on_click(cx.listener(
                 move |this, _, _, cx| {
                     this.select(&root, cx);
@@ -759,8 +790,11 @@ pub struct ConversationView {
     earlier: bool,
     /// How many times a row was looked at or changed, for the cost of an update.
     touched: usize,
-    /// The list's items: "Show earlier" first when older events remain, then the rows.
+    /// The list's items: "Show earlier" first when older events remain, then the rows, a long
+    /// reply as one item per Markdown piece: the list draws only the pieces in view.
     list: ListState,
+    /// The items of each row past its first: the pieces of its reply past the first.
+    more: Vec<usize>,
     renders: usize,
 }
 
@@ -775,6 +809,7 @@ impl ConversationView {
             earlier: false,
             touched: 0,
             list: Self::list(),
+            more: Vec::new(),
             renders: 0,
         }
     }
@@ -785,9 +820,34 @@ impl ConversationView {
         list
     }
 
-    /// The list's item of a row.
+    /// The list's first item of a row.
     fn item(&self, at: usize) -> usize {
-        at + usize::from(self.earlier)
+        at + usize::from(self.earlier) + self.more[..at.min(self.more.len())].iter().sum::<usize>()
+    }
+
+    /// The row of the list's item `ix`, and which of its items it is.
+    fn row_of(&self, ix: usize) -> Option<(usize, usize)> {
+        let mut ix = ix.checked_sub(usize::from(self.earlier))?;
+        for (at, more) in self.more.iter().enumerate() {
+            if ix <= *more {
+                return Some((at, ix));
+            }
+            ix -= more + 1;
+        }
+        None
+    }
+
+    /// Gives the row `at` one item per piece of its reply, and measures again its last.
+    fn fit(&mut self, at: usize, cx: &gpui_kit::App) {
+        let more = self.rows[at].read(cx).more_pieces().len();
+        let (first, had) = (self.item(at), self.more[at]);
+        if more != had {
+            let kept = first + 1 + had.min(more);
+            self.list
+                .splice(kept..first + 1 + had, more.saturating_sub(had));
+            self.more[at] = more;
+        }
+        self.list.remeasure_items(first + more..first + more + 1);
     }
 
     pub fn rows(&self) -> &[Entity<Row>] {
@@ -826,8 +886,10 @@ impl ConversationView {
         self.earlier = read.earlier;
         self.rows.clear();
         self.specials.clear();
+        self.more.clear();
         for at in 0..self.model.blocks().len() {
             self.add_row(at, page, cx);
+            self.more[at] = self.rows[at].read(cx).more_pieces().len();
         }
         let items = self.item(self.rows.len());
         match read.follow {
@@ -851,6 +913,7 @@ impl ConversationView {
         let root = self.id == page.id();
         let row = Row::view(at, block, me, root, page, self.page.clone(), cx);
         self.rows.push(row);
+        self.more.push(0);
         self.touched += 1;
     }
 
@@ -868,9 +931,10 @@ impl ConversationView {
         for change in changes {
             match change {
                 Change::Added => {
-                    let item = self.item(self.rows.len());
-                    self.add_row(self.rows.len(), page, cx);
+                    let (at, item) = (self.rows.len(), self.item(self.rows.len()));
+                    self.add_row(at, page, cx);
                     self.list.splice(item..item, 1);
+                    self.fit(at, cx);
                     added = true;
                 }
                 Change::Changed(at) => {
@@ -880,14 +944,14 @@ impl ConversationView {
                         row.update(cx, |row, cx| row.set_block(block, cx));
                         let item = self.item(*at);
                         self.list.remeasure_items(item..item + 1);
+                        self.fit(*at, cx);
                     }
                 }
                 Change::Appended(at, piece) => {
                     if let Some(row) = self.rows.get(*at).cloned() {
                         self.touched += 1;
                         row.update(cx, |row, cx| row.append(piece, cx));
-                        let item = self.item(*at);
-                        self.list.remeasure_items(item..item + 1);
+                        self.fit(*at, cx);
                     }
                 }
             }
@@ -897,20 +961,32 @@ impl ConversationView {
         }
     }
 
-    /// The list's item `ix`: "Show earlier", or a row, in the conversation's column.
-    fn render_item(&mut self, ix: usize, window: &mut Window, _: &mut Context<Self>) -> AnyElement {
+    /// The list's item `ix`: "Show earlier", a row, or a piece of a row's long reply, in the
+    /// conversation's column.
+    fn render_item(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let narrow = window.viewport_size().width < px(crate::shell::NARROW);
+        let (at, piece) = self.row_of(ix).unwrap_or((usize::MAX, 0));
+        let more = self.more.get(at).copied().unwrap_or(0);
+        // Between the pieces of one reply, the gap of its paragraphs.
+        let below = match () {
+            _ if piece < more => TextViewStyle::default()
+                .paragraph_gap()
+                .to_pixels(window.rem_size()),
+            _ if ix + 1 == self.item(self.rows.len()) => px(20.),
+            _ => px(18.),
+        };
         let column = div()
             .max_w(px(780.))
             .w_full()
             .mx_auto()
             .px(px(if narrow { 16. } else { 28. }))
             .when(ix == 0, |d| d.pt(px(if narrow { 20. } else { 28. })))
-            .pb(px(if ix + 1 == self.item(self.rows.len()) {
-                20.
-            } else {
-                18.
-            }));
+            .pb(below);
         // A list's item is not stretched to its width: the column is centred in a full one.
         let centred = |column| div().w_full().child(column).into_any_element();
         if self.earlier && ix == 0 {
@@ -921,10 +997,13 @@ impl ConversationView {
                 }),
             ));
         }
-        let at = ix - usize::from(self.earlier);
         let Some(row) = self.rows.get(at) else {
             return div().into_any_element();
         };
+        if piece > 0 {
+            let piece = row.read(cx).more_pieces().get(piece - 1).cloned();
+            return centred(column.children(piece));
+        }
         centred(column.child(enter(
             ElementId::Name(format!("enter-row-{}-{at}", self.id).into()),
             0,
@@ -1026,8 +1105,11 @@ pub struct Row {
     page: WeakEntity<SessionPage>,
     /// Shared with nothing: a piece streamed is appended to it in place.
     block: Rc<Block>,
-    /// A thought unfolded.
+    /// A thought or a report unfolded.
     open: bool,
+    /// The reply or the thought as Markdown, in the pieces [`markdown_pieces`] cuts: a piece
+    /// streamed parses the last one again, never the whole reply.
+    markdown: Vec<Entity<MarkdownPiece>>,
     thinking: Option<(Entity<PulsingLabel>, Entity<ThinkingTimer>)>,
     calls: Vec<(Entity<Status>, Entity<StateIcon>)>,
     sub_agents: Vec<SubAgent>,
@@ -1067,6 +1149,7 @@ impl Row {
                     text: String::new(),
                 }),
                 open: false,
+                markdown: Vec::new(),
                 thinking: None,
                 calls: Vec::new(),
                 sub_agents,
@@ -1084,6 +1167,61 @@ impl Row {
 
     pub fn block(&self) -> &Block {
         &self.block
+    }
+
+    /// The line drawn over the row, when it has one: who sent a message (none for the user's:
+    /// the bubble says it), whose report it is, who launched the sub-agents, who asked a request.
+    pub fn label(&self) -> Option<String> {
+        match &*self.block {
+            Block::Message { from, .. } if from != USER => Some(from.clone()),
+            Block::Text { .. } => self.author().map(str::to_owned),
+            Block::Report { from, .. } => Some(format!("Report from {from}")),
+            Block::SubAgents => Some(format!("launched by {}", self.me)),
+            Block::Approval { .. } => self
+                .card
+                .as_ref()
+                .and_then(|card| card.record().or_else(|| card.source.clone())),
+            _ => None,
+        }
+    }
+
+    /// The text a reply or a thought shows, its Markdown drawn: as of the last parse that landed.
+    pub fn rendered(&self, cx: &gpui_kit::App) -> Option<String> {
+        let pieces = self
+            .markdown
+            .iter()
+            .map(|piece| piece.read(cx).state.read(cx));
+        let rendered = pieces.map(|state| state.rendered_text().as_str().to_owned());
+        matches!(*self.block, Block::Text { .. } | Block::Thought { .. })
+            .then(|| rendered.collect())
+    }
+
+    /// The pieces of a reply past its first, which the list draws as items of their own.
+    pub fn more_pieces(&self) -> &[Entity<MarkdownPiece>] {
+        match *self.block {
+            Block::Text { .. } => self.markdown.get(1..).unwrap_or_default(),
+            _ => &[],
+        }
+    }
+
+    /// Shows `text` as Markdown: each piece that did not change keeps its parse, and one that
+    /// grew parses what it gained.
+    fn set_markdown(&mut self, text: &str, muted: bool, cx: &mut Context<Self>) {
+        let pieces = markdown_pieces(text);
+        for (at, piece) in pieces.iter().enumerate() {
+            match self.markdown.get(at) {
+                Some(markdown) => {
+                    let state = markdown.read(cx).state.clone();
+                    state.update(cx, |state, cx| state.set_text(piece, cx));
+                }
+                None => {
+                    let state = cx.new(|cx| TextViewState::markdown(piece, cx));
+                    self.markdown
+                        .push(cx.new(|_| MarkdownPiece { state, muted }));
+                }
+            }
+        }
+        self.markdown.truncate(pieces.len());
     }
 
     /// The name over an agent's reply: none for the root's.
@@ -1116,6 +1254,10 @@ impl Row {
     }
 
     fn set_block(&mut self, block: Block, cx: &mut Context<Self>) {
+        if let Block::Text { text } | Block::Thought { text, .. } = &block {
+            let muted = matches!(block, Block::Thought { .. });
+            self.set_markdown(text, muted, cx);
+        }
         match &block {
             Block::Thought { since, until, .. } => {
                 let (since, until) = (*since, *until);
@@ -1170,8 +1312,12 @@ impl Row {
 
     /// The reply or the thought it shows goes on with `piece`.
     fn append(&mut self, piece: &str, cx: &mut Context<Self>) {
-        if let Block::Text { text } | Block::Thought { text, .. } = Rc::make_mut(&mut self.block) {
+        let block = Rc::make_mut(&mut self.block);
+        let muted = matches!(block, Block::Thought { .. });
+        if let Block::Text { text } | Block::Thought { text, .. } = block {
             text.push_str(piece);
+            let text = text.clone();
+            self.set_markdown(&text, muted, cx);
             cx.notify();
         }
     }
@@ -1211,6 +1357,87 @@ impl Row {
     }
 }
 
+/// A reply or a thought, its Markdown pieces one under the other.
+fn markdown_view(pieces: &[Entity<MarkdownPiece>]) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(TextViewStyle::default().paragraph_gap())
+        .children(pieces.iter().cloned())
+}
+
+/// One piece of a reply's or a thought's Markdown, its own view: a piece streamed draws the last
+/// one again, and the others as they were.
+pub struct MarkdownPiece {
+    state: Entity<TextViewState>,
+    /// A thought's, in the muted ink.
+    muted: bool,
+}
+
+impl Render for MarkdownPiece {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let style = TextViewStyle::default()
+            .with_foreground(if self.muted { p.mute } else { p.text })
+            .with_muted_foreground(p.mute)
+            .with_link(p.acc)
+            .with_selection(p.sel)
+            .with_code_background(p.card2)
+            .with_code_block(gpui_kit::StyleRefinement::default().mono(12.))
+            .with_inline_code(gpui_kit::HighlightStyle {
+                color: Some(p.text),
+                background_color: Some(p.card2),
+                ..Default::default()
+            })
+            .with_border(p.line)
+            .with_dark(p.bg.l < 0.5);
+        TextView::new(&self.state)
+            .style(style)
+            .image_source(no_image)
+    }
+}
+
+/// Past this many bytes, a reply is cut into another Markdown piece where a block starts.
+const MARKDOWN_PIECE: usize = 4096;
+
+/// A reply cut into pieces that parse alone as they would together: each cut, once the piece
+/// before it holds [`MARKDOWN_PIECE`] bytes, is before a line at the left margin that starts a
+/// block (after a blank line, or a list item after a list item), never inside a fenced code
+/// block. The parser reads again the last block of what it shows on every piece streamed, and
+/// keeps the others by copying them all: in one piece, a long reply would cost more on each.
+pub fn markdown_pieces(text: &str) -> Vec<&str> {
+    let item = |line: &str| {
+        let numbered = line.trim_start_matches(|c: char| c.is_ascii_digit());
+        ["- ", "* ", "+ "].iter().any(|m| line.starts_with(m))
+            || (numbered.len() < line.len() && numbered.starts_with(". "))
+    };
+    let (mut pieces, mut start, mut at) = (Vec::new(), 0, 0);
+    let (mut fenced, mut previous): (bool, Option<&str>) = (false, None);
+    for line in text.split_inclusive('\n') {
+        let margin = line.starts_with(|c: char| !c.is_whitespace());
+        let starts_block = previous.is_some_and(|p| p.trim().is_empty() || (item(p) && item(line)));
+        if !fenced && margin && starts_block && at - start >= MARKDOWN_PIECE {
+            pieces.push(&text[start..at]);
+            start = at;
+        }
+        if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
+            fenced = !fenced;
+        }
+        previous = Some(line);
+        at += line.len();
+    }
+    pieces.push(&text[start..]);
+    pieces
+}
+
+/// An image of a reply is never loaded: its address, which the agent wrote, would reach what the
+/// gate does not see.
+pub fn no_image(_: &SharedUri) -> ImageSource {
+    ImageSource::Custom(Arc::new(|_, _| {
+        Some(Err(ImageCacheError::Asset("images are not loaded".into())))
+    }))
+}
+
 fn call_state(call: &Call) -> AgentState {
     match call.state {
         CallState::Running => AgentState::Running,
@@ -1228,7 +1455,7 @@ impl Render for Row {
         // The row's own block, not a copy of it.
         let block = self.block.clone();
         match &*block {
-            Block::Message { from, text } => div()
+            Block::Message { text, .. } => div()
                 .id(id("message"))
                 .flex()
                 .flex_col()
@@ -1243,44 +1470,55 @@ impl Render for Row {
                         .rounded_br(px(4.))
                         .px(px(14.))
                         .py(px(10.))
-                        .child(
-                            div()
-                                .flex()
-                                .justify_end()
-                                .mono(11.5)
-                                .text_color(p.faint)
-                                .mb(px(5.))
-                                .child(SharedString::from(from.clone())),
-                        )
+                        .when_some(self.label(), |d, from| {
+                            d.child(
+                                div()
+                                    .id(id("message-from"))
+                                    .flex()
+                                    .justify_end()
+                                    .mono(11.5)
+                                    .text_color(p.faint)
+                                    .mb(px(5.))
+                                    .child(SharedString::from(from))
+                                    .test_support(),
+                            )
+                        })
                         .child(SharedString::from(text.clone())),
                 )
                 .test_support()
                 .into_any_element(),
             Block::Thought { text, .. } => {
                 let (label, timer) = self.thinking.clone().expect("a thought has its timer");
+                // A thought the provider sent no text of says how long it took, and opens on
+                // nothing.
+                let said = !text.trim().is_empty();
+                let head = div()
+                    .flex()
+                    .items_center()
+                    .gap(px(7.))
+                    .text_size(px(13.))
+                    .text_color(p.faint)
+                    .child(label)
+                    .child(timer);
+                let head = match said {
+                    true => head
+                        .id(id("thought-toggle"))
+                        .cursor_pointer()
+                        .child(icon(Icon::Chevron).size(px(12.)).text_color(p.faint))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.open = !this.open;
+                            cx.notify();
+                        }))
+                        .test_support()
+                        .into_any_element(),
+                    false => head.into_any_element(),
+                };
                 div()
                     .id(id("thought"))
                     .flex()
                     .flex_col()
-                    .child(
-                        div()
-                            .id(id("thought-toggle"))
-                            .flex()
-                            .items_center()
-                            .gap(px(7.))
-                            .text_size(px(13.))
-                            .text_color(p.faint)
-                            .cursor_pointer()
-                            .child(label)
-                            .child(timer)
-                            .child(icon(Icon::Chevron).size(px(12.)).text_color(p.faint))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.open = !this.open;
-                                cx.notify();
-                            }))
-                            .test_support(),
-                    )
-                    .when(self.open, |d| {
+                    .child(head)
+                    .when(said && self.open, |d| {
                         d.child(
                             div()
                                 .id(id("thought-text"))
@@ -1291,14 +1529,14 @@ impl Render for Row {
                                 .border_color(p.line)
                                 .text_size(px(13.))
                                 .text_color(p.mute)
-                                .child(SharedString::from(text.clone()))
+                                .child(markdown_view(&self.markdown))
                                 .test_support(),
                         )
                     })
                     .test_support()
                     .into_any_element()
             }
-            Block::Text { text } => {
+            Block::Text { .. } => {
                 let author = self.author().map(|me| {
                     let letter = me.chars().next().unwrap_or('?').to_uppercase().to_string();
                     (
@@ -1334,7 +1572,7 @@ impl Render for Row {
                                 .child(div().id(id("author")).child(me).test_support()),
                         )
                     })
-                    .child(SharedString::from(text.clone()))
+                    .child(markdown_view(&self.markdown[..self.markdown.len().min(1)]))
                     .test_support()
                     .into_any_element()
             }
@@ -1420,7 +1658,7 @@ impl Render for Row {
                     .into_any_element()
             }
             Block::SubAgents => {
-                let by = self.me.clone();
+                let by = self.label().unwrap_or_default();
                 for agent in &self.sub_agents {
                     if !self.icons.contains_key(&agent.id) {
                         let status = agent.status.clone();
@@ -1455,24 +1693,46 @@ impl Render for Row {
                     .child(
                         Card::new()
                             .title("Sub-agents")
-                            .meta(format!("launched by {by}"))
+                            .meta(by)
                             .child(div().p(px(4.)).children(rows)),
                     )
                     .test_support()
                     .into_any_element()
             }
-            Block::Report { from, text } => div()
+            // Folded to its one line until a click opens it.
+            Block::Report { text, .. } => div()
                 .id(id("report"))
                 .child(
                     Card::new()
-                        .title(SharedString::from(format!("Report from {from}")))
-                        .child(
+                        .title(
                             div()
-                                .px(px(14.))
-                                .pt(px(10.))
-                                .pb(px(12.))
-                                .child(SharedString::from(text.clone())),
-                        ),
+                                .id(id("report-toggle"))
+                                .flex()
+                                .items_center()
+                                .gap(px(7.))
+                                .cursor_pointer()
+                                .child(SharedString::from(self.label().unwrap_or_default()))
+                                .child(icon(Icon::Chevron).size(px(12.)).text_color(p.faint))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.open = !this.open;
+                                    cx.notify();
+                                }))
+                                .test_support(),
+                        )
+                        .when(self.open, |card| {
+                            card.child(
+                                div()
+                                    .id(id("report-text"))
+                                    .px(px(14.))
+                                    .pt(px(10.))
+                                    .pb(px(12.))
+                                    .child(
+                                        TextView::markdown(id("report-markdown"), text.clone())
+                                            .image_source(no_image),
+                                    )
+                                    .test_support(),
+                            )
+                        }),
                 )
                 .test_support()
                 .into_any_element(),
@@ -2195,7 +2455,7 @@ impl Reply {
         let field = cx.new(|cx| {
             let mut field = TextareaState::new(window, cx)
                 .submit_on_enter(true)
-                .placeholder("Reply to lead…");
+                .placeholder(REPLY_PLACEHOLDER);
             let p = palette(cx);
             field.set_editor_style(InputEditorStyle {
                 foreground: p.text,
@@ -2376,7 +2636,7 @@ impl Render for Reply {
                     )
                     .child(div().flex_1())
                     .child(
-                        Button::round("reply-send", Icon::Send, "Send to lead")
+                        Button::round("reply-send", Icon::Send, SEND)
                             .disabled(!can_send)
                             .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
                     ),
@@ -2626,5 +2886,49 @@ mod tests {
         assert_eq!(seconds(2_000), "2.0s");
         assert_eq!(seconds(38_400), "38s");
         assert_eq!(seconds(240_000), "4m");
+    }
+
+    #[test]
+    fn a_long_reply_is_cut_where_a_block_starts_and_its_pieces_make_it_whole() {
+        let paragraph = "word ".repeat(200) + "\n\n";
+        let fence = format!("```\n{}\n\nnot a cut\n```\n\n", "code ".repeat(1000));
+        let items: String = (0..400).map(|n| format!("- item {n}\n")).collect();
+        let text = format!(
+            "{}{fence}{}{items}  indented\n",
+            paragraph.repeat(5),
+            paragraph.repeat(5)
+        );
+
+        let pieces = markdown_pieces(&text);
+
+        assert_eq!(pieces.concat(), text);
+        assert!(pieces.len() > 2, "{}", pieces.len());
+        for piece in &pieces[1..] {
+            assert!(
+                piece.starts_with("word")
+                    || piece.starts_with("```")
+                    || piece.starts_with("- item"),
+                "{:?}",
+                &piece[..20]
+            );
+        }
+        // Inside a code block, after a blank line, nothing is cut.
+        assert!(pieces.iter().all(|p| !p.starts_with("not a cut")));
+        assert!(pieces.iter().any(|p| p.contains("\n\nnot a cut\n```")));
+    }
+
+    #[test]
+    fn a_short_reply_is_one_piece() {
+        assert_eq!(
+            markdown_pieces("**a**\n\n- b\n- c\n"),
+            ["**a**\n\n- b\n- c\n"]
+        );
+        assert_eq!(markdown_pieces(""), [""]);
+    }
+
+    #[test]
+    fn an_image_in_a_reply_is_never_fetched() {
+        let source = no_image(&SharedUri::from("https://example.com/x.png"));
+        assert!(matches!(source, ImageSource::Custom(_)));
     }
 }

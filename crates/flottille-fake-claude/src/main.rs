@@ -34,6 +34,7 @@
 //! | `{"say": "text"}` | a `text_delta` stream event, then an `assistant` message with the text |
 //! | `{"stream": ["a", "b"]}` | a `text_delta` stream event for each part, then one `assistant` message with them all |
 //! | `{"think": "text"}` | the same with a `thinking_delta` and a thinking block |
+//! | `{"think_hidden": true}` | a `signature_delta`, then a thinking block with no text and its signature, as Claude sends a thought whose display is omitted |
 //! | `{"tool": {"id", "name", "input", "result"}}` | an `assistant` message with the `tool_use`, then a `user` message with its `tool_result` |
 //! | `{"permission": {"tool": "Bash", "input": {}}}` | a `can_use_tool` control request, the answer recorded |
 //! | `{"compaction": true}` | a `compacting` status, then a `compact_boundary` |
@@ -304,6 +305,9 @@ impl Fake {
             } else if let Some(text) = step["think"].as_str() {
                 self.delta(json!({"type": "thinking_delta", "thinking": text}));
                 self.assistant(json!({"type": "thinking", "thinking": text, "signature": "x"}));
+            } else if step.get("think_hidden").is_some() {
+                self.delta(json!({"type": "signature_delta", "signature": "x"}));
+                self.assistant(json!({"type": "thinking", "thinking": "", "signature": "x"}));
             } else if let Some(tool) = step.get("tool") {
                 self.assistant(
                     json!({"type": "tool_use", "id": tool["id"], "name": tool["name"],

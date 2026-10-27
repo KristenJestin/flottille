@@ -50,8 +50,9 @@ checked against `claude` 2.1.295; `flottille doctor` warns on another version. T
   Claude Code's default loads all three, with their hooks, plugins and skills), `--strict-mcp-config`
   with `--mcp-config <file>`, `--allowedTools=<exact names>`, `--permission-prompt-tool=stdio`
   (Claude's permission prompts come to the bridge as control requests),
-  `--include-partial-messages` (text and thinking as stream deltas), and `--session-id=<uuid>` or
-  `--resume=<id>`. The SDK writes a flag with a value as `--flag=value`.
+  `--include-partial-messages` (text and thinking as stream deltas), `--thinking-display=summarized`
+  (a hidden option: without it, this mode leaves the API's default, which sends the thoughts of
+  recent models as a signature with no text), and `--session-id=<uuid>` or `--resume=<id>`. The SDK writes a flag with a value as `--flag=value`.
 - **Control requests** on stdin and stdout (`{"type": "control_request", "request_id", "request":
   {"subtype", …}}`, answered by `{"type": "control_response", "response": {"subtype": "success" |
   "error", "request_id", "response" | "error"}}`), both ways. The bridge sends `initialize` (with
