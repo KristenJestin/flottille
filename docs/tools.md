@@ -4,7 +4,7 @@ The tools of the agents Flottille runs, and the MCP server that serves them: the
 `docs/design.md` §1. It follows `docs/reference/hemera.md` §3, with the rules of
 `docs/reference/mcp.md` §4 where they differ. A session lists the tools of its agent, which
 depend on what it can do (`docs/agents.md`): the file and command tools below for every agent,
-`forge_read` for an agent in a workspace, and the tree's tools (`agent_*`, `report`, `ask_user` or
+`forge_read` and `forge_write` for an agent in a workspace, and the tree's tools (`agent_*`, `report`, `ask_user` or
 `ask_parent`, `approval_answer`).
 
 ## The server
@@ -157,7 +157,9 @@ not a lock: a swap between it and the rename is not seen.
     (`$XDG_STATE_HOME/flottille/empty`), so that the forge command lines find no login;
   - `git push` made to fail where the environment can: `GIT_CONFIG_COUNT` incremented, with
     `GIT_CONFIG_KEY_<n>=url./dev/null/flottille-refused-push/.pushInsteadOf` and an empty
-    `GIT_CONFIG_VALUE_<n>`, which rewrites every push URL to a path that is no repository.
+    `GIT_CONFIG_VALUE_<n>`, which rewrites every push URL to a path that is no repository. The
+    one exception is a run whose line the gate let through as a push a procedure grants
+    (`docs/procedures.md`): that run alone keeps its push URLs.
 - **The environment does not stop every push**: `git -c url.<x>.pushInsteadOf=<x> push`,
   `env -u GIT_CONFIG_COUNT git push`, a remote with a push URL of its own
   (`remote.<name>.pushurl`, which git does not rewrite) and a `git config` write all get past it.
@@ -180,8 +182,11 @@ not a lock: a swap between it and the rename is not seen.
 |---|---|
 | `forge_read {repository?}` | The pull request of the workspace's branch in each of its repositories, or the one named: number, state, base, link, review, checks with their states, comments and reviews. Read only, through the user's own `gh`, run by the daemon; an agent has no forge sign-in of its own. A repository the workspace does not take is refused (`refused: X is not a repository of this agent's workspace: it has …`). Only an agent in a workspace has it. |
 
-It goes through the gate like every call, which allows it. How the forge is read, and what it
-never touches (a token, `gh auth token`), is in [`forges.md`](forges.md).
+| `forge_write {action, repository, title?, body?, draft?}` | Opens the pull request of the workspace's branch (`pr-create`), merges it by squash (`pr-merge-squash`) or re-runs the failed jobs of its last commit's pipelines (`pipeline-rerun`), in one of the workspace's repositories, through the user's own `gh` run by the daemon. Only inside a procedure's run that grants the action (`docs/procedures.md`): refused otherwise (`refused: forge_write writes to the forge only inside a procedure that grants it…`, `refused: the procedure P does not grant pr-create: it grants …`), held for the user when the grant is `ask`. Only an agent in a workspace has it. |
+
+`forge_read` goes through the gate like every call, which allows it; `forge_write` is allowed,
+asked or refused by its run's grants. How the forge is read, and what it never touches (a token,
+`gh auth token`), is in [`forges.md`](forges.md).
 
 ## The tree's tools
 
@@ -271,6 +276,16 @@ the call reaches, the project's never list and Flottille's own folders, and answ
 4. **Allow** anything else: reads, `commands_list`, `commands_output`, `commands_stop`, a
    catalogue command not marked, a line inside the place, a write inside the place.
 
+**Inside a procedure's run** (`docs/procedures.md`), for the agents it grants and only in its
+workspace, the run's grants come between 1 and 2: a line that is `git commit`, `git push` or `git
+rebase` itself, with nothing but `--no-pager` before the subcommand and never wrapped, is let
+through as its grant says (`allow`, or `ask`: held, never for the tree) once it fits the grant (the
+workspace's own branch, the repository's remote, no force without a lease, no `--amend`…), and
+refused with why when it does not. The deny rules of 2 that are not a program's (the `never` list,
+`.git`, recursive deletions) and the reasons to ask of 3 still apply. `git stash` and `git reset
+--hard` are refused in a run whatever it grants. Outside a run, none of this applies: the rules
+above are the whole gate.
+
 The words of a line that name paths (every word but the program, an option's value after `=`, a
 `NAME=value`'s value) are resolved from the folder the run starts in, as a file tool's path is.
 
@@ -301,7 +316,8 @@ depend on it`.
 grants that exact call (its tool, its paths, its words or its catalogue command with its line,
 not a write's content nor a read's page) to every agent of the tree from then on without asking;
 it is never given for a request that reaches a sensitive place, and a sensitive place asks every
-time. A request held by an agent is not listed for the user and cannot be answered by them.
+time; so does a request a procedure's `ask` grant held. A request held by an agent is not listed
+for the user and cannot be answered by them.
 
 | Command | |
 |---|---|

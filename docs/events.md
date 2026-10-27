@@ -144,6 +144,30 @@ The workspace's worktrees, folder and record are gone. Its branches are kept.
 |---|---|
 | `project`, `workspace` | |
 
+### `procedure.started`
+
+A procedure's run started (`procedure.start`, `docs/procedures.md`): its root agent holds the grants
+from now on.
+
+| Field | |
+|---|---|
+| `agent` | The run's root agent. |
+| `project` | Its project. |
+| `workspace` | The workspace it runs in. |
+| `procedure` | The procedure's name. |
+| `grants` | The grants, frozen: grant to `allow` or `ask`. |
+| `children` | Whether the root's children get them too. |
+
+### `procedure.ended`
+
+A procedure's run ended: its root reported. Its grants are given no more. (A root that ends,
+stopped or failed, ends its run too, said by its own events.)
+
+| Field | |
+|---|---|
+| `agent` | The run's root agent. |
+| `reason` | `reported`. |
+
 ### The events of an agent
 
 Every event of an agent has `agent`, its id (`docs/agents.md`), and is part of its conversation
@@ -270,7 +294,7 @@ The gate held one of the agent's calls: a request was written (`docs/tools.md`, 
 | `tool` | |
 | `call` | The arguments, every text cut at 500 characters and masked. |
 | `reasons` | Why it was held, one sentence each, masked. |
-| `sensitive` | Whether it reaches a sensitive place: it is then never allowed for the tree. |
+| `sensitive` | Whether it is never allowed for the tree: it reaches a sensitive place, or a procedure's `ask` grant holds it each time (`docs/procedures.md`). |
 | `held_by` | `user`, or the id of the agent that holds it. |
 | `forwards`, `state`, `decision`, `created_at`, `decided_at` | As in `approval.list` (`docs/protocol.md`). |
 

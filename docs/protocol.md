@@ -310,6 +310,53 @@ folder and its record are gone. `refused`, with nothing touched, while it is bei
 when a worktree holds a changed or untracked file or a commit on no remote: the message names
 every one.
 
+### The procedure methods
+
+A project's procedures and their runs (`docs/procedures.md`). A procedure in a result is `{"name",
+"description", "grants", "children", "says"}`, `grants` an object of grant to mode (`{"push":
+"allow", "pr-create": "ask"}`), `says` one `{"grant", "mode", "says"}` per grant with the sentence a
+client shows; `procedure.show` and the edits add `instructions`. `not-found` for a project or a
+procedure that does not exist, `invalid-params` for a grant outside the vocabulary or a mode other
+than `allow` and `ask`, `refused` for an empty description or instructions, `invalid-config` when
+the project's file cannot be used.
+
+#### `procedure.list`
+
+`{"project"}`: `{"project", "procedures": [...]}`, by name.
+
+#### `procedure.show`
+
+`{"project", "name"}`: the procedure.
+
+#### `procedure.add`
+
+`{"project", "name", "description", "instructions", "grants"?, "children"?}`. Writes
+`[procedures.<name>]` in the project's file, what is around it kept, and answers the procedure.
+`refused` when the project has one of that name.
+
+#### `procedure.edit`
+
+`{"project", "name", "description"?, "instructions"?, "grants"?, "children"?}`: what is given
+replaces what the procedure had (`grants` whole). Answers the procedure.
+
+#### `procedure.remove`
+
+`{"project", "name"}`: `{"project", "removed": "<name>"}`.
+
+#### `procedure.run`
+
+`{"project", "name", "workspace"}`: what a run would grant, to show the user; it starts nothing.
+The procedure with `{"project", "workspace", "started": false}`. `not-found` when the workspace does
+not exist.
+
+#### `procedure.start`
+
+`{"project", "name", "workspace", "grants", "children"}`, the grants and `children` the user was
+shown by `procedure.run`. `refused` when they are no longer the procedure's (it was edited
+meanwhile): nothing starts. Otherwise a root agent starts in the workspace with the procedure's
+instructions, as `agent.start` starts one, and its run holds the grants from then on:
+`{"agent", "after", "procedure", "grants"}`, `agent` and `after` as `agent.start` answers them.
+
 ### The agent methods
 
 An agent is one agent session run over ACP (`docs/agents.md`), named by an opaque id. None of
@@ -579,7 +626,8 @@ there is no such agent).
 (the same call goes through without asking from then on). Answered `{"request"}` once it is
 decided; the call is then checked again, performed in the background, and its answer stored for
 the agent (`approval.settled`). `not-found` when there is no such request; `refused` when it is
-held by an agent, already decided, or, with `for_tree`, reaches a sensitive place.
+held by an agent, already decided, or, with `for_tree`, reaches a sensitive place or is held by a
+procedure's `ask` grant (`docs/procedures.md`).
 
 #### `approval.deny`
 
