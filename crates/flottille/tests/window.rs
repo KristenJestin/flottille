@@ -404,7 +404,12 @@ fn when_the_daemon_is_restarted_the_window_reconnects_and_catches_up_without_a_g
 
     closed.store(true, Ordering::SeqCst);
     let stopped = user.run(&["daemon", "stop"]);
-    assert!(stopped.status.success());
+    assert!(
+        stopped.status.success(),
+        "daemon stop failed: {}\nthe daemon's log:\n{}",
+        String::from_utf8_lossy(&stopped.stderr),
+        std::fs::read_to_string(user.path("state/flottille/daemon.log")).unwrap_or_default()
+    );
     until(&shell, cx, "the window sees the daemon gone", |cx| {
         !shell.read_with(cx, |s, cx| s.top().read(cx).online())
     });
