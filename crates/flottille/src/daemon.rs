@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use flottille_core::paths::{Paths, ensure_private_dir};
-use flottille_core::protocol::{Event, Message, Request, WatchParams};
+use flottille_core::protocol::{Event, Message, Request, WatchParams, WorkspaceForge};
 use flottille_core::store::Store;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -22,6 +22,7 @@ use crate::VERSION;
 use crate::agents::{self, Live};
 use crate::approvals;
 use crate::deliveries;
+use crate::forge;
 use crate::inbox;
 use crate::mcp;
 use crate::projects::{self, Projects};
@@ -130,6 +131,8 @@ pub struct Daemon {
     pub waiting_provider: Mutex<HashSet<String>>,
     /// The slots launches took in each project's children cap, before their child exists.
     pub launching: Mutex<HashMap<String, usize>>,
+    /// What the forges said of each workspace, and who watches them.
+    pub forges: forge::Forges,
     /// Becomes true when the daemon stops.
     stopping: watch::Sender<bool>,
 }
@@ -270,6 +273,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         notes: deliveries::Notes::default(),
         waiting_provider: Mutex::new(HashSet::new()),
         launching: Mutex::new(HashMap::new()),
+        forges: forge::Forges::default(),
         stopping: watch::Sender::new(false),
     });
     let mut terminate = signal(SignalKind::terminate())?;
@@ -353,6 +357,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
     let mut lines = BufReader::new(read).lines();
     let mut stopping = daemon.stopping.subscribe();
     let mut subscriptions = JoinSet::new();
+    // The workspaces this connection watches: their forges are read again while it stays open.
+    let mut watched: HashMap<(String, String), forge::Watch> = HashMap::new();
     let client_left = loop {
         let line = tokio::select! {
             line = lines.next_line() => line,
@@ -368,6 +374,16 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                 continue;
             }
         };
+        if request.method == "workspace.forge"
+            && let Ok(asked) = serde_json::from_value::<WorkspaceForge>(request.params.clone())
+            && asked.watch
+            && !watched.contains_key(&(asked.project.clone(), asked.name.clone()))
+            && let Ok(Some(workspace)) =
+                daemon.read(|store| store.workspace(&asked.project, &asked.name))
+        {
+            let watch = forge::watch(&daemon, &workspace);
+            watched.insert((asked.project, asked.name), watch);
+        }
         // They run git or a provider's `--version`, wait on an agent's task or start what an
         // approval allows: answered by a task of their own, the connection goes on.
         if ["workspace.", "agent.", "approval.", "test.", "provider."]

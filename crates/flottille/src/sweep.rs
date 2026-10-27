@@ -42,6 +42,7 @@ pub async fn run(daemon: Arc<Daemon>, mut stopping: watch::Receiver<bool>) {
 pub fn sweep(daemon: &Arc<Daemon>) {
     deliveries::fall_back(daemon);
     tree::end_late_reporters(daemon);
+    crate::forge::poll(daemon);
     let agents = daemon.read(Store::agents).unwrap_or_default();
     let now = now_ms();
     for agent in agents.iter().filter(|a| !a.state.is_final()) {

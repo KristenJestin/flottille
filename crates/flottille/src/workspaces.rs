@@ -51,6 +51,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             Ok(json!({"workspaces": workspaces.iter().map(Workspace::to_json).collect::<Vec<_>>()}))
         }
         "workspace.show" => show(&daemon, serde_json::from_value(params)?).await,
+        "workspace.forge" => crate::forge::call(daemon, params).await,
         "workspace.prepare" => resume(daemon, serde_json::from_value(params)?).await,
         "workspace.remove" => remove(daemon, serde_json::from_value(params)?).await,
         method => Err(Failure::new(

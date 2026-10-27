@@ -374,7 +374,11 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
     let now = now_ms();
     let depth = new.parent.as_ref().map_or(0, |(_, depth)| depth + 1);
     let at_depth_limit = depth >= DEPTH_LIMIT;
-    let tools = provider.tools(new.parent.is_none(), at_depth_limit);
+    let tools = provider.tools(
+        new.parent.is_none(),
+        at_depth_limit,
+        new.workspace.is_some(),
+    );
     let files = roles::project_files(&project.folder, &repositories);
     let instructions = roles::instructions(
         new.role,

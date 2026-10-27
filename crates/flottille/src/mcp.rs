@@ -86,7 +86,7 @@ const REPLACED: &str = "refused: this session has been replaced: a new session o
 
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
 /// the order frozen in the agent.
-const SERVED: [Definition; 18] = [
+const SERVED: [Definition; 19] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -248,6 +248,23 @@ const SERVED: [Definition; 18] = [
             json!({"type": "object", "properties": {
                 "run": {"type": "string"}
             }, "required": ["run"], "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "forge_read",
+        title: "Read the workspace's pull requests",
+        description: "Reads, on the forge, the pull request of this workspace's branch in each of \
+            its repositories (or the one named): its number, state, base and link, its review, \
+            its checks and their states, its comments and reviews. Read only; it reaches no \
+            repository outside the workspace. A repository on a host Flottille cannot read yet \
+            says so. Use it rather than a forge's command line, which has no sign-in here.",
+        read_only: true,
+        idempotent: true,
+        destructive: false,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "repository": {"type": "string", "description": "One of the workspace's repositories, by its path; all of them when left out."}
+            }, "additionalProperties": false})
         },
     },
     Definition {
@@ -1142,6 +1159,7 @@ async fn perform(
         }
         "commands_output" => runs::commands_output(daemon, &grant.agent, args),
         "commands_stop" => runs::commands_stop(daemon, &grant.agent, args).await,
+        "forge_read" => crate::forge::forge_read(daemon, &grant.place, args).await,
         tool if tree::TOOLS.contains(&tool) => tree::call(daemon, grant, tool, args).await,
         _ => {
             // The file tools read and write the disk: off the daemon's thread.
@@ -1224,8 +1242,8 @@ mod tests {
             assert_eq!(tool["inputSchema"]["type"], "object");
             let name = format!("mcp__flottille__{}", definition.name);
             assert!(
-                claude::PROVIDER.tools(true, false).contains(&name)
-                    || claude::PROVIDER.tools(false, false).contains(&name),
+                claude::PROVIDER.tools(true, false, true).contains(&name)
+                    || claude::PROVIDER.tools(false, false, true).contains(&name),
                 "{} is a tool agents get",
                 definition.name
             );
@@ -1234,8 +1252,8 @@ mod tests {
 
     #[test]
     fn a_grant_holds_the_agent_s_served_tools_in_its_own_order() {
-        let mut leaf = claude::PROVIDER.tools(false, true);
-        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 11);
+        let mut leaf = claude::PROVIDER.tools(false, true, true);
+        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 12);
         leaf.reverse();
         leaf.retain(|tool| !tool.ends_with("__search"));
         leaf.push("fs_read".into());
@@ -1243,7 +1261,7 @@ mod tests {
         assert_eq!(served.first(), Some(&"ask_parent"));
         assert_eq!(served.last(), Some(&"fs_read"));
         assert!(!served.contains(&"search"));
-        assert_eq!(served.len(), 10);
+        assert_eq!(served.len(), 11);
     }
 
     #[test]
