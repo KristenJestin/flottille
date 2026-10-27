@@ -69,39 +69,56 @@ impl Render for Fold {
             self.motion.settle(now);
         }
         let t = self.motion.value(now);
-        let height = self.height.clone();
-        // Measures the content's own height, laid out free of the fold's clip.
-        let measure = canvas(
-            move |bounds: Bounds<Pixels>, _, _| height.set(bounds.size.height),
-            |_, _, _, _| {},
+        fold_frame(
+            self.id.clone(),
+            self.open,
+            running,
+            t,
+            &self.height,
+            self.content.clone(),
         )
-        .absolute()
-        .size_full();
-        let outer = div()
-            .id(self.id.clone())
-            .aria_expanded(self.open)
-            .w_full()
-            .relative();
-        if !running && self.open {
-            return outer
-                .child(div().relative().child(self.content.clone()).child(measure))
-                .test_support();
-        }
-        outer
-            .h(self.height.get() * t)
-            .overflow_hidden()
-            .opacity(t)
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .w_full()
-                    .child(self.content.clone())
-                    .child(measure),
-            )
-            .test_support()
     }
+}
+
+/// `content` folded to `t` of its height (1 open, 0 folded): clipped and faded while `running`,
+/// untouched once open at rest. `height` remembers the content's own height, measured on each
+/// frame it is drawn, which a fold needs to start from when it closes.
+pub fn fold_frame(
+    id: impl Into<ElementId>,
+    open: bool,
+    running: bool,
+    t: f32,
+    height: &Rc<Cell<Pixels>>,
+    content: impl IntoElement,
+) -> impl IntoElement {
+    let measured = height.clone();
+    // Measures the content's own height, laid out free of the fold's clip.
+    let measure = canvas(
+        move |bounds: Bounds<Pixels>, _, _| measured.set(bounds.size.height),
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size_full();
+    let outer = div().id(id.into()).aria_expanded(open).w_full().relative();
+    if !running && open {
+        return outer
+            .child(div().relative().child(content).child(measure))
+            .test_support();
+    }
+    outer
+        .h(height.get() * t)
+        .overflow_hidden()
+        .opacity(t)
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .w_full()
+                .child(content)
+                .child(measure),
+        )
+        .test_support()
 }
 
 /// Wraps `child` in an entrance: it fades in while rising [`RISE`] px over [`ENTER`], after

@@ -172,9 +172,9 @@ pub struct Composer {
     _subscriptions: Vec<Subscription>,
 }
 
-/// The field is as tall as its text, a line at a time, from one line up to this many, then it
-/// scrolls: no empty room is left under the text.
-const MIN_ROWS: usize = 1;
+/// The field is as tall as its text, a line at a time, from three lines up to this many, then it
+/// scrolls: the project page's composer starts roomy, and no empty room is left under more text.
+const MIN_ROWS: usize = 3;
 const MAX_ROWS: usize = 8;
 
 fn editor_style(cx: &gpui_kit::App) -> InputEditorStyle {
