@@ -22,7 +22,8 @@
 //! `signed_in: false` makes `gh auth status` end with 1. `pulls` gives, by repository and branch,
 //! the object `gh pr view --json` answers (its `number` is what `gh pr list` answers); a branch
 //! with none has no pull request. `fail` makes every `pr` call on that repository end with 1,
-//! saying its text.
+//! saying its text. `issues` gives, by repository and number, the object `gh issue view --json`
+//! answers; an issue it does not hold is not found. `fail` makes `issue` calls fail the same way.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -69,6 +70,28 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             }
             eprintln!("github.com\n  ✓ Logged in to github.com account someone (keyring)");
             0
+        }
+        ["issue", "view", number, ..] => {
+            let Some(repository) = option("-R") else {
+                eprintln!("fake gh: no -R");
+                return 2;
+            };
+            if let Some(failure) = script["fail"][repository].as_str() {
+                eprintln!("{failure}");
+                return 1;
+            }
+            match script["issues"][repository].get(*number) {
+                Some(issue) => {
+                    println!("{issue}");
+                    0
+                }
+                None => {
+                    eprintln!(
+                        "GraphQL: Could not resolve to an Issue with the number of {number}."
+                    );
+                    1
+                }
+            }
         }
         ["pr", sub @ ("list" | "view"), rest @ ..] => {
             let Some(repository) = option("-R") else {

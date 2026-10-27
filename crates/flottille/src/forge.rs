@@ -308,7 +308,7 @@ pub async fn read(repositories: &[(String, PathBuf, String)], branch: &str) -> R
 }
 
 /// Whether `gh` is there and signed in: its exit code, nothing it prints.
-async fn signed_in() -> Result<(), String> {
+pub(crate) async fn signed_in() -> Result<(), String> {
     match gh(&["auth", "status", "--hostname", "github.com"]).await {
         Err(Gh::Missing) => Err(
             "gh, GitHub's command line, is not on the daemon's PATH: install \
@@ -344,13 +344,13 @@ async fn pull_of(forge: &Forge, branch: &str) -> Result<Option<Pull>, String> {
         .ok_or_else(|| format!("gh pr view {number} answered no pull request"))
 }
 
-enum Gh {
+pub(crate) enum Gh {
     Missing,
     Failed(String),
 }
 
 /// `gh <args>`: whether it succeeded, its output and its errors.
-async fn gh(args: &[&str]) -> Result<(bool, String, String), Gh> {
+pub(crate) async fn gh(args: &[&str]) -> Result<(bool, String, String), Gh> {
     let mut command = tokio::process::Command::new("gh");
     command
         .args(args)
@@ -383,7 +383,7 @@ async fn gh(args: &[&str]) -> Result<(bool, String, String), Gh> {
 }
 
 /// `gh <args>`'s JSON, or a sentence saying why there is none, masked.
-async fn gh_json(args: &[&str]) -> Result<Value, String> {
+pub(crate) async fn gh_json(args: &[&str]) -> Result<Value, String> {
     let shown = args[..2].join(" ");
     match gh(args).await {
         Ok((true, stdout, _)) => serde_json::from_str(&stdout)
@@ -401,7 +401,7 @@ async fn gh_json(args: &[&str]) -> Result<Value, String> {
 }
 
 /// Masked of the daemon's secrets, and of every token shaped like one.
-fn masked(text: &str) -> String {
+pub(crate) fn masked(text: &str) -> String {
     let env: std::collections::BTreeMap<OsString, OsString> = std::env::vars_os().collect();
     secrets::mask(text, &env)
 }

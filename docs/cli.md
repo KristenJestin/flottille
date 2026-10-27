@@ -210,7 +210,8 @@ A workspace is one git worktree per repository, on one branch, prepared by the p
 
 Fetches the base of each repository, makes the worktrees, then goes on with the recipe in the
 background. `--repositories a,b` takes some repositories only, `--branch <branch>` names the
-branch (`<branch prefix>/<name>` otherwise), `--offline` fetches nothing.
+branch (`<branch prefix>/<name>` otherwise), `--offline` fetches nothing, `--ticket <ticket>`
+links it to a ticket (`#123`, `123` or a Jira key such as `ABC-123`, [`tickets.md`](tickets.md)).
 
 ```
 $ flottille workspace create shop login
@@ -229,9 +230,12 @@ shop     login  shop/login  ready
 
 ### `flottille workspace show <project> <name>`
 
-The workspace's repositories, where its preparation stands, and each repository's pull request
-with its checks ([`forges.md`](forges.md)). `--json` prints the workspace, with the forge state
-(`workspace.forge`, `docs/protocol.md`) under `forge`.
+The workspace's repositories, where its preparation stands, its ticket (title, state,
+description, comments, or why it cannot be read, [`tickets.md`](tickets.md)), and each
+repository's pull request with its checks ([`forges.md`](forges.md)). `--json` prints the
+workspace, with its ticket's reference under `ticket`, what the tracker said of it
+(`workspace.ticket`, `docs/protocol.md`) under `ticket_read` and the forge state
+(`workspace.forge`) under `forge`.
 
 ```
 $ flottille workspace show shop login
@@ -242,9 +246,33 @@ Repositories:
   .: main, c9eba53c33ef, fetched
 Steps:
    1. done     git worktree add .
+Ticket #7, open: The login fails
+  https://github.com/acme/shop/issues/7
+  Description:
+    Users cannot sign in.
+  Comments (1):
+    - alice, 2026-10-01T10:00:00Z: I can reproduce
 Pull requests:
   . (acme/shop): #12 open into main, checks passing, approved, 2 comments: Add the login page
     https://github.com/acme/shop/pull/12
+```
+
+The ticket is there only when the workspace is linked to one.
+
+### `flottille workspace ticket <project> <name> [<ticket>]`
+
+Links the workspace to a ticket: `#123` (or `123`, since a shell takes a word starting with `#` for
+a comment), an issue of the first GitHub repository of the workspace, or a Jira key such as
+`ABC-123`. `--clear` unlinks it. It prints the ticket as the tracker says it, or why it cannot be
+read; the link is kept either way (`tickets.md`).
+
+```
+$ flottille workspace ticket shop login 7
+Linked.
+Ticket #7, open: The login fails
+  https://github.com/acme/shop/issues/7
+$ flottille workspace ticket shop login --clear
+Workspace login of shop is linked to no ticket.
 ```
 
 ### `flottille workspace prepare <project> <name>`

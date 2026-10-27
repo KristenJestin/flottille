@@ -97,6 +97,13 @@ outside the agent's workspace: one the workspace does not take is refused (`refu
 repository of this agent's workspace: it has …`), and nothing is asked of the forge. Only an
 agent working in a workspace has the tool.
 
+## Tickets
+
+The issues of GitHub and Jira, linked to a workspace and read the same way (the user's own command
+line, spawned without a shell, nothing written, everything masked), are in
+[`tickets.md`](tickets.md). Its `#123` reads through the `gh` described here, and the agent's
+`ticket_read` sits beside `forge_read`.
+
 ## Tests
 
 Tests never call GitHub nor use anyone's sign-in: a fake `gh` (`crates/flottille-fake-gh`), first

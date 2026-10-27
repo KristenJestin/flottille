@@ -217,6 +217,37 @@ impl User {
         records(&self.path("gh/received.jsonl"))
     }
 
+    /// This user with the fake `acli` (`crates/flottille-fake-acli`) first in its `PATH`, its
+    /// folder `acli`: no test ever calls Jira nor uses anyone's sign-in.
+    pub fn with_fake_acli(self) -> User {
+        std::fs::create_dir(self.path("acli")).unwrap();
+        std::fs::create_dir(self.path("acli-bin")).unwrap();
+        std::os::unix::fs::symlink(fake_acli(), self.path("acli-bin/acli")).unwrap();
+        let path = format!(
+            "{}:{}",
+            self.path("acli-bin").display(),
+            self.env
+                .iter()
+                .rev()
+                .find(|(name, _)| name == "PATH")
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default())
+        );
+        let dir = self.path("acli");
+        self.with_env("PATH", &path)
+            .with_env("FLOTTILLE_FAKE_ACLI_DIR", dir.to_str().unwrap())
+    }
+
+    /// The fake `acli`'s script, read again at each of its calls.
+    pub fn acli_script(&self, script: Value) {
+        std::fs::write(self.path("acli/script.json"), script.to_string()).unwrap();
+    }
+
+    /// Every call of the fake `acli`, the first first: `{"args", "env"}`.
+    pub fn acli_received(&self) -> Vec<Value> {
+        records(&self.path("acli/received.jsonl"))
+    }
+
     /// The fake agent's script (`crates/flottille-fake-agent`).
     pub fn fake_script(&self, script: Value) {
         std::fs::write(self.path("fake/script.json"), script.to_string()).unwrap();
@@ -506,6 +537,17 @@ pub fn fake_gh() -> PathBuf {
     assert!(
         path.exists(),
         "{} is missing: run the tests from the workspace's root, or `cargo build -p flottille-fake-gh` first",
+        path.display()
+    );
+    path
+}
+
+/// The fake `acli`'s binary, built beside Flottille's as the fake agent is.
+pub fn fake_acli() -> PathBuf {
+    let path = Path::new(env!("CARGO_BIN_EXE_flottille")).with_file_name("flottille-fake-acli");
+    assert!(
+        path.exists(),
+        "{} is missing: run the tests from the workspace's root, or `cargo build -p flottille-fake-acli` first",
         path.display()
     );
     path

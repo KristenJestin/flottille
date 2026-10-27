@@ -26,6 +26,10 @@ pub struct Workspace {
     /// The repositories it takes, the root one first, then in dependency order.
     pub repositories: Vec<Worktree>,
     pub steps: Vec<Step>,
+    /// The ticket it is linked to, as `flottille_core::ticket::Key::text` writes it: `#123` or
+    /// `ABC-123` (`docs/tickets.md`).
+    #[serde(default)]
+    pub ticket: Option<String>,
 }
 
 /// One repository of a workspace and the base its branch starts from.

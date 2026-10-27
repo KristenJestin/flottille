@@ -86,7 +86,7 @@ const REPLACED: &str = "refused: this session has been replaced: a new session o
 
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
 /// the order frozen in the agent.
-const SERVED: [Definition; 19] = [
+const SERVED: [Definition; 20] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -264,6 +264,23 @@ const SERVED: [Definition; 19] = [
         schema: || {
             json!({"type": "object", "properties": {
                 "repository": {"type": "string", "description": "One of the workspace's repositories, by its path; all of them when left out."}
+            }, "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "ticket_read",
+        title: "Read the workspace's ticket",
+        description: "Reads, on its tracker, the ticket this workspace is linked to (a GitHub \
+            issue, #123, or a Jira key, ABC-123): its title, state, description and comments; or \
+            another ticket of the same tracker when `ticket` names it. Read only: it writes \
+            nothing to the tracker, and drafts of comments go to the user, who posts them. Use \
+            it rather than a tracker's command line, which has no sign-in here.",
+        read_only: true,
+        idempotent: true,
+        destructive: false,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "ticket": {"type": "string", "description": "A ticket of the same tracker as the workspace's, by its key (#123 or ABC-123); the workspace's own ticket when left out."}
             }, "additionalProperties": false})
         },
     },
@@ -1160,6 +1177,7 @@ async fn perform(
         "commands_output" => runs::commands_output(daemon, &grant.agent, args),
         "commands_stop" => runs::commands_stop(daemon, &grant.agent, args).await,
         "forge_read" => crate::forge::forge_read(daemon, &grant.place, args).await,
+        "ticket_read" => crate::tickets::ticket_read(daemon, &grant.place, args).await,
         tool if tree::TOOLS.contains(&tool) => tree::call(daemon, grant, tool, args).await,
         _ => {
             // The file tools read and write the disk: off the daemon's thread.
@@ -1253,7 +1271,7 @@ mod tests {
     #[test]
     fn a_grant_holds_the_agent_s_served_tools_in_its_own_order() {
         let mut leaf = claude::PROVIDER.tools(false, true, true);
-        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 12);
+        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 13);
         leaf.reverse();
         leaf.retain(|tool| !tool.ends_with("__search"));
         leaf.push("fs_read".into());
@@ -1261,7 +1279,7 @@ mod tests {
         assert_eq!(served.first(), Some(&"ask_parent"));
         assert_eq!(served.last(), Some(&"fs_read"));
         assert!(!served.contains(&"search"));
-        assert_eq!(served.len(), 11);
+        assert_eq!(served.len(), 12);
     }
 
     #[test]

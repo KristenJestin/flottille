@@ -29,6 +29,7 @@ mod providers;
 mod roles;
 mod runs;
 mod sweep;
+mod tickets;
 mod tree;
 mod update;
 mod workspace_command;

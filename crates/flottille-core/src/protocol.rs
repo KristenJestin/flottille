@@ -85,6 +85,19 @@ pub struct WorkspaceCreate {
     /// Fetch nothing: base the branches on the tracking refs as they are.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub offline: bool,
+    /// The ticket it is linked to: `#123` or a Jira key (`docs/tickets.md`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
+}
+
+/// The parameters of `workspace.link_ticket`: `ticket` is none to unlink.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceTicket {
+    pub project: String,
+    pub name: String,
+    #[serde(default)]
+    pub ticket: Option<String>,
 }
 
 /// The parameters of `workspace.show`, `workspace.prepare` and `workspace.remove`.

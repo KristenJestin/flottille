@@ -14,6 +14,7 @@ pub mod registry;
 pub mod run;
 pub mod secrets;
 pub mod store;
+pub mod ticket;
 pub mod variables;
 pub mod workspace;
 

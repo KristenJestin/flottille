@@ -661,6 +661,14 @@ fn program_refusal(layer: &[String]) -> Option<String> {
     match program {
         "git" => git_refusal(args),
         "gh" | "glab" | "bkt" => forge_refusal(program, args),
+        // Jira's sign-in is the user's, in a place no environment variable of ours moves: no word
+        // of `acli` is let through, reads included (`ticket_read` reads a ticket).
+        "acli" => Some(
+            "refused: acli is Atlassian's command line with the user's own Jira sign-in, which \
+             agents never use: read a ticket with ticket_read, and say what should be written \
+             to it, and the user does it"
+                .into(),
+        ),
         "npm" | "pnpm" | "yarn" | "bun" | "cargo" | "poetry" | "flit" | "hatch" | "uv"
             if any(&["publish", "unpublish"]) =>
         {
@@ -1351,6 +1359,23 @@ mod tests {
             "bkt pr list",
         ] {
             assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
+        }
+    }
+
+    #[test]
+    fn acli_is_denied_whatever_it_is_asked_even_to_read() {
+        let fixture = Fixture::workspace();
+        for line in [
+            "acli",
+            "acli jira workitem view ABC-1 --json",
+            "acli jira workitem create --summary x",
+            "acli jira workitem comment create --key ABC-1 --body hi",
+            "acli jira auth status",
+            "env acli jira workitem view ABC-1",
+            "nice acli jira workitem transition --key ABC-1",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(denied(&verdict), "{line}: {verdict:?}");
         }
     }
 

@@ -18,6 +18,7 @@ use flottille_core::project::{Project, RecipeStep, RepositorySet, StepKind, vali
 use flottille_core::protocol::{WorkspaceCreate, WorkspaceList, WorkspaceName};
 use flottille_core::secrets;
 use flottille_core::store::now_ms;
+use flottille_core::ticket::Key;
 use flottille_core::variables::{self, Names};
 use flottille_core::workspace::{
     Action, Base, Failure as StepFailure, State, Step, StepState, Workspace, Worktree,
@@ -52,6 +53,8 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         }
         "workspace.show" => show(&daemon, serde_json::from_value(params)?).await,
         "workspace.forge" => crate::forge::call(daemon, params).await,
+        "workspace.ticket" => crate::tickets::call(daemon, params).await,
+        "workspace.link_ticket" => crate::tickets::link(daemon, params).await,
         "workspace.prepare" => resume(daemon, serde_json::from_value(params)?).await,
         "workspace.remove" => remove(daemon, serde_json::from_value(params)?).await,
         method => Err(Failure::new(
@@ -212,6 +215,12 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
         )));
     }
     let taken = taken_repositories(&project, asked.repositories.as_deref())?;
+    let ticket = asked
+        .ticket
+        .as_deref()
+        .map(|text| Key::parse(text).map(|key| key.text()))
+        .transpose()
+        .map_err(Failure::refused)?;
     let branch = asked
         .branch
         .unwrap_or_else(|| format!("{}/{}", project.branch_prefix, asked.name));
@@ -284,6 +293,7 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
         variables: project.variables.clone(),
         steps: snapshot(&project, &taken),
         repositories,
+        ticket,
     };
     let event = with(
         about(&workspace),
