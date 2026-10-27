@@ -114,8 +114,9 @@ its run grants the action:
 - `repository`: one of the workspace's repositories, by its path; another is refused;
 - `pr-create` needs `title`, takes `body` and `draft`: `gh pr create -R <owner/name> --head <branch>
   --base <base> --title … --body …`, the base the one the workspace's repository started from;
-- `pr-merge-squash`: the open pull request of the workspace's branch, `gh pr merge <n> -R … --squash`;
-  none, or one not open, is refused;
+- `pr-merge-squash`: the open pull request of the workspace's branch from the repository itself
+  (not from a fork, which can have a branch of the same name) into its base,
+  `gh pr merge <n> -R … --squash`; none is refused;
 - `pipeline-rerun`: the failed runs of the branch's last commit (`gh run list -R … --branch <branch>`),
   each `gh run rerun <id> -R … --failed`; none failed is refused.
 

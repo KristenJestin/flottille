@@ -717,3 +717,48 @@ fn forge_write_refuses_a_remote_changed_since_the_workspace_was_created() {
     );
     assert_eq!(creates(&user), 0);
 }
+
+#[test]
+fn pr_merge_squash_merges_only_the_workspace_s_own_pull_request_into_its_base() {
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user);
+    procedure(&user, "merge", json!({"pr-merge-squash": "allow"}), false);
+    let (_, mcp) = run(&user, "merge");
+    let merge = json!({"action": "pr-merge-squash", "repository": "."});
+    let merges = |user: &User| {
+        gh_calls(user)
+            .iter()
+            .filter(|call| call.starts_with("pr merge"))
+            .count()
+    };
+    let pull = |cross: bool, base: &str| {
+        json!({"pulls": {"acme/app": {"app/login": {"number": 12, "title": "Login",
+            "state": "OPEN", "isDraft": false, "baseRefName": base, "isCrossRepository": cross,
+            "url": "https://github.com/acme/app/pull/12"}}}})
+    };
+
+    // A fork's pull request of a branch of the same name.
+    user.gh_script(pull(true, "main"));
+    let answer = mcp.call("forge_write", merge.clone());
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains("from a fork"), "{}", answer.text);
+    // One into another base.
+    user.gh_script(pull(false, "release"));
+    let answer = mcp.call("forge_write", merge.clone());
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("into release, not main"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(merges(&user), 0);
+
+    user.gh_script(pull(false, "main"));
+    let answer = mcp.call("forge_write", merge);
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        gh_calls(&user).contains(&"pr merge 12 -R acme/app --squash".to_owned()),
+        "{:?}",
+        gh_calls(&user)
+    );
+}

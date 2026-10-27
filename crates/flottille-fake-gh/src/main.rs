@@ -21,9 +21,9 @@
 //! ```
 //!
 //! `signed_in: false` makes `gh auth status` end with 1. `pulls` gives, by repository and branch,
-//! the object `gh pr view --json` answers (its `number` is what `gh pr list` answers); a branch
-//! with none has no pull request. `fail` makes every `pr` call on that repository end with 1,
-//! saying its text.
+//! the object `gh pr view --json` answers (`gh pr list --json` answers the fields it asks that the
+//! object has); a branch with none has no pull request. `fail` makes every `pr` call on that
+//! repository end with 1, saying its text.
 //!
 //! The writes answer as `gh` does when they work: `pr create` prints the new pull request's URL
 //! (numbered `created`, 1 by default), `pr merge` and `run rerun` print nothing, and `run list`
@@ -109,9 +109,19 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             }
             let pulls = &script["pulls"][repository];
             if *sub == "list" {
+                // The fields asked of the branch's pull request that its script gives.
+                let fields = option("--json").unwrap_or("number");
                 let found = option("--head")
-                    .and_then(|branch| pulls[branch]["number"].as_u64())
-                    .map(|number| vec![json!({"number": number})])
+                    .map(|branch| &pulls[branch])
+                    .filter(|pull| pull["number"].is_u64())
+                    .map(|pull| {
+                        let asked: Map<String, Value> = fields
+                            .split(',')
+                            .filter(|field| !pull[field].is_null())
+                            .map(|field| (field.to_owned(), pull[field].clone()))
+                            .collect();
+                        vec![Value::from(asked)]
+                    })
                     .unwrap_or_default();
                 println!("{}", Value::from(found));
                 return 0;

@@ -794,28 +794,53 @@ pub async fn forge_write(daemon: &Daemon, place: &Place, args: Value) -> Outcome
             }
         }
         "pr-merge-squash" => {
-            let pull = match pull_of(&forge, branch).await {
-                Ok(Some(pull)) if pull.state == "open" => pull,
-                Ok(Some(pull)) => {
-                    return Outcome::Refused(format!(
-                        "refused: the pull request #{} of {branch} in {slug} is {}: only an open \
-                         one is merged",
-                        pull.number, pull.state
-                    ));
-                }
-                Ok(None) => {
-                    return Outcome::Refused(format!(
-                        "refused: {branch} has no pull request in {slug}: open it first"
-                    ));
-                }
+            let base = &repository.base.branch;
+            let listed = match gh_json(&[
+                "pr",
+                "list",
+                "-R",
+                &slug,
+                "--head",
+                branch,
+                "--state",
+                "open",
+                "--json",
+                "number,isCrossRepository,baseRefName",
+            ])
+            .await
+            {
+                Ok(listed) => listed.as_array().cloned().unwrap_or_default(),
                 Err(why) => return Outcome::Failed(why),
             };
-            let number = pull.number.to_string();
+            // `--head` names a branch, in this repository or in any fork of it.
+            let ours = |pull: &&Value| {
+                pull["isCrossRepository"] == false && pull["baseRefName"].as_str() == Some(base)
+            };
+            let Some(number) = listed.iter().find(ours).and_then(|p| p["number"].as_u64()) else {
+                let why = match listed.first() {
+                    None => format!("{branch} has no open pull request in {slug}: open it first"),
+                    Some(pull) if pull["isCrossRepository"] != false => format!(
+                        "the open pull request #{} of a branch {branch} in {slug} comes from a \
+                         fork, not from the workspace's repository",
+                        pull["number"]
+                    ),
+                    Some(pull) => format!(
+                        "the open pull request #{} of {branch} in {slug} goes into {}, not \
+                         {base}, the workspace's base",
+                        pull["number"],
+                        masked(pull["baseRefName"].as_str().unwrap_or("another branch"))
+                    ),
+                };
+                return Outcome::Refused(format!(
+                    "refused: {why}: only the pull request of the workspace's own branch into \
+                     its base is merged"
+                ));
+            };
+            let number = number.to_string();
             match gh_text(&["pr", "merge", &number, "-R", &slug, "--squash"]).await {
                 Ok(_) => Outcome::Done(format!(
-                    "The pull request #{number} of {branch} was merged by squash into {} in \
-                     {slug}.",
-                    pull.base
+                    "The pull request #{number} of {branch} was merged by squash into {base} in \
+                     {slug}."
                 )),
                 Err(why) => Outcome::Failed(why),
             }
