@@ -16,6 +16,8 @@ use futures::channel::mpsc::UnboundedSender;
 use serde_json::{Value, json};
 
 use crate::link::{Conn, Connect, Update};
+use crate::procedures::ProcedureInfo;
+use crate::references::Reference;
 use crate::session_link::{PullRequest, pull_requests};
 
 /// Where a session is started.
@@ -73,6 +75,46 @@ pub enum Command {
         project: String,
         name: String,
     },
+    /// The project's procedures.
+    Procedures {
+        project: String,
+    },
+    /// One procedure whole, to edit it.
+    ProcedureRead {
+        project: String,
+        name: String,
+    },
+    ProcedureWrite {
+        project: String,
+        write: ProcedureWrite,
+    },
+    /// What a run of the procedure in the workspace would grant: starts nothing.
+    ProcedureShow {
+        project: String,
+        name: String,
+        workspace: String,
+    },
+    /// The confirmed run, with the grants that were shown.
+    ProcedureStart {
+        project: String,
+        name: String,
+        workspace: String,
+        grants: Value,
+        children: bool,
+    },
+    References {
+        project: String,
+    },
+    ReferenceAdd {
+        project: String,
+        name: String,
+        description: String,
+        path: String,
+    },
+    ReferenceRemove {
+        project: String,
+        name: String,
+    },
     /// A message to a session's root agent: the only agent the window writes to.
     Reply {
         session: String,
@@ -92,6 +134,33 @@ pub enum Command {
         session: String,
         number: u64,
         answer: Answer,
+    },
+}
+
+/// A change to a project's procedures, as the daemon takes it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ProcedureWrite {
+    /// One of Flottille's templates, as it is.
+    Template {
+        template: String,
+    },
+    Add {
+        name: String,
+        description: String,
+        instructions: String,
+        grants: Value,
+        children: bool,
+    },
+    /// What is given replaces what the procedure had; `grants` whole.
+    Edit {
+        name: String,
+        description: String,
+        instructions: String,
+        grants: Value,
+        children: bool,
+    },
+    Remove {
+        name: String,
     },
 }
 
@@ -160,6 +229,39 @@ pub enum Outcome {
     /// A provider was enabled or disabled as asked, or the daemon refused it with why.
     ProviderSet {
         name: String,
+        refused: Option<String>,
+    },
+    Procedures {
+        project: String,
+        listed: Result<Vec<ProcedureInfo>, String>,
+    },
+    ProcedureRead {
+        project: String,
+        name: String,
+        read: Result<ProcedureInfo, String>,
+    },
+    /// A change to the procedures was made, or refused with why.
+    ProcedureWritten {
+        project: String,
+        refused: Option<String>,
+    },
+    ProcedureShown {
+        project: String,
+        name: String,
+        workspace: String,
+        shown: Result<ProcedureInfo, String>,
+    },
+    /// The run started, with its root agent; or the daemon refused, and why.
+    ProcedureStarted {
+        project: String,
+        started: Result<String, String>,
+    },
+    References {
+        project: String,
+        listed: Result<Vec<Reference>, String>,
+    },
+    ReferenceWritten {
+        project: String,
         refused: Option<String>,
     },
     /// A message to the session's root was taken, or refused with why.
@@ -403,6 +505,140 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             project,
             name,
         ),
+        Command::Procedures { project } => {
+            let listed = ask_alone(
+                connect,
+                "procedure.list",
+                json!({"project": project}),
+                bounds.quick,
+            );
+            Outcome::Procedures {
+                listed: listed.and_then(|listed| listed).map(|listed| {
+                    listed["procedures"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(ProcedureInfo::of)
+                        .collect()
+                }),
+                project,
+            }
+        }
+        Command::ProcedureRead { project, name } => {
+            let read = ask_alone(
+                connect,
+                "procedure.show",
+                json!({"project": project, "name": name}),
+                bounds.quick,
+            );
+            Outcome::ProcedureRead {
+                read: read
+                    .and_then(|read| read)
+                    .map(|read| ProcedureInfo::of(&read)),
+                project,
+                name,
+            }
+        }
+        Command::ProcedureWrite { project, write } => {
+            let (method, params) = procedure_write(&project, write);
+            let refused = match ask_alone(connect, method, params, bounds.quick) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::ProcedureWritten { project, refused }
+        }
+        Command::ProcedureShow {
+            project,
+            name,
+            workspace,
+        } => {
+            let shown = ask_alone(
+                connect,
+                "procedure.run",
+                json!({"project": project, "name": name, "workspace": workspace}),
+                bounds.quick,
+            );
+            Outcome::ProcedureShown {
+                shown: shown
+                    .and_then(|shown| shown)
+                    .map(|shown| ProcedureInfo::of(&shown)),
+                project,
+                name,
+                workspace,
+            }
+        }
+        Command::ProcedureStart {
+            project,
+            name,
+            workspace,
+            grants,
+            children,
+        } => {
+            let started = ask_alone(
+                connect,
+                "procedure.start",
+                json!({"project": project, "name": name, "workspace": workspace,
+                    "grants": grants, "children": children}),
+                bounds.quick,
+            )
+            .and_then(|started| started)
+            .and_then(|started| {
+                started["agent"]["id"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| "the daemon did not say which agent it started".to_owned())
+            });
+            Outcome::ProcedureStarted { project, started }
+        }
+        Command::References { project } => {
+            let listed = ask_alone(
+                connect,
+                "reference.list",
+                json!({"project": project}),
+                bounds.quick,
+            );
+            Outcome::References {
+                listed: listed.and_then(|listed| listed).map(|listed| {
+                    listed["references"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(Reference::of)
+                        .collect()
+                }),
+                project,
+            }
+        }
+        Command::ReferenceAdd {
+            project,
+            name,
+            description,
+            path,
+        } => {
+            let refused = match ask_alone(
+                connect,
+                "reference.add",
+                json!({"project": project, "name": name, "description": description,
+                    "path": path}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::ReferenceWritten { project, refused }
+        }
+        Command::ReferenceRemove { project, name } => {
+            let refused = match ask_alone(
+                connect,
+                "reference.remove",
+                json!({"project": project, "name": name}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::ReferenceWritten { project, refused }
+        }
         Command::Reply { session, message } => match ask_alone(
             connect,
             "agent.send",
@@ -479,6 +715,41 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             ),
             project,
             name,
+        ),
+    }
+}
+
+fn procedure_write(project: &str, write: ProcedureWrite) -> (&'static str, Value) {
+    match write {
+        ProcedureWrite::Template { template } => (
+            "procedure.add",
+            json!({"project": project, "template": template}),
+        ),
+        ProcedureWrite::Add {
+            name,
+            description,
+            instructions,
+            grants,
+            children,
+        } => (
+            "procedure.add",
+            json!({"project": project, "name": name, "description": description,
+                "instructions": instructions, "grants": grants, "children": children}),
+        ),
+        ProcedureWrite::Edit {
+            name,
+            description,
+            instructions,
+            grants,
+            children,
+        } => (
+            "procedure.edit",
+            json!({"project": project, "name": name, "description": description,
+                "instructions": instructions, "grants": grants, "children": children}),
+        ),
+        ProcedureWrite::Remove { name } => (
+            "procedure.remove",
+            json!({"project": project, "name": name}),
         ),
     }
 }

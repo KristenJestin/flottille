@@ -93,7 +93,8 @@ impl MainArea {
                         let (shell, name) = (self.shell.clone(), name.clone());
                         let narrow = self.layout == Layout::Narrow;
                         Some(cx.new(|cx| {
-                            let mut page = ProjectPage::new(shell, name, composer, new_workspace);
+                            let mut page =
+                                ProjectPage::new(shell, name, composer, new_workspace, cx);
                             page.set_narrow(narrow, cx);
                             page
                         }))

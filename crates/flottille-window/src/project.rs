@@ -20,6 +20,8 @@ use gpui_kit::{
 use crate::actions::{Changes, Command, Details};
 use crate::composer::{Choice, Composer, agents_label};
 use crate::model::{Place, Preparation, ago};
+use crate::procedures::ProceduresSection;
+use crate::references::ReferencesSection;
 use crate::session::pull_row;
 use crate::session_link::PullRequest;
 use crate::shell::{Selection, Shell, now_ms};
@@ -82,6 +84,8 @@ pub struct ProjectPage {
     places: Vec<Place>,
     composer: Entity<Composer>,
     new_workspace: Entity<NewWorkspace>,
+    procedures: Entity<ProceduresSection>,
+    references: Entity<ReferencesSection>,
     narrow: bool,
     /// How many times it was drawn: the tests count them.
     renders: usize,
@@ -93,7 +97,16 @@ impl ProjectPage {
         name: String,
         composer: Entity<Composer>,
         new_workspace: Entity<NewWorkspace>,
+        cx: &mut Context<Self>,
     ) -> Self {
+        let procedures = cx.new(|_| ProceduresSection::new(shell.clone(), name.clone()));
+        let references = cx.new(|_| ReferencesSection::new(shell.clone(), name.clone()));
+        // Asked once the shell, which is making this page, is no longer being updated.
+        let (listing, referencing) = (procedures.clone(), references.clone());
+        cx.defer(move |cx| {
+            listing.update(cx, |section, cx| section.read(cx));
+            referencing.update(cx, |section, cx| section.read(cx));
+        });
         Self {
             shell,
             name,
@@ -104,9 +117,19 @@ impl ProjectPage {
             places: Vec::new(),
             composer,
             new_workspace,
+            procedures,
+            references,
             narrow: false,
             renders: 0,
         }
+    }
+
+    pub fn procedures(&self) -> &Entity<ProceduresSection> {
+        &self.procedures
+    }
+
+    pub fn references(&self) -> &Entity<ReferencesSection> {
+        &self.references
     }
 
     pub fn name(&self) -> &str {
@@ -156,6 +179,8 @@ impl ProjectPage {
     /// Brings the page up to `data`; a card whose data did not change is not drawn again.
     pub fn set(&mut self, data: ProjectData, cx: &mut Context<Self>) {
         let mut changed = self.folder != data.folder || self.repositories != data.repositories;
+        self.references
+            .update(cx, |section, _| section.set_folder(&data.folder));
         self.folder = data.folder;
         self.repositories = data.repositories;
         let mut old = std::mem::take(&mut self.cards);
@@ -363,7 +388,9 @@ impl Render for ProjectPage {
                                     .child(places.to_string()),
                             ),
                     ))
-                    .child(grid),
+                    .child(grid)
+                    .child(self.procedures.clone())
+                    .child(self.references.clone()),
             )
     }
 }
@@ -564,6 +591,19 @@ impl Render for PlaceCard {
                     .font_weight(gpui_kit::FontWeight::NORMAL)
                     .child(div().text_color(p.ok).child(format!("{at_least}+{added}")))
                     .child(div().text_color(p.fail).child(format!("−{removed}"))),
+            );
+        }
+        if place.is_some() && ready && self.busy.is_none() && !self.confirming {
+            let (shell, project, workspace) =
+                (self.shell.clone(), self.project.clone(), name.clone());
+            title = title.child(
+                Button::quiet(id("run-procedure"), "Run procedure…").on_click(move |_, _, cx| {
+                    shell
+                        .update(cx, |shell, cx| {
+                            shell.run_procedure(&project, &workspace, cx)
+                        })
+                        .ok();
+                }),
             );
         }
         if place.is_some() && self.busy.is_none() {

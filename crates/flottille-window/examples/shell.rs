@@ -3,13 +3,15 @@
 //! compositor.
 //!
 //! ```text
-//! cargo run -p flottille-window --example shell [--features frames] -- [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace]
+//! cargo run -p flottille-window --example shell [--features frames] -- [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace] [--add-procedure] [--edit-procedure <name>] [--run <workspace>] [--add-reference] [--size <w>x<h>]
 //! ```
 //!
 //! `--session` opens a session's page (`--agent` then reads one of its sub-agents), `--tree` the
 //! left drawer (in a narrow window), `--rail` the session page's drawer (in a window narrower than
 //! three columns), `--settings` the settings page, `--menu` one of the project page composer's
-//! pickers, `--new-workspace` the project page's new-workspace modal. The daemon is found on
+//! pickers, `--new-workspace` the project page's new-workspace modal, `--add-procedure`,
+//! `--edit-procedure`, `--run` and `--add-reference` the modals of the procedures and references
+//! sections, `--size` the window's size. The daemon is found on
 //! `$XDG_RUNTIME_DIR/flottille/daemon.sock`; it is not started.
 
 use std::os::unix::net::UnixStream;
@@ -27,6 +29,9 @@ fn main() {
     let (mut session, mut agent) = (None, None);
     let (mut tree, mut rail, mut new_workspace, mut settings) = (false, false, false, false);
     let mut menu = None;
+    let (mut add_procedure, mut add_reference) = (false, false);
+    let (mut edit_procedure, mut run) = (None, None);
+    let mut dimensions = (1280., 800.);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -36,6 +41,15 @@ fn main() {
             "--rail" => rail = true,
             "--new-workspace" => new_workspace = true,
             "--settings" => settings = true,
+            "--add-procedure" => add_procedure = true,
+            "--add-reference" => add_reference = true,
+            "--edit-procedure" => edit_procedure = Some(args.next().expect("a procedure")),
+            "--run" => run = Some(args.next().expect("a workspace")),
+            "--size" => {
+                let size = args.next().expect("a size like 1280x1400");
+                let (w, h) = size.split_once('x').expect("WxH");
+                dimensions = (w.parse().expect("a width"), h.parse().expect("a height"));
+            }
             "--menu" => {
                 menu = Some(match args.next().as_deref() {
                     Some("place") => Menu::Place,
@@ -52,7 +66,7 @@ fn main() {
     let socket = paths.socket();
     gpui_kit::application().with_assets(Icons).run(move |cx| {
         flottille_ui::init(cx);
-        let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
+        let bounds = Bounds::centered(None, size(px(dimensions.0), px(dimensions.1)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Maximized(bounds)),
             ..Default::default()
@@ -94,6 +108,24 @@ fn main() {
                                 if let Some(form) = shell.new_workspace_of(&name).cloned() {
                                     form.update(cx, |f, cx| f.open(window, cx));
                                 }
+                            }
+                        }
+                        if let Some(page) = shell.main().read(cx).project_page().cloned() {
+                            let name = page.read(cx).name().to_owned();
+                            if add_procedure {
+                                let section = page.read(cx).procedures().clone();
+                                section.update(cx, |s, cx| s.add(cx));
+                            }
+                            if let Some(procedure) = &edit_procedure {
+                                let section = page.read(cx).procedures().clone();
+                                section.update(cx, |s, cx| s.edit(procedure, cx));
+                            }
+                            if add_reference {
+                                let section = page.read(cx).references().clone();
+                                section.update(cx, |s, cx| s.add(window, cx));
+                            }
+                            if let Some(workspace) = &run {
+                                shell.run_procedure(&name, workspace, cx);
                             }
                         }
                         let page = shell.main().read(cx).session_page().cloned();
