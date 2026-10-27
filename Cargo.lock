@@ -1990,6 +1990,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "flottille-fake-bkt"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "flottille-fake-claude"
 version = "0.1.0"
 dependencies = [
