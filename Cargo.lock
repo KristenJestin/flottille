@@ -1998,6 +1998,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "flottille-fake-gh"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "flottille-ui"
 version = "0.1.0"
 dependencies = [
