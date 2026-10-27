@@ -3,6 +3,7 @@
 //! grants the user confirmed. The grants belong to the run, held by the daemon for its root
 //! agent: no tool nor argument of an agent changes them, and they end with the run.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use flottille_core::approval;
@@ -15,8 +16,10 @@ use serde_json::{Value, json};
 use crate::agents::{self, New};
 use crate::daemon::Daemon;
 use crate::deliveries;
+use crate::forge;
 use crate::gate;
 use crate::mcp;
+use crate::place::Place;
 use crate::projects::{self, Failure};
 use crate::roles;
 use crate::tree;
@@ -385,4 +388,28 @@ pub fn end(daemon: &Daemon, agent: &str, reason: &str) {
     if let Err(error) = daemon.write(|store| Ok(((), store.end_procedure_run(agent, reason)?))) {
         eprintln!("flottille daemon: agent {agent}: its procedure run cannot end: {error}");
     }
+}
+
+/// Refuses a push a procedure grants unless the repository's remote leads where it led when the
+/// workspace was created (`forge::remote_kept`).
+pub async fn remote_kept(
+    daemon: &Daemon,
+    place: &Place,
+    repository: &str,
+    folder: &Path,
+) -> Result<(), String> {
+    let workspace = place.workspace.as_ref().and_then(|name| {
+        daemon
+            .read(|store| store.workspace(&place.project, name))
+            .ok()?
+    });
+    let base = workspace
+        .iter()
+        .flat_map(|workspace| &workspace.repositories)
+        .find(|r| r.path == repository)
+        .map(|r| &r.base)
+        .ok_or_else(|| {
+            format!("refused: {repository} is not a repository of this agent's workspace")
+        })?;
+    forge::remote_kept(folder, base).await
 }

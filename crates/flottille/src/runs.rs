@@ -32,6 +32,7 @@ use crate::daemon::Daemon;
 use crate::gate::{self, Verdict};
 use crate::mcp::{Outcome, arguments, masked};
 use crate::place::{Place, Resolved};
+use crate::procedures;
 use crate::projects;
 
 /// What the call waits for the end of a run, by default and at most, in seconds.
@@ -284,6 +285,12 @@ pub async fn commands_run(
     };
     if let Verdict::Deny(why) = gate::contained(std::slice::from_ref(&folder)) {
         return Outcome::Refused(why);
+    }
+    if matches!(lifted, Some(Grant::Push | Grant::PushForceWithLease))
+        && let Err(refusal) =
+            procedures::remote_kept(daemon, place, &repository, &folder.path).await
+    {
+        return Outcome::Refused(refusal);
     }
     // A server already running for the agent is joined, not started twice.
     if serve

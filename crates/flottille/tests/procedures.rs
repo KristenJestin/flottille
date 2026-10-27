@@ -441,13 +441,20 @@ fn reset_hard_stash_and_a_force_push_without_lease_are_refused_even_with_every_g
     assert!(remote_branches(&user, &remote).contains("app/login"));
 }
 
-/// The fixture's workspace, its remote then made to look like GitHub's.
-fn on_github(user: &User) {
-    let (folder, _) = fixture(user);
-    user.git(
-        &folder,
-        &["remote", "set-url", "origin", "git@github.com:acme/app.git"],
+/// The fixture's workspace, its remote GitHub's `acme/app` (created offline: nothing is fetched
+/// from it). The project's folder.
+fn on_github(user: &User) -> PathBuf {
+    let (folder, _) = prepared(
+        user,
+        |folder| {
+            user.git(
+                folder,
+                &["remote", "set-url", "origin", "git@github.com:acme/app.git"],
+            )
+        },
+        true,
     );
+    folder
 }
 
 fn gh_calls(user: &User) -> Vec<String> {
@@ -641,4 +648,72 @@ fn a_granted_commit_push_or_rebase_runs_none_of_the_hooks_the_agent_can_write() 
         std::fs::read_to_string(user.path("marks")).unwrap(),
         "pre-commit\n"
     );
+}
+
+#[test]
+fn an_agent_cannot_point_a_remote_elsewhere_and_a_push_to_a_remote_changed_since_the_workspace_was_created_is_refused()
+ {
+    let user = User::with_fake_agent();
+    let (folder, remote) = fixture(&user);
+    let evil = bare(&user, "evil");
+    let shown = user
+        .call("workspace.show", json!({"project": "app", "name": "login"}))
+        .unwrap();
+    assert_eq!(
+        shown["repositories"][0]["base"]["urls"],
+        json!([remote.to_str().unwrap()]),
+        "{shown}"
+    );
+    procedure(&user, "ship", json!({"push": "allow"}), false);
+    let (_, mcp) = run(&user, "ship");
+
+    let evil_url = evil.to_str().unwrap();
+    for refused in [
+        format!("git remote set-url origin {evil_url}"),
+        format!("git remote add evil {evil_url}"),
+        format!("git config remote.origin.pushurl {evil_url}"),
+    ] {
+        let answer = line(&mcp, &refused);
+        assert!(answer.error, "{refused}: {}", answer.text);
+    }
+    // Moved anyway, by a way the gate does not see: the push is refused before git runs.
+    user.git(
+        &folder,
+        &["remote", "set-url", "--push", "origin", evil_url],
+    );
+    let answer = line(&mcp, "git push origin app/login");
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("no longer leads where it led"),
+        "{}",
+        answer.text
+    );
+    assert!(!remote_branches(&user, &evil).contains("app/login"));
+    assert!(!remote_branches(&user, &remote).contains("app/login"));
+}
+
+#[test]
+fn forge_write_refuses_a_remote_changed_since_the_workspace_was_created() {
+    let user = User::with_fake_agent().with_fake_gh();
+    let folder = on_github(&user);
+    procedure(&user, "open", json!({"pr-create": "allow"}), false);
+    let (_, open) = run(&user, "open");
+    user.git(
+        &folder,
+        &["remote", "set-url", "origin", "git@github.com:evil/app.git"],
+    );
+
+    let answer = open.call(
+        "forge_write",
+        json!({"action": "pr-create", "repository": ".", "title": "Add the login page"}),
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("no longer leads where it led"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(creates(&user), 0);
 }

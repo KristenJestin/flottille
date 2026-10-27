@@ -27,6 +27,7 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::oneshot;
 
 use crate::daemon::Daemon;
+use crate::forge;
 use crate::git::{self, Class};
 use crate::projects::{self, Failure};
 
@@ -415,6 +416,7 @@ async fn up_to_date_base(
                 return Ok(Base {
                     branch: branch.clone(),
                     remote: remote.to_owned(),
+                    urls: forge::urls_of(main, remote).await,
                     reference: tracking(branch),
                     commit,
                     fetched_now: false,
@@ -478,6 +480,7 @@ async fn up_to_date_base(
     Ok(Base {
         branch: (*branch).clone(),
         remote: remote.to_owned(),
+        urls: forge::urls_of(main, remote).await,
         reference: tracking(branch),
         commit,
         fetched_now: true,

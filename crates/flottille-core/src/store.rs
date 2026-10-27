@@ -1872,6 +1872,7 @@ mod tests {
                 base: Base {
                     branch: "main".into(),
                     remote: "origin".into(),
+                    urls: vec!["https://git.example.com/acme/app.git".into()],
                     reference: "refs/remotes/origin/main".into(),
                     commit: "0123abcd".into(),
                     fetched_now: true,

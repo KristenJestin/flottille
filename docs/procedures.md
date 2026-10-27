@@ -96,6 +96,13 @@ agent's line is unchanged: the hooks are files of the repository or of its confi
 folder, which the agent writes, and a `pre-push` hook would run with the push wall down. The
 repository's own hooks (a commit message check) do not run for a procedure's commits.
 
+**Where the remote leads.** A workspace records, at its creation, the URLs its repositories'
+remotes lead to (fetch and push, `insteadOf` applied, credentials taken out: the `urls` of each
+base, `docs/protocol.md`). An agent never changes them (`git remote` and `git config` writes are
+refused, `docs/tools.md`), and a granted push or `forge_write` is refused, before git or `gh` runs,
+when the remote leads anywhere else now. A workspace created before they were recorded gets no
+granted push nor forge write.
+
 ## `forge_write`
 
 The tool through which an agent writes to its workspace's forge (`docs/forges.md`), refused unless

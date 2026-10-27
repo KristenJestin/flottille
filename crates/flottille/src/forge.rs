@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -18,7 +18,7 @@ use std::time::Duration;
 use flottille_core::protocol::WorkspaceForge;
 use flottille_core::secrets;
 use flottille_core::store::now_ms;
-use flottille_core::workspace::Workspace;
+use flottille_core::workspace::{Base, Workspace};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -108,6 +108,69 @@ pub fn remote_of(url: &str) -> Remote {
         }),
         _ => Remote::Elsewhere,
     }
+}
+
+/// Where a repository's remote leads, as a workspace records it and a push and `forge_write`
+/// check it: its fetch and push URLs as git uses them (`insteadOf` applied), credentials taken
+/// out, sorted; empty when git names none.
+pub async fn urls_of(folder: &Path, remote: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    for push in [&[][..], &["--push"][..]] {
+        let args = [&["remote", "get-url", "--all"][..], push, &[remote]].concat();
+        match git::output(folder, &args, Class::Read).await {
+            Ok(said) => urls.extend(
+                said.lines()
+                    .map(str::trim)
+                    .filter(|url| !url.is_empty())
+                    .map(without_credentials),
+            ),
+            Err(_) => return Vec::new(),
+        }
+    }
+    urls.sort();
+    urls.dedup();
+    urls
+}
+
+/// The URL without what may come before its host: a user, a password or a token.
+fn without_credentials(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_owned();
+    };
+    let authority = rest.split('/').next().unwrap_or(rest);
+    match authority.rsplit_once('@') {
+        Some((_, host)) => format!("{scheme}://{host}{}", &rest[authority.len()..]),
+        None => url.to_owned(),
+    }
+}
+
+/// Refuses unless the repository's remote leads where it led when the workspace was created: an
+/// agent never changes it, and a push or a forge write that a procedure grants goes nowhere else.
+pub async fn remote_kept(folder: &Path, base: &Base) -> Result<(), String> {
+    if base.urls.is_empty() {
+        return Err(format!(
+            "refused: this workspace was created before Flottille recorded where its remote {} \
+             leads, and a procedure's push or forge write goes only where that is known: say \
+             what should be done, and the user does it",
+            base.remote
+        ));
+    }
+    let now = urls_of(folder, &base.remote).await;
+    if now != base.urls {
+        return Err(format!(
+            "refused: the remote {} no longer leads where it led when the workspace was created \
+             ({}): it leads to {}; nothing was sent: say so, and the user checks the \
+             repository's remotes",
+            base.remote,
+            base.urls.join(", "),
+            if now.is_empty() {
+                "nothing".to_owned()
+            } else {
+                now.join(", ")
+            }
+        ));
+    }
+    Ok(())
 }
 
 /// A pull request as the forge said it, its texts masked.
@@ -672,10 +735,11 @@ pub async fn forge_write(daemon: &Daemon, place: &Place, args: Value) -> Outcome
         Err(error) => return Outcome::Failed(error.to_string()),
     };
     let repositories = repositories_of(&workspace);
-    let Some((_, folder, remote)) = repositories
+    let found = repositories
         .iter()
-        .find(|(path, _, _)| *path == asked.repository)
-    else {
+        .zip(&workspace.repositories)
+        .find(|((path, _, _), _)| *path == asked.repository);
+    let Some(((_, folder, remote), repository)) = found else {
         let names: Vec<&str> = repositories.iter().map(|(p, _, _)| p.as_str()).collect();
         return Outcome::Refused(format!(
             "refused: {} is not a repository of this agent's workspace: it has {}; forge_write \
@@ -684,6 +748,9 @@ pub async fn forge_write(daemon: &Daemon, place: &Place, args: Value) -> Outcome
             names.join(", ")
         ));
     };
+    if let Err(refusal) = remote_kept(folder, &repository.base).await {
+        return Outcome::Refused(refusal);
+    }
     let forge = match git::output(folder, &["remote", "get-url", remote.as_str()], Class::Read)
         .await
         .as_deref()
@@ -709,15 +776,10 @@ pub async fn forge_write(daemon: &Daemon, place: &Place, args: Value) -> Outcome
                     "refused: pr-create needs a title: say what the pull request does".into(),
                 );
             };
-            let base = workspace
-                .repositories
-                .iter()
-                .find(|r| r.path == asked.repository)
-                .map(|r| r.base.branch.clone())
-                .unwrap_or_default();
+            let base = &repository.base.branch;
             let body = asked.body.unwrap_or_default();
             let mut args = vec![
-                "pr", "create", "-R", &slug, "--head", branch, "--base", &base, "--title", &title,
+                "pr", "create", "-R", &slug, "--head", branch, "--base", base, "--title", &title,
                 "--body", &body,
             ];
             if asked.draft {
@@ -913,6 +975,28 @@ mod tests {
             owner: owner.into(),
             name: name.into(),
         })
+    }
+
+    #[test]
+    fn a_recorded_url_keeps_no_credentials() {
+        for (url, kept) in [
+            (
+                "https://someone:ghp_secret@github.com/acme/app.git",
+                "https://github.com/acme/app.git",
+            ),
+            (
+                "https://ghp_secret@github.com/acme/app.git",
+                "https://github.com/acme/app.git",
+            ),
+            (
+                "ssh://git@github.com/acme/app.git",
+                "ssh://github.com/acme/app.git",
+            ),
+            ("git@github.com:acme/app.git", "git@github.com:acme/app.git"),
+            ("/srv/git/app.git", "/srv/git/app.git"),
+        ] {
+            assert_eq!(without_credentials(url), kept, "{url}");
+        }
     }
 
     #[test]
