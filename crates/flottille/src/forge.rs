@@ -1,7 +1,8 @@
 //! Forges (`docs/forges.md`): what the forge of each repository of a workspace says of the
-//! workspace's branch, its pull request and their checks. Reading only, through the user's own
-//! command line (`gh` for GitHub), spawned without a shell, with the user's own sign-in: Flottille
-//! never reads, keeps nor prints a token, and of `gh auth status` it reads the exit code alone.
+//! workspace's branch, its pull request and their checks, and the writes of `forge_write` that a
+//! procedure grants (`docs/procedures.md`). Through the user's own command line (`gh` for
+//! GitHub), spawned without a shell, with the user's own sign-in: Flottille never reads, keeps
+//! nor prints a token, and of `gh auth status` it reads the exit code alone.
 //!
 //! A workspace is read on demand (`workspace.forge`, the agents' `forge_read`), and again about
 //! once a minute while a client watches it, less often while `gh` fails. Nothing is read while
@@ -637,6 +638,195 @@ pub async fn forge_read(daemon: &Daemon, place: &Place, args: Value) -> Outcome 
     }
     let read = read(&repositories, &workspace.branch).await;
     Outcome::Done(read_text(&workspace, &read))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ForgeWrite {
+    action: String,
+    repository: String,
+    title: Option<String>,
+    body: Option<String>,
+    #[serde(default)]
+    draft: bool,
+}
+
+/// `forge_write`, once the gate let it through by a procedure's grant: one write to the forge of
+/// one repository of the agent's own workspace, for the workspace's branch only, through the
+/// user's own `gh`.
+pub async fn forge_write(daemon: &Daemon, place: &Place, args: Value) -> Outcome {
+    let asked: ForgeWrite = match arguments("forge_write", args) {
+        Ok(asked) => asked,
+        Err(refusal) => return refusal,
+    };
+    let Some(name) = &place.workspace else {
+        return Outcome::Refused(
+            "refused: this agent works in the project folder, not in a workspace: forge_write \
+             writes for a workspace's branch"
+                .into(),
+        );
+    };
+    let workspace = match daemon.read(|store| store.workspace(&place.project, name)) {
+        Ok(Some(workspace)) => workspace,
+        Ok(None) => return Outcome::Failed(format!("the workspace {name} is gone")),
+        Err(error) => return Outcome::Failed(error.to_string()),
+    };
+    let repositories = repositories_of(&workspace);
+    let Some((_, folder, remote)) = repositories
+        .iter()
+        .find(|(path, _, _)| *path == asked.repository)
+    else {
+        let names: Vec<&str> = repositories.iter().map(|(p, _, _)| p.as_str()).collect();
+        return Outcome::Refused(format!(
+            "refused: {} is not a repository of this agent's workspace: it has {}; forge_write \
+             writes only for those",
+            asked.repository,
+            names.join(", ")
+        ));
+    };
+    let forge = match git::output(folder, &["remote", "get-url", remote.as_str()], Class::Read)
+        .await
+        .as_deref()
+        .map(remote_of)
+    {
+        Ok(Remote::Forge(forge)) => forge,
+        Ok(_) | Err(_) => {
+            return Outcome::Refused(format!(
+                "refused: {}'s remote {remote} is not on a forge Flottille writes to (GitHub)",
+                asked.repository
+            ));
+        }
+    };
+    if let Err(problem) = signed_in().await {
+        return Outcome::Failed(problem);
+    }
+    let slug = forge.slug();
+    let branch = workspace.branch.as_str();
+    match asked.action.as_str() {
+        "pr-create" => {
+            let Some(title) = asked.title.filter(|t| !t.trim().is_empty()) else {
+                return Outcome::Refused(
+                    "refused: pr-create needs a title: say what the pull request does".into(),
+                );
+            };
+            let base = workspace
+                .repositories
+                .iter()
+                .find(|r| r.path == asked.repository)
+                .map(|r| r.base.branch.clone())
+                .unwrap_or_default();
+            let body = asked.body.unwrap_or_default();
+            let mut args = vec![
+                "pr", "create", "-R", &slug, "--head", branch, "--base", &base, "--title", &title,
+                "--body", &body,
+            ];
+            if asked.draft {
+                args.push("--draft");
+            }
+            match gh_text(&args).await {
+                Ok(said) => Outcome::Done(format!(
+                    "The pull request of {branch} into {base} was opened in {slug}: {}",
+                    said.trim()
+                )),
+                Err(why) => Outcome::Failed(why),
+            }
+        }
+        "pr-merge-squash" => {
+            let pull = match pull_of(&forge, branch).await {
+                Ok(Some(pull)) if pull.state == "open" => pull,
+                Ok(Some(pull)) => {
+                    return Outcome::Refused(format!(
+                        "refused: the pull request #{} of {branch} in {slug} is {}: only an open \
+                         one is merged",
+                        pull.number, pull.state
+                    ));
+                }
+                Ok(None) => {
+                    return Outcome::Refused(format!(
+                        "refused: {branch} has no pull request in {slug}: open it first"
+                    ));
+                }
+                Err(why) => return Outcome::Failed(why),
+            };
+            let number = pull.number.to_string();
+            match gh_text(&["pr", "merge", &number, "-R", &slug, "--squash"]).await {
+                Ok(_) => Outcome::Done(format!(
+                    "The pull request #{number} of {branch} was merged by squash into {} in \
+                     {slug}.",
+                    pull.base
+                )),
+                Err(why) => Outcome::Failed(why),
+            }
+        }
+        "pipeline-rerun" => {
+            let runs = match gh_json(&[
+                "run",
+                "list",
+                "-R",
+                &slug,
+                "--branch",
+                branch,
+                "--limit",
+                "50",
+                "--json",
+                "databaseId,headSha,conclusion,workflowName",
+            ])
+            .await
+            {
+                Ok(runs) => runs,
+                Err(why) => return Outcome::Failed(why),
+            };
+            let runs = runs.as_array().cloned().unwrap_or_default();
+            // The runs of the branch's last commit, the newest listed first.
+            let head = runs.first().and_then(|run| run["headSha"].as_str());
+            let failed: Vec<&Value> = runs
+                .iter()
+                .filter(|run| run["headSha"].as_str() == head && run["conclusion"] == "failure")
+                .collect();
+            if failed.is_empty() {
+                return Outcome::Refused(format!(
+                    "refused: no pipeline of {branch}'s last commit failed in {slug}: there is \
+                     nothing to re-run"
+                ));
+            }
+            let mut done = Vec::new();
+            for run in failed {
+                let id = run["databaseId"].as_u64().unwrap_or(0).to_string();
+                if let Err(why) = gh_text(&["run", "rerun", &id, "-R", &slug, "--failed"]).await {
+                    return Outcome::Failed(why);
+                }
+                done.push(format!(
+                    "{} ({id})",
+                    masked(run["workflowName"].as_str().unwrap_or("pipeline"))
+                ));
+            }
+            Outcome::Done(format!(
+                "The failed jobs of {} were started again in {slug}.",
+                done.join(", ")
+            ))
+        }
+        action => Outcome::Refused(format!(
+            "refused: forge_write has no action {action:?}: its actions are pr-create, \
+             pr-merge-squash and pipeline-rerun"
+        )),
+    }
+}
+
+/// `gh <args>`'s output, masked, or a sentence saying why it failed.
+async fn gh_text(args: &[&str]) -> Result<String, String> {
+    let shown = args[..2].join(" ");
+    match gh(args).await {
+        Ok((true, stdout, _)) => Ok(masked(&stdout)),
+        Ok((false, _, stderr)) => {
+            let said = stderr.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+            Err(format!(
+                "gh {shown} failed: {}",
+                masked(&said.chars().take(300).collect::<String>())
+            ))
+        }
+        Err(Gh::Missing) => Err("gh is not on the daemon's PATH".into()),
+        Err(Gh::Failed(why)) => Err(format!("gh {shown}: {why}")),
+    }
 }
 
 /// What `forge_read` answers.

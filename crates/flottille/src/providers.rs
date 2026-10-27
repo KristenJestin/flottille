@@ -121,6 +121,7 @@ impl Provider {
         let mut names: Vec<&str> = FILE_AND_COMMAND_TOOLS.to_vec();
         if in_workspace {
             names.push("forge_read");
+            names.push("forge_write");
         }
         if !at_depth_limit {
             names.extend(AGENT_TOOLS);
@@ -873,7 +874,7 @@ fn set_enabled(paths: &Paths, name: &str, enabled: bool) -> Result<bool, Failure
 /// the old file or the new one, never half of one. A symbolic link stays one (its target is
 /// written, the temporary file beside the target, made when the link dangles), the file's mode
 /// is kept, and no temporary file stays when a step fails.
-fn write_in_place(file: &Path, text: &str) -> std::io::Result<()> {
+pub fn write_in_place(file: &Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let real = written_path(file)?;
@@ -1039,11 +1040,13 @@ mod tests {
     fn an_agent_in_a_workspace_reads_its_pull_requests_and_one_in_the_project_folder_does_not() {
         let main = short(claude::PROVIDER.tools(true, false, false));
         assert!(!main.contains(&"forge_read".to_owned()));
+        assert!(!main.contains(&"forge_write".to_owned()));
         let workspace = short(claude::PROVIDER.tools(true, false, true));
-        assert_eq!(workspace.len(), 18);
+        assert_eq!(workspace.len(), 19);
         assert_eq!(workspace[9], "forge_read", "after the command tools");
+        assert_eq!(workspace[10], "forge_write", "after forge_read");
         let leaf = short(claude::PROVIDER.tools(false, true, true));
-        assert_eq!(leaf.len(), 12);
+        assert_eq!(leaf.len(), 13);
     }
 
     #[test]

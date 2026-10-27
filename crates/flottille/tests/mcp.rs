@@ -240,6 +240,7 @@ fn a_session_sees_only_its_tools() {
             "commands_output",
             "commands_stop",
             "forge_read",
+            "forge_write",
             "agent_launch",
             "agent_send",
             "agent_status",

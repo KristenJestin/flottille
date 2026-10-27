@@ -45,6 +45,7 @@ use crate::deliveries;
 use crate::files::{self, Context};
 use crate::gate;
 use crate::place::{Place, Resolved};
+use crate::procedures;
 use crate::projects;
 use crate::providers::{self, Provider};
 use crate::runs;
@@ -86,7 +87,7 @@ const REPLACED: &str = "refused: this session has been replaced: a new session o
 
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
 /// the order frozen in the agent.
-const SERVED: [Definition; 19] = [
+const SERVED: [Definition; 20] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -265,6 +266,29 @@ const SERVED: [Definition; 19] = [
             json!({"type": "object", "properties": {
                 "repository": {"type": "string", "description": "One of the workspace's repositories, by its path; all of them when left out."}
             }, "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "forge_write",
+        title: "Write to the workspace's forge",
+        description: "Inside a procedure that grants it, and only then: opens the pull request of \
+            this workspace's branch in one of its repositories (pr-create, with a title and a \
+            body, into the repository's base), merges it by squash (pr-merge-squash), or re-runs \
+            the failed jobs of the pipelines of its branch's last commit (pipeline-rerun). Run \
+            by Flottille with the user's own forge sign-in. Refused outside a procedure and for \
+            an action the procedure does not grant; held for the user when it grants it with \
+            ask.",
+        read_only: false,
+        idempotent: false,
+        destructive: false,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["pr-create", "pr-merge-squash", "pipeline-rerun"]},
+                "repository": {"type": "string", "description": "One of the workspace's repositories, by its path."},
+                "title": {"type": "string", "description": "pr-create: the pull request's title."},
+                "body": {"type": "string", "description": "pr-create: its description."},
+                "draft": {"type": "boolean", "description": "pr-create: opened as a draft."}
+            }, "required": ["action", "repository"], "additionalProperties": false})
         },
     },
     Definition {
@@ -1024,6 +1048,25 @@ async fn played(
 
 /// The gate's verdict on a call of one of the agent's tools, and the call's identity for a grant.
 pub fn judge(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> (gate::Verdict, String) {
+    considered(daemon, grant, tool, args, |call| {
+        (gate::decide(call), gate::identity(call))
+    })
+}
+
+/// Whether the procedure run the agent works in lets this `commands_run` push: its run's
+/// environment then lets `git push` reach the remote.
+fn pushes(daemon: &Daemon, grant: &Grant, args: &Value) -> bool {
+    considered(daemon, grant, "commands_run", args, gate::pushes)
+}
+
+/// The call as the gate sees it, handed to `consider`.
+fn considered<T>(
+    daemon: &Daemon,
+    grant: &Grant,
+    tool: &str,
+    args: &Value,
+    consider: impl FnOnce(&gate::Call) -> T,
+) -> T {
     let project = projects::load_project(daemon, &grant.place.project).ok();
     let (paths, words, command) = reached(daemon, &grant.place, tool, args);
     let command = command.as_deref().and_then(|name| {
@@ -1037,6 +1080,7 @@ pub fn judge(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> (gate:
         paths_of.state.clone(),
         paths_of.runtime.clone(),
     ];
+    let run = procedures::run_of(daemon, grant);
     let call = gate::Call {
         grant,
         tool,
@@ -1046,8 +1090,9 @@ pub fn judge(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> (gate:
         command,
         never: project.as_ref().map(|project| project.never.as_slice()),
         own: &own,
+        run: run.as_ref(),
     };
-    (gate::decide(&call), gate::identity(&call))
+    consider(&call)
 }
 
 /// Performs a call the user allowed, recorded as the agent's: the request's answer.
@@ -1155,11 +1200,13 @@ async fn perform(
     match tool {
         "commands_list" => runs::commands_list(daemon, &grant.place, args),
         "commands_run" => {
-            runs::commands_run(daemon, &grant.agent, &grant.place, args, cancelled).await
+            let push = pushes(daemon, grant, &args);
+            runs::commands_run(daemon, &grant.agent, &grant.place, args, push, cancelled).await
         }
         "commands_output" => runs::commands_output(daemon, &grant.agent, args),
         "commands_stop" => runs::commands_stop(daemon, &grant.agent, args).await,
         "forge_read" => crate::forge::forge_read(daemon, &grant.place, args).await,
+        "forge_write" => crate::forge::forge_write(daemon, &grant.place, args).await,
         tool if tree::TOOLS.contains(&tool) => tree::call(daemon, grant, tool, args).await,
         _ => {
             // The file tools read and write the disk: off the daemon's thread.
@@ -1253,7 +1300,7 @@ mod tests {
     #[test]
     fn a_grant_holds_the_agent_s_served_tools_in_its_own_order() {
         let mut leaf = claude::PROVIDER.tools(false, true, true);
-        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 12);
+        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 13);
         leaf.reverse();
         leaf.retain(|tool| !tool.ends_with("__search"));
         leaf.push("fs_read".into());
@@ -1261,7 +1308,7 @@ mod tests {
         assert_eq!(served.first(), Some(&"ask_parent"));
         assert_eq!(served.last(), Some(&"fs_read"));
         assert!(!served.contains(&"search"));
-        assert_eq!(served.len(), 11);
+        assert_eq!(served.len(), 12);
     }
 
     #[test]

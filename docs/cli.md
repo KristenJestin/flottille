@@ -266,6 +266,80 @@ $ flottille workspace remove shop login
 Removed workspace login of shop: its worktrees and its folder. Its branches are kept.
 ```
 
+## Procedures
+
+A procedure is a named action of a project, run by an agent in a workspace with the grants it
+gives (`docs/procedures.md`).
+
+### `flottille procedure list <project>`
+
+```
+$ flottille procedure list shop
+open-prs  Open the pull requests of the workspace
+    grants: push (allow), pr-create (ask)
+```
+
+`--json` prints `procedure.list`.
+
+### `flottille procedure show <project> <name>`
+
+```
+$ flottille procedure show shop open-prs
+Procedure open-prs of project shop: Open the pull requests of the workspace
+It grants, for each run:
+  push (allow): push the workspace's branch to its remote (git push)
+  pr-create (ask): open the workspace's pull requests (forge_write pr-create)
+Its children get none of them.
+Instructions:
+  Push the branch, then open one pull request per repository with commits.
+```
+
+### `flottille procedure add <project> <name>`
+
+`--description <line>`, the instructions with `--instructions <text>` or `--instructions-file
+<file>`, a `--grant <grant>=<mode>` per grant (`push=allow`, `pr-create=ask`; the grants are
+`commit`, `push`, `push-force-with-lease`, `rebase`, `pr-create`, `pr-merge-squash`,
+`pipeline-rerun`) and `--children` to give the grants to the run's children too. Written in the
+project's file, what is around it kept.
+
+```
+$ flottille procedure add shop open-prs --description "Open the pull requests of the workspace" \
+    --instructions-file open-prs.md --grant push=allow --grant pr-create=ask
+Added procedure open-prs to project shop.
+```
+
+### `flottille procedure edit <project> <name>`
+
+Changes what is given (`--description`, `--instructions`, `--instructions-file`, `--children
+true|false`); `--grant` given once or more replaces all the grants, `--no-grants` removes them.
+
+### `flottille procedure remove <project> <name>`
+
+```
+$ flottille procedure remove shop open-prs
+Removed procedure open-prs from project shop.
+```
+
+### `flottille procedure run <project> <name> --workspace <workspace>`
+
+Shows the grants, asks for a yes (`--yes` starts without asking; no answer is a refusal), then
+starts the run's root agent in the workspace. Nothing starts before the yes, and the daemon refuses
+when the grants changed since they were shown.
+
+```
+$ flottille procedure run shop open-prs --workspace login
+Procedure open-prs of project shop, in workspace login: Open the pull requests of the workspace
+It grants, for this run only:
+  push (allow): push the workspace's branch to its remote (git push)
+  pr-create (ask): open the workspace's pull requests (forge_write pr-create)
+Its children get none of them.
+Everything else is decided as for any agent.
+Run it? [y/N] y
+Started agent 3f9a1c0b7d2e for procedure open-prs in workspace login: follow it with `flottille agent read 3f9a1c0b7d2e`.
+```
+
+`--json` prints `procedure.start`'s answer.
+
 ## Agents
 
 An agent is one session of an agent run over ACP on one of its providers, Claude, OpenCode or Codex

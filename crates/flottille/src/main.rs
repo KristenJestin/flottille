@@ -22,6 +22,8 @@ mod mcp;
 mod opencode;
 mod pilot;
 mod place;
+mod procedure_command;
+mod procedures;
 mod program;
 mod project_command;
 mod projects;
@@ -44,6 +46,7 @@ use serde_json::Value;
 
 use crate::agent_command::AgentAction;
 use crate::client::Client;
+use crate::procedure_command::ProcedureAction;
 use crate::project_command::ProjectAction;
 use crate::workspace_command::WorkspaceAction;
 
@@ -77,6 +80,11 @@ enum Command {
     Workspace {
         #[command(subcommand)]
         action: WorkspaceAction,
+    },
+    /// A project's procedures: named actions with grants, run by an agent in a workspace
+    Procedure {
+        #[command(subcommand)]
+        action: ProcedureAction,
     },
     /// Start, write to, read and stop Claude agents
     Agent {
@@ -221,6 +229,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Project { action } => return project_command::run(&paths, action),
         Command::Workspace { action } => return workspace_command::run(&paths, action),
         Command::Agent { action } => return agent_command::run(&paths, action),
+        Command::Procedure { action } => return procedure_command::run(&paths, action),
         Command::Doctor { json } => return agent_command::doctor(&paths, json),
         Command::Provider { action } => {
             let (method, name) = match action {

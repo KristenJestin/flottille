@@ -1,4 +1,5 @@
-//! A scripted `gh` for the tests of Flottille's forge reads (`docs/forges.md`), so that no test
+//! A scripted `gh` for the tests of Flottille's forge reads and writes (`docs/forges.md`,
+//! `docs/procedures.md`), so that no test
 //! ever calls GitHub nor uses anyone's sign-in. It answers the few commands Flottille runs, from a
 //! script, and records every call.
 //!
@@ -23,6 +24,11 @@
 //! the object `gh pr view --json` answers (its `number` is what `gh pr list` answers); a branch
 //! with none has no pull request. `fail` makes every `pr` call on that repository end with 1,
 //! saying its text.
+//!
+//! The writes answer as `gh` does when they work: `pr create` prints the new pull request's URL
+//! (numbered `created`, 1 by default), `pr merge` and `run rerun` print nothing, and `run list`
+//! prints `runs` of the repository (`{"runs": {"acme/app": [{"databaseId": 7, …}]}}`), `[]`
+//! without.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -68,6 +74,28 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 return 1;
             }
             eprintln!("github.com\n  ✓ Logged in to github.com account someone (keyring)");
+            0
+        }
+        ["pr", "create" | "merge", ..] | ["run", "list" | "rerun", ..] => {
+            let Some(repository) = option("-R") else {
+                eprintln!("fake gh: no -R");
+                return 2;
+            };
+            if let Some(failure) = script["fail"][repository].as_str() {
+                eprintln!("{failure}");
+                return 1;
+            }
+            match words[..2] {
+                ["pr", "create"] => println!(
+                    "https://github.com/{repository}/pull/{}",
+                    script["created"].as_u64().unwrap_or(1)
+                ),
+                ["run", "list"] => match &script["runs"][repository] {
+                    Value::Null => println!("[]"),
+                    runs => println!("{runs}"),
+                },
+                _ => {}
+            }
             0
         }
         ["pr", sub @ ("list" | "view"), rest @ ..] => {

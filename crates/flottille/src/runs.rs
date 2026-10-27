@@ -249,11 +249,14 @@ pub fn reaches(
         })
 }
 
+/// `push` says the gate let this line push by a procedure's grant: its environment lets `git
+/// push` through, and only its.
 pub async fn commands_run(
     daemon: &Arc<Daemon>,
     agent: &str,
     place: &Place,
     args: Value,
+    push: bool,
     cancelled: CancellationToken,
 ) -> Outcome {
     let args: RunArguments = match arguments("commands_run", args) {
@@ -295,7 +298,7 @@ pub async fn commands_run(
     {
         return Outcome::Done(describe(daemon, &going.run.id, None, None, true));
     }
-    let env = match environment(daemon, place, &repository) {
+    let env = match environment(daemon, place, &repository, push) {
         Ok(env) => env,
         Err(why) => return Outcome::Failed(why),
     };
@@ -353,11 +356,12 @@ fn wait_for_end(daemon: &Daemon, id: &str) -> impl Future<Output = ()> + use<> {
 }
 
 /// The environment of a run in the place: the daemon's, the place's variables filled, and the
-/// forges kept out of reach.
+/// forges kept out of reach; `push` lets `git push` through, for a push a procedure grants.
 fn environment(
     daemon: &Daemon,
     place: &Place,
     repository: &str,
+    push: bool,
 ) -> Result<BTreeMap<OsString, OsString>, String> {
     let names = Names {
         workspace: place.workspace.clone().unwrap_or_else(|| "main".into()),
@@ -373,18 +377,22 @@ fn environment(
     let mut env = variables::environment(std::env::vars_os(), &[&filled]);
     let empty = daemon.paths.state.join("empty");
     flottille_core::paths::ensure_private_dir(&empty).map_err(|e| e.to_string())?;
-    defend(&mut env, &empty);
+    defend(&mut env, &empty, push);
     Ok(env)
 }
 
-/// No forge token, the forge command lines' configuration in `empty`, and every push URL
-/// rewritten to a path that is no remote (`url.<nowhere>.pushInsteadOf` of every URL).
-fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path) {
+/// No forge token, the forge command lines' configuration in `empty`, and, unless the run is a
+/// push a procedure grants, every push URL rewritten to a path that is no remote
+/// (`url.<nowhere>.pushInsteadOf` of every URL).
+fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path, push: bool) {
     for name in FORGE_TOKENS {
         env.insert(name.into(), OsString::new());
     }
     for name in FORGE_CONFIGS {
         env.insert(name.into(), empty.into());
+    }
+    if push {
+        return;
     }
     let count: usize = env
         .get(&OsString::from("GIT_CONFIG_COUNT"))
@@ -835,7 +843,7 @@ mod tests {
         .map(|(k, v)| (k.into(), v.into()))
         .collect();
 
-        defend(&mut env, Path::new("/state/empty"));
+        defend(&mut env, Path::new("/state/empty"), false);
 
         let get = |name: &str| env[&OsString::from(name)].to_str().unwrap().to_owned();
         assert_eq!(get("GH_TOKEN"), "");
@@ -848,6 +856,23 @@ mod tests {
         );
         assert_eq!(get("GIT_CONFIG_VALUE_2"), "");
         assert_eq!(get("PATH"), "/bin");
+    }
+
+    #[test]
+    fn a_push_a_procedure_grants_keeps_its_push_url_and_still_gets_no_forge_token() {
+        let mut env: BTreeMap<OsString, OsString> =
+            [("GH_TOKEN", "ghp_x"), ("GIT_CONFIG_COUNT", "2")]
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect();
+
+        defend(&mut env, Path::new("/state/empty"), true);
+
+        let get = |name: &str| env[&OsString::from(name)].to_str().unwrap().to_owned();
+        assert_eq!(get("GH_TOKEN"), "");
+        assert_eq!(get("GH_CONFIG_DIR"), "/state/empty");
+        assert_eq!(get("GIT_CONFIG_COUNT"), "2");
+        assert!(!env.contains_key(&OsString::from("GIT_CONFIG_KEY_2")));
     }
 
     #[test]
