@@ -3,6 +3,10 @@
 //!
 //! It is drawn after everything else, above the dropdowns, over a scrim that takes the clicks
 //! meant for the page. The owner gives the focus to its first field when it opens it.
+//!
+//! The owner draws it all the time and says whether it is [`open`](Modal::open): the scrim fades
+//! and the dialog fades and rises when it opens, and the other way when it closes. Once the close
+//! animation has ended nothing is drawn.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -14,8 +18,15 @@ use gpui_kit::{
 };
 
 use crate::button::Button;
+use crate::motion::{MODAL, Motion, RISE};
 use crate::theme::palette;
 use crate::typography::Type;
+
+/// What a modal remembers between two frames: whether it was open, and its entrance.
+struct Shown {
+    open: bool,
+    motion: Motion,
+}
 
 type Handler = Rc<dyn Fn(&mut Window, &mut App) + 'static>;
 
@@ -27,6 +38,7 @@ pub struct Modal {
     body: Vec<AnyElement>,
     actions: Vec<AnyElement>,
     on_close: Option<Handler>,
+    open: bool,
 }
 
 impl Modal {
@@ -39,11 +51,18 @@ impl Modal {
             body: Vec::new(),
             actions: Vec::new(),
             on_close: None,
+            open: true,
         }
     }
 
     pub fn width(mut self, width: Pixels) -> Self {
         self.width = width;
+        self
+    }
+
+    /// Whether it is open, `true` unless said.
+    pub fn open(mut self, open: bool) -> Self {
+        self.open = open;
         self
     }
 
@@ -75,6 +94,29 @@ fn part(id: &ElementId, name: &'static str) -> ElementId {
 
 impl RenderOnce for Modal {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let state = window.use_keyed_state(part(&self.id, "motion"), cx, |_, _| Shown {
+            open: false,
+            motion: Motion::settled(0.0),
+        });
+        let now = cx.background_executor().now();
+        let reduce = cx.reduce_motion();
+        state.update(cx, |shown, _| {
+            if shown.open != self.open {
+                shown.open = self.open;
+                let target = if self.open { 1.0 } else { 0.0 };
+                shown.motion.animate(target, MODAL, now, reduce);
+            }
+        });
+        let motion = state.read(cx).motion;
+        if motion.is_running(now) {
+            window.request_animation_frame();
+        } else {
+            state.update(cx, |shown, _| shown.motion.settle(now));
+        }
+        let t = motion.value(now);
+        if !self.open && t == 0.0 {
+            return div().into_any_element();
+        }
         let p = palette(cx);
         let viewport = window.viewport_size();
         let close = self.on_close.clone();
@@ -88,13 +130,16 @@ impl RenderOnce for Modal {
             .id(part(&self.id, "scrim"))
             .absolute()
             .inset_0()
-            .bg(p.scrim)
+            .bg(p.scrim.opacity(t))
             .occlude()
             .on_mouse_down(MouseButton::Left, move |_, window, cx| on_scrim(window, cx))
             .test_support();
         let panel = div()
             .id(self.id.clone())
             .occlude()
+            .relative()
+            .top(px(RISE * (1.0 - t)))
+            .opacity(t)
             .w(self.width)
             .max_w(viewport.width - px(32.))
             .p(px(18.))
@@ -135,7 +180,7 @@ impl RenderOnce for Modal {
                     .children(self.actions),
             )
             .test_support();
-        deferred(
+        let layer = deferred(
             anchored().position(point(px(0.), px(0.))).child(
                 div()
                     .w(viewport.width)
@@ -148,6 +193,7 @@ impl RenderOnce for Modal {
                     .child(panel),
             ),
         )
-        .priority(2)
+        .priority(2);
+        layer.into_any_element()
     }
 }
