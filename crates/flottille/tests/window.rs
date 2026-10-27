@@ -977,13 +977,13 @@ fn the_composer_grows_line_by_line_up_to_a_limit_then_scrolls(cx: &mut TestAppCo
     let composer = composer_of(&shell, "atlas", cx);
     let lines = |n: usize| vec!["a line of the task"; n].join("\n");
 
-    // Padding 12 above and below; a line is 21 px; one line at least, eight at most.
+    // Padding 12 above and below; a line is 21 px; three lines at least, eight at most.
     let heights: Vec<f32> = [1, 2, 3, 4, 8, 9, 40]
         .map(|n| field_height(&composer, &lines(n), cx))
         .into();
     assert_eq!(
         heights,
-        [45., 66., 87., 108., 192., 192., 192.],
+        [87., 87., 87., 108., 192., 192., 192.],
         "one, two, three, four, eight, nine and forty lines"
     );
     let back = field_height(&composer, &lines(3), cx);
@@ -998,8 +998,38 @@ fn the_composer_grows_line_by_line_up_to_a_limit_then_scrolls(cx: &mut TestAppCo
         cx.simulate_input(line);
         typed.push(field_height(&composer, &field_of(&composer, cx), cx));
     }
-    assert_eq!(typed, [66., 87., 108.], "two, three and four typed lines");
+    assert_eq!(typed, [87., 87., 108.], "two, three and four typed lines");
 }
+
+#[gpui_kit::test]
+fn the_project_pages_empty_composer_is_three_lines_high_and_the_replys_input_is_not_changed(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let composer = composer_of(&shell, "atlas", cx);
+    // Padding 12 above and below, three lines of 21 px.
+    assert_eq!(field_height(&composer, "", cx), 87., "no text");
+
+    // The session's reply input keeps the height it had.
+    let lead = start(&user, "atlas", None, "Release notes for 2.4");
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&lead)).is_some())
+    });
+    cx.update(|window, cx| window.click(session_id(&lead), cx));
+    until(&shell, cx, "the session's page is open", |cx| {
+        cx.update(|window, _| window.try_find("reply-field").is_some())
+    });
+    settle(cx);
+    let reply = cx.update(|window, _| f32::from(window.find("reply-field").bounds().size.height));
+    assert_eq!(reply, REPLY_FIELD_HEIGHT, "the reply input, empty");
+}
+
+/// The height of the session's reply input with no text, as it was before the project page's
+/// composer changed.
+const REPLY_FIELD_HEIGHT: f32 = 60.;
 
 #[gpui_kit::test]
 fn typing_in_the_composer_does_not_redraw_the_page(cx: &mut TestAppContext) {
@@ -2105,6 +2135,77 @@ fn ended_children_are_gathered_under_a_folded_row_that_opens_on_a_click(cx: &mut
     until(&shell, cx, "the ended child's conversation", |cx| {
         session_page(&shell, cx).read_with(cx, |p, _| p.shown() == stopped)
     });
+}
+
+/// Runs the clock `by` forward, a frame at a time, as the platform would.
+fn run_for(by: Duration, cx: &mut VisualTestContext) {
+    let step = Duration::from_millis(16);
+    let mut gone = Duration::ZERO;
+    while gone < by {
+        cx.executor().advance_clock(step);
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        gone += step;
+    }
+}
+
+/// The height the ended children of `parent` take in the rail, once a frame is drawn; `None`
+/// when they are not drawn at all.
+fn ended_height(parent: &str, cx: &mut VisualTestContext) -> Option<f32> {
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        let group = window.try_find(format!("rail-ended-children-{parent}"))?;
+        Some(f32::from(group.bounds().size.height))
+    })
+}
+
+#[gpui_kit::test]
+fn the_ended_row_opens_and_folds_its_children_with_an_animation(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, mcp, _) = lead_in_w(&user);
+    let done = worker_doing(&mcp, "REPORT", "write the notes");
+    eventually("it has ended", || {
+        user.call("agent.show", json!({"agent": done})).unwrap()["agent"]["state"] == "ended"
+    });
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the rail knows the ended child", |cx| {
+        rail_ids(&page, cx).contains(&done)
+            && page.read_with(cx, |p, cx| {
+                matches!(
+                    p.state(&done, cx),
+                    Some(AgentState::Completed | AgentState::Stopped)
+                )
+            })
+    });
+    settle(cx);
+    assert_eq!(ended_height(&lead, cx), None, "folded, nothing is drawn");
+
+    // Opening: the child grows into place, then the rail asks for no more frames.
+    cx.update(|window, cx| window.click(format!("rail-ended-{lead}"), cx));
+    let first = ended_height(&lead, cx).expect("drawn from the first frame");
+    run_for(Duration::from_millis(60), cx);
+    let part_way = ended_height(&lead, cx).unwrap();
+    run_for(Duration::from_millis(600), cx);
+    let open = ended_height(&lead, cx).unwrap();
+    assert!(
+        first < part_way && part_way < open,
+        "it grows: {first} then {part_way} then {open}"
+    );
+    assert!(open > 20., "a whole row: {open}");
+    assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 0);
+
+    // Folding: still drawn part way, shrinking, gone once the animation ended.
+    cx.update(|window, cx| window.click(format!("rail-ended-{lead}"), cx));
+    run_for(Duration::from_millis(60), cx);
+    let leaving = ended_height(&lead, cx).expect("still drawn, leaving");
+    assert!(
+        leaving < open && leaving > 0.,
+        "it shrinks: {leaving} of {open}"
+    );
+    run_for(Duration::from_millis(600), cx);
+    assert_eq!(ended_height(&lead, cx), None, "gone once the fold ended");
+    assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 0);
 }
 
 fn row_ids(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Vec<gpui_kit::EntityId> {
@@ -3511,6 +3612,89 @@ fn a_reply_with_bold_a_list_and_a_code_block_renders_them_not_their_marks(cx: &m
     let shown = rendered(&page, 1, cx);
     assert!(shown.trim_end().ends_with("Then ship it."), "{shown:?}");
     assert!(!shown.contains("**"), "{shown:?}");
+}
+
+const TABLE: &str = "A table:\n\n| Tool | Result |\n| --- | --- |\n| `cargo test` | passes |\n| clippy | clean |\n\nAfter it.";
+
+/// Opens a session whose reply holds a table, in a window of the palette `colors` describes (the
+/// default dark one when `None`), and gives the solid backgrounds drawn, with the palette.
+fn drawn_table(
+    colors: Option<&str>,
+    cx: &mut TestAppContext,
+) -> (flottille_ui::Palette, Vec<gpui_kit::Hsla>) {
+    let user = team_user();
+    if let Some(colors) = colors {
+        std::fs::write(user.path("os-release"), "NAME=Test\nID=omarchy\n").unwrap();
+        let file = user.path("state/omarchy/current/theme/colors.toml");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, colors).unwrap();
+    }
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    settle(cx);
+    read_events(
+        &page,
+        vec![
+            made_up(
+                1,
+                "agent.prompted",
+                json!({"text": "[flottille:user]\nlist them"}),
+            ),
+            made_up(2, "agent.message", json!({"text": TABLE})),
+        ],
+        cx,
+    );
+    frame(cx);
+    settle(cx);
+    let palette = cx.update(|_, cx| flottille_ui::palette(cx));
+    let quads = cx.update(|window, _| {
+        window
+            .painted_quads()
+            .iter()
+            .filter_map(|q| q.background.as_solid())
+            .collect()
+    });
+    (palette, quads)
+}
+
+/// The table's frame is on the palette's card and its header on the quiet surface: no quad of the
+/// kit's own (white) surface is left.
+fn assert_table_in_palette(p: &flottille_ui::Palette, quads: &[gpui_kit::Hsla]) {
+    assert!(
+        quads.contains(&p.card),
+        "the table's frame is the card colour"
+    );
+    assert!(
+        quads.contains(&p.card2),
+        "the table's header is the quiet surface"
+    );
+    assert!(
+        !quads.contains(&gpui_kit::white()),
+        "no white quad is drawn"
+    );
+}
+
+#[gpui_kit::test]
+fn a_markdown_table_is_drawn_with_the_palette_on_the_dark_theme(cx: &mut TestAppContext) {
+    let (p, quads) = drawn_table(None, cx);
+    assert_table_in_palette(&p, &quads);
+    assert!(
+        quads
+            .iter()
+            .all(|bg| bg.a < 1.0 || bg.l < 0.9 || *bg == p.acc),
+        "nothing light is under the cells on a dark theme"
+    );
+}
+
+#[gpui_kit::test]
+fn a_markdown_table_is_drawn_with_the_palette_on_a_light_theme(cx: &mut TestAppContext) {
+    let (p, quads) = drawn_table(
+        Some("background = \"#fafafa\"\nforeground = \"#1c1c1c\"\naccent = \"#2f5fd0\"\n"),
+        cx,
+    );
+    assert!(p.bg.l > 0.9, "the theme is light: {:?}", p.bg);
+    assert_table_in_palette(&p, &quads);
 }
 
 #[gpui_kit::test]

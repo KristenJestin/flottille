@@ -3,7 +3,7 @@
 mod common;
 
 use common::{Desktop, advance, init, pending_frames};
-use flottille_ui::motion::MODAL;
+use flottille_ui::motion::{ENTER, HOVER, MODAL};
 use flottille_ui::{Align, Dropdown, MenuItem, Modal};
 use gpui_kit::base::input::{Input, InputState};
 use gpui_kit::test::TestWindowExt;
@@ -112,6 +112,7 @@ fn an_open_dropdown_is_above_the_elements_under_it_and_takes_their_clicks(cx: &m
 fn a_dropdown_with_no_room_below_opens_upward_inside_the_window(cx: &mut TestAppContext) {
     let (_, cx) = page(true, cx);
     cx.update(|window, cx| window.click("picker", cx));
+    advance(cx, ENTER * 2);
     let (menu, button, viewport) = cx.update(|window, cx| {
         window.render_frame(cx);
         (
@@ -139,6 +140,104 @@ fn a_click_outside_an_open_dropdown_closes_it_and_goes_no_further(cx: &mut TestA
         assert!(!p.open);
         assert_eq!(p.under, 0);
         assert_eq!(p.picked, None);
+    });
+}
+
+/// Where the dropdown's list is, after the frame its state asked for.
+fn list_top(cx: &mut VisualTestContext) -> gpui_kit::Pixels {
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        window.find("picker-menu").bounds().origin.y
+    })
+}
+
+#[gpui_kit::test]
+fn a_dropdown_rises_into_place_when_opened_and_stops_asking_for_frames(cx: &mut TestAppContext) {
+    let (page, cx) = page(false, cx);
+    cx.update(|window, cx| window.click("picker", cx));
+    assert!(page.read_with(cx, |p, _| p.open));
+    let first = list_top(cx);
+    advance(cx, ENTER / 3);
+    let part_way = list_top(cx);
+    advance(cx, ENTER * 2);
+    let rested = list_top(cx);
+
+    assert!(first > part_way, "it rises: {first:?} then {part_way:?}");
+    assert!(
+        part_way > rested,
+        "and keeps rising: {part_way:?} then {rested:?}"
+    );
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn once it rests");
+}
+
+#[gpui_kit::test]
+fn a_dropdown_stays_drawn_until_its_close_ends_then_goes(cx: &mut TestAppContext) {
+    let (page, cx) = page(false, cx);
+    cx.update(|window, cx| window.click("picker", cx));
+    advance(cx, ENTER * 2);
+    let rested = list_top(cx);
+
+    // Closed by its button, or by a click outside: both start the same close.
+    cx.update(|window, cx| window.click("picker", cx));
+    assert!(!page.read_with(cx, |p, _| p.open));
+    advance(cx, HOVER / 3);
+    cx.update(|window, _| {
+        assert!(
+            window.try_find("picker-menu").is_some(),
+            "still on screen, leaving"
+        );
+        assert!(
+            window.try_find("picker-backdrop").is_none(),
+            "nothing over the window takes a click while it leaves"
+        );
+    });
+    assert!(list_top(cx) > rested, "it sinks as it fades");
+
+    advance(cx, HOVER * 3);
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find("picker-menu").is_none(),
+            "gone once the close ended"
+        );
+    });
+    assert_eq!(pending_frames(cx), 0);
+
+    // And it opens again from the start.
+    cx.update(|window, cx| window.click("picker", cx));
+    assert!(list_top(cx) > rested);
+}
+
+#[gpui_kit::test]
+fn picking_an_entry_closes_the_dropdown_with_the_same_animation(cx: &mut TestAppContext) {
+    let (page, cx) = page(false, cx);
+    cx.update(|window, cx| window.click("picker", cx));
+    advance(cx, ENTER * 2);
+    cx.update(|window, cx| window.click("choice-low", cx));
+    page.read_with(cx, |p, _| assert_eq!(p.picked, Some("low")));
+    advance(cx, HOVER / 3);
+    cx.update(|window, _| assert!(window.try_find("picker-menu").is_some()));
+    advance(cx, HOVER * 3);
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("picker-menu").is_none());
+    });
+}
+
+#[gpui_kit::test]
+fn with_reduced_motion_a_dropdown_comes_and_goes_at_once(cx: &mut TestAppContext) {
+    let (_, cx) = page(false, cx);
+    cx.update(|_, cx| cx.set_reduce_motion(true));
+    cx.update(|window, cx| window.click("picker", cx));
+    let first = list_top(cx);
+    assert_eq!(pending_frames(cx), 0);
+    advance(cx, ENTER * 2);
+    assert_eq!(first, list_top(cx), "it was in place at the first frame");
+
+    cx.update(|window, cx| window.click("picker", cx));
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("picker-menu").is_none());
     });
 }
 
