@@ -3,7 +3,7 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::{SharedString, Styled, Svg, px, svg};
 
-gpui_kit::assets::icon_assets!(pub Icons, [Folder, GitBranch, Book, ChevronDown, Plus, Search, Bell, ExternalLink, Network, Menu, ArrowUp, ChevronsUpDown, Settings, Ellipsis]);
+gpui_kit::assets::icon_assets!(pub Icons, [Folder, GitBranch, Book, ChevronDown, Plus, Search, Bell, ExternalLink, Network, Menu, ArrowUp, ChevronsUpDown, Settings, Ellipsis, CircleStop]);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
@@ -25,10 +25,12 @@ pub enum Icon {
     Settings,
     /// A "⋯" button: it opens a small menu.
     More,
+    /// The composer's button that interrupts the turn that runs.
+    Stop,
 }
 
 impl Icon {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Folder,
         Self::Branch,
         Self::Repository,
@@ -43,6 +45,7 @@ impl Icon {
         Self::Choose,
         Self::Settings,
         Self::More,
+        Self::Stop,
     ];
 
     pub fn path(self) -> SharedString {
@@ -61,6 +64,7 @@ impl Icon {
             Self::Choose => IconName::ChevronsUpDown,
             Self::Settings => IconName::Settings,
             Self::More => IconName::Ellipsis,
+            Self::Stop => IconName::CircleStop,
         }
         .path()
     }

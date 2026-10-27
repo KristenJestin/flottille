@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use flottille_ui::motion::{Motion, PANEL};
 use flottille_ui::{
-    AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Menu, Palette, Pill, PulsingLabel,
-    Side, StateIcon, Status, Type, enter, fold_frame, icon, palette, section_label,
+    AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Menu, Modal, Palette, Pill,
+    PulsingLabel, Side, StateIcon, Status, Type, enter, fold_frame, icon, palette, section_label,
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{Input, InputEditorStyle, InputEvent, InputState, TextareaState};
@@ -56,6 +56,8 @@ pub const THE_CONVERSATION: &str = "the conversation";
 /// The reply field's placeholder and its send button's tooltip: the field writes to the root.
 pub const REPLY_PLACEHOLDER: &str = "Reply…";
 pub const SEND: &str = "Send";
+/// The composer's button that interrupts the turn that runs.
+pub const STOP: &str = "Stop the turn";
 
 /// The state an agent of the tree is drawn with, from what the daemon says of it: only a root can
 /// need the user; a child waiting on its parent is waiting, in grey.
@@ -143,6 +145,10 @@ pub struct SessionPage {
     /// How many times a conversation was read and its rows made again.
     histories: usize,
     needs_you: bool,
+    /// The confirmation of stopping the session's tree is open.
+    stopping: bool,
+    /// What the daemon said when it refused to stop the tree.
+    stop_error: Option<SharedString>,
     renders: usize,
     _status: Subscription,
 }
@@ -198,6 +204,8 @@ impl SessionPage {
             read: false,
             histories: 0,
             needs_you,
+            stopping: false,
+            stop_error: None,
             renders: 0,
             _status,
             opened,
@@ -265,6 +273,72 @@ impl SessionPage {
     /// The state the page draws an agent of its tree with.
     pub fn state(&self, agent: &str, cx: &gpui_kit::App) -> Option<AgentState> {
         self.statuses.get(agent).map(|s| s.read(cx).state())
+    }
+
+    /// The agents a stop would end: the root and the children of its tree that did not end.
+    pub fn stop_count(&self) -> usize {
+        self.tree
+            .iter()
+            .filter(|a| !matches!(a.state.as_str(), "ended" | "failed"))
+            .count()
+    }
+
+    /// Whether the root can be stopped: the daemon refuses an agent in a final state.
+    pub fn stoppable(&self) -> bool {
+        self.tree
+            .iter()
+            .any(|a| a.parent.is_none() && !matches!(a.state.as_str(), "ended" | "failed"))
+    }
+
+    /// What the confirmation says while it is open: how many agents stop.
+    pub fn stop_question(&self) -> Option<String> {
+        if !self.stopping {
+            return None;
+        }
+        Some(match self.stop_count() {
+            0 | 1 => format!("This stops {THE_CONVERSATION}. Its workspace stays."),
+            n => format!(
+                "This stops {n} agents: {THE_CONVERSATION} and its {} sub-agent{}. Workspaces \
+                 stay.",
+                n - 1,
+                if n == 2 { "" } else { "s" }
+            ),
+        })
+    }
+
+    /// Opens the confirmation of stopping the tree, from the header or the rail.
+    pub fn ask_stop(&mut self, cx: &mut Context<Self>) {
+        if self.stoppable() && !self.stopping {
+            self.stopping = true;
+            self.stop_error = None;
+            cx.notify();
+        }
+    }
+
+    /// Closes the confirmation: Cancel, Escape or a click outside it.
+    pub fn cancel_stop(&mut self, cx: &mut Context<Self>) {
+        if self.stopping {
+            self.stopping = false;
+            cx.notify();
+        }
+    }
+
+    /// Stops the root agent and its tree, deepest first, as the daemon does.
+    pub fn confirm_stop(&mut self, cx: &mut Context<Self>) {
+        self.stopping = false;
+        let session = self.opened.id.clone();
+        self.perform(Command::Stop { session }, cx);
+        cx.notify();
+    }
+
+    /// What the daemon answered to a stop: it says why when it refused.
+    pub fn stopped(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
+        self.stop_error = refused.map(Into::into);
+        cx.notify();
+    }
+
+    pub fn stop_error(&self) -> Option<&str> {
+        self.stop_error.as_deref()
     }
 
     pub fn set_title(&mut self, title: &str, cx: &mut Context<Self>) {
@@ -538,6 +612,9 @@ impl SessionPage {
             let runs_on = (root.provider.clone(), root.model.clone());
             let facts = self.reply.read(cx).facts.clone();
             facts.update(cx, |facts, cx| facts.set_model(runs_on, cx));
+            let running = root.state == "working";
+            self.reply
+                .update(cx, |reply, cx| reply.set_running(running, cx));
         }
         let names: HashMap<String, String> =
             tree.iter().map(|a| (a.id.clone(), name_of(a))).collect();
@@ -726,6 +803,20 @@ impl Render for SessionPage {
             )
             .child(self.pill.clone())
             .child(div().flex_1())
+            .children(self.stop_error.clone().map(|error| {
+                div()
+                    .id("session-stop-error")
+                    .text_size(px(12.5))
+                    .text_color(p.fail)
+                    .child(error)
+                    .test_support()
+            }))
+            .when(self.stoppable(), |d| {
+                d.child(
+                    Button::quiet("session-stop", "Stop")
+                        .on_click(cx.listener(|this, _, _, cx| this.ask_stop(cx))),
+                )
+            })
             .when(!wide, |d| {
                 let mut agents = Button::icon("open-rail", Icon::Agents, "Agents")
                     .on_click(move |_, _, cx| drawer.update(cx, |d, cx| d.open(cx)));
@@ -774,10 +865,44 @@ impl Render for SessionPage {
                 )
             }))
             .when(!wide, |d| d.child(self.drawer.clone()))
+            .child(self.stop_modal(cx))
     }
 }
 
 impl SessionPage {
+    /// The confirmation of stopping the tree: it names how many agents stop.
+    fn stop_modal(&self, cx: &mut Context<Self>) -> Modal {
+        let p = palette(cx);
+        let count = self.stop_count();
+        let this = cx.entity().downgrade();
+        Modal::new("session-stop-modal", "Stop the conversation?")
+            .open(self.stopping)
+            .on_close(move |_, cx| {
+                this.update(cx, |this, cx| this.cancel_stop(cx)).ok();
+            })
+            .child(
+                div()
+                    .id("session-stop-question")
+                    .text_size(px(12.5))
+                    .text_color(p.mute)
+                    .child(SharedString::from(
+                        self.stop_question()
+                            .unwrap_or_else(|| format!("{count} to stop")),
+                    ))
+                    .test_support(),
+            )
+            .action(
+                Button::primary(
+                    "session-stop-confirm",
+                    match count {
+                        0 | 1 => "Stop".to_owned(),
+                        n => format!("Stop {n} agents"),
+                    },
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.confirm_stop(cx))),
+            )
+    }
+
     /// What the bar in place of the composer says while a sub-agent is read, and its button:
     /// `None` while the root is shown.
     pub fn read_only_text(&self) -> Option<(String, String)> {
@@ -2127,6 +2252,8 @@ pub struct SessionRail {
     place: Option<PlaceFacts>,
     /// The "⋯" menu of the WORKSPACE section.
     menu: Entity<Menu>,
+    /// The "⋯" menu of the root's row: it stops the tree.
+    agent_menu: Entity<Menu>,
     /// Where a ticket is typed to link it, made when the section first shows a workspace.
     ticket_field: Option<Entity<InputState>>,
     /// What the daemon said of the ticket typed.
@@ -2143,6 +2270,17 @@ impl SessionRail {
         cx: &mut Context<Self>,
     ) -> Self {
         let editor = page.clone();
+        let stopper = page.clone();
+        let agent_menu = cx.new(|cx| {
+            Menu::new("rail-agent-menu", "Agent actions", cx).entry(
+                "rail-agent-stop",
+                "Stop…",
+                Some(Icon::Stop),
+                move |_, cx| {
+                    stopper.update(cx, |page, cx| page.ask_stop(cx)).ok();
+                },
+            )
+        });
         let menu = cx.new(|cx| {
             Menu::new("workspace-menu", "Workspace actions", cx).entry(
                 "open-in-editor",
@@ -2160,6 +2298,7 @@ impl SessionRail {
             open_ended: HashSet::new(),
             ended_folds: HashMap::new(),
             menu,
+            agent_menu,
             selected: root,
             workspace: opened.place.clone(),
             project: opened.project.clone(),
@@ -2316,6 +2455,15 @@ impl Render for SessionRail {
                 fold.motion.settle(now);
             }
         }
+        // The root alone is stopped (the daemon refuses a child), and only while it is not ended.
+        let stoppable = self.agents.iter().any(|a| {
+            a.parent.is_none()
+                && !matches!(
+                    a.status.read(cx).state(),
+                    AgentState::Failed | AgentState::Completed | AgentState::Stopped
+                )
+        });
+        let agent_menu = self.agent_menu.clone();
         let agent_row = |agent: &RailAgent| {
             let (mark, pill) = self.marks[&agent.id].clone();
             let page = self.page.clone();
@@ -2325,6 +2473,8 @@ impl Render for SessionRail {
             div()
                 .id(ElementId::Name(format!("rail-agent-{}", agent.id).into()))
                 .relative()
+                .flex()
+                .items_center()
                 .pl(px(indent))
                 .when(kid, |d| {
                     d.child(enter(
@@ -2343,6 +2493,8 @@ impl Render for SessionRail {
                     // line.
                     div()
                         .id(ElementId::Name(format!("rail-row-{}", agent.id).into()))
+                        .flex_1()
+                        .min_w_0()
                         .flex()
                         .items_center()
                         .gap(px(10.))
@@ -2405,6 +2557,7 @@ impl Render for SessionRail {
                         })
                         .test_support(),
                 )
+                .when(!kid && stoppable, |d| d.child(agent_menu.clone()))
                 .test_support()
         };
         let ended_row = |parent: &str, count: usize, open: bool| {
@@ -2517,7 +2670,14 @@ impl Render for SessionRail {
                 .find(|pull| pull.repository == path)
                 .cloned()
         };
-        let repositories: Vec<(String, String, Option<PullRequest>)> = self
+        let forge_of = |path: &str| {
+            self.place
+                .iter()
+                .flat_map(|place| place.forges.iter())
+                .find(|(repository, _)| repository == path)
+                .map(|(_, line)| line.clone())
+        };
+        let repositories: Vec<(String, String, Option<PullRequest>, Option<String>)> = self
             .place
             .iter()
             .flat_map(|place| place.repositories.iter())
@@ -2540,6 +2700,7 @@ impl Render for SessionRail {
                     crate::project::repository_label(&self.project, path),
                     said,
                     pull_of(path),
+                    forge_of(path),
                 )
             })
             .collect();
@@ -2668,7 +2829,7 @@ impl Render for SessionRail {
                     .child(div().flex_1().child(section_label("Workspace", cx)))
                     .child(self.menu.clone()),
             )
-            .children(repositories.into_iter().map(|(path, said, pull)| {
+            .children(repositories.into_iter().map(|(path, said, pull, forge)| {
                 let row = div()
                     .id(ElementId::Name(format!("rail-repository-{path}").into()))
                     .flex()
@@ -2701,7 +2862,17 @@ impl Render for SessionRail {
                     })
                     .test_support()
                 });
-                div().child(row).children(pull)
+                let forge = forge.map(|line| {
+                    div()
+                        .id(ElementId::Name(format!("rail-forge-{path}").into()))
+                        .pl(px(29.))
+                        .pb(px(4.))
+                        .mono(11.)
+                        .text_color(p.faint)
+                        .child(SharedString::from(line))
+                        .test_support()
+                });
+                div().child(row).children(forge).children(pull)
             }))
             .children(forge_problem.map(|problem| {
                 div()
@@ -2818,6 +2989,10 @@ pub struct Reply {
     has_text: bool,
     focused: bool,
     sending: bool,
+    /// The root runs a turn: the composer offers to interrupt it.
+    running: bool,
+    /// An interruption was asked and not answered yet.
+    interrupting: bool,
     /// The field's text as it was sent, while it is: what is typed after it is kept.
     sent: Option<String>,
     error: Option<SharedString>,
@@ -2881,6 +3056,8 @@ impl Reply {
             has_text: false,
             focused: false,
             sending: false,
+            running: false,
+            interrupting: false,
             sent: None,
             error: None,
             renders: 0,
@@ -2907,6 +3084,42 @@ impl Reply {
 
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    /// The root runs a turn.
+    pub fn is_running(&self) -> bool {
+        self.running
+    }
+
+    fn set_running(&mut self, running: bool, cx: &mut Context<Self>) {
+        if self.running != running {
+            self.running = running;
+            cx.notify();
+        }
+    }
+
+    /// Interrupts the turn that runs: the agent stays alive, and the turn ends cancelled. Nothing
+    /// happens while no turn runs.
+    pub fn interrupt(&mut self, cx: &mut Context<Self>) {
+        if !self.running || self.interrupting {
+            return;
+        }
+        self.interrupting = true;
+        self.error = None;
+        let command = Command::Interrupt {
+            session: self.session.clone(),
+        };
+        self.shell
+            .update(cx, |shell, _| shell.perform(command))
+            .ok();
+        cx.notify();
+    }
+
+    /// What the daemon answered to an interruption.
+    pub fn interrupted(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
+        self.interrupting = false;
+        self.error = refused.map(Into::into);
+        cx.notify();
     }
 
     pub fn renders(&self) -> usize {
@@ -2969,6 +3182,13 @@ impl Render for Reply {
         div()
             .id("reply")
             .w_full()
+            // Escape interrupts the turn that runs; with none running it is left to others.
+            .on_key_down(cx.listener(|this, event: &gpui_kit::KeyDownEvent, _, cx| {
+                if this.running && event.keystroke.key == "escape" {
+                    cx.stop_propagation();
+                    this.interrupt(cx);
+                }
+            }))
             .p(px(6.))
             .rounded(px(16.))
             .bg(p.shell)
@@ -3015,6 +3235,13 @@ impl Render for Reply {
                             .tooltip("The daemon takes no attachments yet"),
                     )
                     .child(div().flex_1())
+                    .when(self.running, |d| {
+                        d.child(
+                            Button::icon("reply-stop", Icon::Stop, STOP)
+                                .disabled(self.interrupting)
+                                .on_click(cx.listener(|this, _, _, cx| this.interrupt(cx))),
+                        )
+                    })
                     .child(
                         Button::round("reply-send", Icon::Send, SEND)
                             .disabled(!can_send)

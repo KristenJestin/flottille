@@ -387,8 +387,11 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   a session (place, agent, model, first message);
 - a session page: the root's conversation, live (messages, thoughts collapsed, tool calls with
   their result, the children launched, reports, diffs), the approvals that reach the user, inline,
-  with deny / allow for the tree / allow once, and a composer that writes to the root; a rail
-  with the session's tree of agents, its workspace and facts. Selecting a child shows its
+  with deny / allow for the tree / allow once, and a composer that writes to the root, whose Stop
+  button and `Escape` interrupt the turn that runs (the agent stays); a rail with the session's
+  tree of agents, its workspace (each repository's forge as the daemon reads it, its ticket,
+  linked or unlinked there) and facts. The header and the root's row menu stop the root and its
+  tree, after a confirmation that counts the agents that stop. Selecting a child shows its
   conversation read-only;
 - narrow and portrait windows: the rail, then the left tree, become drawers.
 - a history of the pages shown (project pages, sessions with the agent shown in them, settings),

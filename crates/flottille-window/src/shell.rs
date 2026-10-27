@@ -465,6 +465,18 @@ impl Shell {
                     reply.update(cx, |reply, cx| reply.replied(refused, window, cx));
                 }
             }
+            Outcome::Stopped { session, refused } => {
+                if let Some(page) = self.session_page.clone()
+                    && page.read(cx).id() == session
+                {
+                    page.update(cx, |page, cx| page.stopped(refused, cx));
+                }
+            }
+            Outcome::Interrupted { session, refused } => {
+                if let Some(reply) = self.replies.get(&session).cloned() {
+                    reply.update(cx, |reply, cx| reply.interrupted(refused, cx));
+                }
+            }
             // Only for its own session's page: a page opened since has nothing to fold, and the
             // session's page, opened again, reads the decision from the daemon.
             Outcome::Answered {

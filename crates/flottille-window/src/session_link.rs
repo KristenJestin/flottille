@@ -168,6 +168,32 @@ pub fn pull_requests(forge: &Value) -> (Vec<PullRequest>, Option<String>) {
     (pulls, forge["problem"].as_str().map(str::to_owned))
 }
 
+/// What each repository of a `workspace.forge` answer says of its forge, in a line: the forge and
+/// its repository (`github · acme/api`), else why there is none, else why it could not be read.
+pub fn forge_lines(forge: &Value) -> Vec<(String, String)> {
+    forge["repositories"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|repository| {
+            let text = |key: &str| repository[key].as_str();
+            let line = match (
+                text("forge"),
+                text("repository"),
+                text("error"),
+                text("note"),
+            ) {
+                (_, _, Some(error), _) => error.to_owned(),
+                (Some(forge), Some(name), _, _) => format!("{forge} · {name}"),
+                (Some(forge), None, _, _) => forge.to_owned(),
+                (None, _, _, Some(note)) => note.to_owned(),
+                (None, _, _, None) => return None,
+            };
+            Some((text("path")?.to_owned(), line))
+        })
+        .collect()
+}
+
 /// A workspace's ticket, as `workspace.ticket` gives it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TicketFacts {
@@ -208,6 +234,8 @@ pub struct PlaceFacts {
     pub prepared_ms: Option<u64>,
     /// Each repository's pull request (a workspace).
     pub pulls: Vec<PullRequest>,
+    /// Each repository's forge in a line, as the daemon says it.
+    pub forges: Vec<(String, String)>,
     /// Why the forges cannot be read (`gh` missing, not signed in), with what to do.
     pub forge_problem: Option<String>,
     /// The ticket it is linked to (a workspace).
@@ -613,7 +641,9 @@ impl Link {
                             .map(|facts| (facts, Instant::now())),
                     };
                 }
+                let forges = forge.as_ref().map_or(Vec::new(), forge_lines);
                 PlaceFacts {
+                    forges,
                     ticket: ticket.as_ref().map(|(facts, _)| facts.clone()),
                     repositories,
                     branch: shown["branch"].as_str().map(str::to_owned),
