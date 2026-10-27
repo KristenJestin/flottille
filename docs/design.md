@@ -370,6 +370,10 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   with the session's tree of agents, its workspace and facts. Selecting a child shows its
   conversation read-only;
 - narrow and portrait windows: the rail, then the left tree, become drawers.
+- a history of the pages shown (project pages, sessions with the agent shown in them, settings),
+  as a browser keeps one: it lives as long as the window and is not stored. The mouse's back and
+  forward buttons and `Alt+Left` / `Alt+Right` move in it; an open list, modal or drawer takes
+  the button first and closes; a page that no longer exists is skipped.
 
 Colours: Flottille's own palette, or, on an Omarchy desktop, the current Omarchy theme's colours
 followed live. Shapes, type and motion do not change with the theme. A state is drawn the same

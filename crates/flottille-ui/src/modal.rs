@@ -18,6 +18,7 @@ use gpui_kit::{
 };
 
 use crate::button::Button;
+use crate::interact::{dismiss_on_navigate, open_overlay};
 use crate::motion::{MODAL, Motion, RISE};
 use crate::theme::palette;
 use crate::typography::Type;
@@ -125,7 +126,10 @@ impl RenderOnce for Modal {
                 close(window, cx);
             }
         };
-        let (on_scrim, on_key, on_cancel) = (close.clone(), close.clone(), close);
+        if self.open {
+            open_overlay(self.id.clone(), close.clone(), cx);
+        }
+        let (on_scrim, on_key, on_cancel) = (close.clone(), close.clone(), close.clone());
         let scrim = div()
             .id(part(&self.id, "scrim"))
             .absolute()
@@ -134,6 +138,7 @@ impl RenderOnce for Modal {
             .occlude()
             .on_mouse_down(MouseButton::Left, move |_, window, cx| on_scrim(window, cx))
             .test_support();
+        let scrim = dismiss_on_navigate(scrim, close.clone());
         let panel = div()
             .id(self.id.clone())
             .occlude()
@@ -180,6 +185,7 @@ impl RenderOnce for Modal {
                     .children(self.actions),
             )
             .test_support();
+        let panel = dismiss_on_navigate(panel, close);
         let layer = deferred(
             anchored().position(point(px(0.), px(0.))).child(
                 div()

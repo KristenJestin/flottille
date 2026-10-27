@@ -2,11 +2,12 @@
 //! or by a choice made inside it.
 
 use gpui_kit::{
-    AnyView, BoxShadow, Context, ElementId, EventEmitter, InteractiveElement, IntoElement,
+    AnyView, App, BoxShadow, Context, ElementId, EventEmitter, InteractiveElement, IntoElement,
     ParentElement, Pixels, Render, StatefulInteractiveElement, Styled, TestSupportExt, Window, div,
     hsla, point, px,
 };
 
+use crate::interact::{dismiss_on_navigate, open_overlay};
 use crate::motion::{Motion, PANEL};
 use crate::theme::palette;
 
@@ -114,16 +115,22 @@ impl Render for Drawer {
             Side::Left => panel.left(offset).border_r_1().border_color(p.line),
             Side::Right => panel.right(offset).border_l_1().border_color(p.line),
         };
-        root.child(
-            div()
-                .id("drawer-scrim")
-                .absolute()
-                .inset_0()
-                .bg(p.scrim.opacity(t))
-                .on_click(cx.listener(|this, _, _, cx| this.close(cx)))
-                .test_support(),
-        )
-        .child(panel)
-        .test_support()
+        let this = cx.entity().downgrade();
+        let close = move |_: &mut Window, cx: &mut App| {
+            this.update(cx, |this, cx| this.close(cx)).ok();
+        };
+        if self.open {
+            open_overlay(self.id.clone(), close.clone(), cx);
+        }
+        let scrim = div()
+            .id("drawer-scrim")
+            .absolute()
+            .inset_0()
+            .bg(p.scrim.opacity(t))
+            .on_click(cx.listener(|this, _, _, cx| this.close(cx)))
+            .test_support();
+        root.child(dismiss_on_navigate(scrim, close.clone()))
+            .child(dismiss_on_navigate(panel, close))
+            .test_support()
     }
 }
