@@ -3,7 +3,7 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::{SharedString, Styled, Svg, px, svg};
 
-gpui_kit::assets::icon_assets!(pub Icons, [Folder, GitBranch, Book, ChevronDown, Plus, Search, Bell, ExternalLink, Network, Menu, ArrowUp, ChevronsUpDown, Settings]);
+gpui_kit::assets::icon_assets!(pub Icons, [Folder, GitBranch, Book, ChevronDown, Plus, Search, Bell, ExternalLink, Network, Menu, ArrowUp, ChevronsUpDown, Settings, Ellipsis]);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
@@ -23,10 +23,12 @@ pub enum Icon {
     Choose,
     /// The settings page.
     Settings,
+    /// A "⋯" button: it opens a small menu.
+    More,
 }
 
 impl Icon {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Folder,
         Self::Branch,
         Self::Repository,
@@ -40,6 +42,7 @@ impl Icon {
         Self::Send,
         Self::Choose,
         Self::Settings,
+        Self::More,
     ];
 
     pub fn path(self) -> SharedString {
@@ -57,6 +60,7 @@ impl Icon {
             Self::Send => IconName::ArrowUp,
             Self::Choose => IconName::ChevronsUpDown,
             Self::Settings => IconName::Settings,
+            Self::More => IconName::Ellipsis,
         }
         .path()
     }

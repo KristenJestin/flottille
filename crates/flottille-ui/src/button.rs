@@ -35,6 +35,7 @@ pub struct Button {
     label: Option<SharedString>,
     icon: Option<Icon>,
     tooltip: Option<SharedString>,
+    tooltip_hidden: bool,
     badge: Option<Badge>,
     full_width: bool,
     disabled: bool,
@@ -49,6 +50,7 @@ impl Button {
             label: None,
             icon: None,
             tooltip: None,
+            tooltip_hidden: false,
             badge: None,
             full_width: false,
             disabled: false,
@@ -103,6 +105,13 @@ impl Button {
 
     pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
         self.tooltip = Some(text.into());
+        self
+    }
+
+    /// Keeps the tooltip from showing (it stays the button's accessible name): a button whose
+    /// menu is open would have it drawn over the menu.
+    pub fn tooltip_hidden(mut self, hidden: bool) -> Self {
+        self.tooltip_hidden = hidden;
         self
     }
 
@@ -212,7 +221,7 @@ impl RenderOnce for Button {
         if let Some(badge) = self.badge {
             button = button.child(div().absolute().top(px(2.)).right(px(1.)).child(badge));
         }
-        if let Some(text) = tooltip {
+        if let Some(text) = tooltip.filter(|_| !self.tooltip_hidden) {
             button = button.tooltip(move |_, cx| Tooltip::view(text.clone(), cx));
         }
         if self.disabled {

@@ -21,7 +21,7 @@ use flottille_window::conversation::Block;
 use flottille_window::link::{self, Connect};
 use flottille_window::model::{Place, Preparation};
 use flottille_window::project::{NewWorkspace, PlaceCard, ProjectPage};
-use flottille_window::session::SessionPage;
+use flottille_window::session::{RailRow, SessionPage};
 use flottille_window::settings::SettingsPage;
 use flottille_window::shell::{Layout, Selection};
 use flottille_window::tree::{place_id, project_id, session_id};
@@ -514,15 +514,6 @@ fn recipe(user: &User, project: &str, body: &str) {
     std::fs::write(file, text).unwrap();
 }
 
-/// A recipe script that waits for `gate` to exist, then runs `then`: the test says when the
-/// preparation ends.
-fn gated(then: &str, gate: &std::path::Path) -> String {
-    format!(
-        "while [ ! -e '{}' ]; do sleep 0.05; done\n{then}\n",
-        gate.display()
-    )
-}
-
 fn page_of(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<ProjectPage> {
     shell
         .read_with(cx, |s, cx| s.main().read(cx).project_page().cloned())
@@ -631,8 +622,9 @@ fn the_page_lists_main_and_two_workspaces_with_their_sessions(cx: &mut TestAppCo
     );
     assert_eq!(
         cards[1].read_with(cx, |c, _| c.data().meta.clone()),
-        "from main · atlas"
+        Some("from main · atlas".to_owned())
     );
+    assert_eq!(cards[0].read_with(cx, |c, _| c.data().meta.clone()), None);
     assert_eq!(
         page.read_with(cx, |page, _| page.chips()),
         ["atlas · main"],
@@ -667,78 +659,6 @@ fn the_page_lists_main_and_two_workspaces_with_their_sessions(cx: &mut TestAppCo
 }
 
 #[gpui_kit::test]
-fn starting_a_task_in_a_new_workspace_prepares_it_then_starts_the_session_in_it(
-    cx: &mut TestAppContext,
-) {
-    let user = user();
-    project(&user, "atlas");
-    let gate = user.path("gate");
-    recipe(&user, "atlas", &gated("echo prepared", &gate));
-    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    until(&shell, cx, "the page is shown", |cx| {
-        shell.read_with(cx, |s, cx| s.main().read(cx).project_page().is_some())
-    });
-    settle(cx);
-
-    type_task("Fix the login\nwith a second line", cx);
-    cx.update(|window, cx| window.click("place-picker", cx));
-    cx.update(|window, cx| window.click("place-choice-new", cx));
-    cx.simulate_input("login-fix");
-    cx.simulate_keystrokes("enter");
-    let composer = composer_of(&shell, "atlas", cx);
-    assert!(composer.read_with(cx, |c, _| c.is_sending()));
-
-    until(
-        &shell,
-        cx,
-        "the workspace's card shows its preparation",
-        |cx| {
-            card_of(&shell, Some("login-fix"), cx).is_some_and(|card| {
-                matches!(
-                    card.read_with(cx, |c, _| c.data().preparation.clone()),
-                    Preparation::Preparing { .. }
-                )
-            })
-        },
-    );
-    assert!(
-        composer.read_with(cx, |c, _| c.is_sending()),
-        "it waits for the preparation"
-    );
-    assert_eq!(
-        user.call("agent.list", json!({})).unwrap()["agents"],
-        json!([]),
-        "nothing starts before the workspace is ready"
-    );
-    std::fs::write(&gate, "").unwrap();
-    until(&shell, cx, "the session's page opens", |cx| {
-        matches!(
-            shell.read_with(cx, |s, _| s.selected().cloned()),
-            Some(Selection::Session(_))
-        )
-    });
-    let Some(Selection::Session(id)) = shell.read_with(cx, |s, _| s.selected().cloned()) else {
-        unreachable!()
-    };
-    let agent = user.call("agent.status", json!({"agent": id})).unwrap();
-    assert_eq!(agent["agent"]["workspace"], "login-fix", "it started in it");
-    let workspace = user
-        .call(
-            "workspace.show",
-            json!({"project": "atlas", "name": "login-fix"}),
-        )
-        .unwrap();
-    assert_eq!(workspace["state"], "ready", "prepared before it started");
-    let first = user.call("agent.show", json!({"agent": id})).unwrap();
-    assert_eq!(first["agent"]["brief"], "Fix the login\nwith a second line");
-    assert!(
-        !composer.read_with(cx, |c, cx| c.is_sending()
-            || !c.field().read(cx).value().is_empty()),
-        "the field is emptied for the next task"
-    );
-}
-
-#[gpui_kit::test]
 fn a_failing_recipe_shows_its_output_on_the_card(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");
@@ -753,18 +673,10 @@ fn a_failing_recipe_shows_its_output_on_the_card(cx: &mut TestAppContext) {
     });
     settle(cx);
 
-    type_task("Try the broken recipe", cx);
-    cx.update(|window, cx| window.click("place-picker", cx));
-    cx.update(|window, cx| window.click("place-choice-new", cx));
+    cx.update(|window, cx| window.click("new-workspace", cx));
     cx.simulate_input("broken");
-    cx.update(|window, cx| window.click("send", cx));
+    cx.simulate_keystrokes("enter");
 
-    let composer = composer_of(&shell, "atlas", cx);
-    until(&shell, cx, "the composer says no session started", |cx| {
-        composer.read_with(cx, |c, _| c.error().is_some())
-    });
-    let error = composer.read_with(cx, |c, _| c.error().unwrap().to_owned());
-    assert!(error.contains("no session started"), "{error}");
     until(&shell, cx, "the card shows the failure", |cx| {
         card_of(&shell, Some("broken"), cx).is_some_and(|card| {
             matches!(
@@ -847,10 +759,19 @@ fn new_workspace_opens_a_modal_and_escape_closes_it(cx: &mut TestAppContext) {
         "login"
     );
     cx.simulate_keystrokes("escape");
-    settle(cx);
     assert!(!form.read_with(cx, |f, _| f.is_open()));
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find("new-workspace-modal").is_some()
+                && window.try_find("new-workspace-modal-scrim").is_some(),
+            "the modal and its backdrop leave before they go"
+        );
+    });
+    settle(cx);
     cx.update(|window, _| {
         assert!(window.try_find("new-workspace-modal").is_none());
+        assert!(window.try_find("new-workspace-modal-scrim").is_none());
         assert!(
             window.try_find("new-workspace-card").is_some(),
             "the card stays in the grid"
@@ -871,6 +792,213 @@ fn new_workspace_opens_a_modal_and_escape_closes_it(cx: &mut TestAppContext) {
             .is_empty(),
         "nothing was made"
     );
+}
+
+#[gpui_kit::test]
+fn the_composer_has_no_new_task_row(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+
+    cx.update(|window, _| {
+        let composer = window.find("composer").bounds();
+        let field = window.find("composer-field").bounds();
+        // The shell's padding and border, and nothing above the field.
+        assert!(
+            field.origin.y - composer.origin.y <= px(10.),
+            "a row sits above the field: {:?} below the composer's top",
+            field.origin.y - composer.origin.y
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn the_main_card_has_no_second_header_and_a_workspace_card_keeps_where_it_comes_from(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    workspace(&user, "atlas", "login");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    until(&shell, cx, "the page shows both cards", |cx| {
+        card_of(&shell, Some("login"), cx).is_some()
+    });
+    settle(cx);
+
+    cx.update(|window, _| {
+        assert!(window.try_find("place-card-main").is_some());
+        assert!(
+            window.try_find("meta-main").is_none(),
+            "the project folder's card repeats its title in a second line"
+        );
+        assert!(window.find("meta-login").visible());
+    });
+}
+
+#[gpui_kit::test]
+fn the_place_picker_s_new_workspace_opens_the_same_modal_as_the_page_s_action(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let form = shell
+        .read_with(cx, |s, _| s.new_workspace_of("atlas").cloned())
+        .unwrap();
+    let composer = composer_of(&shell, "atlas", cx);
+
+    cx.update(|window, cx| window.click("new-workspace", cx));
+    settle(cx);
+    let from_page = cx.update(|window, _| window.find("new-workspace-modal").bounds());
+    cx.simulate_keystrokes("escape");
+    settle(cx);
+    assert!(!form.read_with(cx, |f, _| f.is_open()));
+
+    cx.update(|window, cx| window.click("place-picker", cx));
+    cx.update(|window, cx| window.click("place-choice-new", cx));
+    settle(cx);
+    assert!(
+        form.read_with(cx, |f, _| f.is_open()),
+        "the page's form is open"
+    );
+    cx.update(|window, _| {
+        assert_eq!(
+            window.find("new-workspace-modal").bounds(),
+            from_page,
+            "the same modal"
+        );
+        assert!(
+            window.try_find("new-workspace-name").is_none(),
+            "no inline input is left in the picker"
+        );
+    });
+    assert_eq!(
+        composer.read_with(cx, |c, _| c.choice().clone()),
+        Choice::Main,
+        "the picker keeps its place"
+    );
+    // The caret is in the modal's name, and Enter makes the workspace there.
+    cx.simulate_input("from-picker");
+    cx.simulate_keystrokes("enter");
+    until(
+        &shell,
+        cx,
+        "the workspace is made and the modal closes",
+        |cx| !form.read_with(cx, |f, _| f.is_open()),
+    );
+    assert_eq!(
+        user.call("workspace.list", json!({"project": "atlas"}))
+            .unwrap()["workspaces"][0]["name"],
+        "from-picker"
+    );
+}
+
+#[gpui_kit::test]
+fn a_workspace_made_from_the_composer_s_picker_becomes_its_place(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let form = shell
+        .read_with(cx, |s, _| s.new_workspace_of("atlas").cloned())
+        .unwrap();
+    let composer = composer_of(&shell, "atlas", cx);
+
+    cx.update(|window, cx| window.click("place-picker", cx));
+    cx.update(|window, cx| window.click("place-choice-new", cx));
+    settle(cx);
+    cx.simulate_input("from-picker");
+    cx.simulate_keystrokes("enter");
+    until(
+        &shell,
+        cx,
+        "the composer's place is the workspace it asked for",
+        |cx| {
+            composer.read_with(cx, |c, _| c.choice().clone())
+                == Choice::Workspace("from-picker".into())
+        },
+    );
+    assert!(!form.read_with(cx, |f, _| f.is_open()), "the modal closed");
+}
+
+#[gpui_kit::test]
+fn a_workspace_made_from_the_page_s_action_leaves_the_composer_s_place(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let form = shell
+        .read_with(cx, |s, _| s.new_workspace_of("atlas").cloned())
+        .unwrap();
+    let composer = composer_of(&shell, "atlas", cx);
+
+    // Opened from the picker first, then closed: the page's own action must not inherit it.
+    cx.update(|window, cx| window.click("place-picker", cx));
+    cx.update(|window, cx| window.click("place-choice-new", cx));
+    settle(cx);
+    cx.simulate_keystrokes("escape");
+    settle(cx);
+    cx.update(|window, cx| window.click("new-workspace", cx));
+    settle(cx);
+    cx.simulate_input("from-page");
+    cx.simulate_keystrokes("enter");
+    until(&shell, cx, "the workspace is made", |cx| {
+        !form.read_with(cx, |f, _| f.is_open())
+    });
+    until(&shell, cx, "the card of the workspace is shown", |cx| {
+        cx.update(|window, _| window.try_find("place-card-from-page").is_some())
+    });
+    assert_eq!(
+        composer.read_with(cx, |c, _| c.choice().clone()),
+        Choice::Main,
+        "the composer's place did not move"
+    );
+}
+
+/// The height of the composer's field once its text is `text`.
+fn field_height(composer: &Entity<Composer>, text: &str, cx: &mut VisualTestContext) -> f32 {
+    let field = composer.read_with(cx, |c, _| c.field().clone());
+    field.update_in(cx, |field, window, cx| field.set_value(text, window, cx));
+    for _ in 0..4 {
+        cx.update(|window, cx| window.render_frame(cx));
+        cx.run_until_parked();
+    }
+    cx.update(|window, _| f32::from(window.find("composer-field").bounds().size.height))
+}
+
+#[gpui_kit::test]
+fn the_composer_grows_line_by_line_up_to_a_limit_then_scrolls(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let composer = composer_of(&shell, "atlas", cx);
+    let lines = |n: usize| vec!["a line of the task"; n].join("\n");
+
+    // Padding 12 above and below; a line is 21 px; one line at least, eight at most.
+    let heights: Vec<f32> = [1, 2, 3, 4, 8, 9, 40]
+        .map(|n| field_height(&composer, &lines(n), cx))
+        .into();
+    assert_eq!(
+        heights,
+        [45., 66., 87., 108., 192., 192., 192.],
+        "one, two, three, four, eight, nine and forty lines"
+    );
+    let back = field_height(&composer, &lines(3), cx);
+    assert_eq!(back, 87., "it shrinks with the text");
+
+    // Typed, as a user does: a line at a time, with no gap left under the last one.
+    field_height(&composer, "", cx);
+    type_task("one", cx);
+    let mut typed = Vec::new();
+    for line in ["two", "three", "four"] {
+        cx.simulate_keystrokes("shift-enter");
+        cx.simulate_input(line);
+        typed.push(field_height(&composer, &field_of(&composer, cx), cx));
+    }
+    assert_eq!(typed, [66., 87., 108.], "two, three and four typed lines");
 }
 
 #[gpui_kit::test]
@@ -908,10 +1036,22 @@ fn typing_in_the_composer_does_not_redraw_the_page(cx: &mut TestAppContext) {
     cx.simulate_input("Fix the timeout");
     cx.simulate_keystrokes("shift-enter");
     cx.simulate_input("and its test");
+    // The second line made the field taller, so what is below it moved: drawn once more for that,
+    // and once for the send button waking up in the composer.
+    let (page_grown, cards_grown, composer_grown) = renders(cx);
+    assert!(
+        page_grown <= page_before + 1,
+        "{page_grown} after {page_before}"
+    );
+    for (grown, before) in cards_grown.iter().zip(&cards_before) {
+        assert!(grown <= &(before + 1), "{grown} after {before}");
+    }
+    assert!(composer_grown <= composer_before + 2);
+    cx.simulate_input(" and every other detail of it");
 
     let field = composer.read_with(cx, |c, cx| c.field().read(cx).value().to_string());
     assert_eq!(
-        field, "Fix the timeout\nand its test",
+        field, "Fix the timeout\nand its test and every other detail of it",
         "Shift+Enter makes a new line"
     );
     assert!(
@@ -919,13 +1059,12 @@ fn typing_in_the_composer_does_not_redraw_the_page(cx: &mut TestAppContext) {
         "nothing was sent"
     );
     let (page_after, cards_after, composer_after) = renders(cx);
-    assert_eq!(page_after, page_before, "the page is not drawn again");
-    assert_eq!(cards_after, cards_before, "nor its cards");
     assert_eq!(
-        composer_after,
-        composer_before + 1,
-        "the composer is drawn again once, when its send button wakes up, not once a letter"
+        page_after, page_grown,
+        "the page is not drawn once a letter"
     );
+    assert_eq!(cards_after, cards_grown, "nor its cards");
+    assert_eq!(composer_after, composer_grown, "nor the composer");
 }
 
 fn composer_of(
@@ -958,13 +1097,58 @@ fn open_project(shell: &Entity<Shell>, project: &str, cx: &mut VisualTestContext
     settle(cx);
 }
 
-/// Sends `task` from atlas's composer into a new workspace named `name`.
-fn send_in_new(task: &str, name: &str, cx: &mut VisualTestContext) {
+/// Connects to the user's daemon through a relay that holds back the answer to every
+/// `agent.start` for `delay`, then gives it as it came, or as a refusal saying `refuse`.
+fn slow_start(user: &User, delay: Duration, refuse: Option<&'static str>) -> Connect {
+    use std::collections::HashSet;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+    use std::sync::Mutex;
+    let connect = user.connector();
+    Arc::new(move || {
+        let daemon = connect()?;
+        let (window_side, relay_side) = UnixStream::pair()?;
+        let starts: Arc<Mutex<HashSet<String>>> = Arc::default();
+        let (mut to_daemon, from_window) = (daemon.try_clone()?, relay_side.try_clone()?);
+        let marks = starts.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(from_window).lines() {
+                let Ok(line) = line else { return };
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+                if request["method"] == "agent.start" {
+                    marks.lock().unwrap().insert(request["id"].to_string());
+                }
+                if writeln!(to_daemon, "{line}").is_err() {
+                    return;
+                }
+            }
+        });
+        let mut to_window = relay_side;
+        std::thread::spawn(move || {
+            for line in BufReader::new(daemon).lines() {
+                let Ok(line) = line else { return };
+                let answer: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+                let mut line = line;
+                if starts.lock().unwrap().remove(&answer["id"].to_string()) {
+                    std::thread::sleep(delay);
+                    if let Some(why) = refuse {
+                        line = json!({"id": answer["id"], "error": {"code": "refused", "message": why}})
+                            .to_string();
+                    }
+                }
+                if writeln!(to_window, "{line}").is_err() {
+                    return;
+                }
+            }
+        });
+        Ok(window_side)
+    })
+}
+
+/// Sends `task` from atlas's composer, to main.
+fn send_to_main(task: &str, cx: &mut VisualTestContext) {
     type_task(task, cx);
-    cx.update(|window, cx| window.click("place-picker", cx));
-    cx.update(|window, cx| window.click("place-choice-new", cx));
-    cx.simulate_input(name);
-    cx.simulate_keystrokes("enter");
+    cx.update(|window, cx| window.click("send", cx));
 }
 
 #[gpui_kit::test]
@@ -972,11 +1156,14 @@ fn a_session_started_after_switching_project_stays_with_its_project(cx: &mut Tes
     let user = user();
     project(&user, "atlas");
     project(&user, "borealis");
-    let gate = user.path("gate");
-    recipe(&user, "atlas", &gated("echo prepared", &gate));
-    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let (shell, cx) = window(
+        &user,
+        slow_start(&user, Duration::from_secs(2), None),
+        1280.,
+        cx,
+    );
     open_project(&shell, "atlas", cx);
-    send_in_new("Fix the login", "login-fix", cx);
+    send_to_main("Fix the login", cx);
     let atlas = composer_of(&shell, "atlas", cx);
     assert!(atlas.read_with(cx, |c, _| c.is_sending()));
 
@@ -988,7 +1175,6 @@ fn a_session_started_after_switching_project_stays_with_its_project(cx: &mut Tes
     );
     assert_eq!(field_of(&borealis, cx), "", "nor its draft");
     type_task("A draft for borealis", cx);
-    std::fs::write(&gate, "").unwrap();
     until(&shell, cx, "atlas's session started", |cx| {
         !atlas.read_with(cx, |c, _| c.is_sending())
     });
@@ -1001,16 +1187,8 @@ fn a_session_started_after_switching_project_stays_with_its_project(cx: &mut Tes
     assert_eq!(field_of(&borealis, cx), "A draft for borealis");
     assert!(borealis.read_with(cx, |c, _| c.error().is_none() && !c.is_sending()));
     let agents = user.call("agent.list", json!({})).unwrap();
-    assert_eq!(agents["agents"][0]["workspace"], "login-fix");
+    assert_eq!(agents["agents"].as_array().map(Vec::len), Some(1));
     assert_eq!(field_of(&atlas, cx), "", "atlas's field is emptied");
-    assert_eq!(
-        atlas.read_with(cx, |c, cx| (
-            c.name_field().read(cx).value().to_string(),
-            c.choice().clone()
-        )),
-        (String::new(), Choice::Main),
-        "and the new workspace's name with it"
-    );
     open_project(&shell, "atlas", cx);
     assert_eq!(
         shell.read_with(cx, |s, cx| s
@@ -1031,21 +1209,15 @@ fn a_send_that_fails_after_switching_project_says_so_on_its_project(cx: &mut Tes
     let user = user();
     project(&user, "atlas");
     project(&user, "borealis");
-    let gate = user.path("gate");
-    recipe(
-        &user,
-        "atlas",
-        &gated("echo 'made-up failure'\nexit 3", &gate),
-    );
-    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let slow = slow_start(&user, Duration::from_secs(2), Some("made-up failure"));
+    let (shell, cx) = window(&user, slow, 1280., cx);
     open_project(&shell, "atlas", cx);
-    send_in_new("Try the broken recipe", "broken", cx);
+    send_to_main("Try the broken start", cx);
     let atlas = composer_of(&shell, "atlas", cx);
 
     open_project(&shell, "borealis", cx);
     let borealis = composer_of(&shell, "borealis", cx);
     type_task("A draft for borealis", cx);
-    std::fs::write(&gate, "").unwrap();
     until(&shell, cx, "atlas's send failed", |cx| {
         atlas.read_with(cx, |c, _| c.error().is_some())
     });
@@ -1062,7 +1234,7 @@ fn a_send_that_fails_after_switching_project_says_so_on_its_project(cx: &mut Tes
     open_project(&shell, "atlas", cx);
     assert_eq!(
         field_of(&atlas, cx),
-        "Try the broken recipe",
+        "Try the broken start",
         "atlas keeps its task, to send again"
     );
 }
@@ -1205,11 +1377,14 @@ fn a_chosen_workspace_that_stops_being_ready_cannot_take_the_task(cx: &mut TestA
 // fake agent would (`tests/tree.rs`), while the fake agent plays the turns (`HANG` keeps a worker
 // mid-turn).
 
-/// A user whose fake agent keeps a worker mid-turn when its brief says `HANG`, and answers "ok"
-/// otherwise.
+/// A user whose fake agent keeps a worker mid-turn when its brief says `HANG`, has it report when
+/// the brief says `REPORT` (it then ends), and answers "ok" otherwise.
 fn team_user() -> User {
     let user = User::with_fake_agent();
-    user.fake_script(json!({"turns": [{"when": "HANG", "do": [{"hang": true}]}]}));
+    user.fake_script(json!({"turns": [
+        {"when": "HANG", "do": [{"hang": true}]},
+        {"when": "REPORT", "do": [{"mcp": {"tool": "report", "arguments": {"text": "done"}}}]}
+    ]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     user
 }
@@ -1267,19 +1442,24 @@ fn mcp_session(user: &User, which: impl Fn(&str) -> bool) -> Mcp {
 
 /// Launches a worker of the lead's in `w`, kept mid-turn: its id and its MCP session.
 fn worker(user: &User, lead: &Mcp, title: &str) -> (String, Mcp) {
+    let id = worker_doing(lead, "HANG", title);
+    let task = format!("Your task: {title}.");
+    (id, mcp_session(user, |prompt| prompt.contains(&task)))
+}
+
+/// Launches a worker of the lead's in `w` whose brief starts with `what`: its id.
+fn worker_doing(lead: &Mcp, what: &str, title: &str) -> String {
     let answer = lead.call(
         "agent_launch",
-        json!({"title": title, "brief": format!("HANG and {title}"), "workspace": "w"}),
+        json!({"title": title, "brief": format!("{what} and {title}"), "workspace": "w"}),
     );
     assert!(!answer.error, "{}", answer.text);
-    let id = answer
+    answer
         .text
         .split(|c: char| !c.is_ascii_alphanumeric())
         .find(|w| w.len() == 12 && w.chars().all(|c| c.is_ascii_hexdigit()))
         .unwrap()
-        .to_owned();
-    let task = format!("Your task: {title}.");
-    (id, mcp_session(user, |prompt| prompt.contains(&task)))
+        .to_owned()
 }
 
 /// The number of the request a held call's answer names.
@@ -1793,7 +1973,9 @@ fn a_child_appearing_adds_its_row_to_the_rail_and_the_sub_agents_list(cx: &mut T
 }
 
 #[gpui_kit::test]
-fn the_editor_button_opens_the_place_s_folder_with_the_system_handler(cx: &mut TestAppContext) {
+fn the_header_has_no_editor_button_and_the_workspace_menu_opens_the_place_s_folder_and_closes_on_escape(
+    cx: &mut TestAppContext,
+) {
     let user = team_user();
     let (lead, _mcp, folder) = lead_in_w(&user);
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
@@ -1810,9 +1992,119 @@ fn the_editor_button_opens_the_place_s_folder_with_the_system_handler(cx: &mut T
     cx.update(|window, cx| window.click(session_id(&lead), cx));
     settle(cx);
 
-    cx.update(|window, cx| window.click("open-in-editor", cx));
+    cx.update(|window, _| {
+        assert!(window.try_find("session-header").is_some());
+        assert!(
+            window.try_find("open-in-editor").is_none(),
+            "no editor button, in the header or anywhere while the menu is shut"
+        );
+        assert!(window.try_find("workspace-menu").is_some(), "the ⋯ button");
+    });
 
+    // It opens animated: it starts below its place and rises into it.
+    cx.update(|window, cx| window.click("workspace-menu", cx));
+    let entering = cx.update(|window, _| window.find("workspace-menu-menu").bounds().origin.y);
+    settle(cx);
+    let at_rest = cx.update(|window, _| window.find("workspace-menu-menu").bounds().origin.y);
+    assert!(entering > at_rest, "{entering:?} then {at_rest:?}");
+    cx.update(|window, _| assert!(window.find("open-in-editor").visible()));
+
+    // Escape closes it, animated too, and nothing was opened.
+    cx.simulate_keystrokes("escape");
+    cx.update(|window, _| {
+        assert!(
+            window.try_find("open-in-editor").is_some(),
+            "still on its way out"
+        )
+    });
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find("open-in-editor").is_none()));
+    assert!(given.lock().unwrap().is_empty());
+
+    // A click outside it closes it too.
+    cx.update(|window, cx| window.click("workspace-menu", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("session-header", cx));
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find("open-in-editor").is_none()));
+
+    // The entry opens the place's folder with the system's handler, and shuts the menu.
+    cx.update(|window, cx| window.click("workspace-menu", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("open-in-editor", cx));
+    settle(cx);
     assert_eq!(*given.lock().unwrap(), [folder]);
+    cx.update(|window, _| assert!(window.try_find("open-in-editor").is_none()));
+}
+
+#[gpui_kit::test]
+fn ended_children_are_gathered_under_a_folded_row_that_opens_on_a_click(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, mcp, _) = lead_in_w(&user);
+    let done = worker_doing(&mcp, "REPORT", "write the notes");
+    let (stopped, _s) = worker(&user, &mcp, "try the idea");
+    let (running, _r) = worker(&user, &mcp, "build the form");
+    let stop = mcp.call("agent_stop", json!({"agent_id": stopped}));
+    assert!(!stop.error, "{}", stop.text);
+    eventually("both have ended", || {
+        [&done, &stopped].iter().all(|id| {
+            user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["state"] == "ended"
+        })
+    });
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the rail knows the three children", |cx| {
+        rail_ids(&page, cx).len() == 4
+            && page.read_with(cx, |p, cx| {
+                [&done, &stopped].iter().all(|id| {
+                    matches!(
+                        p.state(id, cx),
+                        Some(AgentState::Completed | AgentState::Stopped)
+                    )
+                })
+            })
+    });
+    settle(cx);
+
+    // The running child keeps its place; the two ended ones are behind one folded row.
+    cx.update(|window, _| {
+        assert!(window.try_find(format!("rail-row-{lead}")).is_some());
+        assert!(window.try_find(format!("rail-row-{running}")).is_some());
+        assert!(window.try_find(format!("rail-row-{done}")).is_none());
+        assert!(window.try_find(format!("rail-row-{stopped}")).is_none());
+        assert!(window.try_find(format!("rail-ended-{lead}")).is_some());
+    });
+    assert_eq!(
+        page.read_with(cx, |p, cx| p.rail().read(cx).rows()),
+        [
+            RailRow::Agent(lead.clone()),
+            RailRow::Agent(running.clone()),
+            RailRow::Ended {
+                parent: lead.clone(),
+                count: 2,
+                open: false
+            }
+        ]
+    );
+
+    // A click opens it, and the ended children come back; a second click folds it again.
+    cx.update(|window, cx| window.click(format!("rail-ended-{lead}"), cx));
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(window.try_find(format!("rail-row-{done}")).is_some());
+        assert!(window.try_find(format!("rail-row-{stopped}")).is_some());
+    });
+    cx.update(|window, cx| window.click(format!("rail-ended-{lead}"), cx));
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find(format!("rail-row-{done}")).is_none()));
+
+    // An ended child shown in the conversation stays reachable from the row.
+    cx.update(|window, cx| window.click(format!("rail-ended-{lead}"), cx));
+    settle(cx);
+    cx.update(|window, cx| window.click(format!("rail-row-{stopped}"), cx));
+    until(&shell, cx, "the ended child's conversation", |cx| {
+        session_page(&shell, cx).read_with(cx, |p, _| p.shown() == stopped)
+    });
 }
 
 fn row_ids(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Vec<gpui_kit::EntityId> {

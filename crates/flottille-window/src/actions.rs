@@ -24,8 +24,6 @@ pub enum Target {
     Main,
     /// A workspace there is.
     Workspace(String),
-    /// A workspace made for it, named here: it is created and prepared first.
-    New(String),
 }
 
 /// What a session is started on: each left out takes the daemon's default (the project's, else
@@ -161,15 +159,11 @@ pub(crate) struct Bounds {
     pub quick: Duration,
     /// What runs git's work (a fetch, a worktree made or removed): its own limit is 30 minutes.
     pub slow: Duration,
-    /// While a new workspace is prepared, how long without an event before the daemon is asked
-    /// whether it is still there.
-    pub quiet: Duration,
 }
 
 pub(crate) const BOUNDS: Bounds = Bounds {
     quick: Duration::from_secs(120),
     slow: Duration::from_secs(31 * 60),
-    quiet: Duration::from_secs(30),
 };
 
 /// The details are read at most once in this time: a burst of changes asks for them once.
@@ -295,19 +289,13 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
         Command::Details(_) => unreachable!("the details have their own thread"),
         Command::Start {
             project,
-            target: Target::New(name),
-            pick,
-            message,
-        } => start_in_new(connect, &project, &name, &pick, &message, bounds),
-        Command::Start {
-            project,
             target,
             pick,
             message,
         } => {
             let workspace = match target {
                 Target::Main => None,
-                Target::Workspace(name) | Target::New(name) => Some(name),
+                Target::Workspace(name) => Some(name),
             };
             match ask_alone(
                 connect,
@@ -525,96 +513,6 @@ fn details(
         branches,
         changes,
     })
-}
-
-/// Creates a workspace, waits for its preparation, then starts the session in it. A preparation
-/// that fails starts nothing: its output is on the workspace's card. A preparation takes as long
-/// as its recipe: while no event comes, the daemon is asked now and then whether it is still there.
-fn start_in_new(
-    connect: &Connect,
-    project: &str,
-    name: &str,
-    pick: &Pick,
-    message: &str,
-    bounds: Bounds,
-) -> Outcome {
-    let not_started = |why: String| Outcome::NotStarted {
-        project: project.to_owned(),
-        why,
-    };
-    let mut conn = match connected(connect) {
-        Ok(conn) => conn,
-        Err(why) => return not_started(why),
-    };
-    // Subscribed first, so that no step of the preparation goes unseen.
-    if let Err(why) = conn
-        .ask_within("events.watch", json!({}), bounds.quick)
-        .and_then(|a| a)
-    {
-        return not_started(why);
-    }
-    let created = match conn.ask_within(
-        "workspace.create",
-        json!({"project": project, "name": name}),
-        bounds.slow,
-    ) {
-        Ok(Ok(created)) => created,
-        Ok(Err(why)) | Err(why) => return not_started(why),
-    };
-    let mut state = created["state"].as_str().unwrap_or("preparing").to_owned();
-    while state == "preparing" {
-        let event = match conn.next_event(Some(bounds.quiet)) {
-            Ok(Some(event)) => event,
-            Ok(None) => {
-                state = match still_preparing(&mut conn, project, name, bounds.quick) {
-                    Ok(state) => state,
-                    Err(why) => return not_started(why),
-                };
-                continue;
-            }
-            Err(why) => return not_started(why),
-        };
-        let ours = event.data["project"] == project && event.data["workspace"] == name;
-        state = match (ours, event.name.as_str()) {
-            (true, "workspace.ready") => "ready".into(),
-            (true, "workspace.step_failed") => "failed".into(),
-            (true, "workspace.removed") => "removed".into(),
-            _ => state,
-        };
-    }
-    if state != "ready" {
-        return not_started(format!(
-            "the preparation of workspace {name} failed: no session started"
-        ));
-    }
-    match conn.ask_within(
-        "agent.start",
-        start_params(project, Some(name), pick, message),
-        bounds.quick,
-    ) {
-        Ok(Ok(started)) => started_outcome(project, &started),
-        Ok(Err(why)) | Err(why) => not_started(why),
-    }
-}
-
-/// The workspace's state as the daemon says it now (a listing: it runs no git); `removed` when it
-/// is gone.
-fn still_preparing(
-    conn: &mut Conn,
-    project: &str,
-    name: &str,
-    bound: Duration,
-) -> Result<String, String> {
-    let listed = conn.ask_within("workspace.list", json!({"project": project}), bound)??;
-    Ok(listed["workspaces"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|workspace| workspace["name"] == name)
-        .map_or("removed", |workspace| {
-            workspace["state"].as_str().unwrap_or("preparing")
-        })
-        .to_owned())
 }
 
 #[cfg(test)]

@@ -44,8 +44,8 @@ pub struct SessionLine {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlaceData {
     pub place: Place,
-    /// `the project folder · …` or `from develop · …`.
-    pub meta: String,
+    /// `from develop · …`; `main` has none, its title says what it is.
+    pub meta: Option<String>,
     /// `Ready` for `main`.
     pub preparation: Preparation,
     pub sessions: Vec<SessionLine>,
@@ -574,16 +574,20 @@ impl Render for PlaceCard {
             };
         }
 
-        let meta = div()
-            .px(px(14.))
-            .pl(px(36.))
-            .pb(px(10.))
-            .mono(11.5)
-            .text_color(p.faint)
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis()
-            .child(SharedString::from(self.data.meta.clone()));
+        let meta = self.data.meta.clone().map(|meta| {
+            div()
+                .id(id("meta"))
+                .px(px(14.))
+                .pl(px(36.))
+                .pb(px(10.))
+                .mono(11.5)
+                .text_color(p.faint)
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(SharedString::from(meta))
+                .test_support()
+        });
 
         let status = match &self.data.preparation {
             Preparation::Preparing { done, total, doing } => Some(
@@ -747,7 +751,7 @@ impl Render for PlaceCard {
             .child(
                 Card::new()
                     .title(title)
-                    .child(div().pt(px(10.)).child(meta))
+                    .children_opt(meta.map(|meta| div().pt(px(10.)).child(meta)))
                     .children_opt(status)
                     .children_opt(busy)
                     .children_opt(error)
@@ -790,6 +794,10 @@ pub struct NewWorkspace {
     has_name: bool,
     /// The name asked for, while the daemon makes it.
     creating: Option<String>,
+    /// Opened from the composer's picker: the workspace made becomes the composer's place.
+    for_composer: bool,
+    /// `for_composer` as it was when the name was asked for.
+    creating_for_composer: bool,
     error: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
 }
@@ -835,6 +843,8 @@ impl NewWorkspace {
             name,
             has_name: false,
             creating: None,
+            for_composer: false,
+            creating_for_composer: false,
             error: None,
             _subscriptions: subscriptions,
         }
@@ -858,6 +868,17 @@ impl NewWorkspace {
 
     /// Opens its modal, the caret in the name.
     pub fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.for_composer = false;
+        self.show(window, cx);
+    }
+
+    /// Opens it from the composer's picker: the workspace it makes becomes the composer's place.
+    pub fn open_for_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.for_composer = true;
+        self.show(window, cx);
+    }
+
+    fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open = true;
         self.error = None;
         let focus = self.name.read(cx).focus_handle(cx);
@@ -878,6 +899,7 @@ impl NewWorkspace {
         }
         let name = self.name.read(cx).value().trim().to_owned();
         self.creating = Some(name.clone());
+        self.creating_for_composer = self.for_composer;
         self.error = None;
         let command = Command::CreateWorkspace {
             project: self.project.clone(),
@@ -889,9 +911,16 @@ impl NewWorkspace {
         cx.notify();
     }
 
-    /// What the daemon answered: made, and the card closes; or refused, and it says why.
-    pub fn answered(&mut self, refused: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
+    /// What the daemon answered: made, and the card closes; or refused, and it says why. `true`
+    /// when the workspace made is to become the composer's place.
+    pub fn answered(
+        &mut self,
+        refused: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         self.creating = None;
+        let for_composer = refused.is_none() && self.creating_for_composer;
         match refused {
             None => {
                 self.open = false;
@@ -903,6 +932,7 @@ impl NewWorkspace {
             Some(why) => self.error = Some(SharedString::from(why.to_owned())),
         }
         cx.notify();
+        for_composer
     }
 }
 
@@ -937,12 +967,10 @@ impl Render for NewWorkspace {
             .child("a branch of its own in every repository")
             .on_click(cx.listener(|this, _, window, cx| this.open(window, cx)))
             .test_support();
-        if !self.open {
-            return card;
-        }
         let creating = self.creating.is_some();
         let this = cx.entity().downgrade();
         let modal = Modal::new("new-workspace-modal", "New workspace")
+            .open(self.open)
             .on_close(move |_, cx| {
                 this.update(cx, |this, cx| this.close(cx)).ok();
             })
