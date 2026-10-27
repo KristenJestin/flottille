@@ -17,6 +17,7 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use flottille_core::agent::Agent;
+use flottille_core::procedure;
 use flottille_core::secrets;
 use http::{Request, Response, StatusCode};
 use http_body_util::combinators::BoxBody;
@@ -1053,10 +1054,10 @@ pub fn judge(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> (gate:
     })
 }
 
-/// Whether the procedure run the agent works in lets this `commands_run` push: its run's
-/// environment then lets `git push` reach the remote.
-fn pushes(daemon: &Daemon, grant: &Grant, args: &Value) -> bool {
-    considered(daemon, grant, "commands_run", args, gate::pushes)
+/// The grant the procedure run the agent works in lets this `commands_run` through by, if any: its
+/// run's environment is then lifted for it (`gate::lifted`).
+fn lifted(daemon: &Daemon, grant: &Grant, args: &Value) -> Option<procedure::Grant> {
+    considered(daemon, grant, "commands_run", args, gate::lifted)
 }
 
 /// The call as the gate sees it, handed to `consider`.
@@ -1200,8 +1201,8 @@ async fn perform(
     match tool {
         "commands_list" => runs::commands_list(daemon, &grant.place, args),
         "commands_run" => {
-            let push = pushes(daemon, grant, &args);
-            runs::commands_run(daemon, &grant.agent, &grant.place, args, push, cancelled).await
+            let lifted = lifted(daemon, grant, &args);
+            runs::commands_run(daemon, &grant.agent, &grant.place, args, lifted, cancelled).await
         }
         "commands_output" => runs::commands_output(daemon, &grant.agent, args),
         "commands_stop" => runs::commands_stop(daemon, &grant.agent, args).await,

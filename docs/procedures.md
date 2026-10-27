@@ -90,6 +90,12 @@ environment without that rewrite, and only it: a script the agent wrote and runs
 The forge tokens stay empty either way: a push goes with the user's own git credentials (an SSH
 key, a credential helper that needs no forge command line).
 
+**No hook.** A line a grant lets through (a commit, a push, a rebase) runs with
+`core.hooksPath=/dev/null`, given through `GIT_CONFIG_COUNT` in its environment so that the
+agent's line is unchanged: the hooks are files of the repository or of its configured hooks
+folder, which the agent writes, and a `pre-push` hook would run with the push wall down. The
+repository's own hooks (a commit message check) do not run for a procedure's commits.
+
 ## `forge_write`
 
 The tool through which an agent writes to its workspace's forge (`docs/forges.md`), refused unless

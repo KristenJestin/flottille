@@ -1015,25 +1015,17 @@ fn api_reads(args: &[String]) -> bool {
         .is_some_and(|endpoint| *endpoint != "graphql")
 }
 
-/// Whether the call is a `git push` a procedure's grant lets through: its run's environment then
-/// lets git push, which every other run's environment stops.
-pub fn pushes(call: &Call) -> bool {
-    let Some(run) = call.run else {
-        return false;
-    };
+/// The grant a procedure's run lets this `commands_run` line through by, when the gate lets it
+/// through: its environment is then lifted for it alone (`runs::defend`), hooks off, and the push
+/// wall down for a push.
+pub fn lifted(call: &Call) -> Option<procedure::Grant> {
+    let run = call.run?;
     if call.tool != "commands_run" || call.words.is_empty() {
-        return false;
+        return None;
     }
-    let Ok(layers) = layers(call.words) else {
-        return false;
-    };
-    matches!(
-        granted(call, run, &layers),
-        Ok(Some((
-            procedure::Grant::Push | procedure::Grant::PushForceWithLease,
-            _
-        )))
-    ) && matches!(decide(call), Verdict::Allow | Verdict::Ask(_))
+    let layers = layers(call.words).ok()?;
+    let (grant, _) = granted(call, run, &layers).ok()??;
+    matches!(decide(call), Verdict::Allow | Verdict::Ask(_)).then_some(grant)
 }
 
 /// The reason a call is held when the procedure grants it with `ask`.
@@ -1561,6 +1553,26 @@ mod tests {
         }
 
         fn judge(&self, tool: &str, args: Value, never: Option<&[Vec<String>]>) -> Verdict {
+            self.considered(tool, args, never, decide)
+        }
+
+        /// The grant a procedure lifts the line's environment for.
+        fn lifted(&self, line: &str) -> Option<procedure::Grant> {
+            self.considered(
+                "commands_run",
+                json!({"line": line}),
+                Some(&self.never),
+                super::lifted,
+            )
+        }
+
+        fn considered<T>(
+            &self,
+            tool: &str,
+            args: Value,
+            never: Option<&[Vec<String>]>,
+            consider: impl FnOnce(&Call) -> T,
+        ) -> T {
             let place = &self.grant.place;
             let (words, paths, command) = match tool {
                 "commands_run" => {
@@ -1579,7 +1591,7 @@ mod tests {
                     None => (Vec::new(), Vec::new(), None),
                 },
             };
-            decide(&Call {
+            consider(&Call {
                 grant: &self.grant,
                 tool,
                 args: &args,
@@ -2589,5 +2601,25 @@ mod tests {
         ] {
             assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
         }
+    }
+
+    #[test]
+    fn a_granted_commit_push_or_rebase_is_lifted_and_nothing_else_is() {
+        let fixture = Fixture::workspace().in_run(&[
+            (Commit, Mode::Allow),
+            (Push, Mode::Ask),
+            (Rebase, Mode::Allow),
+        ]);
+        assert_eq!(fixture.lifted("git commit -m change"), Some(Commit));
+        assert_eq!(fixture.lifted("git push origin app/login"), Some(Push));
+        assert_eq!(fixture.lifted("git rebase main"), Some(Rebase));
+        for line in ["git status", "git push origin main", "git commit --amend"] {
+            assert_eq!(fixture.lifted(line), None, "{line}");
+        }
+        assert_eq!(
+            Fixture::workspace().lifted("git commit -m change"),
+            None,
+            "outside a run"
+        );
     }
 }

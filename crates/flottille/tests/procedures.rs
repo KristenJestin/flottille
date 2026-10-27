@@ -15,31 +15,44 @@ use serde_json::{Value, json};
 /// A project `app` that is one repository, pushed to a bare remote `origin`, with its ready
 /// workspace `login` on the branch `app/login`. Its folder and the remote's.
 fn fixture(user: &User) -> (PathBuf, PathBuf) {
+    prepared(user, |_| {}, false)
+}
+
+/// The same, `prepare` given the project's folder before the workspace is created (`offline`
+/// when the remote it leaves cannot be fetched).
+fn prepared(user: &User, prepare: impl FnOnce(&Path), offline: bool) -> (PathBuf, PathBuf) {
     let folder = user.path("work/app");
     user.git_init(&folder);
     std::fs::write(folder.join("README.md"), "app\n").unwrap();
     user.git(&folder, &["add", "."]);
     user.git(&folder, &["commit", "--quiet", "-m", "start"]);
-    let remote = user.path("remotes/app.git");
-    user.git(
-        &user.path(""),
-        &["init", "--quiet", "--bare", remote.to_str().unwrap()],
-    );
+    let remote = bare(user, "app");
     user.git(
         &folder,
         &["remote", "add", "origin", remote.to_str().unwrap()],
     );
     user.git(&folder, &["push", "--quiet", "origin", "main"]);
+    prepare(&folder);
     user.call("project.add", json!({"folder": folder, "name": "app"}))
         .unwrap();
     let workspace = user
         .call(
             "workspace.create",
-            json!({"project": "app", "name": "login"}),
+            json!({"project": "app", "name": "login", "offline": offline}),
         )
         .unwrap();
     assert_eq!(workspace["state"], "ready", "{workspace}");
     (folder, remote)
+}
+
+/// A throwaway bare repository `remotes/<name>.git`.
+fn bare(user: &User, name: &str) -> PathBuf {
+    let remote = user.path(&format!("remotes/{name}.git"));
+    user.git(
+        &user.path(""),
+        &["init", "--quiet", "--bare", remote.to_str().unwrap()],
+    );
+    remote
 }
 
 /// Adds the procedure `ship` with these grants.
@@ -551,4 +564,81 @@ fn the_grants_end_with_the_run() {
 
     assert!(answer.error, "{}", answer.text);
     assert!(!remote_branches(&user, &remote).contains("app/login"));
+}
+
+/// A hook that leaves a mark in `marks` each time it runs.
+fn marking_hook(user: &User, folder: &Path, name: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let hooks = folder.join(".githooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    let hook = hooks.join(name);
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\necho {name} >> '{}'\n",
+            user.path("marks").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn a_granted_commit_push_or_rebase_runs_none_of_the_hooks_the_agent_can_write() {
+    let user = User::with_fake_agent();
+    // The repository's hooks are files of its tree, which the agent writes.
+    let (folder, remote) = prepared(
+        &user,
+        |folder| {
+            for hook in ["pre-commit", "pre-push", "pre-rebase"] {
+                marking_hook(&user, folder, hook);
+            }
+            user.git(folder, &["add", ".githooks"]);
+            user.git(folder, &["commit", "--quiet", "-m", "hooks"]);
+            user.git(folder, &["push", "--quiet", "origin", "main"]);
+            user.git(folder, &["config", "core.hooksPath", ".githooks"]);
+        },
+        false,
+    );
+    procedure(
+        &user,
+        "ship",
+        json!({"commit": "allow", "push": "allow", "rebase": "allow"}),
+        false,
+    );
+    let (_, mcp) = run(&user, "ship");
+
+    let written = mcp.call(
+        "fs_write",
+        json!({"path": "change.txt", "content": "change\n"}),
+    );
+    assert!(!written.error, "{}", written.text);
+    for done in [
+        "git add change.txt",
+        "git commit -m change",
+        "git rebase main",
+        "git push origin app/login",
+    ] {
+        let answer = line(&mcp, done);
+        assert!(
+            !answer.error && answer.text.contains("exited with code 0"),
+            "{done}: {}",
+            answer.text
+        );
+    }
+
+    assert!(remote_branches(&user, &remote).contains("app/login"));
+    assert!(
+        !user.path("marks").exists(),
+        "{}",
+        std::fs::read_to_string(user.path("marks")).unwrap_or_default()
+    );
+    // The same hooks run for the user.
+    std::fs::write(folder.join("other.txt"), "other\n").unwrap();
+    user.git(&folder, &["add", "other.txt"]);
+    user.git(&folder, &["commit", "--quiet", "-m", "other"]);
+    assert_eq!(
+        std::fs::read_to_string(user.path("marks")).unwrap(),
+        "pre-commit\n"
+    );
 }

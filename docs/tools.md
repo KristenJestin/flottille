@@ -159,7 +159,9 @@ not a lock: a swap between it and the rename is not seen.
     `GIT_CONFIG_KEY_<n>=url./dev/null/flottille-refused-push/.pushInsteadOf` and an empty
     `GIT_CONFIG_VALUE_<n>`, which rewrites every push URL to a path that is no repository. The
     one exception is a run whose line the gate let through as a push a procedure grants
-    (`docs/procedures.md`): that run alone keeps its push URLs.
+    (`docs/procedures.md`): that run alone keeps its push URLs;
+  - for a line the gate let through by a procedure's grant (a commit, a push, a rebase), no hook:
+    `core.hooksPath=/dev/null` added the same way, since the hooks are files the agent can write.
 - **The environment does not stop every push**: `git -c url.<x>.pushInsteadOf=<x> push`,
   `env -u GIT_CONFIG_COUNT git push`, a remote with a push URL of its own
   (`remote.<name>.pushurl`, which git does not rewrite) and a `git config` write all get past it.
