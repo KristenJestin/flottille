@@ -1,4 +1,4 @@
-//! A session's page: a header on one line (title, place, state pill, the editor button), the
+//! A session's page: a header on one line (title, place, state pill), the
 //! shown agent's conversation, live, the composer that writes to the root agent (or, reading a
 //! sub-agent, a line saying it belongs to its parent), and a rail with the session's tree of
 //! agents, its workspace and its facts, which becomes a drawer in a narrower window.
@@ -7,14 +7,15 @@
 //! again, never the others. What an agent, a file or a command said is shown as the daemon gave
 //! it (masked and escaped), as plain text.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::f32::consts::FRAC_PI_2;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
 use flottille_ui::{
-    AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Pill, PulsingLabel, Side, StateIcon,
-    Status, Type, enter, icon, palette, section_label,
+    AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Menu, Pill, PulsingLabel, Side,
+    StateIcon, Status, Type, enter, icon, palette, section_label,
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{InputEditorStyle, InputEvent, TextareaState};
@@ -23,7 +24,7 @@ use gpui_kit::{
     AnyElement, AppContext as _, Bounds, Context, ElementId, Entity, Focusable as _, FollowMode,
     InteractiveElement, IntoElement, ListAlignment, ListState, ParentElement, PathBuilder, Pixels,
     Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
-    TestSupportExt as _, WeakEntity, Window, canvas, div, list, point, px,
+    TestSupportExt as _, Transformation, WeakEntity, Window, canvas, div, list, point, px, radians,
 };
 
 use crate::actions::{Answer, Command};
@@ -139,7 +140,7 @@ impl SessionPage {
         cx: &mut Context<Self>,
     ) -> Self {
         let page = cx.entity().downgrade();
-        let rail = cx.new(|_| SessionRail::new(page.clone(), opened.id.clone(), &opened));
+        let rail = cx.new(|cx| SessionRail::new(page.clone(), opened.id.clone(), &opened, cx));
         let drawer = cx.new(|_| Drawer::new("rail-drawer", Side::Right, px(RAIL), rail.clone()));
         let pill = cx.new(|cx| Pill::new(status.clone(), cx));
         let shown = opened.id.clone();
@@ -472,6 +473,8 @@ impl SessionPage {
                     provider: agent.provider.clone(),
                     model: agent.model.clone(),
                     depth: agent.depth,
+                    parent: agent.parent.clone(),
+                    ended: matches!(state_of(agent), AgentState::Completed | AgentState::Stopped),
                     status,
                 })
             })
@@ -597,7 +600,6 @@ impl Render for SessionPage {
         let wide = self.layout == Layout::Wide;
         let drawer = self.drawer.clone();
         let place = self.opened.place.clone();
-        let editor = cx.entity().downgrade();
         let header = div()
             .id("session-header")
             .flex_none()
@@ -642,15 +644,6 @@ impl Render for SessionPage {
             )
             .child(self.pill.clone())
             .child(div().flex_1())
-            .child(
-                // Said in words: an arrow alone did not say what it opens.
-                Button::quiet("open-in-editor", "Open in editor")
-                    .leading(Icon::OpenInEditor)
-                    .tooltip(format!("Open {} in your editor", place_name(&place)))
-                    .on_click(move |_, _, cx| {
-                        editor.update(cx, |page, _| page.open_in_editor()).ok();
-                    }),
-            )
             .when(!wide, |d| {
                 let mut agents = Button::icon("open-rail", Icon::Agents, "Agents")
                     .on_click(move |_, _, cx| drawer.update(cx, |d, cx| d.open(cx)));
@@ -658,7 +651,8 @@ impl Render for SessionPage {
                     agents = agents.badge(Badge::alert());
                 }
                 d.child(agents)
-            });
+            })
+            .test_support();
         let root = self.shown == self.opened.id;
         let dock = div()
             .flex_none()
@@ -1701,7 +1695,86 @@ pub struct RailAgent {
     pub provider: String,
     pub model: Option<String>,
     pub depth: u64,
+    /// The agent that launched it; `None` for the root.
+    pub parent: Option<String>,
+    /// A child that completed or was stopped: the rail gathers those under one folded row.
+    pub ended: bool,
     pub status: Entity<Status>,
+}
+
+/// A row of the rail: an agent, or the folded row that gathers the ended children of `parent`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RailRow {
+    Agent(String),
+    Ended {
+        parent: String,
+        /// The agents behind the row, the ended children's own ended children included.
+        count: usize,
+        open: bool,
+    },
+}
+
+/// What [`rail_rows`] needs of an agent.
+struct Node<'a> {
+    id: &'a str,
+    parent: Option<&'a str>,
+    ended: bool,
+}
+
+/// The rail's rows, in tree order. A child that ended is left out and counted in the "ended" row
+/// that closes its parent's children, unless one of its descendants has not ended: that one
+/// would be hidden with it. Those behind an open row follow it, in tree order.
+fn rail_rows(nodes: &[Node], open: &HashSet<String>) -> Vec<RailRow> {
+    fn children<'a, 'b>(
+        nodes: &'b [Node<'a>],
+        id: &'b str,
+    ) -> impl Iterator<Item = &'b Node<'a>> + use<'a, 'b> {
+        nodes.iter().filter(move |n| n.parent == Some(id))
+    }
+    fn all_ended(nodes: &[Node], id: &str) -> bool {
+        children(nodes, id).all(|n| n.ended && all_ended(nodes, n.id))
+    }
+    fn descendants<'a>(nodes: &[Node<'a>], id: &str, out: &mut Vec<&'a str>) {
+        for node in children(nodes, id) {
+            out.push(node.id);
+            descendants(nodes, node.id, out);
+        }
+    }
+    fn walk(nodes: &[Node], open: &HashSet<String>, parent: &str, rows: &mut Vec<RailRow>) {
+        let mut gathered: Vec<&str> = Vec::new();
+        for child in children(nodes, parent) {
+            if child.ended && all_ended(nodes, child.id) {
+                gathered.push(child.id);
+                descendants(nodes, child.id, &mut gathered);
+            } else {
+                rows.push(RailRow::Agent(child.id.to_owned()));
+                walk(nodes, open, child.id, rows);
+            }
+        }
+        if gathered.is_empty() {
+            return;
+        }
+        let open = open.contains(parent);
+        rows.push(RailRow::Ended {
+            parent: parent.to_owned(),
+            count: gathered.len(),
+            open,
+        });
+        if open {
+            // `gathered` is already in tree order: each agent, then its own descendants.
+            rows.extend(gathered.into_iter().map(|id| RailRow::Agent(id.to_owned())));
+        }
+    }
+    let known: HashSet<&str> = nodes.iter().map(|n| n.id).collect();
+    let mut rows = Vec::new();
+    for top in nodes
+        .iter()
+        .filter(|n| n.parent.is_none_or(|p| !known.contains(p)))
+    {
+        rows.push(RailRow::Agent(top.id.to_owned()));
+        walk(nodes, open, top.id, &mut rows);
+    }
+    rows
 }
 
 /// The rail: the session's agents, its workspace and its facts.
@@ -1709,19 +1782,41 @@ pub struct SessionRail {
     page: WeakEntity<SessionPage>,
     agents: Vec<RailAgent>,
     marks: HashMap<String, (Entity<StateIcon>, Entity<Pill>)>,
+    /// The parents whose "ended" row is open: kept while the window shows the session.
+    open_ended: HashSet<String>,
     selected: String,
     workspace: Option<String>,
     project: String,
     place: Option<PlaceFacts>,
+    /// The "⋯" menu of the WORKSPACE section.
+    menu: Entity<Menu>,
     renders: usize,
 }
 
 impl SessionRail {
-    fn new(page: WeakEntity<SessionPage>, root: String, opened: &Opened) -> Self {
+    fn new(
+        page: WeakEntity<SessionPage>,
+        root: String,
+        opened: &Opened,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let editor = page.clone();
+        let menu = cx.new(|cx| {
+            Menu::new("workspace-menu", "Workspace actions", cx).entry(
+                "open-in-editor",
+                "Open in editor",
+                Some(Icon::OpenInEditor),
+                move |_, cx| {
+                    editor.update(cx, |page, _| page.open_in_editor()).ok();
+                },
+            )
+        });
         Self {
             page,
             agents: Vec::new(),
             marks: HashMap::new(),
+            open_ended: HashSet::new(),
+            menu,
             selected: root,
             workspace: opened.place.clone(),
             project: opened.project.clone(),
@@ -1732,6 +1827,28 @@ impl SessionRail {
 
     pub fn agents(&self) -> &[RailAgent] {
         &self.agents
+    }
+
+    /// What the rail draws of the agents: the ones in their place, and the folded rows.
+    pub fn rows(&self) -> Vec<RailRow> {
+        let nodes: Vec<Node> = self
+            .agents
+            .iter()
+            .map(|a| Node {
+                id: &a.id,
+                parent: a.parent.as_deref(),
+                ended: a.ended,
+            })
+            .collect();
+        rail_rows(&nodes, &self.open_ended)
+    }
+
+    /// Opens or folds the row that gathers the ended children of `parent`.
+    pub fn toggle_ended(&mut self, parent: &str, cx: &mut Context<Self>) {
+        if !self.open_ended.remove(parent) {
+            self.open_ended.insert(parent.to_owned());
+        }
+        cx.notify();
     }
 
     pub fn place(&self) -> Option<&PlaceFacts> {
@@ -1779,7 +1896,7 @@ impl Render for SessionRail {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
         let p = palette(cx);
-        let agents = self.agents.iter().map(|agent| {
+        let agent_row = |agent: &RailAgent| {
             let (mark, pill) = self.marks[&agent.id].clone();
             let page = self.page.clone();
             let target = agent.id.clone();
@@ -1869,7 +1986,72 @@ impl Render for SessionRail {
                         .test_support(),
                 )
                 .test_support()
-        });
+        };
+        let ended_row = |parent: &str, count: usize, open: bool| {
+            let depth = self
+                .agents
+                .iter()
+                .find(|a| a.id == parent)
+                .map_or(1, |a| a.depth + 1);
+            let indent = 20. * depth as f32;
+            let target = parent.to_owned();
+            div()
+                .relative()
+                .pl(px(indent))
+                .child(enter(
+                    ElementId::Name(format!("elbow-ended-{parent}").into()),
+                    0,
+                    elbow(p.line2)
+                        .absolute()
+                        .left(px(indent - 5.))
+                        .top(px(-12.))
+                        .w(px(10.))
+                        .h(px(32.)),
+                ))
+                .child(
+                    div()
+                        .id(ElementId::Name(format!("rail-ended-{parent}").into()))
+                        .aria_expanded(open)
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .px(px(10.))
+                        .py(px(6.))
+                        .rounded(px(8.))
+                        .cursor_pointer()
+                        .text_size(px(12.5))
+                        .text_color(p.faint)
+                        .hover(|s| s.bg(p.hover).text_color(p.text))
+                        .child(div().w(px(16.)).flex_none().flex().justify_center().child(
+                            icon(Icon::Chevron).size(px(12.)).text_color(p.faint).when(
+                                !open,
+                                |i| {
+                                    i.with_transformation(Transformation::rotate(radians(
+                                        -FRAC_PI_2,
+                                    )))
+                                },
+                            ),
+                        ))
+                        .child(SharedString::from(format!("{count} ended")))
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_ended(&target, cx)))
+                        .test_support(),
+                )
+        };
+        let rows: Vec<AnyElement> = self
+            .rows()
+            .into_iter()
+            .filter_map(|row| match row {
+                RailRow::Agent(id) => {
+                    let agent = self.agents.iter().find(|a| a.id == id)?;
+                    Some(agent_row(agent).into_any_element())
+                }
+                RailRow::Ended {
+                    parent,
+                    count,
+                    open,
+                } => Some(ended_row(&parent, count, open).into_any_element()),
+            })
+            .collect();
         let repositories: Vec<(String, String)> = self
             .place
             .iter()
@@ -1917,9 +2099,15 @@ impl Render for SessionRail {
             .flex()
             .flex_col()
             .child(section_label("Agents", cx))
-            .children(agents)
+            .children(rows)
             .child(div().h(px(1.)).bg(p.line).mx(px(6.)).my(px(16.)))
-            .child(section_label("Workspace", cx))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .child(div().flex_1().child(section_label("Workspace", cx)))
+                    .child(self.menu.clone()),
+            )
             .children(repositories.into_iter().map(|(path, said)| {
                 div()
                     .id(ElementId::Name(format!("rail-repository-{path}").into()))
@@ -2332,6 +2520,83 @@ mod tests {
     fn a_root_is_named_by_its_role_and_a_child_by_its_task() {
         assert_eq!(name_of(&agent(None, "idle")), "lead");
         assert_eq!(name_of(&agent(Some("r"), "idle")), "build the form");
+    }
+
+    fn node<'a>(id: &'a str, parent: Option<&'a str>, ended: bool) -> Node<'a> {
+        Node { id, parent, ended }
+    }
+
+    fn agent_row(id: &str) -> RailRow {
+        RailRow::Agent(id.to_owned())
+    }
+
+    fn ended_row(parent: &str, count: usize, open: bool) -> RailRow {
+        RailRow::Ended {
+            parent: parent.to_owned(),
+            count,
+            open,
+        }
+    }
+
+    #[test]
+    fn a_running_child_with_ended_children_of_its_own_gathers_them_under_it() {
+        let nodes = [
+            node("lead", None, false),
+            node("mid", Some("lead"), false),
+            node("a", Some("mid"), true),
+            node("b", Some("mid"), true),
+            node("live", Some("mid"), false),
+            node("old", Some("lead"), true),
+        ];
+        assert_eq!(
+            rail_rows(&nodes, &HashSet::new()),
+            [
+                agent_row("lead"),
+                agent_row("mid"),
+                agent_row("live"),
+                ended_row("mid", 2, false),
+                ended_row("lead", 1, false),
+            ]
+        );
+        let open: HashSet<String> = ["mid".to_owned()].into();
+        assert_eq!(
+            rail_rows(&nodes, &open)[3..],
+            [
+                ended_row("mid", 2, true),
+                agent_row("a"),
+                agent_row("b"),
+                ended_row("lead", 1, false)
+            ]
+        );
+    }
+
+    #[test]
+    fn an_ended_child_with_a_child_still_running_keeps_its_place() {
+        let nodes = [
+            node("lead", None, false),
+            node("gone", Some("lead"), true),
+            node("deep", Some("gone"), false),
+            node("old", Some("lead"), true),
+            node("older", Some("old"), true),
+        ];
+        assert_eq!(
+            rail_rows(&nodes, &HashSet::new()),
+            [
+                agent_row("lead"),
+                agent_row("gone"),
+                agent_row("deep"),
+                ended_row("lead", 2, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_ended_root_and_a_child_that_did_not_end_keep_their_place() {
+        let nodes = [node("lead", None, true), node("c", Some("lead"), false)];
+        assert_eq!(
+            rail_rows(&nodes, &HashSet::new()),
+            [agent_row("lead"), agent_row("c")]
+        );
     }
 
     #[test]
