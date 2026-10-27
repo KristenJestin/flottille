@@ -4,8 +4,8 @@ The tools of the agents Flottille runs, and the MCP server that serves them: the
 `docs/design.md` §1. It follows `docs/reference/hemera.md` §3, with the rules of
 `docs/reference/mcp.md` §4 where they differ. A session lists the tools of its agent, which
 depend on what it can do (`docs/agents.md`): the file and command tools below for every agent,
-`forge_read` for an agent in a workspace, `reference_read`, and the tree's tools (`agent_*`,
-`report`, `ask_user` or `ask_parent`, `approval_answer`).
+`forge_read` for an agent in a workspace, `reference_read`, `ticket_read` for an agent in a workspace,
+and the tree's tools (`agent_*`, `report`, `ask_user` or `ask_parent`, `approval_answer`).
 
 ## The server
 
@@ -203,6 +203,15 @@ not a lock: a swap between it and the rename is not seen.
 It goes through the gate like every call, which allows it. How the forge is read, and what it
 never touches (a token, `gh auth token`), is in [`forges.md`](forges.md).
 
+## The tickets
+
+| Tool | |
+|---|---|
+| `ticket_read {ticket?}` | The ticket the agent's workspace is linked to, or `ticket`, another ticket of the same tracker by its key (`#123` or `ABC-123`): its reference, tracker, state, title, link, description and comments (the newest 30), masked. Read only, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own, and none of either's write commands is reachable from it. The tracker is that of the workspace's ticket, or GitHub's (its own repositories' issues) when it has none; a key of the other tracker is refused (`refused: ABC-123 is a Jira ticket, and this workspace's tracker is GitHub issues (#123): …`), and nothing is asked of any tracker. A workspace with no ticket and no key is refused (`refused: workspace X is linked to no ticket: …`). An unreadable ticket (`gh` or `acli` missing or signed out, no such ticket) is an error saying why and what to do. Only an agent in a workspace has it, whether a ticket is linked or not. |
+
+It goes through the gate like every call, which allows it. How a ticket is read, Jira's text
+turned into plain text, and what is assumed of `acli`'s output, is in [`tickets.md`](tickets.md).
+
 ## The tree's tools
 
 The tools through which agents launch other agents and answer for them (`docs/design.md` §4.3,
@@ -263,6 +272,9 @@ the call reaches, the project's never list and Flottille's own folders, and answ
      `pipeline view/list`; for all, `repo view`, `auth status` and `api` with GET, no field, no
      input and not `graphql`; `auth token` and `auth status` with `--show-token` (`-t`) are
      refused, since they print a login;
+   - `acli`, Atlassian's command line: every line, reads included. Its Jira sign-in is the user's,
+     in a place no variable of ours moves, so it cannot be emptied as `gh`'s is; an agent reads a
+     ticket with `ticket_read` and says what should be written to it;
    - publishing: `npm`, `pnpm`, `yarn`, `bun`, `cargo`, `poetry`, `flit`, `hatch`, `uv` with
      `publish` or `unpublish`, `twine upload`, `gem`, `dotnet` and `nuget` with `push`.
 

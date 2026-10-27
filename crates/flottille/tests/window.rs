@@ -26,7 +26,7 @@ use flottille_window::settings::SettingsPage;
 use flottille_window::shell::{Layout, Selection};
 use flottille_window::tree::{place_id, project_id, session_id};
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
+use gpui_kit::{Entity, Focusable as _, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
 
 /// A user whose fake agent answers "ok", reads `.env` when asked to (a call the gate holds for
@@ -3997,6 +3997,149 @@ fn the_workspace_section_shows_the_pull_request_and_its_checks_mark_and_opens_it
     cx.update(|window, cx| window.click("pull-w-app", cx));
     settle(cx);
     assert_eq!(given.lock().unwrap().len(), 2);
+}
+
+// Tickets (#79): the workspace's ticket in the session's WORKSPACE section, linked and unlinked
+// there, and linked from the form that makes a workspace, read through the fake `gh`.
+
+#[gpui_kit::test]
+fn the_workspace_section_shows_the_ticket_opens_it_on_a_click_and_links_and_unlinks_it(
+    cx: &mut TestAppContext,
+) {
+    let user = team_user().with_fake_gh();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    user.git(
+        &user.path("work/app"),
+        &["remote", "set-url", "origin", "git@github.com:acme/app.git"],
+    );
+    let issue = |number: u64, title: &str| {
+        json!({"number": number, "title": title, "state": "OPEN", "body": "", "comments": [],
+               "url": format!("https://github.com/acme/app/issues/{number}")})
+    };
+    user.gh_script(json!({"issues": {"acme/app": {
+        "12": issue(12, "The form fails"), "13": issue(13, "The menu fails")
+    }}}));
+    user.call(
+        "workspace.link_ticket",
+        json!({"project": "app", "name": "w", "ticket": "#12"}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let given: Arc<std::sync::Mutex<Vec<PathBuf>>> = Arc::default();
+    let opened = given.clone();
+    shell.update(cx, |s, _| {
+        s.set_opener(Arc::new(move |path: &std::path::Path| {
+            opened.lock().unwrap().push(path.to_owned())
+        }))
+    });
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&lead)).is_some())
+    });
+    cx.update(|window, cx| window.click(session_id(&lead), cx));
+
+    until(&shell, cx, "the ticket in the rail", |cx| {
+        cx.update(|window, _| window.try_find("rail-ticket").is_some())
+    });
+    let page = session_page(&shell, cx);
+    let ticket = page
+        .read_with(cx, |p, cx| {
+            p.rail().read(cx).place().unwrap().ticket.clone()
+        })
+        .unwrap();
+    assert_eq!(ticket.reference, "#12");
+    assert_eq!(ticket.title.as_deref(), Some("The form fails"));
+    assert_eq!(ticket.state.as_deref(), Some("open"));
+    settle(cx);
+    cx.update(|window, cx| window.click("rail-ticket", cx));
+    settle(cx);
+    assert_eq!(
+        *given.lock().unwrap(),
+        [PathBuf::from("https://github.com/acme/app/issues/12")]
+    );
+
+    // Unlinked from the rail: the daemon forgets it and the row goes.
+    cx.update(|window, cx| window.click("rail-ticket-unlink", cx));
+    until(&shell, cx, "the ticket gone from the rail", |cx| {
+        cx.update(|window, _| window.try_find("rail-ticket").is_none())
+    });
+    let shown = user
+        .call("workspace.show", json!({"project": "app", "name": "w"}))
+        .unwrap();
+    assert_eq!(shown["ticket"], serde_json::Value::Null);
+
+    // Linked from the field: Enter links what is typed.
+    let field = page
+        .read_with(cx, |p, cx| p.rail().read(cx).ticket_field().cloned())
+        .expect("the rail has its field");
+    cx.update(|window, cx| {
+        let focus = field.read(cx).focus_handle(cx);
+        window.focus(&focus, cx)
+    });
+    cx.simulate_input("13");
+    cx.simulate_keystrokes("enter");
+    until(&shell, cx, "the new ticket in the rail", |cx| {
+        cx.update(|window, _| window.try_find("rail-ticket").is_some())
+    });
+    let ticket = page
+        .read_with(cx, |p, cx| {
+            p.rail().read(cx).place().unwrap().ticket.clone()
+        })
+        .unwrap();
+    assert_eq!(ticket.reference, "#13");
+    assert_eq!(ticket.title.as_deref(), Some("The menu fails"));
+    assert_eq!(field.read_with(cx, |f, _| f.value().to_string()), "");
+
+    // A reference that is no ticket is refused, and the rail says why.
+    cx.update(|window, cx| {
+        let focus = field.read(cx).focus_handle(cx);
+        window.focus(&focus, cx)
+    });
+    cx.simulate_input("nope");
+    cx.simulate_keystrokes("enter");
+    until(&shell, cx, "the refusal in the rail", |cx| {
+        page.read_with(cx, |p, cx| p.rail().read(cx).ticket_error().is_some())
+    });
+    let said = page.read_with(cx, |p, cx| {
+        p.rail().read(cx).ticket_error().unwrap().to_owned()
+    });
+    assert!(said.contains("is not a ticket"), "{said}");
+}
+
+#[gpui_kit::test]
+fn the_form_that_makes_a_workspace_links_the_ticket_typed_in_it(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let form = shell
+        .read_with(cx, |s, _| s.new_workspace_of("atlas").cloned())
+        .unwrap();
+
+    cx.update(|window, cx| window.click("new-workspace", cx));
+    settle(cx);
+    assert!(cx.update(|window, _| window.find("new-workspace-modal-ticket").visible()));
+    form.update_in(cx, |form, window, cx| {
+        form.ticket_field()
+            .update(cx, |ticket, cx| ticket.set_value("abc-5", window, cx))
+    });
+    cx.simulate_input("with-ticket");
+    cx.simulate_keystrokes("enter");
+    until(&shell, cx, "the workspace is made", |cx| {
+        !form.read_with(cx, |f, _| f.is_open())
+    });
+
+    let shown = user
+        .call(
+            "workspace.show",
+            json!({"project": "atlas", "name": "with-ticket"}),
+        )
+        .unwrap();
+    assert_eq!(shown["ticket"], "ABC-5");
+    assert_eq!(
+        form.read_with(cx, |f, cx| f.ticket_field().read(cx).value().to_string()),
+        "",
+        "the field is empty for the next one"
+    );
 }
 
 // The window's history (#73): the mouse's back and forward buttons and Alt+Left / Alt+Right.

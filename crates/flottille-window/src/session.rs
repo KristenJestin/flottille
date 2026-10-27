@@ -24,7 +24,7 @@ use flottille_ui::{
     Side, StateIcon, Status, Type, enter, fold_frame, icon, palette, section_label,
 };
 use futures::channel::mpsc::UnboundedSender;
-use gpui_kit::base::input::{InputEditorStyle, InputEvent, TextareaState};
+use gpui_kit::base::input::{Input, InputEditorStyle, InputEvent, InputState, TextareaState};
 use gpui_kit::base::text::{TextView, TextViewState, TextViewStyle};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -377,9 +377,32 @@ impl SessionPage {
         }
     }
 
-    /// Opens a link (a pull request) with the system's default handler.
+    /// Opens a link (a pull request, a ticket) with the system's default handler.
     pub fn open_link(&self, url: &str) {
         (self.follow.opener)(std::path::Path::new(url));
+    }
+
+    /// Asks the daemon, off the UI thread.
+    fn perform(&self, command: Command, cx: &mut Context<Self>) {
+        self.shell
+            .update(cx, |shell, _| shell.perform(command))
+            .ok();
+    }
+
+    /// What the daemon answered to a ticket linked from the rail: the rail says why when it was
+    /// refused.
+    pub fn ticket_linked(
+        &mut self,
+        project: &str,
+        name: &str,
+        refused: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.opened.project == project && self.opened.place.as_deref() == Some(name) {
+            self.rail
+                .update(cx, |rail, cx| rail.ticket_answered(refused, window, cx));
+        }
     }
 
     /// What the page's link read or saw; what an older link sends is not for it.
@@ -2104,6 +2127,11 @@ pub struct SessionRail {
     place: Option<PlaceFacts>,
     /// The "⋯" menu of the WORKSPACE section.
     menu: Entity<Menu>,
+    /// Where a ticket is typed to link it, made when the section first shows a workspace.
+    ticket_field: Option<Entity<InputState>>,
+    /// What the daemon said of the ticket typed.
+    ticket_error: Option<SharedString>,
+    _ticket_subscription: Option<Subscription>,
     renders: usize,
 }
 
@@ -2136,8 +2164,56 @@ impl SessionRail {
             workspace: opened.place.clone(),
             project: opened.project.clone(),
             place: None,
+            ticket_field: None,
+            ticket_error: None,
+            _ticket_subscription: None,
             renders: 0,
         }
+    }
+
+    /// The field a ticket is typed in.
+    pub fn ticket_field(&self) -> Option<&Entity<InputState>> {
+        self.ticket_field.as_ref()
+    }
+
+    pub fn ticket_error(&self) -> Option<&str> {
+        self.ticket_error.as_deref()
+    }
+
+    /// Links the workspace to the ticket typed, or to none (`None`).
+    fn link_ticket(&mut self, ticket: Option<String>, cx: &mut Context<Self>) {
+        let Some(name) = self.workspace.clone() else {
+            return;
+        };
+        self.ticket_error = None;
+        let command = Command::LinkTicket {
+            project: self.project.clone(),
+            name,
+            ticket,
+        };
+        self.page
+            .update(cx, |page, cx| page.perform(command, cx))
+            .ok();
+        cx.notify();
+    }
+
+    /// The daemon linked what was typed, and the field empties; or it says why not.
+    fn ticket_answered(
+        &mut self,
+        refused: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match refused {
+            None => {
+                self.ticket_error = None;
+                if let Some(field) = self.ticket_field.clone() {
+                    field.update(cx, |field, cx| field.set_value("", window, cx));
+                }
+            }
+            Some(why) => self.ticket_error = Some(why.into()),
+        }
+        cx.notify();
     }
 
     pub fn agents(&self) -> &[RailAgent] {
@@ -2468,6 +2544,96 @@ impl Render for SessionRail {
             })
             .collect();
         let forge_problem = self.place.as_ref().and_then(|p| p.forge_problem.clone());
+        if self.workspace.is_some() && self.ticket_field.is_none() {
+            let field = cx.new(|cx| {
+                let mut field =
+                    InputState::new(window, cx).placeholder("link a ticket: #123 or ABC-123");
+                field.set_editor_style(InputEditorStyle {
+                    foreground: p.text,
+                    muted_foreground: p.faint,
+                    selection: p.run.opacity(0.35),
+                    caret: p.text,
+                    ..Default::default()
+                });
+                field
+            });
+            self._ticket_subscription =
+                Some(
+                    cx.subscribe_in(&field, window, |this, field, event, _, cx| {
+                        if let InputEvent::PressEnter { .. } = event {
+                            let typed = field.read(cx).value().trim().to_owned();
+                            if !typed.is_empty() {
+                                this.link_ticket(Some(typed), cx);
+                            }
+                        }
+                    }),
+                );
+            self.ticket_field = Some(field);
+        }
+        let ticket = self.place.as_ref().and_then(|p| p.ticket.clone());
+        let ticket_row = ticket.map(|ticket| {
+            let page = self.page.clone();
+            let rail = cx.entity().downgrade();
+            let said = match (&ticket.state, &ticket.title, &ticket.problem) {
+                (_, _, Some(problem)) => problem.clone(),
+                (state, title, None) => format!(
+                    "{} {}",
+                    state.clone().unwrap_or_default(),
+                    title.clone().unwrap_or_default()
+                )
+                .trim()
+                .to_owned(),
+            };
+            let url = ticket.url.clone();
+            div()
+                .flex()
+                .items_start()
+                .child(
+                    div()
+                        .id("rail-ticket")
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .px(px(8.))
+                        .py(px(4.))
+                        .rounded(px(6.))
+                        .when(url.is_some(), |d| d.cursor_pointer())
+                        .hover(|s| s.bg(p.hover))
+                        .aria_label(SharedString::from(format!("{} {said}", ticket.reference)))
+                        .child(
+                            div()
+                                .mono(11.5)
+                                .text_color(p.mute)
+                                .child(SharedString::from(ticket.reference.clone())),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.5))
+                                .text_color(if ticket.problem.is_some() {
+                                    p.faint
+                                } else {
+                                    p.text
+                                })
+                                .child(SharedString::from(said)),
+                        )
+                        .on_click(move |_, _, cx| {
+                            if let Some(url) = &url {
+                                page.update(cx, |page, _| page.open_link(url)).ok();
+                            }
+                        })
+                        .test_support(),
+                )
+                .child(
+                    Button::quiet("rail-ticket-unlink", "Unlink").on_click(move |_, _, cx| {
+                        rail.update(cx, |rail, cx| rail.link_ticket(None, cx)).ok();
+                    }),
+                )
+        });
+        let ticket_field = self
+            .ticket_field
+            .clone()
+            .filter(|_| self.workspace.is_some());
+        let ticket_error = self.ticket_error.clone();
         let mut facts: Vec<(&str, String)> = Vec::new();
         match (&self.workspace, &self.place) {
             (Some(_), Some(place)) => {
@@ -2545,6 +2711,34 @@ impl Render for SessionRail {
                     .text_size(px(11.5))
                     .text_color(p.faint)
                     .child(SharedString::from(problem))
+                    .test_support()
+            }))
+            .children(ticket_row)
+            .children(ticket_field.map(|field| {
+                div()
+                    .id("rail-ticket-field")
+                    .mx(px(8.))
+                    .my(px(4.))
+                    .h(px(28.))
+                    .px(px(8.))
+                    .rounded(px(8.))
+                    .bg(p.field)
+                    .border_1()
+                    .border_color(p.line2)
+                    .flex()
+                    .items_center()
+                    .mono(11.5)
+                    .child(Input::new(&field))
+                    .test_support()
+            }))
+            .children(ticket_error.map(|error| {
+                div()
+                    .id("rail-ticket-error")
+                    .px(px(8.))
+                    .py(px(4.))
+                    .text_size(px(11.5))
+                    .text_color(p.fail)
+                    .child(error)
                     .test_support()
             }))
             .child(div().h(px(1.)).bg(p.line).mx(px(6.)).my(px(16.)))

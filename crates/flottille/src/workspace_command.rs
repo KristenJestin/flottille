@@ -4,7 +4,9 @@ use std::process::ExitCode;
 
 use clap::Subcommand;
 use flottille_core::paths::Paths;
-use flottille_core::protocol::{WorkspaceCreate, WorkspaceForge, WorkspaceList, WorkspaceName};
+use flottille_core::protocol::{
+    WorkspaceCreate, WorkspaceForge, WorkspaceList, WorkspaceName, WorkspaceTicket,
+};
 use flottille_core::store::now_ms;
 use serde_json::Value;
 
@@ -29,6 +31,9 @@ pub enum WorkspaceAction {
         /// Fetch nothing: start from the tracking refs as they are
         #[arg(long)]
         offline: bool,
+        /// Link it to a ticket: #123 (an issue of the repository's GitHub) or a Jira key
+        #[arg(long)]
+        ticket: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -38,8 +43,21 @@ pub enum WorkspaceAction {
         #[arg(long)]
         json: bool,
     },
-    /// One workspace: its repositories, where its preparation stands, and each repository's
-    /// pull request with its checks
+    /// Link a workspace to a ticket (#123 or a Jira key), or to none with --clear
+    Ticket {
+        project: String,
+        name: String,
+        /// #123 (an issue of the repository's GitHub) or a Jira key such as ABC-123
+        #[arg(required_unless_present = "clear", conflicts_with = "clear")]
+        ticket: Option<String>,
+        /// Unlink it
+        #[arg(long)]
+        clear: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// One workspace: its repositories, where its preparation stands, its ticket, and each
+    /// repository's pull request with its checks
     Show {
         project: String,
         name: String,
@@ -79,6 +97,7 @@ pub fn run(paths: &Paths, action: WorkspaceAction) -> Result<ExitCode> {
             repositories,
             branch,
             offline,
+            ticket,
             json,
         } => {
             let workspace = ask(
@@ -89,6 +108,7 @@ pub fn run(paths: &Paths, action: WorkspaceAction) -> Result<ExitCode> {
                     repositories,
                     branch,
                     offline,
+                    ticket,
                 })?,
             )?;
             let text = created_text(&workspace);
@@ -108,12 +128,41 @@ pub fn run(paths: &Paths, action: WorkspaceAction) -> Result<ExitCode> {
             let text = list_text(&list);
             (list, (json, text))
         }
+        WorkspaceAction::Ticket {
+            project,
+            name,
+            ticket,
+            clear: _,
+            json,
+        } => {
+            let linked = ask(
+                "workspace.link_ticket",
+                serde_json::to_value(WorkspaceTicket {
+                    project,
+                    name,
+                    ticket,
+                })?,
+            )?;
+            let text = match linked["ticket"].as_str() {
+                Some(_) => format!("Linked.\n{}", ticket_text(&linked)),
+                None => format!(
+                    "Workspace {} of {} is linked to no ticket.\n",
+                    text(&linked, "workspace"),
+                    text(&linked, "project")
+                ),
+            };
+            (linked, (json, text))
+        }
         WorkspaceAction::Show {
             project,
             name,
             json,
         } => {
             let mut workspace = ask("workspace.show", named(project.clone(), name.clone())?)?;
+            if workspace["ticket"].is_string() {
+                workspace["ticket_read"] =
+                    ask("workspace.ticket", named(project.clone(), name.clone())?)?;
+            }
             workspace["forge"] = ask(
                 "workspace.forge",
                 serde_json::to_value(WorkspaceForge {
@@ -177,6 +226,9 @@ fn created_text(workspace: &Value) -> String {
         text(workspace, "folder")
     );
     shown.push_str(&repositories_text(workspace));
+    if let Some(ticket) = workspace["ticket"].as_str() {
+        shown.push_str(&format!("Ticket: {ticket}\n"));
+    }
     match workspace["state"].as_str() {
         Some("ready") => shown.push_str("Ready.\n"),
         Some("failed") => shown.push_str(&failure_text(workspace)),
@@ -292,7 +344,53 @@ fn show_text(workspace: &Value) -> String {
     if workspace["state"] == "failed" {
         shown.push_str(&failure_text(workspace));
     }
+    shown.push_str(&ticket_text(&workspace["ticket_read"]));
     shown.push_str(&forge_text(&workspace["forge"]));
+    shown
+}
+
+/// The workspace's ticket as its tracker said it, or why it could not be read; nothing when the
+/// workspace has none.
+fn ticket_text(ticket: &Value) -> String {
+    let Some(reference) = ticket["ticket"].as_str() else {
+        return String::new();
+    };
+    if let Some(problem) = ticket["problem"].as_str() {
+        return format!("Ticket {reference}: it could not be read: {problem}\n");
+    }
+    let mut shown = format!(
+        "Ticket {reference}, {}: {}\n",
+        text(ticket, "state"),
+        text(ticket, "title")
+    );
+    if let Some(url) = ticket["url"].as_str() {
+        shown.push_str(&format!("  {url}\n"));
+    }
+    let description = text(ticket, "description");
+    if !description.is_empty() {
+        shown.push_str("  Description:\n");
+        for line in description.lines() {
+            shown.push_str(&format!("    {line}\n"));
+        }
+    }
+    let comments = ticket["comments"].as_array().map_or(&[][..], Vec::as_slice);
+    if !comments.is_empty() {
+        shown.push_str(&format!("  Comments ({}):\n", comments.len()));
+        for comment in comments {
+            let at = comment["at"]
+                .as_str()
+                .map_or(String::new(), |at| format!(", {at}"));
+            let mut lines = text(comment, "body").lines();
+            shown.push_str(&format!(
+                "    - {}{at}: {}\n",
+                text(comment, "author"),
+                lines.next().unwrap_or_default()
+            ));
+            for line in lines {
+                shown.push_str(&format!("        {line}\n"));
+            }
+        }
+    }
     shown
 }
 

@@ -254,13 +254,15 @@ cannot be used.
 
 #### `workspace.create`
 
-`{"project", "name", "repositories"?, "branch"?, "offline"?}`. Fetches the base of each
+`{"project", "name", "repositories"?, "branch"?, "offline"?, "ticket"?}`. Fetches the base of each
 repository, writes the workspace, makes the worktrees and answers the workspace; the rest of the
 recipe goes on in the background. `repositories` is the project's default set when left out,
-`branch` is `<branch prefix>/<name>`, and `offline: true` fetches nothing.
+`branch` is `<branch prefix>/<name>`, `offline: true` fetches nothing, and `ticket` (`#123`, `123`
+or a Jira key) links the workspace to a ticket (`tickets.md`); the workspace's `ticket` says it, in
+every answer that shows a workspace, `null` when it has none.
 
-`refused`, with nothing written nor made, when the name is not one, a repository is not the
-project's, the branch is not one git accepts, the project has a workspace of that name, the folder
+`refused`, with nothing written nor made, when the name is not one, the ticket is not one, a
+repository is not the project's, the branch is not one git accepts, the project has a workspace of that name, the folder
 exists, the branch exists in a repository, no branch of a base rule is on the remote, or **a fetch
 fails** (the message is git's reason). A worktree that cannot be made is not a refusal: the
 workspace is answered `failed`, with the step's failure.
@@ -316,6 +318,41 @@ is `null` when its branch has none, and `error` says why its forge could not be 
 request's `state` is `open`, `draft`, `merged` or `closed`; `review` `approved`, `changes
 requested`, `review required` or `null`; a check's `state` `passing`, `failing`, `pending` or
 `skipped`; `mark` the checks as one (`failing`, `pending`, `passing`), `null` without checks.
+
+#### `workspace.ticket`
+
+`{"project", "name"}`. The workspace's ticket, read now on its tracker ([`tickets.md`](tickets.md)):
+
+```json
+{
+  "project": "app",
+  "workspace": "login",
+  "ticket": "#12",
+  "tracker": "github",
+  "repository": "acme/api",
+  "title": "The login fails",
+  "state": "open",
+  "url": "https://github.com/acme/api/issues/12",
+  "description": "Users cannot sign in.",
+  "comments": [{"author": "alice", "at": "2026-10-01T10:00:00Z", "body": "I can reproduce"}],
+  "older_comments": 0,
+  "read_at": 1792843730808,
+  "problem": null
+}
+```
+
+`ticket` is `null` for a workspace linked to none, and then nothing else but `read_at` and a null
+`problem` is there. `tracker` is `github` or `jira`; `repository` is the GitHub repository the issue
+is in, `null` for Jira; `state` is `open` or `closed` for GitHub and Jira's own status name for
+Jira. When the ticket cannot be read (`gh` or `acli` missing, not signed in, no such ticket, a call
+that failed), `problem` says why and with what to do, and the fields of the ticket are absent. All
+the tracker's text is masked. Nothing is kept: every call reads again.
+
+#### `workspace.link_ticket`
+
+`{"project", "name", "ticket"}`. Links the workspace to a ticket, or to none when `ticket` is
+`null`, and answers as `workspace.ticket` does. `refused` when `ticket` is not `#123`, `123` or a
+Jira key (`ABC-123`, any case). Emits `workspace.ticket` (`docs/events.md`).
 
 #### `workspace.prepare`
 

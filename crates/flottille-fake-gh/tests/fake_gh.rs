@@ -33,3 +33,44 @@ fn auth_status_follows_the_script_and_every_call_is_recorded() {
     assert_eq!(calls.len(), 2);
     assert_eq!(calls[0]["args"], json!(["auth", "status"]));
 }
+
+#[test]
+fn an_issue_is_answered_from_the_script_and_one_it_does_not_hold_is_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        json!({"issues": {"acme/api": {"12": {"number": 12, "title": "It fails"}}}}).to_string(),
+    )
+    .unwrap();
+
+    let found = fake(dir.path())
+        .args([
+            "issue",
+            "view",
+            "12",
+            "-R",
+            "acme/api",
+            "--json",
+            "number,title",
+        ])
+        .output()
+        .unwrap();
+    let missing = fake(dir.path())
+        .args([
+            "issue",
+            "view",
+            "13",
+            "-R",
+            "acme/api",
+            "--json",
+            "number,title",
+        ])
+        .status()
+        .unwrap();
+
+    assert_eq!(
+        serde_json::from_slice::<Value>(&found.stdout).unwrap()["title"],
+        "It fails"
+    );
+    assert_eq!(missing.code(), Some(1));
+}

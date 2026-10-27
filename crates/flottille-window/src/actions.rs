@@ -56,6 +56,14 @@ pub enum Command {
     CreateWorkspace {
         project: String,
         name: String,
+        /// The ticket to link it to: `#123` or a Jira key.
+        ticket: Option<String>,
+    },
+    /// Links a workspace to a ticket, or to none (`ticket` empty of a null).
+    LinkTicket {
+        project: String,
+        name: String,
+        ticket: Option<String>,
     },
     PrepareWorkspace {
         project: String,
@@ -131,6 +139,12 @@ pub enum Outcome {
         project: String,
         name: String,
         why: String,
+    },
+    /// A workspace was linked to a ticket (or unlinked) as asked, or the daemon refused, and why.
+    TicketLinked {
+        project: String,
+        name: String,
+        refused: Option<String>,
     },
     /// The providers, read again, with the read's number (`providers::next_read`); `None` when
     /// the daemon could not be asked.
@@ -326,16 +340,41 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             let read = crate::providers::next_read();
             Outcome::Providers(read, read_providers(connect, bounds.quick))
         }
-        Command::CreateWorkspace { project, name } => workspace_outcome(
+        Command::CreateWorkspace {
+            project,
+            name,
+            ticket,
+        } => workspace_outcome(
             ask_alone(
                 connect,
                 "workspace.create",
-                json!({"project": project, "name": name}),
+                json!({"project": project, "name": name, "ticket": ticket}),
                 bounds.slow,
             ),
             project,
             name,
         ),
+        Command::LinkTicket {
+            project,
+            name,
+            ticket,
+        } => match ask_alone(
+            connect,
+            "workspace.link_ticket",
+            json!({"project": project, "name": name, "ticket": ticket}),
+            bounds.slow,
+        ) {
+            Ok(Ok(_)) => Outcome::TicketLinked {
+                project,
+                name,
+                refused: None,
+            },
+            Ok(Err(why)) | Err(why) => Outcome::TicketLinked {
+                project,
+                name,
+                refused: Some(why),
+            },
+        },
         Command::PrepareWorkspace { project, name } => workspace_outcome(
             ask_alone(
                 connect,

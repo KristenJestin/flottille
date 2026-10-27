@@ -116,13 +116,17 @@ impl Provider {
     /// The exact tool names an agent gets, as the provider names them: what it can do decides
     /// (`docs/design.md` §4.3, `docs/reference/mcp.md` §4 rule 9). A root asks the user, a child
     /// its parent; an agent at the depth limit cannot have children, so it has no `agent_*` tool
-    /// and nobody's request to answer. Only an agent in a workspace reads its pull requests.
+    /// and nobody's request to answer. Only an agent in a workspace reads its pull requests and its
+    /// ticket.
     pub fn tools(&self, root: bool, at_depth_limit: bool, in_workspace: bool) -> Vec<String> {
         let mut names: Vec<&str> = FILE_AND_COMMAND_TOOLS.to_vec();
         if in_workspace {
             names.push("forge_read");
         }
         names.push("reference_read");
+        if in_workspace {
+            names.push("ticket_read");
+        }
         if !at_depth_limit {
             names.extend(AGENT_TOOLS);
         }
@@ -1038,15 +1042,18 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_in_a_workspace_reads_its_pull_requests_and_one_in_the_project_folder_does_not() {
+    fn an_agent_in_a_workspace_reads_its_pull_requests_and_ticket_and_one_in_the_project_folder_does_not()
+     {
         let main = short(claude::PROVIDER.tools(true, false, false));
         assert!(!main.contains(&"forge_read".to_owned()));
+        assert!(!main.contains(&"ticket_read".to_owned()));
         let workspace = short(claude::PROVIDER.tools(true, false, true));
-        assert_eq!(workspace.len(), 19);
+        assert_eq!(workspace.len(), 20);
         assert_eq!(workspace[9], "forge_read", "after the command tools");
         assert_eq!(workspace[10], "reference_read", "after forge_read");
+        assert_eq!(workspace[11], "ticket_read", "after reference_read");
         let leaf = short(claude::PROVIDER.tools(false, true, true));
-        assert_eq!(leaf.len(), 13);
+        assert_eq!(leaf.len(), 14);
     }
 
     #[test]
