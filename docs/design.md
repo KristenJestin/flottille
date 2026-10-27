@@ -147,7 +147,9 @@ of Codex's own starts.
 
 This is what makes the rest hold: with no shell and no native sub-agent tool, an agent **cannot**
 start another agent (no `Task`, no `claude --bg`, no background shell) except through
-`agent_launch`, and it cannot do anything the gate did not see. The agent's own permission
+`agent_launch`, and it cannot do anything the gate did not see. Nor can it drive the daemon from
+a command it runs: the daemon refuses a client that descends from it (`docs/protocol.md`,
+"Transport"). The agent's own permission
 prompts answer themselves: Flottille's tools are allowed, anything else is rejected.
 
 ### 4.3 The tools an agent gets (first milestones)

@@ -177,7 +177,9 @@ not a lock: a swap between it and the rename is not seen.
     (`$XDG_STATE_HOME/flottille/empty`), so that the forge command lines find no login;
   - `git push` made to fail where the environment can: `GIT_CONFIG_COUNT` incremented, with
     `GIT_CONFIG_KEY_<n>=url./dev/null/flottille-refused-push/.pushInsteadOf` and an empty
-    `GIT_CONFIG_VALUE_<n>`, which rewrites every push URL to a path that is no repository.
+    `GIT_CONFIG_VALUE_<n>`, which rewrites every push URL to a path that is no repository;
+  - no `XDG_RUNTIME_DIR`, which says where the daemon's socket is (a client a run starts is
+    refused anyway).
 - **The environment does not stop every push**: `git -c url.<x>.pushInsteadOf=<x> push`,
   `env -u GIT_CONFIG_COUNT git push`, a remote with a push URL of its own
   (`remote.<name>.pushurl`, which git does not rewrite) and a `git config` write all get past it.
@@ -187,7 +189,10 @@ not a lock: a swap between it and the rename is not seen.
   the call's client and the daemon's stop signal the group the run was spawned in (`SIGTERM`,
   then `SIGKILL` after 5 s), and what the run left in its group is killed when its own process
   ends. A process that left the group (`setsid`, a daemon that forks and detaches) escapes all
-  of this and keeps running; Flottille neither sees nor stops it.
+  of this and keeps running; Flottille does not stop it. It stays the daemon's descendant,
+  though: the daemon is the subreaper of what it starts, so a process orphaned there is taken in
+  by the daemon rather than by init, waited for when it ends, and refused if it connects to the
+  socket.
 - **Runs are records**: the store's `runs` (with the end of their output once ended), and the
   `run.started` and `run.ended` events. Each run's process group is recorded while it runs: a
   daemon started after a crash kills the groups a previous one left (only while their leader is
@@ -276,7 +281,10 @@ the call reaches, the project's never list and Flottille's own folders, and answ
      in a place no variable of ours moves, so it cannot be emptied as `gh`'s is; an agent reads a
      ticket with `ticket_read` and says what should be written to it;
    - publishing: `npm`, `pnpm`, `yarn`, `bun`, `cargo`, `poetry`, `flit`, `hatch`, `uv` with
-     `publish` or `unpublish`, `twine upload`, `gem`, `dotnet` and `nuget` with `push`.
+     `publish` or `unpublish`, `twine upload`, `gem`, `dotnet` and `nuget` with `push`;
+   - `flottille` itself: it drives the daemon, and agents act only through their tools. A copy
+     of it under another name, or any program that speaks to the socket, is refused by the
+     daemon itself (`docs/protocol.md`, "Transport").
 
    These are judged on the line and on every program a wrapper runs, unwrapped in turn (16 at
    most): `env` (its options, `NAME=value` words and `-S` line), `sudo`, `doas`, `nice`, `nohup`,

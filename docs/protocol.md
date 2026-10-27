@@ -22,6 +22,17 @@ it (`docs/design.md` §3, §11).
 - The daemon and its agents end with the user's last session, unless `loginctl enable-linger` keeps
   the runtime folder. The socket and the lock carry the sticky bit, so that a cleanup of files
   untouched for 6 hours does not remove them.
+- **A client an agent started is refused.** Everything the daemon starts (agents, their
+  commands, git, the forges' command lines) descends from it, the daemon is the subreaper of all
+  of it (a process orphaned there, even one that detached with `setsid`, is taken in by the
+  daemon, not by init), and nothing it starts is a client of its own. So on each connection the
+  daemon reads the client's process id (`SO_PEERCRED`) and walks up its parents
+  (`/proc/<pid>/stat`): a client that descends from the daemon, or whose ancestry cannot be read
+  (gone already, a parent's pid taken since by another process), gets every request answered
+  with the error `refused`, "refused: this client was started by an agent; agents act only
+  through their tools", for 10 seconds at most, and nothing it sends is done. The daemon's log
+  says it once per connection. The user's own clients (the command line, the window, the pilot
+  door an outside agent starts) do not descend from the daemon and are not affected.
 - Any command but `flottille daemon` starts the daemon in the background when nobody listens on
   the socket, then talks to it. The daemon started this way writes its output to
   `$XDG_STATE_HOME/flottille/daemon.log`.

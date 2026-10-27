@@ -676,6 +676,11 @@ fn program_refusal(layer: &[String]) -> Option<String> {
         }
         "twine" if any(&["upload"]) => Some(publishing(layer)),
         "gem" | "dotnet" | "nuget" if any(&["push"]) => Some(publishing(layer)),
+        "flottille" => Some(
+            "refused: flottille drives the daemon, and agents act only through their tools: \
+             ask the user to run it"
+                .into(),
+        ),
         _ => None,
     }
 }
