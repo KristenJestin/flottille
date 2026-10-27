@@ -44,8 +44,8 @@ pub struct SessionLine {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlaceData {
     pub place: Place,
-    /// `the project folder · …` or `from develop · …`.
-    pub meta: String,
+    /// `from develop · …`; `main` has none, its title says what it is.
+    pub meta: Option<String>,
     /// `Ready` for `main`.
     pub preparation: Preparation,
     pub sessions: Vec<SessionLine>,
@@ -574,16 +574,20 @@ impl Render for PlaceCard {
             };
         }
 
-        let meta = div()
-            .px(px(14.))
-            .pl(px(36.))
-            .pb(px(10.))
-            .mono(11.5)
-            .text_color(p.faint)
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis()
-            .child(SharedString::from(self.data.meta.clone()));
+        let meta = self.data.meta.clone().map(|meta| {
+            div()
+                .id(id("meta"))
+                .px(px(14.))
+                .pl(px(36.))
+                .pb(px(10.))
+                .mono(11.5)
+                .text_color(p.faint)
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(SharedString::from(meta))
+                .test_support()
+        });
 
         let status = match &self.data.preparation {
             Preparation::Preparing { done, total, doing } => Some(
@@ -747,7 +751,7 @@ impl Render for PlaceCard {
             .child(
                 Card::new()
                     .title(title)
-                    .child(div().pt(px(10.)).child(meta))
+                    .children_opt(meta.map(|meta| div().pt(px(10.)).child(meta)))
                     .children_opt(status)
                     .children_opt(busy)
                     .children_opt(error)
@@ -937,12 +941,10 @@ impl Render for NewWorkspace {
             .child("a branch of its own in every repository")
             .on_click(cx.listener(|this, _, window, cx| this.open(window, cx)))
             .test_support();
-        if !self.open {
-            return card;
-        }
         let creating = self.creating.is_some();
         let this = cx.entity().downgrade();
         let modal = Modal::new("new-workspace-modal", "New workspace")
+            .open(self.open)
             .on_close(move |_, cx| {
                 this.update(cx, |this, cx| this.close(cx)).ok();
             })

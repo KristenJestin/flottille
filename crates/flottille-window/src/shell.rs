@@ -532,14 +532,9 @@ impl Shell {
                 status: row.read(cx).status(),
             })
         };
-        let labels: Vec<String> = project
-            .repositories
-            .iter()
-            .map(|path| repository_label(&name, path))
-            .collect();
         let mut places = vec![PlaceData {
             place: None,
-            meta: format!("the project folder · {}", labels.join(", ")),
+            meta: None,
             preparation: Preparation::Ready,
             sessions: self
                 .snapshot
@@ -564,11 +559,11 @@ impl Shell {
                 .map(|path| repository_label(&name, path))
                 .collect();
             places.push(PlaceData {
-                meta: format!(
+                meta: Some(format!(
                     "from {} · {}",
                     workspace.bases.join(", "),
                     repositories.join(", ")
-                ),
+                )),
                 preparation: workspace.preparation.clone(),
                 sessions: self
                     .snapshot
