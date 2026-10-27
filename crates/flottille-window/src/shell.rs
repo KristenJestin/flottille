@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use flottille_ui::{
     AgentState, Badge, Button, Drawer, Icon, ListRow, Side, StateIcon, Status, Type,
-    dismiss_on_navigate, icon, palette,
+    dismiss_on_navigate, dismiss_top_overlay, forget_overlays, icon, open_overlay, palette,
 };
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
@@ -981,6 +981,22 @@ impl Render for Shell {
             .child(div().flex_1().min_w_0().h_full().child(self.main.clone()))
             .when(side.is_none(), |d| d.child(self.left.clone()));
         let shell = cx.entity().downgrade();
+        // The overlays drawn from here on say they are open: Alt+Left closes the topmost.
+        forget_overlays(cx);
+        if self.bell_open {
+            let shell = shell.clone();
+            open_overlay(
+                "bell-scrim".into(),
+                // A key reaches this while the shell handles it: the update waits.
+                move |_, cx| {
+                    let shell = shell.clone();
+                    cx.defer(move |cx| {
+                        shell.update(cx, |this, cx| this.set_bell(false, cx)).ok();
+                    });
+                },
+                cx,
+            );
+        }
         div()
             .id("shell")
             .track_focus(&self.focus)
@@ -1009,7 +1025,13 @@ impl Render for Shell {
                 };
                 if event.keystroke.modifiers == Modifiers::alt() {
                     cx.stop_propagation();
-                    this.go(way, window, cx);
+                    // Like the mouse's buttons: an open overlay closes first and that is all.
+                    if dismiss_top_overlay(window, cx) {
+                        // Whatever held the focus in it is going: the next key must still arrive.
+                        window.focus(&this.focus, cx);
+                    } else {
+                        this.go(way, window, cx);
+                    }
                 }
             }))
             .child(self.top.clone())

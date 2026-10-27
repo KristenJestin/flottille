@@ -18,7 +18,7 @@ use gpui_kit::{
 };
 
 use crate::button::Button;
-use crate::interact::dismiss_on_navigate;
+use crate::interact::{dismiss_on_navigate, open_overlay};
 use crate::motion::{MODAL, Motion, RISE};
 use crate::theme::palette;
 use crate::typography::Type;
@@ -126,6 +126,9 @@ impl RenderOnce for Modal {
                 close(window, cx);
             }
         };
+        if self.open {
+            open_overlay(self.id.clone(), close.clone(), cx);
+        }
         let (on_scrim, on_key, on_cancel) = (close.clone(), close.clone(), close.clone());
         let scrim = div()
             .id(part(&self.id, "scrim"))

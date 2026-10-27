@@ -4213,8 +4213,9 @@ fn showing_a_new_page_cuts_what_was_ahead_and_the_same_page_again_adds_nothing(
     );
 }
 
-/// Connects to the user's daemon through a relay that leaves out of every `agent.list` answer
-/// the agents named in `hidden`: a session the daemon forgot.
+/// Connects to the user's daemon through a relay that leaves out of every `agent.list` and
+/// `agent.tree` answer the agents named in `hidden`: a session the daemon forgot, an agent that
+/// left a tree.
 fn forgetting(
     user: &User,
     hidden: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
@@ -4234,7 +4235,7 @@ fn forgetting(
             for line in BufReader::new(from_window).lines() {
                 let Ok(line) = line else { return };
                 let request: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
-                if request["method"] == "agent.list" {
+                if request["method"] == "agent.list" || request["method"] == "agent.tree" {
                     marks.lock().unwrap().insert(request["id"].to_string());
                 }
                 if writeln!(to_daemon, "{line}").is_err() {
@@ -4252,7 +4253,11 @@ fn forgetting(
                 if lists.lock().unwrap().remove(&answer["id"].to_string()) {
                     let hidden = hidden.lock().unwrap();
                     if let Some(agents) = answer["result"]["agents"].as_array_mut() {
-                        agents.retain(|a| !hidden.contains(a["id"].as_str().unwrap_or_default()));
+                        // `agent.list` gives the agents, `agent.tree` an entry holding each.
+                        agents.retain(|a| {
+                            let id = a["id"].as_str().or(a["agent"]["id"].as_str());
+                            !hidden.contains(id.unwrap_or_default())
+                        });
                     }
                     line = answer.to_string();
                 }
@@ -4418,5 +4423,163 @@ fn back_with_the_tree_drawer_open_closes_it_and_goes_nowhere(cx: &mut TestAppCon
     assert_eq!(
         selected(&shell, cx),
         Some(Selection::Project("bravo".into()))
+    );
+}
+
+/// A key press of the window's history with a list, modal, drawer or bell open: it closes that
+/// first and goes nowhere, as the mouse's buttons do.
+#[gpui_kit::test]
+fn alt_left_with_a_dropdown_open_closes_it_and_goes_nowhere(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    project(&user, "bravo");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    open_project(&shell, "bravo", cx);
+    cx.update(|window, cx| window.click("provider-picker", cx));
+    settle(cx);
+    assert!(cx.update(|window, _| window.try_find("provider-picker-menu").is_some()));
+
+    cx.simulate_keystrokes("alt-left");
+    settle(cx);
+    assert!(cx.update(|window, _| window.try_find("provider-picker-menu").is_none()));
+    assert_eq!(
+        selected(&shell, cx),
+        Some(Selection::Project("bravo".into())),
+        "the key only closed the list"
+    );
+    cx.simulate_keystrokes("alt-left");
+    assert_eq!(
+        selected(&shell, cx),
+        Some(Selection::Project("atlas".into()))
+    );
+}
+
+#[gpui_kit::test]
+fn alt_right_with_a_modal_open_closes_it_and_goes_nowhere(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    project(&user, "bravo");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    open_project(&shell, "bravo", cx);
+    back(cx);
+    let form = shell
+        .read_with(cx, |s, _| s.new_workspace_of("atlas").cloned())
+        .unwrap();
+    cx.update(|window, cx| window.click("new-workspace", cx));
+    settle(cx);
+    assert!(form.read_with(cx, |f, _| f.is_open()));
+
+    cx.simulate_keystrokes("alt-right");
+    assert!(!form.read_with(cx, |f, _| f.is_open()));
+    assert_eq!(
+        selected(&shell, cx),
+        Some(Selection::Project("atlas".into())),
+        "the key only closed the modal"
+    );
+    cx.simulate_keystrokes("alt-right");
+    assert_eq!(
+        selected(&shell, cx),
+        Some(Selection::Project("bravo".into()))
+    );
+}
+
+#[gpui_kit::test]
+fn alt_left_with_the_bell_open_closes_it_and_goes_nowhere(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    project(&user, "bravo");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    open_project(&shell, "bravo", cx);
+    cx.update(|window, cx| window.click("bell", cx));
+    assert!(shell.read_with(cx, |s, _| s.bell_open()));
+
+    cx.simulate_keystrokes("alt-left");
+    assert!(!shell.read_with(cx, |s, _| s.bell_open()));
+    assert_eq!(
+        selected(&shell, cx),
+        Some(Selection::Project("bravo".into()))
+    );
+}
+
+#[gpui_kit::test]
+fn alt_left_with_the_tree_drawer_open_closes_it_and_goes_nowhere(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    project(&user, "bravo");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 700., cx);
+    open_project(&shell, "atlas", cx);
+    open_project(&shell, "bravo", cx);
+    cx.update(|window, cx| window.click("open-tree", cx));
+    settle(cx);
+    assert!(shell.read_with(cx, |s, cx| s.left_drawer().read(cx).is_open()));
+
+    cx.simulate_keystrokes("alt-left");
+    assert!(!shell.read_with(cx, |s, cx| s.left_drawer().read(cx).is_open()));
+    assert_eq!(
+        selected(&shell, cx),
+        Some(Selection::Project("bravo".into()))
+    );
+}
+
+#[gpui_kit::test]
+fn going_back_to_an_agent_that_left_the_tree_shows_the_conversation(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, mcp, _) = lead_in_w(&user);
+    let child = worker_doing(&mcp, "WRITE", "draft the notes");
+    eventually("the child replied", || {
+        user.call("agent.show", json!({"agent": child})).unwrap()["agent"]["state"] == "idle"
+    });
+    let hidden: Arc<std::sync::Mutex<std::collections::HashSet<String>>> = Arc::default();
+    let (shell, cx) = window(&user, forgetting(&user, hidden.clone()), 1280., cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&lead)).is_some())
+    });
+    open_row(&shell, &lead, cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the child is in the rail", |cx| {
+        rail_ids(&page, cx).contains(&child)
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click(format!("rail-row-{child}"), cx));
+    until(&shell, cx, "the child is shown", |cx| {
+        session_page(&shell, cx).read_with(cx, |p, _| p.shown() == child)
+    });
+
+    // The child leaves the tree while the user is elsewhere.
+    cx.update(|window, cx| window.click(project_id("app"), cx));
+    settle(cx);
+    hidden.lock().unwrap().insert(child.clone());
+    back(cx);
+    assert_eq!(selected(&shell, cx), Some(Selection::Session(lead.clone())));
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the tree is read", |cx| {
+        !page.read_with(cx, |p, _| p.tree().is_empty())
+    });
+    assert_eq!(
+        page.read_with(cx, |p, _| p.shown().to_owned()),
+        lead,
+        "the session's conversation, not `agent <id>`"
+    );
+}
+
+#[gpui_kit::test]
+fn alt_left_with_a_menu_open_closes_it_and_goes_nowhere(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx, ids) = atlas_with_sessions(&user, &["Tidy the aliases"], cx);
+    open_row(&shell, &ids[0], cx);
+    cx.update(|window, cx| window.click("workspace-menu", cx));
+    settle(cx);
+    assert!(cx.update(|window, _| window.try_find("workspace-menu-menu").is_some()));
+
+    cx.simulate_keystrokes("alt-left");
+    settle(cx);
+    assert!(cx.update(|window, _| window.try_find("workspace-menu-menu").is_none()));
+    assert_eq!(
+        selected(&shell, cx),
+        Some(Selection::Session(ids[0].clone())),
+        "the key only closed the menu"
     );
 }

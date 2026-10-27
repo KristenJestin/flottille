@@ -4,11 +4,12 @@
 //! The state lives in the element's keyed state; it is touched only by the pointer, so nothing
 //! here runs at rest.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::{
-    App, Context, Div, ElementId, Entity, InteractiveElement, MouseButton, NavigationDirection,
-    Stateful, StatefulInteractiveElement, Window,
+    App, Context, Div, ElementId, Entity, Global, InteractiveElement, MouseButton,
+    NavigationDirection, Stateful, StatefulInteractiveElement, Window,
 };
 
 use crate::motion::{HOVER, Motion, PRESS, PRESSED};
@@ -28,6 +29,43 @@ pub fn dismiss_on_navigate<E: InteractiveElement>(
                 dismiss(window, cx);
             })
         })
+}
+
+/// The overlays drawn open in this frame, in drawing order, each with how it is dismissed. A key
+/// has no pointer to say which one it is meant for, and no focus inside the overlay: the window's
+/// root asks for the topmost.
+#[derive(Default)]
+struct Overlays(Vec<(ElementId, Dismiss)>);
+
+type Dismiss = Rc<dyn Fn(&mut Window, &mut App)>;
+
+impl Global for Overlays {}
+
+/// Called by the window's root before it draws a frame: the overlays that are open say so again.
+pub fn forget_overlays(cx: &mut App) {
+    cx.default_global::<Overlays>().0.clear();
+}
+
+/// An open overlay says, as it is drawn, how it is dismissed. One that is not drawn open (closed,
+/// or closing) does not say it.
+pub fn open_overlay(
+    id: ElementId,
+    dismiss: impl Fn(&mut Window, &mut App) + 'static,
+    cx: &mut App,
+) {
+    let open = &mut cx.default_global::<Overlays>().0;
+    open.retain(|(known, _)| known != &id);
+    open.push((id, Rc::new(dismiss)));
+}
+
+/// Dismisses the topmost open overlay, as the mouse's back and forward buttons do. Whether there
+/// was one.
+pub fn dismiss_top_overlay(window: &mut Window, cx: &mut App) -> bool {
+    let Some((_, dismiss)) = cx.default_global::<Overlays>().0.last().cloned() else {
+        return false;
+    };
+    dismiss(window, cx);
+    true
 }
 
 pub(crate) struct Feel {

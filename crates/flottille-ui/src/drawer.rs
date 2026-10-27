@@ -7,7 +7,7 @@ use gpui_kit::{
     hsla, point, px,
 };
 
-use crate::interact::dismiss_on_navigate;
+use crate::interact::{dismiss_on_navigate, open_overlay};
 use crate::motion::{Motion, PANEL};
 use crate::theme::palette;
 
@@ -119,6 +119,9 @@ impl Render for Drawer {
         let close = move |_: &mut Window, cx: &mut App| {
             this.update(cx, |this, cx| this.close(cx)).ok();
         };
+        if self.open {
+            open_overlay(self.id.clone(), close.clone(), cx);
+        }
         let scrim = div()
             .id("drawer-scrim")
             .absolute()
