@@ -193,7 +193,7 @@ piece (`docs/agents.md` "The conversation").
 |---|---|
 | `agent`, `replay` | |
 | `text` | The piece, cut at 64 KiB (`‹+N chars›` says how much was left out). |
-| `message_id` | Of `agent.message`, when the source gives one (ACP's `messageId`; Codex's item id): the pieces that share it are one message, another id starts another. |
+| `message_id` | Of `agent.message`, when the source gives one (ACP's `messageId`; Codex's item id; the API message's id for Claude): the pieces that share it are one message, another id starts another. |
 
 #### `agent.tool_call`
 

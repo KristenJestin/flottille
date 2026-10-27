@@ -337,6 +337,103 @@ fn a_prompt_streams_text_thoughts_and_tool_calls_then_the_usage_and_its_stop_rea
     );
 }
 
+/// The `messageId` of each update that carries a reply or a thought, in order.
+fn message_ids(updates: &[Value]) -> Vec<(String, Option<String>)> {
+    updates
+        .iter()
+        .filter(|u| {
+            ["agent_message_chunk", "agent_thought_chunk"]
+                .contains(&u["sessionUpdate"].as_str().unwrap())
+        })
+        .map(|u| {
+            (
+                u["content"]["text"].as_str().unwrap().to_owned(),
+                u["messageId"].as_str().map(str::to_owned),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_reply_and_a_thought_carry_the_id_of_the_api_message_they_come_from() {
+    let user = User::with_fake_claude();
+    user.claude_script(json!({"turns": [{"when": "hello", "do": [
+        {"think": "a greeting", "message": "msg_a"},
+        {"say": "Hello", "message": "msg_a"},
+        {"say": " there!", "message": "msg_a"},
+        {"stream": ["Bye", " now"], "message": "msg_b"}
+    ]}]}));
+    let mut bridge = Bridge::start(&user);
+    let session = bridge.open(&user, &[]);
+
+    let (_, seen) = bridge.prompt(&session, "hello");
+
+    let ids = message_ids(&updates(&seen));
+    let id = |text: &str, id: &str| (text.to_owned(), Some(id.to_owned()));
+    assert_eq!(
+        ids,
+        [
+            id("a greeting", "msg_a"),
+            id("Hello", "msg_a"),
+            id(" there!", "msg_a"),
+            id("Bye", "msg_b"),
+            id(" now", "msg_b"),
+        ]
+    );
+}
+
+#[test]
+fn a_reply_the_api_message_of_which_is_unknown_has_no_message_id() {
+    let user = User::with_fake_claude();
+    user.claude_script(json!({"turns": [{"when": "work", "do": [{"limit": "five_hour"}]}]}));
+    let mut bridge = Bridge::start(&user);
+    let session = bridge.open(&user, &[]);
+
+    let (_, seen) = bridge.prompt(&session, "work");
+
+    // Claude Code's own message about the limit has no API message behind it: nothing is invented.
+    let ids = message_ids(&updates(&seen));
+    assert_eq!(ids.len(), 1, "{ids:?}");
+    assert_eq!(ids[0].1, None);
+}
+
+#[test]
+fn a_loaded_session_replays_its_history_with_the_message_ids() {
+    let user = User::with_fake_claude();
+    user.claude_script(json!({"turns": [{"when": "hello", "do": [
+        {"think": "a greeting", "message": "msg_a"},
+        {"say": "Hello!", "message": "msg_a"}
+    ]}]}));
+    let mut first = Bridge::start(&user);
+    let session = first.open(&user, &[]);
+    first.prompt(&session, "hello").0.unwrap();
+    assert_eq!(first.close(), Some(0));
+    // A line written before the ids were kept has none, and replays with none.
+    let history = user.path(&format!("state/flottille/bridge/claude/{session}.jsonl"));
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(history)
+        .unwrap();
+    writeln!(file, "{}", json!({"agent": "an old reply"})).unwrap();
+
+    let mut second = Bridge::start(&user);
+    let mut params = new_session(&user, &[]);
+    params["sessionId"] = session.into();
+    let (loaded, seen) = second.request("session/load", params);
+    loaded.unwrap();
+
+    let ids = message_ids(&updates(&seen));
+    let id = |text: &str, id: Option<&str>| (text.to_owned(), id.map(str::to_owned));
+    assert_eq!(
+        ids,
+        [
+            id("a greeting", Some("msg_a")),
+            id("Hello!", Some("msg_a")),
+            id("an old reply", None),
+        ]
+    );
+}
+
 #[test]
 fn a_thought_claude_sends_without_its_text_gives_no_empty_thought() {
     let user = User::with_fake_claude();
@@ -582,8 +679,8 @@ fn the_history_is_masked_and_kept_one_line_per_message() {
         lines,
         [
             json!({"user": "hello, my key is [masked]"}),
-            json!({"agent": "Hello, [masked]"}),
-            json!({"thought": "a greeting"})
+            json!({"agent": "Hello, [masked]", "id": "msg_fake_1"}),
+            json!({"thought": "a greeting", "id": "msg_fake_2"})
         ]
     );
 }

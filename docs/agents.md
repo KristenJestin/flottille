@@ -511,8 +511,11 @@ bridge runs one session.
   the official Agent SDK sends it. The session opens once `claude` answered it; a `claude` that
   ends before (a resume of a session it does not know) fails the open.
 - **What `claude` says**, mapped to ACP updates: stream deltas of text and thinking become
-  `agent_message_chunk` and `agent_thought_chunk`, with no message id (the whole message that
-  follows does not repeat them); a thinking block with no text (its display omitted: only its
+  `agent_message_chunk` and `agent_thought_chunk` (the whole message that follows does not repeat
+  them), each with the `messageId` of the API message it comes from: `message.id` of the
+  `message_start` stream event, or of the whole `assistant` message when nothing was streamed,
+  and none for a message Claude Code wrote itself; the session's history keeps the id beside
+  each line, and a loaded session replays it (a line kept without one replays without); a thinking block with no text (its display omitted: only its
   signature) becomes nothing; a `tool_use` becomes a `tool_call` (`in_progress`, the tool's name as its title and in
   `_meta.claudeCode.toolName`, its input as `rawInput`) whose id is the tool use's, the one
   `claude` gives Flottille's MCP server as `claudecode/toolUseId`; a `tool_result` its
@@ -682,8 +685,9 @@ changes, and goes on across the events the daemon records itself meanwhile (a to
 through MCP, a question, a report, a delivery, an approval), whose lines follow the reply: an MCP
 call may land before the provider's last pieces of the reply that led to it. Codex's bridge gives
 the id of the item, so a reply and then a question of
-`request_user_input_async` read as two lines. A source that gives none (Claude's bridge,
-OpenCode's adapter today) is joined as before: its pieces follow each other until a tool call,
+`request_user_input_async` read as two lines; Claude's bridge gives the id of the API message, so
+a reply split by a tool served reads as one. A source that gives none (OpenCode's adapter today)
+is joined as before: its pieces follow each other until a tool call,
 the end of a turn or any other event comes between, a thought or a tool-call update included.
 
 Known limits: a word with no whitespace is held back 4 KiB at most, unless a secret crosses that
