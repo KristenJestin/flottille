@@ -241,6 +241,28 @@ const MIGRATIONS: &[&str] = &[
         ended_at   INTEGER
     ) STRICT;
 ",
+    "
+    -- The agents' tools as their providers name them: `commands_output` and `commands_stop` became
+    -- `commands_status` and `agent_read` became `agent_status` (`docs/tools.md`), so an agent made
+    -- before keeps what it could do. Each name takes the place of the first one it replaces, once,
+    -- the others' order untouched.
+    UPDATE agents SET tools = (
+        SELECT json_group_array(name) FROM (
+            SELECT name FROM (
+                SELECT CASE value
+                    WHEN 'mcp__flottille__commands_output' THEN 'mcp__flottille__commands_status'
+                    WHEN 'mcp__flottille__commands_stop' THEN 'mcp__flottille__commands_status'
+                    WHEN 'mcp__flottille__agent_read' THEN 'mcp__flottille__agent_status'
+                    WHEN 'flottille_commands_output' THEN 'flottille_commands_status'
+                    WHEN 'flottille_commands_stop' THEN 'flottille_commands_status'
+                    WHEN 'flottille_agent_read' THEN 'flottille_agent_status'
+                    ELSE value
+                END AS name, min(key) AS first
+                FROM json_each(agents.tools) GROUP BY name
+            ) ORDER BY first
+        )
+    );
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -2006,6 +2028,86 @@ mod tests {
 
         assert_eq!(event.name, "workspace.ready");
         assert_eq!(store.workspace_ready_at(id).unwrap(), Some(event.at));
+    }
+
+    #[test]
+    fn a_store_before_the_merged_tools_gives_its_agents_commands_status_and_agent_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let old = Connection::open(&path).unwrap();
+        let previous = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("commands_status"))
+            .unwrap();
+        for migration in &MIGRATIONS[..previous] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.pragma_update(None, "user_version", previous).unwrap();
+        for (id, tools) in [
+            // A worker (Claude's names), a lead (opencode's), a stop with no output, an agent
+            // already on the new names.
+            (
+                "000000000001",
+                r#"["mcp__flottille__fs_read","mcp__flottille__commands_run","mcp__flottille__commands_output","mcp__flottille__commands_stop","mcp__flottille__report"]"#,
+            ),
+            (
+                "000000000002",
+                r#"["flottille_agent_launch","flottille_agent_read","flottille_agent_status","flottille_commands_output","flottille_report"]"#,
+            ),
+            (
+                "000000000003",
+                r#"["mcp__flottille__agent_read","mcp__flottille__commands_stop"]"#,
+            ),
+            (
+                "000000000004",
+                r#"["mcp__flottille__agent_status","mcp__flottille__commands_status"]"#,
+            ),
+        ] {
+            old.execute(
+                "INSERT INTO agents (id, provider, role, project, workspace, folder, state, \
+                 created_at, updated_at, instructions, tools) VALUES (?1, 'claude', 'lead', \
+                 'app', NULL, '/work/app', 'idle', 1, 1, 'text', ?2)",
+                params![id, tools],
+            )
+            .unwrap();
+        }
+        drop(old);
+
+        let store = Store::open(&path).unwrap();
+
+        let tools = |id: &str| store.agent(id).unwrap().unwrap().tools;
+        assert_eq!(
+            tools("000000000001"),
+            [
+                "mcp__flottille__fs_read",
+                "mcp__flottille__commands_run",
+                "mcp__flottille__commands_status",
+                "mcp__flottille__report"
+            ]
+        );
+        assert_eq!(
+            tools("000000000002"),
+            [
+                "flottille_agent_launch",
+                "flottille_agent_status",
+                "flottille_commands_status",
+                "flottille_report"
+            ]
+        );
+        assert_eq!(
+            tools("000000000003"),
+            [
+                "mcp__flottille__agent_status",
+                "mcp__flottille__commands_status"
+            ]
+        );
+        assert_eq!(
+            tools("000000000004"),
+            [
+                "mcp__flottille__agent_status",
+                "mcp__flottille__commands_status"
+            ]
+        );
     }
 
     #[test]

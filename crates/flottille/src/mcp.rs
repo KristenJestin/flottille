@@ -1385,6 +1385,35 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_stored_with_the_old_tool_names_gets_the_merged_ones_from_the_daemon() {
+        // What the store holds for a worker and a lead made before the merges, once the
+        // migration renamed their tools (`store.rs`): the names the daemon gives today.
+        let worker = [
+            "mcp__flottille__fs_read",
+            "mcp__flottille__commands_status",
+            "mcp__flottille__report",
+        ]
+        .map(String::from);
+        let lead = ["mcp__flottille__agent_status", "mcp__flottille__report"].map(String::from);
+
+        for stored in [&worker[..], &lead[..]] {
+            let given = claude::PROVIDER.tools(false, false, true, &all_grants());
+            assert!(stored.iter().all(|tool| given.contains(tool)), "{stored:?}");
+        }
+        let served_worker = served(&claude::PROVIDER, &worker);
+        assert_eq!(served_worker, ["fs_read", "commands_status", "report"]);
+        let served_lead = served(&claude::PROVIDER, &lead);
+        assert_eq!(served_lead, ["agent_status", "report"]);
+        let meta = claude::session_meta("text", &worker);
+        assert_eq!(meta["claudeCode"]["options"]["allowedTools"], json!(worker));
+        let server = crate::codex::server("http://x", &json!({}), &worker);
+        assert_eq!(
+            server["flottille"]["enabled_tools"],
+            json!(["fs_read", "commands_status", "report"])
+        );
+    }
+
+    #[test]
     fn a_long_text_is_cut_under_its_limit() {
         let text = "é".repeat(50_000);
         let kept = cut(&text, RESULT_LIMIT);
