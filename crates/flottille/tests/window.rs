@@ -742,6 +742,8 @@ fn the_project_page_has_no_running_agents_tab(cx: &mut TestAppContext) {
 fn new_workspace_opens_a_modal_and_escape_closes_it(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");
+    // A session in main: a page with nothing in it shows its empty state, not the dashed card.
+    start(&user, "atlas", None, "Release notes");
     user.call(
         "project.set_settings",
         json!({"name": "atlas",
@@ -750,6 +752,9 @@ fn new_workspace_opens_a_modal_and_escape_closes_it(cx: &mut TestAppContext) {
     .unwrap();
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     open_project(&shell, "atlas", cx);
+    until(&shell, cx, "main's card lists the session", |cx| {
+        card_of(&shell, None, cx).is_some_and(|card| !titles_in(&card, cx).is_empty())
+    });
     let form = shell
         .read_with(cx, |s, _| s.new_workspace_of("atlas").cloned())
         .unwrap();
@@ -5897,5 +5902,112 @@ fn the_project_at_the_root_of_the_picked_folder_is_named_after_its_folder(cx: &m
         Some("shop"),
         "the window names it after its folder"
     );
+}
+
+#[gpui_kit::test]
+fn a_project_with_only_main_and_no_session_shows_an_empty_state(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let page = page_of(&shell, cx);
+    until(&shell, cx, "the page knows its places", |cx| {
+        page.read_with(cx, |page, _| page.is_empty())
+    });
+    settle(cx);
+
+    cx.update(|window, _| {
+        assert!(window.find("project-empty").visible());
+        assert!(window.find("empty-new-session").visible());
+        assert!(window.find("empty-new-workspace").visible());
+        assert!(
+            window.try_find("place-card-main").is_none(),
+            "no bare card of main"
+        );
+        assert!(window.try_find("new-workspace-card").is_none());
+    });
+
+    // Its two actions start the work.
+    cx.update(|window, cx| window.click("empty-new-workspace", cx));
+    settle(cx);
+    let form = shell
+        .read_with(cx, |s, _| s.new_workspace_of("atlas").cloned())
+        .unwrap();
+    assert!(form.read_with(cx, |f, _| f.is_open()), "the same modal");
+    cx.update(|window, cx| window.click("new-workspace-modal-cancel", cx));
+    settle(cx);
+
+    cx.update(|window, cx| window.click("empty-new-session", cx));
+    let composer = composer_of(&shell, "atlas", cx);
+    assert_eq!(
+        composer.read_with(cx, |c, _| c.choice().clone()),
+        Choice::Main
+    );
+    cx.simulate_input("Fix the timeout");
+    assert_eq!(
+        composer.read_with(cx, |c, cx| c.field().read(cx).value().to_string()),
+        "Fix the timeout",
+        "the caret is in the composer"
+    );
+}
+
+#[gpui_kit::test]
+fn a_project_with_a_workspace_does_not_show_the_empty_state(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    workspace(&user, "atlas", "login");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    until(&shell, cx, "the page shows login", |cx| {
+        card_of(&shell, Some("login"), cx).is_some()
+    });
+    settle(cx);
+
+    assert!(!page_of(&shell, cx).read_with(cx, |page, _| page.is_empty()));
+    cx.update(|window, _| {
+        assert!(window.try_find("project-empty").is_none());
+        assert!(window.try_find("place-card-main").is_some());
+        assert!(window.try_find("new-workspace-card").is_some());
+    });
+}
+
+#[gpui_kit::test]
+fn a_project_with_a_session_in_main_does_not_show_the_empty_state(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    start(&user, "atlas", None, "Release notes");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    until(&shell, cx, "main's card lists the session", |cx| {
+        card_of(&shell, None, cx).is_some_and(|card| !titles_in(&card, cx).is_empty())
+    });
+    settle(cx);
+
+    assert!(!page_of(&shell, cx).read_with(cx, |page, _| page.is_empty()));
+    cx.update(|window, _| {
+        assert!(window.try_find("project-empty").is_none());
+        assert!(window.try_find("new-session-in-main").is_some());
+    });
+}
+
+#[gpui_kit::test]
+fn the_empty_state_gives_way_to_the_page_once_a_workspace_exists(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let page = page_of(&shell, cx);
+    until(&shell, cx, "the empty state is shown", |cx| {
+        page.read_with(cx, |page, _| page.is_empty())
+    });
+
+    workspace(&user, "atlas", "login");
+    until(&shell, cx, "the page shows login", |cx| {
+        card_of(&shell, Some("login"), cx).is_some()
+    });
+    settle(cx);
+    assert!(!page.read_with(cx, |page, _| page.is_empty()));
+    cx.update(|window, _| {
+        assert!(window.try_find("project-empty").is_none());
+        assert!(window.try_find("new-workspace-card").is_some());
+    });
 }
 

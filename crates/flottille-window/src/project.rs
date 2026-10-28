@@ -87,6 +87,9 @@ pub struct ProjectPage {
     procedures: Entity<ProceduresSection>,
     references: Entity<ReferencesSection>,
     narrow: bool,
+    /// Nothing but `main`, and no session in it: the page says what to start with, instead of a
+    /// section of one bare card. Kept here for the same reason as `places`.
+    empty: bool,
     /// How many times it was drawn: the tests count them.
     renders: usize,
 }
@@ -120,8 +123,14 @@ impl ProjectPage {
             procedures,
             references,
             narrow: false,
+            empty: false,
             renders: 0,
         }
+    }
+
+    /// Whether the page shows its empty state in place of "Where the work happens".
+    pub fn is_empty(&self) -> bool {
+        self.empty
     }
 
     pub fn procedures(&self) -> &Entity<ProceduresSection> {
@@ -195,6 +204,17 @@ impl ProjectPage {
         let mut old = std::mem::take(&mut self.cards);
         let mut cards = Vec::new();
         self.places = data.places.iter().map(|p| p.place.clone()).collect();
+        let empty = !data.places.is_empty()
+            && data
+                .places
+                .iter()
+                .all(|p| p.place.is_none() && p.sessions.is_empty());
+        if self.empty != empty {
+            self.empty = empty;
+            changed = true;
+            self.new_workspace
+                .update(cx, |form, cx| form.set_framed(!empty, cx));
+        }
         for place in data.places {
             let at = old
                 .iter()
@@ -368,6 +388,59 @@ impl Render for ProjectPage {
                     4 + places,
                     self.new_workspace.clone(),
                 ));
+        // What a workspace is, and the two ways to start: the form's modal stays in the tree,
+        // which only the dashed card of the grid carries otherwise.
+        let nothing = {
+            let (shell, project) = (self.shell.clone(), self.name.clone());
+            let new_workspace = self.new_workspace.clone();
+            div()
+                .id("project-empty")
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(14.))
+                .py(px(28.))
+                .child(
+                    div()
+                        .max_w(px(440.))
+                        .text_size(px(13.))
+                        .text_center()
+                        .text_color(p.faint)
+                        .child(
+                            "A workspace is a branch of its own in every repository of the \
+                             project, so a session can work there without touching main.",
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .justify_center()
+                        .gap(px(8.))
+                        .child(
+                            Button::primary("empty-new-session", "New session in main")
+                                .leading(Icon::Plus)
+                                .on_click(move |_, window, cx| {
+                                    let project = project.clone();
+                                    shell
+                                        .update(cx, |shell, cx| {
+                                            shell.compose_in(&project, Choice::Main, window, cx)
+                                        })
+                                        .ok();
+                                }),
+                        )
+                        .child({
+                            let form = new_workspace.clone();
+                            Button::secondary("empty-new-workspace", "New workspace")
+                                .leading(Icon::Plus)
+                                .on_click(move |_, window, cx| {
+                                    form.update(cx, |form, cx| form.open(window, cx))
+                                })
+                        }),
+                )
+                .child(new_workspace)
+                .test_support()
+        };
         div()
             .id("project-page")
             .size_full()
@@ -389,26 +462,29 @@ impl Render for ProjectPage {
                         2,
                         div().mb(px(34.)).child(self.composer.clone()),
                     ))
-                    .child(enter(
-                        key("places"),
-                        3,
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .mb(px(12.))
-                            .text_size(px(13.))
-                            .semibold()
-                            .child("Where the work happens")
-                            .child(
-                                div()
-                                    .mono(11.)
-                                    .font_weight(gpui_kit::FontWeight::NORMAL)
-                                    .text_color(p.faint)
-                                    .child(places.to_string()),
-                            ),
-                    ))
-                    .child(grid)
+                    .when(self.empty, |d| d.child(enter(key("empty"), 3, nothing)))
+                    .when(!self.empty, |d| {
+                        d.child(enter(
+                            key("places"),
+                            3,
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .mb(px(12.))
+                                .text_size(px(13.))
+                                .semibold()
+                                .child("Where the work happens")
+                                .child(
+                                    div()
+                                        .mono(11.)
+                                        .font_weight(gpui_kit::FontWeight::NORMAL)
+                                        .text_color(p.faint)
+                                        .child(places.to_string()),
+                                ),
+                        ))
+                        .child(grid)
+                    })
                     .child(self.procedures.clone())
                     .child(self.references.clone()),
             )
@@ -917,6 +993,9 @@ pub struct NewWorkspace {
     chosen: Vec<String>,
     branch: Entity<InputState>,
     offline: bool,
+    /// Drawn as the dashed card of the grid; not when the page's empty state carries the
+    /// actions, where only the modal stays.
+    framed: bool,
     /// The name asked for, while the daemon makes it.
     creating: Option<String>,
     /// Opened from the composer's picker: the workspace made becomes the composer's place.
@@ -1000,6 +1079,7 @@ impl NewWorkspace {
             chosen: Vec::new(),
             branch,
             offline: false,
+            framed: true,
             creating: None,
             for_composer: false,
             creating_for_composer: false,
@@ -1062,6 +1142,14 @@ impl NewWorkspace {
                 .sort_by_key(|p| order.iter().position(|o| o == p).unwrap_or(usize::MAX));
         }
         cx.notify();
+    }
+
+    /// Whether the dashed card is drawn; the modal is either way.
+    pub fn set_framed(&mut self, framed: bool, cx: &mut Context<Self>) {
+        if self.framed != framed {
+            self.framed = framed;
+            cx.notify();
+        }
     }
 
     pub fn toggle_offline(&mut self, cx: &mut Context<Self>) {
@@ -1407,6 +1495,12 @@ impl Render for NewWorkspace {
                     .on_click(cx.listener(|this, _, _, cx| this.create(cx)))
                     .into_any_element()
             });
-        card.child(modal)
+        if !self.framed {
+            return div()
+                .id("new-workspace-anchor")
+                .child(modal)
+                .into_any_element();
+        }
+        card.child(modal).into_any_element()
     }
 }
