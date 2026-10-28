@@ -212,6 +212,11 @@ fn decide(daemon: &Arc<Daemon>, number: u64, decision: Decision) -> Answer {
              can be allowed once, never for the tree"
         )));
     }
+    if decision == Decision::Always && request.sensitive {
+        return Err(Failure::refused(format!(
+            "request #{number} reaches a sensitive place: it can be allowed once, never always"
+        )));
+    }
     if !request.kind.takes(decision) {
         return Err(Failure::refused(match (decision, request.kind) {
             (Decision::Tree, Kind::Catalogue) => format!(

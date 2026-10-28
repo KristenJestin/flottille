@@ -133,7 +133,25 @@ pub fn decide(call: &Call) -> Verdict {
                     .into(),
             );
         }
-        if run && !call.command.is_some_and(|(_, c)| c.check && c.read_only) {
+        if run
+            && let Some((name, command)) = call.command
+            && command.added_by.is_some()
+        {
+            // Allowed always where it was asked for, and nowhere else.
+            let allowed = command.repository.as_deref().unwrap_or(".");
+            let asked = call.args["repository"].as_str().unwrap_or(allowed);
+            if asked != allowed {
+                return Verdict::Deny(format!(
+                    "refused: the user allowed {name} in {allowed} only, and this agent works in \
+                     the project folder, where it runs nowhere else"
+                ));
+            }
+        }
+        if run
+            && !call
+                .command
+                .is_some_and(|(_, c)| c.runs_in_project_folder())
+        {
             match (call.command, call.args["line"].as_str()) {
                 // A line outside the catalogue is the user's to allow, once or always, after
                 // every other rule (`outside_catalogue`).
@@ -155,6 +173,18 @@ pub fn decide(call: &Call) -> Verdict {
         }
     }
     if let Some(family) = crate::actions::family(call.tool, call.args) {
+        // Nothing checks a tracker against the project, as a forge is against its remote: its
+        // change asks whatever the project lets run on its own.
+        if family == "settings" && call.args.get("tracker").is_some() {
+            return Verdict::Ask(Ask {
+                reasons: vec![
+                    "a change of the tracker always asks: nothing checks it against the project"
+                        .into(),
+                ],
+                sensitive: false,
+                kind: Kind::Action,
+            });
+        }
         return match call.actions {
             Some(actions) if crate::actions::on_its_own(actions, family) => Verdict::Allow,
             Some(_) => Verdict::Ask(Ask {
@@ -187,6 +217,14 @@ pub fn decide(call: &Call) -> Verdict {
     } else {
         Vec::new()
     };
+    if call.grant.place.workspace.is_none()
+        && let Some(why) = layers
+            .iter()
+            .filter(|layer| base(&layer[0]) == "git")
+            .find_map(|layer| discards_work(layer))
+    {
+        return Verdict::Deny(why);
+    }
     // Inside a procedure run, its grants let through what the rules below refuse to agents;
     // outside one, nothing here changes them.
     let granted = match call.run {
@@ -1274,6 +1312,34 @@ fn granted(
     }
 }
 
+/// The refusal of a git line that discards or rewrites the work of the user's own checkout, which
+/// no agent runs in the project folder, whatever the user allowed.
+fn discards_work(layer: &[String]) -> Option<String> {
+    let args = &layer[1..];
+    let (at, _) = git_subcommand(args);
+    let subcommand = args.get(at)?.as_str();
+    let rest = &args[at + 1..];
+    let any = |names: &[&str]| rest.iter().any(|word| names.contains(&word.as_str()));
+    let discards = match subcommand {
+        "checkout" => any(&["--", ".", "-f", "--force"]),
+        "restore" | "clean" | "reset" => true,
+        "stash" => !matches!(rest.first().map(String::as_str), Some("list" | "show")),
+        "worktree" => rest.first().is_some_and(|word| word == "remove"),
+        "branch" => rest.iter().any(|word| {
+            word == "--delete"
+                || (!word.starts_with("--") && word.starts_with('-') && word.contains(['d', 'D']))
+        }),
+        _ => false,
+    };
+    discards.then(|| {
+        format!(
+            "refused: {} discards or rewrites the work in the user's own checkout, which agents \
+             never do in the project folder: say what should be done there, and the user does it",
+            shown_words(layer)
+        )
+    })
+}
+
 /// Where git's subcommand is among its arguments, and whether nothing but `--no-pager` comes
 /// before it.
 fn git_subcommand(args: &[String]) -> (usize, bool) {
@@ -1516,7 +1582,7 @@ fn rebase_check(args: &[String]) -> Result<(), String> {
 
 /// The sensitive place a path is in, if it is in one: inside the place, only what sits below it
 /// counts.
-fn sensitive(own: &[PathBuf], path: &Resolved) -> Option<String> {
+pub fn sensitive(own: &[PathBuf], path: &Resolved) -> Option<String> {
     let parts: Vec<String> = if path.inside {
         Path::new(&path.shown)
     } else {
@@ -1663,6 +1729,7 @@ mod tests {
                 check: false,
                 read_only: false,
                 ask_before_running: false,
+                added_by: None,
             };
             set(&mut command);
             self.commands.insert(name.into(), command);
@@ -2428,6 +2495,109 @@ mod tests {
             "gh pr merge 3",
         ] {
             assert!(denied(&fixture.run(line)), "{line}");
+        }
+    }
+
+    #[test]
+    fn in_main_a_line_that_discards_the_user_s_work_is_refused_not_held() {
+        let fixture = Fixture::new(None);
+        for line in [
+            "git checkout -- src/a.rs",
+            "git checkout .",
+            "git checkout -f main",
+            "git restore src/a.rs",
+            "git restore --staged src/a.rs",
+            "git clean -fdx",
+            "git stash",
+            "git stash pop",
+            "git reset",
+            "git reset --hard HEAD~1",
+            "git -C . reset --soft HEAD",
+            "git worktree remove ../w",
+            "git branch -D old",
+            "git branch -d old",
+            "git branch --delete old",
+            "env git reset --hard",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(denied(&verdict), "{line}: {verdict:?}");
+            let Verdict::Deny(why) = verdict else {
+                unreachable!()
+            };
+            assert!(why.contains("the user's own checkout"), "{line}: {why}");
+        }
+        // Reads are still the user's to allow, once or always.
+        for line in ["git status", "git stash list", "git branch -v"] {
+            let Verdict::Ask(ask) = fixture.run(line) else {
+                panic!("{line} held")
+            };
+            assert_eq!(ask.kind, Kind::Catalogue, "{line}");
+        }
+        // Even a line the user allowed always.
+        let fixture = Fixture::new(None).command("reset", "git reset --hard", |c| {
+            c.added_by = Some(flottille_core::project::AddedBy::Approval)
+        });
+        assert!(denied(&fixture.catalogue("reset")));
+        // A workspace is the agent's own.
+        assert_eq!(Fixture::workspace().run("git stash"), Verdict::Allow);
+    }
+
+    #[test]
+    fn a_line_allowed_always_runs_only_in_the_repository_it_was_allowed_in() {
+        let approved = |c: &mut CatalogueCommand| {
+            c.added_by = Some(flottille_core::project::AddedBy::Approval)
+        };
+        let fixture = Fixture::new(None).command("ls", "ls", approved);
+        assert_eq!(fixture.catalogue("ls"), Verdict::Allow);
+        let other = json!({"command": "ls", "repository": "lib"});
+        let Verdict::Deny(why) = fixture.judge("commands_run", other, Some(&fixture.never)) else {
+            panic!("refused")
+        };
+        assert!(why.contains("in . only"), "{why}");
+        let fixture = Fixture::new(None).command("ls", "ls", |c| {
+            approved(c);
+            c.repository = Some("lib".into());
+        });
+        let same = json!({"command": "ls", "repository": "lib"});
+        assert_eq!(
+            fixture.judge("commands_run", same, Some(&fixture.never)),
+            Verdict::Allow
+        );
+        let root = json!({"command": "ls", "repository": "."});
+        assert!(denied(&fixture.judge(
+            "commands_run",
+            root,
+            Some(&fixture.never)
+        )));
+    }
+
+    #[test]
+    fn a_tracker_change_always_asks_whatever_settings_says() {
+        let mut fixture = Fixture::new(None);
+        fixture.actions = Some(AgentActions {
+            settings: Mode::Allow,
+            ..AgentActions::default()
+        });
+        let forge =
+            json!({"action": "set_settings", "repositories": [{"path": ".", "forge": null}]});
+        assert_eq!(
+            fixture.judge("project", forge, Some(&fixture.never)),
+            Verdict::Allow
+        );
+        for tracker in [
+            json!({"action": "set_settings", "tracker": null}),
+            json!({"action": "set_settings", "tracker": {"kind": "github", "repository": "a/b"},
+                "repositories": [{"path": ".", "forge": null}]}),
+        ] {
+            let Verdict::Ask(ask) = fixture.judge("project", tracker, Some(&fixture.never)) else {
+                panic!("held")
+            };
+            assert_eq!(ask.kind, Kind::Action);
+            assert!(
+                ask.reasons[0].contains("tracker always asks"),
+                "{:?}",
+                ask.reasons
+            );
         }
     }
 

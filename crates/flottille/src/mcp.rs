@@ -1190,19 +1190,13 @@ fn considered<T>(
 ) -> T {
     let project = projects::load_project(daemon, &grant.place.project).ok();
     let (paths, words, mut command) = reached(daemon, &grant.place, tool, args);
-    // In the project folder, a line the catalogue holds as a read-only check, where it runs, is
-    // that check: what the user allowed Always runs from then on without asking.
+    // In the project folder, a line the catalogue holds where it runs is that command, with its
+    // own flags: what the user allowed Always runs from then on without asking, and a command
+    // the user marked to ask is never a line to allow again.
     if command.is_none() && grant.place.workspace.is_none() && !words.is_empty() {
-        let asked = args["repository"].as_str().unwrap_or(".");
-        command = project.as_ref().and_then(|project| {
-            let (name, _) = project.commands.iter().find(|(_, c)| {
-                c.check
-                    && c.read_only
-                    && c.repository.as_deref().unwrap_or(".") == asked
-                    && flottille_core::command::split_line(&c.line).ok().as_ref() == Some(&words)
-            })?;
-            Some(name.clone())
-        });
+        command = project
+            .as_ref()
+            .and_then(|project| crate::actions::catalogued(project, args, &words));
     }
     let command = command.as_deref().and_then(|name| {
         let (name, command) = project.as_ref()?.commands.get_key_value(name)?;

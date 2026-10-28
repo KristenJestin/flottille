@@ -294,6 +294,7 @@ fn an_agent_s_procedure_start_is_held_confirmed_then_started_in_its_workspace() 
         asked["says"],
         json!([
             "Start the procedure ship in workspace login: Ship the workspace",
+            "Its agent is told: Push the branch.",
             "Its agents may push the workspace's branch to its remote (git push), after asking \
              you, each time",
             "The agents the run starts may do the same"
@@ -406,8 +407,9 @@ fn a_line_outside_the_catalogue_in_main_is_held_and_once_runs_it_without_changin
         asked["says"],
         json!([
             "Run cat README.md in the project folder",
-            "Always adds it to the project's catalogue as cat-readme-md, a read-only check its \
-             agents run there without asking"
+            "Always adds it to the project's catalogue as cat-readme-md. Flottille does not \
+             check that it only reads. It will run in your project folder without asking, for \
+             every agent of this project."
         ])
     );
     let error = cli(&user, &["approve", &number.to_string(), "--for-tree"]).unwrap_err();
@@ -445,7 +447,7 @@ fn always_runs_it_and_writes_it_in_the_catalogue() {
     assert!(text.starts_with("# The user's own words.\n"), "{text}");
     assert!(
         text.contains(
-            "[commands.cat-readme-md]\nline = \"cat README.md\"\ncheck = true\nread_only = true\n"
+            "[commands.cat-readme-md]\nline = \"cat README.md\"\nadded_by = \"approval\"\n"
         ),
         "{text}"
     );
@@ -482,4 +484,214 @@ fn a_never_command_or_shell_syntax_in_main_is_still_refused() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn an_agent_s_reference_on_the_project_folder_or_a_repository_is_refused() {
+    let user = User::with_fake_agent();
+    let folder = project(&user);
+    std::os::unix::fs::symlink(&folder, folder.join("docs/all")).unwrap();
+    let (_, mcp) = root(&user, Some("login"));
+
+    for path in [".", "./", "docs/all"] {
+        let said = refused(mcp.call(
+            "project",
+            json!({"action": "add_reference", "name": "all", "description": "Everything",
+                "path": path}),
+        ));
+        assert!(said.contains("the project folder"), "{path}: {said}");
+    }
+    assert!(
+        user.call("approval.list", json!({})).unwrap()["requests"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "nothing was asked"
+    );
+    assert!(!file(&user).contains("[references.all]"));
+}
+
+#[test]
+fn a_tracker_change_always_asks_whatever_settings_says() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let path = user.project_file("app");
+    let text = file(&user);
+    std::fs::write(
+        &path,
+        format!("{text}\n[agent_actions]\nsettings = \"allow\"\n"),
+    )
+    .unwrap();
+    let (_, mcp) = root(&user, None);
+
+    let saved = done(mcp.call(
+        "project",
+        json!({"action": "set_settings", "repositories": [{"path": ".", "forge": null}]}),
+    ));
+    assert!(saved.starts_with("Saved."), "{saved}");
+    let number = held(mcp.call(
+        "project",
+        json!({"action": "set_settings", "tracker": {"kind": "github", "repository": "acme/app"}}),
+    ));
+    let asked = request(&user, number);
+    assert_eq!(asked["kind"], "action");
+    assert!(!file(&user).contains("[tracker]"));
+}
+
+#[test]
+fn a_procedure_whose_instructions_changed_after_it_was_asked_is_not_started() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (_, mcp) = root(&user, Some("login"));
+    let number = held(mcp.call("procedure", json!({"action": "start", "name": "ship"})));
+    assert!(
+        request(&user, number)["says"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("Its agent is told: Push the branch."))
+    );
+    user.call(
+        "procedure.edit",
+        json!({"project": "app", "name": "ship", "instructions": "Push it, then force-push."}),
+    )
+    .unwrap();
+
+    cli(&user, &["approve", &number.to_string()]).unwrap();
+
+    let body = settled(&user, number).body;
+    assert!(
+        body.starts_with(&format!(
+            "Request #{number} (procedure) was not executed: what it does changed since the user \
+             allowed it"
+        )),
+        "{body}"
+    );
+    assert!(body.contains("then force-push"), "{body}");
+}
+
+#[test]
+fn a_line_equal_to_a_catalogue_command_is_that_command_with_its_own_flags() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let path = user.project_file("app");
+    let text = file(&user);
+    std::fs::write(
+        &path,
+        format!(
+            "{text}\n[commands.readme]\nline = \"cat README.md\"\n\n\
+             [commands.status]\nline = \"git status\"\ncheck = true\nread_only = true\n\
+             ask_before_running = true\n"
+        ),
+    )
+    .unwrap();
+    let (_, mcp) = root(&user, None);
+    let before = file(&user);
+
+    // Not a read-only check: refused in the project folder, never held to be allowed always.
+    let said = refused(mcp.call("commands_run", json!({"line": "cat README.md"})));
+    assert!(said.contains("readme is not one"), "{said}");
+    // Marked to ask: held as that command, which Always does not take.
+    let number = held(mcp.call("commands_run", json!({"line": "git  status"})));
+    assert_eq!(request(&user, number)["kind"], "call");
+    let error = cli(&user, &["approve", &number.to_string(), "--always"]).unwrap_err();
+    assert!(error.contains("only such a line"), "{error}");
+    assert_eq!(file(&user), before, "nothing duplicated");
+}
+
+#[test]
+fn a_line_allowed_always_is_listed_as_the_user_s_not_as_changing_nothing() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (_, mcp) = root(&user, None);
+    let number = held(mcp.call("commands_run", json!({"line": "cat README.md"})));
+    cli(&user, &["approve", &number.to_string(), "--always"]).unwrap();
+    settled(&user, number);
+
+    let listed = done(mcp.call("commands_list", json!({})));
+    let line = listed
+        .lines()
+        .find(|line| line.starts_with("cat-readme-md: "))
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert!(!line.contains("changes nothing"), "{line}");
+    assert!(line.contains("allowed always by the user"), "{line}");
+}
+
+#[test]
+fn a_line_allowed_always_runs_only_in_the_repository_it_was_allowed_in() {
+    let user = User::with_fake_agent();
+    let folder = project(&user);
+    let lib = folder.join("lib");
+    user.git_init(&lib);
+    std::fs::write(lib.join("README.md"), "lib\n").unwrap();
+    user.git(&lib, &["add", "."]);
+    user.git(&lib, &["commit", "--quiet", "-m", "start"]);
+    let path = user.project_file("app");
+    let text = file(&user).replacen(
+        "[[repositories]]",
+        "[[repositories]]\npath = \"lib\"\n\n[[repositories]]",
+        1,
+    );
+    std::fs::write(&path, text).unwrap();
+    let (_, mcp) = root(&user, None);
+    let number = held(mcp.call(
+        "commands_run",
+        json!({"line": "cat README.md", "repository": "lib"}),
+    ));
+    cli(&user, &["approve", &number.to_string(), "--always"]).unwrap();
+    settled(&user, number);
+    assert!(
+        file(&user).contains("repository = \"lib\""),
+        "{}",
+        file(&user)
+    );
+
+    let ran = done(mcp.call("commands_run", json!({"command": "cat-readme-md"})));
+    assert!(ran.contains("lib"), "{ran}");
+    let said = refused(mcp.call(
+        "commands_run",
+        json!({"command": "cat-readme-md", "repository": "."}),
+    ));
+    assert!(said.contains("in lib only"), "{said}");
+    // Its line elsewhere is another line, held again.
+    held(mcp.call("commands_run", json!({"line": "cat README.md"})));
+}
+
+#[test]
+fn in_main_a_line_that_discards_the_user_s_work_is_refused_not_held() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (_, mcp) = root(&user, None);
+
+    for line in [
+        "git checkout -- README.md",
+        "git restore README.md",
+        "git clean -fd",
+        "git stash",
+        "git reset --hard",
+        "git worktree remove ../w",
+        "git branch -D old",
+    ] {
+        let said = refused(mcp.call("commands_run", json!({"line": line})));
+        assert!(said.contains("the user's own checkout"), "{line}: {said}");
+    }
+    assert!(
+        user.call("approval.list", json!({})).unwrap()["requests"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn always_is_never_offered_for_a_sensitive_line() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (_, mcp) = root(&user, None);
+    let number = held(mcp.call("commands_run", json!({"line": "cat .env"})));
+    assert_eq!(request(&user, number)["sensitive"], true);
+
+    let error = cli(&user, &["approve", &number.to_string(), "--always"]).unwrap_err();
+    assert!(error.contains("never always"), "{error}");
+    assert_eq!(request(&user, number)["state"], "pending");
+    assert!(!file(&user).contains("[commands."));
 }

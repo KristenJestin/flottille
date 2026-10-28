@@ -65,6 +65,7 @@ serve = true                          # keeps running
 check = false                         # tests, lint
 read_only = false                     # changes nothing
 ask_before_running = false            # held for approval each time an agent runs it
+# added_by = "approval"               # written by Always (docs/tools.md, "The gate"): runs in the project folder, unchecked
 
 [[recipe]]                            # the steps that prepare a new workspace, in order
 copy = [".env", ".env.*"]             # globs, copied from the main checkout, never over a file
@@ -154,9 +155,9 @@ confirms it. `[agent_actions]` lets a family of these changes run on its own:
 
 | Key | The change |
 |---|---|
-| `procedures` | Starting one of the project's procedures in a workspace. Its grants are still the procedure's, as the file says them; the agent gives none. |
-| `settings` | Declaring or removing a repository's forge, or the tracker. A forge is still checked against its repository's remote. |
-| `references` | Adding or removing a reference. A reference still stays inside the project folder. |
+| `procedures` | Starting one of the project's procedures in a workspace. An agent may then start any procedure in any of the project's workspaces without asking; its grants are still the procedure's, as the file says them, and the agent gives none. |
+| `settings` | Declaring or removing a repository's forge, or the tracker. A forge is still checked against its repository's remote; a change of the tracker, which nothing checks, always asks. |
+| `references` | Adding or removing a reference. A reference still stays inside the project folder, and an agent's is never the folder itself nor a repository's root. |
 
 Each is `ask` (the default: held for the user each time) or `allow` (done at once). Only the user
 sets them, in the file or with the switches of the project's Settings in the window, which take

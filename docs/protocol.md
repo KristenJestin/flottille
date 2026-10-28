@@ -750,15 +750,15 @@ there is no such agent).
 
 `{"number", "for_tree"?, "always"?}`. Allows the request, once, with `for_tree: true` for the
 root's tree (the same call goes through without asking from then on), or with `always: true` for a
-`catalogue` request: its line is added to the project's catalogue as a read-only check
-(`[commands.<name>]` in its file, what is around it kept), then run. Answered `{"request"}` once it
+`catalogue` request: its line is added to the project's catalogue as allowed always
+(`[commands.<name>]` with `added_by = "approval"` in its file, what is around it kept), then run. Answered `{"request"}` once it
 is decided; the call is then checked again, performed in the background, and its answer stored for
 the agent (`approval.settled`). An `action` is done only while what it `says` still holds (a
 procedure edited meanwhile is not started). `not-found` when there is no such request;
 `invalid-params` for both `for_tree` and `always`; `refused` when it is held by an agent, already
 decided, with `for_tree` when it reaches a sensitive place, is held by a procedure's `ask` grant
 (`docs/procedures.md`) or is not a `call`, and with `always` when it is not a `catalogue`
-request.
+request or reaches a sensitive place.
 
 #### `approval.deny`
 

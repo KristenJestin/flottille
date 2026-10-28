@@ -119,7 +119,11 @@ pub async fn prepared(
                     )
                     .await
                     .map_err(refusal)?;
-                    Ok(start_says(name, &workspace, &shown))
+                    let instructions = project
+                        .procedures
+                        .get(name)
+                        .map_or("", |procedure| procedure.instructions.as_str());
+                    Ok(start_says(name, &workspace, instructions, &shown))
                 }
                 other => Err(unknown("procedure", other, "list, show and start")),
             }
@@ -146,6 +150,14 @@ pub async fn prepared(
                     check_reference(name, &reference).map_err(|error| {
                         Outcome::Refused(format!("refused: references.{name}{error}"))
                     })?;
+                    if whole_checkout(&project, &reference.path) {
+                        return Err(Outcome::Refused(format!(
+                            "refused: {} is the project folder or one of its repositories, which \
+                             an agent never makes a reference: name the folder or file inside it \
+                             that is worth reading, like docs/STYLE.md",
+                            reference.path
+                        )));
+                    }
                     if project.references.contains_key(name) {
                         return Err(Outcome::Refused(format!(
                             "refused: project {} already has a reference named {name}",
@@ -349,12 +361,24 @@ fn listed<'a>(names: impl Iterator<Item = &'a String>) -> String {
     }
 }
 
+/// Whether a reference's path is the project folder or a repository's root, on the text or, past
+/// a link, on the disk: everything a checkout holds, which no agent makes a reference of.
+fn whole_checkout(project: &Project, path: &str) -> bool {
+    let real = |path: &str| project.folder.join(path).canonicalize().ok();
+    let target = real(path);
+    std::iter::once(".")
+        .chain(project.repositories.iter().map(|r| r.path.as_str()))
+        .any(|root| root == path || (target.is_some() && real(root) == target))
+}
+
 /// What starting a procedure does, in words: the user confirms these, as in the window.
-fn start_says(name: &str, workspace: &str, shown: &Value) -> Vec<String> {
+fn start_says(name: &str, workspace: &str, instructions: &str, shown: &Value) -> Vec<String> {
     let mut says = vec![format!(
         "Start the procedure {name} in workspace {workspace}: {}",
         shown["description"].as_str().unwrap_or_default()
     )];
+    // What its agent is told is part of what the user confirms: edited meanwhile, nothing starts.
+    says.push(format!("Its agent is told: {}", instructions.trim()));
     let grants = shown["says"].as_array().map_or(&[][..], Vec::as_slice);
     for grant in grants {
         let how = match grant["mode"].as_str() {
@@ -566,17 +590,33 @@ pub fn catalogue_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Vec<Strin
     }];
     if let (Ok(project), Ok(words)) = (own(daemon, grant), split_line(line)) {
         says.push(format!(
-            "Always adds it to the project's catalogue as {}, a read-only check its agents run \
-             there without asking",
+            "Always adds it to the project's catalogue as {}. Flottille does not check that it \
+             only reads. It will run in your project folder without asking, for every agent of \
+             this project.",
             catalogue_name(&project, &words)
         ));
     }
     says
 }
 
-/// Adds the line of a `commands_run` call to the project's catalogue as a read-only check, so
-/// that it runs in the project folder without asking from now on: its name. A line the
-/// catalogue already holds there is not added again.
+/// The catalogue command a line run in the project folder is: the one whose line it is, where
+/// it runs, whatever its flags.
+pub fn catalogued(project: &Project, args: &Value, words: &[String]) -> Option<String> {
+    let asked = args["repository"].as_str().unwrap_or(".");
+    project
+        .commands
+        .iter()
+        .find(|(_, command)| {
+            command.repository.as_deref().unwrap_or(".") == asked
+                && split_line(&command.line).ok().as_deref() == Some(words)
+        })
+        .map(|(name, _)| name.clone())
+}
+
+/// Adds the line of a `commands_run` call to the project's catalogue as allowed always by the
+/// user (`added_by = "approval"`), so that it runs in the project folder without asking from now
+/// on, where it was asked for: its name. A line the catalogue already holds there is that
+/// command, never added again.
 pub fn add_to_catalogue(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<String, String> {
     let line = args["line"]
         .as_str()
@@ -589,14 +629,8 @@ pub fn add_to_catalogue(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<
         .map(str::to_owned);
     let mut added = String::new();
     projects::rewrite(daemon, &grant.place.project, |project, document| {
-        if let Some((name, _)) = project.commands.iter().find(|(_, command)| {
-            command.check
-                && command.read_only
-                && command.repository.as_deref().filter(|path| *path != ".")
-                    == repository.as_deref()
-                && split_line(&command.line).ok().as_ref() == Some(&words)
-        }) {
-            added = name.clone();
+        if let Some(name) = catalogued(project, args, &words) {
+            added = name;
             return Ok(());
         }
         added = catalogue_name(project, &words);
@@ -605,8 +639,7 @@ pub fn add_to_catalogue(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<
         if let Some(repository) = &repository {
             entry.insert("repository", toml_edit::value(repository.as_str()));
         }
-        entry.insert("check", toml_edit::value(true));
-        entry.insert("read_only", toml_edit::value(true));
+        entry.insert("added_by", toml_edit::value("approval"));
         let commands = document.entry("commands").or_insert_with(|| {
             let mut commands = toml_edit::Table::new();
             // `[commands.<name>]` alone, without an empty `[commands]` above it.

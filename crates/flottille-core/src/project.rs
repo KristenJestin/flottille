@@ -170,6 +170,26 @@ pub struct CatalogueCommand {
     /// Held for approval each time an agent runs it.
     #[serde(default)]
     pub ask_before_running: bool,
+    /// Who added it, when not the user writing it: a line the user allowed always, which runs in
+    /// the project folder without asking though nothing checked that it changes nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_by: Option<AddedBy>,
+}
+
+/// Who added a catalogue command, when it was not written by the user.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AddedBy {
+    /// The user answered Always to an agent's request to run its line in the project folder.
+    Approval,
+}
+
+impl CatalogueCommand {
+    /// Whether an agent in the project folder runs it: one of the catalogue's read-only checks,
+    /// or a line the user allowed always there.
+    pub fn runs_in_project_folder(&self) -> bool {
+        (self.check && self.read_only) || self.added_by == Some(AddedBy::Approval)
+    }
 }
 
 /// One step of the recipe that prepares a new workspace, as written: exactly one of `copy`,

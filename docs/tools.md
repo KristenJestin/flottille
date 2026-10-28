@@ -122,7 +122,7 @@ not a lock: a swap between it and the rename is not seen.
 
 | Tool | Arguments | |
 |---|---|---|
-| `reference_read` | `name`, `path?`, `range? {offset?, length?}` | One of the project's references (`docs/projects.md`, "References"), read-only. A file reference is read by its name alone, a page at a time exactly as `fs_read` does (32 KiB at most, `range` to go on). A folder reference answers with its files and their sizes (`.git`, links and files of secrets left out, 1000 at most); `path`, relative to the reference, then names the file to read, or a folder of it to list. |
+| `reference_read` | `name`, `path?`, `range? {offset?, length?}` | One of the project's references (`docs/projects.md`, "References"), read-only. A file reference is read by its name alone, a page at a time exactly as `fs_read` does (32 KiB at most, `range` to go on). A folder reference answers with its files and their sizes (`.git`, links, files of secrets and sensitive places left out, 1000 at most); `path`, relative to the reference, then names the file to read, or a folder of it to list. |
 
 - **The list is the only door**: a name not in the agent's list is refused with `refused: no
   reference named X: the project's references are a, b`; the reference is looked up in the
@@ -132,6 +132,10 @@ not a lock: a swap between it and the rename is not seen.
   once followed are refused with `refused: X is outside the reference Y: it serves its own files
   only`; a path through a `.git` or naming a file of secrets (`.env`, `.env.*`) is refused; a
   `path` for a file reference is refused.
+- **What `fs_read` holds for the user, a reference never serves**: a path in a sensitive place
+  (The gate, 3: `.ssh`, `.netrc`, `.npmrc`, `.git-credentials`…), by the gate's own rule taken
+  from the project folder, links followed, is refused with `refused: X is in a sensitive place
+  (…), which a reference never serves: read it with fs_read, which asks the user first`.
 - **The call goes through the gate** like every other and is allowed: it names a reference, not a
   path of the place, and reads from the project folder whatever the agent's place. The result is
   masked like a file read, and recorded as an `agent.tool_served` event.
@@ -142,7 +146,7 @@ not a lock: a swap between it and the rename is not seen.
 
 | Tool | Arguments | |
 |---|---|---|
-| `commands_list` | none | The project's catalogue (`docs/projects.md`), one line each: `name: line`, and where it runs, whether it keeps running, is a check, changes nothing, is held for approval. |
+| `commands_list` | none | The project's catalogue (`docs/projects.md`), one line each: `name: line`, and where it runs, whether it keeps running, is a check, changes nothing, is held for approval, was allowed always by the user (`allowed always by the user in the project folder, never checked to change nothing`). |
 | `commands_run` | `command` or `line` (exactly one), `repository?`, `timeout? 1..600`, `why?` | Runs a catalogue command (`refused: the catalogue has no command X: list them with commands_list`) or one line, in the repository's folder (the catalogue's, or the one named) or the place's top. Its description holds a call of each form: `{"command": "test"}`, `{"line": "cargo test -p core", "repository": "api", "timeout": 120}`. |
 | `commands_status` | `run`, `action? output \| stop`, `tail? 1..1000`, `start?` | `action output` (the default): the run's state and lines of its output, the last `tail` (40 by default), or `tail` lines from line `start`. `action stop`: stops the run and everything in its process group, `SIGTERM`, then `SIGKILL` 5 s later, and answers once it ended; `tail` and `start` are refused with it. |
 
@@ -254,12 +258,16 @@ own project: a root has these two tools, a child none (it does its brief). Two f
   changes in words, one sentence each (`Start the procedure ship in workspace login: …`, then each
   grant and whether the run's children get them; `Set the tracker to Jira on acme.atlassian.net
   (ABC)`; `Add the reference style (docs/STYLE.md): …`), the user confirms it once (never for the
-  tree), and it is done only while those words still hold: a procedure whose grants changed
-  meanwhile is not started (`Request #n (procedure) was not executed: what it does changed since
+  tree), and it is done only while those words still hold: a procedure whose grants or
+  instructions (`Its agent is told: …`) changed meanwhile is not started (`Request #n (procedure) was not executed: what it does changed since
   the user allowed it; it would now: …`).
 - **What an agent never does, whatever the file says**: give a grant (`start` takes none; the
   run's grants are the procedure's), change a run's grants, set what runs on its own
   (`agent_actions` is not an argument), or reach another project (`project` is not an argument).
+  A change of the tracker always asks, whatever `settings` says: nothing checks it against the
+  project, as a forge is checked against its remote. An agent's reference is never the project
+  folder itself nor a repository's root (`.`, `api`, or a link to one): what a whole checkout
+  holds is not a document to read.
   Such an argument is refused as one that does not fit the tool. A write that cannot be done (an
   unknown procedure, a reference outside the project folder, a repository the project has not) is
   refused before anything is asked.
@@ -296,14 +304,22 @@ the call reaches, the project's never list and Flottille's own folders, and answ
 
 1. **The project folder is read-only for agents** (`docs/design.md` §6.2; no project grants
    writing there yet): `fs_write` and `fs_edit` are refused there, and `commands_run` runs at once
-   only a catalogue command that is both `check` and `read_only`; another catalogue command is
-   refused. A line is judged as the catalogue command it is, when the catalogue holds the same
-   words as a read-only check where it runs; a line the catalogue does not hold goes through the
-   rest of the gate (the refusals of 2 still refuse it, shell syntax included) and is then held
-   for the user (3), as a `catalogue` request: Once runs it, Always adds it to the project's
-   catalogue (`[commands.<its words as a name>]`, `check` and `read_only`, in the project's file
-   where it stands) and runs it, after which it runs there without asking. A workspace is where an
-   agent writes and runs.
+   only a catalogue command that is both `check` and `read_only`, or one the user allowed always
+   (`added_by = "approval"`) in the repository it was allowed in; another catalogue command is
+   refused. A line is judged as the catalogue command it is, whatever its flags, when the
+   catalogue holds the same words where it runs (a command marked `ask_before_running` still
+   asks, as that command, and one that is not a read-only check is refused); a line the catalogue
+   does not hold goes through the rest of the gate (the refusals of 2 still refuse it, shell
+   syntax included) and is then held for the user (3), as a `catalogue` request: Once runs it,
+   Always adds it to the project's catalogue (`[commands.<its words as a name>]` with
+   `added_by = "approval"`, and its `repository` when not the folder's top, in the project's file
+   where it stands) and runs it, after which it runs there without asking. Flottille does not
+   check that such a line only reads: the request says so. Always is not offered for a line that
+   reaches a sensitive place, which asks each time. A line that discards or rewrites the user's
+   own work there is refused, never held, whatever the catalogue says: `git checkout` with `--`,
+   `.`, `-f` or `--force`; `git restore`, `git clean` and `git reset`, in any form; `git stash`
+   but `list` and `show`; `git worktree remove`; `git branch -d`, `-D` or `--delete`. A workspace
+   is where an agent writes and runs.
 2. **Deny**, with a sentence saying why and what to do instead (under 2,000 characters):
    - the project's `never` list: an entry matches a line's words from any position (its first
      word is a program, in any folder), or a catalogue command by its name;
@@ -420,7 +436,7 @@ for the user and cannot be answered by them.
 | Command | |
 |---|---|
 | `flottille approvals [--json]` | The requests the user holds, each with its number, the agent, the call and why. |
-| `flottille approve <n> [--for-tree \| --always]` | Allows the request once, for the root's tree, or always (a line outside the catalogue, added to it). Refused for a request held by an agent, one already decided, `--for-tree` on a sensitive place or a request that is not a `call`, and `--always` on one that is not a `catalogue` request. |
+| `flottille approve <n> [--for-tree \| --always]` | Allows the request once, for the root's tree, or always (a line outside the catalogue, added to it). Refused for a request held by an agent, one already decided, `--for-tree` on a sensitive place or a request that is not a `call`, and `--always` on one that is not a `catalogue` request or that reaches a sensitive place. |
 | `flottille deny <n>` | Denies it: the agent is told nothing was done. |
 
 **An allowed request** is checked again (the gate on the frozen call: a refusal now, or a reason
