@@ -93,6 +93,11 @@ pr-create = "ask"
 [pull_requests]                       # how its pull requests are opened (docs/procedures.md)
 title = "type(TICKET): subject"       # the title's format, told to the agent that writes it
 reviewers = ["alice", "bob"]          # asked to review each pull request Flottille opens
+
+[agent_actions]                       # what its agents do without asking first; each "ask" (default) or "allow"
+procedures = "allow"                  # start a procedure
+settings = "ask"                      # change the forges and the tracker
+references = "ask"                    # add or remove a reference
 ```
 
 The repositories are put in dependency order (a repository after those it depends on; among those
@@ -139,6 +144,25 @@ Nothing is converted on its own.
 A procedure's keys, its grants' vocabulary and what a run of it may do are in
 [`procedures.md`](procedures.md); `flottille procedure add`, `edit` and `remove` write them in the
 file where it stands, keeping what is around them.
+
+## What agents do on their own
+
+The agent the user talks to (a root) does what the window does, through the tools `procedure` and
+`project` (`docs/tools.md`, "The project"): it reads the project's procedures and settings at once,
+and every change it makes is held for the user first, who sees what it changes in words and
+confirms it. `[agent_actions]` lets a family of these changes run on its own:
+
+| Key | The change |
+|---|---|
+| `procedures` | Starting one of the project's procedures in a workspace. Its grants are still the procedure's, as the file says them; the agent gives none. |
+| `settings` | Declaring or removing a repository's forge, or the tracker. A forge is still checked against its repository's remote. |
+| `references` | Adding or removing a reference. A reference still stays inside the project folder. |
+
+Each is `ask` (the default: held for the user each time) or `allow` (done at once). Only the user
+sets them, in the file or with the switches of the project's Settings in the window, which take
+effect at once (`project.set_agent_actions`, `docs/protocol.md`): no tool of an agent writes
+`[agent_actions]`, and an agent never reaches another project's file. A line run in the project
+folder that is not in the catalogue is held too, whatever this says (`docs/tools.md`, "The gate").
 
 ## References
 

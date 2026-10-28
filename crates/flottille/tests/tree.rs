@@ -636,12 +636,16 @@ fn a_lead_lists_the_agent_tools_ask_user_and_approval_answer_and_a_worker_at_the
     assert!(names.iter().any(|n| n == "ticket_read"));
     assert!(!names.iter().any(|n| n == "forge_write"));
     assert!(!names.iter().any(|n| n == "workspace_remove"));
-    assert_eq!(names.len(), 18);
+    // A root also reads and asks for changes to its project's procedures and settings.
+    assert!(names.iter().any(|n| n == "procedure"));
+    assert!(names.iter().any(|n| n == "project"));
+    assert_eq!(names.len(), 20);
 
     let names = worker.names();
     assert!(names.iter().any(|n| n == "ask_parent"));
     assert!(names.iter().any(|n| n == "agent_launch"));
     assert!(!names.iter().any(|n| n == "ask_user"));
+    assert!(!names.iter().any(|n| n == "procedure" || n == "project"));
 
     let names = leaf.names();
     assert_eq!(names.len(), 13, "{names:?}");

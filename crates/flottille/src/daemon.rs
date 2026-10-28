@@ -546,6 +546,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                 "project.show",
                 "project.settings",
                 "project.set_settings",
+                "project.set_agent_actions",
                 "project.ticket",
             ]
             .contains(&request.method.as_str())
@@ -568,6 +569,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     projects::settings(daemon, request.params).await
                 } else if request.method == "project.set_settings" {
                     projects::set_settings(daemon, request.params).await
+                } else if request.method == "project.set_agent_actions" {
+                    projects::set_agent_actions(&daemon, request.params)
                 } else if request.method == "project.ticket" {
                     tickets::preview(daemon, request.params).await
                 } else {

@@ -17,6 +17,7 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use flottille_core::agent::Agent;
+use flottille_core::approval::Kind;
 use flottille_core::procedure;
 use flottille_core::secrets;
 use http::{Request, Response, StatusCode};
@@ -89,7 +90,7 @@ const REPLACED: &str = "refused: this session has been replaced: a new session o
 
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
 /// the order frozen in the agent.
-const SERVED: [Definition; 21] = [
+const SERVED: [Definition; 23] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -344,6 +345,56 @@ const SERVED: [Definition; 21] = [
         idempotent: false,
         destructive: true,
         schema: || json!({"type": "object", "properties": {}, "additionalProperties": false}),
+    },
+    Definition {
+        name: "procedure",
+        title: "The project's procedures",
+        description: "The project's procedures, the named multi-step actions the user runs in a \
+            workspace (open the pull requests, merge a stack, close a workspace). list and show \
+            read them, with what each grants. start runs one in a workspace (yours when left \
+            out) as a new session of its own: it is held for the user, who sees what it grants \
+            and confirms it, unless the project lets procedures start on their own; you are \
+            answered at once, and the result comes later. You never give nor change a grant. \
+            {\"action\": \"list\"}; {\"action\": \"start\", \"name\": \"open-prs\", \
+            \"workspace\": \"login\"}.",
+        read_only: false,
+        idempotent: false,
+        destructive: true,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["list", "show", "start"]},
+                "name": {"type": "string", "description": "show, start: the procedure's name."},
+                "workspace": {"type": "string", "description": "start: the workspace it runs in; yours when left out."}
+            }, "required": ["action"], "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "project",
+        title: "The project's settings",
+        description: "This project's settings, as its Settings page shows them. settings reads \
+            each repository's forge, the tracker, the references and what agents may do on their \
+            own. set_settings declares a repository's forge or the tracker (null removes it; a \
+            tracker left out is kept); add_reference and remove_reference edit the references. \
+            A change is held for the user unless the project lets it run on its own: you are \
+            answered at once, the result comes later. {\"action\": \"set_settings\", \
+            \"repositories\": [{\"path\": \"api\", \"forge\": {\"kind\": \"github\", \
+            \"repository\": \"acme/api\"}}]}.",
+        read_only: false,
+        idempotent: false,
+        destructive: true,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["settings", "set_settings", "add_reference", "remove_reference"]},
+                "repositories": {"type": "array", "items": {"type": "object", "properties": {
+                    "path": {"type": "string"},
+                    "forge": {"type": ["object", "null"], "description": "{kind: github | bitbucket-cloud, repository} or {kind: bitbucket-data-center, host, repository}."}
+                }, "required": ["path", "forge"], "additionalProperties": false}},
+                "tracker": {"type": ["object", "null"], "description": "{kind: github, repository: <path>} or {kind: jira, site, projects}."},
+                "name": {"type": "string", "description": "The reference's name."},
+                "description": {"type": "string", "description": "add_reference: when it is worth reading."},
+                "path": {"type": "string", "description": "add_reference: relative to the project folder."}
+            }, "required": ["action"], "additionalProperties": false})
+        },
     },
     Definition {
         name: "agent_launch",
@@ -1059,22 +1110,38 @@ async fn played(
     let outcome = if replaced {
         Outcome::Refused(REPLACED.into())
     } else if grant.tools.contains(&tool) {
-        let (decided, identity) = judge(daemon, grant, tool, &args);
-        // A call the user allowed for the tree goes through, never one reaching a sensitive place.
-        let decided = match decided {
-            gate::Verdict::Ask(ask)
-                if !ask.sensitive && approvals::granted(daemon, &grant.agent, &identity) =>
-            {
-                gate::Verdict::Allow
-            }
-            decided => decided,
-        };
-        verdict = Some(decided.word());
-        match decided {
-            gate::Verdict::Allow => perform(daemon, grant, tool, args, cancelled, false).await,
-            gate::Verdict::Deny(why) => Outcome::Refused(why),
-            gate::Verdict::Ask(ask) => {
-                approvals::ask(daemon, grant, tool, &args, key, ask, identity)
+        // A write of the project shows what it changes; one that cannot be done is refused
+        // before the user is asked anything.
+        match crate::actions::prepared(daemon, grant, tool, &args).await {
+            Err(refused) => refused,
+            Ok(says) => {
+                let (decided, identity) = judge(daemon, grant, tool, &args);
+                // A call the user allowed for the tree goes through, never one reaching a
+                // sensitive place.
+                let decided = match decided {
+                    gate::Verdict::Ask(ask)
+                        if !ask.sensitive
+                            && ask.kind == Kind::Call
+                            && approvals::granted(daemon, &grant.agent, &identity) =>
+                    {
+                        gate::Verdict::Allow
+                    }
+                    decided => decided,
+                };
+                verdict = Some(decided.word());
+                match decided {
+                    gate::Verdict::Allow => {
+                        perform(daemon, grant, tool, args, cancelled, false).await
+                    }
+                    gate::Verdict::Deny(why) => Outcome::Refused(why),
+                    gate::Verdict::Ask(ask) => {
+                        let says = match ask.kind {
+                            Kind::Catalogue => crate::actions::catalogue_says(daemon, grant, &args),
+                            _ => says,
+                        };
+                        approvals::ask(daemon, grant, tool, &args, key, ask, identity, says)
+                    }
+                }
             }
         }
     } else {
@@ -1122,7 +1189,21 @@ fn considered<T>(
     consider: impl FnOnce(&gate::Call) -> T,
 ) -> T {
     let project = projects::load_project(daemon, &grant.place.project).ok();
-    let (paths, words, command) = reached(daemon, &grant.place, tool, args);
+    let (paths, words, mut command) = reached(daemon, &grant.place, tool, args);
+    // In the project folder, a line the catalogue holds as a read-only check, where it runs, is
+    // that check: what the user allowed Always runs from then on without asking.
+    if command.is_none() && grant.place.workspace.is_none() && !words.is_empty() {
+        let asked = args["repository"].as_str().unwrap_or(".");
+        command = project.as_ref().and_then(|project| {
+            let (name, _) = project.commands.iter().find(|(_, c)| {
+                c.check
+                    && c.read_only
+                    && c.repository.as_deref().unwrap_or(".") == asked
+                    && flottille_core::command::split_line(&c.line).ok().as_ref() == Some(&words)
+            })?;
+            Some(name.clone())
+        });
+    }
     let command = command.as_deref().and_then(|name| {
         let (name, command) = project.as_ref()?.commands.get_key_value(name)?;
         Some((name.as_str(), command))
@@ -1145,6 +1226,7 @@ fn considered<T>(
         never: project.as_ref().map(|project| project.never.as_slice()),
         own: &own,
         run: run.as_ref(),
+        actions: project.as_ref().map(|project| &project.agent_actions),
     };
     consider(&call)
 }
@@ -1265,6 +1347,9 @@ async fn perform(
             crate::workspaces::workspace_remove(daemon, &grant.agent, &grant.place, args).await
         }
         tool if tree::TOOLS.contains(&tool) => tree::call(daemon, grant, tool, args).await,
+        tool if crate::actions::TOOLS.contains(&tool) => {
+            crate::actions::perform(daemon, grant, tool, args).await
+        }
         _ => {
             // The file tools read and write the disk: off the daemon's thread.
             let (daemon, grant, tool) = (daemon.clone(), grant.clone(), tool.to_owned());
@@ -1478,7 +1563,7 @@ mod tests {
     #[test]
     fn the_biggest_list_stays_far_under_the_threshold_of_tool_search() {
         // About 4 characters a token: Anthropic suggests tool search past 10k tokens of
-        // definitions (`docs/reference/mcp.md` §3).
+        // definitions (`docs/reference/mcp.md` §3), 40,000 characters.
         let biggest = claude::PROVIDER.tools(true, false, true, &all_grants());
         let chars: usize = served(&claude::PROVIDER, &biggest)
             .into_iter()
@@ -1487,6 +1572,7 @@ mod tests {
                 tool.unwrap().len()
             })
             .sum();
-        assert!(chars < 20_000, "{chars} characters of definitions");
+        // About 6k tokens since the project's procedures and settings came (#112).
+        assert!(chars < 24_000, "{chars} characters of definitions");
     }
 }

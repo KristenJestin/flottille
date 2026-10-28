@@ -642,7 +642,9 @@ Answer with `flottille approve <n>` (`--for-tree` for the same call from now on)
 
 Allows the request: its call is checked again, performed, and its result handed to the agent.
 `--for-tree` allows the same call, exactly, for the whole tree of the agent's root from now on;
-never for a sensitive place.
+never for a sensitive place, nor for a change of the project an agent asked for. `--always` answers
+a line run outside the catalogue in the project folder: it is added to the project's catalogue as a
+read-only check, so that it runs there without asking from now on, then run.
 
 ```
 $ flottille approve 1

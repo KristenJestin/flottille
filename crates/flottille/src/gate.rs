@@ -3,8 +3,9 @@
 
 use std::path::{Path, PathBuf};
 
+use flottille_core::approval::Kind;
 use flottille_core::procedure::{self, Grants, Mode};
-use flottille_core::project::CatalogueCommand;
+use flottille_core::project::{AgentActions, CatalogueCommand};
 use serde_json::{Value, json};
 
 use crate::mcp::Grant;
@@ -30,6 +31,8 @@ pub struct Call<'a> {
     pub own: &'a [PathBuf],
     /// The procedure run whose grants the agent has, when it has some (`docs/procedures.md`).
     pub run: Option<&'a Run>,
+    /// What the project's agents do without asking; `None` when its configuration cannot be read.
+    pub actions: Option<&'a AgentActions>,
 }
 
 /// The grants of the procedure run an agent works in, as the gate applies them.
@@ -55,6 +58,8 @@ pub struct Ask {
     pub reasons: Vec<String>,
     /// It reaches a sensitive place: it is never allowed for a tree.
     pub sensitive: bool,
+    /// What the user may answer.
+    pub kind: Kind,
 }
 
 impl Verdict {
@@ -117,6 +122,7 @@ const TEMPLATES: [&str; 4] = [".example", ".sample", ".template", ".dist"];
 /// refusals, then what asks; anything else is allowed.
 pub fn decide(call: &Call) -> Verdict {
     let run = call.tool == "commands_run";
+    let mut outside_catalogue = None;
     // The project folder is read-only for agents (`docs/design.md` §6.2): no project grants
     // writing there yet.
     if call.grant.place.workspace.is_none() {
@@ -128,14 +134,44 @@ pub fn decide(call: &Call) -> Verdict {
             );
         }
         if run && !call.command.is_some_and(|(_, c)| c.check && c.read_only) {
-            let what = call
-                .command
-                .map_or("a line".to_owned(), |(name, _)| name.to_owned());
-            return Verdict::Deny(format!(
-                "refused: this agent works in the project folder, which is read-only for agents: \
-                 it runs only the catalogue's read-only checks there, and {what} is not one"
-            ));
+            match (call.command, call.args["line"].as_str()) {
+                // A line outside the catalogue is the user's to allow, once or always, after
+                // every other rule (`outside_catalogue`).
+                (None, Some(line)) if !call.words.is_empty() => outside_catalogue = Some(line),
+                (None, Some(line)) => {
+                    if let Err(why) = flottille_core::command::split_line(line) {
+                        return Verdict::Deny(why);
+                    }
+                }
+                (Some((name, _)), _) => {
+                    return Verdict::Deny(format!(
+                        "refused: this agent works in the project folder, which is read-only for \
+                         agents: it runs only the catalogue's read-only checks there, and {name} \
+                         is not one"
+                    ));
+                }
+                (None, None) => {}
+            }
         }
+    }
+    if let Some(family) = crate::actions::family(call.tool, call.args) {
+        return match call.actions {
+            Some(actions) if crate::actions::on_its_own(actions, family) => Verdict::Allow,
+            Some(_) => Verdict::Ask(Ask {
+                reasons: vec![crate::actions::asked(family)],
+                sensitive: false,
+                kind: Kind::Action,
+            }),
+            None => Verdict::Ask(Ask {
+                reasons: vec![
+                    "the project's configuration cannot be read, so what its agents may do on \
+                     their own is not known"
+                        .into(),
+                ],
+                sensitive: false,
+                kind: Kind::Action,
+            }),
+        };
     }
     if call.tool == "forge_write" {
         return forge_write(call);
@@ -167,7 +203,15 @@ pub fn decide(call: &Call) -> Verdict {
     let mut ask = Ask {
         reasons: Vec::new(),
         sensitive: false,
+        kind: Kind::Call,
     };
+    if let Some(line) = outside_catalogue {
+        ask.reasons.push(format!(
+            "{line} is not in the project's catalogue, and this agent works in the project \
+             folder, where agents run only the catalogue's read-only checks"
+        ));
+        ask.kind = Kind::Catalogue;
+    }
     if let (Some((grant, Mode::Ask)), Some(procedure)) = (granted, call.run) {
         ask.reasons
             .push(asked_by_grant(&procedure.procedure, grant));
@@ -1106,6 +1150,7 @@ fn forge_write(call: &Call) -> Verdict {
             "it merges a pull request whose checks or review block it, waived: {why}"
         )],
         sensitive: true,
+        kind: Kind::Call,
     })
 }
 
@@ -1136,6 +1181,7 @@ fn by_grant(run: &Run, grant: procedure::Grant) -> Verdict {
         Some(Mode::Ask) => Verdict::Ask(Ask {
             reasons: vec![asked_by_grant(&run.procedure, grant)],
             sensitive: true,
+            kind: Kind::Call,
         }),
     }
 }
@@ -1536,6 +1582,7 @@ mod tests {
         commands: BTreeMap<String, CatalogueCommand>,
         /// The procedure run the agent works in, if any.
         run: Option<Run>,
+        actions: Option<AgentActions>,
     }
 
     impl Fixture {
@@ -1580,6 +1627,7 @@ mod tests {
                 ],
                 commands: BTreeMap::new(),
                 run: None,
+                actions: Some(AgentActions::default()),
             }
         }
 
@@ -1670,6 +1718,7 @@ mod tests {
                 never,
                 own: &self.own,
                 run: self.run.as_ref(),
+                actions: self.actions.as_ref(),
             })
         }
 
@@ -1712,6 +1761,7 @@ mod tests {
                 never: Some(&self.never),
                 own: &self.own,
                 run: self.run.as_ref(),
+                actions: self.actions.as_ref(),
             })
         }
     }
@@ -2342,14 +2392,97 @@ mod tests {
             .command("fmt", "cargo fmt", |c| c.check = true);
         assert!(denied(&fixture.file("fs_write", "src/new.rs")));
         assert!(denied(&fixture.file("fs_edit", "src/a.rs")));
-        assert!(denied(&fixture.run("cargo test")));
         assert!(denied(&fixture.catalogue("fmt")));
         assert_eq!(fixture.catalogue("check"), Verdict::Allow);
         assert_eq!(fixture.file("fs_read", "src/a.rs"), Verdict::Allow);
-        let Verdict::Deny(why) = fixture.run("cargo test") else {
+        let Verdict::Deny(why) = fixture.catalogue("fmt") else {
             unreachable!()
         };
         assert!(why.contains("read-only"), "{why}");
+    }
+
+    #[test]
+    fn a_line_outside_the_catalogue_in_the_project_folder_is_held_to_be_allowed_once_or_always() {
+        let fixture = Fixture::new(None);
+        let Verdict::Ask(ask) = fixture.run("cargo test") else {
+            panic!("held")
+        };
+        assert_eq!(ask.kind, Kind::Catalogue);
+        assert!(!ask.sensitive);
+        assert!(
+            ask.reasons[0].starts_with("cargo test is not in the project's catalogue"),
+            "{:?}",
+            ask.reasons
+        );
+        // In a workspace a line is the agent's to run, as before.
+        assert_eq!(Fixture::workspace().run("cargo test"), Verdict::Allow);
+    }
+
+    #[test]
+    fn a_line_in_the_project_folder_is_still_refused_by_the_never_list_and_the_git_rules() {
+        let fixture = Fixture::new(None);
+        for line in [
+            "rm -rf build",
+            "deploy now",
+            "git push origin main",
+            "gh pr merge 3",
+        ] {
+            assert!(denied(&fixture.run(line)), "{line}");
+        }
+    }
+
+    #[test]
+    fn an_agent_s_write_of_the_project_is_held_unless_its_family_runs_on_its_own() {
+        let mut fixture = Fixture::new(None);
+        let start = json!({"action": "start", "name": "open-prs", "workspace": "w"});
+        let Verdict::Ask(ask) = fixture.judge("procedure", start.clone(), Some(&fixture.never))
+        else {
+            panic!("held")
+        };
+        assert_eq!(ask.kind, Kind::Action);
+        assert!(!ask.sensitive);
+        for (tool, read) in [
+            ("procedure", json!({"action": "list"})),
+            ("procedure", json!({"action": "show", "name": "open-prs"})),
+            ("project", json!({"action": "settings"})),
+        ] {
+            assert_eq!(
+                fixture.judge(tool, read, Some(&fixture.never)),
+                Verdict::Allow
+            );
+        }
+        for write in [
+            json!({"action": "set_settings", "tracker": null}),
+            json!({"action": "add_reference", "name": "a", "description": "b", "path": "c"}),
+            json!({"action": "remove_reference", "name": "a"}),
+        ] {
+            assert!(asked(
+                &fixture.judge("project", write, Some(&fixture.never)),
+                false
+            ));
+        }
+        fixture.actions = Some(AgentActions {
+            procedures: Mode::Allow,
+            ..AgentActions::default()
+        });
+        assert_eq!(
+            fixture.judge("procedure", start.clone(), Some(&fixture.never)),
+            Verdict::Allow
+        );
+        assert!(asked(
+            &fixture.judge(
+                "project",
+                json!({"action": "set_settings", "tracker": null}),
+                Some(&fixture.never)
+            ),
+            false
+        ));
+        // A configuration that cannot be read lets nothing run on its own.
+        fixture.actions = None;
+        assert!(asked(
+            &fixture.judge("procedure", start, Some(&fixture.never)),
+            false
+        ));
     }
 
     #[test]

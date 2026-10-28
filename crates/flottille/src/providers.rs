@@ -105,6 +105,7 @@ const FILE_AND_COMMAND_TOOLS: [&str; 8] = [
     "commands_status",
 ];
 const AGENT_TOOLS: [&str; 4] = ["agent_launch", "agent_send", "agent_status", "agent_stop"];
+const ACTION_TOOLS: [&str; 2] = ["procedure", "project"];
 
 /// The grants `forge_write` acts by.
 pub const FORGE_GRANTS: [Grant; 3] = [Grant::PrCreate, Grant::PrMergeSquash, Grant::PipelineRerun];
@@ -142,6 +143,11 @@ impl Provider {
         }
         if !at_depth_limit {
             names.extend(AGENT_TOOLS);
+        }
+        // What the user does in the window, the agent they talk to does too, asking first
+        // (`docs/tools.md`, "The project"); a child does its brief and nothing of the project's.
+        if root {
+            names.extend(ACTION_TOOLS);
         }
         names.push("report");
         names.push(if root { "ask_user" } else { "ask_parent" });
@@ -1029,6 +1035,8 @@ mod tests {
                 "agent_send",
                 "agent_status",
                 "agent_stop",
+                "procedure",
+                "project",
                 "report",
                 "ask_user",
                 "approval_answer",
@@ -1051,6 +1059,11 @@ mod tests {
         assert!(lead_child.contains(&"ask_parent".to_owned()));
         assert!(lead_child.contains(&"approval_answer".to_owned()));
         assert!(!lead_child.contains(&"ask_user".to_owned()));
+        // A child does its brief: the project's procedures and settings are the root's.
+        for child in [&leaf, &lead_child] {
+            assert!(!child.contains(&"procedure".to_owned()));
+            assert!(!child.contains(&"project".to_owned()));
+        }
     }
 
     #[test]
@@ -1060,7 +1073,7 @@ mod tests {
         assert!(!main.contains(&"forge_read".to_owned()));
         assert!(!main.contains(&"ticket_read".to_owned()));
         let workspace = short(claude::PROVIDER.tools(true, false, true, &Grants::new()));
-        assert_eq!(workspace.len(), 18);
+        assert_eq!(workspace.len(), 20);
         assert_eq!(workspace[8], "forge_read", "after the command tools");
         assert_eq!(workspace[9], "reference_read", "after forge_read");
         assert_eq!(workspace[10], "ticket_read", "after reference_read");

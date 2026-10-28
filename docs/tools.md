@@ -7,6 +7,7 @@ depend on what it can do (`docs/agents.md`): the file and command tools below fo
 `reference_read`, then `forge_read` and `ticket_read` for an agent in a workspace, and
 `forge_write` or `workspace_remove` for one whose procedure run grants what they do
 (`docs/procedures.md`: a tool that could only refuse is not listed),
+`procedure` and `project` for a root (below, "The project"),
 and the tree's tools (`agent_*`, `report`, `ask_user` or `ask_parent`,
 `approval_answer`).
 
@@ -234,6 +235,35 @@ asked or refused by its run's grants.
 It goes through the gate like every call, which allows it. How a ticket is read, Jira's text
 turned into plain text, and what is assumed of `acli`'s output, is in [`tickets.md`](tickets.md).
 
+## The project
+
+What the user does in the window, the agent they talk to does too, under the gate, always on its
+own project: a root has these two tools, a child none (it does its brief). Two families with an
+`action`, as `agent_status` is:
+
+| Tool | |
+|---|---|
+| `procedure {action: list \| show \| start, name?, workspace?}` | `list` and `show` read the project's procedures, with what each grants (`docs/procedures.md`). `start` runs one in a workspace, the agent's own when `workspace` is left out (one in the project folder must name one), as a new root of its own: the same as the window's confirmation, with the procedure's own grants as its file says them. Refused, nothing asked, for a procedure or a workspace the project has not, or one that writes to a forge none is declared for. |
+| `project {action: settings \| set_settings \| add_reference \| remove_reference, …}` | `settings` reads each repository's forge (and what its remote proposes), the tracker, the references and what agents do on their own (`docs/projects.md`). `set_settings {repositories?: [{path, forge}], tracker?}` declares a repository's forge or the tracker (`null` removes it; a tracker left out is kept), checked as `project.set_settings` checks them; `add_reference {name, description, path}` and `remove_reference {name}` edit the references as `flottille reference add` and `remove` do. The file is written where it stands, its comments kept. |
+
+- **Reads run at once.** `procedure` `list` and `show`, `project` `settings`.
+- **Every write is held** for the user, as any held call is (answered at once that it waits, the
+  result later as a delivery), unless the project's `[agent_actions]` lets its family run on its
+  own (`docs/projects.md`, "What agents do on their own"): `procedures` for `start`, `settings`
+  for `set_settings`, `references` for the other two. Its request is an `action`: it says what it
+  changes in words, one sentence each (`Start the procedure ship in workspace login: …`, then each
+  grant and whether the run's children get them; `Set the tracker to Jira on acme.atlassian.net
+  (ABC)`; `Add the reference style (docs/STYLE.md): …`), the user confirms it once (never for the
+  tree), and it is done only while those words still hold: a procedure whose grants changed
+  meanwhile is not started (`Request #n (procedure) was not executed: what it does changed since
+  the user allowed it; it would now: …`).
+- **What an agent never does, whatever the file says**: give a grant (`start` takes none; the
+  run's grants are the procedure's), change a run's grants, set what runs on its own
+  (`agent_actions` is not an argument), or reach another project (`project` is not an argument).
+  Such an argument is refused as one that does not fit the tool. A write that cannot be done (an
+  unknown procedure, a reference outside the project folder, a repository the project has not) is
+  refused before anything is asked.
+
 ## The tree's tools
 
 The tools through which agents launch other agents and answer for them (`docs/design.md` §4.3,
@@ -265,9 +295,15 @@ the arguments, the words of the line a run would start, the catalogue command it
 the call reaches, the project's never list and Flottille's own folders, and answers:
 
 1. **The project folder is read-only for agents** (`docs/design.md` §6.2; no project grants
-   writing there yet): `fs_write` and `fs_edit` are refused there, and `commands_run` runs only a
-   catalogue command that is both `check` and `read_only`. A workspace is where an agent writes
-   and runs.
+   writing there yet): `fs_write` and `fs_edit` are refused there, and `commands_run` runs at once
+   only a catalogue command that is both `check` and `read_only`; another catalogue command is
+   refused. A line is judged as the catalogue command it is, when the catalogue holds the same
+   words as a read-only check where it runs; a line the catalogue does not hold goes through the
+   rest of the gate (the refusals of 2 still refuse it, shell syntax included) and is then held
+   for the user (3), as a `catalogue` request: Once runs it, Always adds it to the project's
+   catalogue (`[commands.<its words as a name>]`, `check` and `read_only`, in the project's file
+   where it stands) and runs it, after which it runs there without asking. A workspace is where an
+   agent writes and runs.
 2. **Deny**, with a sentence saying why and what to do instead (under 2,000 characters):
    - the project's `never` list: an entry matches a line's words from any position (its first
      word is a program, in any folder), or a catalogue command by its name;
@@ -325,7 +361,9 @@ the call reaches, the project's never list and Flottille's own folders, and answ
    left there.
 3. **Ask**: a sensitive place; a path outside the place, or one that cannot be resolved; a
    catalogue command marked `ask_before_running`, or whose program is a shell; a run when the
-   project's configuration cannot be read. Sensitive places are `.env` and `.env.*` anywhere but
+   project's configuration cannot be read; a line outside the catalogue in the project folder (1);
+   a write of `procedure` or `project` whose family the project does not let run on its own
+   ("The project"). Sensitive places are `.env` and `.env.*` anywhere but
    the templates (`.example`, `.sample`, `.template`, `.dist`), `.ssh`, `.gnupg`, `.aws`, `.azure`,
    `.config/gcloud`, `.kube`, `.docker/config.json`, `.config/gh`, `.netrc`, `.npmrc`, `.pypirc`,
    `.git-credentials`, `.local/share/keyrings`, `Library/Keychains` and the agents' logins
@@ -371,8 +409,9 @@ twice gives the same request. A request that cannot be written refuses the call:
 request for the user could not be made, so nothing was done; say so and go on with what does not
 depend on it`.
 
-**The user answers** a request they hold: deny, allow once, or allow for the root's tree, which
-grants that exact call (its tool, its paths, its words or its catalogue command with its line,
+**The user answers** a request they hold: deny, allow once, or allow for the root's tree (a
+`call` only: never a `catalogue` request, which is allowed once or always, nor an `action`, which is
+allowed once), which grants that exact call (its tool, its paths, its words or its catalogue command with its line,
 not a write's content nor a read's page) to every agent of the tree from then on without asking;
 it is never given for a request that reaches a sensitive place, and a sensitive place asks every
 time; so does a request a procedure's `ask` grant held. A request held by an agent is not listed
@@ -381,7 +420,7 @@ for the user and cannot be answered by them.
 | Command | |
 |---|---|
 | `flottille approvals [--json]` | The requests the user holds, each with its number, the agent, the call and why. |
-| `flottille approve <n> [--for-tree]` | Allows the request once, or for the root's tree. Refused for a request held by an agent, one already decided, and `--for-tree` on a sensitive place. |
+| `flottille approve <n> [--for-tree \| --always]` | Allows the request once, for the root's tree, or always (a line outside the catalogue, added to it). Refused for a request held by an agent, one already decided, `--for-tree` on a sensitive place or a request that is not a `call`, and `--always` on one that is not a `catalogue` request. |
 | `flottille deny <n>` | Denies it: the agent is told nothing was done. |
 
 **An allowed request** is checked again (the gate on the frozen call: a refusal now, or a reason
@@ -390,7 +429,8 @@ to ask that the request did not have, stops it), performed as the agent's call (
 delivery, urgent and masked, then sent to it (`docs/agents.md`):
 
 - `Request #n (tool) was approved by the user, and Flottille has now done it. Its result:` and
-  the result;
+  the result (`…approved by the user, who added it to the project's catalogue as <name> (run it
+  with commands_run {"command": "<name>"} from now on), and Flottille…` for Always);
 - `Request #n (tool) was approved by the user, but nothing was done: …` for a failure;
 - `Request #n (tool) was not executed: …` for a refusal, or when the situation changed;
 - `Request #n (tool) was refused by the user. Nothing was done.` for a denial;

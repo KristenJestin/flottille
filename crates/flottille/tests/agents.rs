@@ -161,6 +161,8 @@ fn the_exact_claude_code_options_are_sent() {
         "agent_send",
         "agent_status",
         "agent_stop",
+        "procedure",
+        "project",
         "report",
         "ask_user",
         "approval_answer",

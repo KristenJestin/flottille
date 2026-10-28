@@ -18,13 +18,18 @@ pub fn approvals(paths: &Paths, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn approve(paths: &Paths, number: u64, for_tree: bool) -> Result<()> {
+pub fn approve(paths: &Paths, number: u64, for_tree: bool, always: bool) -> Result<()> {
     let decided = Client::connect_or_start(paths)?.request(
         "approval.approve",
-        json!({"number": number, "for_tree": for_tree}),
+        json!({"number": number, "for_tree": for_tree, "always": always}),
     )?;
     let agent = decided["request"]["agent"].as_str().unwrap_or("?");
-    if for_tree {
+    if always {
+        println!(
+            "Request #{number} is allowed, and its line is added to the project's catalogue: \
+             Flottille runs it and hands the result to agent {agent}."
+        );
+    } else if for_tree {
         println!(
             "Request #{number} is allowed, and the same call for the tree of agent {agent} from \
              now on; Flottille performs it and hands the result to the agent."
