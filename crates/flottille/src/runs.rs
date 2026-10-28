@@ -1,4 +1,4 @@
-//! The command tools: `commands_list`, `commands_run`, `commands_output`, `commands_stop`
+//! The command tools: `commands_list`, `commands_run`, `commands_status`
 //! (`docs/tools.md`, `docs/reference/hemera.md` §3 "Commands").
 //!
 //! A run is a line split without a shell and spawned in a process group of its own, with the
@@ -269,7 +269,7 @@ pub async fn commands_run(
     if !(1..=WAIT_SECONDS_MAX).contains(&wait) {
         return Outcome::Refused(format!(
             "refused: timeout must be 1 to {WAIT_SECONDS_MAX} seconds: a run that takes longer \
-             keeps going, read it with commands_output"
+             keeps going, read it with commands_status"
         ));
     }
     let Request {
@@ -588,45 +588,46 @@ async fn stop(daemon: &Daemon, id: &str, state: RunState) {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct OutputArguments {
+struct StatusArguments {
     run: String,
+    action: Option<String>,
     tail: Option<usize>,
     start: Option<usize>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StopArguments {
-    run: String,
-}
-
-pub fn commands_output(daemon: &Daemon, agent: &str, args: Value) -> Outcome {
-    let args: OutputArguments = match arguments("commands_output", args) {
-        Ok(args) => args,
-        Err(refusal) => return refusal,
-    };
-    let tail = args.tail.unwrap_or(TAIL_LINES);
-    if !(1..=TAIL_LINES_MAX).contains(&tail) {
-        return Outcome::Refused(format!(
-            "refused: tail must be 1 to {TAIL_LINES_MAX} lines: read on with start"
-        ));
-    }
-    if let Err(refusal) = own(daemon, agent, &args.run) {
-        return refusal;
-    }
-    Outcome::Done(describe(daemon, &args.run, Some(tail), args.start, false))
-}
-
-pub async fn commands_stop(daemon: &Daemon, agent: &str, args: Value) -> Outcome {
-    let args: StopArguments = match arguments("commands_stop", args) {
+/// `commands_status`: the state and the output of a run this agent started, or its stop.
+pub async fn commands_status(daemon: &Daemon, agent: &str, args: Value) -> Outcome {
+    let args: StatusArguments = match arguments("commands_status", args) {
         Ok(args) => args,
         Err(refusal) => return refusal,
     };
     if let Err(refusal) = own(daemon, agent, &args.run) {
         return refusal;
     }
-    stop(daemon, &args.run, RunState::Stopped).await;
-    Outcome::Done(describe(daemon, &args.run, None, None, false))
+    match args.action.as_deref().unwrap_or("output") {
+        "output" => {
+            let tail = args.tail.unwrap_or(TAIL_LINES);
+            if !(1..=TAIL_LINES_MAX).contains(&tail) {
+                return Outcome::Refused(format!(
+                    "refused: tail must be 1 to {TAIL_LINES_MAX} lines: read on with start"
+                ));
+            }
+            Outcome::Done(describe(daemon, &args.run, Some(tail), args.start, false))
+        }
+        "stop" => {
+            if args.tail.is_some() || args.start.is_some() {
+                return Outcome::Refused(
+                    "refused: tail and start are for action output; action stop only stops the                      run and answers with the end of its output"
+                        .into(),
+                );
+            }
+            stop(daemon, &args.run, RunState::Stopped).await;
+            Outcome::Done(describe(daemon, &args.run, None, None, false))
+        }
+        other => Outcome::Refused(format!(
+            "refused: commands_status has no action {other:?}: its actions are output (the              default) and stop"
+        )),
+    }
 }
 
 /// The run, refused unless the agent started it.
@@ -701,7 +702,11 @@ fn describe(
     let seconds = (run.ended_at.unwrap_or_else(now_ms) - run.started_at) as f64 / 1000.0;
     let mut text = format!("run {}: {label} {state} after {seconds:.1} s", run.id);
     if end.is_none() && answer_of_run {
-        text.push_str("\nit keeps going: read it with commands_output, stop it with commands_stop");
+        text.push_str(&format!(
+            "\nit keeps going: read it with commands_status {{\"run\": \"{id}\"}}, stop it with \
+             commands_status {{\"run\": \"{id}\", \"action\": \"stop\"}}",
+            id = run.id
+        ));
     }
     let lines = display_lines(&output);
     if lines.is_empty() {
@@ -717,13 +722,13 @@ fn describe(
     if from > 0 {
         let earlier = from.saturating_sub(tail) + 1;
         about.push_str(&format!(
-            "; earlier lines: commands_output {{\"run\": \"{}\", \"start\": {earlier}}}",
+            "; earlier lines: commands_status {{\"run\": \"{}\", \"start\": {earlier}}}",
             run.id
         ));
     }
     if to < lines.len() {
         about.push_str(&format!(
-            "; later lines: commands_output {{\"run\": \"{}\", \"start\": {}}}",
+            "; later lines: commands_status {{\"run\": \"{}\", \"start\": {}}}",
             run.id,
             to + 1
         ));

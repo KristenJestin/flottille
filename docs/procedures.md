@@ -46,7 +46,7 @@ gate refuses to agents otherwise:
 | `pr-create` | `forge_write` `pr-create`: opens the pull request of the workspace's branch into the repository's base. |
 | `pr-merge-squash` | `forge_write` `pr-merge-squash`: merges the open pull request of the workspace's branch, by squash. |
 | `pipeline-rerun` | `forge_write` `pipeline-rerun`: re-runs the failed jobs of the pipelines of the branch's last commit. |
-| `workspace-remove` | `workspace_remove`: removes the run's own workspace, as `flottille workspace remove` does, and deletes its empty branches; refused while an agent or a command run outside the run works in it. |
+| `workspace-remove` | `workspace_remove`: removes the run's own workspace, as `flottille workspace remove` does, and deletes its empty branches; refused while an agent or a command run outside the run works in it. The tool is listed only to an agent whose run grants this. |
 
 Each grant is `allow` (let through at once) or `ask` (held for the user every time, as the gate
 holds a call today: the agent is answered at once that the request waits, and the result comes
@@ -147,8 +147,12 @@ the same checks (the remote kept, the workspace's own pull request, not a fork's
 base), through `bkt pr create`, `bkt pr merge --strategy squash` and, on Cloud only, `bkt pipeline
 run --ref <branch>` after the branch's newest pipeline failed: what each does, and what differs
 from `gh`, is in [`forges.md`](forges.md#bitbucket).
-Every agent in a workspace lists it (its tool list is fixed when it starts); outside a run it
-answers `refused: forge_write writes to the forge only inside a procedure that grants it…`.
+It is listed only to an agent in a workspace whose run grants one of the three actions (its tool
+list is fixed when it starts, from the grants the run holds then): the run's root, and its
+children in the run's workspace when the run gives them its grants. Listing grants nothing: the
+gate still decides each call, refusing an action the run does not grant
+(`refused: the procedure P does not grant pr-create…`). An agent outside such a run does not have
+the tool.
 
 ## The project's pull requests
 

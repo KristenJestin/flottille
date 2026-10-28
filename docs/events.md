@@ -490,6 +490,6 @@ the agent that started it, and `run`, its id.
 | Field | |
 |---|---|
 | `agent`, `run` | |
-| `state` | `exited` (by itself), `stopped` (`commands_stop`, or the call that started it stopped), `interrupted` (the daemon stopped, or the one that ran it is gone). |
+| `state` | `exited` (by itself), `stopped` (`commands_status` with `action: stop`, or the call that started it stopped), `interrupted` (the daemon stopped, or the one that ran it is gone). |
 | `exit_code` | Its exit code, `null` when it did not exit by itself or a signal ended it. |
 | `signal` | The signal that ended it, `null` otherwise. |

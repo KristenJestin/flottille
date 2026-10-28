@@ -113,7 +113,7 @@ fn secret_in_pieces() -> Value {
 }
 
 #[test]
-fn a_secret_split_over_several_pieces_reads_masked_in_agent_read() {
+fn a_secret_split_over_several_pieces_reads_masked_in_a_conversation_page() {
     let user = user(json!([{"when": "go", "do": secret_in_pieces()}]));
     let (id, after) = run(&user, "go");
     turn_ended(&user, &id, after, 1);
@@ -582,7 +582,7 @@ fn a_tool_served_between_the_pieces() -> Value {
 const THE_REPLY: &str = "I will look at the files now, then the token is [masked], keep it quiet";
 
 #[test]
-fn a_tool_served_between_two_pieces_of_a_reply_does_not_split_it_in_agent_read() {
+fn a_tool_served_between_two_pieces_of_a_reply_does_not_split_it_in_a_conversation_page() {
     let user = user(json!([{"when": "go", "do": a_tool_served_between_the_pieces()}]));
     let (id, after) = run(&user, "go");
     turn_ended(&user, &id, after, 1);

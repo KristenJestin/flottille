@@ -33,7 +33,7 @@ pub enum RunState {
     Running,
     /// Its process ended by itself, with an exit code or by a signal.
     Exited,
-    /// Ended by `commands_stop`, or by the call that started it being stopped.
+    /// Ended by `commands_status` with `action: stop`, or by the call that started it being stopped.
     Stopped,
     /// The daemon that ran it stopped, or died.
     Interrupted,

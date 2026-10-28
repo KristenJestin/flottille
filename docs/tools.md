@@ -4,8 +4,9 @@ The tools of the agents Flottille runs, and the MCP server that serves them: the
 `docs/design.md` §1. It follows `docs/reference/hemera.md` §3, with the rules of
 `docs/reference/mcp.md` §4 where they differ. A session lists the tools of its agent, which
 depend on what it can do (`docs/agents.md`): the file and command tools below for every agent,
-`reference_read`, then `forge_read`, `ticket_read`, `forge_write` and `workspace_remove` for an
-agent in a workspace,
+`reference_read`, then `forge_read` and `ticket_read` for an agent in a workspace, and
+`forge_write` or `workspace_remove` for one whose procedure run grants what they do
+(`docs/procedures.md`: a tool that could only refuse is not listed),
 and the tree's tools (`agent_*`, `report`, `ask_user` or `ask_parent`,
 `approval_answer`).
 
@@ -37,7 +38,7 @@ and the tree's tools (`agent_*`, `report`, `ask_user` or `ask_parent`,
 - **Every tool listed** has a `title`, a description (what it does, when to use it, its effects,
   when it refuses), `inputSchema`, annotations (`readOnlyHint`, `idempotentHint`,
   `destructiveHint`, `openWorldHint: false`) and `_meta["anthropic/alwaysLoad"]: true`: in bare
-  mode these tools are all the agent has, so they load upfront.
+  mode these tools are all the agent has, so they load upfront. The bridge also sets `alwaysLoad: true` on the server's entry of the `--mcp-config` it gives `claude` (`docs/reference/mcp.md` §4 rule 7).
 - **A call's key**, `_meta["claudecode/toolUseId"]` (Claude Code sends it with every call): a
   call is played once for its key, and a retry with the same key waits for the first one and gets
   its answer. Without a key there is no deduplication, which the log says once per agent. The last
@@ -62,7 +63,7 @@ and the tree's tools (`agent_*`, `report`, `ask_user` or `ask_parent`,
 The agent's place is its folder: a workspace, or the project folder (`main`).
 
 **Every call is decided once**, by the gate (below), after the tool is known to be the agent's
-and before it is performed: `commands_output` and `commands_stop` as much as the file tools. A
+and before it is performed: `commands_status` as much as the file tools. A
 path outside the place is asked for; the tools check again that a path they resolve is inside,
 and refuse it with `refused: X is outside this agent's place: …`, unless the user allowed the call.
 A path is resolved this way:
@@ -141,9 +142,8 @@ not a lock: a swap between it and the rename is not seen.
 | Tool | Arguments | |
 |---|---|---|
 | `commands_list` | none | The project's catalogue (`docs/projects.md`), one line each: `name: line`, and where it runs, whether it keeps running, is a check, changes nothing, is held for approval. |
-| `commands_run` | `command` or `line` (exactly one), `repository?`, `timeout? 1..600`, `why?` | Runs a catalogue command (`refused: the catalogue has no command X: list them with commands_list`) or one line, in the repository's folder (the catalogue's, or the one named) or the place's top. |
-| `commands_output` | `run`, `tail? 1..1000`, `start?` | The run's state and lines of its output: the last `tail` (40 by default), or `tail` lines from line `start`. |
-| `commands_stop` | `run` | Stops the run and everything in its process group: `SIGTERM`, then `SIGKILL` 5 s later. Answers once it ended. |
+| `commands_run` | `command` or `line` (exactly one), `repository?`, `timeout? 1..600`, `why?` | Runs a catalogue command (`refused: the catalogue has no command X: list them with commands_list`) or one line, in the repository's folder (the catalogue's, or the one named) or the place's top. Its description holds a call of each form: `{"command": "test"}`, `{"line": "cargo test -p core", "repository": "api", "timeout": 120}`. |
+| `commands_status` | `run`, `action? output \| stop`, `tail? 1..1000`, `start?` | `action output` (the default): the run's state and lines of its output, the last `tail` (40 by default), or `tail` lines from line `start`. `action stop`: stops the run and everything in its process group, `SIGTERM`, then `SIGKILL` 5 s later, and answers once it ended; `tail` and `start` are refused with it. |
 
 - **No shell, ever.** A line is split as `flottille_core::command` does (the recipe's `run` steps
   too): words on whitespace, a quoted part kept whole, a backslash literal. A newline, `|`, `&`,
@@ -157,8 +157,8 @@ not a lock: a swap between it and the rename is not seen.
   A call stopped by its client stops its run.
 - **The answer**: `run <id>: <name> <state> after <s> s` (`is running`, `exited with code N`,
   `was killed by signal N`, `was stopped`, `was interrupted…`), then, while it runs, `it keeps
-  going: read it with commands_output, stop it with commands_stop`, then `(lines a-b of N…)` with
-  how to read the lines before or after (`commands_output {"run", "start"}`), then the lines. A
+  going: read it with commands_status {"run": "<id>"}, stop it with commands_status {"run": "<id>", "action": "stop"}`, then `(lines a-b of N…)` with
+  how to read the lines before or after (`commands_status {"run", "start"}`), then the lines. A
   line longer than 2,000 characters shows as several; the lines shown are cut to stay under the
   limit.
 - **Only the agent that started a run** reads or stops it: `refused: X is not a run this agent
@@ -191,7 +191,7 @@ not a lock: a swap between it and the rename is not seen.
   (`remote.<name>.pushurl`, which git does not rewrite) and a `git config` write all get past it.
   The gate refuses each of these in the words of a line (below); a script the agent wrote and runs
   is not read, and there the environment is the only wall.
-- **A stop ends the run's process group, not every descendant.** `commands_stop`, a timeout of
+- **A stop ends the run's process group, not every descendant.** `commands_status` with `action stop`, a timeout of
   the call's client and the daemon's stop signal the group the run was spawned in (`SIGTERM`,
   then `SIGKILL` after 5 s), and what the run left in its group is killed when its own process
   ends. A process that left the group (`setsid`, a daemon that forks and detaches) escapes all
@@ -209,9 +209,9 @@ not a lock: a swap between it and the rename is not seen.
 
 | Tool | |
 |---|---|
-| `forge_read {repository?}` | The pull request of the workspace's branch in each of its repositories, or the one named: number, state, base, link, review, checks with their states, comments and reviews. Read only, through the user's own `gh`, run by the daemon; an agent has no forge sign-in of its own. A repository the workspace does not take is refused (`refused: X is not a repository of this agent's workspace: it has …`). Only an agent in a workspace has it. |
+| `forge_read {repository?, detail? short \| full}` | The pull request of the workspace's branch in each of its repositories, or the one named: number, state, base, link, review, checks with their states, and how many comments and reviews it has (`comments: 2, read them with forge_read {"detail": "full"}`); `detail full` gives their texts, cut and under the result limit. Read only, through the user's own `gh`, run by the daemon; an agent has no forge sign-in of its own. A repository the workspace does not take is refused (`refused: X is not a repository of this agent's workspace: it has …`). Only an agent in a workspace has it. |
 
-| `forge_write {action, repository, title?, body?, draft?, waive?}` | Opens the pull request of the workspace's branch (`pr-create`, with the project's reviewers), merges it by squash (`pr-merge-squash`; refused while its checks fail or run or a review asks for changes, unless `waive` gives the user's words, which holds the merge for their approval) or re-runs the failed jobs of its last commit's pipelines (`pipeline-rerun`), in one of the workspace's repositories, through the user's own `gh` run by the daemon. Only inside a procedure's run that grants the action (`docs/procedures.md`): refused otherwise (`refused: forge_write writes to the forge only inside a procedure that grants it…`, `refused: the procedure P does not grant pr-create: it grants …`), held for the user when the grant is `ask`. Only an agent in a workspace has it. |
+| `forge_write {action, repository, title?, body?, draft?, waive?}` | Opens the pull request of the workspace's branch (`pr-create`, with the project's reviewers), merges it by squash (`pr-merge-squash`; refused while its checks fail or run or a review asks for changes, unless `waive` gives the user's words, which holds the merge for their approval) or re-runs the failed jobs of its last commit's pipelines (`pipeline-rerun`), in one of the workspace's repositories, through the user's own `gh` run by the daemon. Only inside a procedure's run that grants an action (`docs/procedures.md`): the tool is **listed** only to an agent in a workspace whose run grants `pr-create`, `pr-merge-squash` or `pipeline-rerun` (the run's own root, and its children in the run's workspace when the run gives them its grants), the list being fixed when the agent is made; the gate still decides each call, refusing an action the run does not grant (`refused: the procedure P does not grant pr-create: it grants …`) and holding one granted with `ask` for the user. Its description holds a call of `pr-create` and of `pr-merge-squash`. |
 
 `forge_read` goes through the gate like every call, which allows it; `forge_write` is allowed,
 asked or refused by its run's grants.
@@ -220,7 +220,7 @@ asked or refused by its run's grants.
 
 | Tool | |
 |---|---|
-| `workspace_remove {}` | Removes the agent's own workspace as `flottille workspace remove` does (`docs/workspaces.md`, "Removal"): refused, nothing touched, while a repository holds uncommitted work or commits on no remote, or while an agent outside the run's tree works in the workspace or a command run not the run's own runs there (`refused: workspace … is not removed, nothing was touched: the agent …, outside this run, works in it…`), each named; then deletes, in each repository, the workspace's branch when it holds no commit of its own (every commit of it is in its base's tracking ref), and keeps the others. Only inside a procedure's run that grants `workspace-remove`, and so only for the run's own workspace (`docs/procedures.md`): refused otherwise (`refused: workspace_remove removes a workspace only inside a procedure that grants it…`). Only an agent in a workspace has it. |
+| `workspace_remove {}` | Removes the agent's own workspace as `flottille workspace remove` does (`docs/workspaces.md`, "Removal"): refused, nothing touched, while a repository holds uncommitted work or commits on no remote, or while an agent outside the run's tree works in the workspace or a command run not the run's own runs there (`refused: workspace … is not removed, nothing was touched: the agent …, outside this run, works in it…`), each named; then deletes, in each repository, the workspace's branch when it holds no commit of its own (every commit of it is in its base's tracking ref), and keeps the others. Only inside a procedure's run that grants `workspace-remove`, and so only for the run's own workspace (`docs/procedures.md`): **listed** only to an agent in a workspace whose run grants it, as `forge_write` is. |
 
  How the forge is read, and what it never touches (a token,
 `gh auth token`), is in [`forges.md`](forges.md).
@@ -229,7 +229,7 @@ asked or refused by its run's grants.
 
 | Tool | |
 |---|---|
-| `ticket_read {ticket?}` | The ticket the agent's workspace is linked to, or `ticket`, another ticket of the same tracker by its key (`#123` or `ABC-123`): its reference, tracker, state, title, link, description and comments (the newest 30), masked. Read only, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own, and none of either's write commands is reachable from it. The tracker is that of the workspace's ticket, or GitHub's (its own repositories' issues) when it has none; a key of the other tracker is refused (`refused: ABC-123 is a Jira ticket, and this workspace's tracker is GitHub issues (#123): …`), and nothing is asked of any tracker. A workspace with no ticket and no key is refused (`refused: workspace X is linked to no ticket: …`). An unreadable ticket (`gh` or `acli` missing or signed out, no such ticket) is an error saying why and what to do. Only an agent in a workspace has it, whether a ticket is linked or not. |
+| `ticket_read {ticket?, detail? short \| full}` | The ticket the agent's workspace is linked to, or `ticket`, another ticket of the same tracker by its key (`#123` or `ABC-123`): its reference, tracker, state, title, link and description, masked, and how many comments it has with the newest one's author (`Comments: 12, … read them with ticket_read {"detail": "full"}`); `detail full` gives the comments (the newest 30). Read only, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own, and none of either's write commands is reachable from it. The tracker is that of the workspace's ticket, or GitHub's (its own repositories' issues) when it has none; a key of the other tracker is refused (`refused: ABC-123 is a Jira ticket, and this workspace's tracker is GitHub issues (#123): …`), and nothing is asked of any tracker. A workspace with no ticket and no key is refused (`refused: workspace X is linked to no ticket: …`). An unreadable ticket (`gh` or `acli` missing or signed out, no such ticket) is an error saying why and what to do. Only an agent in a workspace has it, whether a ticket is linked or not. |
 
 It goes through the gate like every call, which allows it. How a ticket is read, Jira's text
 turned into plain text, and what is assumed of `acli`'s output, is in [`tickets.md`](tickets.md).
@@ -241,12 +241,13 @@ The tools through which agents launch other agents and answer for them (`docs/de
 reach only the caller's own children, and are refused with `refused: <id> is not one of your
 children: agent_status lists them` for any other agent.
 
+Two of them take an `action`, as the tools of a family do: `agent_status` (`status` or `conversation`) and `commands_status` above.
+
 | Tool | |
 |---|---|
-| `agent_launch {title, brief, provider?, model?, effort?, role?, workspace?}` | Starts a child on one task and answers at once with its id. `provider` is the caller's when left out, and the child's for life; `model` and `effort` the provider's defaults when left out (`docs/agents.md`, "Providers"): a provider not enabled or not ready, or a model or an effort it is known not to offer, is refused naming those that are (`refused: provider opencode is not enabled (…); the ready providers are claude`). `role` is `worker` (by default) or `lead`; `workspace` is an existing workspace's name, `{"new": {"name", "repositories"?}}` for a new one (made at once, the child's brief sent once it is prepared; a workspace that fails fails the child), or left out for the caller's own place. Refused, never queued, above the project's children cap (`refused: N children already run in project P, its cap: do the work yourself, or wait for one of them to end (agent_stop ends one of yours)`) and past the depth limit. |
+| `agent_launch {title, brief, provider?, model?, effort?, role?, new_workspace?, repositories?}` | Starts a child on one task and answers at once with its id. `provider` is the caller's when left out, and the child's for life; `model` and `effort` the provider's defaults when left out (`docs/agents.md`, "Providers"): a provider not enabled or not ready, or a model or an effort it is known not to offer, is refused naming those that are (`refused: provider opencode is not enabled (…); the ready providers are claude`). `role` is `worker` (by default) or `lead`; `workspace` is an existing workspace's name, `new_workspace` the name of a new one (made at once, with `repositories` as its repositories, the child's brief sent once it is prepared; a workspace that fails fails the child), neither for the caller's own place; both are plain optional fields, and a mix is refused naming the field to use (`refused: workspace and new_workspace are exclusive: …`, `refused: repositories goes with new_workspace, …`). Its description holds a call of each form. Refused, never queued, above the project's children cap (`refused: N children already run in project P, its cap: do the work yourself, or wait for one of them to end (agent_stop ends one of yours)`) and past the depth limit. |
 | `agent_send {agent_id, message}` | A message to a child, urgent: on its next tool result in a turn, a new turn otherwise. It answers the child's question. |
-| `agent_status {agent_id?}` | One line per child (or for the one named): what it does (in a turn, `running \`<line>\` for 12 min`, `waiting for approval #3`, `waiting on the provider`, idle, reported, ended or failed with why), the time since its last sign of activity, its context use, then its last three messages. |
-| `agent_read {agent_id, after?}` | A page of the child's conversation, oldest first, one line per event that says something (`#<n> sent: …`, `said: …` for a whole reply, its streamed pieces joined and masked, two messages apart, `tool call: …`, a tool served and its outcome, a turn's end, a replacement, a report), each line of 2,000 characters at most (a longer reply goes on, whole, on the next lines), the page under 30,000; it ends with the `after` to pass for the next page. |
+| `agent_status {agent_id?, action? status \| conversation, detail? short \| full, after?}` | `action status` (the default): one line per child (or for the one named): what it does (in a turn, `running \`<line>\` for 12 min`, `waiting for approval #3`, `waiting on the provider`, idle, reported, ended or failed with why), the time since its last sign of activity, its context use. For all the children it stops there (`detail short`) and says how to get more; for the one named, or with `detail full`, each also has its last three messages. `action conversation` (with `agent_id`; `after` pages): a page of the child's conversation, oldest first, one line per event that says something (`#<n> sent: …`, `said: …` for a whole reply, its streamed pieces joined and masked, two messages apart, `tool call: …`, a tool served and its outcome, a turn's end, a replacement, a report), each line of 2,000 characters at most (a longer reply goes on, whole, on the next lines), the page under 30,000; it ends with the `after` to pass for the next page. |
 | `agent_stop {agent_id}` | Stops the child and its own children, deepest first; what was queued for them is superseded; their runs are stopped. Their workspaces stay. |
 | `report {text}` | The caller is done. At most 10,000 characters, so that it rides whole on its parent's results; a longer one is refused, asking for fewer words and a file that holds the details. A child's report goes to its parent at once (`child-report`, with its workspace, its branch and the last commit of each repository), and the child ends when its turn does (or two minutes later, if its turn goes on). A root's report is shown to the user (`agent.reported`) and the root stays. |
 | `ask_user {question}` (a root) | A question to the user (`agent.asked`), answered later as a message. |
@@ -331,7 +332,7 @@ the call reaches, the project's never list and Flottille's own folders, and answ
    (`.claude`, `.claude.json`, `.codex`, `.local/share/opencode`) wherever they sit along the path,
    `/etc/shadow`, `/etc/sudoers`, `/etc/sudoers.d`, and Flottille's own folders (data,
    configuration, state, runtime). Inside the place only what sits below it counts.
-4. **Allow** anything else: reads, `commands_list`, `commands_output`, `commands_stop`, a
+4. **Allow** anything else: reads, `commands_list`, `commands_status`, a
    catalogue command not marked, a line inside the place, a write inside the place.
 
 **Inside a procedure's run** (`docs/procedures.md`), for the agents it grants and only in its

@@ -17,7 +17,7 @@ The child knows only what the brief and the files it names say. Write it for a c
 ## While children run
 
 - `[flottille:child-report]`: a child is done. `[flottille:child-asks]`: a call of a child's is held; answer with `approval_answer`: deny it, or forward it with one sentence of why when the user should decide. You cannot allow it. `[flottille:child-question]`: answer with `agent_send`. `[flottille:child-idle]`, `child-stuck`, `child-replaced`, `child-failed`: decide whether to send, stop or relaunch. `[flottille:children-status]`: nothing happened for a while; decide whether that is normal (a long command) or not (a child going in circles).
-- `agent_status` and `agent_read` show a child's state and conversation; read the lines that matter, never whole transcripts.
+- `agent_status` shows how your children do, and with `action: "conversation"` a child's conversation; read the lines that matter, never whole transcripts.
 
 ## When a report arrives
 

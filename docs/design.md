@@ -160,12 +160,14 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
 - files: `fs_read`, `fs_list`, `search`, `fs_write`, `fs_edit` (read-before-write fingerprints,
   temp file + rename, all-or-nothing edits);
 - commands: `commands_list`, `commands_run` (catalogue command or one line, **never a shell**),
-  `commands_output`, `commands_stop`;
+  `commands_status` (a run's output, or its stop);
 - forges (an agent in a workspace): `forge_read`, the pull requests of its workspace's
   repositories and their checks, read only (`forges.md`), and `forge_write`, which opens or merges
-  them or re-runs a failed pipeline only inside a procedure that grants it (`procedures.md`);
+  them or re-runs a failed pipeline, listed only to an agent whose procedure run grants one of
+  those (`procedures.md`);
 - the workspace (an agent in a workspace): `workspace_remove`, which removes the agent's own
-  workspace once nothing in it would be lost, only inside a procedure that grants it;
+  workspace once nothing in it would be lost, listed only to an agent whose procedure run grants
+  it;
 - references: `reference_read`, one of the project's references, documents read when relevant
   (`docs/projects.md`, "References");
 - tickets (an agent in a workspace): `ticket_read`, the ticket its workspace is linked to, or
@@ -173,13 +175,14 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
 
 Flottille's own tools:
 
-- `agent_launch {title, brief, model?, role?, workspace?: existing | new {name, repositories?} | parent's}`:
+- `agent_launch {title, brief, model?, role?, workspace? | new_workspace? + repositories?}`, the parent's place when neither:
   starts a child, answers at once with its id. Refused (never queued) above the caps.
 - `agent_send {agent_id, message}`: a message to one of the caller's children.
-- `agent_status {agent_id?}`: for one child or all of them: state, what it is doing now (thinking,
-  in a tool call, which command runs and for how long, waiting for approval #n, waiting on the
-  provider), time since its last sign of activity, context use, last few messages.
-- `agent_read {agent_id, after?}`: a page of the child's conversation.
+- `agent_status {agent_id?, action?, detail?, after?}`: for one child or all of them: state, what
+  it is doing now (thinking, in a tool call, which command runs and for how long, waiting for
+  approval #n, waiting on the provider), time since its last sign of activity, context use; the
+  last few messages for one child, or for all with `detail: full`. `action: conversation`: a
+  page of the child's conversation.
 - `agent_stop {agent_id}`: stops the child and its own tree.
 - `report {text}`: the caller is done; its report goes to its parent at once and the session ends
   (see 5.3). A root agent's report goes to the user.
@@ -194,8 +197,8 @@ Flottille's own tools:
 The tool list of a session is fixed for its whole life (prompt cache, `reference/hemera.md` §7)
 and depends on what the agent can do, known when it starts: a root gets `ask_user`, a child
 `ask_parent`; an agent at the depth limit gets no `agent_*` tools and no `approval_answer`. A lead
-has about 18 tools, a leaf worker 12, four more each in a workspace (`forge_read`, `ticket_read`,
-`forge_write`, `workspace_remove`)
+has about 16 tools, a leaf worker 11, two more each in a workspace (`forge_read`, `ticket_read`),
+and `forge_write` or `workspace_remove` for an agent whose procedure run grants what they do
 (`reference/mcp.md` §4).
 
 ### 4.4 Roles
@@ -227,7 +230,7 @@ something happens or when nothing does.
   refused with a sentence the agent can act on; it never queues silently.
 - **Stopping a parent stops its tree**, deepest first. Closing or archiving an agent closes its
   children. Deleting a workspace that an agent uses is refused while it runs.
-- **A child belongs to its parent.** The parent reads it (`agent_read`, `agent_status`), writes to
+- **A child belongs to its parent.** The parent reads it (`agent_status`), writes to
   it (`agent_send`) and is written to by it (its report, its questions, its approval requests).
   The user can open and read **any** agent in the tree, but writes to the root only: a user
   message to a child is refused, from every client, and the user stops a child only by stopping

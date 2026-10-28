@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
 use crate::forge::{self, Checkout, Forge, Gh, masked};
-use crate::mcp::{Outcome, arguments};
+use crate::mcp::{Outcome, arguments, full_detail};
 use crate::place::Place;
 use crate::projects::{self, Failure};
 
@@ -81,8 +81,9 @@ impl Ticket {
         })
     }
 
-    /// What `ticket_read` answers.
-    fn text(&self) -> String {
+    /// What `ticket_read` answers: the comments themselves only when `full`, otherwise their
+    /// number and the way to get them.
+    fn text(&self, full: bool) -> String {
         let place = match (&self.repository, self.tracker) {
             (Some(repository), _) => format!(" of {repository} (GitHub)"),
             (None, _) => " (Jira)".to_owned(),
@@ -99,7 +100,20 @@ impl Ticket {
         } else {
             text.push_str(&format!("\nDescription:\n{}\n", self.description));
         }
-        if !self.comments.is_empty() {
+        if !self.comments.is_empty() && !full {
+            let older = self.older;
+            text.push_str(&format!(
+                "\nComments: {}{}, read them with ticket_read {{\"detail\": \"full\"}}\n",
+                self.comments.len() + older,
+                self.comments.last().map_or(String::new(), |last| format!(
+                    ", the newest by {}{}",
+                    last.author,
+                    last.at
+                        .as_deref()
+                        .map_or(String::new(), |at| format!(" on {at}"))
+                ))
+            ));
+        } else if !self.comments.is_empty() {
             text.push_str(&format!("\nComments ({}):\n", self.comments.len()));
             if self.older > 0 {
                 text.push_str(&format!("  ({} older ones are not shown)\n", self.older));
@@ -577,6 +591,7 @@ pub async fn preview(daemon: Arc<Daemon>, params: Value) -> Result<Value, Failur
 #[serde(deny_unknown_fields)]
 struct TicketRead {
     ticket: Option<String>,
+    detail: Option<String>,
 }
 
 /// `ticket_read`: the ticket of the agent's own workspace, or another ticket of the same tracker.
@@ -584,6 +599,10 @@ struct TicketRead {
 pub async fn ticket_read(daemon: &Daemon, place: &Place, args: Value) -> Outcome {
     let asked: TicketRead = match arguments("ticket_read", args) {
         Ok(asked) => asked,
+        Err(refusal) => return refusal,
+    };
+    let full = match full_detail("ticket_read", asked.detail.as_deref()) {
+        Ok(full) => full,
         Err(refusal) => return refusal,
     };
     let Some(name) = &place.workspace else {
@@ -616,7 +635,7 @@ pub async fn ticket_read(daemon: &Daemon, place: &Place, args: Value) -> Outcome
         }
     };
     match read(&project, &key).await {
-        Ok(ticket) => Outcome::Done(ticket.text()),
+        Ok(ticket) => Outcome::Done(ticket.text(full)),
         Err(problem) => Outcome::Failed(format!(
             "the ticket {} could not be read: {problem}",
             key.text()

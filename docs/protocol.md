@@ -583,7 +583,7 @@ pieces is one line, led by its first piece's, and masked once joined; two messag
 at most 30,000 characters of them in all, a line of 2,000 at most: a longer reply goes on, whole,
 on the next lines; `name` is the agent as another is told of it (its title and its id);
 `after` is the number to read on after, and `more` whether the page stopped before the end of what
-is stored. `agent_read` of the agents' tools gives the same page to a parent.
+is stored. `agent_status` with `action: conversation`, of the agents' tools, gives the same page to a parent.
 
 #### `agent.status`
 

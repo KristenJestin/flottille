@@ -692,11 +692,27 @@ fn ticket_read_returns_the_workspace_s_ticket_or_another_of_its_tracker_and_neve
         "Ticket #12 of acme/api (GitHub), open: The login fails",
         "https://github.com/acme/api/issues/12",
         "Users cannot sign in.",
-        "- alice, 2026-10-01T10:00:00Z: I can reproduce",
-        "- bob, 2026-10-02T09:30:00Z: Fixed on a branch",
+        "Comments: 2, the newest by bob on 2026-10-02T09:30:00Z, read them with ticket_read \
+         {\"detail\": \"full\"}",
     ] {
         assert!(own.text.contains(said), "{said} in {}", own.text);
     }
+    // The comments themselves come only when asked for.
+    assert!(!own.text.contains("I can reproduce"), "{}", own.text);
+    let full = mcp.call("ticket_read", json!({"detail": "full"}));
+    assert!(!full.error, "{}", full.text);
+    for said in [
+        "- alice, 2026-10-01T10:00:00Z: I can reproduce",
+        "- bob, 2026-10-02T09:30:00Z: Fixed on a branch",
+    ] {
+        assert!(full.text.contains(said), "{said} in {}", full.text);
+    }
+    let refused = mcp.call("ticket_read", json!({"detail": "all"}));
+    assert!(
+        refused.error && refused.text.contains("has no detail \"all\""),
+        "{}",
+        refused.text
+    );
 
     // Another ticket of the same tracker, by its key.
     let other = mcp.call("ticket_read", json!({"ticket": "13"}));

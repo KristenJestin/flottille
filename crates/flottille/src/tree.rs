@@ -23,17 +23,17 @@ use crate::daemon::Daemon;
 use crate::deliveries;
 use crate::git::{self, Class};
 use crate::mcp::{Grant, Outcome, arguments};
+use crate::procedures;
 use crate::projects::{self, Failure};
 use crate::providers;
 use crate::roles;
 use crate::workspaces;
 
 /// The tree's tools, served with the others.
-pub const TOOLS: [&str; 9] = [
+pub const TOOLS: [&str; 8] = [
     "agent_launch",
     "agent_send",
     "agent_status",
-    "agent_read",
     "agent_stop",
     "report",
     "ask_user",
@@ -41,7 +41,7 @@ pub const TOOLS: [&str; 9] = [
     "approval_answer",
 ];
 
-/// What `agent_read` shows of a conversation at once, at most, in characters: under the result
+/// What `agent_status` shows of a conversation at once, at most, in characters: under the result
 /// limit, with room for the notes pinned on it.
 const READ_PAGE: usize = 30_000;
 /// What a line of a conversation keeps of a text.
@@ -64,7 +64,6 @@ pub async fn call(daemon: &Arc<Daemon>, grant: &Arc<Grant>, tool: &str, args: Va
         "agent_launch" => launch(daemon, &caller, args).await,
         "agent_send" => send(daemon, &caller, args),
         "agent_status" => status(daemon, &caller, args),
-        "agent_read" => read(daemon, &caller, args),
         "agent_stop" => stop(daemon, &caller, args),
         "report" => report(daemon, grant, &caller, args).await,
         "ask_user" | "ask_parent" => ask(daemon, &caller, tool, args),
@@ -114,25 +113,51 @@ struct Launch {
     model: Option<String>,
     effort: Option<String>,
     role: Option<String>,
-    workspace: Option<WorkspaceChoice>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum WorkspaceChoice {
-    Existing(String),
-    New { new: NewWorkspace },
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct NewWorkspace {
-    name: String,
+    workspace: Option<String>,
+    new_workspace: Option<String>,
     repositories: Option<Vec<String>>,
+}
+
+/// Where a child works: an existing workspace, a new one, or its parent's place. The workspace
+/// fields are plain and optional, and a mix of them is refused with the field to use.
+enum WorkspaceChoice {
+    Own,
+    Existing(String),
+    New {
+        name: String,
+        repositories: Option<Vec<String>>,
+    },
+}
+
+impl Launch {
+    fn workspace_choice(&self) -> Result<WorkspaceChoice, Outcome> {
+        match (&self.workspace, &self.new_workspace, &self.repositories) {
+            (Some(_), Some(_), _) => Err(refused(
+                "refused: workspace and new_workspace are exclusive: workspace names an existing \
+                 workspace, new_workspace the name of one to make; leave both out for your own \
+                 place",
+            )),
+            (Some(_), None, Some(_)) => Err(refused(
+                "refused: repositories goes with new_workspace, which makes a workspace; \
+                 workspace names one that exists: drop repositories, or use new_workspace",
+            )),
+            (None, None, Some(_)) => Err(refused(
+                "refused: repositories goes with new_workspace, the name of the workspace to \
+                 make: add it, or drop repositories to work in your own place",
+            )),
+            (Some(name), None, None) => Ok(WorkspaceChoice::Existing(name.clone())),
+            (None, Some(name), repositories) => Ok(WorkspaceChoice::New {
+                name: name.clone(),
+                repositories: repositories.clone(),
+            }),
+            (None, None, None) => Ok(WorkspaceChoice::Own),
+        }
+    }
 }
 
 async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     let asked: Launch = arguments("agent_launch", args)?;
+    let choice = asked.workspace_choice()?;
     if caller.depth + 1 > DEPTH_LIMIT {
         return Err(refused(format!(
             "refused: this agent is at the depth limit ({DEPTH_LIMIT}): it cannot launch \
@@ -162,15 +187,15 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
         .map_err(|f| refused(format!("refused: {}", f.message)))?;
     // The slot is taken before anything is made: a launch refused leaves nothing behind.
     let _slot = Slot::take(daemon, &project.name, project.max_children)?;
-    let (workspace, preparing) = match asked.workspace {
-        None => (caller.workspace.clone(), false),
-        Some(WorkspaceChoice::Existing(name)) => (Some(name), false),
-        Some(WorkspaceChoice::New { new }) => {
+    let (workspace, preparing) = match choice {
+        WorkspaceChoice::Own => (caller.workspace.clone(), false),
+        WorkspaceChoice::Existing(name) => (Some(name), false),
+        WorkspaceChoice::New { name, repositories } => {
             let created = workspaces::call(
                 daemon.clone(),
                 "workspace.create",
-                json!({"project": project.name, "name": new.name,
-                    "repositories": new.repositories}),
+                json!({"project": project.name, "name": name,
+                    "repositories": repositories}),
             )
             .await
             .map_err(|f| {
@@ -179,10 +204,14 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
                     f.message
                 ))
             })?;
-            let name = created["name"].as_str().unwrap_or(&new.name).to_owned();
+            let name = created["name"].as_str().unwrap_or(&name).to_owned();
             (Some(name), true)
         }
     };
+    // A run that gives its grants to its children lists the tools they let through; the list is
+    // frozen with the child.
+    let grants =
+        procedures::granted_to_child(daemon, &caller.id, &project.name, workspace.as_deref());
     let child = agents::create(
         daemon,
         &project,
@@ -196,6 +225,7 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             provider,
             model: asked.model,
             effort: asked.effort,
+            grants,
         },
     )
     .map_err(|f| refused(format!("refused: {}", f.message)))?;
@@ -330,11 +360,60 @@ fn send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
 #[serde(deny_unknown_fields)]
 struct Status {
     agent_id: Option<String>,
+    action: Option<String>,
+    detail: Option<String>,
+    after: Option<u64>,
 }
 
+/// `agent_status`: how the children do, or the conversation of one of them.
 fn status(daemon: &Daemon, caller: &Agent, args: Value) -> Done {
     let asked: Status = arguments("agent_status", args)?;
-    let children = match asked.agent_id {
+    match asked.action.as_deref().unwrap_or("status") {
+        "status" => {
+            if asked.after.is_some() {
+                return Err(refused(
+                    "refused: after is for action conversation: it pages a child's conversation",
+                ));
+            }
+            // All the children at once are a line each; one child, which was asked for, is
+            // shown whole.
+            let full = match asked.detail.as_deref() {
+                Some("full") => true,
+                Some("short") => false,
+                None => asked.agent_id.is_some(),
+                Some(other) => {
+                    return Err(refused(format!(
+                        "refused: agent_status has no detail {other:?}: its details are short and \
+                         full"
+                    )));
+                }
+            };
+            states(daemon, caller, asked.agent_id, full)
+        }
+        "conversation" => {
+            if asked.detail.is_some() {
+                return Err(refused(
+                    "refused: detail is for action status; a conversation is paged with after",
+                ));
+            }
+            let Some(id) = asked.agent_id else {
+                return Err(refused(
+                    "refused: action conversation needs agent_id, the child whose conversation \
+                     to read: agent_status without it lists your children",
+                ));
+            };
+            read(daemon, caller, &id, asked.after)
+        }
+        other => Err(refused(format!(
+            "refused: agent_status has no action {other:?}: its actions are status (the default) \
+             and conversation"
+        ))),
+    }
+}
+
+/// How one child, or each of them, does: a line each, with the child's last messages when `full`.
+fn states(daemon: &Daemon, caller: &Agent, id: Option<String>, full: bool) -> Done {
+    let children = match id {
         Some(id) => vec![child_of(daemon, caller, &id)?],
         None => daemon
             .read(|store| store.children(&caller.id))
@@ -347,13 +426,23 @@ fn status(daemon: &Daemon, caller: &Agent, args: Value) -> Done {
         .iter()
         .map(|child| {
             let mut block = format!("- {}", line(daemon, child));
-            for message in last_messages(daemon, &child.id) {
-                block.push_str(&format!("\n  > {}", cut(&message, MESSAGE_CHARS)));
+            if full {
+                for message in last_messages(daemon, &child.id) {
+                    block.push_str(&format!("\n  > {}", cut(&message, MESSAGE_CHARS)));
+                }
             }
             block
         })
         .collect();
-    Ok(Outcome::Done(blocks.join("\n")))
+    let mut text = blocks.join("\n");
+    if !full {
+        text.push_str(
+            "\n\nTheir last messages: agent_status {\"detail\": \"full\"}, or {\"agent_id\": \
+             \"<id>\"} for one child; its conversation: {\"agent_id\": \"<id>\", \"action\": \
+             \"conversation\"}.",
+        );
+    }
+    Ok(Outcome::Done(text))
 }
 
 /// One line of what a child is and does, as `agent_status` and `children-status` give it.
@@ -497,13 +586,6 @@ fn last_messages(daemon: &Daemon, agent: &str) -> Vec<String> {
         .collect()
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Read {
-    agent_id: String,
-    after: Option<u64>,
-}
-
 /// A page of an agent's conversation.
 pub struct Page {
     /// Each line led by the number of its event.
@@ -637,11 +719,10 @@ fn joined(
     Some((lines, last.max(crossed)))
 }
 
-fn read(daemon: &Daemon, caller: &Agent, args: Value) -> Done {
-    let asked: Read = arguments("agent_read", args)?;
-    let child = child_of(daemon, caller, &asked.agent_id)?;
+fn read(daemon: &Daemon, caller: &Agent, id: &str, after: Option<u64>) -> Done {
+    let child = child_of(daemon, caller, id)?;
     let Page { lines, after, more } =
-        conversation(daemon, &child, asked.after.unwrap_or(0)).map_err(failed)?;
+        conversation(daemon, &child, after.unwrap_or(0)).map_err(failed)?;
     let mut text = format!("The conversation of {}:\n", named(&child));
     if lines.is_empty() {
         text.push_str("(nothing after this point)");
@@ -650,7 +731,8 @@ fn read(daemon: &Daemon, caller: &Agent, args: Value) -> Done {
     }
     if more {
         text.push_str(&format!(
-            "\n\nMore follows: agent_read {{\"agent_id\": \"{}\", \"after\": {after}}}",
+            "\n\nMore follows: agent_status {{\"agent_id\": \"{}\", \"action\": \"conversation\", \
+             \"after\": {after}}}",
             child.id
         ));
     } else {

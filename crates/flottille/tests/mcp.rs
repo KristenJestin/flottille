@@ -237,17 +237,13 @@ fn a_session_sees_only_its_tools() {
             "fs_edit",
             "commands_list",
             "commands_run",
-            "commands_output",
-            "commands_stop",
+            "commands_status",
             "forge_read",
             "reference_read",
             "ticket_read",
-            "forge_write",
-            "workspace_remove",
             "agent_launch",
             "agent_send",
             "agent_status",
-            "agent_read",
             "agent_stop",
             "report",
             "ask_user",
@@ -267,7 +263,7 @@ fn a_session_sees_only_its_tools() {
     let other = Mcp::initialize(&url, &authorization);
     let text = refused(other.call("fs_write", json!({"path": "README.md", "content": "x"})));
     assert!(text.contains("has not read it"), "{text}");
-    let text = refused(other.call("commands_output", json!({"run": run})));
+    let text = refused(other.call("commands_status", json!({"run": run})));
     assert!(text.contains("is not a run this agent started"), "{text}");
 }
 
@@ -309,7 +305,7 @@ fn tools_list_is_in_the_same_order_every_time_and_every_entry_carries_title_anno
     assert_eq!(hints("fs_read"), (true, false));
     assert_eq!(hints("search"), (true, false));
     assert_eq!(hints("fs_write"), (false, true));
-    assert_eq!(hints("commands_stop"), (false, true));
+    assert_eq!(hints("commands_status"), (false, true));
 }
 
 // Protocol revisions.
@@ -367,7 +363,7 @@ fn a_2026_07_28_client_with_server_discover_lists_and_calls_the_tools() {
     let (_, url, authorization) = agent(&user, json!({}));
 
     let mcp = Mcp::discover(&url, &authorization);
-    assert_eq!(mcp.names().len(), 18);
+    assert_eq!(mcp.names().len(), 16);
     assert!(ok(mcp.call("fs_list", json!({"path": "."}))).contains("README.md"));
 
     let meta = json!({
@@ -728,20 +724,20 @@ fn a_command_printing_megabytes_stays_under_the_limit_and_says_how_to_read_on() 
         );
         assert!(answer.contains("exited with code 0"), "{line}: {answer}");
         let run = run_id(&answer);
-        let output = ok(mcp.call("commands_output", json!({"run": run, "tail": 1000})));
+        let output = ok(mcp.call("commands_status", json!({"run": run, "tail": 1000})));
         assert!(
             output.chars().count() < RESULT_LIMIT,
             "{line}: {}",
             output.len()
         );
         assert!(
-            output.contains("earlier lines: commands_output"),
+            output.contains("earlier lines: commands_status"),
             "{line}: {}",
             &output[output.len().saturating_sub(400)..]
         );
     }
     let answer = ok(mcp.call("commands_run", json!({"line": "seq 1 500000"})));
-    let output = ok(mcp.call("commands_output", json!({"run": run_id(&answer)})));
+    let output = ok(mcp.call("commands_status", json!({"run": run_id(&answer)})));
     assert!(output.contains("500000"), "the tail is the end: {output}");
 }
 
@@ -794,7 +790,7 @@ fn a_long_command_answers_after_its_timeout_with_it_keeps_going_and_stop_ends_it
     assert!(started.elapsed() < Duration::from_secs(10));
     assert!(answer.contains("is running"), "{answer}");
     assert!(
-        answer.contains("it keeps going: read it with commands_output, stop it with commands_stop"),
+        answer.contains("it keeps going: read it with commands_status"),
         "{answer}"
     );
     let run = run_id(&answer);
@@ -806,17 +802,17 @@ fn a_long_command_answers_after_its_timeout_with_it_keeps_going_and_stop_ends_it
         .unwrap();
     assert!(alive(child));
 
-    let output = ok(mcp.call("commands_output", json!({"run": run})));
+    let output = ok(mcp.call("commands_status", json!({"run": run})));
     assert!(output.contains("is running"), "{output}");
     assert!(output.contains("started"), "{output}");
 
-    let stopped = ok(mcp.call("commands_stop", json!({"run": run})));
+    let stopped = ok(mcp.call("commands_status", json!({"run": run, "action": "stop"})));
     assert!(stopped.contains("was stopped"), "{stopped}");
     eventually("the child's end", || !alive(child));
-    let output = ok(mcp.call("commands_output", json!({"run": run})));
+    let output = ok(mcp.call("commands_status", json!({"run": run})));
     assert!(output.contains("was stopped"), "{output}");
 
-    let text = refused(mcp.call("commands_output", json!({"run": "000000000000"})));
+    let text = refused(mcp.call("commands_status", json!({"run": "000000000000"})));
     assert_eq!(
         text,
         "refused: 000000000000 is not a run this agent started"
@@ -834,7 +830,7 @@ fn stubborn(folder: &Path, seconds: u32) -> Value {
 }
 
 #[test]
-fn commands_stop_kills_after_the_grace_a_run_that_ignores_sigterm() {
+fn stopping_a_run_kills_after_the_grace_one_that_ignores_sigterm() {
     let user = User::with_fake_agent();
     let (mcp, folder) = session(&user);
     let run = run_id(&ok(mcp.call("commands_run", stubborn(&folder, 300))));
@@ -847,7 +843,7 @@ fn commands_stop_kills_after_the_grace_a_run_that_ignores_sigterm() {
     assert!(alive(pid));
 
     let asked = Instant::now();
-    let stopped = ok(mcp.call("commands_stop", json!({"run": run})));
+    let stopped = ok(mcp.call("commands_status", json!({"run": run, "action": "stop"})));
 
     // It answers once the run ended: not before the 5 s of grace, since the term was ignored.
     assert!(
@@ -983,7 +979,7 @@ fn gh_token_is_empty_in_a_run() {
 
     let answer = ok(mcp.call("commands_run", json!({"line": "env"})));
     let output = ok(mcp.call(
-        "commands_output",
+        "commands_status",
         json!({"run": run_id(&answer), "tail": 1000}),
     ));
     let value = |name: &str| {
@@ -1117,7 +1113,7 @@ fn a_run_s_line_is_masked_in_its_record_its_event_and_its_answers() {
     assert!(line.contains("[masked]") && !line.contains(token), "{line}");
     assert!(!answer.contains(token), "{answer}");
     // Once ended, the answer is read from the store.
-    let stored = ok(mcp.call("commands_output", json!({"run": run})));
+    let stored = ok(mcp.call("commands_status", json!({"run": run})));
     assert!(
         stored.contains("[masked]") && !stored.contains(token),
         "{stored}"
@@ -1125,7 +1121,7 @@ fn a_run_s_line_is_masked_in_its_record_its_event_and_its_answers() {
 }
 
 #[test]
-fn every_call_goes_through_the_gate_commands_stop_and_output_included() {
+fn every_call_goes_through_the_gate_stopping_a_run_and_reading_its_output_included() {
     let user = User::with_fake_agent();
     project(&user);
     workspace(&user);
@@ -1133,8 +1129,8 @@ fn every_call_goes_through_the_gate_commands_stop_and_output_included() {
     let mcp = Mcp::initialize(&url, &authorization);
     let answer = ok(mcp.call("commands_run", json!({"line": "sleep 300", "timeout": 1})));
     let run = run_id(&answer);
-    ok(mcp.call("commands_output", json!({"run": run})));
-    ok(mcp.call("commands_stop", json!({"run": run})));
+    ok(mcp.call("commands_status", json!({"run": run})));
+    ok(mcp.call("commands_status", json!({"run": run, "action": "stop"})));
     ok(mcp.call("commands_list", json!({})));
     held(mcp.call("fs_read", json!({"path": "/etc/hostname"})));
     refused(mcp.call("commands_run", json!({"line": "git push"})));
@@ -1159,8 +1155,8 @@ fn every_call_goes_through_the_gate_commands_stop_and_output_included() {
         verdicts,
         [
             row("commands_run", "allow", "ok"),
-            row("commands_output", "allow", "ok"),
-            row("commands_stop", "allow", "ok"),
+            row("commands_status", "allow", "ok"),
+            row("commands_status", "allow", "ok"),
             row("commands_list", "allow", "ok"),
             row("fs_read", "ask", "held"),
             row("commands_run", "deny", "refused"),
@@ -1343,7 +1339,7 @@ fn a_run_s_environment_does_not_say_where_the_daemon_is() {
     let (mcp, _) = session(&user);
 
     let answer = ok(mcp.call("commands_run", json!({"line": "env"})));
-    let output = ok(mcp.call("commands_output", json!({"run": run_id(&answer)})));
+    let output = ok(mcp.call("commands_status", json!({"run": run_id(&answer)})));
     assert!(output.contains("HOME="), "{output}");
     assert!(!output.contains("XDG_RUNTIME_DIR="), "{output}");
 }
@@ -1358,4 +1354,49 @@ fn a_client_started_outside_the_agents_works_as_before() {
     let listed = user.run(&["project", "list", "--json"]);
     assert!(listed.status.success(), "{listed:?}");
     assert!(String::from_utf8_lossy(&listed.stdout).contains("app"));
+}
+
+#[test]
+fn commands_status_reads_by_default_stops_on_request_and_refuses_what_does_not_fit() {
+    let user = User::with_fake_agent();
+    let (mcp, _) = session(&user);
+    let answer = ok(mcp.call("commands_run", json!({"line": "sleep 300", "timeout": 1})));
+    let run = run_id(&answer);
+    assert!(
+        answer.contains(&format!(
+            "commands_status {{\"run\": \"{run}\", \"action\": \"stop\"}}"
+        )),
+        "the way to stop it: {answer}"
+    );
+
+    let state = ok(mcp.call("commands_status", json!({"run": run})));
+    assert!(state.contains("is running"), "{state}");
+    for (arguments, said) in [
+        (
+            json!({"run": run, "action": "stop", "tail": 5}),
+            "tail and start are for action output",
+        ),
+        (
+            json!({"run": run, "action": "kill"}),
+            "has no action \"kill\"",
+        ),
+        (json!({"run": run, "tail": 5000}), "tail must be 1 to 1000"),
+        (
+            json!({"run": "000000000000"}),
+            "is not a run this agent started",
+        ),
+    ] {
+        let text = refused(mcp.call("commands_status", arguments.clone()));
+        assert!(text.contains(said), "{arguments}: {text}");
+    }
+    // Nothing was stopped by the refusals.
+    let state = ok(mcp.call("commands_status", json!({"run": run})));
+    assert!(state.contains("is running"), "{state}");
+    let stopped = ok(mcp.call("commands_status", json!({"run": run, "action": "stop"})));
+    assert!(stopped.contains("was stopped"), "{stopped}");
+    // The two tools it replaces are gone.
+    for old in ["commands_output", "commands_stop"] {
+        let text = refused(mcp.call(old, json!({"run": run})));
+        assert!(text.contains(&format!("has no tool {old}")), "{text}");
+    }
 }

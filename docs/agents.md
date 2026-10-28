@@ -216,12 +216,16 @@ bridge sets on `claude` ("The Claude bridge", below):
 - `allowedTools`: the exact names of the agent's Flottille tools (never a wildcard), so that
   Claude never asks for them, each prefixed `mcp__flottille__`. The list depends on what the agent
   can do (`docs/design.md` §4.3, `docs/reference/mcp.md` §4 rule 9). Every agent has `fs_read`,
-  `fs_list`, `search`, `fs_write`, `fs_edit`, `commands_list`, `commands_run`, `commands_output`,
-  `commands_stop` and `report`; one that can have children (below the depth limit) also
-  `agent_launch`, `agent_send`, `agent_status`, `agent_read`, `agent_stop` and
-  `approval_answer`; a root `ask_user`, a child `ask_parent`. A root gets, in this order, the
-  first nine, the five `agent_*`, `report`, `ask_user`, `approval_answer` (17). The list is
-  frozen in the agent when it is created (the prompt cache depends on it).
+  `fs_list`, `search`, `fs_write`, `fs_edit`, `commands_list`, `commands_run`, `commands_status`
+  and `report`; one that can have children (below the depth limit) also
+  `agent_launch`, `agent_send`, `agent_status`, `agent_stop` and
+  `approval_answer`; a root `ask_user`, a child `ask_parent`. An agent in a workspace also has
+  `forge_read` and `ticket_read`, and `forge_write` or `workspace_remove` when the procedure run
+  it works in (or its parent's, when the run gives its grants to its children) grants what they
+  do. A root outside a workspace gets, in this order, the first eight, `reference_read`, the four
+  `agent_*`, `report`, `ask_user`, `approval_answer` (16). The list is
+  frozen in the agent when it is created (the prompt cache depends on it), with the run's grants
+  known at that moment.
 - `settingSources: []`: Claude Code's own default loads the user's settings, hooks, plugins,
   skills and instruction files; this overrides it.
 - `strictMcpConfig`: only the MCP servers given with the session.
@@ -675,7 +679,7 @@ Bookkeeping that comes between two pieces (`agent.usage`, `agent.mode_changed`,
 `agent.options_changed`, `agent.provider_wait`) does not end the message: it is kept right after
 it. So the stored pieces are not the provider's, and a reply shows about the longest
 secret-named value of the environment late: a long key in the environment (a few KiB) delays a
-short reply to the end of its message. `agent.read` and `agent_read` join the pieces that follow
+short reply to the end of its message. `agent.read` and `agent_status`'s conversation join the pieces that follow
 each other into one line, led by the number of the first, and mask the joined text again, as
 `agent_status`'s last messages: replies kept before this held back nothing. A reply longer than a line goes on, whole, on the next ones.
 
