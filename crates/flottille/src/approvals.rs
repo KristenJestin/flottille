@@ -10,11 +10,12 @@
 
 use std::sync::Arc;
 
-use flottille_core::approval::{self, Decision, Request, RequestState};
+use flottille_core::approval::{self, Decision, Kind, Request, RequestState};
 use flottille_core::store::Store;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::actions;
 use crate::daemon::Daemon;
 use crate::deliveries;
 use crate::gate::{self, Verdict};
@@ -62,7 +63,8 @@ pub fn granted(daemon: &Daemon, agent: &str, identity: &str) -> bool {
 }
 
 /// Writes the request for a held call, or finds the one its call key already made, and answers
-/// the agent at once.
+/// the agent at once. `says` is what it changes, in words, for the user.
+#[allow(clippy::too_many_arguments)]
 pub fn ask(
     daemon: &Arc<Daemon>,
     grant: &Grant,
@@ -71,6 +73,7 @@ pub fn ask(
     key: Option<&str>,
     ask: gate::Ask,
     identity: String,
+    says: Vec<String>,
 ) -> Outcome {
     let asked = Request {
         number: 0,
@@ -85,6 +88,11 @@ pub fn ask(
             .map(|reason| mcp::masked(reason, &grant.place))
             .collect(),
         sensitive: ask.sensitive,
+        kind: ask.kind,
+        says: says
+            .iter()
+            .map(|said| mcp::masked(said, &grant.place))
+            .collect(),
         identity,
         held_by: holder(daemon, &grant.agent),
         forwards: Vec::new(),
@@ -127,6 +135,9 @@ struct Approve {
     number: u64,
     #[serde(default)]
     for_tree: bool,
+    /// A line outside the catalogue: added to it.
+    #[serde(default)]
+    always: bool,
 }
 
 #[derive(Deserialize)]
@@ -155,10 +166,16 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         }
         "approval.approve" => {
             let asked: Approve = serde_json::from_value(params)?;
-            let decision = if asked.for_tree {
-                Decision::Tree
-            } else {
-                Decision::Once
+            let decision = match (asked.for_tree, asked.always) {
+                (true, true) => {
+                    return Err(Failure::new(
+                        "invalid-params",
+                        "for_tree and always are exclusive",
+                    ));
+                }
+                (true, false) => Decision::Tree,
+                (false, true) => Decision::Always,
+                (false, false) => Decision::Once,
             };
             decide(&daemon, asked.number, decision)
         }
@@ -194,6 +211,27 @@ fn decide(daemon: &Arc<Daemon>, number: u64, decision: Decision) -> Answer {
             "request #{number} reaches a sensitive place, or its procedure asks for each one: it \
              can be allowed once, never for the tree"
         )));
+    }
+    if decision == Decision::Always && request.sensitive {
+        return Err(Failure::refused(format!(
+            "request #{number} reaches a sensitive place: it can be allowed once, never always"
+        )));
+    }
+    if !request.kind.takes(decision) {
+        return Err(Failure::refused(match (decision, request.kind) {
+            (Decision::Tree, Kind::Catalogue) => format!(
+                "request #{number} is a line outside the catalogue: allowed once or always, never \
+                 for the tree"
+            ),
+            (Decision::Tree, _) => format!(
+                "request #{number} is a change the agent asks for, allowed once each time: never \
+                 for the tree"
+            ),
+            _ => format!(
+                "request #{number} is not a line outside the catalogue: only such a line is \
+                 allowed always"
+            ),
+        }));
     }
     let tree = tree::root_of(daemon, &request.agent);
     let decided = daemon.write(|store| {
@@ -283,13 +321,60 @@ async fn performed(daemon: &Arc<Daemon>, request: &Request) -> (&'static str, St
     if let Some(why) = changed {
         return not_executed(mcp::masked(&why, &grant.place));
     }
+    // What the user allowed is what they read: an action whose words changed meanwhile (its
+    // procedure was edited, its reference removed) is not done.
+    if request.kind == Kind::Action {
+        match actions::prepared(daemon, &grant, tool, &request.arguments).await {
+            Err(Outcome::Refused(why) | Outcome::Failed(why) | Outcome::Held(why)) => {
+                return not_executed(mcp::masked(&why, &grant.place));
+            }
+            Err(Outcome::Done(_)) => {}
+            Ok(says) => {
+                let says: Vec<String> = says
+                    .iter()
+                    .map(|said| mcp::masked(said, &grant.place))
+                    .collect();
+                if says != request.says {
+                    return not_executed(format!(
+                        "what it does changed since the user allowed it; it would now: {}",
+                        says.join("; ")
+                    ));
+                }
+            }
+        }
+    }
+    let mut added = None;
+    if request.decision == Some(Decision::Always) {
+        match actions::add_to_catalogue(daemon, &grant, &request.arguments) {
+            Ok(name) => added = Some(name),
+            Err(why) => {
+                return (
+                    "failed",
+                    mcp::masked(
+                        &format!(
+                            "Request #{number} ({tool}) was approved by the user, but nothing was \
+                             done: its line could not be added to the project's catalogue: {why}"
+                        ),
+                        &grant.place,
+                    ),
+                );
+            }
+        }
+    }
     let outcome = mcp::performed(daemon, &grant, tool, request.arguments.clone(), number).await;
+    let approved = match &added {
+        Some(name) => format!(
+            "was approved by the user, who added it to the project's catalogue as {name} (run it \
+             with commands_run {{\"command\": \"{name}\"}} from now on)"
+        ),
+        None => "was approved by the user".into(),
+    };
     let (word, body) = match outcome {
         Outcome::Done(text) => (
             "done",
             format!(
-                "Request #{number} ({tool}) was approved by the user, and Flottille has now done \
-                 it. Its result:\n\n{text}"
+                "Request #{number} ({tool}) {approved}, and Flottille has now done it. Its \
+                 result:\n\n{text}"
             ),
         ),
         Outcome::Failed(why) => (

@@ -24,6 +24,10 @@ pub struct Request {
     pub reasons: Vec<String>,
     /// It reaches a sensitive place: it is never allowed for a tree.
     pub sensitive: bool,
+    /// What the user can answer besides denying it.
+    pub kind: Kind,
+    /// What it changes, in words, one sentence each: what the user allows (an action's).
+    pub says: Vec<String>,
     /// What a grant for the tree is given to: the exact call, without what changes each time.
     pub identity: String,
     /// `USER`, or the id of the agent that holds it.
@@ -61,6 +65,49 @@ pub enum Decision {
     Once,
     /// Allowed, and the same call allowed for the root's tree from now on.
     Tree,
+    /// Allowed, and its line added to the project's catalogue: a `Kind::Catalogue` request only.
+    Always,
+}
+
+/// What a request is, which says what the user may answer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    /// A tool call the gate held: allowed once or for the tree (never for the tree when it
+    /// reaches a sensitive place).
+    #[default]
+    Call,
+    /// A line outside the catalogue, in the project folder: allowed once, or always, which adds
+    /// it to the catalogue.
+    Catalogue,
+    /// A write of the project an agent asked for (`docs/tools.md`, "The project"): allowed once,
+    /// each time.
+    Action,
+}
+
+impl Kind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Call => "call",
+            Kind::Catalogue => "catalogue",
+            Kind::Action => "action",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Kind> {
+        [Kind::Call, Kind::Catalogue, Kind::Action]
+            .into_iter()
+            .find(|kind| kind.as_str() == text)
+    }
+
+    /// Whether the user may answer it with `decision`.
+    pub fn takes(self, decision: Decision) -> bool {
+        match decision {
+            Decision::Deny | Decision::Once => true,
+            Decision::Tree => self == Kind::Call,
+            Decision::Always => self == Kind::Catalogue,
+        }
+    }
 }
 
 impl RequestState {
@@ -91,13 +138,19 @@ impl Decision {
             Decision::Deny => "deny",
             Decision::Once => "once",
             Decision::Tree => "tree",
+            Decision::Always => "always",
         }
     }
 
     pub fn parse(text: &str) -> Option<Decision> {
-        [Decision::Deny, Decision::Once, Decision::Tree]
-            .into_iter()
-            .find(|decision| decision.as_str() == text)
+        [
+            Decision::Deny,
+            Decision::Once,
+            Decision::Tree,
+            Decision::Always,
+        ]
+        .into_iter()
+        .find(|decision| decision.as_str() == text)
     }
 }
 
@@ -113,6 +166,8 @@ impl Request {
             "call": self.shown,
             "reasons": self.reasons,
             "sensitive": self.sensitive,
+            "kind": self.kind,
+            "says": self.says,
             "held_by": self.held_by,
             "forwards": self.forwards,
             "state": self.state,
@@ -160,10 +215,31 @@ mod tests {
         ] {
             assert_eq!(RequestState::parse(state.as_str()), Some(state));
         }
-        for decision in [Decision::Deny, Decision::Once, Decision::Tree] {
+        for decision in [
+            Decision::Deny,
+            Decision::Once,
+            Decision::Tree,
+            Decision::Always,
+        ] {
             assert_eq!(Decision::parse(decision.as_str()), Some(decision));
         }
+        for kind in [Kind::Call, Kind::Catalogue, Kind::Action] {
+            assert_eq!(Kind::parse(kind.as_str()), Some(kind));
+        }
         assert_eq!(RequestState::parse("gone"), None);
-        assert_eq!(Decision::parse("always"), None);
+        assert_eq!(Decision::parse("forever"), None);
+    }
+
+    #[test]
+    fn only_a_call_is_allowed_for_the_tree_and_only_a_line_outside_the_catalogue_always() {
+        assert!(Kind::Call.takes(Decision::Tree));
+        assert!(!Kind::Call.takes(Decision::Always));
+        assert!(Kind::Catalogue.takes(Decision::Always));
+        assert!(!Kind::Catalogue.takes(Decision::Tree));
+        assert!(!Kind::Action.takes(Decision::Tree));
+        assert!(!Kind::Action.takes(Decision::Always));
+        for kind in [Kind::Call, Kind::Catalogue, Kind::Action] {
+            assert!(kind.takes(Decision::Once) && kind.takes(Decision::Deny));
+        }
     }
 }

@@ -13,6 +13,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::files::{self, Context, Range};
+use crate::gate;
 use crate::mcp::{Outcome, arguments};
 use crate::place::Resolved;
 use crate::projects;
@@ -65,12 +66,14 @@ fn read(
         }));
     };
     let root = root_of(project, name, reference)?;
+    let folder = project.folder.canonicalize().unwrap_or_default();
     let is_dir = root.is_dir();
     let Some(named) = args.path.as_deref() else {
+        held_for_the_user(&folder, &root, name)?;
         if !is_dir {
             return read_file(name, name, &root, offset, length);
         }
-        return Ok(listing(name, &root));
+        return Ok(listing(name, &root, &folder));
     };
     if !is_dir {
         return Err(Outcome::Refused(format!(
@@ -79,8 +82,9 @@ fn read(
     }
     let target = inside(name, &root, named)?;
     let shown = format!("{name}/{}", relative(&root, &target));
+    held_for_the_user(&folder, &target, &shown)?;
     if target.is_dir() {
-        return Ok(listing(&shown, &target));
+        return Ok(listing(&shown, &target, &folder));
     }
     read_file(name, &shown, &target, offset, length)
 }
@@ -162,6 +166,27 @@ fn inside(name: &str, root: &Path, named: &str) -> Result<PathBuf, Outcome> {
     Ok(real)
 }
 
+/// Whether `fs_read` would hold the real path `target` for the user, by the gate's own rule of
+/// sensitive places, taken from the project folder: a reference never serves it, asked or not.
+fn sensitive(folder: &Path, target: &Path) -> Option<String> {
+    let path = Resolved {
+        shown: relative(folder, target),
+        path: target.to_owned(),
+        inside: true,
+    };
+    gate::sensitive(&[], &path)
+}
+
+fn held_for_the_user(folder: &Path, target: &Path, named: &str) -> Result<(), Outcome> {
+    match sensitive(folder, target) {
+        Some(place) => Err(Outcome::Refused(format!(
+            "refused: {named} is in a sensitive place ({place}), which a reference never serves: \
+             read it with fs_read, which asks the user first"
+        ))),
+        None => Ok(()),
+    }
+}
+
 fn relative(root: &Path, target: &Path) -> String {
     target
         .strip_prefix(root)
@@ -192,11 +217,11 @@ fn read_file(
     files::read_page(None, &file, offset, length).or_else(|error| Ok(files::failed(&file, error)))
 }
 
-/// The regular files of a folder, sorted, with their sizes: what to name in `path`. Links, `.git`
-/// and files of secrets are left out.
-fn listing(shown: &str, folder: &Path) -> Outcome {
+/// The regular files of a folder, sorted, with their sizes: what to name in `path`. Links, `.git`,
+/// files of secrets and sensitive places are left out.
+fn listing(shown: &str, folder: &Path, project: &Path) -> Outcome {
     let mut found = Vec::new();
-    let truncated = collect(folder, Path::new(""), &mut found);
+    let truncated = collect(folder, Path::new(""), project, &mut found);
     found.sort();
     let mut text = format!("{shown}: {} file(s)\n", found.len());
     for (path, size) in &found {
@@ -212,7 +237,7 @@ fn listing(shown: &str, folder: &Path) -> Outcome {
 }
 
 /// Whether it stopped early.
-fn collect(folder: &Path, relative: &Path, found: &mut Vec<(String, u64)>) -> bool {
+fn collect(folder: &Path, relative: &Path, project: &Path, found: &mut Vec<(String, u64)>) -> bool {
     let Ok(entries) = std::fs::read_dir(folder.join(relative)) else {
         return false;
     };
@@ -225,11 +250,14 @@ fn collect(folder: &Path, relative: &Path, found: &mut Vec<(String, u64)>) -> bo
             continue;
         }
         let path = relative.join(&name);
+        if sensitive(project, &folder.join(&path)).is_some() {
+            continue;
+        }
         let Ok(metadata) = std::fs::symlink_metadata(folder.join(&path)) else {
             continue;
         };
         if metadata.is_dir() {
-            if collect(folder, &path, found) {
+            if collect(folder, &path, project, found) {
                 return true;
             }
         } else if metadata.is_file() {

@@ -204,7 +204,9 @@ exists.
 
 `{"name"}`. The project's forges and tracker as its Settings show them (`docs/forges.md`, "The
 forge of a repository"): `{"name", "folder", "repositories": [{"path", "remote", "url", "forge",
-"proposal", "disagrees"}], "tracker", "obsolete"}`. `url` is the remote's address (credentials taken
+"proposal", "disagrees"}], "tracker", "agent_actions", "obsolete"}`. `agent_actions` is what its
+agents do without asking (`docs/projects.md`, "What agents do on their own"):
+`{"procedures", "settings", "references"}`, each `ask` or `allow`. `url` is the remote's address (credentials taken
 out, masked; `null` when it has none), `forge` the one declared (`null` when none), `proposal` what
 the address proposes (`null` when nothing), `disagrees` why the declared forge is not where the
 remote leads (`null` when it is). `obsolete` lists the keys of the file that are no longer read
@@ -219,6 +221,13 @@ when `null` or left out) in its file, where they stand, what is around them kept
 forge or the tracker cannot be used (naming its key), or a forge is not where its repository's
 remote leads (`api cannot be declared on GitHub acme/api: its remote origin: it leads to
 github.com/other/api, not to GitHub acme/api; nothing was saved`).
+
+#### `project.set_agent_actions`
+
+`{"name", "agent_actions": {"procedures", "settings", "references"}}`, each `ask` or `allow`. Writes
+the project's `[agent_actions]` in its file, where it stands, what is around it kept (removed when
+every family asks, the default), and answers `{"name", "agent_actions"}`. The user's door alone
+sets it: no tool of an agent does (`docs/tools.md`, "The project").
 
 #### `project.ticket`
 
@@ -709,6 +718,8 @@ The requests of the gate (`docs/tools.md`, "The gate"). A request in a result:
   "call": {"path": ".env"},
   "reasons": [".env is a sensitive place (.env)"],
   "sensitive": true,
+  "kind": "call",
+  "says": [],
   "held_by": "user",
   "forwards": [],
   "state": "pending",
@@ -722,7 +733,11 @@ The requests of the gate (`docs/tools.md`, "The gate"). A request in a result:
 kept whole, to be performed, and never sent. `held_by` is `user` or the id of the agent that holds
 the request; `forwards` are the `{"by", "why"}` of each agent that passed it up. `state` is
 `pending`, `denied`, `allowed`, or `cancelled` when the agent that asked or the one that held it
-ended first; `decision` is `deny`, `once` or `tree` once it is decided.
+ended first; `decision` is `deny`, `once`, `tree` or `always` once it is decided. `kind` says what
+the user may answer: `call` (once, or for the tree unless it is `sensitive`), `catalogue` (a line
+outside the catalogue run in the project folder: once, or always) or `action` (a change of the
+project an agent asked for, `docs/tools.md`, "The project": once). `says` is what it does, in
+words, one sentence each: what the user allows (empty for a `call`).
 
 #### `approval.list`
 
@@ -733,12 +748,17 @@ there is no such agent).
 
 #### `approval.approve`
 
-`{"number", "for_tree"?}`. Allows the request, once, or with `for_tree: true` for the root's tree
-(the same call goes through without asking from then on). Answered `{"request"}` once it is
-decided; the call is then checked again, performed in the background, and its answer stored for
-the agent (`approval.settled`). `not-found` when there is no such request; `refused` when it is
-held by an agent, already decided, or, with `for_tree`, reaches a sensitive place or is held by a
-procedure's `ask` grant (`docs/procedures.md`).
+`{"number", "for_tree"?, "always"?}`. Allows the request, once, with `for_tree: true` for the
+root's tree (the same call goes through without asking from then on), or with `always: true` for a
+`catalogue` request: its line is added to the project's catalogue as allowed always
+(`[commands.<name>]` with `added_by = "approval"` in its file, what is around it kept), then run. Answered `{"request"}` once it
+is decided; the call is then checked again, performed in the background, and its answer stored for
+the agent (`approval.settled`). An `action` is done only while what it `says` still holds (a
+procedure edited meanwhile is not started). `not-found` when there is no such request;
+`invalid-params` for both `for_tree` and `always`; `refused` when it is held by an agent, already
+decided, with `for_tree` when it reaches a sensitive place, is held by a procedure's `ask` grant
+(`docs/procedures.md`) or is not a `call`, and with `always` when it is not a `catalogue`
+request or reaches a sensitive place.
 
 #### `approval.deny`
 

@@ -734,6 +734,8 @@ impl SessionPage {
         Some(ApprovalCard {
             number,
             sensitive: request.is_some_and(|r| r.sensitive),
+            kind: request.map_or_else(|| "call".to_owned(), |r| r.kind.clone()),
+            says: request.map(|r| r.says.clone()).unwrap_or_default(),
             asked: request.map(Request::asked),
             why: request.map(|r| {
                 let mut why = r.reasons.join(" ");
@@ -1255,11 +1257,15 @@ pub struct ApprovalCard {
     pub number: u64,
     /// It reaches a sensitive place: it is never allowed for the tree.
     pub sensitive: bool,
+    /// `call`, `catalogue` or `action`: what the user may answer.
+    pub kind: String,
+    /// What it changes, in words, one line each.
+    pub says: Vec<String>,
     pub asked: Option<String>,
     pub why: Option<String>,
     pub source: Option<String>,
     pub asker: Option<String>,
-    /// `deny`, `once`, `tree` or `cancelled`, once decided.
+    /// `deny`, `once`, `tree`, `always` or `cancelled`, once decided.
     pub decision: Option<String>,
 }
 
@@ -1270,6 +1276,7 @@ impl ApprovalCard {
             "deny" => "Denied",
             "once" => "Allowed once",
             "tree" => "Allowed for this tree",
+            "always" => "Allowed always, added to the catalogue",
             "cancelled" => "Cancelled",
             other => other,
         };
@@ -2106,6 +2113,15 @@ impl Row {
                                             .unwrap_or_else(|| format!("Request #{number}"))
                                     ))),
                             )
+                            .children(card.says.iter().enumerate().map(|(i, said)| {
+                                div()
+                                    .id(ElementId::Name(
+                                        format!("approval-says-{number}-{i}").into(),
+                                    ))
+                                    .text_size(px(13.))
+                                    .child(SharedString::from(said.clone()))
+                                    .test_support()
+                            }))
                             .when_some(card.why.clone(), |d, why| {
                                 d.child(
                                     div()
@@ -2136,8 +2152,10 @@ impl Row {
                             }),
                     )
                     .action(button("deny", "Deny", Answer::Deny, false))
-                    // The daemon never allows a sensitive place for the tree: not offered.
-                    .when(!card.sensitive, |c| {
+                    // The daemon never allows a sensitive place, nor a change the agent asks
+                    // for, for the tree: not offered. A line outside the catalogue is allowed
+                    // once or always.
+                    .when(card.kind == "call" && !card.sensitive, |c| {
                         c.action(button(
                             "allow-tree",
                             "Allow for this tree",
@@ -2145,7 +2163,15 @@ impl Row {
                             false,
                         ))
                     })
-                    .action(button("allow-once", "Allow once", Answer::Once, true)),
+                    // A sensitive line asks each time: the daemon never allows it always.
+                    .when(card.kind == "catalogue" && !card.sensitive, |c| {
+                        c.action(button("allow-always", "Always", Answer::Always, false))
+                    })
+                    .action(match card.kind.as_str() {
+                        "catalogue" => button("allow-once", "Once", Answer::Once, true),
+                        "action" => button("allow-once", "Confirm", Answer::Once, true),
+                        _ => button("allow-once", "Allow once", Answer::Once, true),
+                    }),
             )
             .test_support()
             .into_any_element()
@@ -3812,6 +3838,8 @@ mod tests {
         let card = ApprovalCard {
             number: 4,
             sensitive: false,
+            kind: "call".into(),
+            says: Vec::new(),
             asked: Some("Read .env".into()),
             why: None,
             source: None,

@@ -6,7 +6,9 @@
 //! its remote and keeps the file's comments.
 
 use flottille_core::declared::{ProjectTracker, RepositoryForge};
-use flottille_ui::{Button, Card, Dropdown, MenuItem, Type, enter, palette};
+use flottille_core::procedure::Mode;
+use flottille_core::project::AgentActions;
+use flottille_ui::{Button, Card, Dropdown, MenuItem, Switch, Type, enter, palette};
 use gpui_kit::base::input::{Input, InputEditorStyle, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -208,6 +210,12 @@ pub struct ProjectSettingsPage {
     site: Entity<InputState>,
     keys: Entity<InputState>,
     obsolete: Vec<String>,
+    /// What the project's agents do without asking, as the daemon last said it.
+    agent_actions: AgentActions,
+    /// A switch was flipped and the daemon has not answered yet.
+    switching: bool,
+    /// Why the last switch was not saved.
+    switch_refused: Option<String>,
     picker: Option<Picker>,
     saving: bool,
     saved: Option<Said>,
@@ -238,6 +246,9 @@ impl ProjectSettingsPage {
             site: cx.new(|cx| styled_input("site, for example example.atlassian.net", window, cx)),
             keys: cx.new(|cx| styled_input("project keys, for example ABC, DEF", window, cx)),
             obsolete: Vec::new(),
+            agent_actions: AgentActions::default(),
+            switching: false,
+            switch_refused: None,
             picker: None,
             saving: false,
             saved: None,
@@ -264,6 +275,10 @@ impl ProjectSettingsPage {
 
     pub fn tracker(&self) -> TrackerKind {
         self.tracker
+    }
+
+    pub fn agent_actions(&self) -> AgentActions {
+        self.agent_actions
     }
 
     pub fn saved(&self) -> Option<&Said> {
@@ -326,6 +341,8 @@ impl ProjectSettingsPage {
         self.error = None;
         self.folder = settings["folder"].as_str().unwrap_or_default().to_owned();
         self.obsolete = strings(&settings["obsolete"]);
+        self.agent_actions =
+            serde_json::from_value(settings["agent_actions"].clone()).unwrap_or_default();
         let forge = |value: &Value| serde_json::from_value::<RepositoryForge>(value.clone()).ok();
         let mut rows = Vec::new();
         for repository in settings["repositories"].as_array().into_iter().flatten() {
@@ -425,6 +442,142 @@ impl ProjectSettingsPage {
         self.picker = None;
         self.saved = None;
         cx.notify();
+    }
+
+    /// Lets a family of the agents' writes run on its own, or ask again: saved at once, as a
+    /// switch is, apart from the forges and the tracker that Save writes.
+    pub fn flip_family(&mut self, family: &str, cx: &mut Context<Self>) {
+        if self.switching || !self.loaded {
+            return;
+        }
+        let mut actions = self.agent_actions;
+        let mode = match family {
+            "procedures" => &mut actions.procedures,
+            "settings" => &mut actions.settings,
+            "references" => &mut actions.references,
+            _ => return,
+        };
+        *mode = match *mode {
+            Mode::Ask => Mode::Allow,
+            Mode::Allow => Mode::Ask,
+        };
+        self.switching = true;
+        self.switch_refused = None;
+        let command = Command::SetAgentActions {
+            project: self.name.clone(),
+            actions: serde_json::to_value(actions).unwrap_or_default(),
+        };
+        self.shell
+            .update(cx, |shell, _| shell.perform(command))
+            .ok();
+        cx.notify();
+    }
+
+    /// The daemon's answer to a switch: what it saved, or why not.
+    pub fn actions_answered(&mut self, read: Result<Value, String>, cx: &mut Context<Self>) {
+        self.switching = false;
+        match read {
+            Ok(saved) => {
+                self.agent_actions =
+                    serde_json::from_value(saved["agent_actions"].clone()).unwrap_or_default();
+            }
+            Err(why) => self.switch_refused = Some(why),
+        }
+        cx.notify();
+    }
+
+    /// What a family let run on its own opens beyond what its switch says, shown under it.
+    pub fn warning(family: &str) -> Option<&'static str> {
+        (family == "procedures").then_some(
+            "An agent may then start any procedure in any of the project's workspaces without \
+             asking, with the procedure's own grants.",
+        )
+    }
+
+    fn agent_actions_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let rows = [
+            (
+                "procedures",
+                "Start a procedure",
+                "The run starts without the confirmation; its grants are still the procedure's.",
+                Self::warning("procedures"),
+            ),
+            (
+                "settings",
+                "Change the forges and the tracker",
+                "Each forge is still checked against its repository's remote; a change of the \
+                 tracker still asks.",
+                Self::warning("settings"),
+            ),
+            (
+                "references",
+                "Add or remove a reference",
+                "A reference still stays inside the project folder.",
+                Self::warning("references"),
+            ),
+        ];
+        let mut card = Card::new().title("What an agent may do");
+        for (family, what, still, warning) in rows {
+            let on = self.agent_actions.mode(family) == Some(Mode::Allow);
+            let switch = Switch::new(
+                ElementId::Name(format!("on-its-own-{family}").into()),
+                on,
+                format!("{what}, on their own"),
+            )
+            .disabled(self.switching)
+            .on_click(cx.listener(move |this, _, _, cx| this.flip_family(family, cx)));
+            card = card.child(
+                div()
+                    .id(ElementId::Name(format!("agent-actions-{family}").into()))
+                    .px(px(14.))
+                    .py(px(10.))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(div().text_size(px(13.)).child(what))
+                            .child(div().text_size(px(12.)).text_color(p.faint).child(
+                                SharedString::from(match on {
+                                    true => format!("On their own. {still}"),
+                                    false => "After asking me, each time.".to_owned(),
+                                }),
+                            ))
+                            .when_some(warning, |d, warning| {
+                                d.child(
+                                    div()
+                                        .id(ElementId::Name(
+                                            format!("agent-actions-warning-{family}").into(),
+                                        ))
+                                        .text_size(px(12.))
+                                        .text_color(p.mute)
+                                        .child(warning)
+                                        .test_support(),
+                                )
+                            }),
+                    )
+                    .child(switch)
+                    .test_support(),
+            );
+        }
+        if let Some(why) = &self.switch_refused {
+            card = card.child(
+                div()
+                    .id("agent-actions-error")
+                    .px(px(14.))
+                    .pb(px(10.))
+                    .text_size(px(12.5))
+                    .text_color(p.fail)
+                    .child(SharedString::from(why.clone()))
+                    .test_support(),
+            );
+        }
+        card
     }
 
     pub fn choose_tracker(&mut self, kind: TrackerKind, cx: &mut Context<Self>) {
@@ -901,7 +1054,8 @@ impl Render for ProjectSettingsPage {
                     .on_click(cx.listener(|this, _, _, cx| this.save(cx)))
                     .into_any_element()
             });
-        let tracker = self.tracker_card(cx);
+        let tracker = self.tracker_card(cx).into_any_element();
+        let agent_actions = self.agent_actions_card(cx).into_any_element();
         div()
             .id("project-settings-page")
             .size_full()
@@ -956,7 +1110,21 @@ impl Render for ProjectSettingsPage {
                     .when_some(self.saved.clone(), |d, saved| {
                         d.child(said("project-settings-saved", &saved))
                     })
-                    .child(footer),
+                    .child(footer)
+                    .child(enter(key("agents"), 6 + count, label("Agents")))
+                    .child(enter(
+                        key("agents-note"),
+                        7 + count,
+                        note(
+                            "What this project's agents may do without asking you first. A switch \
+                             takes effect at once; only you change it, never an agent.",
+                        ),
+                    ))
+                    .child(enter(
+                        key("agents-card"),
+                        8 + count,
+                        div().mb(px(12.)).child(agent_actions),
+                    )),
             )
     }
 }

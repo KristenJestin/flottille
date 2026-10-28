@@ -9,7 +9,7 @@ use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::declared::{ProjectTracker, RepositoryForge};
-use crate::procedure::Procedure;
+use crate::procedure::{Mode, Procedure};
 
 /// Children running at once per project: the bounds of `max_children`.
 pub const CHILDREN_CAP: std::ops::RangeInclusive<u8> = 1..=6;
@@ -99,6 +99,56 @@ impl PullRequests {
     }
 }
 
+/// What the project's agents do without asking the user first, by family of writes
+/// (`docs/projects.md`, "What agents do on their own"): each `ask` unless the file says `allow`.
+/// Only the user sets it: no tool of an agent writes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentActions {
+    /// Starting one of the project's procedures.
+    #[serde(default = "ask")]
+    pub procedures: Mode,
+    /// Changing the forges and the tracker.
+    #[serde(default = "ask")]
+    pub settings: Mode,
+    /// Adding or removing a reference.
+    #[serde(default = "ask")]
+    pub references: Mode,
+}
+
+fn ask() -> Mode {
+    Mode::Ask
+}
+
+impl Default for AgentActions {
+    fn default() -> Self {
+        AgentActions {
+            procedures: Mode::Ask,
+            settings: Mode::Ask,
+            references: Mode::Ask,
+        }
+    }
+}
+
+impl AgentActions {
+    /// The families, by the name the file and the protocol give them.
+    pub const FAMILIES: [&str; 3] = ["procedures", "settings", "references"];
+
+    pub fn is_default(&self) -> bool {
+        *self == AgentActions::default()
+    }
+
+    /// The mode of a family named as in `FAMILIES`.
+    pub fn mode(&self, family: &str) -> Option<Mode> {
+        match family {
+            "procedures" => Some(self.procedures),
+            "settings" => Some(self.settings),
+            "references" => Some(self.references),
+            _ => None,
+        }
+    }
+}
+
 /// A named command of the project, for the user and for agents.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -120,6 +170,26 @@ pub struct CatalogueCommand {
     /// Held for approval each time an agent runs it.
     #[serde(default)]
     pub ask_before_running: bool,
+    /// Who added it, when not the user writing it: a line the user allowed always, which runs in
+    /// the project folder without asking though nothing checked that it changes nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_by: Option<AddedBy>,
+}
+
+/// Who added a catalogue command, when it was not written by the user.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AddedBy {
+    /// The user answered Always to an agent's request to run its line in the project folder.
+    Approval,
+}
+
+impl CatalogueCommand {
+    /// Whether an agent in the project folder runs it: one of the catalogue's read-only checks,
+    /// or a line the user allowed always there.
+    pub fn runs_in_project_folder(&self) -> bool {
+        (self.check && self.read_only) || self.added_by == Some(AddedBy::Approval)
+    }
 }
 
 /// One step of the recipe that prepares a new workspace, as written: exactly one of `copy`,
@@ -287,6 +357,9 @@ pub struct Project {
     /// The tracker of its tickets, as the user declared it; none is read without one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tracker: Option<ProjectTracker>,
+    /// What its agents do without asking first.
+    #[serde(skip_serializing_if = "AgentActions::is_default")]
+    pub agent_actions: AgentActions,
     /// Keys of the file that are no longer read, each with what replaces it: said, never
     /// followed nor refused.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -332,6 +405,8 @@ struct File {
     #[serde(default)]
     pull_requests: PullRequests,
     tracker: Option<ProjectTracker>,
+    #[serde(default)]
+    agent_actions: AgentActions,
     /// Obsolete: read as nothing, and said (`OBSOLETE_FORGES`).
     forges: Option<toml::Value>,
 }
@@ -381,6 +456,7 @@ impl Project {
             procedures: BTreeMap::new(),
             pull_requests: PullRequests::default(),
             tracker: None,
+            agent_actions: AgentActions::default(),
             obsolete: Vec::new(),
         }
     }
@@ -676,6 +752,7 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
         procedures: file.procedures,
         pull_requests: file.pull_requests,
         tracker,
+        agent_actions: file.agent_actions,
         obsolete,
     })
 }
@@ -963,6 +1040,31 @@ mod tests {
             refusal(&format!("provider = \"gemini\"\n{MINIMAL}")),
             "projects/app.toml: provider: unknown provider \"gemini\": the providers are claude, \
              opencode, codex"
+        );
+    }
+
+    #[test]
+    fn a_family_of_agent_writes_asks_unless_the_file_lets_it_run_on_its_own() {
+        let project = parse(MINIMAL).unwrap();
+        assert_eq!(project.agent_actions, AgentActions::default());
+        assert_eq!(project.agent_actions.mode("procedures"), Some(Mode::Ask));
+        let project = parse(&format!(
+            "{MINIMAL}\n[agent_actions]\nprocedures = \"allow\"\n"
+        ))
+        .unwrap();
+        assert_eq!(project.agent_actions.procedures, Mode::Allow);
+        assert_eq!(project.agent_actions.settings, Mode::Ask);
+        assert_eq!(project.agent_actions.references, Mode::Ask);
+        let unknown = refusal(&format!("{MINIMAL}\n[agent_actions]\ngrants = \"allow\"\n"));
+        assert!(
+            unknown.contains("agent_actions") && unknown.contains("unknown field `grants`"),
+            "{unknown}"
+        );
+        assert!(
+            refusal(&format!(
+                "{MINIMAL}\n[agent_actions]\nsettings = \"never\"\n"
+            ))
+            .contains("agent_actions.settings")
         );
     }
 

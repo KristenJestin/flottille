@@ -77,6 +77,11 @@ pub struct Request {
     pub forwards: Vec<(String, String)>,
     /// It reaches a sensitive place: the daemon never allows it for the tree.
     pub sensitive: bool,
+    /// `call`, `catalogue` (a line outside the catalogue: once or always) or `action` (a change
+    /// of the project the agent asks for: once).
+    pub kind: String,
+    /// What it changes, in words, one sentence each.
+    pub says: Vec<String>,
     /// When it was asked.
     pub created_at: u64,
     /// `deny`, `once`, `tree` once decided, `cancelled` when nobody answered it.
@@ -104,6 +109,13 @@ impl Request {
                 .map(|f| (text(&f["by"]), text(&f["why"])))
                 .collect(),
             sensitive: request["sensitive"] == true,
+            kind: request["kind"].as_str().unwrap_or("call").to_owned(),
+            says: request["says"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(text)
+                .collect(),
             created_at: request["created_at"].as_u64().unwrap_or(0),
             decision: match request["state"].as_str() {
                 Some("cancelled") => Some("cancelled".into()),
@@ -123,6 +135,16 @@ impl Request {
             },
             ("fs_read" | "fs_list" | "search", _, Some(path)) => format!("Read {path}"),
             ("fs_write" | "fs_edit", _, Some(path)) => format!("Write {path}"),
+            ("procedure" | "project", _, _) => {
+                let name = field("name").unwrap_or_default();
+                match field("action").as_deref() {
+                    Some("start") => format!("Start the procedure {name}"),
+                    Some("set_settings") => "Change the project's settings".into(),
+                    Some("add_reference") => format!("Add the reference {name}"),
+                    Some("remove_reference") => format!("Remove the reference {name}"),
+                    _ => format!("{} {}", self.tool, one_line(&self.call)),
+                }
+            }
             (tool, _, _) => format!("{tool} {}", one_line(&self.call)),
         }
     }
