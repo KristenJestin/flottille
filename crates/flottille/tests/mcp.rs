@@ -1374,11 +1374,13 @@ fn commands_status_reads_by_default_stops_on_request_and_refuses_what_does_not_f
     for (arguments, said) in [
         (
             json!({"run": run, "action": "stop", "tail": 5}),
-            "tail and start are for action output",
+            "refused: tail and start are for action output; action stop only stops the run and \
+             answers with the end of its output",
         ),
         (
             json!({"run": run, "action": "kill"}),
-            "has no action \"kill\"",
+            "refused: commands_status has no action \"kill\": its actions are output (the default) \
+             and stop",
         ),
         (json!({"run": run, "tail": 5000}), "tail must be 1 to 1000"),
         (

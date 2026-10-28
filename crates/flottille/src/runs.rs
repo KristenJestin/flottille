@@ -617,7 +617,8 @@ pub async fn commands_status(daemon: &Daemon, agent: &str, args: Value) -> Outco
         "stop" => {
             if args.tail.is_some() || args.start.is_some() {
                 return Outcome::Refused(
-                    "refused: tail and start are for action output; action stop only stops the                      run and answers with the end of its output"
+                    "refused: tail and start are for action output; action stop only stops the \
+                     run and answers with the end of its output"
                         .into(),
                 );
             }
@@ -625,7 +626,8 @@ pub async fn commands_status(daemon: &Daemon, agent: &str, args: Value) -> Outco
             Outcome::Done(describe(daemon, &args.run, None, None, false))
         }
         other => Outcome::Refused(format!(
-            "refused: commands_status has no action {other:?}: its actions are output (the              default) and stop"
+            "refused: commands_status has no action {other:?}: its actions are output (the \
+             default) and stop"
         )),
     }
 }
