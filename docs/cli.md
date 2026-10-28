@@ -368,8 +368,8 @@ Instructions:
 `--description <line>`, the instructions with `--instructions <text>` or `--instructions-file
 <file>`, a `--grant <grant>=<mode>` per grant (`push=allow`, `pr-create=ask`; the grants are
 `commit`, `push`, `push-force-with-lease`, `rebase`, `pr-create`, `pr-merge-squash`,
-`pipeline-rerun`, `workspace-remove`) and `--children` to give the grants to the run's children
-too. Written in the project's file, what is around it kept.
+`pipeline-rerun`, `workspace-remove`) and `--children false` to keep the grants from the run's
+children, who get them otherwise. Written in the project's file, what is around it kept.
 
 ```
 $ flottille procedure add shop open-prs --description "Open the pull requests of the workspace" \
