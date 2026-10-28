@@ -1852,11 +1852,69 @@ impl Render for Row {
                                 ))
                                 .test_support()
                         });
+                let toggle = cx.listener(|this, _, _, cx| {
+                    this.open = !this.open;
+                    cx.notify();
+                });
+                let chevron = |turn: f32| {
+                    icon(Icon::Chevron)
+                        .size(px(12.))
+                        .text_color(p.faint)
+                        .with_transformation(Transformation::rotate(radians(-FRAC_PI_2 * turn)))
+                };
+                // Folded to one discreet line until a click opens it: a long run of calls
+                // would push the conversation down.
+                if !self.open {
+                    let last = calls.last().expect("a block of steps holds a call");
+                    let count = calls.len();
+                    let line = SharedString::from(format!(
+                        "{count} {} · {}",
+                        if count == 1 { "step" } else { "steps" },
+                        last.name
+                    ));
+                    return div()
+                        .id(id("steps"))
+                        .child(
+                            div()
+                                .id(id("steps-toggle"))
+                                .flex()
+                                .items_center()
+                                .gap(px(7.))
+                                .py(px(2.))
+                                .cursor_pointer()
+                                .mono(12.)
+                                .text_color(p.faint)
+                                .hover(|d| d.text_color(p.mute))
+                                .child(chevron(1.))
+                                .aria_label(line.clone())
+                                .child(line)
+                                .when(running > 0, |d| {
+                                    d.child(
+                                        div().mono(10.).medium().text_color(p.run).child("RUNNING"),
+                                    )
+                                })
+                                .on_click(toggle)
+                                .test_support(),
+                        )
+                        .test_support()
+                        .into_any_element();
+                }
                 div()
                     .id(id("steps"))
                     .child(
                         Card::new()
-                            .title("Agent steps")
+                            .title(
+                                div()
+                                    .id(id("steps-toggle"))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(7.))
+                                    .cursor_pointer()
+                                    .child("Agent steps")
+                                    .child(chevron(0.))
+                                    .on_click(toggle)
+                                    .test_support(),
+                            )
                             .meta(meta)
                             .child(div().px(px(12.)).py(px(6.)).children(rows)),
                     )

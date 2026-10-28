@@ -3,10 +3,11 @@
 //! compositor.
 //!
 //! ```text
-//! cargo run -p flottille-window --example shell [--features frames] -- [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace] [--add-procedure] [--edit-procedure <name>] [--run <workspace>] [--add-reference] [--project-settings <project>] [--size <w>x<h>]
+//! cargo run -p flottille-window --example shell [--features frames] -- [--project <name>] [--add-project <folder>] [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace] [--add-procedure] [--edit-procedure <name>] [--run <workspace>] [--add-reference] [--project-settings <project>] [--size <w>x<h>]
 //! ```
 //!
-//! `--session` opens a session's page (`--agent` then reads one of its sub-agents), `--tree` the
+//! `--project` opens a project's page, `--add-project` the "Add a project" modal with the
+//! repositories detected in a folder, `--session` opens a session's page (`--agent` then reads one of its sub-agents), `--tree` the
 //! left drawer (in a narrow window), `--rail` the session page's drawer (in a window narrower than
 //! three columns), `--settings` the settings page, `--menu` one of the project page composer's
 //! pickers, `--new-workspace` the project page's new-workspace modal, `--add-procedure`,
@@ -21,6 +22,7 @@ use std::time::Duration;
 use flottille_core::paths::Paths;
 use flottille_ui::Icons;
 use flottille_window::Shell;
+use flottille_window::actions::Command;
 use flottille_window::composer::Menu;
 use flottille_window::shell::Selection;
 use gpui_kit::{AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
@@ -29,6 +31,7 @@ fn main() {
     let (mut session, mut agent) = (None, None);
     let (mut tree, mut rail, mut new_workspace, mut settings) = (false, false, false, false);
     let (mut menu, mut project_settings) = (None, None);
+    let (mut project, mut add_project) = (None, None);
     let (mut add_procedure, mut add_reference) = (false, false);
     let (mut edit_procedure, mut run) = (None, None);
     let mut dimensions = (1280., 800.);
@@ -36,6 +39,8 @@ fn main() {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--session" => session = Some(args.next().expect("a session id")),
+            "--project" => project = Some(args.next().expect("a project")),
+            "--add-project" => add_project = Some(args.next().expect("a folder")),
             "--agent" => agent = Some(args.next().expect("an agent id")),
             "--tree" => tree = true,
             "--rail" => rail = true,
@@ -88,6 +93,17 @@ fn main() {
                     shell.update(cx, |shell, cx| {
                         if let Some(id) = session {
                             shell.open(Selection::Session(id), window, cx);
+                        }
+                        if let Some(name) = project.clone() {
+                            shell.open(Selection::Project(name), window, cx);
+                        }
+                        if let Some(folder) = add_project.clone() {
+                            shell.add_project(window, cx);
+                            let form = shell.add_project_form().clone();
+                            form.update(cx, |form, cx| {
+                                form.set_folder(folder.clone().into(), window, cx)
+                            });
+                            shell.perform(Command::DetectProject { folder, name: None });
                         }
                         if settings {
                             shell.open(Selection::Settings, window, cx);

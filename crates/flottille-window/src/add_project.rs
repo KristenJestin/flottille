@@ -9,9 +9,9 @@ use flottille_ui::{Button, Modal, Type, palette};
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AppContext as _, Context, Entity, Focusable as _, InteractiveElement, IntoElement,
-    ParentElement, PathPromptOptions, Render, SharedString, Styled, Subscription,
-    TestSupportExt as _, WeakEntity, Window, div, px,
+    AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement, IntoElement,
+    ParentElement, PathPromptOptions, Render, SharedString, StatefulInteractiveElement, Styled,
+    Subscription, TestSupportExt as _, WeakEntity, Window, div, px,
 };
 use serde_json::Value;
 
@@ -25,6 +25,17 @@ pub struct Detected {
     pub name: String,
     pub folder: String,
     pub repositories: Vec<String>,
+}
+
+/// A repository as the modal names it: the folder's own name for the project's root (`.`).
+pub fn repository_name(folder: &str, path: &str) -> String {
+    match path {
+        "." => std::path::Path::new(folder).file_name().map_or_else(
+            || folder.to_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        ),
+        path => path.to_owned(),
+    }
 }
 
 pub struct AddProject {
@@ -237,12 +248,18 @@ impl Render for AddProject {
                         "repositories"
                     }
                 )))
-                .children(detected.repositories.iter().map(|path| {
+                .children(detected.repositories.iter().enumerate().map(|(i, path)| {
+                    let name = SharedString::from(repository_name(&detected.folder, path));
                     div()
+                        .id(ElementId::Name(
+                            format!("add-project-repository-{i}").into(),
+                        ))
+                        .aria_label(name.clone())
                         .pl(px(10.))
                         .mono(12.)
                         .text_color(p.text)
-                        .child(SharedString::from(path.clone()))
+                        .child(name)
+                        .test_support()
                 }))
                 .child(
                     div()
