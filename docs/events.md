@@ -169,13 +169,13 @@ from now on.
 
 ### `procedure.ended`
 
-A procedure's run ended: its root reported. Its grants are given no more. (A root that ends,
-stopped or failed, ends its run too, said by its own events.)
+A procedure's run ended: its root reported, or ended (stopped or failed). Its grants are given no
+more, even when the root is resumed.
 
 | Field | |
 |---|---|
 | `agent` | The run's root agent. |
-| `reason` | `reported`. |
+| `reason` | `reported`, `ended` or `failed`. |
 
 ### The events of an agent
 
@@ -369,7 +369,7 @@ Its process was let go; the next message starts it again.
 | Field | |
 |---|---|
 | `agent` | |
-| `reason` | `idle` (no turn for the idle release time) or `restart` (the daemon that ran it is gone). |
+| `reason` | `idle` (no turn for the idle release time), `restart` (the daemon that ran it is gone) or `stopped` (an ended root whose session is kept: it can be resumed now, `agent.resume`). |
 
 #### `agent.died`
 

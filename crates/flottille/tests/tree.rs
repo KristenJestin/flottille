@@ -1231,8 +1231,7 @@ fn resuming_a_stopped_lead_restarts_it_alone_and_its_children_stay_ended() {
     assert_eq!(refusal.0, "refused");
     assert!(refusal.1.contains("its root"), "{}", refusal.1);
 
-    user.call("agent.resume", json!({"agent": lead_id}))
-        .unwrap();
+    user.resume(&lead_id);
 
     assert_eq!(state(&user, &lead_id), "idle");
     assert_eq!(state(&user, &one), "ended");

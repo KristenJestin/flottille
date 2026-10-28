@@ -527,7 +527,7 @@ fn through_the_bridge_a_stopped_root_keeps_its_history_and_resumes_on_it() {
     // Its process is gone, and what would have removed the history ran with it.
     assert!(!within_10_s(|| !history.exists()), "kept to be resumed");
 
-    user.call("agent.resume", json!({"agent": id})).unwrap();
+    user.resume(&id);
     let sent = user
         .call("agent.send", json!({"agent": id, "message": "again"}))
         .unwrap();
@@ -542,6 +542,39 @@ fn through_the_bridge_a_stopped_root_keeps_its_history_and_resumes_on_it() {
         .find(|e| e["name"] == "agent.started")
         .unwrap();
     assert_eq!(started["data"]["opened"], "resumed");
+}
+
+#[test]
+fn an_ended_root_s_kept_session_is_forgotten_7_days_after_it_ended() {
+    let user = User::with_fake_claude().with_env("FLOTTILLE_TEST_CLOCK", "1");
+    project(&user);
+    let (id, after) = run(&user, "hello");
+    events_until(&user, &id, after, "agent.turn_ended");
+    let history = history(&user, &id);
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+    events_until(&user, &id, after, "agent.released");
+    let resumable = || {
+        user.call("agent.list", json!({})).unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == id.as_str())
+            .unwrap()["resumable"]
+            .clone()
+    };
+    const DAY_MS: u64 = 24 * 3_600_000;
+
+    user.call("test.advance", json!({"ms": 7 * DAY_MS - 60_000}))
+        .unwrap();
+    assert!(history.exists(), "kept for 7 days");
+    assert_eq!(resumable(), true);
+    user.call("test.advance", json!({"ms": 120_000})).unwrap();
+
+    assert!(within_10_s(|| !history.exists()), "forgotten after");
+    assert_eq!(resumable(), false);
+    let refused = user.call("agent.resume", json!({"agent": id})).unwrap_err();
+    assert_eq!(refused.0, "refused");
+    assert!(refused.1.contains("it was forgotten"), "{}", refused.1);
 }
 
 #[test]

@@ -101,7 +101,8 @@ later changes no run that started. They apply:
 - only in the run's workspace: an agent of the tree working elsewhere gets none.
 
 **The run ends** when its root reports (`report`) or ends (stopped, failed): its grants are given
-no more, and the next push is refused as outside a run. A request an `ask` grant held is checked
+no more, and the next push is refused as outside a run. A root the user resumes after it ended
+(`agent.resume`) does not start its run again: it is an ordinary session. A request an `ask` grant held is checked
 again when the user allows it: a run that ended meanwhile makes it not executed.
 
 **The push's environment.** An agent's runs have `git push` neutralised by their environment

@@ -720,14 +720,23 @@ workspace of the project, or a new one, made and prepared before it starts.
   `agent.failed` when it is a failure that spreads), what was queued for it is superseded, the
   pending requests it made or held are cancelled (`approval.cancelled`: the user never sees them),
   its process and its runs are stopped. Workspaces stay. Nothing is delivered to an agent that
-  ended. What Flottille keeps of its session goes (the bridge's history, Codex's thread), but for
-  a root that ended (not failed) whose agent resumes or loads sessions: that one is kept, so that
-  the user can resume the root on it.
+  ended. A root that ends, stopped or failed, ends the procedure run it is the root of
+  (`docs/procedures.md`). What Flottille keeps of its session goes (the bridge's history, Codex's
+  thread), but for a root that ended (not failed) whose agent resumes or loads sessions: that one
+  is kept, so that the user can resume the root on it. It holds the whole conversation, what the
+  agent's tools printed included (masked as the daemon masks what it keeps), and it is kept 7
+  days after the root ended: then the sweep forgets it, and the root can be resumed no more.
+  Once its process is gone, the root's `agent.released` (reason `stopped`) says it can be resumed.
 - **Resuming** an ended root (`agent.resume`, `docs/protocol.md`) makes it idle again, with its
   id, its epoch (it is the same session, and its last process's token was revoked when it
   stopped), its conversation and its session; the next message starts its process, which resumes
-  or loads the session as after an idle release. Its children stay ended. A failed root is not
-  resumed: its session could not go on, and went.
+  or loads the session as after an idle release. That message comes after a `resume` delivery,
+  queued without waking it: the user stopped it, and the requests of its own that were cancelled
+  then, never executed. Its children stay ended, and its procedure run too: a resumed root is an
+  ordinary session, without grants, and so are the children it launches. It is refused while its
+  last process is still stopping, and when its workspace or its project is gone (one made again
+  under the same name is another). A failed root is not resumed: its session could not go on, and
+  went.
 - **A report** (`report`, at most 10,000 characters) of a child goes to its parent at once, and
   the child ends when its turn does, or 2 minutes later if its turn goes on. A root's report is
   kept and the root stays.

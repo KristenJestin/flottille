@@ -1,7 +1,7 @@
 //! The sweep (`docs/reference/hemera.md` §5 "Sweep"): every few seconds, what time alone decides.
 //! A note not taken in time goes as a prompt; a child stuck in a turn is replaced; a lead whose
 //! children run while nothing happens is told how they are; a child that reported and stays in
-//! its turn is stopped. It never wakes an agent by itself: what it finds is delivered.
+//! its turn is stopped; an ended root's session kept 7 days is forgotten. It never wakes an agent by itself: what it finds is delivered.
 //!
 //! Every time is read from the store's clock, which a test moves ahead (`test.advance`).
 
@@ -43,6 +43,7 @@ pub fn sweep(daemon: &Arc<Daemon>) {
     deliveries::fall_back(daemon);
     tree::end_late_reporters(daemon);
     crate::forge::poll(daemon);
+    agents::forget_kept_sessions(daemon);
     let agents = daemon.read(Store::agents).unwrap_or_default();
     let now = now_ms();
     for agent in agents.iter().filter(|a| !a.state.is_final()) {

@@ -55,7 +55,7 @@ pub struct Agent {
     /// The adapter's name and version, from its `initialize` answer.
     pub agent_version: Option<String>,
     /// Its agent offered to resume or load a session when it last opened one: its session can be
-    /// opened again once it ended (`agent.resume`).
+    /// opened again once it ended (`agent.resume`). False once Flottille forgot it.
     pub reopens: bool,
     /// The system prompt, frozen at creation, with its cache boundary.
     pub instructions: String,

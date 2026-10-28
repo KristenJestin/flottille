@@ -193,6 +193,30 @@ pub fn deliver(
     body: &str,
     urgency: &str,
 ) -> Option<String> {
+    let id = store(daemon, agent, kind, id, body, urgency)?;
+    ring(daemon, agent);
+    Some(id)
+}
+
+/// Stores a delivery between turns without ringing: the agent reads it with what wakes it next.
+pub fn queue(
+    daemon: &Daemon,
+    agent: &str,
+    kind: &str,
+    id: Option<String>,
+    body: &str,
+) -> Option<String> {
+    store(daemon, agent, kind, id, body, approval::BETWEEN_TURNS)
+}
+
+fn store(
+    daemon: &Daemon,
+    agent: &str,
+    kind: &str,
+    id: Option<String>,
+    body: &str,
+    urgency: &str,
+) -> Option<String> {
     let id = id.unwrap_or_else(|| format!("{kind}-{}", new_id().unwrap_or_default()));
     let delivery = Delivery {
         id: id.clone(),
@@ -208,7 +232,6 @@ pub fn deliver(
         eprintln!("flottille daemon: agent {agent}: a delivery cannot be stored: {error}");
         return None;
     }
-    ring(daemon, agent);
     Some(id)
 }
 

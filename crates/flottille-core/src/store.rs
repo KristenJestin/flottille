@@ -1057,6 +1057,16 @@ impl Store {
         rows.map(|row| row?).collect()
     }
 
+    /// The requests the agent's calls made that were cancelled at `since` or after, oldest first.
+    pub fn cancelled_requests_of(&self, agent: &str, since: u64) -> Result<Vec<Request>> {
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {REQUEST_COLUMNS} FROM approval_requests \
+             WHERE agent = ?1 AND state = 'cancelled' AND decided_at >= ?2 ORDER BY number"
+        ))?;
+        let rows = statement.query_map(params![agent, since], request_row)?;
+        rows.map(|row| row?).collect()
+    }
+
     /// The agent `by`, which holds the pending request, passes it to `to` (its parent, or
     /// `approval::USER`) with one sentence of why, and its `approval.forwarded` event; `None`
     /// when the request is not pending or not held by `by`.

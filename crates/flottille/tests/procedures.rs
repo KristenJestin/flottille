@@ -2163,3 +2163,81 @@ fn a_child_of_a_run_lists_the_tools_its_run_gives_it_only_when_the_run_gives_its
         answer.text
     );
 }
+
+/// The MCP session of the process that resumed or loaded a session, the `index`th to.
+fn reopened_server(user: &User, index: usize) -> Mcp {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let reopened: Vec<Value> = user
+            .received()
+            .into_iter()
+            .filter(|e| {
+                ["session/resume", "session/load"]
+                    .contains(&e["received"]["method"].as_str().unwrap_or(""))
+            })
+            .map(|e| e["received"].clone())
+            .collect();
+        if let Some(opened) = reopened.get(index) {
+            let server = &opened["params"]["mcpServers"][0];
+            let authorization = server["headers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|h| h["name"] == "Authorization")
+                .and_then(|h| h["value"].as_str())
+                .unwrap()
+                .to_owned();
+            return Mcp::initialize(server["url"].as_str().unwrap(), &authorization);
+        }
+        assert!(Instant::now() < deadline, "no session was reopened");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_run_ends_with_its_stopped_root_and_the_resumed_root_and_its_new_children_get_no_grant() {
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user);
+    procedure(
+        &user,
+        "ship",
+        json!({"push": "allow", "pr-create": "allow"}),
+        true,
+    );
+    let (agent, root) = run(&user, "ship");
+    assert!(root.names().contains(&"forge_write".to_owned()));
+    let ran = user.call("procedure.of", json!({"agent": agent})).unwrap();
+    assert_eq!(ran["run"]["ended"], false);
+
+    user.call("agent.stop", json!({"agent": agent})).unwrap();
+    let ended = user.call("procedure.of", json!({"agent": agent})).unwrap();
+    assert_eq!(ended["run"]["ended"], true, "the run ends with its root");
+    user.resume(&agent);
+    user.call("agent.send", json!({"agent": agent, "message": "go on"}))
+        .unwrap();
+    let resumed = reopened_server(&user, 0);
+
+    let answer = line(&resumed, "git push origin app/login");
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("git push is refused for agents"),
+        "{}",
+        answer.text
+    );
+    let opened = user.received_requests("session/new").len();
+    let launched = resumed.call(
+        "agent_launch",
+        json!({"title": "push", "brief": "Push the branch."}),
+    );
+    assert!(!launched.error, "{}", launched.text);
+    let (url, authorization) = server_of(&user, opened);
+    let child = Mcp::initialize(&url, &authorization);
+    assert!(!child.names().contains(&"forge_write".to_owned()));
+    let answer = line(&child, "git push origin app/login");
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("git push is refused for agents"),
+        "{}",
+        answer.text
+    );
+}

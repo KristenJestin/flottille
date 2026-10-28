@@ -514,7 +514,7 @@ is never left, but for an ended root the user resumes (`agent.resume`).
 `provider` is the provider it runs on, for life (`docs/agents.md`, "Providers"). `chosen` is what
 was asked, or the project's default model, `null` for the agent's default; `taken` what the agent reported
 at the last start of its process; `reopens` whether its agent offered to resume or load a session
-when it last opened one. `active_at` is its last sign of activity, `null` before the
+when it last opened one, `false` once Flottille forgot an ended root's session. `active_at` is its last sign of activity, `null` before the
 first. `instructions` and `tools` are frozen when the agent is created. `parent` is the agent that
 launched it (`null` for a root), `depth` its depth in the tree, `epoch` the number of its session
 (each replacement adds one), `title` and `brief` a child's task, `reported_at` when it reported,
@@ -570,9 +570,13 @@ names its root).
 (`agent.resumed`, `docs/events.md`). It keeps its id, its epoch, its conversation and its session;
 nothing is sent to it, and the next message (`agent.send`) starts its process, which resumes or
 loads the session as after an idle release (`docs/agents.md`, "How an agent runs"). Its children
-stay ended. `refused` for a child (the sentence names its root), an agent that has not ended, a
-failed one (its session went with it), and one whose agent can neither resume nor load a session
-or that never opened one: what `resumable` says, in short (`agent.tree`).
+stay ended, and so does the procedure run it was the root of. Its next prompt starts with a
+`resume` delivery saying the user stopped it and naming its requests cancelled then. `refused`
+for a child (the sentence names its root), an agent that has not ended, a failed one (its session
+went with it), one whose agent can neither resume nor load a session, that never opened one or
+whose session was forgotten (7 days after it ended), one whose workspace or project is gone: what
+`resumable` says, in short (`agent.tree`); and one whose last process is still stopping
+(`stopping`), with a sentence to try again in a moment.
 
 #### `agent.tree`
 
@@ -581,7 +585,8 @@ or that never opened one: what `resumable` says, in short (`agent.tree`).
 (`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `depth`, `epoch`, `state`,
 `state_reason`, `created_at`, `active_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
 took at the last start of its process, else the one asked, `null` for the agent's default before it
-started; `resumable`: whether `agent.resume` takes it); `doing` a sentence of what it does
+started; `resumable`: whether `agent.resume` takes it once its last process is gone; `stopping`:
+whether the process of an agent that ended is still stopping); `doing` a sentence of what it does
 (`working`, `idle`, `running \`cargo test\` for 12 min`, `waiting for approval #3`, `failed: …`);
 `waiting_on` `parent` for a child whose request or question waits for its parent, `user` for a
 root whose own does, else `null`; `needs_user`, for the root, whether a request of its tree or its

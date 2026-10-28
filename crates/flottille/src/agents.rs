@@ -135,16 +135,20 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                     agent.state.as_str()
                 )));
             }
-            if !tree::resumable(&agent) {
-                let why = match agent.state {
-                    AgentState::Failed => "it failed, and its session went with it",
-                    _ => "its agent can neither resume nor load its session",
-                };
+            if let Some(why) = tree::resume_refusal(daemon, &agent) {
                 return Err(Failure::refused(format!(
                     "agent {} cannot resume: {why}",
                     agent.id
                 )));
             }
+            // Its last process would revoke the new one's token as it goes.
+            if stopping(daemon, &agent.id) {
+                return Err(Failure::refused(format!(
+                    "agent {} is still stopping, try again in a moment",
+                    agent.id
+                )));
+            }
+            let ended_at = agent.ended_at.unwrap_or(agent.updated_at);
             let resumed = daemon.write(|store| match store.resume_agent(&agent.id)? {
                 Some((agent, event)) => Ok((Some(agent), Some(event))),
                 None => Ok((None, None)),
@@ -152,9 +156,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let agent = resumed.ok_or_else(|| {
                 Failure::refused(format!("agent {} was resumed already", agent.id))
             })?;
-            // The task of its last life may still be stopping its process: what is delivered
-            // now goes to a new one.
-            daemon.agents.tasks.lock().unwrap().remove(&agent.id);
+            tell_resumed(daemon, &agent, ended_at);
             Ok(json!({"agent": agent.to_json()}))
         }
         "agent.tree" => {
@@ -184,7 +186,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             Ok(json!({"agents": agents
                 .iter()
                 .filter(|a| project.as_ref().is_none_or(|p| &a.project == p))
-                .map(tree::summary)
+                .map(|agent| tree::summary(daemon, agent))
                 .collect::<Vec<_>>()}))
         }
         "agent.read" => {
@@ -510,6 +512,45 @@ pub fn tell(daemon: &Daemon, id: &str, order: Order) {
     }
 }
 
+/// Whether the agent's last process is still going: its task has not let its orders go.
+pub fn stopping(daemon: &Daemon, id: &str) -> bool {
+    daemon
+        .agents
+        .tasks
+        .lock()
+        .unwrap()
+        .get(id)
+        .is_some_and(|(sender, _)| !sender.is_closed())
+}
+
+/// What a resumed root reads first in its next prompt, without being woken for it: that the user
+/// stopped it, and which of its requests were cancelled then, never to be executed.
+fn tell_resumed(daemon: &Arc<Daemon>, agent: &Agent, ended_at: u64) {
+    let cancelled = daemon
+        .read(|store| store.cancelled_requests_of(&agent.id, ended_at))
+        .unwrap_or_default();
+    let mut body = "The user stopped you, then resumed you on this session: what you were doing \
+                    was cut. Check the real state of your place before you go on."
+        .to_owned();
+    if !cancelled.is_empty() {
+        let named: Vec<String> = cancelled
+            .iter()
+            .map(|request| format!("#{} ({})", request.number, request.tool))
+            .collect();
+        body.push_str(&format!(
+            " Cancelled when you stopped, never executed: {}.",
+            named.join(", ")
+        ));
+    }
+    deliveries::queue(
+        daemon,
+        &agent.id,
+        "resume",
+        Some(format!("resumed-{}-{ended_at}", agent.id)),
+        &body,
+    );
+}
+
 /// Hands an order to the agent's task, starting the task when it has none.
 pub fn order(daemon: &Arc<Daemon>, id: &str, order: Order) {
     let mut tasks = daemon.agents.tasks.lock().unwrap();
@@ -570,8 +611,18 @@ async fn agent_task(daemon: Arc<Daemon>, id: String, orders: mpsc::UnboundedRece
     let Ok(Some(agent)) = daemon.read(|store| store.agent(&id)) else {
         return;
     };
-    // Resumed while its last process stopped, it has a new task already.
-    if !agent.state.is_final() || tree::resumable(&agent) {
+    if !agent.state.is_final() {
+        return;
+    }
+    if tree::keeps_session(&agent) {
+        // Said once its process is gone: it can be resumed now (`stopping`).
+        record(
+            &daemon,
+            &id,
+            "agent.released",
+            json!({"reason": "stopped"}),
+            false,
+        );
         return;
     }
     if let Ok(provider) = providers::of(&agent) {
@@ -579,6 +630,42 @@ async fn agent_task(daemon: Arc<Daemon>, id: String, orders: mpsc::UnboundedRece
             (provider.forget_session)(&daemon.paths, native);
         }
         (provider.forget_agent)(&daemon.paths, &agent.id);
+    }
+}
+
+/// Forgets the sessions of the ended roots kept longer than `tree::KEPT_MS`: they are resumed no
+/// more, and what their tools printed goes with them.
+pub fn forget_kept_sessions(daemon: &Daemon) {
+    let now = now_ms();
+    for agent in daemon.read(Store::agents).unwrap_or_default() {
+        let Some(ended_at) = agent.ended_at else {
+            continue;
+        };
+        if !tree::keeps_session(&agent)
+            || now.saturating_sub(ended_at) < tree::KEPT_MS
+            || stopping(daemon, &agent.id)
+        {
+            continue;
+        }
+        // Written first, so that the next sweep does not find it again.
+        let forgotten = daemon.write(|store| {
+            let change = AgentChange {
+                reopens: Some(false),
+                ..AgentChange::default()
+            };
+            let (_, event) = store.change_agent(&agent.id, change, None)?;
+            Ok(((), event))
+        });
+        let (Ok(()), Ok(provider), Some(native)) =
+            (forgotten, providers::of(&agent), agent.native_id.clone())
+        else {
+            continue;
+        };
+        let paths = daemon.paths.clone();
+        tokio::task::spawn_blocking(move || {
+            (provider.forget_session)(&paths, &native);
+            (provider.forget_agent)(&paths, &agent.id);
+        });
     }
 }
 
