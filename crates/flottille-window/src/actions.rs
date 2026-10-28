@@ -75,6 +75,11 @@ pub enum Command {
         project: String,
         settings: Value,
     },
+    /// Sets what the project's agents do without asking (`project.set_agent_actions`).
+    SetAgentActions {
+        project: String,
+        actions: Value,
+    },
     /// Detects the project's repositories again, against its file.
     CheckProject(String),
     /// Forgets the project, never its folder.
@@ -204,6 +209,8 @@ pub enum Answer {
     Once,
     /// Allowed for the root's tree.
     Tree,
+    /// Allowed, and the line added to the project's catalogue.
+    Always,
 }
 
 /// What one project page shows beyond the shell's read.
@@ -257,6 +264,11 @@ pub enum Outcome {
         project: String,
         read: Result<Value, String>,
         saved: bool,
+    },
+    /// What the project's agents do without asking, as saved, or why it was not.
+    AgentActions {
+        project: String,
+        read: Result<Value, String>,
     },
     /// The project's repositories detected again (`project.check`), or why not.
     ProjectChecked {
@@ -565,6 +577,15 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             project,
             saved: true,
         },
+        Command::SetAgentActions { project, actions } => Outcome::AgentActions {
+            read: answer(ask_alone(
+                connect,
+                "project.set_agent_actions",
+                json!({"name": project, "agent_actions": actions}),
+                bounds.quick,
+            )),
+            project,
+        },
         Command::CheckProject(project) => Outcome::ProjectChecked {
             read: answer(ask_alone(
                 connect,
@@ -831,6 +852,10 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 Answer::Tree => (
                     "approval.approve",
                     json!({"number": number, "for_tree": true}),
+                ),
+                Answer::Always => (
+                    "approval.approve",
+                    json!({"number": number, "always": true}),
                 ),
             };
             match ask_alone(connect, method, params, bounds.quick) {
