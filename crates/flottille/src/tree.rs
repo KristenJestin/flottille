@@ -1306,6 +1306,16 @@ pub fn root_of(daemon: &Daemon, id: &str) -> String {
 }
 
 /// An agent as a list shows it: without its instructions and its brief.
+/// Whether `agent.resume` can start the agent again on its own session: a root that ended (not
+/// one that failed: its session could not go on) whose agent said it resumes or loads sessions,
+/// and that opened one. Its session is kept for it.
+pub fn resumable(agent: &Agent) -> bool {
+    agent.state == AgentState::Ended
+        && agent.parent.is_none()
+        && agent.reopens
+        && agent.native_id.is_some()
+}
+
 pub fn summary(agent: &Agent) -> Value {
     json!({
         "id": agent.id,
@@ -1325,6 +1335,7 @@ pub fn summary(agent: &Agent) -> Value {
         "active_at": agent.active_at,
         "ended_at": agent.ended_at,
         "waiting_on_answer": agent.waiting_on_answer,
+        "resumable": resumable(agent),
     })
 }
 

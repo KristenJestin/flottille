@@ -124,18 +124,41 @@ fn the_daemon_runs_a_codex_agent_through_the_bridge_with_its_bare_session() {
 #[test]
 fn a_codex_session_s_thread_is_deleted_when_flottille_forgets_it() {
     let (user, _) = user_with_codex();
+    user.codex_script(json!({"turns": [{"when": "boom", "do": [{"die": 3}]}]}));
     let (id, after) = run(&user, "hello");
     events_until(&user, &id, after, "agent.turn_ended");
     let native = agent(&user, &id)["native_id"].as_str().unwrap().to_owned();
     let thread = user.path(&format!("codex/threads/{native}"));
     assert!(thread.exists());
 
-    user.call("agent.stop", json!({"agent": id})).unwrap();
+    // Its process dies: a new session replaces the old one, which nothing will open again (the
+    // message, given back, kills the next ones too, until the agent fails).
+    let sent_at = user
+        .call("agent.send", json!({"agent": id, "message": "boom"}))
+        .unwrap()["after"]
+        .as_u64()
+        .unwrap();
+    events_until(&user, &id, sent_at, "agent.replaced");
 
     eventually("the thread deleted", || !thread.exists());
     let deleted = sent(&user, "thread/delete");
-    assert_eq!(deleted.len(), 1);
     assert_eq!(deleted[0]["params"], json!({"threadId": native}));
+}
+
+#[test]
+fn a_stopped_codex_root_keeps_its_thread_to_be_resumed() {
+    let (user, _) = user_with_codex();
+    let (id, after) = run(&user, "hello");
+    events_until(&user, &id, after, "agent.turn_ended");
+    let native = agent(&user, &id)["native_id"].as_str().unwrap().to_owned();
+    let thread = user.path(&format!("codex/threads/{native}"));
+
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+    events_until(&user, &id, after, "agent.ended");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    assert!(thread.exists());
+    assert!(sent(&user, "thread/delete").is_empty());
 }
 
 #[test]

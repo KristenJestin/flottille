@@ -263,6 +263,11 @@ const MIGRATIONS: &[&str] = &[
         )
     );
 ",
+    "
+    -- Whether an agent's agent can resume or load its session, as it said when it last opened
+    -- one: an ended root whose agent can is resumed on its own session (`agent.resume`).
+    ALTER TABLE agents ADD COLUMN reopens INTEGER NOT NULL DEFAULT 0;
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -274,7 +279,7 @@ const RUN_COLUMNS: &str =
 const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, state, state_reason, \
     created_at, updated_at, active_at, ended_at, chosen_model, chosen_effort, chosen_mode, \
     taken_model, taken_effort, taken_mode, native_id, agent_version, instructions, tools, parent, \
-    depth, epoch, title, brief, reported_at, quiet_turns, waiting_on_answer";
+    depth, epoch, title, brief, reported_at, quiet_turns, waiting_on_answer, reopens";
 
 const DELIVERY_COLUMNS: &str = "id, agent, kind, body, urgency, state, created_at, sent_at";
 
@@ -286,6 +291,7 @@ pub struct AgentChange {
     pub state_reason: Option<String>,
     pub native_id: Option<String>,
     pub agent_version: Option<String>,
+    pub reopens: Option<bool>,
     pub taken: Option<Choices>,
     /// `Some(None)` forgets it.
     pub reported_at: Option<Option<u64>>,
@@ -596,7 +602,7 @@ impl Store {
             &format!(
                 "INSERT INTO agents ({AGENT_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, \
                  ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, \
-                 ?25, ?26, ?27, ?28, ?29, ?30)"
+                 ?25, ?26, ?27, ?28, ?29, ?30, ?31)"
             ),
             params![
                 agent.id,
@@ -629,6 +635,7 @@ impl Store {
                 agent.reported_at,
                 agent.quiet_turns,
                 agent.waiting_on_answer,
+                agent.reopens,
             ],
         )?;
         let event = append_agent_event(&transaction, &agent.id, event.0, event.1)?;
@@ -690,6 +697,12 @@ impl Store {
             transaction.execute(
                 "UPDATE agents SET agent_version = ?2 WHERE id = ?1",
                 params![id, version],
+            )?;
+        }
+        if let Some(reopens) = change.reopens {
+            transaction.execute(
+                "UPDATE agents SET reopens = ?2 WHERE id = ?1",
+                params![id, reopens],
             )?;
         }
         if let Some(reported_at) = change.reported_at {
@@ -1594,6 +1607,28 @@ impl Store {
         Ok((agent, event))
     }
 
+    /// An ended root starts again on its own session, with its `agent.resumed` event: idle, its
+    /// end and its reason forgotten, its epoch and its session kept. `None` when it is not ended
+    /// (a failed agent stays failed).
+    pub fn resume_agent(&mut self, id: &str) -> Result<Option<(Agent, Event)>> {
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE agents SET state = 'idle', state_reason = NULL, ended_at = NULL, \
+             reported_at = NULL, quiet_turns = 0, waiting_on_answer = 0, updated_at = ?2 \
+             WHERE id = ?1 AND state = 'ended'",
+            params![id, now_ms()],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let event = append_agent_event(&transaction, id, "agent.resumed", json!({"agent": id}))?;
+        transaction.commit()?;
+        let agent = self
+            .agent(id)?
+            .ok_or_else(|| Error::Refused(format!("there is no agent {id}")))?;
+        Ok(Some((agent, event)))
+    }
+
     /// At most `limit` events numbered after `after`, oldest first.
     pub fn events_after(&self, after: u64, limit: usize) -> Result<Vec<Event>> {
         let mut statement = self.connection.prepare_cached(
@@ -1806,6 +1841,7 @@ fn agent_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Agent>> {
         reported_at: row.get(27)?,
         quiet_turns: row.get(28)?,
         waiting_on_answer: row.get(29)?,
+        reopens: row.get(30)?,
     }))
 }
 
@@ -2314,6 +2350,7 @@ mod tests {
             reported_at: None,
             quiet_turns: 0,
             waiting_on_answer: false,
+            reopens: false,
         }
     }
 
@@ -2330,6 +2367,45 @@ mod tests {
         assert_eq!(store.agents().unwrap(), std::slice::from_ref(&agent));
         assert_eq!(store.agent("other").unwrap(), None);
         assert_eq!(store.agent_events(&agent.id, 0, 10).unwrap(), [event]);
+    }
+
+    #[test]
+    fn an_ended_agent_is_resumed_on_its_session_and_a_failed_one_is_not() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut agent = an_agent();
+        agent.native_id = Some("s1".into());
+        let mut failed = an_agent();
+        failed.id = "failed000000".into();
+        for agent in [&agent, &failed] {
+            store
+                .create_agent(agent, ("agent.created", json!({})))
+                .unwrap();
+        }
+        assert_eq!(store.resume_agent(&agent.id).unwrap(), None, "not ended");
+        for (id, state) in [
+            (&agent.id, AgentState::Ended),
+            (&failed.id, AgentState::Failed),
+        ] {
+            let change = AgentChange {
+                state: Some(state),
+                state_reason: Some("stopped by the user".into()),
+                ..AgentChange::default()
+            };
+            store.change_agent(id, change, None).unwrap();
+        }
+
+        let (resumed, event) = store.resume_agent(&agent.id).unwrap().unwrap();
+
+        assert_eq!(resumed.state, AgentState::Idle);
+        assert_eq!((resumed.state_reason, resumed.ended_at), (None, None));
+        assert_eq!(resumed.native_id.as_deref(), Some("s1"));
+        assert_eq!(resumed.epoch, agent.epoch);
+        assert_eq!(event.name, "agent.resumed");
+        assert_eq!(store.resume_agent(&failed.id).unwrap(), None);
+        assert_eq!(
+            store.agent(&failed.id).unwrap().unwrap().state,
+            AgentState::Failed
+        );
     }
 
     #[test]

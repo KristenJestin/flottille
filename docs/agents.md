@@ -482,7 +482,7 @@ default environment (`core/src/thread_manager.rs:2148-2154`) until a turn gives 
 - **What it keeps**: its threads, state and logs are in `<data>/agents/codex/codex`, apart from the
   user's: each thread's rollout under `sessions/` (or `archived_sessions/`), with the raw output of
   its tools, and its rows in `state_5.sqlite` and `logs_2.sqlite`. When Flottille forgets a session
-  (replaced, or its agent ended), the daemon starts `codex app-server` once more, bare, to delete
+  (replaced, or its agent ended, but for a root kept to be resumed: "The tree", below), the daemon starts `codex app-server` once more, bare, to delete
   the thread with Codex's own `thread/delete`, which removes its rollouts and then its rows under
   Codex's locks (`app-server/src/request_processors/thread_delete.rs`,
   `thread-store/src/local/delete_thread.rs:95-140`, `state/src/runtime/threads.rs:1164-1208`). A
@@ -562,7 +562,7 @@ bridge runs one session.
   `$XDG_STATE_HOME/flottille/bridge/claude/<session>.jsonl` (it never reads Claude Code's own
   files): one line per message, its secrets masked as the daemon masks what it keeps, only its
   later half kept past 4 MiB. The daemon removes it when the session is replaced or its agent
-  ends.
+  ends, but for a root kept to be resumed ("The tree", below).
 - **A death**: once the session is open, the end of `claude` ends the bridge with its exit code
   (128 and the signal for a signal), which the daemon sees as the agent's death.
 - **Its end**: its input closed or a `SIGTERM`, the bridge closes `claude`'s input, kills it if
@@ -720,7 +720,14 @@ workspace of the project, or a new one, made and prepared before it starts.
   `agent.failed` when it is a failure that spreads), what was queued for it is superseded, the
   pending requests it made or held are cancelled (`approval.cancelled`: the user never sees them),
   its process and its runs are stopped. Workspaces stay. Nothing is delivered to an agent that
-  ended.
+  ended. What Flottille keeps of its session goes (the bridge's history, Codex's thread), but for
+  a root that ended (not failed) whose agent resumes or loads sessions: that one is kept, so that
+  the user can resume the root on it.
+- **Resuming** an ended root (`agent.resume`, `docs/protocol.md`) makes it idle again, with its
+  id, its epoch (it is the same session, and its last process's token was revoked when it
+  stopped), its conversation and its session; the next message starts its process, which resumes
+  or loads the session as after an idle release. Its children stay ended. A failed root is not
+  resumed: its session could not go on, and went.
 - **A report** (`report`, at most 10,000 characters) of a child goes to its parent at once, and
   the child ends when its turn does, or 2 minutes later if its turn goes on. A root's report is
   kept and the root stays.

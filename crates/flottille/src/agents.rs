@@ -124,6 +124,39 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let agent = find(daemon, &agent.id)?;
             Ok(json!({"agent": agent.to_json()}))
         }
+        "agent.resume" => {
+            let asked: AgentName = serde_json::from_value(params)?;
+            let agent = find(daemon, &asked.agent)?;
+            refuse_child(daemon, &agent, "resumes it")?;
+            if !agent.state.is_final() {
+                return Err(Failure::refused(format!(
+                    "agent {} has not ended: it is {}",
+                    agent.id,
+                    agent.state.as_str()
+                )));
+            }
+            if !tree::resumable(&agent) {
+                let why = match agent.state {
+                    AgentState::Failed => "it failed, and its session went with it",
+                    _ => "its agent can neither resume nor load its session",
+                };
+                return Err(Failure::refused(format!(
+                    "agent {} cannot resume: {why}",
+                    agent.id
+                )));
+            }
+            let resumed = daemon.write(|store| match store.resume_agent(&agent.id)? {
+                Some((agent, event)) => Ok((Some(agent), Some(event))),
+                None => Ok((None, None)),
+            })?;
+            let agent = resumed.ok_or_else(|| {
+                Failure::refused(format!("agent {} was resumed already", agent.id))
+            })?;
+            // The task of its last life may still be stopping its process: what is delivered
+            // now goes to a new one.
+            daemon.agents.tasks.lock().unwrap().remove(&agent.id);
+            Ok(json!({"agent": agent.to_json()}))
+        }
         "agent.tree" => {
             let asked: AgentName = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
@@ -430,6 +463,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         reported_at: None,
         quiet_turns: 0,
         waiting_on_answer: false,
+        reopens: false,
     };
     daemon.write(|store| {
         let event = store.create_agent(
@@ -529,13 +563,18 @@ fn idle_release() -> Duration {
         .map_or(IDLE_RELEASE, Duration::from_millis)
 }
 
-/// The agent's task: its life, then, once it ended, its session's history goes.
+/// The agent's task: its life, then, once it ended, its session's history goes, unless it is a
+/// root that can be resumed on it.
 async fn agent_task(daemon: Arc<Daemon>, id: String, orders: mpsc::UnboundedReceiver<Order>) {
     agent_life(daemon.clone(), id.clone(), orders).await;
-    if let Ok(Some(agent)) = daemon.read(|store| store.agent(&id))
-        && agent.state.is_final()
-        && let Ok(provider) = providers::of(&agent)
-    {
+    let Ok(Some(agent)) = daemon.read(|store| store.agent(&id)) else {
+        return;
+    };
+    // Resumed while its last process stopped, it has a new task already.
+    if !agent.state.is_final() || tree::resumable(&agent) {
+        return;
+    }
+    if let Ok(provider) = providers::of(&agent) {
         if let Some(native) = &agent.native_id {
             (provider.forget_session)(&daemon.paths, native);
         }
@@ -1055,7 +1094,14 @@ impl acp::Events for Recorder {
         providers::learn(&self.daemon, self.provider, options, fresh);
     }
 
-    fn opened(&self, opened: &str, native_id: &str, agent_version: &str, taken: Choices) {
+    fn opened(
+        &self,
+        opened: &str,
+        native_id: &str,
+        agent_version: &str,
+        taken: Choices,
+        reopens: bool,
+    ) {
         let result = self.daemon.write(|store| {
             let data = json!({"agent": self.agent, "pid": self.pid, "opened": opened,
                 "native_id": native_id, "agent_version": agent_version, "taken": taken});
@@ -1065,6 +1111,7 @@ impl acp::Events for Recorder {
                     state: Some(AgentState::Idle),
                     native_id: Some(native_id.to_owned()),
                     agent_version: Some(agent_version.to_owned()),
+                    reopens: Some(reopens),
                     taken: Some(taken),
                     ..AgentChange::default()
                 },

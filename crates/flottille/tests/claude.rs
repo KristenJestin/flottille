@@ -514,7 +514,7 @@ fn through_the_bridge_a_session_s_history_goes_with_its_replacement() {
 }
 
 #[test]
-fn through_the_bridge_a_session_s_history_goes_when_its_agent_ends() {
+fn through_the_bridge_a_stopped_root_keeps_its_history_and_resumes_on_it() {
     let user = User::with_fake_claude();
     project(&user);
     let (id, after) = run(&user, "hello");
@@ -523,8 +523,25 @@ fn through_the_bridge_a_session_s_history_goes_when_its_agent_ends() {
     assert!(history.exists());
 
     user.call("agent.stop", json!({"agent": id})).unwrap();
+    events_until(&user, &id, after, "agent.ended");
+    // Its process is gone, and what would have removed the history ran with it.
+    assert!(!within_10_s(|| !history.exists()), "kept to be resumed");
 
-    assert!(within_10_s(|| !history.exists()));
+    user.call("agent.resume", json!({"agent": id})).unwrap();
+    let sent = user
+        .call("agent.send", json!({"agent": id, "message": "again"}))
+        .unwrap();
+    let events = events_until(
+        &user,
+        &id,
+        sent["after"].as_u64().unwrap(),
+        "agent.turn_ended",
+    );
+    let started = events
+        .iter()
+        .find(|e| e["name"] == "agent.started")
+        .unwrap();
+    assert_eq!(started["data"]["opened"], "resumed");
 }
 
 #[test]

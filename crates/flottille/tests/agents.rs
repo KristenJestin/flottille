@@ -739,3 +739,136 @@ fn agent_show_pages_from_either_end_and_says_when_more_remain() {
     assert_eq!(more, json!(false));
     assert_eq!(earlier, all[..all.len() - 1000]);
 }
+
+// Ending and resuming a root (#109): a root the user stopped keeps its session, and `agent.resume`
+// opens it again, as a released agent's process does.
+
+fn in_short(user: &User, agent: &str) -> Value {
+    user.call("agent.list", json!({})).unwrap()["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == agent)
+        .cloned()
+        .unwrap()
+}
+
+#[test]
+fn an_ended_root_resumes_its_own_session_and_takes_messages_again() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [{"when": "recall", "do": [{"recall": true}]}]}));
+    project(&user);
+    let (id, after) = run(&user, json!({"message": "hello"}));
+    events_until(&user, &id, after, "agent.turn_ended");
+    let before = show(&user, &id)["agent"].clone();
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+    assert_eq!(in_short(&user, &id)["resumable"], true);
+    let refused = user
+        .call("agent.send", json!({"agent": id, "message": "recall"}))
+        .unwrap_err();
+    assert_eq!(refused.0, "refused");
+
+    let resumed = user.call("agent.resume", json!({"agent": id})).unwrap();
+
+    let agent = &resumed["agent"];
+    assert_eq!(agent["state"], "idle");
+    assert_eq!(agent["state_reason"], Value::Null);
+    assert_eq!(agent["ended_at"], Value::Null);
+    assert_eq!(agent["native_id"], before["native_id"], "its own session");
+    assert_eq!(
+        agent["epoch"], before["epoch"],
+        "the same session, not a new one"
+    );
+    assert_eq!(in_short(&user, &id)["resumable"], false, "it runs");
+    let sent = user
+        .call("agent.send", json!({"agent": id, "message": "recall"}))
+        .unwrap();
+    let events = events_until(
+        &user,
+        &id,
+        sent["after"].as_u64().unwrap(),
+        "agent.turn_ended",
+    );
+    let started = events
+        .iter()
+        .find(|e| e["name"] == "agent.started")
+        .unwrap();
+    assert_eq!(started["data"]["opened"], "resumed");
+    let resumes = user.received_requests("session/resume");
+    assert_eq!(resumes.len(), 1);
+    assert_eq!(resumes[0]["params"]["sessionId"], before["native_id"]);
+    let said: String = events
+        .iter()
+        .filter(|e| e["name"] == "agent.message")
+        .filter_map(|e| e["data"]["text"].as_str())
+        .collect();
+    assert!(
+        said.starts_with("earlier you said:") && said.contains("hello"),
+        "the session kept its history: {said}"
+    );
+    let resumed_events: Vec<Value> = show(&user, &id)["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["name"] == "agent.resumed")
+        .cloned()
+        .collect();
+    assert_eq!(resumed_events.len(), 1);
+}
+
+#[test]
+fn an_ended_root_whose_agent_loads_is_resumed_through_a_load() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"resume": false}));
+    project(&user);
+    let (id, after) = run(&user, json!({"message": "hello"}));
+    events_until(&user, &id, after, "agent.turn_ended");
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+    assert_eq!(in_short(&user, &id)["resumable"], true);
+
+    user.call("agent.resume", json!({"agent": id})).unwrap();
+    let sent = user
+        .call("agent.send", json!({"agent": id, "message": "again"}))
+        .unwrap();
+
+    let events = events_until(
+        &user,
+        &id,
+        sent["after"].as_u64().unwrap(),
+        "agent.turn_ended",
+    );
+    let started = events
+        .iter()
+        .find(|e| e["name"] == "agent.started")
+        .unwrap();
+    assert_eq!(started["data"]["opened"], "loaded");
+}
+
+#[test]
+fn an_ended_root_whose_agent_can_neither_resume_nor_load_is_not_resumable() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"resume": false, "load": false}));
+    project(&user);
+    let (id, after) = run(&user, json!({"message": "hello"}));
+    events_until(&user, &id, after, "agent.turn_ended");
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+
+    assert_eq!(in_short(&user, &id)["resumable"], false);
+    let refused = user.call("agent.resume", json!({"agent": id})).unwrap_err();
+    assert_eq!(refused.0, "refused");
+    assert!(refused.1.contains("cannot resume"), "{}", refused.1);
+    assert_eq!(show(&user, &id)["agent"]["state"], "ended");
+}
+
+#[test]
+fn an_agent_that_did_not_end_is_not_resumed() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (id, after) = run(&user, json!({"message": "hello"}));
+    events_until(&user, &id, after, "agent.turn_ended");
+
+    assert_eq!(in_short(&user, &id)["resumable"], false);
+    let refused = user.call("agent.resume", json!({"agent": id})).unwrap_err();
+    assert_eq!(refused.0, "refused");
+    assert!(refused.1.contains("has not ended"), "{}", refused.1);
+}

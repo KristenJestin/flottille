@@ -501,6 +501,7 @@ there. An agent in a result:
   "taken": {"model": "sonnet", "effort": "high", "mode": null},
   "native_id": "0f6c…",
   "agent_version": "flottille-claude-bridge 0.1.0",
+  "reopens": true,
   "instructions": "…\n\n__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__\n\n…",
   "tools": ["mcp__flottille__fs_read", "…"]
 }
@@ -508,10 +509,12 @@ there. An agent in a result:
 
 `workspace` is `null` for the project folder itself. `state` is `starting` (its process starts
 and its session opens), `working` (a turn runs), `idle` (between turns, its process running or
-released), or one of the final states, never left: `ended`, `failed` (`state_reason` says why).
+released), or one of the final states: `ended`, `failed` (`state_reason` says why). A final state
+is never left, but for an ended root the user resumes (`agent.resume`).
 `provider` is the provider it runs on, for life (`docs/agents.md`, "Providers"). `chosen` is what
 was asked, or the project's default model, `null` for the agent's default; `taken` what the agent reported
-at the last start of its process. `active_at` is its last sign of activity, `null` before the
+at the last start of its process; `reopens` whether its agent offered to resume or load a session
+when it last opened one. `active_at` is its last sign of activity, `null` before the
 first. `instructions` and `tools` are frozen when the agent is created. `parent` is the agent that
 launched it (`null` for a root), `depth` its depth in the tree, `epoch` the number of its session
 (each replacement adds one), `title` and `brief` a child's task, `reported_at` when it reported,
@@ -561,6 +564,16 @@ and the sentence names its root.
 `{"agent"}`, the root once ended. `refused` when it is in a final state, or a child (the sentence
 names its root).
 
+#### `agent.resume`
+
+`{"agent"}`. Starts an ended root again on its own session: `{"agent"}`, the root once idle again
+(`agent.resumed`, `docs/events.md`). It keeps its id, its epoch, its conversation and its session;
+nothing is sent to it, and the next message (`agent.send`) starts its process, which resumes or
+loads the session as after an idle release (`docs/agents.md`, "How an agent runs"). Its children
+stay ended. `refused` for a child (the sentence names its root), an agent that has not ended, a
+failed one (its session went with it), and one whose agent can neither resume nor load a session
+or that never opened one: what `resumable` says, in short (`agent.tree`).
+
 #### `agent.tree`
 
 `{"agent"}`. The whole tree of the agent's root, each agent before its children:
@@ -568,7 +581,7 @@ names its root).
 (`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `depth`, `epoch`, `state`,
 `state_reason`, `created_at`, `active_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
 took at the last start of its process, else the one asked, `null` for the agent's default before it
-started); `doing` a sentence of what it does
+started; `resumable`: whether `agent.resume` takes it); `doing` a sentence of what it does
 (`working`, `idle`, `running \`cargo test\` for 12 min`, `waiting for approval #3`, `failed: …`);
 `waiting_on` `parent` for a child whose request or question waits for its parent, `user` for a
 root whose own does, else `null`; `needs_user`, for the root, whether a request of its tree or its

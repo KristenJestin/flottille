@@ -54,6 +54,9 @@ pub struct Agent {
     pub native_id: Option<String>,
     /// The adapter's name and version, from its `initialize` answer.
     pub agent_version: Option<String>,
+    /// Its agent offered to resume or load a session when it last opened one: its session can be
+    /// opened again once it ended (`agent.resume`).
+    pub reopens: bool,
     /// The system prompt, frozen at creation, with its cache boundary.
     pub instructions: String,
     /// The exact names of its tools, frozen at creation (the prompt cache depends on it).
@@ -105,7 +108,7 @@ impl AgentState {
         .find(|state| state.as_str() == text)
     }
 
-    /// A final state is never left.
+    /// A final state is never left, but for an ended root the user resumes (`agent.resume`).
     pub fn is_final(self) -> bool {
         matches!(self, AgentState::Ended | AgentState::Failed)
     }

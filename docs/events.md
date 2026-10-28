@@ -405,6 +405,15 @@ reported. Its process and its runs are stopped; what was queued for it is supers
 | `agent` | |
 | `reason` | A sentence. |
 
+#### `agent.resumed`
+
+The user resumed an ended root (`agent.resume`, `docs/protocol.md`): it is idle again, on its own
+session, which its next process resumes or loads. Its children stay ended.
+
+| Field | |
+|---|---|
+| `agent` | |
+
 #### `agent.reported`
 
 The agent called `report` (`docs/tools.md`). A root's report is for the user: `flottille inbox`
