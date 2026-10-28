@@ -4837,9 +4837,11 @@ fn alt_left_with_a_menu_open_closes_it_and_goes_nowhere(cx: &mut TestAppContext)
     );
 }
 
-// Stopping and interrupting (#100): a session's tree stopped from the header or the rail, after a
-// confirmation that counts the agents; a turn interrupted by the composer's Stop or Escape, the
-// agent staying alive.
+// Stopping, ending and resuming (#100, #109): the composer's Stop and Escape interrupt the turn
+// that runs, the agent staying alive and the conversation going on; "End session" in the root's
+// menu ends the tree after a confirmation that counts the agents, moves the session to its
+// project's "Ended" group and puts a line in place of the composer; Resume, when the agent can,
+// brings the composer back.
 
 fn tree_states(user: &User, lead: &str) -> Vec<(String, String)> {
     user.call("agent.tree", json!({"agent": lead})).unwrap()["agents"]
@@ -4872,35 +4874,146 @@ fn lead_with_two_workers<'a>(
     (lead, shell, cx)
 }
 
+/// The sessions a place of the left tree lists.
+fn listed_in(shell: &Entity<Shell>, place: Place, cx: &mut VisualTestContext) -> Vec<String> {
+    shell.read_with(cx, |s, cx| {
+        s.place("app", &place)
+            .map(|node| {
+                node.read(cx)
+                    .sessions(cx)
+                    .iter()
+                    .map(|row| row.read(cx).id().to_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// The sessions the "Ended" group of `app` lists, and whether it is open.
+fn ended_in_app(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> (Vec<String>, bool) {
+    shell.read_with(cx, |s, cx| {
+        s.ended("app")
+            .map(|node| {
+                let node = node.read(cx);
+                let ids = node
+                    .sessions(cx)
+                    .iter()
+                    .map(|row| row.read(cx).id().to_owned())
+                    .collect();
+                (ids, node.is_open())
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// Opens an ended session from its project's "Ended" group, as a user would.
+fn open_ended<'a>(
+    user: &User,
+    lead: &str,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    let (shell, cx) = window(user, Arc::new(user.connector()), 1280., cx);
+    until(&shell, cx, "the Ended group is in the tree", |cx| {
+        cx.update(|window, _| window.try_find("ended-app").is_some())
+    });
+    cx.update(|window, cx| window.click("ended-app", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click(session_id(lead), cx));
+    until(&shell, cx, "the ended session's page", |cx| {
+        session_page(&shell, cx).read_with(cx, |page, cx| {
+            !page.conversation().read(cx).rows().is_empty() && !page.tree().is_empty()
+        })
+    });
+    settle(cx);
+    (shell, cx)
+}
+
 #[gpui_kit::test]
-fn stopping_from_the_header_asks_first_naming_the_agents_that_stop_then_ends_the_tree(
+fn stop_during_a_turn_cancels_it_and_the_next_message_is_taken(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let reply = shell
+        .read_with(cx, |s, _| s.reply_of(&lead).cloned())
+        .unwrap();
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(
+            window.try_find("session-stop").is_none(),
+            "nothing on the page ends the agent but End session"
+        )
+    });
+
+    send(&user, &lead, "HANG");
+    until(&shell, cx, "the turn runs and Stop is offered", |cx| {
+        reply.read_with(cx, |r, _| r.is_running())
+            && cx.update(|window, _| window.try_find("reply-stop").is_some())
+    });
+    cx.update(|window, cx| window.click("reply-stop", cx));
+    until(&shell, cx, "the turn ends", |cx| {
+        !reply.read_with(cx, |r, _| r.is_running())
+    });
+    settle(cx);
+
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("go on with the plan");
+    cx.simulate_keystrokes("enter");
+    until(&shell, cx, "the daemon took the message", |cx| {
+        reply.read_with(cx, |r, cx| {
+            !r.is_sending() && r.field().read(cx).value().is_empty()
+        })
+    });
+    assert_eq!(
+        reply.read_with(cx, |r, _| r.error().map(str::to_owned)),
+        None
+    );
+    eventually("the message is played as a new turn", || {
+        user.received_requests("session/prompt")
+            .iter()
+            .filter_map(|p| p["params"]["prompt"][0]["text"].as_str().map(str::to_owned))
+            .any(|text| text.contains("go on with the plan"))
+    });
+    let agent = user.call("agent.show", json!({"agent": lead})).unwrap();
+    assert_ne!(agent["agent"]["state"], "ended", "the agent stays");
+}
+
+#[gpui_kit::test]
+fn end_session_asks_ends_the_tree_moves_it_to_ended_and_replaces_the_composer(
     cx: &mut TestAppContext,
 ) {
     let user = team_user();
     let (lead, shell, cx) = lead_with_two_workers(&user, cx);
     let page = session_page(&shell, cx);
-    assert_eq!(page.read_with(cx, |p, _| p.stop_question()), None);
-
-    cx.update(|window, cx| window.click("session-stop", cx));
-    settle(cx);
-    let asked = page.read_with(cx, |p, _| p.stop_question()).unwrap();
-    assert!(asked.contains("3 agents"), "{asked}");
-    cx.update(|window, _| assert!(window.find("session-stop-confirm").visible()));
-
-    // Cancel stops nothing.
-    cx.update(|window, cx| window.click("session-stop-modal-cancel", cx));
-    settle(cx);
-    assert_eq!(page.read_with(cx, |p, _| p.stop_question()), None);
-    assert!(
-        tree_states(&user, &lead).iter().all(|(_, s)| s != "ended"),
-        "nothing stopped"
+    assert_eq!(page.read_with(cx, |p, _| p.end_question()), None);
+    assert_eq!(
+        listed_in(&shell, Some("w".into()), cx),
+        std::slice::from_ref(&lead)
     );
 
-    // Confirmed: the parent and its children end, and the rail shows them stopped.
-    cx.update(|window, cx| window.click("session-stop", cx));
+    cx.update(|window, cx| window.click("rail-agent-menu", cx));
     settle(cx);
-    cx.update(|window, cx| window.click("session-stop-confirm", cx));
-    until(&shell, cx, "the tree is stopped", |cx| {
+    cx.update(|window, cx| window.click("rail-agent-end", cx));
+    settle(cx);
+    let asked = page.read_with(cx, |p, _| p.end_question()).unwrap();
+    assert!(asked.contains("3 agents"), "{asked}");
+    cx.update(|window, _| assert!(window.find("session-end-confirm").visible()));
+
+    // Cancel ends nothing.
+    cx.update(|window, cx| window.click("session-end-modal-cancel", cx));
+    settle(cx);
+    assert_eq!(page.read_with(cx, |p, _| p.end_question()), None);
+    assert!(
+        tree_states(&user, &lead).iter().all(|(_, s)| s != "ended"),
+        "nothing ended"
+    );
+
+    // Confirmed: the root and its children end.
+    cx.update(|window, cx| window.click("rail-agent-menu", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("rail-agent-end", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("session-end-confirm", cx));
+    until(&shell, cx, "the tree ended", |cx| {
         page.read_with(cx, |p, cx| {
             p.tree().len() == 3
                 && p.tree()
@@ -4909,33 +5022,108 @@ fn stopping_from_the_header_asks_first_naming_the_agents_that_stop_then_ends_the
         })
     });
     let states = tree_states(&user, &lead);
-    assert_eq!(states.len(), 3);
     assert!(states.iter().all(|(_, s)| s == "ended"), "{states:?}");
+
+    // A line in place of the composer, with Resume: the fake agent resumes its sessions.
+    settle(cx);
+    assert_eq!(
+        page.read_with(cx, |p, _| p.ended_line()),
+        Some(("This session ended: stopped by you.".to_owned(), true))
+    );
     cx.update(|window, _| {
+        assert!(window.try_find("session-ended").is_some());
+        assert!(window.try_find("session-resume").is_some());
+        assert!(window.try_find("reply-field").is_none(), "no composer");
         assert!(
-            window.try_find("session-stop").is_none(),
-            "an ended session has nothing to stop"
-        )
+            window.try_find("rail-agent-menu").is_none(),
+            "an ended session has nothing to end"
+        );
+    });
+
+    // It left its place's list for its project's "Ended" group, folded, and opens from there.
+    until(&shell, cx, "the session moved to Ended", |cx| {
+        listed_in(&shell, Some("w".into()), cx).is_empty()
+            && ended_in_app(&shell, cx).0 == [lead.clone()]
+    });
+    assert!(!ended_in_app(&shell, cx).1, "the group is folded");
+    settle(cx);
+    cx.update(|window, cx| window.click("ended-app", cx));
+    settle(cx);
+    assert!(ended_in_app(&shell, cx).1);
+    cx.update(|window, _| assert!(window.find(session_id(&lead)).visible()));
+}
+
+#[gpui_kit::test]
+fn resume_on_an_ended_session_brings_the_composer_back_and_a_message_is_answered(
+    cx: &mut TestAppContext,
+) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    user.call("agent.stop", json!({"agent": lead})).unwrap();
+    let (shell, cx) = open_ended(&user, &lead, cx);
+    cx.update(|window, _| assert!(window.try_find("reply-field").is_none()));
+
+    cx.update(|window, cx| window.click("session-resume", cx));
+    until(&shell, cx, "the composer is back", |cx| {
+        cx.update(|window, _| {
+            window.try_find("reply-field").is_some() && window.try_find("session-ended").is_none()
+        })
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("carry on");
+    cx.simulate_keystrokes("enter");
+    let reply = shell
+        .read_with(cx, |s, _| s.reply_of(&lead).cloned())
+        .unwrap();
+    until(&shell, cx, "the daemon took the message", |cx| {
+        reply.read_with(cx, |r, cx| {
+            !r.is_sending() && r.field().read(cx).value().is_empty()
+        })
+    });
+    assert_eq!(
+        reply.read_with(cx, |r, _| r.error().map(str::to_owned)),
+        None
+    );
+    eventually("the message is answered on the same session", || {
+        let shown = user.call("agent.show", json!({"agent": lead})).unwrap();
+        shown["agent"]["state"] == "idle"
+            && shown["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["name"] == "agent.started" && e["data"]["opened"] == "resumed")
+            && shown["events"].as_array().unwrap().last().unwrap()["name"] == "agent.turn_ended"
+    });
+    let native =
+        user.call("agent.show", json!({"agent": lead})).unwrap()["agent"]["native_id"].clone();
+    let resumes = user.received_requests("session/resume");
+    assert_eq!(resumes.len(), 1);
+    assert_eq!(resumes[0]["params"]["sessionId"], native);
+    until(&shell, cx, "the session is back in its place", |cx| {
+        listed_in(&shell, Some("w".into()), cx) == [lead.clone()]
+            && ended_in_app(&shell, cx).0.is_empty()
     });
 }
 
 #[gpui_kit::test]
-fn the_lead_s_row_menu_in_the_rail_stops_the_tree_after_the_same_confirmation(
-    cx: &mut TestAppContext,
-) {
+fn no_resume_when_the_agent_can_neither_resume_nor_load(cx: &mut TestAppContext) {
     let user = team_user();
-    let (lead, shell, cx) = lead_with_two_workers(&user, cx);
-    let page = session_page(&shell, cx);
+    user.fake_script(json!({"resume": false, "load": false}));
+    let (lead, _mcp, _) = lead_in_w(&user);
+    user.call("agent.stop", json!({"agent": lead})).unwrap();
 
-    cx.update(|window, cx| window.click("rail-agent-menu", cx));
-    settle(cx);
-    cx.update(|window, cx| window.click("rail-agent-stop", cx));
-    settle(cx);
-    let asked = page.read_with(cx, |p, _| p.stop_question()).unwrap();
-    assert!(asked.contains("3 agents"), "{asked}");
-    cx.update(|window, cx| window.click("session-stop-confirm", cx));
-    until(&shell, cx, "the tree is stopped", |_| {
-        tree_states(&user, &lead).iter().all(|(_, s)| s == "ended")
+    let (shell, cx) = open_ended(&user, &lead, cx);
+
+    let page = session_page(&shell, cx);
+    assert_eq!(
+        page.read_with(cx, |p, _| p.ended_line()),
+        Some(("This session ended: stopped by you.".to_owned(), false))
+    );
+    cx.update(|window, _| {
+        assert!(window.try_find("session-ended").is_some());
+        assert!(window.try_find("session-resume").is_none());
+        assert!(window.try_find("reply-field").is_none());
     });
 }
 

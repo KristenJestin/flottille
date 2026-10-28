@@ -401,7 +401,11 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   text); a rail with the session's
   tree of agents, its workspace (each repository's forge as the daemon reads it, its ticket,
   linked or unlinked there) and facts (the grants of the procedure it runs, while it runs). The
-  header and the root's row menu stop the root and its tree, after a confirmation that counts the agents that stop. Selecting a child shows its
+  root's row menu ("⋯") holds End session, the only way the window ends an agent: it ends the root
+  and its tree, after a confirmation that counts the agents that end. An ended session leaves its
+  place in the left tree for its project's "Ended" group, folded at the bottom, and its page shows,
+  in place of the composer, why it ended and Resume when its agent can resume or load its session
+  (`agent.resume`), which brings the composer back. Selecting a child shows its
   conversation read-only;
 - narrow and portrait windows: the rail, then the left tree, become drawers.
 - a history of the pages shown (project pages, sessions with the agent shown in them, settings),

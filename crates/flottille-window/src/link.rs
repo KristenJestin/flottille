@@ -264,6 +264,7 @@ fn matters(event: &Event) -> bool {
                 | "agent.replaced"
                 | "agent.failed"
                 | "agent.ended"
+                | "agent.resumed"
                 | "agent.reported"
                 | "agent.asked"
         ),

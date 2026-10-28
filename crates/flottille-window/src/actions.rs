@@ -154,8 +154,12 @@ pub enum Command {
         session: String,
         message: String,
     },
-    /// Stops a session's root agent and its tree.
+    /// Ends a session: its root agent and its tree stop.
     Stop {
+        session: String,
+    },
+    /// Starts an ended session's root agent again on its own session.
+    Resume {
         session: String,
     },
     /// Interrupts the turn the session's root agent runs; the agent stays.
@@ -338,6 +342,11 @@ pub enum Outcome {
     },
     /// The session's tree was stopped, or the daemon refused with why.
     Stopped {
+        session: String,
+        refused: Option<String>,
+    },
+    /// The session's root was resumed, or the daemon refused with why.
+    Resumed {
         session: String,
         refused: Option<String>,
     },
@@ -807,6 +816,18 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 Ok(Err(why)) | Err(why) => Some(why),
             };
             Outcome::Stopped { session, refused }
+        }
+        Command::Resume { session } => {
+            let refused = match ask_alone(
+                connect,
+                "agent.resume",
+                json!({"agent": session}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::Resumed { session, refused }
         }
         Command::Interrupt { session } => {
             let refused = match ask_alone(

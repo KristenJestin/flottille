@@ -40,6 +40,8 @@ pub struct TreeAgent {
     /// `parent`, `user` or nothing.
     pub waiting_on: Option<String>,
     pub needs_user: bool,
+    /// An ended root the daemon can start again on its own session (`agent.resume`).
+    pub resumable: bool,
 }
 
 impl TreeAgent {
@@ -59,6 +61,7 @@ impl TreeAgent {
             doing: text(&entry["doing"]).unwrap_or_default(),
             waiting_on: text(&entry["waiting_on"]),
             needs_user: entry["needs_user"] == true,
+            resumable: agent["resumable"] == true,
         }
     }
 }
@@ -316,6 +319,7 @@ const TREE_EVENTS: &[&str] = &[
     "agent.replaced",
     "agent.failed",
     "agent.ended",
+    "agent.resumed",
     "agent.reported",
     "agent.asked",
     "delivery.queued",

@@ -27,6 +27,11 @@ pub fn place_id(project: &str, place: &Place) -> ElementId {
     ElementId::Name(format!("place-{project}-{}", place_name(place)).into())
 }
 
+/// The element id of a project's "Ended" group.
+pub fn ended_id(project: &str) -> ElementId {
+    ElementId::Name(format!("ended-{project}").into())
+}
+
 /// The element id of a session's row.
 pub fn session_id(id: &str) -> ElementId {
     ElementId::Name(format!("session-{id}").into())
@@ -274,10 +279,13 @@ impl<V: Render> Render for Level<V> {
 }
 
 /// A place's row (`main` with a folder icon, a workspace with a git-branch icon) and, folding
-/// under it, its sessions.
+/// under it, its sessions; or, at the bottom of a project, the "Ended" group that gathers its
+/// ended sessions, folded until the user opens it.
 pub struct PlaceNode {
     project: String,
     place: Place,
+    /// The "Ended" group: no place of its own.
+    ended: bool,
     open: bool,
     mark: Mark,
     sessions: Entity<Level<SessionRow>>,
@@ -297,7 +305,23 @@ impl PlaceNode {
         Self {
             project,
             place,
+            ended: false,
             open: true,
+            mark: Mark::new(cx),
+            sessions,
+            fold,
+        }
+    }
+
+    /// The "Ended" group of a project, folded.
+    pub fn ended(project: String, cx: &mut Context<Self>) -> Self {
+        let sessions = cx.new(|_| Level::new());
+        let fold = cx.new(|_| Fold::new(format!("fold-ended-{project}"), sessions.clone(), false));
+        Self {
+            project,
+            place: None,
+            ended: true,
+            open: false,
             mark: Mark::new(cx),
             sessions,
             fold,
@@ -336,6 +360,10 @@ impl PlaceNode {
         if self.sessions.read(cx).rows != sessions {
             self.sessions
                 .update(cx, |level, cx| level.set(sessions, cx));
+            // The "Ended" row counts them.
+            if self.ended {
+                cx.notify();
+            }
         }
         if self.mark.set(mark, cx) {
             cx.notify();
@@ -352,19 +380,25 @@ impl PlaceNode {
 
 impl Render for PlaceNode {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let level = match self.place {
-            None => TreeLevel::Main,
-            Some(_) => TreeLevel::Workspace,
-        };
-        let row = TreeRow::new(
-            place_id(&self.project, &self.place),
-            level,
-            SharedString::from(place_name(&self.place).to_owned()),
-        )
+        let row = match (self.ended, &self.place) {
+            (true, _) => {
+                let count = self.sessions.read(cx).rows.len();
+                TreeRow::new(ended_id(&self.project), TreeLevel::Session, "Ended")
+                    .trailing(meta(count.to_string(), cx))
+            }
+            (false, place) => TreeRow::new(
+                place_id(&self.project, place),
+                match place {
+                    None => TreeLevel::Main,
+                    Some(_) => TreeLevel::Workspace,
+                },
+                SharedString::from(place_name(place).to_owned()),
+            )
+            .when_some(self.mark.shown, |row, _| {
+                row.trailing(self.mark.icon.clone())
+            }),
+        }
         .expanded(self.open)
-        .when_some(self.mark.shown, |row, _| {
-            row.trailing(self.mark.icon.clone())
-        })
         .on_click(cx.listener(|this, _, _, cx| this.toggle(cx)));
         div()
             .flex()
@@ -405,6 +439,11 @@ impl SessionRow {
 
     pub fn mark(&self) -> Option<AgentState> {
         self.mark.shown
+    }
+
+    /// The session's root agent.
+    pub fn id(&self) -> &str {
+        &self.id
     }
 
     pub fn renders(&self) -> usize {
