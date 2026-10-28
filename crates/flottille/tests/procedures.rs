@@ -611,6 +611,61 @@ fn a_child_of_the_run_has_no_grant_unless_the_procedure_gives_it() {
 }
 
 #[test]
+fn a_run_s_children_get_its_grants_when_the_file_says_nothing_and_none_when_it_says_children_false()
+{
+    let user = User::with_fake_agent();
+    let (_, remote) = fixture(&user);
+    // Written by hand: one says nothing of its children, the other keeps its grants from them.
+    let file = user.project_file("app");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let procedure = |name: &str, more: &str| {
+        format!(
+            "\n[procedures.{name}]\ndescription = \"Ship the workspace\"\n\
+             instructions = \"Push the branch.\"\n{more}[procedures.{name}.grants]\n\
+             push = \"allow\"\n"
+        )
+    };
+    std::fs::write(
+        &file,
+        format!(
+            "{text}{}{}",
+            procedure("silent", ""),
+            procedure("alone", "children = false\n")
+        ),
+    )
+    .unwrap();
+
+    for (name, inherits) in [("alone", false), ("silent", true)] {
+        let (_, root) = run(&user, name);
+        let opened = user.received_requests("session/new").len();
+        let launched = root.call(
+            "agent_launch",
+            json!({"title": "push", "brief": "Push the branch."}),
+        );
+        assert!(!launched.error, "{}", launched.text);
+        let (url, authorization) = server_of(&user, opened);
+        let child = Mcp::initialize(&url, &authorization);
+
+        let answer = line(&child, "git push origin app/login");
+
+        assert_eq!(!answer.error, inherits, "{name}: {}", answer.text);
+        assert_eq!(
+            remote_branches(&user, &remote).contains("app/login"),
+            inherits,
+            "{name}"
+        );
+    }
+    // Editing the one that said `children = false` keeps it.
+    user.call(
+        "procedure.edit",
+        json!({"project": "app", "name": "alone", "description": "Ship it"}),
+    )
+    .unwrap();
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("children = false"), "{text}");
+}
+
+#[test]
 fn the_grants_end_with_the_run() {
     let user = User::with_fake_agent();
     let (_, remote) = fixture(&user);

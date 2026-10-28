@@ -178,20 +178,20 @@ pub enum ProcedureWrite {
     Template {
         template: String,
     },
+    /// A new procedure: its children get its grants, the default.
     Add {
         name: String,
         description: String,
         instructions: String,
         grants: Value,
-        children: bool,
     },
-    /// What is given replaces what the procedure had; `grants` whole.
+    /// What is given replaces what the procedure had, `grants` whole; whether its children get them
+    /// stays as the file says.
     Edit {
         name: String,
         description: String,
         instructions: String,
         grants: Value,
-        children: bool,
     },
     Remove {
         name: String,
@@ -872,22 +872,20 @@ fn procedure_write(project: &str, write: ProcedureWrite) -> (&'static str, Value
             description,
             instructions,
             grants,
-            children,
         } => (
             "procedure.add",
             json!({"project": project, "name": name, "description": description,
-                "instructions": instructions, "grants": grants, "children": children}),
+                "instructions": instructions, "grants": grants}),
         ),
         ProcedureWrite::Edit {
             name,
             description,
             instructions,
             grants,
-            children,
         } => (
             "procedure.edit",
             json!({"project": project, "name": name, "description": description,
-                "instructions": instructions, "grants": grants, "children": children}),
+                "instructions": instructions, "grants": grants}),
         ),
         ProcedureWrite::Remove { name } => (
             "procedure.remove",

@@ -208,6 +208,7 @@ pub struct ListRow {
     leading: Option<AnyElement>,
     title: SharedString,
     detail: Option<SharedString>,
+    line: Option<SharedString>,
     meta: Option<SharedString>,
     trailing: Option<AnyElement>,
     selected: bool,
@@ -221,6 +222,7 @@ impl ListRow {
             leading: None,
             title: title.into(),
             detail: None,
+            line: None,
             meta: None,
             trailing: None,
             selected: false,
@@ -237,6 +239,13 @@ impl ListRow {
     /// Mono, beside the title: a model.
     pub fn detail(mut self, text: impl Into<SharedString>) -> Self {
         self.detail = Some(text.into());
+        self
+    }
+
+    /// A sentence under the title: what a procedure or a template does. It is the element
+    /// `<id>-line`.
+    pub fn line(mut self, text: impl Into<SharedString>) -> Self {
+        self.line = Some(text.into());
         self
     }
 
@@ -293,10 +302,8 @@ impl RenderOnce for ListRow {
                     .justify_center()
                     .children(self.leading),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
+            .child({
+                let title = div()
                     .flex()
                     .items_baseline()
                     .gap(px(6.))
@@ -311,8 +318,28 @@ impl RenderOnce for ListRow {
                     )
                     .when_some(self.detail, |d, detail| {
                         d.child(div().mono(11.5).text_color(p.faint).child(detail))
-                    }),
-            )
+                    });
+                let line = self.line.map(|line| {
+                    div()
+                        .id(ElementId::Name(format!("{}-line", self.id).into()))
+                        .aria_label(line.clone())
+                        .text_size(px(12.5))
+                        .text_color(p.mute)
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(line)
+                        .test_support()
+                });
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
+                    .child(title)
+                    .children(line)
+            })
             .when_some(self.meta, |d, text| {
                 d.child(
                     div()

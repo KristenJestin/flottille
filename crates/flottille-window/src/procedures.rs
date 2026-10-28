@@ -3,15 +3,15 @@
 //! shows the list the daemon gives next.
 //!
 //! * [`ProceduresSection`]: the "Procedures" section of the project page, with the modal that adds
-//!   one (from a template or blank) or edits one.
-//! * [`RunProcedure`]: the modal that runs one in a workspace. It shows the grants in words and
-//!   starts nothing before Confirm.
+//!   one (from the list of templates, or blank) or edits one, each grant a sentence.
+//! * [`RunProcedure`]: the modal that runs one, picked with `/` in a session's composer, in that
+//!   session's workspace. It shows the grants in words and starts nothing before Confirm.
 //! * [`run_block`]: the grants of the run a session belongs to, in its rail's WORKSPACE section.
 
 use std::collections::BTreeMap;
 
 use flottille_core::procedure::{Grant, Mode, TEMPLATES};
-use flottille_ui::{Button, Modal, Switch, Type, palette};
+use flottille_ui::{Button, Icon, ListRow, Modal, Type, icon, palette};
 use gpui_kit::base::input::{Input, InputEditorStyle, InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -24,14 +24,33 @@ use serde_json::{Value, json};
 use crate::actions::{Command, ProcedureWrite};
 use crate::shell::Shell;
 
-/// What a grant's mode means, in words: `allow` runs without asking, `ask` is held for the user's
-/// answer, every time.
+/// What a grant's mode means, in the words of the editor's choices: `allow` is done on its own,
+/// `ask` after asking the user, every time.
 pub fn mode_words(mode: &str) -> &'static str {
     match mode {
-        "allow" => "runs without asking",
-        "ask" => "held for your answer",
-        _ => "not granted",
+        "allow" => "on its own",
+        "ask" => "after asking me",
+        _ => "no",
     }
+}
+
+/// What a grant lets a run do, as a sentence for the user; the grant's own word when it is not
+/// one Flottille knows.
+pub fn sentence(grant: &str) -> String {
+    let Some(grant) = Grant::of(grant) else {
+        return grant.to_owned();
+    };
+    match grant {
+        Grant::Commit => "Make commits",
+        Grant::Push => "Push the workspace's branch",
+        Grant::PushForceWithLease => "Force-push the branch, with a lease",
+        Grant::Rebase => "Rebase the branch on its base",
+        Grant::PrCreate => "Open the pull requests",
+        Grant::PrMergeSquash => "Merge the pull requests, by squash",
+        Grant::PipelineRerun => "Re-run the failed pipelines",
+        Grant::WorkspaceRemove => "Remove the workspace, once nothing would be lost",
+    }
+    .to_owned()
 }
 
 /// One grant of a procedure: the sentence the daemon gives for what it lets through.
@@ -43,9 +62,9 @@ pub struct GrantLine {
 }
 
 impl GrantLine {
-    /// `push: runs without asking · push the workspace's branch…`
+    /// `Push the workspace's branch · after asking me`
     pub fn text(&self) -> String {
-        format!("{}: {} · {}", self.grant, mode_words(&self.mode), self.says)
+        format!("{} · {}", sentence(&self.grant), mode_words(&self.mode))
     }
 }
 
@@ -109,9 +128,9 @@ impl ProcedureInfo {
 
 fn children_words(children: bool, grants: bool) -> &'static str {
     match (grants, children) {
-        (false, _) => "It grants nothing beyond what agents may always do.",
-        (true, true) => "The agents the run starts get these grants too.",
-        (true, false) => "The agents the run starts get none of them.",
+        (false, _) => "It may do nothing beyond what agents may always do.",
+        (true, true) => "The agents the run starts may do the same.",
+        (true, false) => "The agents the run starts may do none of it.",
     }
 }
 
@@ -223,6 +242,8 @@ pub struct ProceduresSection {
     /// Made when the modal first opens, which is when a window is at hand.
     fields: Option<Fields>,
     grants: BTreeMap<Grant, Mode>,
+    /// Whether the run's children get the grants, as the file says: the form shows it and leaves
+    /// it as it is.
     children: bool,
     saving: bool,
     form_error: Option<SharedString>,
@@ -242,7 +263,7 @@ impl ProceduresSection {
             form: Form::Closed,
             fields: None,
             grants: BTreeMap::new(),
-            children: false,
+            children: true,
             saving: false,
             form_error: None,
             reading: None,
@@ -334,7 +355,7 @@ impl ProceduresSection {
         self.fields.as_ref().expect("made above")
     }
 
-    /// "Add procedure": the choice of a template or a blank one.
+    /// "New procedure": the list of the templates, and a blank one.
     pub fn add(&mut self, cx: &mut Context<Self>) {
         self.form = Form::Choosing;
         self.form_error = None;
@@ -372,7 +393,7 @@ impl ProceduresSection {
                     .collect()
             })
             .unwrap_or_default();
-        self.children = info.is_some_and(|info| info.children);
+        self.children = info.is_none_or(|info| info.children);
         self.form = Form::Editing(info.map(|info| info.name.clone()));
         self.form_error = None;
         self.saving = false;
@@ -465,21 +486,18 @@ impl ProceduresSection {
             fields.description.read(cx).value().trim().to_owned(),
             fields.instructions.read(cx).value().trim().to_owned(),
         );
-        let children = self.children;
         let write = match original {
             Some(_) => ProcedureWrite::Edit {
                 name,
                 description,
                 instructions,
                 grants,
-                children,
             },
             None => ProcedureWrite::Add {
                 name,
                 description,
                 instructions,
                 grants,
-                children,
             },
         };
         self.write(write, cx);
@@ -538,6 +556,11 @@ impl ProceduresSection {
                 .collect::<Vec<_>>()
                 .join(" · ")
         };
+        let children = if info.children || info.grants.is_empty() {
+            ""
+        } else {
+            " · not the children"
+        };
         div()
             .id(id("procedure"))
             .px(px(14.))
@@ -572,14 +595,7 @@ impl ProceduresSection {
                             .test_support(),
                     )
                     .child({
-                        let grants = SharedString::from(format!(
-                            "{grants}{}",
-                            if info.children {
-                                " · children too"
-                            } else {
-                                ""
-                            }
-                        ));
+                        let grants = SharedString::from(format!("{grants}{children}"));
                         div()
                             .id(id("procedure-grants"))
                             .mono(11.)
@@ -628,48 +644,59 @@ impl ProceduresSection {
         let p = palette(cx);
         let this = cx.entity().downgrade();
         let open = self.form != Form::Closed;
-        let modal = Modal::new("procedure-modal", "Procedure")
-            .width(px(560.))
+        let title = match &self.form {
+            Form::Editing(Some(_)) => "Edit procedure",
+            _ => "New procedure",
+        };
+        let modal = Modal::new("procedure-modal", title)
+            .width(px(600.))
             .open(open)
             .on_close(move |_, cx| {
                 this.update(cx, |this, cx| this.close(cx)).ok();
             });
+        let error = self.form_error.clone().map(|error| {
+            div()
+                .id("procedure-error")
+                .text_size(px(12.5))
+                .text_color(p.fail)
+                .child(error)
+                .test_support()
+        });
         match self.form.clone() {
             Form::Closed => modal,
             Form::Choosing => {
-                let mut modal = modal.child(
-                    div()
-                        .text_size(px(12.5))
-                        .text_color(p.mute)
-                        .child("Start from one of Flottille's templates, or write your own."),
-                );
-                for template in TEMPLATES {
-                    modal = modal.child(
-                        Button::secondary(
-                            ElementId::Name(format!("template-{template}").into()),
-                            template,
-                        )
-                        .full_width()
-                        .disabled(self.saving)
-                        .on_click(cx.listener(move |this, _, _, cx| this.template(template, cx))),
-                    );
-                }
+                let templates = TEMPLATES.into_iter().map(|template| {
+                    let description = flottille_core::procedure::template(template)
+                        .map(|t| t.description)
+                        .unwrap_or_default();
+                    ListRow::new(
+                        ElementId::Name(format!("template-{template}").into()),
+                        template,
+                    )
+                    .leading(icon(Icon::Branch).size(px(14.)).text_color(p.faint))
+                    .line(description)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.saving {
+                            this.template(template, cx)
+                        }
+                    }))
+                });
+                let blank = ListRow::new("blank-procedure", "Blank procedure")
+                    .leading(icon(Icon::Plus).size(px(14.)).text_color(p.faint))
+                    .line("Write your own: a name, what it does, and what a run may do")
+                    .on_click(cx.listener(|this, _, window, cx| this.blank(window, cx)));
                 modal
                     .child(
-                        Button::quiet("blank-procedure", "Blank procedure")
-                            .full_width()
-                            .on_click(cx.listener(|this, _, window, cx| this.blank(window, cx))),
+                        div()
+                            .id("procedure-templates")
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .children(templates)
+                            .child(blank)
+                            .test_support(),
                     )
-                    .when_some(self.form_error.clone(), |m, error| {
-                        m.child(
-                            div()
-                                .id("procedure-error")
-                                .text_size(px(12.5))
-                                .text_color(p.fail)
-                                .child(error)
-                                .test_support(),
-                        )
-                    })
+                    .children(error)
             }
             Form::Editing(original) => {
                 let fields = self.fields.as_ref().expect("made when the form opens");
@@ -677,7 +704,7 @@ impl ProceduresSection {
                     let word = grant.word();
                     let mode = self.grants.get(&grant).copied();
                     let choice =
-                        |label: &'static str, this: Option<Mode>| {
+                        |label: &'static str, width: f32, this: Option<Mode>| {
                             let button = ElementId::Name(
                                 format!("grant-{word}-{}", this.map_or("off", Mode::word)).into(),
                             );
@@ -688,134 +715,108 @@ impl ProceduresSection {
                             };
                             // One width each, so that the columns stay aligned whichever is chosen.
                             div()
-                                .w(px(56.))
+                                .w(px(width))
                                 .flex()
                                 .justify_center()
                                 .child(button.on_click(cx.listener(move |this_, _, _, cx| {
                                     this_.set_grant(grant, this, cx)
                                 })))
                         };
+                    let said = sentence(word);
                     div()
                         .id(ElementId::Name(format!("grant-{word}").into()))
+                        .aria_label(SharedString::from(said.clone()))
                         .flex()
                         .items_center()
                         .gap(px(6.))
+                        .py(px(2.))
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
                                 .flex()
                                 .flex_col()
-                                .child(div().mono(12.).child(word))
-                                .child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .text_color(p.faint)
-                                        .child(grant.says()),
-                                ),
+                                .child(div().text_size(px(13.)).child(said))
+                                .child(div().mono(10.5).text_color(p.faint).child(word)),
                         )
-                        .child(choice("off", None))
-                        .child(choice("allow", Some(Mode::Allow)))
-                        .child(choice("ask", Some(Mode::Ask)))
+                        .child(choice("No", 44., None))
+                        .child(choice("After asking me", 124., Some(Mode::Ask)))
+                        .child(choice("On its own", 92., Some(Mode::Allow)))
                         .test_support()
                 });
-                let body = div()
-                    .id("procedure-form")
-                    .max_h(window.viewport_size().height - px(200.))
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.))
-                    .child(match &original {
-                        Some(name) => div()
-                            .mono(12.5)
-                            .semibold()
-                            .child(SharedString::from(name.clone()))
-                            .into_any_element(),
-                        None => {
-                            boxed("procedure-name", Input::new(&fields.name), cx).into_any_element()
-                        }
-                    })
-                    .child(boxed(
-                        "procedure-description-field",
-                        Input::new(&fields.description),
-                        cx,
-                    ))
-                    .child(
-                        div()
-                            .id("procedure-instructions")
-                            .px(px(10.))
-                            .py(px(8.))
-                            .rounded(px(8.))
-                            .bg(p.field)
-                            .border_1()
-                            .border_color(p.line2)
-                            .text_size(px(12.5))
-                            .child(fields.instructions.clone())
-                            .test_support(),
-                    )
-                    .child(
-                        div()
-                            .mt(px(4.))
-                            .text_size(px(12.))
-                            .semibold()
-                            .child("Grants for the agents of a run"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.5))
-                            .text_color(p.faint)
-                            .child("allow: runs without asking · ask: held for your answer"),
-                    )
-                    .children(grants)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(
-                                Switch::new(
-                                    "procedure-children",
-                                    self.children,
-                                    "Children get the grants",
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.children = !this.children;
-                                        cx.notify();
-                                    },
-                                )),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.5))
-                                    .child("The agents the run starts get its grants too"),
-                            ),
-                    )
-                    .test_support();
-                modal
-                    .child(body)
-                    .when_some(self.form_error.clone(), |m, error| {
-                        m.child(
+                let body =
+                    div()
+                        .id("procedure-form")
+                        .max_h(window.viewport_size().height - px(200.))
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.))
+                        .child(match &original {
+                            Some(name) => div()
+                                .mono(12.5)
+                                .semibold()
+                                .child(SharedString::from(name.clone()))
+                                .into_any_element(),
+                            None => boxed("procedure-name", Input::new(&fields.name), cx)
+                                .into_any_element(),
+                        })
+                        .child(boxed(
+                            "procedure-description-field",
+                            Input::new(&fields.description),
+                            cx,
+                        ))
+                        .child(
                             div()
-                                .id("procedure-error")
+                                .id("procedure-instructions")
+                                .px(px(10.))
+                                .py(px(8.))
+                                .rounded(px(8.))
+                                .bg(p.field)
+                                .border_1()
+                                .border_color(p.line2)
                                 .text_size(px(12.5))
-                                .text_color(p.fail)
-                                .child(error)
+                                .child(fields.instructions.clone())
                                 .test_support(),
                         )
-                    })
-                    .action(if self.saving {
-                        div()
-                            .mono(11.5)
-                            .text_color(p.faint)
-                            .child("Saving…")
-                            .into_any_element()
-                    } else {
-                        Button::primary("save-procedure", "Save")
-                            .on_click(cx.listener(|this, _, _, cx| this.save(cx)))
-                            .into_any_element()
-                    })
+                        .child(
+                            div()
+                                .mt(px(4.))
+                                .text_size(px(12.))
+                                .semibold()
+                                .child("What a run may do"),
+                        )
+                        .child(
+                            div().text_size(px(11.5)).text_color(p.faint).child(
+                                "Each run shows you these, and starts only once you confirm.",
+                            ),
+                        )
+                        .children(grants)
+                        .child(
+                            div()
+                                .id("procedure-children-said")
+                                .text_size(px(11.5))
+                                .text_color(p.faint)
+                                .child(if self.children {
+                                    "The agents a run starts may do the same."
+                                } else {
+                                    "The agents a run starts may do none of it: the project's file \
+                                 says children = false."
+                                })
+                                .test_support(),
+                        )
+                        .test_support();
+                modal.child(body).children(error).action(if self.saving {
+                    div()
+                        .mono(11.5)
+                        .text_color(p.faint)
+                        .child("Saving…")
+                        .into_any_element()
+                } else {
+                    Button::primary("save-procedure", "Save")
+                        .on_click(cx.listener(|this, _, _, cx| this.save(cx)))
+                        .into_any_element()
+                })
             }
         }
     }
@@ -839,7 +840,7 @@ impl Render for ProceduresSection {
             .child(heading(
                 "Procedures",
                 count,
-                Button::secondary("add-procedure", "Add procedure")
+                Button::secondary("add-procedure", "New procedure")
                     .leading(flottille_ui::Icon::Plus)
                     .on_click(cx.listener(|this, _, _, cx| this.add(cx))),
                 cx,
@@ -880,16 +881,14 @@ impl Render for ProceduresSection {
 
 // ── The run modal ──────────────────────────────────────────────────────────────────────────────
 
-/// The modal that runs a procedure in a workspace: the procedure, the workspace, every grant in
-/// words, and Confirm. The daemon is asked what the run would grant (`procedure.run`), which
+/// The modal that runs a procedure picked with `/` in the workspace of the session it was typed
+/// in: the procedure, the workspace, every grant in words, and Confirm. The daemon is asked what the run would grant (`procedure.run`), which
 /// starts nothing; `procedure.start` is asked only when the user confirms.
 pub struct RunProcedure {
     shell: WeakEntity<Shell>,
     open: bool,
     project: String,
     workspace: String,
-    /// The project's procedures; `None` until the daemon has listed them.
-    procedures: Option<Vec<ProcedureInfo>>,
     chosen: Option<String>,
     /// What running `chosen` would grant, as the daemon shows it.
     shown: Option<ProcedureInfo>,
@@ -904,7 +903,6 @@ impl RunProcedure {
             open: false,
             project: String::new(),
             workspace: String::new(),
-            procedures: None,
             chosen: None,
             shown: None,
             starting: false,
@@ -941,47 +939,19 @@ impl RunProcedure {
         self.starting
     }
 
-    /// Opens the modal on a workspace, nothing running. The shell asks the daemon for the
-    /// procedures: it opens the modal while it is being updated itself.
-    pub fn open(&mut self, project: &str, workspace: &str, cx: &mut Context<Self>) {
+    /// Opens the modal on a procedure to run in a workspace, nothing running: the daemon is asked
+    /// what a run of it would grant.
+    pub fn open(&mut self, project: &str, workspace: &str, name: &str, cx: &mut Context<Self>) {
         self.open = true;
         self.project = project.to_owned();
         self.workspace = workspace.to_owned();
-        self.procedures = None;
-        self.chosen = None;
-        self.shown = None;
         self.starting = false;
-        self.error = None;
-        cx.notify();
+        self.choose(name, cx);
     }
 
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.open = false;
         self.error = None;
-        cx.notify();
-    }
-
-    /// The project's procedures: when the modal waits for them, and there is only one, it is the
-    /// choice (still to be confirmed).
-    pub fn listed(
-        &mut self,
-        project: &str,
-        listed: Result<Vec<ProcedureInfo>, String>,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.open || self.project != project || self.procedures.is_some() {
-            return;
-        }
-        match listed {
-            Ok(list) => {
-                let only = (list.len() == 1).then(|| list[0].name.clone());
-                self.procedures = Some(list);
-                if let Some(only) = only {
-                    self.choose(&only, cx);
-                }
-            }
-            Err(why) => self.error = Some(why.into()),
-        }
         cx.notify();
     }
 
@@ -1083,116 +1053,84 @@ impl Render for RunProcedure {
                     )
                     .test_support(),
             );
-            let list = self.procedures.clone().unwrap_or_default();
-            if self.procedures.as_ref().is_some_and(Vec::is_empty) {
+            if let Some(shown) = &self.shown {
                 modal = modal.child(
                     div()
-                        .id("run-no-procedure")
-                        .text_size(px(12.5))
-                        .text_color(p.faint)
-                        .child("This project has no procedure yet: add one on its page.")
+                        .id("run-shown")
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .mono(12.5)
+                                .semibold()
+                                .child(SharedString::from(shown.name.clone())),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.5))
+                                .text_color(p.mute)
+                                .child(SharedString::from(shown.description.clone())),
+                        )
+                        .child(
+                            div()
+                                .mt(px(4.))
+                                .text_size(px(12.))
+                                .semibold()
+                                .child("This run may"),
+                        )
+                        .child(
+                            div()
+                                .id("run-grants")
+                                .flex()
+                                .flex_col()
+                                .gap(px(6.))
+                                .children(shown.grants.iter().map(|line| {
+                                    div()
+                                        .id(ElementId::Name(
+                                            format!("run-grant-{}", line.grant).into(),
+                                        ))
+                                        .aria_label(SharedString::from(line.text()))
+                                        .flex()
+                                        .items_baseline()
+                                        .gap(px(8.))
+                                        .child(
+                                            div().text_size(px(12.5)).child(sentence(&line.grant)),
+                                        )
+                                        .child(
+                                            div()
+                                                .mono(10.5)
+                                                .text_color(p.faint)
+                                                .child(SharedString::from(line.grant.clone())),
+                                        )
+                                        .child(div().flex_1())
+                                        .child(
+                                            div()
+                                                .text_size(px(12.))
+                                                .text_color(if line.mode == "ask" {
+                                                    p.wait
+                                                } else {
+                                                    p.mute
+                                                })
+                                                .child(mode_words(&line.mode)),
+                                        )
+                                        .test_support()
+                                })),
+                        )
+                        .child(
+                            div()
+                                .id("run-children")
+                                .aria_label(children_words(
+                                    shown.children,
+                                    !shown.grants.is_empty(),
+                                ))
+                                .text_size(px(12.))
+                                .text_color(p.faint)
+                                .child(children_words(shown.children, !shown.grants.is_empty()))
+                                .test_support(),
+                        )
                         .test_support(),
                 );
-            }
-            if list.len() > 1 {
-                modal = modal.child(div().flex().flex_col().gap(px(4.)).children(
-                    list.into_iter().map(|info| {
-                        let name = info.name.clone();
-                        let chosen = self.chosen.as_deref() == Some(&info.name);
-                        let button = ElementId::Name(format!("run-pick-{}", info.name).into());
-                        let button = if chosen {
-                            Button::secondary(button, info.name.clone())
-                        } else {
-                            Button::quiet(button, info.name.clone())
-                        };
-                        button
-                            .full_width()
-                            .on_click(cx.listener(move |this, _, _, cx| this.choose(&name, cx)))
-                    }),
-                ));
-            }
-            if let Some(shown) = &self.shown {
-                modal =
-                    modal.child(
-                        div()
-                            .id("run-shown")
-                            .flex()
-                            .flex_col()
-                            .gap(px(6.))
-                            .child(
-                                div()
-                                    .mono(12.5)
-                                    .semibold()
-                                    .child(SharedString::from(shown.name.clone())),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.5))
-                                    .text_color(p.mute)
-                                    .child(SharedString::from(shown.description.clone())),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(4.))
-                                    .text_size(px(12.))
-                                    .semibold()
-                                    .child("This run is granted"),
-                            )
-                            .child(
-                                div()
-                                    .id("run-grants")
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(6.))
-                                    .children(shown.grants.iter().map(|line| {
-                                        div()
-                                            .id(ElementId::Name(
-                                                format!("run-grant-{}", line.grant).into(),
-                                            ))
-                                            .aria_label(SharedString::from(line.text()))
-                                            .flex()
-                                            .flex_col()
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .gap(px(8.))
-                                                    .child(div().mono(12.).child(
-                                                        SharedString::from(line.grant.clone()),
-                                                    ))
-                                                    .child(
-                                                        div()
-                                                            .text_size(px(12.))
-                                                            .text_color(if line.mode == "ask" {
-                                                                p.wait
-                                                            } else {
-                                                                p.mute
-                                                            })
-                                                            .child(mode_words(&line.mode)),
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_size(px(11.5))
-                                                    .text_color(p.faint)
-                                                    .child(SharedString::from(line.says.clone())),
-                                            )
-                                            .test_support()
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .id("run-children")
-                                    .aria_label(children_words(
-                                        shown.children,
-                                        !shown.grants.is_empty(),
-                                    ))
-                                    .text_size(px(12.))
-                                    .text_color(p.faint)
-                                    .child(children_words(shown.children, !shown.grants.is_empty()))
-                                    .test_support(),
-                            )
-                            .test_support(),
-                    );
             }
             modal = modal
                 .child(
@@ -1287,16 +1225,13 @@ pub fn run_block(run: &RunFacts, cx: &App) -> impl IntoElement {
                 .id(ElementId::Name(
                     format!("rail-run-grant-{}", line.grant).into(),
                 ))
-                .aria_label(SharedString::from(format!(
-                    "{}: {}",
-                    line.grant,
-                    mode_words(&line.mode)
-                )))
+                .aria_label(SharedString::from(line.text()))
                 .flex()
-                .gap(px(6.))
-                .mono(11.)
+                .flex_wrap()
+                .gap_x(px(6.))
+                .text_size(px(11.5))
                 .text_color(p.mute)
-                .child(SharedString::from(line.grant.clone()))
+                .child(sentence(&line.grant))
                 .child(
                     div()
                         .text_color(if line.mode == "ask" { p.wait } else { p.faint })

@@ -24,7 +24,9 @@ use flottille_ui::{
     PulsingLabel, Side, StateIcon, Status, Type, enter, fold_frame, icon, palette, section_label,
 };
 use futures::channel::mpsc::UnboundedSender;
-use gpui_kit::base::input::{Input, InputEditorStyle, InputEvent, InputState, TextareaState};
+use gpui_kit::base::input::{
+    Escape, Input, InputEditorStyle, InputEvent, InputState, MoveDown, MoveUp, TextareaState,
+};
 use gpui_kit::base::text::{TextView, TextViewState, TextViewStyle};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -40,6 +42,7 @@ use crate::conversation::{Block, Call, CallState, Change, Conversation, DiffLine
 use crate::link::{Connect, Update};
 use crate::model::Place;
 use crate::open::Opener;
+use crate::procedures::ProcedureInfo;
 use crate::session_link::{
     self, PlaceFacts, PullRequest, RepositoryFacts, Request, SessionLink, SessionUpdate, TreeAgent,
     Where,
@@ -448,18 +451,6 @@ impl SessionPage {
     pub fn open_in_editor(&self) {
         if let Some(folder) = &self.opened.folder {
             (self.follow.opener)(folder);
-        }
-    }
-
-    /// "Run procedure…": the shell's modal, on this session's workspace.
-    pub fn run_procedure(&self, cx: &mut Context<Self>) {
-        if let Some(workspace) = self.opened.place.clone() {
-            let project = self.opened.project.clone();
-            self.shell
-                .update(cx, |shell, cx| {
-                    shell.run_procedure(&project, &workspace, cx)
-                })
-                .ok();
         }
     }
 
@@ -1852,11 +1843,69 @@ impl Render for Row {
                                 ))
                                 .test_support()
                         });
+                let toggle = cx.listener(|this, _, _, cx| {
+                    this.open = !this.open;
+                    cx.notify();
+                });
+                let chevron = |turn: f32| {
+                    icon(Icon::Chevron)
+                        .size(px(12.))
+                        .text_color(p.faint)
+                        .with_transformation(Transformation::rotate(radians(-FRAC_PI_2 * turn)))
+                };
+                // Folded to one discreet line until a click opens it: a long run of calls
+                // would push the conversation down.
+                if !self.open {
+                    let last = calls.last().expect("a block of steps holds a call");
+                    let count = calls.len();
+                    let line = SharedString::from(format!(
+                        "{count} {} · {}",
+                        if count == 1 { "step" } else { "steps" },
+                        last.name
+                    ));
+                    return div()
+                        .id(id("steps"))
+                        .child(
+                            div()
+                                .id(id("steps-toggle"))
+                                .flex()
+                                .items_center()
+                                .gap(px(7.))
+                                .py(px(2.))
+                                .cursor_pointer()
+                                .mono(12.)
+                                .text_color(p.faint)
+                                .hover(|d| d.text_color(p.mute))
+                                .child(chevron(1.))
+                                .aria_label(line.clone())
+                                .child(line)
+                                .when(running > 0, |d| {
+                                    d.child(
+                                        div().mono(10.).medium().text_color(p.run).child("RUNNING"),
+                                    )
+                                })
+                                .on_click(toggle)
+                                .test_support(),
+                        )
+                        .test_support()
+                        .into_any_element();
+                }
                 div()
                     .id(id("steps"))
                     .child(
                         Card::new()
-                            .title("Agent steps")
+                            .title(
+                                div()
+                                    .id(id("steps-toggle"))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(7.))
+                                    .cursor_pointer()
+                                    .child("Agent steps")
+                                    .child(chevron(0.))
+                                    .on_click(toggle)
+                                    .test_support(),
+                            )
                             .meta(meta)
                             .child(div().px(px(12.)).py(px(6.)).children(rows)),
                     )
@@ -2294,26 +2343,15 @@ impl SessionRail {
                 },
             )
         });
-        let procedures = page.clone();
-        let in_workspace = opened.place.is_some();
         let menu = cx.new(|cx| {
-            let menu = Menu::new("workspace-menu", "Workspace actions", cx).entry(
+            Menu::new("workspace-menu", "Workspace actions", cx).entry(
                 "open-in-editor",
                 "Open in editor",
                 Some(Icon::OpenInEditor),
                 move |_, cx| {
                     editor.update(cx, |page, _| page.open_in_editor()).ok();
                 },
-            );
-            if in_workspace {
-                menu.entry("run-procedure", "Run procedure…", None, move |_, cx| {
-                    procedures
-                        .update(cx, |page, cx| page.run_procedure(cx))
-                        .ok();
-                })
-            } else {
-                menu
-            }
+            )
         });
         Self {
             page,
@@ -3009,11 +3047,23 @@ fn elbow(color: gpui_kit::Hsla) -> gpui_kit::Canvas<()> {
     )
 }
 
-/// The composer of a session: it writes to the root agent, and only to it.
+/// The composer of a session: it writes to the root agent, and only to it. `/` at the start of a
+/// message lists the project's procedures, to run one in the session's workspace.
 pub struct Reply {
     shell: WeakEntity<Shell>,
     /// The root agent: fixed when the composer is made, the only agent it writes to.
     session: String,
+    project: String,
+    /// The session's workspace; `None` in `main`, where no procedure runs.
+    workspace: Place,
+    /// The project's procedures, as the daemon listed them when `/` was last typed.
+    procedures: Option<Vec<ProcedureInfo>>,
+    /// What follows the `/` while the message is that one word: the `/` list is open.
+    slash: Option<String>,
+    /// The entry of the `/` list the keyboard is on.
+    highlighted: usize,
+    /// Escape closed the `/` list: it stays closed until the message is no longer a `/` word.
+    dismissed: bool,
     field: Entity<TextareaState>,
     facts: Entity<ReplyFacts>,
     has_text: bool,
@@ -3034,6 +3084,8 @@ impl Reply {
     pub fn new(
         shell: WeakEntity<Shell>,
         session: String,
+        project: String,
+        workspace: Place,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -3056,13 +3108,15 @@ impl Reply {
             window,
             |this, field, event, window, cx| match event {
                 InputEvent::Change => {
-                    let has_text = !field.read(cx).value().trim().is_empty();
+                    let text = field.read(cx).value().to_string();
+                    let has_text = !text.trim().is_empty();
                     if this.has_text != has_text {
                         this.has_text = has_text;
                         cx.notify();
                     }
+                    this.typed(&text, cx);
                 }
-                InputEvent::PressEnter { shift: false, .. } => this.send(window, cx),
+                InputEvent::PressEnter { shift: false, .. } => this.enter(window, cx),
                 InputEvent::Focus if !this.focused => {
                     this.focused = true;
                     cx.notify();
@@ -3077,6 +3131,12 @@ impl Reply {
         Self {
             shell,
             session,
+            project,
+            workspace,
+            procedures: None,
+            slash: None,
+            highlighted: 0,
+            dismissed: false,
             field,
             facts: cx.new(|_| ReplyFacts {
                 provider: None,
@@ -3156,6 +3216,201 @@ impl Reply {
         self.renders
     }
 
+    /// The procedures the `/` list offers now, each with its description: those whose name holds
+    /// what follows the `/`. None in `main`, nor while the list is closed.
+    pub fn slash_entries(&self) -> Vec<(String, String)> {
+        let (Some(typed), Some(procedures), Some(_), false) = (
+            &self.slash,
+            &self.procedures,
+            &self.workspace,
+            self.dismissed,
+        ) else {
+            return Vec::new();
+        };
+        let typed = typed.to_lowercase();
+        procedures
+            .iter()
+            .filter(|p| p.name.to_lowercase().contains(&typed))
+            .map(|p| (p.name.clone(), p.description.clone()))
+            .collect()
+    }
+
+    /// The daemon has listed the project's procedures since the composer was made.
+    pub fn knows_procedures(&self) -> bool {
+        self.procedures.is_some()
+    }
+
+    fn slash_open(&self) -> bool {
+        self.slash.is_some() && !self.dismissed
+    }
+
+    /// The message changed: a `/` and one word open the list, asking the daemon for the
+    /// procedures again (the project's file is the user's to edit). The field says it when the
+    /// user types; a text set from code says it here.
+    pub fn typed(&mut self, text: &str, cx: &mut Context<Self>) {
+        let slash = text
+            .strip_prefix('/')
+            .filter(|word| !word.contains(char::is_whitespace))
+            .map(str::to_owned);
+        if slash.is_none() {
+            self.dismissed = false;
+        }
+        if slash.is_some() && self.slash.is_none() && self.workspace.is_some() {
+            let command = Command::Procedures {
+                project: self.project.clone(),
+            };
+            // Later: the shell may be the one setting the text, as it hands a reply its answer.
+            crate::procedures::perform_later(&self.shell, command, cx);
+        }
+        if self.slash != slash {
+            self.slash = slash;
+            self.highlighted = 0;
+            cx.notify();
+        }
+    }
+
+    /// The project's procedures, as the daemon listed them.
+    pub fn procedures_listed(
+        &mut self,
+        project: &str,
+        listed: &Result<Vec<ProcedureInfo>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if project != self.project {
+            return;
+        }
+        if let Ok(list) = listed
+            && self.procedures.as_ref() != Some(list)
+        {
+            self.procedures = Some(list.clone());
+            self.highlighted = 0;
+            cx.notify();
+        }
+    }
+
+    fn highlight(&mut self, by: isize, cx: &mut Context<Self>) {
+        let count = self.slash_entries().len();
+        if count > 0 {
+            self.highlighted = (self.highlighted as isize + by).rem_euclid(count as isize) as usize;
+            cx.notify();
+        }
+    }
+
+    /// Enter: picks the procedure the `/` list is on; with none offered, the message is sent as
+    /// text.
+    fn enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let entries = self.slash_entries();
+        match entries.get(self.highlighted).or(entries.first()) {
+            Some((name, _)) => {
+                let name = name.clone();
+                self.pick(&name, window, cx)
+            }
+            None => self.send(window, cx),
+        }
+    }
+
+    /// Opens the confirmation of a run of `name` in the session's workspace; the `/` word leaves
+    /// the field. Nothing starts before Confirm.
+    pub fn pick(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.clone() else {
+            return;
+        };
+        self.slash = None;
+        self.has_text = false;
+        self.field
+            .update(cx, |field, cx| field.set_value("", window, cx));
+        let (project, name) = (self.project.clone(), name.to_owned());
+        self.shell
+            .update(cx, |shell, cx| {
+                shell.run_procedure(&project, &workspace, &name, cx)
+            })
+            .ok();
+        cx.notify();
+    }
+
+    /// The `/` list, over the composer: the procedures offered, or in `main` why there are none.
+    fn render_slash(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.slash_open() {
+            return None;
+        }
+        let p = palette(cx);
+        let note = |id: &'static str, text: &'static str| {
+            div()
+                .id(id)
+                .aria_label(text)
+                .px(px(10.))
+                .py(px(8.))
+                .text_size(px(12.5))
+                .text_color(p.faint)
+                .child(text)
+                .test_support()
+                .into_any_element()
+        };
+        let body: Vec<AnyElement> = if self.workspace.is_none() {
+            vec![note(
+                "slash-in-main",
+                "Procedures run in a workspace: start a session in one to run them.",
+            )]
+        } else {
+            let entries = self.slash_entries();
+            if entries.is_empty() {
+                // A word that names no procedure is a message like any other: nothing to show.
+                if self.procedures.as_ref().is_none_or(|p| !p.is_empty())
+                    || self.slash.as_deref() != Some("")
+                {
+                    return None;
+                }
+                vec![note(
+                    "slash-none",
+                    "This project has no procedure yet: add one on its page.",
+                )]
+            } else {
+                let mut rows = vec![section_label("Procedures", cx).into_any_element()];
+                for (at, (name, description)) in entries.into_iter().enumerate() {
+                    let picked = name.clone();
+                    rows.push(
+                        ListRow::new(
+                            ElementId::Name(format!("slash-{name}").into()),
+                            format!("/{name}"),
+                        )
+                        .line(description)
+                        .selected(at == self.highlighted)
+                        .on_click(
+                            cx.listener(move |this, _, window, cx| this.pick(&picked, window, cx)),
+                        )
+                        .into_any_element(),
+                    );
+                }
+                rows
+            }
+        };
+        Some(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(gpui_kit::relative(1.))
+                .pb(px(6.))
+                .child(
+                    div()
+                        .id("slash-list")
+                        .occlude()
+                        .p(px(6.))
+                        .rounded(px(12.))
+                        .bg(p.card)
+                        .border_1()
+                        .border_color(p.line2)
+                        .shadow_lg()
+                        .flex()
+                        .flex_col()
+                        .gap(px(1.))
+                        .children(body)
+                        .test_support(),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// Sends what the field holds to the root agent.
     pub fn send(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         let typed = self.field.read(cx).value().to_string();
@@ -3195,7 +3450,8 @@ impl Reply {
                     let rest = rest.trim_start().to_owned();
                     self.has_text = !rest.trim().is_empty();
                     self.field
-                        .update(cx, |field, cx| field.set_value(rest, window, cx));
+                        .update(cx, |field, cx| field.set_value(rest.clone(), window, cx));
+                    self.typed(&rest, cx);
                 }
             }
             Some(why) => self.error = Some(why.into()),
@@ -3209,9 +3465,33 @@ impl Render for Reply {
         self.renders += 1;
         let p = palette(cx);
         let can_send = self.has_text && !self.sending;
+        let slash = self.render_slash(cx);
         div()
             .id("reply")
+            .relative()
             .w_full()
+            // While the `/` list is open, the arrows move in it and Escape closes it, before the
+            // field takes them.
+            .capture_action(cx.listener(|this, _: &MoveUp, _, cx| {
+                if this.slash_open() {
+                    cx.stop_propagation();
+                    this.highlight(-1, cx);
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &MoveDown, _, cx| {
+                if this.slash_open() {
+                    cx.stop_propagation();
+                    this.highlight(1, cx);
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &Escape, _, cx| {
+                if this.slash_open() {
+                    cx.stop_propagation();
+                    this.dismissed = true;
+                    cx.notify();
+                }
+            }))
+            .children(slash.map(|slash| gpui_kit::deferred(slash).priority(1)))
             // Escape interrupts the turn that runs; with none running it is left to others.
             .on_key_down(cx.listener(|this, event: &gpui_kit::KeyDownEvent, _, cx| {
                 if this.running && event.keystroke.key == "escape" {

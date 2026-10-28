@@ -128,9 +128,18 @@ pub struct Procedure {
     pub instructions: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub grants: Grants,
-    /// Whether the children of a run's agent get the run's grants too; they get none otherwise.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    /// Whether the children of a run's agent get the run's grants too: they do unless the file
+    /// says `children = false`.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub children: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 impl Procedure {
@@ -201,7 +210,7 @@ pub fn template(name: &str) -> Option<Procedure> {
         description: description.into(),
         instructions: instructions.into(),
         grants: grants.iter().copied().collect(),
-        children: false,
+        children: true,
     })
 }
 
@@ -307,7 +316,7 @@ mod tests {
         for name in TEMPLATES {
             let procedure = template(name).unwrap();
             procedure.check(name).unwrap();
-            assert!(!procedure.children, "{name}");
+            assert!(procedure.children, "{name}");
         }
         assert_eq!(
             shown(&template("open-prs").unwrap().grants),

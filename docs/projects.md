@@ -85,7 +85,7 @@ projects = ["ABC", "OPS"]
 [procedures.open-prs]                 # a named action run by an agent in a workspace (docs/procedures.md)
 description = "Open the pull requests"
 instructions = "Push the branch, then open one pull request per repository."
-children = false                      # the run's children get its grants; default false
+children = false                      # the run's children get none of its grants; default true
 [procedures.open-prs.grants]          # from a fixed vocabulary, each "allow" or "ask"
 push = "allow"
 pr-create = "ask"

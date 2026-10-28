@@ -55,9 +55,9 @@ pub enum ProcedureAction {
         /// A grant and its mode, `push=allow` or `pr-create=ask`; once per grant
         #[arg(long = "grant", value_name = "GRANT=MODE")]
         grants: Vec<String>,
-        /// The run's children get its grants too
-        #[arg(long)]
-        children: bool,
+        /// Whether the run's children get its grants; they do unless it is false
+        #[arg(long, value_name = "true|false")]
+        children: Option<bool>,
         #[arg(long)]
         json: bool,
     },
@@ -157,7 +157,9 @@ pub fn run(paths: &Paths, action: ProcedureAction) -> Result<ExitCode> {
                 params["description"] = description.into();
                 params["instructions"] = instructions.into();
                 params["grants"] = serde_json::to_value(grants_of(&grants)?)?;
-                params["children"] = children.into();
+                if let Some(children) = children {
+                    params["children"] = children.into();
+                }
             }
             let added = ask("procedure.add", params)?;
             if json {
