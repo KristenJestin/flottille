@@ -304,6 +304,8 @@ The gate held one of the agent's calls: a request was written (`docs/tools.md`, 
 | `call` | The arguments, every text cut at 500 characters and masked. |
 | `reasons` | Why it was held, one sentence each, masked. |
 | `sensitive` | Whether it is never allowed for the tree: it reaches a sensitive place, or a procedure's `ask` grant holds it each time (`docs/procedures.md`). |
+| `kind` | `call`, `catalogue` (a line outside the catalogue in the project folder: once or always) or `action` (a change of the project an agent asked for: once) (`docs/protocol.md`). |
+| `says` | What it does, in words, one sentence each; empty for a `call`. |
 | `held_by` | `user`, or the id of the agent that holds it. |
 | `forwards`, `state`, `decision`, `created_at`, `decided_at` | As in `approval.list` (`docs/protocol.md`). |
 
@@ -339,7 +341,7 @@ The user answered the request, or the agent that held it denied it.
 |---|---|
 | `number` | |
 | `agent` | The agent that asked. |
-| `decision` | `deny`, `once`, or `tree` (allowed for the root's tree). |
+| `decision` | `deny`, `once`, `tree` (allowed for the root's tree), or `always` (a line added to the catalogue). |
 | `by` | `user`, or the id of the agent that denied it (`approval_answer`). |
 
 #### `approval.settled`

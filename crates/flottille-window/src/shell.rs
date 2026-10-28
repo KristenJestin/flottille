@@ -613,6 +613,13 @@ impl Shell {
                     page.update(cx, |page, cx| page.answered(read, saved, window, cx));
                 }
             }
+            Outcome::AgentActions { project, read } => {
+                if let Some(page) = self.project_settings.clone()
+                    && page.read(cx).name() == project
+                {
+                    page.update(cx, |page, cx| page.actions_answered(read, cx));
+                }
+            }
             Outcome::ProjectChecked { project, read } => {
                 if let Some(page) = self.project_settings.clone()
                     && page.read(cx).name() == project

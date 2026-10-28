@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 
 use crate::agent::{Agent, AgentState, Choices};
-use crate::approval::{Decision, Delivery, Forward, Request, RequestState};
+use crate::approval::{Decision, Delivery, Forward, Kind, Request, RequestState};
 use crate::procedure::Grants;
 use crate::protocol::Event;
 use crate::run::{Run, RunState};
@@ -264,6 +264,12 @@ const MIGRATIONS: &[&str] = &[
     );
 ",
     "
+    -- What a request is (`call`, `catalogue` or `action`), which says what the user may answer,
+    -- and what it changes in words (`docs/tools.md`, \"The project\").
+    ALTER TABLE approval_requests ADD COLUMN kind TEXT NOT NULL DEFAULT 'call';
+    ALTER TABLE approval_requests ADD COLUMN says TEXT NOT NULL DEFAULT '[]';
+",
+    "
     -- Whether an agent's agent can resume or load its session, as it said when it last opened
     -- one: an ended root whose agent can is resumed on its own session (`agent.resume`).
     ALTER TABLE agents ADD COLUMN reopens INTEGER NOT NULL DEFAULT 0;
@@ -271,7 +277,7 @@ const MIGRATIONS: &[&str] = &[
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
-    identity, held_by, forwards, state, decision, created_at, decided_at";
+    identity, held_by, forwards, state, decision, created_at, decided_at, kind, says";
 
 const RUN_COLUMNS: &str =
     "id, agent, name, line, folder, state, exit_code, signal, started_at, ended_at, output";
@@ -977,8 +983,9 @@ impl Store {
         let created_at = now_ms();
         let number: u64 = transaction.query_row(
             "INSERT INTO approval_requests (agent, call_key, tool, arguments, shown, reasons, \
-             sensitive, identity, held_by, forwards, state, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending', ?11) RETURNING number",
+             sensitive, identity, held_by, forwards, state, created_at, kind, says) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending', ?11, ?12, ?13) \
+             RETURNING number",
             params![
                 asked.agent,
                 asked.call_key,
@@ -991,6 +998,8 @@ impl Store {
                 asked.held_by,
                 serde_json::to_string(&asked.forwards)?,
                 created_at,
+                asked.kind.as_str(),
+                serde_json::to_string(&asked.says)?,
             ],
             |row| row.get(0),
         )?;
@@ -1130,7 +1139,7 @@ impl Store {
         let now = now_ms();
         let state = match decision {
             Decision::Deny => RequestState::Denied,
-            Decision::Once | Decision::Tree => RequestState::Allowed,
+            Decision::Once | Decision::Tree | Decision::Always => RequestState::Allowed,
         };
         let changed = transaction.execute(
             "UPDATE approval_requests SET state = ?2, decision = ?3, decided_at = ?4 \
@@ -1741,6 +1750,9 @@ fn run_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Run>> {
     }))
 }
 
+/// A stored request's JSON columns: arguments, shown, reasons, forwards and says.
+type RequestParts = (Value, Value, Vec<String>, Vec<Forward>, Vec<String>);
+
 fn request_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Request>> {
     let json = |i| -> rusqlite::Result<Result<Value>> {
         let text: String = row.get(i)?;
@@ -1758,15 +1770,22 @@ fn request_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Request>> {
             "the store holds a request with an unknown decision".into(),
         )));
     }
-    let parsed = (|| -> Result<(Value, Value, Vec<String>, Vec<Forward>)> {
+    let kind: String = row.get(15)?;
+    let Some(kind) = Kind::parse(&kind) else {
+        return Ok(Err(Error::Refused(format!(
+            "the store holds a request of an unknown kind {kind}"
+        ))));
+    };
+    let parsed = (|| -> Result<RequestParts> {
         Ok((
             json(4)??,
             json(5)??,
             serde_json::from_value(json(6)??)?,
             serde_json::from_value(json(10)??)?,
+            serde_json::from_value(json(16)??)?,
         ))
     })();
-    let (arguments, shown, reasons, forwards) = match parsed {
+    let (arguments, shown, reasons, forwards, says) = match parsed {
         Ok(parsed) => parsed,
         Err(error) => return Ok(Err(error)),
     };
@@ -1779,6 +1798,8 @@ fn request_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Request>> {
         shown,
         reasons,
         sensitive: row.get(7)?,
+        kind,
+        says,
         identity: row.get(8)?,
         held_by: row.get(9)?,
         forwards,
@@ -2868,6 +2889,8 @@ mod tests {
             shown: json!({"path": ".env"}),
             reasons: vec![".env is a sensitive place (.env)".into()],
             sensitive: true,
+            kind: approval::Kind::Call,
+            says: Vec::new(),
             identity: "fs_read .env".into(),
             held_by: approval::USER.into(),
             forwards: Vec::new(),
@@ -2904,6 +2927,40 @@ mod tests {
         assert_ne!(keyless.number, keyless_again.number);
         assert_eq!(store.request(first.number).unwrap(), Some(first));
         assert_eq!(store.pending_requests(approval::USER).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn a_request_keeps_its_kind_and_what_it_says_and_always_grants_no_tree() {
+        let mut store = Store::open_in_memory().unwrap();
+        let agent = an_agent();
+        store
+            .create_agent(&agent, ("agent.created", json!({})))
+            .unwrap();
+        let (made, event) = store
+            .ask(&Request {
+                kind: approval::Kind::Catalogue,
+                says: vec!["Run cargo test in the project folder".into()],
+                sensitive: false,
+                ..a_request(None)
+            })
+            .unwrap();
+        assert_eq!(made.kind, approval::Kind::Catalogue);
+        assert_eq!(
+            event.unwrap().data["says"][0],
+            "Run cargo test in the project folder"
+        );
+        let read = store.request(made.number).unwrap().unwrap();
+        assert_eq!(read.kind, approval::Kind::Catalogue);
+        assert_eq!(read.says, made.says);
+
+        let (decided, event) = store
+            .decide(made.number, Decision::Always, &agent.id, approval::USER)
+            .unwrap()
+            .unwrap();
+        assert_eq!(decided.state, RequestState::Allowed);
+        assert_eq!(decided.decision, Some(Decision::Always));
+        assert_eq!(event.data["decision"], "always");
+        assert!(!store.tree_granted(&agent.id, &made.identity).unwrap());
     }
 
     #[test]

@@ -149,6 +149,13 @@ pub fn commands_list(daemon: &Daemon, place: &Place, args: Value) -> Outcome {
                     notes.push(note.to_owned());
                 }
             }
+            if command.added_by.is_some() {
+                notes.push(
+                    "allowed always by the user in the project folder, never checked to change \
+                     nothing"
+                        .to_owned(),
+                );
+            }
             let notes = if notes.is_empty() {
                 String::new()
             } else {

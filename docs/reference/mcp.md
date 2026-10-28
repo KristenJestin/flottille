@@ -145,7 +145,10 @@ and the 2026 practice around it:
      child is made by a parent whose run is known; listing grants nothing, the gate still decides
      each call.
 
-   A lead has 16 tools, a leaf worker 11, two more each in a workspace (`forge_read`,
+   - only a root gets `procedure` and `project`, the project's procedures and settings
+     (`docs/tools.md`, "The project"): a child does its brief.
+
+   A root lead has 18 tools, a leaf worker 11, two more each in a workspace (`forge_read`,
    `ticket_read`), and up to two more inside a run that grants them (`forge_write`,
    `workspace_remove`).
 10. **The idempotency key** of a call is read from the call's `_meta` (`claudecode/toolUseId` for

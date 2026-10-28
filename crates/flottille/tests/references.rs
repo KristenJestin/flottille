@@ -386,6 +386,44 @@ fn reference_read_refuses_a_path_outside_the_reference() {
 }
 
 #[test]
+fn reference_read_refuses_what_fs_read_holds_for_the_user() {
+    let user = User::with_fake_agent();
+    let folder = project(&user);
+    reference(&user, "all", "The whole project", ".");
+    std::fs::write(folder.join(".npmrc"), "//registry/:_authToken=x\n").unwrap();
+    std::fs::write(folder.join(".netrc"), "machine example.com\n").unwrap();
+    std::fs::write(folder.join(".git-credentials"), "https://u:p@example.com\n").unwrap();
+    std::fs::create_dir_all(folder.join(".ssh")).unwrap();
+    std::fs::write(folder.join(".ssh/id_ed25519"), "key\n").unwrap();
+    std::os::unix::fs::symlink(folder.join(".npmrc"), folder.join("docs/npmrc.md")).unwrap();
+    let (mcp, _) = session(&user);
+
+    for path in [
+        ".npmrc",
+        ".netrc",
+        ".git-credentials",
+        ".ssh/id_ed25519",
+        ".ssh",
+        "docs/npmrc.md",
+    ] {
+        let message = refused(mcp.call("reference_read", json!({"name": "all", "path": path})));
+        assert!(
+            message.contains("sensitive place") && message.contains("fs_read"),
+            "{path}: {message}"
+        );
+    }
+    let listed = ok(mcp.call("reference_read", json!({"name": "all"})));
+    assert!(listed.contains("README.md"), "{listed}");
+    for hidden in [".npmrc", ".netrc", ".git-credentials", ".ssh"] {
+        assert!(!listed.contains(hidden), "{hidden}: {listed}");
+    }
+    // A reference that is the sensitive file itself is refused too.
+    reference(&user, "npm", "The registry", ".npmrc");
+    let message = refused(mcp.call("reference_read", json!({"name": "npm"})));
+    assert!(message.contains("sensitive place"), "{message}");
+}
+
+#[test]
 fn reference_read_reads_the_project_folder_from_a_workspace_and_follows_its_edits() {
     let user = User::with_fake_agent();
     let folder = project(&user);

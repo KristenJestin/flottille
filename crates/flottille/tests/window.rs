@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 
 use common::User;
 use common::mcp::Mcp;
+use flottille_core::procedure::Mode;
+use flottille_core::project::AgentActions;
 use flottille_ui::AgentState;
 use flottille_ui::omarchy::Environment;
 use flottille_ui::state::icon_id;
@@ -1981,6 +1983,216 @@ fn approving_once_from_the_card_performs_the_call_and_leaves_the_record(cx: &mut
     let seen = result().unwrap();
     assert!(seen.contains("TOKEN"), "{seen}");
     assert!(!seen.contains("made-up-made-up"), "{seen}");
+}
+
+/// The card of a request, once the session page shows it.
+fn card_for(
+    shell: &Entity<Shell>,
+    number: u64,
+    cx: &mut VisualTestContext,
+) -> flottille_window::session::ApprovalCard {
+    until(shell, cx, "the card is shown", |cx| {
+        cx.update(|window, _| window.try_find(format!("allow-once-{number}")).is_some())
+    });
+    settle(cx);
+    session_page(shell, cx)
+        .read_with(cx, |p, cx| {
+            p.conversation()
+                .read(cx)
+                .rows()
+                .iter()
+                .find_map(|row| row.read(cx).card().filter(|c| c.number == number).cloned())
+        })
+        .unwrap()
+}
+
+#[gpui_kit::test]
+fn the_card_of_a_procedure_an_agent_starts_says_what_it_runs_and_is_confirmed_once(
+    cx: &mut TestAppContext,
+) {
+    let user = team_user();
+    let (lead, mcp, _) = lead_in_w(&user);
+    user.call(
+        "procedure.add",
+        json!({"project": "app", "name": "ship", "description": "Ship the workspace",
+            "instructions": "Push the branch.", "grants": {"push": "ask"}, "children": false}),
+    )
+    .unwrap();
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+
+    let number = held_number(mcp.call("procedure", json!({"action": "start", "name": "ship"})));
+    let card = card_for(&shell, number, cx);
+
+    assert_eq!(card.asked.as_deref(), Some("Start the procedure ship"));
+    assert_eq!(
+        card.says,
+        [
+            "Start the procedure ship in workspace w: Ship the workspace",
+            "Its agent is told: Push the branch.",
+            "Its agents may push the workspace's branch to its remote (git push), after asking \
+             you, each time",
+            "The agents the run starts may do none of it",
+        ]
+    );
+    cx.update(|window, _| {
+        assert!(window.find(format!("approval-says-{number}-1")).visible());
+        assert!(window.try_find(format!("allow-tree-{number}")).is_none());
+        assert!(window.try_find(format!("allow-always-{number}")).is_none());
+    });
+    cx.update(|window, cx| window.click(format!("allow-once-{number}"), cx));
+    until(&shell, cx, "the card folds into its record", |cx| {
+        cx.update(|window, _| {
+            window
+                .try_find(format!("approval-record-{number}"))
+                .is_some()
+        })
+    });
+    eventually("the run starts", || {
+        user.call("agent.list", json!({})).unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| {
+                a["id"] != lead.as_str()
+                    && a["workspace"] == "w"
+                    && a["parent"].is_null()
+                    && user
+                        .call("procedure.of", json!({"agent": a["id"]}))
+                        .unwrap()["run"]["procedure"]
+                        == "ship"
+            })
+    });
+}
+
+#[gpui_kit::test]
+fn the_card_of_a_settings_change_or_a_reference_says_what_changes(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+
+    let tracker = held_number(mcp.call(
+        "project",
+        json!({"action": "set_settings", "tracker": {"kind": "jira", "site": "acme.atlassian.net",
+            "projects": ["ABC"]}}),
+    ));
+    let card = card_for(&shell, tracker, cx);
+    assert_eq!(card.asked.as_deref(), Some("Change the project's settings"));
+    assert_eq!(
+        card.says,
+        ["Set the tracker to Jira on acme.atlassian.net (ABC)"]
+    );
+    let reference = held_number(mcp.call(
+        "project",
+        json!({"action": "add_reference", "name": "readme", "description": "What the app is",
+            "path": "README.md"}),
+    ));
+    let card = card_for(&shell, reference, cx);
+    assert_eq!(card.asked.as_deref(), Some("Add the reference readme"));
+    assert_eq!(
+        card.says,
+        ["Add the reference readme (README.md): What the app is"]
+    );
+    cx.update(|window, _| {
+        assert!(
+            window
+                .find(format!("approval-says-{reference}-0"))
+                .visible()
+        );
+        assert!(window.try_find(format!("allow-tree-{reference}")).is_none());
+        assert!(
+            window
+                .try_find(format!("allow-always-{reference}"))
+                .is_none()
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn the_card_of_a_line_outside_the_catalogue_in_main_offers_once_and_always(
+    cx: &mut TestAppContext,
+) {
+    let user = team_user();
+    project(&user, "app");
+    let answer = user
+        .call(
+            "agent.run",
+            json!({"project": "app", "message": "lead the work"}),
+        )
+        .unwrap();
+    let lead = answer["agent"]["id"].as_str().unwrap().to_owned();
+    let mcp = mcp_session(&user, |prompt| prompt.contains("You are the root"));
+    eventually("the lead's first turn", || {
+        user.call("agent.show", json!({"agent": lead})).unwrap()["agent"]["state"] == "idle"
+    });
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+
+    let number = held_number(mcp.call("commands_run", json!({"line": "cat README.md"})));
+    let card = card_for(&shell, number, cx);
+
+    assert_eq!(card.asked.as_deref(), Some("Run cat README.md"));
+    assert_eq!(card.says[0], "Run cat README.md in the project folder");
+    assert_eq!(
+        card.says[1],
+        "Always adds it to the project's catalogue as cat-readme-md. Flottille does not check \
+         that it only reads. It will run in your project folder without asking, for every agent \
+         of this project."
+    );
+    cx.update(|window, _| {
+        assert!(window.find(format!("allow-always-{number}")).visible());
+        assert!(window.try_find(format!("allow-tree-{number}")).is_none());
+    });
+    cx.update(|window, cx| window.click(format!("allow-always-{number}"), cx));
+    until(&shell, cx, "the card folds into its record", |cx| {
+        cx.update(|window, _| {
+            window
+                .try_find(format!("approval-record-{number}"))
+                .is_some()
+        })
+    });
+    let record = session_page(&shell, cx).read_with(cx, |p, cx| {
+        p.conversation()
+            .read(cx)
+            .rows()
+            .iter()
+            .find_map(|row| row.read(cx).card().and_then(|c| c.record()))
+    });
+    assert_eq!(
+        record.as_deref(),
+        Some("Allowed always, added to the catalogue · Run cat README.md · the conversation")
+    );
+    eventually("the line is in the catalogue", || {
+        std::fs::read_to_string(user.project_file("app"))
+            .unwrap()
+            .contains("[commands.cat-readme-md]")
+    });
+}
+
+#[gpui_kit::test]
+fn a_sensitive_line_outside_the_catalogue_is_not_offered_always(cx: &mut TestAppContext) {
+    let user = team_user();
+    project(&user, "app");
+    let answer = user
+        .call(
+            "agent.run",
+            json!({"project": "app", "message": "lead the work"}),
+        )
+        .unwrap();
+    let lead = answer["agent"]["id"].as_str().unwrap().to_owned();
+    let mcp = mcp_session(&user, |prompt| prompt.contains("You are the root"));
+    eventually("the lead's first turn", || {
+        user.call("agent.show", json!({"agent": lead})).unwrap()["agent"]["state"] == "idle"
+    });
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+
+    let number = held_number(mcp.call("commands_run", json!({"line": "cat .env"})));
+    let card = card_for(&shell, number, cx);
+
+    assert!(card.sensitive);
+    cx.update(|window, _| {
+        assert!(window.find(format!("allow-once-{number}")).visible());
+        assert!(window.try_find(format!("allow-always-{number}")).is_none());
+        assert!(window.try_find(format!("allow-tree-{number}")).is_none());
+    });
 }
 
 #[gpui_kit::test]
@@ -6312,6 +6524,79 @@ fn the_settings_page_proposes_the_remote_s_forge_and_nothing_is_read_until_it_is
     assert!(file.contains("forge = {"), "{file}");
     page.read_with(cx, |page, _| {
         assert!(!page.repositories()[0].proposed(), "now declared");
+    });
+}
+
+#[gpui_kit::test]
+fn the_settings_page_sets_a_family_to_run_on_its_own(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_project_settings(&shell, "atlas", cx);
+    page.read_with(cx, |page, _| {
+        assert_eq!(page.agent_actions(), AgentActions::default());
+    });
+    cx.update(|window, _| {
+        for family in ["procedures", "settings", "references"] {
+            assert!(window.try_find(format!("on-its-own-{family}")).is_some());
+        }
+    });
+
+    cx.update(|window, cx| window.click("on-its-own-procedures", cx));
+    until(&shell, cx, "the switch is saved", |cx| {
+        page.read_with(cx, |page, _| page.agent_actions().procedures == Mode::Allow)
+    });
+
+    let saved = user
+        .call("project.settings", json!({"name": "atlas"}))
+        .unwrap();
+    assert_eq!(
+        saved["agent_actions"],
+        json!({"procedures": "allow", "settings": "ask", "references": "ask"})
+    );
+    let file = std::fs::read_to_string(user.project_file("atlas")).unwrap();
+    assert!(
+        file.contains("[agent_actions]\nprocedures = \"allow\""),
+        "{file}"
+    );
+    assert!(!file.contains("forge"), "the forges wait for Save: {file}");
+
+    // Flipped back, the file says nothing of it: every family asks.
+    cx.update(|window, cx| window.click("on-its-own-procedures", cx));
+    until(&shell, cx, "the switch is saved again", |cx| {
+        page.read_with(cx, |page, _| {
+            page.agent_actions() == AgentActions::default()
+        })
+    });
+    let file = std::fs::read_to_string(user.project_file("atlas")).unwrap();
+    assert!(!file.contains("agent_actions"), "{file}");
+}
+
+#[gpui_kit::test]
+fn the_procedures_switch_says_an_agent_may_then_start_any_procedure_anywhere(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project_settings(&shell, "atlas", cx);
+
+    cx.update(|window, _| {
+        assert!(window.find("agent-actions-warning-procedures").visible());
+        assert_eq!(
+            ProjectSettingsPage::warning("procedures"),
+            Some(
+                "An agent may then start any procedure in any of the project's workspaces without \
+             asking, with the procedure's own grants."
+            )
+        );
+        for family in ["settings", "references"] {
+            assert!(
+                window
+                    .try_find(format!("agent-actions-warning-{family}"))
+                    .is_none()
+            );
+        }
     });
 }
 

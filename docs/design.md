@@ -172,6 +172,9 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
   (`docs/projects.md`, "References");
 - tickets (an agent in a workspace): `ticket_read`, the ticket its workspace is linked to, or
   another of the same tracker, read only (`tickets.md`);
+- the project (a root): `procedure` (list, show, start) and `project` (its settings, its forges and
+  tracker, its references), what the window does, each change held for the user unless the
+  project lets its family run on its own (`tools.md`, "The project", `projects.md`);
 
 Flottille's own tools:
 
@@ -195,9 +198,9 @@ Flottille's own tools:
   when the caller is a root. There is no way to allow a request.
 
 The tool list of a session is fixed for its whole life (prompt cache, `reference/hemera.md` §7)
-and depends on what the agent can do, known when it starts: a root gets `ask_user`, a child
-`ask_parent`; an agent at the depth limit gets no `agent_*` tools and no `approval_answer`. A lead
-has about 16 tools, a leaf worker 11, two more each in a workspace (`forge_read`, `ticket_read`),
+and depends on what the agent can do, known when it starts: a root gets `ask_user`, `procedure` and
+`project`, a child `ask_parent`; an agent at the depth limit gets no `agent_*` tools and no
+`approval_answer`. A root lead has about 18 tools, a leaf worker 11, two more each in a workspace (`forge_read`, `ticket_read`),
 and `forge_write` or `workspace_remove` for an agent whose procedure run grants what they do
 (`reference/mcp.md` §4).
 
@@ -390,10 +393,13 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   a session (place, agent, model, first message); its procedures (added from a list of the
   templates and a blank one, edited with each grant a sentence of what a run may do and three
   choices, No, After asking me (`ask`) and On its own (`allow`), removed) and its references (add
-  with a path picked in the project folder, remove);
+  with a path picked in the project folder, remove); its Settings: each repository's forge, the
+  tracker, and a switch per family of an agent's changes (start a procedure, change the settings,
+  add or remove a reference) that lets it run on its own;
 - a session page: the root's conversation, live (messages, thoughts collapsed, tool calls with
   their result, the children launched, reports, diffs), the approvals that reach the user, inline,
-  with deny / allow for the tree / allow once, and a composer that writes to the root, whose Stop
+  with deny / allow for the tree / allow once (a line outside the catalogue in `main`: deny / always
+  / once; a change of the project an agent asks for, said in words: deny / confirm), and a composer that writes to the root, whose Stop
   button and `Escape` interrupt the turn that runs (the agent stays), and where `/` at the start
   of a message lists the project's procedures, filtered as the user types: picking one shows what
   it runs, the workspace and each grant in words, and Confirm runs it in the session's workspace

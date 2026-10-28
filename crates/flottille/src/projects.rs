@@ -8,9 +8,13 @@ use std::sync::Arc;
 use flottille_core::declared::RepositoryForge;
 use flottille_core::detect;
 use flottille_core::paths::Paths;
-use flottille_core::project::{Project, Reference, check_reference, slug, valid_name};
+use flottille_core::procedure::Mode;
+use flottille_core::project::{
+    AgentActions, Project, Reference, check_reference, slug, valid_name,
+};
 use flottille_core::protocol::{
-    ProjectFolder, ProjectName, ProjectSettings, ReferenceAdd, ReferenceList, ReferenceRemove,
+    ProjectAgentActions, ProjectFolder, ProjectName, ProjectSettings, ReferenceAdd, ReferenceList,
+    ReferenceRemove,
 };
 use flottille_core::registry::Registry;
 use flottille_core::{Error, Result};
@@ -391,6 +395,7 @@ async fn settings_of(project: &Project) -> Value {
         "folder": project.folder,
         "repositories": repositories,
         "tracker": project.tracker,
+        "agent_actions": project.agent_actions,
         "obsolete": project.obsolete,
     })
 }
@@ -480,6 +485,36 @@ pub async fn set_settings(
         Ok(())
     })?;
     Ok(settings_of(&saved).await)
+}
+
+/// `project.set_agent_actions`: writes `[agent_actions]` in the project's file, where it stands,
+/// what is around it kept (removed when every family asks, the default), and answers
+/// `{"name", "agent_actions"}`.
+pub fn set_agent_actions(daemon: &Daemon, params: Value) -> std::result::Result<Value, Failure> {
+    let asked: ProjectAgentActions = serde_json::from_value(params)?;
+    let actions = asked.agent_actions;
+    let saved = rewrite(daemon, &asked.name, |_, document| {
+        if actions.is_default() {
+            document.remove("agent_actions");
+            return Ok(());
+        }
+        let table = document
+            .entry("agent_actions")
+            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
+            .as_table_mut()
+            .ok_or_else(|| {
+                Failure::new(
+                    "invalid-config",
+                    format!("projects/{}.toml: agent_actions: not a table", asked.name),
+                )
+            })?;
+        for family in AgentActions::FAMILIES {
+            let mode = actions.mode(family).unwrap_or(Mode::Ask);
+            table.insert(family, toml_edit::value(mode.word()));
+        }
+        Ok(())
+    })?;
+    Ok(json!({"name": saved.name, "agent_actions": saved.agent_actions}))
 }
 
 /// A declaration as the TOML inline table it is written as: its keys hold strings and lists of

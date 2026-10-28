@@ -318,6 +318,8 @@ fn a_request_held_by_an_agent_is_not_the_user_s_until_it_is_forwarded_to_them() 
             shown: json!({"path": "/tmp/flottille-never-written", "content": "x"}),
             reasons: vec!["/tmp/flottille-never-written is outside this agent's place".into()],
             sensitive: false,
+            kind: flottille_core::approval::Kind::Call,
+            says: Vec::new(),
             identity: "a child's write".into(),
             held_by: "parent0000ab".into(),
             forwards: Vec::new(),
