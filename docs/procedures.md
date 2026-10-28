@@ -76,6 +76,12 @@ the workspace's), what the project says of its pull requests when the run grants
 (below), the workspace's ticket when it is linked to one, then its instructions. The run is a session like any other: it shows in the tree, the user writes to its
 root, its requests reach the user.
 
+In the window, a procedure is run as a slash command was: `/` at the start of a message in a
+session's composer lists the project's procedures, filtered as the user types; picking one shows
+the same confirmation (what it runs, the session's workspace, each grant in words) and Confirm
+starts the run in that workspace. A session in `main` has no workspace to run one in, and a
+`/word` that names no procedure is sent to the agent as text.
+
 **A procedure that writes to a forge needs every forge declared.** When it grants `pr-create`,
 `pr-merge-squash` or `pipeline-rerun` and a repository of the workspace has no forge in the
 project's file (`docs/forges.md`, "The forge of a repository"), it refuses to start, naming them:

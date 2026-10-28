@@ -120,8 +120,8 @@ pub struct Shell {
     /// a composer with no project default starts there.
     last_pick: Option<Pick>,
     settings: Entity<SettingsPage>,
-    /// The modal that runs a procedure in a workspace, one for the window: a card and a session's
-    /// menu open it.
+    /// The modal that runs a procedure in a workspace, one for the window: the `/` of every session
+    /// opens it.
     run: Entity<RunProcedure>,
     /// The open project's settings page; made again for another project.
     project_settings: Option<Entity<ProjectSettingsPage>>,
@@ -397,7 +397,8 @@ impl Shell {
             .entry(id.clone())
             .or_insert_with(|| {
                 let (this, id) = (this.clone(), id.clone());
-                cx.new(|cx| Reply::new(this, id, window, cx))
+                let (project, place) = (opened.project.clone(), opened.place.clone());
+                cx.new(|cx| Reply::new(this, id, project, place, window, cx))
             })
             .clone();
         let (follow, layout, status) = (self.follow.clone(), self.layout, status.clone());
@@ -428,14 +429,17 @@ impl Shell {
         }
     }
 
-    /// "Run procedure…" on a workspace: the modal lists the project's procedures and shows what
-    /// the chosen one grants. Nothing starts before Confirm.
-    pub fn run_procedure(&mut self, project: &str, workspace: &str, cx: &mut Context<Self>) {
+    /// A procedure picked with `/` in a session of the workspace: the modal shows what it grants.
+    /// Nothing starts before Confirm.
+    pub fn run_procedure(
+        &mut self,
+        project: &str,
+        workspace: &str,
+        name: &str,
+        cx: &mut Context<Self>,
+    ) {
         self.run
-            .update(cx, |run, cx| run.open(project, workspace, cx));
-        self.actions.send(Command::Procedures {
-            project: project.to_owned(),
-        });
+            .update(cx, |run, cx| run.open(project, workspace, name, cx));
     }
 
     pub fn procedure_run(&self) -> &Entity<RunProcedure> {
@@ -658,8 +662,12 @@ impl Shell {
                 }
             }
             Outcome::Procedures { project, listed } => {
-                self.run
-                    .update(cx, |run, cx| run.listed(&project, listed.clone(), cx));
+                // The `/` lists of the project's sessions.
+                for reply in self.replies.values() {
+                    reply.update(cx, |reply, cx| {
+                        reply.procedures_listed(&project, &listed, cx)
+                    });
+                }
                 if let Some(page) = self.page_of_project(&project, cx) {
                     let section = page.read(cx).procedures().clone();
                     section.update(cx, |section, cx| section.listed(listed, cx));

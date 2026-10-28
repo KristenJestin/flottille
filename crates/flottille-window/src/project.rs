@@ -689,19 +689,6 @@ impl Render for PlaceCard {
                     .child(div().text_color(p.fail).child(format!("−{removed}"))),
             );
         }
-        if place.is_some() && ready && self.busy.is_none() && !self.confirming {
-            let (shell, project, workspace) =
-                (self.shell.clone(), self.project.clone(), name.clone());
-            title = title.child(
-                Button::quiet(id("run-procedure"), "Run procedure…").on_click(move |_, _, cx| {
-                    shell
-                        .update(cx, |shell, cx| {
-                            shell.run_procedure(&project, &workspace, cx)
-                        })
-                        .ok();
-                }),
-            );
-        }
         if place.is_some() && self.busy.is_none() {
             title = if self.confirming {
                 title

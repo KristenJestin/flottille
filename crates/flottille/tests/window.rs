@@ -22,7 +22,7 @@ use flottille_window::link::{self, Connect};
 use flottille_window::model::{Place, Preparation};
 use flottille_window::project::{NewWorkspace, PlaceCard, ProjectPage};
 use flottille_window::project_settings::{ForgeKind, ProjectSettingsPage, Said};
-use flottille_window::session::{RailRow, SessionPage};
+use flottille_window::session::{RailRow, Reply, SessionPage};
 use flottille_window::settings::SettingsPage;
 use flottille_window::shell::{Layout, Selection};
 use flottille_window::tree::{place_id, project_id, session_id};
@@ -5298,19 +5298,103 @@ fn user_with_a_procedure() -> User {
     user
 }
 
+/// The reply of the session open now.
+fn reply_open(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<Reply> {
+    let page = session_page(shell, cx);
+    page.read_with(cx, |page, _| page.reply().cloned())
+        .expect("the session's composer")
+}
+
+/// The names the `/` list offers now.
+fn slash_offered(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
+    let reply = reply_open(shell, cx);
+    reply.read_with(cx, |reply, _| {
+        reply
+            .slash_entries()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    })
+}
+
+/// What the session's root was sent, in order.
+fn prompts(user: &User) -> Vec<String> {
+    user.received_requests("session/prompt")
+        .iter()
+        .filter_map(|p| p["params"]["prompt"][0]["text"].as_str().map(str::to_owned))
+        .collect()
+}
+
 #[gpui_kit::test]
-fn run_procedure_shows_the_grants_in_words_and_starts_nothing_until_confirm_then_opens_the_session(
+fn slash_lists_the_procedures_and_filters_them_as_the_user_types(cx: &mut TestAppContext) {
+    let user = user_with_a_procedure();
+    user.call(
+        "procedure.add",
+        json!({"project": "atlas", "template": "close"}),
+    )
+    .unwrap();
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    settle(cx);
+
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("/");
+    until(&shell, cx, "the list offers the procedures", |cx| {
+        slash_offered(&shell, cx).len() == 2
+    });
+    settle(cx);
+    assert_eq!(slash_offered(&shell, cx), ["close", "open-prs"]);
+    let reply = reply_open(&shell, cx);
+    let entries = reply.read_with(cx, |r, _| r.slash_entries());
+    assert!(
+        entries[1].1.contains("pull requests"),
+        "each with its description: {entries:?}"
+    );
+    cx.update(|window, _| {
+        assert!(window.find("slash-list").visible());
+        assert!(window.find("slash-open-prs").visible());
+        assert!(window.find("slash-close").visible());
+    });
+
+    cx.simulate_input("op");
+    settle(cx);
+    assert_eq!(slash_offered(&shell, cx), ["open-prs"]);
+    cx.update(|window, _| assert!(window.try_find("slash-close").is_none()));
+
+    // Escape closes it; the text stays.
+    cx.simulate_keystrokes("escape");
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find("slash-list").is_none()));
+    assert_eq!(
+        reply.read_with(cx, |r, cx| r.field().read(cx).value().to_string()),
+        "/op"
+    );
+}
+
+#[gpui_kit::test]
+fn picking_a_procedure_with_slash_shows_the_confirmation_and_starts_nothing_before_confirm(
     cx: &mut TestAppContext,
 ) {
     let user = user_with_a_procedure();
+    user.call(
+        "procedure.add",
+        json!({"project": "atlas", "template": "close"}),
+    )
+    .unwrap();
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    settle(cx);
     let before = agents_started(&user);
-    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    open_project(&shell, "atlas", cx);
-    until(&shell, cx, "the workspace's card has the action", |cx| {
-        cx.update(|window, _| window.try_find("run-procedure-login").is_some())
-    });
+    let sent = prompts(&user).len();
 
-    cx.update(|window, cx| window.click("run-procedure-login", cx));
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("/");
+    until(&shell, cx, "the list offers the procedures", |cx| {
+        slash_offered(&shell, cx).len() == 2
+    });
+    // The keyboard picks: down to the second, Enter.
+    cx.simulate_keystrokes("down");
+    cx.simulate_keystrokes("enter");
     let run = shell.read_with(cx, |s, _| s.procedure_run().clone());
     until(&shell, cx, "the grants are shown", |cx| {
         run.read_with(cx, |run, _| run.shown().is_some())
@@ -5318,54 +5402,75 @@ fn run_procedure_shows_the_grants_in_words_and_starts_nothing_until_confirm_then
     settle(cx);
 
     run.read_with(cx, |run, _| {
-        assert_eq!(run.workspace(), "login");
-        assert_eq!(
-            run.chosen(),
-            Some("open-prs"),
-            "the only procedure is chosen"
-        );
+        assert!(run.is_open());
+        assert_eq!((run.project(), run.workspace()), ("atlas", "login"));
+        assert_eq!(run.chosen(), Some("open-prs"));
     });
     let said = text_of("run-grant-push", cx).unwrap();
-    assert!(said.contains("push"), "{said}");
-    assert!(
-        said.contains("held for your answer"),
-        "ask is said in words: {said}"
-    );
-    assert!(
-        text_of("run-grant-pr-create", cx)
-            .unwrap()
-            .contains("held for your answer")
-    );
-    assert!(
-        text_of("run-children", cx)
-            .unwrap()
-            .contains("none of them")
-    );
+    assert!(said.contains("Push the workspace's branch"), "{said}");
+    assert!(said.contains("after asking me"), "ask in words: {said}");
     assert!(
         text_of("run-notice", cx)
             .unwrap()
             .contains("until you confirm")
     );
+    assert_eq!(agents_started(&user), before, "nothing started");
+    assert_eq!(prompts(&user).len(), sent, "nothing was sent to the lead");
+    let reply = reply_open(&shell, cx);
     assert_eq!(
-        agents_started(&user),
-        before,
-        "nothing started: only Confirm starts"
+        reply.read_with(cx, |r, cx| r.field().read(cx).value().to_string()),
+        "",
+        "the field is left for the next message"
     );
-    // Cancel starts nothing either.
+    cx.update(|window, _| assert!(window.try_find("slash-list").is_none()));
+
+    // Cancel starts nothing either; a click on an entry picks it too.
     cx.update(|window, cx| window.click("run-procedure-modal-cancel", cx));
     settle(cx);
     assert!(!run.read_with(cx, |run, _| run.is_open()));
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("/");
+    until(&shell, cx, "the list is back", |cx| {
+        slash_offered(&shell, cx).len() == 2
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("slash-close", cx));
+    until(&shell, cx, "close is shown", |cx| {
+        run.read_with(cx, |run, _| {
+            run.shown().is_some_and(|shown| shown.name == "close")
+        })
+    });
     assert_eq!(agents_started(&user), before);
+}
 
-    cx.update(|window, cx| window.click("run-procedure-login", cx));
-    until(&shell, cx, "the grants are shown again", |cx| {
+#[gpui_kit::test]
+fn confirm_runs_the_procedure_picked_with_slash_in_the_session_s_workspace(
+    cx: &mut TestAppContext,
+) {
+    let user = user_with_a_procedure();
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    settle(cx);
+    let before = agents_started(&user);
+
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("/open-prs");
+    until(&shell, cx, "the list offers it", |cx| {
+        slash_offered(&shell, cx) == ["open-prs"]
+    });
+    cx.simulate_keystrokes("enter");
+    let run = shell.read_with(cx, |s, _| s.procedure_run().clone());
+    until(&shell, cx, "the grants are shown", |cx| {
         run.read_with(cx, |run, _| run.shown().is_some())
     });
     settle(cx);
     cx.update(|window, cx| window.click("run-confirm", cx));
-    until(&shell, cx, "the run's session is open", |cx| {
-        matches!(selected(&shell, cx), Some(Selection::Session(_)))
-    });
+    until(
+        &shell,
+        cx,
+        "the run's session is open",
+        |cx| matches!(selected(&shell, cx), Some(Selection::Session(agent)) if agent != lead),
+    );
 
     assert_eq!(agents_started(&user), before + 1);
     let Some(Selection::Session(agent)) = selected(&shell, cx) else {
@@ -5373,61 +5478,243 @@ fn run_procedure_shows_the_grants_in_words_and_starts_nothing_until_confirm_then
     };
     let held = user.call("procedure.of", json!({"agent": agent})).unwrap();
     assert_eq!(held["run"]["procedure"], "open-prs");
+    assert_eq!(held["run"]["workspace"], "login");
     assert_eq!(
         held["run"]["grants"],
         json!({"pr-create": "ask", "push": "ask"})
     );
-    assert!(
-        !run.read_with(cx, |run, _| run.is_open()),
-        "the modal closed"
-    );
-
-    // Its grants are shown in the WORKSPACE section while it runs.
+    assert!(!run.read_with(cx, |run, _| run.is_open()));
     until(&shell, cx, "the rail shows the grants", |cx| {
         cx.update(|window, _| window.try_find("rail-run-grant-push").is_some())
     });
-    assert!(text_of("rail-run-title", cx).unwrap().contains("open-prs"));
     assert!(
         text_of("rail-run-grant-pr-create", cx)
             .unwrap()
-            .contains("held for your answer")
+            .contains("after asking me")
     );
 }
 
 #[gpui_kit::test]
-fn the_session_s_workspace_menu_runs_a_procedure_in_its_workspace_and_main_has_no_such_entry(
-    cx: &mut TestAppContext,
-) {
+fn in_main_slash_says_procedures_run_in_a_workspace_and_offers_none(cx: &mut TestAppContext) {
     let user = user_with_a_procedure();
-    let in_workspace = start(&user, "atlas", Some("login"), "Fix the login");
-    let in_main = start(&user, "atlas", None, "Read the notes");
+    let lead = start(&user, "atlas", None, "Read the notes");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    settle(cx);
     let before = agents_started(&user);
-    let (shell, cx) = open_session(&user, &in_workspace, 1280., cx);
 
-    cx.update(|window, cx| window.click("workspace-menu", cx));
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("/open-prs");
     settle(cx);
-    cx.update(|window, cx| window.click("run-procedure", cx));
-    let run = shell.read_with(cx, |s, _| s.procedure_run().clone());
-    until(&shell, cx, "the grants are shown", |cx| {
-        run.read_with(cx, |run, _| run.shown().is_some())
+    cx.update(|window, _| {
+        assert!(window.find("slash-in-main").visible());
+        assert!(window.try_find("slash-open-prs").is_none());
     });
-    run.read_with(cx, |run, _| {
-        assert_eq!((run.project(), run.workspace()), ("atlas", "login"));
+    assert!(slash_offered(&shell, cx).is_empty());
+
+    // Enter sends it as text: there is nothing to run here.
+    cx.simulate_keystrokes("enter");
+    until(&shell, cx, "the lead was sent the text", |_| {
+        prompts(&user).iter().any(|text| text.contains("/open-prs"))
     });
-    assert_eq!(
-        agents_started(&user),
-        before,
-        "nothing started before Confirm"
+    let reply = reply_open(&shell, cx);
+    until(&shell, cx, "the field is emptied", |cx| {
+        reply.read_with(cx, |r, cx| r.field().read(cx).value().is_empty())
+    });
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(
+            window.try_find("slash-in-main").is_none(),
+            "the list went with the message"
+        )
+    });
+    assert_eq!(agents_started(&user), before);
+    assert!(
+        !shell.read_with(cx, |s, cx| s.procedure_run().read(cx).is_open()),
+        "no confirmation"
     );
-    cx.update(|window, cx| window.click("run-procedure-modal-cancel", cx));
+}
+
+#[gpui_kit::test]
+fn an_unknown_slash_word_is_sent_as_text(cx: &mut TestAppContext) {
+    let user = user_with_a_procedure();
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    settle(cx);
+    let before = agents_started(&user);
+
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("/deploy");
+    until(&shell, cx, "the procedures are known", |cx| {
+        reply_open(&shell, cx).read_with(cx, |r, _| r.knows_procedures())
+    });
+    settle(cx);
+    assert!(
+        slash_offered(&shell, cx).is_empty(),
+        "no procedure is named so"
+    );
+    cx.simulate_keystrokes("enter");
+    until(&shell, cx, "the lead was sent the text", |_| {
+        prompts(&user).iter().any(|text| text.contains("/deploy"))
+    });
+    assert_eq!(agents_started(&user), before);
+    assert!(!shell.read_with(cx, |s, cx| s.procedure_run().read(cx).is_open()));
+}
+
+#[gpui_kit::test]
+fn the_editor_writes_ask_allow_and_removes_a_grant_from_the_three_choices(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    user.call(
+        "procedure.add",
+        json!({"project": "atlas", "template": "close"}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    until(&shell, cx, "the procedure is listed", |cx| {
+        !procedures_listed(&shell, cx).is_empty()
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("edit-procedure-close", cx));
+    let section = page_of(&shell, cx).read_with(cx, |page, _| page.procedures().clone());
+    until(&shell, cx, "the form is open on it", |cx| {
+        section.read_with(cx, |s, _| s.is_open())
+    });
     settle(cx);
 
-    // The project folder is not a workspace: nothing to run a procedure in.
-    shell.update_in(cx, |s, window, cx| {
-        s.open(Selection::Session(in_main.clone()), window, cx)
+    // Each grant is a sentence of what a run may do, with three choices in words.
+    let push = text_of("grant-push", cx).unwrap();
+    assert!(push.contains("Push the workspace's branch"), "{push}");
+    let merge = text_of("grant-pr-merge-squash", cx).unwrap();
+    assert!(
+        merge.contains("Merge the pull requests, by squash"),
+        "{merge}"
+    );
+    cx.update(|window, _| {
+        for (choice, words) in [
+            ("off", "No"),
+            ("ask", "After asking me"),
+            ("allow", "On its own"),
+        ] {
+            let found = window.find(format!("grant-push-{choice}"));
+            assert_eq!(found.label(), Some(words), "{choice}");
+        }
+        assert!(
+            window.try_find("procedure-children").is_none(),
+            "no switch for the children"
+        );
     });
-    until(&shell, cx, "main's session is open", |cx| {
-        selected(&shell, cx) == Some(Selection::Session(in_main.clone()))
+
+    cx.update(|window, cx| {
+        window.scroll(
+            "procedure-form",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-600.))),
+            cx,
+        )
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("grant-workspace-remove-off", cx));
+    cx.update(|window, cx| window.click("grant-push-ask", cx));
+    cx.update(|window, cx| window.click("grant-commit-allow", cx));
+    cx.update(|window, cx| window.click("save-procedure", cx));
+    until(&shell, cx, "the file says so", |_| {
+        let file = std::fs::read_to_string(user.project_file("atlas")).unwrap();
+        file.contains("push = \"ask\"") && file.contains("commit = \"allow\"")
+    });
+    let file = std::fs::read_to_string(user.project_file("atlas")).unwrap();
+    assert!(!file.contains("workspace-remove"), "{file}");
+    assert!(
+        !file.contains("\nchildren"),
+        "the default is not written: {file}"
+    );
+}
+
+#[gpui_kit::test]
+fn the_template_list_adds_a_template_and_a_blank_one(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    until(&shell, cx, "the empty list is shown", |cx| {
+        cx.update(|window, _| window.try_find("no-procedures").is_some())
+    });
+    let section = page_of(&shell, cx).read_with(cx, |page, _| page.procedures().clone());
+
+    cx.update(|window, cx| window.click("add-procedure", cx));
+    settle(cx);
+    // One list: each template with its description, then the blank one last.
+    let rows = cx.update(|window, _| {
+        ["open-prs", "merge-stack", "close"]
+            .map(|t| format!("template-{t}"))
+            .into_iter()
+            .chain(["blank-procedure".to_owned()])
+            .map(|id| {
+                let found = window.find(id.clone());
+                assert!(found.visible(), "{id}");
+                (
+                    found.label().unwrap_or_default().to_owned(),
+                    found.bounds().top(),
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    assert!(rows[0].0.contains("open-prs"), "{rows:?}");
+    assert!(
+        rows.windows(2).all(|pair| pair[0].1 < pair[1].1),
+        "one under the other, the blank one last: {rows:?}"
+    );
+    assert!(
+        text_of("template-open-prs-line", cx)
+            .unwrap()
+            .contains("pull requests")
+    );
+
+    cx.update(|window, cx| window.click("template-close", cx));
+    until(&shell, cx, "the template is listed", |cx| {
+        procedures_listed(&shell, cx)
+            .iter()
+            .any(|p| p.name == "close")
+    });
+    settle(cx);
+
+    cx.update(|window, cx| window.click("add-procedure", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("blank-procedure", cx));
+    settle(cx);
+    cx.simulate_input("tidy");
+    let description = section.read_with(cx, |s, _| s.description_field().unwrap().clone());
+    cx.update(|window, cx| {
+        description.update(cx, |f, cx| f.set_value("Tidy the branch", window, cx))
+    });
+    let instructions = section.read_with(cx, |s, _| s.instructions_field().unwrap().clone());
+    cx.update(|window, cx| {
+        instructions.update(cx, |f, cx| f.set_value("Remove the dead code.", window, cx))
+    });
+    cx.update(|window, cx| window.click("save-procedure", cx));
+    until(&shell, cx, "the blank one is listed", |cx| {
+        procedures_listed(&shell, cx)
+            .iter()
+            .any(|p| p.name == "tidy")
+    });
+}
+
+#[gpui_kit::test]
+fn the_card_and_the_session_menu_have_no_run_procedure_entry(cx: &mut TestAppContext) {
+    let user = user_with_a_procedure();
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    until(&shell, cx, "the workspace's card is drawn", |cx| {
+        cx.update(|window, _| window.try_find("place-card-login").is_some())
+    });
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find("run-procedure-login").is_none()));
+
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::Session(lead.clone()), window, cx)
+    });
+    until(&shell, cx, "the session is open", |cx| {
+        selected(&shell, cx) == Some(Selection::Session(lead.clone()))
     });
     settle(cx);
     cx.update(|window, cx| window.click("workspace-menu", cx));

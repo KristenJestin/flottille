@@ -3,7 +3,7 @@
 //! compositor.
 //!
 //! ```text
-//! cargo run -p flottille-window --example shell [--features frames] -- [--project <name>] [--add-project <folder>] [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace] [--add-procedure] [--edit-procedure <name>] [--run <workspace>] [--add-reference] [--project-settings <project>] [--size <w>x<h>]
+//! cargo run -p flottille-window --example shell [--features frames] -- [--project <name>] [--add-project <folder>] [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace] [--add-procedure] [--edit-procedure <name>] [--run <workspace>/<procedure>] [--slash <text>] [--add-reference] [--project-settings <project>] [--size <w>x<h>]
 //! ```
 //!
 //! `--project` opens a project's page, `--add-project` the "Add a project" modal with the
@@ -12,7 +12,7 @@
 //! three columns), `--settings` the settings page, `--menu` one of the project page composer's
 //! pickers, `--new-workspace` the project page's new-workspace modal, `--add-procedure`,
 //! `--edit-procedure`, `--run` and `--add-reference` the modals of the procedures and references
-//! sections, `--project-settings` a project's settings page, `--size` the window's size. The daemon is found on
+//! sections, `--slash` types a text in the open session's composer (its `/` list), `--project-settings` a project's settings page, `--size` the window's size. The daemon is found on
 //! `$XDG_RUNTIME_DIR/flottille/daemon.sock`; it is not started.
 
 use std::os::unix::net::UnixStream;
@@ -25,7 +25,7 @@ use flottille_window::Shell;
 use flottille_window::actions::Command;
 use flottille_window::composer::Menu;
 use flottille_window::shell::Selection;
-use gpui_kit::{AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
+use gpui_kit::{AppContext as _, Bounds, Focusable as _, WindowBounds, WindowOptions, px, size};
 
 fn main() {
     let (mut session, mut agent) = (None, None);
@@ -33,7 +33,7 @@ fn main() {
     let (mut menu, mut project_settings) = (None, None);
     let (mut project, mut add_project) = (None, None);
     let (mut add_procedure, mut add_reference) = (false, false);
-    let (mut edit_procedure, mut run) = (None, None);
+    let (mut edit_procedure, mut run, mut slash) = (None, None, None);
     let mut dimensions = (1280., 800.);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -50,7 +50,8 @@ fn main() {
             "--add-procedure" => add_procedure = true,
             "--add-reference" => add_reference = true,
             "--edit-procedure" => edit_procedure = Some(args.next().expect("a procedure")),
-            "--run" => run = Some(args.next().expect("a workspace")),
+            "--run" => run = Some(args.next().expect("a workspace/procedure")),
+            "--slash" => slash = Some(args.next().expect("what the reply's field holds")),
             "--size" => {
                 let size = args.next().expect("a size like 1280x1400");
                 let (w, h) = size.split_once('x').expect("WxH");
@@ -144,11 +145,22 @@ fn main() {
                                 let section = page.read(cx).references().clone();
                                 section.update(cx, |s, cx| s.add(window, cx));
                             }
-                            if let Some(workspace) = &run {
-                                shell.run_procedure(&name, workspace, cx);
+                            if let Some((workspace, procedure)) =
+                                run.as_deref().and_then(|run| run.split_once('/'))
+                            {
+                                shell.run_procedure(&name, workspace, procedure, cx);
                             }
                         }
                         let page = shell.main().read(cx).session_page().cloned();
+                        if let (Some(text), Some(page)) = (&slash, &page)
+                            && let Some(reply) = page.read(cx).reply().cloned()
+                        {
+                            let field = reply.read(cx).field().clone();
+                            field.update(cx, |f, cx| f.set_value(text.clone(), window, cx));
+                            reply.update(cx, |r, cx| r.typed(text, cx));
+                            let focus = field.read(cx).focus_handle(cx);
+                            window.focus(&focus, cx);
+                        }
                         if rail && let Some(page) = page {
                             let drawer = page.read(cx).drawer().clone();
                             drawer.update(cx, |d, cx| d.open(cx));
