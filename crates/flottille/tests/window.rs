@@ -2463,6 +2463,15 @@ fn a_call_left_running_shows_interrupted_when_the_conversation_is_read(cx: &mut 
         p.conversation().read(cx).rows()[1].read(cx).marks(cx)
     });
     assert_eq!(marks, [AgentState::Stopped], "no spinner at rest");
+    cx.update(|window, cx| {
+        assert_eq!(
+            window.find("row-1-steps-toggle").label(),
+            Some("1 step · fs_read")
+        );
+        assert!(window.try_find("step-1-0").is_none(), "folded");
+        window.click("row-1-steps-toggle", cx);
+    });
+    frame(cx);
     cx.update(|window, _| assert!(window.try_find("step-1-0").is_some()));
 }
 
@@ -6011,3 +6020,58 @@ fn the_empty_state_gives_way_to_the_page_once_a_workspace_exists(cx: &mut TestAp
     });
 }
 
+#[gpui_kit::test]
+fn agent_steps_are_folded_until_clicked_and_stay_open_while_the_session_is_shown(
+    cx: &mut TestAppContext,
+) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    settle(cx);
+
+    let call = |seq: u64, id: &str, name: &str| {
+        made_up(
+            seq,
+            "agent.tool_call",
+            json!({"id": id, "title": name, "status": "completed"}),
+        )
+    };
+    read_events(
+        &page,
+        vec![call(1, "a", "fs_read"), call(2, "b", "fs_list")],
+        cx,
+    );
+    frame(cx);
+
+    cx.update(|window, _| {
+        assert_eq!(
+            window.find("row-0-steps-toggle").label(),
+            Some("2 steps · fs_list"),
+            "how many, and the last one's name"
+        );
+        assert!(window.try_find("step-0-0").is_none(), "folded");
+    });
+
+    cx.update(|window, cx| window.click("row-0-steps-toggle", cx));
+    frame(cx);
+    cx.update(|window, _| {
+        assert!(window.find("step-0-0").visible());
+        assert!(window.find("step-0-1").visible());
+    });
+
+    // Opened, it stays so while the session goes on.
+    live(&page, call(3, "c", "fs_edit"), cx);
+    frame(cx);
+    cx.update(|window, _| assert!(window.find("step-0-2").visible()));
+
+    cx.update(|window, cx| window.click("row-0-steps-toggle", cx));
+    frame(cx);
+    cx.update(|window, _| {
+        assert!(window.try_find("step-0-0").is_none());
+        assert_eq!(
+            window.find("row-0-steps-toggle").label(),
+            Some("3 steps · fs_edit")
+        );
+    });
+}
