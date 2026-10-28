@@ -570,6 +570,20 @@ $ flottille agent stop bd7ed8152969
 Stopped agent bd7ed8152969 and its tree; it is ended now. Its workspace stays.
 ```
 
+### `flottille agent resume <agent>`
+
+Starts an ended root again on its own session (`agent.resume`, `docs/protocol.md`): it is idle,
+and its next message starts its process, which resumes or loads the session. Its children stay
+ended. `--json` prints `{"agent": {...}}`, the root once idle. Refused for a child, an agent that
+has not ended, a failed one, one whose agent can neither resume nor load its session, one whose
+session was forgotten (7 days after it ended), whose workspace or project is gone, and one whose
+process is still stopping (try again in a moment).
+
+```
+$ flottille agent resume bd7ed8152969
+Resumed agent bd7ed8152969 on its own session; it is idle now. Its next message starts it.
+```
+
 ### `flottille agent list`
 
 The agents, in short, of every project or of `--project <name>`: id, role, place, provider and

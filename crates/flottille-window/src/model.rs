@@ -134,6 +134,8 @@ pub struct Session {
     pub mark: Option<AgentState>,
     /// How many agents its tree holds, the root included.
     pub agents: usize,
+    /// Its root ended or failed: the left tree lists it in its project's "Ended" group.
+    pub ended: bool,
     /// The last sign of activity of its tree, in milliseconds since the Unix epoch.
     pub active_at: u64,
     pub created_at: u64,
@@ -298,6 +300,7 @@ impl Snapshot {
                     place: agent["workspace"].as_str().map(str::to_owned),
                     mark,
                     agents: size.max(1),
+                    ended: matches!(agent["state"].as_str(), Some("ended" | "failed")),
                     active_at,
                     created_at: number(agent, "created_at"),
                     id,
@@ -405,6 +408,23 @@ mod tests {
             questions: &HashMap::new(),
             briefs: &HashMap::from([("r1".into(), "\n  Fix the login\nmore".into())]),
         })
+    }
+
+    #[test]
+    fn a_session_whose_root_ended_or_failed_is_ended() {
+        let snapshot = build(
+            json!({"agents": [agent("r1", None, "ended", Some("login")),
+                agent("r2", None, "failed", None), agent("r3", None, "idle", None),
+                agent("c1", Some("r3"), "ended", None)]}),
+            json!({"requests": []}),
+            &[],
+        );
+        let ended: Vec<(&str, bool)> = snapshot
+            .sessions
+            .iter()
+            .map(|s| (s.id.as_str(), s.ended))
+            .collect();
+        assert_eq!(ended, [("r1", true), ("r2", true), ("r3", false)]);
     }
 
     #[test]

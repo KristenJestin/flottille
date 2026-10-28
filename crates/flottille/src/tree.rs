@@ -1167,6 +1167,10 @@ fn end(daemon: &Arc<Daemon>, id: &str, state: AgentState, reason: &str) -> bool 
         Some(reason.to_owned()),
         Some((event, json!({"reason": reason}))),
     );
+    if agent.parent.is_none() {
+        // A procedure's run ends with its root: resumed, the root is an ordinary session.
+        procedures::end(daemon, id, state.as_str());
+    }
     let _ = daemon.write(|store| Ok(((), store.supersede(id)?)));
     // Nobody is left to answer what it asked, nor to answer what it held: nobody sees them.
     let _ = daemon.write_all(|store| {
@@ -1305,8 +1309,44 @@ pub fn root_of(daemon: &Daemon, id: &str) -> String {
     id
 }
 
+/// Whether the agent's session is kept for `agent.resume`: a root that ended (not one that failed:
+/// its session could not go on) whose agent said it resumes or loads sessions, and that opened
+/// one. Flottille forgets it `KEPT_MS` after the root ended (`forget_kept_sessions`).
+pub fn keeps_session(agent: &Agent) -> bool {
+    agent.state == AgentState::Ended
+        && agent.parent.is_none()
+        && agent.reopens
+        && agent.native_id.is_some()
+}
+
+/// How long an ended root's session is kept to be resumed: 7 days.
+pub const KEPT_MS: u64 = 7 * 24 * 3_600_000;
+
+/// Why `agent.resume` could not start the ended agent again on its own session, `None` when it
+/// could once its last process is gone (`agents::stopping`).
+pub fn resume_refusal(daemon: &Daemon, agent: &Agent) -> Option<&'static str> {
+    if agent.state == AgentState::Failed {
+        return Some("it failed, and its session went with it");
+    }
+    if !keeps_session(agent) {
+        return Some("its agent can neither resume nor load its session, or it was forgotten");
+    }
+    // Gone, or made again under the same name since: not the place the session worked in.
+    let Ok(project) = projects::load_project(daemon, &agent.project) else {
+        return Some("its project is gone");
+    };
+    match &agent.workspace {
+        None if project.folder != agent.folder => Some("its project is gone"),
+        None => None,
+        Some(name) => match daemon.read(|store| store.workspace(&agent.project, name)) {
+            Ok(Some(workspace)) if workspace.created_at <= agent.created_at => None,
+            _ => Some("its workspace is gone"),
+        },
+    }
+}
+
 /// An agent as a list shows it: without its instructions and its brief.
-pub fn summary(agent: &Agent) -> Value {
+pub fn summary(daemon: &Daemon, agent: &Agent) -> Value {
     json!({
         "id": agent.id,
         "provider": agent.provider,
@@ -1325,6 +1365,8 @@ pub fn summary(agent: &Agent) -> Value {
         "active_at": agent.active_at,
         "ended_at": agent.ended_at,
         "waiting_on_answer": agent.waiting_on_answer,
+        "resumable": agent.state == AgentState::Ended && resume_refusal(daemon, agent).is_none(),
+        "stopping": agent.state.is_final() && agents::stopping(daemon, &agent.id),
     })
 }
 
@@ -1341,7 +1383,7 @@ pub fn status_of(daemon: &Daemon, agent: &Agent) -> Result<Value, Failure> {
 /// `status_of` for an agent whose entry of its tree is known.
 fn status_from(daemon: &Daemon, agent: &Agent, entry: &Value) -> Value {
     json!({
-        "agent": summary(agent),
+        "agent": summary(daemon, agent),
         "name": named(agent),
         "line": line(daemon, agent),
         "doing": entry["doing"],
@@ -1430,7 +1472,7 @@ pub fn tree(daemon: &Daemon, agent: &Agent) -> Result<Vec<Value>, Failure> {
                     .iter()
                     .any(|request| root_of(daemon, &request.agent) == agent.id));
         out.push(json!({
-            "agent": summary(&agent),
+            "agent": summary(daemon, &agent),
             "doing": doing(daemon, &agent),
             "waiting_on": waiting_on,
             "needs_user": needs_user,

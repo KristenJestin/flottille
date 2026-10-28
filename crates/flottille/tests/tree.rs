@@ -1220,3 +1220,26 @@ fn agent_launch_refuses_a_mixed_workspace_with_a_sentence_naming_the_field() {
     let own = agent_id(&text).unwrap();
     assert_eq!(show(&user, &own)["agent"]["workspace"], "w");
 }
+
+#[test]
+fn resuming_a_stopped_lead_restarts_it_alone_and_its_children_stay_ended() {
+    let user = user();
+    let (lead_id, lead) = lead(&user);
+    let one = launch(&lead, "one", "HANG one");
+    eventually("the worker's turn", || state(&user, &one) == "working");
+    user.call("agent.stop", json!({"agent": lead_id})).unwrap();
+    eventually("the stop", || state(&user, &one) == "ended");
+    let refusal = user
+        .call("agent.resume", json!({"agent": one}))
+        .unwrap_err();
+    assert_eq!(refusal.0, "refused");
+    assert!(refusal.1.contains("its root"), "{}", refusal.1);
+
+    user.resume(&lead_id);
+
+    assert_eq!(state(&user, &lead_id), "idle");
+    assert_eq!(state(&user, &one), "ended");
+    let resumed = events(&user, &lead_id, "agent.resumed");
+    assert_eq!(resumed.len(), 1);
+    assert_eq!(resumed[0]["data"]["agent"], lead_id.as_str());
+}

@@ -442,6 +442,20 @@ impl User {
         }
     }
 
+    /// `agent.resume`, once the agent's last process is gone: refused while it still stops.
+    pub fn resume(&self, agent: &str) -> Value {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match self.call("agent.resume", serde_json::json!({"agent": agent})) {
+                Err((_, message)) if message.contains("still stopping") => {
+                    assert!(std::time::Instant::now() < deadline, "{message}");
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                answer => return answer.unwrap(),
+            }
+        }
+    }
+
     /// A throwaway git repository in `path`, which is made with its parents.
     pub fn git_init(&self, path: &Path) {
         std::fs::create_dir_all(path).unwrap();

@@ -741,3 +741,280 @@ fn agent_show_pages_from_either_end_and_says_when_more_remain() {
     assert_eq!(more, json!(false));
     assert_eq!(earlier, all[..all.len() - 1000]);
 }
+
+// Ending and resuming a root (#109): a root the user stopped keeps its session, and `agent.resume`
+// opens it again, as a released agent's process does.
+
+fn in_short(user: &User, agent: &str) -> Value {
+    user.call("agent.list", json!({})).unwrap()["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == agent)
+        .cloned()
+        .unwrap()
+}
+
+#[test]
+fn an_ended_root_resumes_its_own_session_and_takes_messages_again() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [{"when": "recall", "do": [{"recall": true}]}]}));
+    project(&user);
+    let (id, after) = run(&user, json!({"message": "hello"}));
+    events_until(&user, &id, after, "agent.turn_ended");
+    let before = show(&user, &id)["agent"].clone();
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+    assert_eq!(in_short(&user, &id)["resumable"], true);
+    let refused = user
+        .call("agent.send", json!({"agent": id, "message": "recall"}))
+        .unwrap_err();
+    assert_eq!(refused.0, "refused");
+
+    let resumed = user.resume(&id);
+
+    let agent = &resumed["agent"];
+    assert_eq!(agent["state"], "idle");
+    assert_eq!(agent["state_reason"], Value::Null);
+    assert_eq!(agent["ended_at"], Value::Null);
+    assert_eq!(agent["native_id"], before["native_id"], "its own session");
+    assert_eq!(
+        agent["epoch"], before["epoch"],
+        "the same session, not a new one"
+    );
+    assert_eq!(in_short(&user, &id)["resumable"], false, "it runs");
+    let sent = user
+        .call("agent.send", json!({"agent": id, "message": "recall"}))
+        .unwrap();
+    let events = events_until(
+        &user,
+        &id,
+        sent["after"].as_u64().unwrap(),
+        "agent.turn_ended",
+    );
+    let started = events
+        .iter()
+        .find(|e| e["name"] == "agent.started")
+        .unwrap();
+    assert_eq!(started["data"]["opened"], "resumed");
+    let resumes = user.received_requests("session/resume");
+    assert_eq!(resumes.len(), 1);
+    assert_eq!(resumes[0]["params"]["sessionId"], before["native_id"]);
+    let said: String = events
+        .iter()
+        .filter(|e| e["name"] == "agent.message")
+        .filter_map(|e| e["data"]["text"].as_str())
+        .collect();
+    assert!(
+        said.starts_with("earlier you said:") && said.contains("hello"),
+        "the session kept its history: {said}"
+    );
+    let resumed_events: Vec<Value> = show(&user, &id)["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["name"] == "agent.resumed")
+        .cloned()
+        .collect();
+    assert_eq!(resumed_events.len(), 1);
+}
+
+#[test]
+fn an_ended_root_whose_agent_loads_is_resumed_through_a_load() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"resume": false}));
+    project(&user);
+    let (id, after) = run(&user, json!({"message": "hello"}));
+    events_until(&user, &id, after, "agent.turn_ended");
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+    assert_eq!(in_short(&user, &id)["resumable"], true);
+
+    user.resume(&id);
+    let sent = user
+        .call("agent.send", json!({"agent": id, "message": "again"}))
+        .unwrap();
+
+    let events = events_until(
+        &user,
+        &id,
+        sent["after"].as_u64().unwrap(),
+        "agent.turn_ended",
+    );
+    let started = events
+        .iter()
+        .find(|e| e["name"] == "agent.started")
+        .unwrap();
+    assert_eq!(started["data"]["opened"], "loaded");
+}
+
+#[test]
+fn an_ended_root_whose_agent_can_neither_resume_nor_load_is_not_resumable() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"resume": false, "load": false}));
+    project(&user);
+    let (id, after) = run(&user, json!({"message": "hello"}));
+    events_until(&user, &id, after, "agent.turn_ended");
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+
+    assert_eq!(in_short(&user, &id)["resumable"], false);
+    let refused = user.call("agent.resume", json!({"agent": id})).unwrap_err();
+    assert_eq!(refused.0, "refused");
+    assert!(refused.1.contains("cannot resume"), "{}", refused.1);
+    assert_eq!(show(&user, &id)["agent"]["state"], "ended");
+}
+
+#[test]
+fn an_agent_that_did_not_end_is_not_resumed() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (id, after) = run(&user, json!({"message": "hello"}));
+    events_until(&user, &id, after, "agent.turn_ended");
+
+    assert_eq!(in_short(&user, &id)["resumable"], false);
+    let refused = user.call("agent.resume", json!({"agent": id})).unwrap_err();
+    assert_eq!(refused.0, "refused");
+    assert!(refused.1.contains("has not ended"), "{}", refused.1);
+}
+
+#[test]
+fn resume_is_refused_while_the_stopped_process_is_still_stopping() {
+    // An agent slow to stop: deaf to SIGTERM and running on once its input closes, it is killed
+    // 2 s after the stop.
+    let user = User::with_fake_agent();
+    let slow = user.path("slow-agent");
+    std::fs::write(
+        &slow,
+        format!(
+            "#!/bin/sh\ntrap '' TERM\nexec '{}' \"$@\"\n",
+            common::fake_agent().display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&slow, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let user = user.with_env("FLOTTILLE_AGENT_COMMAND", slow.to_str().unwrap());
+    user.fake_script(json!({"linger": true}));
+    project(&user);
+    let (id, after) = run(&user, json!({"message": "hello"}));
+    events_until(&user, &id, after, "agent.turn_ended");
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+
+    let refused = user.call("agent.resume", json!({"agent": id})).unwrap_err();
+
+    assert_eq!(refused.0, "refused");
+    assert!(
+        refused.1.contains("still stopping, try again in a moment"),
+        "{}",
+        refused.1
+    );
+    let listed = in_short(&user, &id);
+    assert_eq!(
+        (listed["resumable"].clone(), listed["stopping"].clone()),
+        (json!(true), json!(true))
+    );
+    let released = events_until(&user, &id, after, "agent.released");
+    assert_eq!(released.last().unwrap()["data"]["reason"], "stopped");
+    assert_eq!(in_short(&user, &id)["stopping"], false);
+    user.call("agent.resume", json!({"agent": id})).unwrap();
+    let sent = user
+        .call("agent.send", json!({"agent": id, "message": "again"}))
+        .unwrap();
+    let events = events_until(
+        &user,
+        &id,
+        sent["after"].as_u64().unwrap(),
+        "agent.turn_ended",
+    );
+    let started = events
+        .iter()
+        .find(|e| e["name"] == "agent.started")
+        .unwrap();
+    assert_eq!(started["data"]["opened"], "resumed");
+}
+
+#[test]
+fn resume_is_refused_when_the_project_is_gone() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (id, after) = run(&user, json!({"message": "hello"}));
+    events_until(&user, &id, after, "agent.turn_ended");
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+    events_until(&user, &id, after, "agent.released");
+    assert_eq!(in_short(&user, &id)["resumable"], true);
+
+    user.call("project.remove", json!({"name": "app"})).unwrap();
+
+    assert_eq!(in_short(&user, &id)["resumable"], false);
+    let refused = user.call("agent.resume", json!({"agent": id})).unwrap_err();
+    assert_eq!(refused.0, "refused");
+    assert!(refused.1.contains("its project is gone"), "{}", refused.1);
+}
+
+#[test]
+fn resume_is_refused_when_the_workspace_is_gone_even_made_again_under_its_name() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let workspace = json!({"project": "app", "name": "login"});
+    user.call("workspace.create", workspace.clone()).unwrap();
+    let (id, after) = run(&user, json!({"message": "hello", "workspace": "login"}));
+    events_until(&user, &id, after, "agent.turn_ended");
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+    events_until(&user, &id, after, "agent.released");
+    assert_eq!(in_short(&user, &id)["resumable"], true);
+
+    user.call("workspace.remove", workspace.clone()).unwrap();
+    assert_eq!(in_short(&user, &id)["resumable"], false);
+    // Its branch stays in the repository: the new one takes another.
+    let again = json!({"project": "app", "name": "login", "branch": "app/login-again"});
+    user.call("workspace.create", again).unwrap();
+
+    assert_eq!(
+        in_short(&user, &id)["resumable"],
+        false,
+        "another workspace"
+    );
+    let refused = user.call("agent.resume", json!({"agent": id})).unwrap_err();
+    assert_eq!(refused.0, "refused");
+    assert!(refused.1.contains("its workspace is gone"), "{}", refused.1);
+}
+
+#[test]
+fn a_resumed_root_reads_first_that_the_user_stopped_it_and_which_requests_were_cancelled() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "secret", "do": [{"mcp": {"tool": "fs_read", "arguments": {"path": ".env"}}}]}
+    ]}));
+    let folder = project(&user);
+    std::fs::write(folder.join(".env"), "TOKEN=x\n").unwrap();
+    let (id, after) = run(&user, json!({"message": "read the secret"}));
+    events_until(&user, &id, after, "agent.turn_ended");
+    let held = user.call("approval.list", json!({})).unwrap()["requests"].clone();
+    let number = held[0]["number"]
+        .as_u64()
+        .expect("a request held for the user");
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+
+    user.resume(&id);
+    let sent = user
+        .call("agent.send", json!({"agent": id, "message": "go on"}))
+        .unwrap();
+    events_until(
+        &user,
+        &id,
+        sent["after"].as_u64().unwrap(),
+        "agent.turn_ended",
+    );
+
+    let prompts = user.received_requests("session/prompt");
+    let last = prompts.last().unwrap()["params"]["prompt"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(last.starts_with("[flottille:resume]"), "{last}");
+    assert!(last.contains("The user stopped you"), "{last}");
+    assert!(last.contains(&format!("#{number} (fs_read)")), "{last}");
+    assert!(last.contains("go on"), "{last}");
+    assert_eq!(
+        user.received_requests("session/prompt").len(),
+        2,
+        "the resume woke nothing"
+    );
+}

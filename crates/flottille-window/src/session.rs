@@ -1,6 +1,7 @@
 //! A session's page: a header on one line (title, place, state pill), the
 //! shown agent's conversation, live, the composer that writes to the root agent (or, reading a
-//! sub-agent, a line saying it belongs to its parent), and a rail with the session's tree of
+//! sub-agent, a line saying it belongs to its parent; once the session ended, a line saying why,
+//! with Resume when it can be), and a rail with the session's tree of
 //! agents, its workspace and its facts, which becomes a drawer in a narrower window.
 //!
 //! Every row of the conversation is its own view: a message arriving adds a row or draws one row
@@ -127,6 +128,8 @@ pub struct SessionPage {
     /// The session's state, as the shell's tree draws it.
     status: Entity<Status>,
     pill: Entity<Pill>,
+    /// What the header's pill shows: the left tree's state, or the root's once it ended.
+    pill_status: Entity<Status>,
     /// The agent whose conversation is shown: the root, or a sub-agent read.
     shown: String,
     link: Option<SessionLink>,
@@ -148,10 +151,14 @@ pub struct SessionPage {
     /// How many times a conversation was read and its rows made again.
     histories: usize,
     needs_you: bool,
-    /// The confirmation of stopping the session's tree is open.
-    stopping: bool,
-    /// What the daemon said when it refused to stop the tree.
-    stop_error: Option<SharedString>,
+    /// The confirmation of ending the session is open.
+    ending: bool,
+    /// What the daemon said when it refused to end the session.
+    end_error: Option<SharedString>,
+    /// A resume was asked and not answered yet.
+    resuming: bool,
+    /// What the daemon said when it refused to resume the session.
+    resume_error: Option<SharedString>,
     renders: usize,
     _status: Subscription,
 }
@@ -190,6 +197,7 @@ impl SessionPage {
             shell,
             follow,
             layout,
+            pill_status: status.clone(),
             status,
             pill,
             shown,
@@ -207,8 +215,10 @@ impl SessionPage {
             read: false,
             histories: 0,
             needs_you,
-            stopping: false,
-            stop_error: None,
+            ending: false,
+            end_error: None,
+            resuming: false,
+            resume_error: None,
             renders: 0,
             _status,
             opened,
@@ -224,6 +234,11 @@ impl SessionPage {
     /// The session's state, as the shell's tree draws it.
     pub fn status(&self) -> &Entity<Status> {
         &self.status
+    }
+
+    /// The state the header's pill shows.
+    pub fn header_state(&self, cx: &gpui_kit::App) -> AgentState {
+        self.pill_status.read(cx).state()
     }
 
     /// The agent whose conversation is shown.
@@ -278,30 +293,35 @@ impl SessionPage {
         self.statuses.get(agent).map(|s| s.read(cx).state())
     }
 
-    /// The agents a stop would end: the root and the children of its tree that did not end.
-    pub fn stop_count(&self) -> usize {
+    /// The agents ending the session would end: the root and the children of its tree that did
+    /// not end.
+    pub fn end_count(&self) -> usize {
         self.tree
             .iter()
             .filter(|a| !matches!(a.state.as_str(), "ended" | "failed"))
             .count()
     }
 
-    /// Whether the root can be stopped: the daemon refuses an agent in a final state.
-    pub fn stoppable(&self) -> bool {
-        self.tree
-            .iter()
-            .any(|a| a.parent.is_none() && !matches!(a.state.as_str(), "ended" | "failed"))
+    /// The session's root, once the tree is read.
+    fn root(&self) -> Option<&TreeAgent> {
+        self.tree.iter().find(|a| a.parent.is_none())
     }
 
-    /// What the confirmation says while it is open: how many agents stop.
-    pub fn stop_question(&self) -> Option<String> {
-        if !self.stopping {
+    /// Whether the session can be ended: the daemon refuses a root in a final state.
+    pub fn endable(&self) -> bool {
+        self.root()
+            .is_some_and(|a| !matches!(a.state.as_str(), "ended" | "failed"))
+    }
+
+    /// What the confirmation says while it is open: how many agents end.
+    pub fn end_question(&self) -> Option<String> {
+        if !self.ending {
             return None;
         }
-        Some(match self.stop_count() {
-            0 | 1 => format!("This stops {THE_CONVERSATION}. Its workspace stays."),
+        Some(match self.end_count() {
+            0 | 1 => format!("This ends {THE_CONVERSATION}. Its workspace stays."),
             n => format!(
-                "This stops {n} agents: {THE_CONVERSATION} and its {} sub-agent{}. Workspaces \
+                "This ends {n} agents: {THE_CONVERSATION} and its {} sub-agent{}. Workspaces \
                  stay.",
                 n - 1,
                 if n == 2 { "" } else { "s" }
@@ -309,39 +329,91 @@ impl SessionPage {
         })
     }
 
-    /// Opens the confirmation of stopping the tree, from the header or the rail.
-    pub fn ask_stop(&mut self, cx: &mut Context<Self>) {
-        if self.stoppable() && !self.stopping {
-            self.stopping = true;
-            self.stop_error = None;
+    /// Opens the confirmation of ending the session, from the root's menu.
+    pub fn ask_end(&mut self, cx: &mut Context<Self>) {
+        if self.endable() && !self.ending {
+            self.ending = true;
+            self.end_error = None;
             cx.notify();
         }
     }
 
     /// Closes the confirmation: Cancel, Escape or a click outside it.
-    pub fn cancel_stop(&mut self, cx: &mut Context<Self>) {
-        if self.stopping {
-            self.stopping = false;
+    pub fn cancel_end(&mut self, cx: &mut Context<Self>) {
+        if self.ending {
+            self.ending = false;
             cx.notify();
         }
     }
 
-    /// Stops the root agent and its tree, deepest first, as the daemon does.
-    pub fn confirm_stop(&mut self, cx: &mut Context<Self>) {
-        self.stopping = false;
+    /// Ends the session: the root agent and its tree stop, deepest first, as the daemon does.
+    pub fn confirm_end(&mut self, cx: &mut Context<Self>) {
+        self.ending = false;
         let session = self.opened.id.clone();
         self.perform(Command::Stop { session }, cx);
         cx.notify();
     }
 
-    /// What the daemon answered to a stop: it says why when it refused.
-    pub fn stopped(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
-        self.stop_error = refused.map(Into::into);
+    /// What the daemon answered to an end: it says why when it refused.
+    pub fn end_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
+        self.end_error = refused.map(Into::into);
         cx.notify();
     }
 
-    pub fn stop_error(&self) -> Option<&str> {
-        self.stop_error.as_deref()
+    pub fn end_error(&self) -> Option<&str> {
+        self.end_error.as_deref()
+    }
+
+    /// What the line in place of the composer says once the session ended, and whether it offers
+    /// Resume: `None` while the root runs.
+    pub fn ended_line(&self) -> Option<(String, bool)> {
+        let root = self.root()?;
+        let reason = root
+            .state_reason
+            .as_deref()
+            .unwrap_or_default()
+            .trim_end_matches('.');
+        let why = match (root.state.as_str(), reason) {
+            ("ended", "stopped by the user") => "stopped by you".to_owned(),
+            ("ended", "") => "stopped".to_owned(),
+            ("ended", reason) => reason.to_owned(),
+            ("failed", "") => "failed".to_owned(),
+            ("failed", reason) => format!("failed: {reason}"),
+            _ => return None,
+        };
+        Some((format!("This session ended: {why}."), root.resumable))
+    }
+
+    /// Whether Resume is enabled: offered, not asked already, and the root's last process gone.
+    pub fn can_resume(&self) -> bool {
+        !self.resuming
+            && !self.root().is_some_and(|root| root.stopping)
+            && self.ended_line().is_some_and(|(_, resumable)| resumable)
+    }
+
+    /// Starts the ended session's root again on its own session, once its last process is gone.
+    pub fn resume(&mut self, cx: &mut Context<Self>) {
+        if !self.can_resume() {
+            return;
+        }
+        self.resuming = true;
+        self.resume_error = None;
+        let session = self.opened.id.clone();
+        self.perform(Command::Resume { session }, cx);
+        cx.notify();
+    }
+
+    /// What the daemon answered to a resume: the composer comes back with the tree read again, or
+    /// the line says why it was refused.
+    pub fn resumed(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
+        // Taken: Resume stays disabled until the tree shows the root going again.
+        self.resuming = refused.is_none() && self.ended_line().is_some();
+        self.resume_error = refused.map(Into::into);
+        cx.notify();
+    }
+
+    pub fn resume_error(&self) -> Option<&str> {
+        self.resume_error.as_deref()
     }
 
     pub fn set_title(&mut self, title: &str, cx: &mut Context<Self>) {
@@ -640,7 +712,35 @@ impl SessionPage {
             .collect();
         self.rail.update(cx, |rail, cx| rail.set_agents(rows, cx));
         let changed = self.tree != tree;
+        let ended = |tree: &[TreeAgent]| {
+            tree.iter()
+                .find(|a| a.parent.is_none())
+                .map(|root| matches!(root.state.as_str(), "ended" | "failed"))
+        };
+        let (was_ended, now_ended) = (ended(&self.tree), ended(&tree));
         self.tree = tree;
+        if let Some(now_ended) = now_ended.filter(|now| was_ended != Some(*now)) {
+            if was_ended.is_some() {
+                // Ended or resumed: what was said before it is over.
+                self.resume_error = None;
+                self.reply.update(cx, |reply, cx| reply.clear_error(cx));
+            }
+            if !now_ended {
+                self.resuming = false;
+            }
+            // Ended, the header says how, as the rail does; else what the left tree shows.
+            let status = match now_ended {
+                true => self
+                    .root()
+                    .and_then(|root| self.statuses.get(&root.id))
+                    .cloned(),
+                false => None,
+            }
+            .unwrap_or_else(|| self.status.clone());
+            self.pill_status = status.clone();
+            self.pill = cx.new(|cx| Pill::new(status, cx));
+            cx.notify();
+        }
         if std::mem::take(&mut self.unchecked) && !self.tree.iter().any(|a| a.id == self.shown) {
             let root = self.opened.id.clone();
             self.show(&root, cx);
@@ -809,20 +909,14 @@ impl Render for SessionPage {
             )
             .child(self.pill.clone())
             .child(div().flex_1())
-            .children(self.stop_error.clone().map(|error| {
+            .children(self.end_error.clone().map(|error| {
                 div()
-                    .id("session-stop-error")
+                    .id("session-end-error")
                     .text_size(px(12.5))
                     .text_color(p.fail)
                     .child(error)
                     .test_support()
             }))
-            .when(self.stoppable(), |d| {
-                d.child(
-                    Button::quiet("session-stop", "Stop")
-                        .on_click(cx.listener(|this, _, _, cx| this.ask_stop(cx))),
-                )
-            })
             .when(!wide, |d| {
                 let mut agents = Button::icon("open-rail", Icon::Agents, "Agents")
                     .on_click(move |_, _, cx| drawer.update(cx, |d, cx| d.open(cx)));
@@ -840,9 +934,10 @@ impl Render for SessionPage {
             .mx_auto()
             .px(px(if narrow { 12. } else { 28. }))
             .pb(px(if narrow { 12. } else { 20. }))
-            .map(|d| match root {
-                true => d.child(self.reply.clone()),
-                false => d.child(self.read_only(cx)),
+            .map(|d| match (root, self.ended_line()) {
+                (true, None) => d.child(self.reply.clone()),
+                (true, Some(ended)) => d.child(self.ended_bar(ended, cx)),
+                (false, _) => d.child(self.read_only(cx)),
             });
         let column = div()
             .flex_1()
@@ -871,42 +966,86 @@ impl Render for SessionPage {
                 )
             }))
             .when(!wide, |d| d.child(self.drawer.clone()))
-            .child(self.stop_modal(cx))
+            .child(self.end_modal(cx))
     }
 }
 
 impl SessionPage {
-    /// The confirmation of stopping the tree: it names how many agents stop.
-    fn stop_modal(&self, cx: &mut Context<Self>) -> Modal {
+    /// The confirmation of ending the session: it names how many agents end.
+    fn end_modal(&self, cx: &mut Context<Self>) -> Modal {
         let p = palette(cx);
-        let count = self.stop_count();
+        let count = self.end_count();
         let this = cx.entity().downgrade();
-        Modal::new("session-stop-modal", "Stop the conversation?")
-            .open(self.stopping)
+        Modal::new("session-end-modal", "End the session?")
+            .open(self.ending)
             .on_close(move |_, cx| {
-                this.update(cx, |this, cx| this.cancel_stop(cx)).ok();
+                this.update(cx, |this, cx| this.cancel_end(cx)).ok();
             })
             .child(
                 div()
-                    .id("session-stop-question")
+                    .id("session-end-question")
                     .text_size(px(12.5))
                     .text_color(p.mute)
                     .child(SharedString::from(
-                        self.stop_question()
-                            .unwrap_or_else(|| format!("{count} to stop")),
+                        self.end_question()
+                            .unwrap_or_else(|| format!("{count} to end")),
                     ))
                     .test_support(),
             )
             .action(
                 Button::primary(
-                    "session-stop-confirm",
+                    "session-end-confirm",
                     match count {
-                        0 | 1 => "Stop".to_owned(),
-                        n => format!("Stop {n} agents"),
+                        0 | 1 => "End session".to_owned(),
+                        n => format!("End {n} agents"),
                     },
                 )
-                .on_click(cx.listener(|this, _, _, cx| this.confirm_stop(cx))),
+                .on_click(cx.listener(|this, _, _, cx| this.confirm_end(cx))),
             )
+    }
+
+    /// In place of the composer once the session ended: why, and Resume when the daemon can
+    /// start the root again on its own session.
+    fn ended_bar(&self, (said, resumable): (String, bool), cx: &mut Context<Self>) -> Div {
+        let p = palette(cx);
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(
+                div()
+                    .id("session-ended")
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .border_1()
+                    .border_dashed()
+                    .border_color(p.line2)
+                    .rounded(px(12.))
+                    .pl(px(14.))
+                    .pr(px(12.))
+                    .py(px(10.))
+                    .text_size(px(13.))
+                    .text_color(p.mute)
+                    .child(div().flex_1().min_w_0().child(SharedString::from(said)))
+                    .when(resumable, |d| {
+                        d.child(
+                            Button::quiet("session-resume", "Resume")
+                                .disabled(!self.can_resume())
+                                .on_click(cx.listener(|this, _, _, cx| this.resume(cx))),
+                        )
+                    })
+                    .test_support(),
+            )
+            .children(self.resume_error.clone().map(|error| {
+                div()
+                    .id("session-resume-error")
+                    .px(px(10.))
+                    .text_size(px(12.5))
+                    .text_color(p.fail)
+                    .child(error)
+                    .test_support()
+            }))
     }
 
     /// What the bar in place of the composer says while a sub-agent is read, and its button:
@@ -2340,7 +2479,7 @@ pub struct SessionRail {
     place: Option<PlaceFacts>,
     /// The "⋯" menu of the WORKSPACE section.
     menu: Entity<Menu>,
-    /// The "⋯" menu of the root's row: it stops the tree.
+    /// The "⋯" menu of the root's row: it ends the session.
     agent_menu: Entity<Menu>,
     /// Where a ticket is typed to link it, made when the section first shows a workspace.
     ticket_field: Option<Entity<InputState>>,
@@ -2358,14 +2497,14 @@ impl SessionRail {
         cx: &mut Context<Self>,
     ) -> Self {
         let editor = page.clone();
-        let stopper = page.clone();
+        let ender = page.clone();
         let agent_menu = cx.new(|cx| {
-            Menu::new("rail-agent-menu", "Agent actions", cx).entry(
-                "rail-agent-stop",
-                "Stop…",
+            Menu::new("rail-agent-menu", "Session actions", cx).entry(
+                "rail-agent-end",
+                "End session…",
                 Some(Icon::Stop),
                 move |_, cx| {
-                    stopper.update(cx, |page, cx| page.ask_stop(cx)).ok();
+                    ender.update(cx, |page, cx| page.ask_end(cx)).ok();
                 },
             )
         });
@@ -2543,8 +2682,8 @@ impl Render for SessionRail {
                 fold.motion.settle(now);
             }
         }
-        // The root alone is stopped (the daemon refuses a child), and only while it is not ended.
-        let stoppable = self.agents.iter().any(|a| {
+        // The root alone is ended (the daemon refuses a child), and only while it is not ended.
+        let endable = self.agents.iter().any(|a| {
             a.parent.is_none()
                 && !matches!(
                     a.status.read(cx).state(),
@@ -2645,7 +2784,7 @@ impl Render for SessionRail {
                         })
                         .test_support(),
                 )
-                .when(!kid && stoppable, |d| d.child(agent_menu.clone()))
+                .when(!kid && endable, |d| d.child(agent_menu.clone()))
                 .test_support()
         };
         let ended_row = |parent: &str, count: usize, open: bool| {
@@ -3207,6 +3346,12 @@ impl Reply {
         self.running
     }
 
+    fn clear_error(&mut self, cx: &mut Context<Self>) {
+        if self.error.take().is_some() {
+            cx.notify();
+        }
+    }
+
     fn set_running(&mut self, running: bool, cx: &mut Context<Self>) {
         if self.running != running {
             self.running = running;
@@ -3724,6 +3869,8 @@ mod tests {
             doing: String::new(),
             waiting_on: None,
             needs_user: false,
+            resumable: false,
+            stopping: false,
         }
     }
 

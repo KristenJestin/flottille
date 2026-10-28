@@ -355,6 +355,10 @@ impl Conversation {
                 }));
                 changes
             }
+            "agent.resumed" => self.push(Block::Notice {
+                kind: "resumed".into(),
+                text: "by you, on its own session".into(),
+            }),
             _ => Vec::new(),
         }
     }

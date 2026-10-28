@@ -3,7 +3,7 @@
 //! compositor.
 //!
 //! ```text
-//! cargo run -p flottille-window --example shell [--features frames] -- [--project <name>] [--add-project <folder>] [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace] [--add-procedure] [--edit-procedure <name>] [--run <workspace>/<procedure>] [--slash <text>] [--add-reference] [--project-settings <project>] [--size <w>x<h>]
+//! cargo run -p flottille-window --example shell [--features frames] -- [--project <name>] [--add-project <folder>] [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace] [--add-procedure] [--edit-procedure <name>] [--run <workspace>/<procedure>] [--slash <text>] [--end] [--ended <project>] [--add-reference] [--project-settings <project>] [--size <w>x<h>]
 //! ```
 //!
 //! `--project` opens a project's page, `--add-project` the "Add a project" modal with the
@@ -12,7 +12,9 @@
 //! three columns), `--settings` the settings page, `--menu` one of the project page composer's
 //! pickers, `--new-workspace` the project page's new-workspace modal, `--add-procedure`,
 //! `--edit-procedure`, `--run` and `--add-reference` the modals of the procedures and references
-//! sections, `--slash` types a text in the open session's composer (its `/` list), `--project-settings` a project's settings page, `--size` the window's size. The daemon is found on
+//! sections, `--slash` types a text in the open session's composer (its `/` list), `--end` opens the open
+//! session's "End the session?" confirmation, `--ended` unfolds a project's "Ended" group of the
+//! left tree, `--project-settings` a project's settings page, `--size` the window's size. The daemon is found on
 //! `$XDG_RUNTIME_DIR/flottille/daemon.sock`; it is not started.
 
 use std::os::unix::net::UnixStream;
@@ -34,6 +36,7 @@ fn main() {
     let (mut project, mut add_project) = (None, None);
     let (mut add_procedure, mut add_reference) = (false, false);
     let (mut edit_procedure, mut run, mut slash) = (None, None, None);
+    let (mut end, mut ended) = (false, None);
     let mut dimensions = (1280., 800.);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -52,6 +55,8 @@ fn main() {
             "--edit-procedure" => edit_procedure = Some(args.next().expect("a procedure")),
             "--run" => run = Some(args.next().expect("a workspace/procedure")),
             "--slash" => slash = Some(args.next().expect("what the reply's field holds")),
+            "--end" => end = true,
+            "--ended" => ended = Some(args.next().expect("a project")),
             "--size" => {
                 let size = args.next().expect("a size like 1280x1400");
                 let (w, h) = size.split_once('x').expect("WxH");
@@ -168,8 +173,8 @@ fn main() {
                     })
                 })
                 .ok();
-            // A sub-agent read once the page knows its tree.
-            if let Some(agent) = agent {
+            // A sub-agent read, or the end asked, once the page knows its tree.
+            if agent.is_some() || end || ended.is_some() {
                 cx.background_executor()
                     .timer(Duration::from_millis(1500))
                     .await;
@@ -177,7 +182,20 @@ fn main() {
                     .update(cx, |_, _, cx| {
                         let page = shell.read(cx).main().read(cx).session_page().cloned();
                         if let Some(page) = page {
-                            page.update(cx, |page, cx| page.select(&agent, cx));
+                            page.update(cx, |page, cx| {
+                                if let Some(agent) = &agent {
+                                    page.select(agent, cx);
+                                }
+                                if end {
+                                    page.ask_end(cx);
+                                }
+                            });
+                        }
+                        let group = ended
+                            .as_deref()
+                            .and_then(|p| shell.read(cx).ended(p).cloned());
+                        if let Some(group) = group {
+                            group.update(cx, |group, cx| group.toggle(cx));
                         }
                     })
                     .ok();

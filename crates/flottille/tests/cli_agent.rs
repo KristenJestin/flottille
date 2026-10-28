@@ -762,3 +762,26 @@ fn send_follow_prints_only_the_reply_to_its_own_message_when_another_client_writ
     assert!(status.success());
     assert_eq!(out, "mine\n");
 }
+
+#[test]
+fn agent_resume_starts_an_ended_root_again_and_its_show_says_it_ended_then_resumed() {
+    let user = user();
+    let agent = idle_agent(&user);
+    user.run(&["agent", "stop", &agent]);
+    let watch = user.watch(&["--after", "0"]);
+    watch.until(|e| e["name"] == "agent.released" && e["data"]["agent"] == agent.as_str());
+
+    let resumed = json_of(user.run(&["agent", "resume", &agent, "--json"]));
+
+    assert_eq!(resumed["agent"]["id"], agent.as_str());
+    assert_eq!(resumed["agent"]["state"], "idle");
+    let seen = watch.until(|e| e["name"] == "agent.resumed");
+    assert_eq!(seen.last().unwrap()["data"]["agent"], agent.as_str());
+    let shown = user.run(&["agent", "show", &agent]);
+    let shown = String::from_utf8_lossy(&shown.stdout);
+    let ended = shown.find("[ended: stopped by the user]").expect(&shown);
+    let again = shown.find("[resumed by the user]").expect(&shown);
+    assert!(ended < again, "{shown}");
+    let refused = failure_of(user.run(&["agent", "resume", &agent]));
+    assert!(refused.contains("has not ended"), "{refused}");
+}
