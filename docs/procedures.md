@@ -21,7 +21,7 @@ description = "Open the pull requests of the workspace"         # one line, not 
 instructions = """
 Report each repository's state (uncommitted, unpushed, ahead of its base), then push the branch
 and open one pull request per repository with commits."""        # the agent's first message, not empty
-children = false                                                  # the run's children get its grants; default false
+children = false                                                  # the run's children get none of its grants; default true
 
 [procedures.open-prs.grants]                                      # each grant: "allow" or "ask"
 push = "allow"
@@ -76,6 +76,12 @@ the workspace's), what the project says of its pull requests when the run grants
 (below), the workspace's ticket when it is linked to one, then its instructions. The run is a session like any other: it shows in the tree, the user writes to its
 root, its requests reach the user.
 
+In the window, a procedure is run as a slash command was: `/` at the start of a message in a
+session's composer lists the project's procedures, filtered as the user types; picking one shows
+the same confirmation (what it runs, the session's workspace, each grant in words) and Confirm
+starts the run in that workspace. A session in `main` has no workspace to run one in, and a
+`/word` that names no procedure is sent to the agent as text.
+
 **A procedure that writes to a forge needs every forge declared.** When it grants `pr-create`,
 `pr-merge-squash` or `pipeline-rerun` and a repository of the workspace has no forge in the
 project's file (`docs/forges.md`, "The forge of a repository"), it refuses to start, naming them:
@@ -89,8 +95,9 @@ for the run's root agent, and no tool nor argument of an agent changes them. Edi
 later changes no run that started. They apply:
 
 - to the run's root agent;
-- to its children, at any depth, only when the procedure says `children = true`; a child gets none
-  otherwise;
+- to its children, at any depth, unless the procedure says `children = false`: a run's children
+  get its grants by default (an agent the run starts does the run's work), and none when the
+  file says `children = false`, which every write of the procedure keeps;
 - only in the run's workspace: an agent of the tree working elsewhere gets none.
 
 **The run ends** when its root reports (`report`) or ends (stopped, failed): its grants are given
@@ -183,7 +190,8 @@ never a forge's command line, so they work on every forge Flottille writes to.
 
 A run never waits inside a tool call: when a template's agent must wait for something outside (a
 pipeline, a release), it tells the user with `ask_user` what it waits for and ends its turn, and
-goes on when it is written to. Their children get none of their grants.
+goes on when it is written to. Their children get their grants, as any procedure's do unless its
+file says `children = false`.
 
 The order of the levels is the project's `depends_on`: a repository that must be merged after
 another (an end-to-end harness after the applications it observes) says so there.
@@ -194,7 +202,7 @@ another (an end-to-end harness after the applications it observes) says so there
 |---|---|
 | `flottille procedure list <project>` | The procedures, with their grants. |
 | `flottille procedure show <project> <name>` | One procedure: its grants, its instructions. |
-| `flottille procedure add <project> <name> --description <d> (--instructions <t> \| --instructions-file <f>) [--grant <grant>=<mode>]… [--children]` | Adds it to the project's file. |
+| `flottille procedure add <project> <name> --description <d> (--instructions <t> \| --instructions-file <f>) [--grant <grant>=<mode>]… [--children true\|false]` | Adds it to the project's file. |
 | `flottille procedure add <project> [<name>] --template <template>` | Adds one of Flottille's templates, as it is. |
 | `flottille procedure edit <project> <name> [--description] [--instructions \| --instructions-file] [--grant …]… [--no-grants] [--children true\|false]` | Changes what is given; the grants given replace all of them. |
 | `flottille procedure remove <project> <name>` | Removes it from the file. |

@@ -384,15 +384,18 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   root needs the user; a folded level shows the strongest mark it holds;
 - a project page: its repositories, its places with their sessions, creating and removing a
   workspace (with the preparation's progress and failure output), and the composer that starts
-  a session (place, agent, model, first message); its procedures (add from a template or blank,
-  edit with the grants as `allow` / `ask`, remove) and its references (add with a path picked in
-  the project folder, remove); "Run procedure…" on a workspace, which shows the grants in words
-  (`allow` runs without asking, `ask` is held for the user's answer) and starts nothing before
-  Confirm;
+  a session (place, agent, model, first message); its procedures (added from a list of the
+  templates and a blank one, edited with each grant a sentence of what a run may do and three
+  choices, No, After asking me (`ask`) and On its own (`allow`), removed) and its references (add
+  with a path picked in the project folder, remove);
 - a session page: the root's conversation, live (messages, thoughts collapsed, tool calls with
   their result, the children launched, reports, diffs), the approvals that reach the user, inline,
   with deny / allow for the tree / allow once, and a composer that writes to the root, whose Stop
-  button and `Escape` interrupt the turn that runs (the agent stays); a rail with the session's
+  button and `Escape` interrupt the turn that runs (the agent stays), and where `/` at the start
+  of a message lists the project's procedures, filtered as the user types: picking one shows what
+  it runs, the workspace and each grant in words, and Confirm runs it in the session's workspace
+  (in `main` the list says procedures run in a workspace; a `/word` that names none is sent as
+  text); a rail with the session's
   tree of agents, its workspace (each repository's forge as the daemon reads it, its ticket,
   linked or unlinked there) and facts (the grants of the procedure it runs, while it runs). The
   header and the root's row menu stop the root and its tree, after a confirmation that counts the agents that stop. Selecting a child shows its

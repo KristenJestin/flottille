@@ -72,7 +72,7 @@ impl Add {
                     description,
                     instructions,
                     grants: self.grants.unwrap_or_default(),
-                    children: self.children.unwrap_or_default(),
+                    children: self.children.unwrap_or(true),
                 },
             ));
         };
@@ -327,8 +327,10 @@ fn write(
     let mut table = toml_edit::Table::new();
     table.insert("description", toml_edit::value(&procedure.description));
     table.insert("instructions", toml_edit::value(&procedure.instructions));
-    if procedure.children {
-        table.insert("children", toml_edit::value(true));
+    // Written only when it is not the default, so that a file that keeps the grants from the
+    // children says so, and keeps saying so across edits.
+    if !procedure.children {
+        table.insert("children", toml_edit::value(false));
     }
     if !procedure.grants.is_empty() {
         let mut grants = toml_edit::Table::new();
