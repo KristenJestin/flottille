@@ -5863,3 +5863,39 @@ fn the_new_workspace_modal_takes_the_chosen_repositories_branch_and_offline(
         "the form starts afresh"
     );
 }
+
+#[gpui_kit::test]
+fn the_project_at_the_root_of_the_picked_folder_is_named_after_its_folder(cx: &mut TestAppContext) {
+    let user = user();
+    let folder = user.path("work/shop");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "shop\n").unwrap();
+    user.git(&folder, &["add", "README.md"]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    until(&shell, cx, "the window is read", |cx| {
+        cx.update(|window, _| window.try_find("add-first-project").is_some())
+    });
+
+    cx.update(|window, cx| window.click("add-first-project", cx));
+    settle(cx);
+    let form = shell.read_with(cx, |s, _| s.add_project_form().clone());
+    cx.simulate_input(folder.to_str().unwrap());
+    cx.simulate_keystrokes("enter");
+    until(&shell, cx, "the repositories are detected", |cx| {
+        form.read_with(cx, |f, _| f.detected().is_some())
+    });
+    settle(cx);
+
+    assert_eq!(
+        form.read_with(cx, |f, _| f.detected().unwrap().repositories.clone()),
+        vec![".".to_owned()],
+        "the daemon names the root `.`"
+    );
+    assert_eq!(
+        text_of("add-project-repository-0", cx).as_deref(),
+        Some("shop"),
+        "the window names it after its folder"
+    );
+}
+
