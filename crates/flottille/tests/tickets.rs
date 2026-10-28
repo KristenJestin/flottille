@@ -670,6 +670,32 @@ fn a_ticket_the_tracker_does_not_know_or_a_tracker_whose_remote_moved_says_so() 
 }
 
 #[test]
+fn the_short_ticket_read_of_a_named_ticket_points_at_that_ticket() {
+    let user = User::with_fake_agent().with_fake_gh().with_fake_acli();
+    fixture(&user);
+    issues(
+        &user,
+        json!({"12": issue(12, "The login fails"), "13": issue(13, "The logout fails")}),
+    );
+    track(&user, github_issues());
+    link(&user, Some("#12")).unwrap();
+    let mcp = agent_in(&user, Some("login"));
+
+    let other = mcp.call("ticket_read", json!({"ticket": "13"}));
+
+    assert!(!other.error, "{}", other.text);
+    assert!(
+        other
+            .text
+            .contains("read them with ticket_read {\"ticket\": \"13\", \"detail\": \"full\"}"),
+        "{}",
+        other.text
+    );
+    let full = mcp.call("ticket_read", json!({"ticket": "13", "detail": "full"}));
+    assert!(full.text.contains("The logout fails"), "{}", full.text);
+}
+
+#[test]
 fn ticket_read_returns_the_workspace_s_ticket_or_another_of_its_tracker_and_never_writes() {
     let user = User::with_fake_agent().with_fake_gh().with_fake_acli();
     fixture(&user);

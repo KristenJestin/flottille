@@ -82,8 +82,15 @@ impl Ticket {
     }
 
     /// What `ticket_read` answers: the comments themselves only when `full`, otherwise their
-    /// number and the way to get them.
-    fn text(&self, full: bool) -> String {
+    /// number and the way to get them, for the ticket that was named when one was.
+    fn text(&self, full: bool, named: Option<&str>) -> String {
+        let again = match named {
+            Some(ticket) => format!(
+                "{{\"ticket\": {}, \"detail\": \"full\"}}",
+                Value::from(ticket)
+            ),
+            None => "{\"detail\": \"full\"}".to_owned(),
+        };
         let place = match (&self.repository, self.tracker) {
             (Some(repository), _) => format!(" of {repository} (GitHub)"),
             (None, _) => " (Jira)".to_owned(),
@@ -103,7 +110,7 @@ impl Ticket {
         if !self.comments.is_empty() && !full {
             let older = self.older;
             text.push_str(&format!(
-                "\nComments: {}{}, read them with ticket_read {{\"detail\": \"full\"}}\n",
+                "\nComments: {}{}, read them with ticket_read {again}\n",
                 self.comments.len() + older,
                 self.comments.last().map_or(String::new(), |last| format!(
                     ", the newest by {}{}",
@@ -635,7 +642,7 @@ pub async fn ticket_read(daemon: &Daemon, place: &Place, args: Value) -> Outcome
         }
     };
     match read(&project, &key).await {
-        Ok(ticket) => Outcome::Done(ticket.text(full)),
+        Ok(ticket) => Outcome::Done(ticket.text(full, asked.ticket.as_deref())),
         Err(problem) => Outcome::Failed(format!(
             "the ticket {} could not be read: {problem}",
             key.text()

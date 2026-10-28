@@ -622,6 +622,24 @@ fn forge_read_returns_its_workspace_s_pull_requests_and_refuses_another_reposito
 }
 
 #[test]
+fn the_short_forge_read_of_a_named_repository_points_at_that_repository() {
+    let user = User::with_fake_agent().with_fake_gh();
+    fixture(&user);
+    one_pull_request(&user, pull(12, "Add the login page"));
+    let (_, mcp) = agent_in(&user, Some("login"));
+
+    let answer = mcp.call("forge_read", json!({"repository": "api"}));
+
+    assert!(!answer.error, "{}", answer.text);
+    for said in [
+        "comments: 1, read them with forge_read {\"repository\": \"api\", \"detail\": \"full\"}",
+        "reviews: 1, read them with forge_read {\"repository\": \"api\", \"detail\": \"full\"}",
+    ] {
+        assert!(answer.text.contains(said), "{said} in {}", answer.text);
+    }
+}
+
+#[test]
 fn an_agent_in_the_project_folder_has_no_forge_read() {
     let user = User::with_fake_agent().with_fake_gh();
     fixture(&user);

@@ -879,7 +879,12 @@ pub async fn forge_read(daemon: &Daemon, place: &Place, args: Value) -> Outcome 
         repositories.retain(|r| &r.path == asked);
     }
     let read = read(&repositories, &workspace.branch, obsolete).await;
-    Outcome::Done(read_text(&workspace, &read, full))
+    Outcome::Done(read_text(
+        &workspace,
+        &read,
+        full,
+        asked.repository.as_deref(),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -1148,8 +1153,15 @@ async fn gh_text(args: &[&str]) -> Result<String, String> {
 }
 
 /// What `forge_read` answers: the texts of the comments and reviews only when `full`, otherwise
-/// their number and the way to get them.
-fn read_text(workspace: &Workspace, read: &Read, full: bool) -> String {
+/// their number and the way to get them, for the `repository` that was asked when one was.
+fn read_text(workspace: &Workspace, read: &Read, full: bool, asked: Option<&str>) -> String {
+    let again = match asked {
+        Some(repository) => format!(
+            "{{\"repository\": {}, \"detail\": \"full\"}}",
+            Value::from(repository)
+        ),
+        None => "{\"detail\": \"full\"}".to_owned(),
+    };
     let mut text = format!(
         "The pull requests of workspace {}, branch {}:\n",
         workspace.name, workspace.branch
@@ -1215,7 +1227,7 @@ fn read_text(workspace: &Workspace, read: &Read, full: bool) -> String {
             }
             if !full {
                 text.push_str(&format!(
-                    "  {title}: {}, read them with forge_read {{\"detail\": \"full\"}}\n",
+                    "  {title}: {}, read them with forge_read {again}\n",
                     said.len()
                 ));
                 continue;
