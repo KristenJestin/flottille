@@ -16,6 +16,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use flottille_core::agent::{Agent, Choices};
 use flottille_core::paths::Paths;
+use flottille_core::procedure::{Grant, Grants};
 use flottille_core::project::Project;
 use flottille_core::provider::{self, Settings};
 use serde_json::{Value, json};
@@ -93,7 +94,7 @@ pub fn of(agent: &Agent) -> Result<&'static Provider, String> {
 
 /// The names of the tools every agent has, in their fixed order (`docs/design.md` §4.3). Their
 /// names are frozen in each agent, because the prompt cache depends on them.
-const FILE_AND_COMMAND_TOOLS: [&str; 9] = [
+const FILE_AND_COMMAND_TOOLS: [&str; 8] = [
     "fs_read",
     "fs_list",
     "search",
@@ -101,24 +102,28 @@ const FILE_AND_COMMAND_TOOLS: [&str; 9] = [
     "fs_edit",
     "commands_list",
     "commands_run",
-    "commands_output",
-    "commands_stop",
+    "commands_status",
 ];
-const AGENT_TOOLS: [&str; 5] = [
-    "agent_launch",
-    "agent_send",
-    "agent_status",
-    "agent_read",
-    "agent_stop",
-];
+const AGENT_TOOLS: [&str; 4] = ["agent_launch", "agent_send", "agent_status", "agent_stop"];
+
+/// The grants `forge_write` acts by.
+pub const FORGE_GRANTS: [Grant; 3] = [Grant::PrCreate, Grant::PrMergeSquash, Grant::PipelineRerun];
 
 impl Provider {
     /// The exact tool names an agent gets, as the provider names them: what it can do decides
     /// (`docs/design.md` §4.3, `docs/reference/mcp.md` §4 rule 9). A root asks the user, a child
     /// its parent; an agent at the depth limit cannot have children, so it has no `agent_*` tool
     /// and nobody's request to answer. Only an agent in a workspace reads its pull requests and its
-    /// ticket.
-    pub fn tools(&self, root: bool, at_depth_limit: bool, in_workspace: bool) -> Vec<String> {
+    /// ticket, and only one whose procedure run grants it a pull request action or the removal of
+    /// the workspace has `forge_write` or `workspace_remove`: a tool that can only refuse is
+    /// not listed.
+    pub fn tools(
+        &self,
+        root: bool,
+        at_depth_limit: bool,
+        in_workspace: bool,
+        grants: &Grants,
+    ) -> Vec<String> {
         let mut names: Vec<&str> = FILE_AND_COMMAND_TOOLS.to_vec();
         if in_workspace {
             names.push("forge_read");
@@ -126,8 +131,14 @@ impl Provider {
         names.push("reference_read");
         if in_workspace {
             names.push("ticket_read");
-            names.push("forge_write");
-            names.push("workspace_remove");
+            // A tool that could only refuse is not listed: the grants of the run the agent works
+            // in are known when its list is frozen (`docs/reference/mcp.md` §4 rule 9).
+            if FORGE_GRANTS.iter().any(|grant| grants.contains_key(grant)) {
+                names.push("forge_write");
+            }
+            if grants.contains_key(&Grant::WorkspaceRemove) {
+                names.push("workspace_remove");
+            }
         }
         if !at_depth_limit {
             names.extend(AGENT_TOOLS);
@@ -984,6 +995,7 @@ fn list(daemon: &Daemon, project: Option<&Project>) -> Result<Value, Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flottille_core::procedure::Mode;
 
     fn short(tools: Vec<String>) -> Vec<String> {
         tools
@@ -1000,7 +1012,7 @@ mod tests {
 
     #[test]
     fn a_root_agent_gets_ask_user_the_agent_tools_and_approval_answer() {
-        let tools = short(claude::PROVIDER.tools(true, false, false));
+        let tools = short(claude::PROVIDER.tools(true, false, false, &Grants::new()));
         assert_eq!(
             tools,
             [
@@ -1011,13 +1023,11 @@ mod tests {
                 "fs_edit",
                 "commands_list",
                 "commands_run",
-                "commands_output",
-                "commands_stop",
+                "commands_status",
                 "reference_read",
                 "agent_launch",
                 "agent_send",
                 "agent_status",
-                "agent_read",
                 "agent_stop",
                 "report",
                 "ask_user",
@@ -1028,8 +1038,8 @@ mod tests {
 
     #[test]
     fn the_tools_follow_what_the_agent_can_do() {
-        let leaf = short(claude::PROVIDER.tools(false, true, false));
-        assert_eq!(leaf.len(), 12);
+        let leaf = short(claude::PROVIDER.tools(false, true, false, &Grants::new()));
+        assert_eq!(leaf.len(), 11);
         assert!(leaf.contains(&"ask_parent".to_owned()));
         assert!(
             !leaf
@@ -1037,7 +1047,7 @@ mod tests {
                 .any(|t| t.starts_with("agent_") || t == "ask_user")
         );
         assert!(!leaf.contains(&"approval_answer".to_owned()));
-        let lead_child = short(claude::PROVIDER.tools(false, false, false));
+        let lead_child = short(claude::PROVIDER.tools(false, false, false, &Grants::new()));
         assert!(lead_child.contains(&"ask_parent".to_owned()));
         assert!(lead_child.contains(&"approval_answer".to_owned()));
         assert!(!lead_child.contains(&"ask_user".to_owned()));
@@ -1046,30 +1056,56 @@ mod tests {
     #[test]
     fn an_agent_in_a_workspace_reads_its_pull_requests_and_ticket_and_one_in_the_project_folder_does_not()
      {
-        let main = short(claude::PROVIDER.tools(true, false, false));
+        let main = short(claude::PROVIDER.tools(true, false, false, &Grants::new()));
         assert!(!main.contains(&"forge_read".to_owned()));
         assert!(!main.contains(&"ticket_read".to_owned()));
-        assert!(!main.contains(&"forge_write".to_owned()));
-        assert!(!main.contains(&"workspace_remove".to_owned()));
-        let workspace = short(claude::PROVIDER.tools(true, false, true));
-        assert_eq!(workspace.len(), 22);
-        assert_eq!(workspace[9], "forge_read", "after the command tools");
-        assert_eq!(workspace[10], "reference_read", "after forge_read");
-        assert_eq!(workspace[11], "ticket_read", "after reference_read");
-        assert_eq!(workspace[12], "forge_write", "after ticket_read");
-        assert_eq!(workspace[13], "workspace_remove", "after forge_write");
-        let leaf = short(claude::PROVIDER.tools(false, true, true));
-        assert_eq!(leaf.len(), 16);
+        let workspace = short(claude::PROVIDER.tools(true, false, true, &Grants::new()));
+        assert_eq!(workspace.len(), 18);
+        assert_eq!(workspace[8], "forge_read", "after the command tools");
+        assert_eq!(workspace[9], "reference_read", "after forge_read");
+        assert_eq!(workspace[10], "ticket_read", "after reference_read");
+        let leaf = short(claude::PROVIDER.tools(false, true, true, &Grants::new()));
+        assert_eq!(leaf.len(), 13);
+    }
+
+    #[test]
+    fn forge_write_and_workspace_remove_are_listed_only_for_what_the_run_grants() {
+        let grants =
+            |each: &[Grant]| -> Grants { each.iter().map(|g| (*g, Mode::Allow)).collect() };
+        let listed = |grants: &Grants| short(claude::PROVIDER.tools(true, false, true, grants));
+        let none = listed(&grants(&[Grant::Push, Grant::Commit]));
+        assert!(!none.contains(&"forge_write".to_owned()));
+        assert!(!none.contains(&"workspace_remove".to_owned()));
+        for grant in FORGE_GRANTS {
+            let each = listed(&grants(&[grant]));
+            assert!(each.contains(&"forge_write".to_owned()), "{grant}");
+            assert!(!each.contains(&"workspace_remove".to_owned()), "{grant}");
+        }
+        let removing = listed(&grants(&[Grant::WorkspaceRemove]));
+        assert!(!removing.contains(&"forge_write".to_owned()));
+        assert_eq!(removing[11], "workspace_remove", "after ticket_read");
+        let both = listed(&grants(&[Grant::PrCreate, Grant::WorkspaceRemove]));
+        assert_eq!(both[11], "forge_write", "after ticket_read");
+        assert_eq!(both[12], "workspace_remove", "after forge_write");
+        // Outside a workspace nothing is granted, whatever a run says.
+        let folder = short(claude::PROVIDER.tools(
+            true,
+            false,
+            false,
+            &grants(&[Grant::PrCreate, Grant::WorkspaceRemove]),
+        ));
+        assert!(!folder.contains(&"forge_write".to_owned()));
+        assert!(!folder.contains(&"workspace_remove".to_owned()));
     }
 
     #[test]
     fn each_provider_names_flottille_s_tools_its_own_way() {
         assert_eq!(
-            claude::PROVIDER.tools(true, false, false)[0],
+            claude::PROVIDER.tools(true, false, false, &Grants::new())[0],
             "mcp__flottille__fs_read"
         );
         assert_eq!(
-            opencode::PROVIDER.tools(true, false, false)[0],
+            opencode::PROVIDER.tools(true, false, false, &Grants::new())[0],
             "flottille_fs_read"
         );
         assert_eq!(

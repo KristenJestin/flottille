@@ -216,7 +216,7 @@ fn the_bridge_gives_claude_exactly_the_bare_options_and_environment() {
     assert_eq!(
         started["mcp_config"],
         json!({"mcpServers": {"flottille": {"type": "http", "url": "http://127.0.0.1:9/mcp",
-            "headers": {"Authorization": "Bearer invented-token-1"}}}})
+            "headers": {"Authorization": "Bearer invented-token-1"}, "alwaysLoad": true}}})
     );
     assert_eq!(started["cwd"], user.path("work").to_str().unwrap());
     let env = &started["env"];

@@ -1033,9 +1033,11 @@ fn mcp_servers(servers: &Value) -> Result<Value, String> {
             .flatten()
             .filter_map(|h| Some((h["name"].as_str()?.to_owned(), h["value"].clone())))
             .collect();
+        // The server's tools are all the agent has: `alwaysLoad` keeps them upfront wherever
+        // tool search is on (`docs/reference/mcp.md` §4 rule 7).
         config.insert(
             name.to_owned(),
-            json!({"type": "http", "url": url, "headers": headers}),
+            json!({"type": "http", "url": url, "headers": headers, "alwaysLoad": true}),
         );
     }
     Ok(json!({"mcpServers": config}))

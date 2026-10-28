@@ -47,7 +47,7 @@ Sources: [changelog 2026-07-28](https://modelcontextprotocol.io/specification/20
 
 | Behaviour | Value |
 |---|---|
-| Tool search | On by default: MCP tools are **deferred** and found through a `ToolSearch` step. `ENABLE_TOOL_SEARCH=false` loads them upfront; `_meta["anthropic/alwaysLoad"]: true` on a tool loads that tool upfront |
+| Tool search | On by default: MCP tools are **deferred** and found through a `ToolSearch` step. `ENABLE_TOOL_SEARCH=false` loads them upfront; `ENABLE_TOOL_SEARCH=auto` (or `auto:N`) loads them upfront while their definitions total under 10% of the context window (N percent), and turns search on at that size or more. `_meta["anthropic/alwaysLoad"]: true` on a tool loads that tool upfront; `"alwaysLoad": true` in a server's own entry of the configuration (`.mcp.json`, `--mcp-config`) loads all that server's tools upfront whatever `ENABLE_TOOL_SEARCH` says (it also makes startup wait for the server's tools, 5 s at most) |
 | Description cut | 4,096 characters for an upfront tool and for server instructions; 16,384 for a deferred tool. Only the text before the cut is seen |
 | Tool name | the full name `mcp__<server>__<tool>` must stay under 128 characters, or the tool is dropped |
 | Text result kept in context | up to 50,000 characters, and 25,000 tokens (`MAX_MCP_OUTPUT_TOKENS`, warning at 10,000). Above that, the result is **saved to a file** and replaced by its path. `_meta["anthropic/maxResultSizeChars"]` on a tool raises its threshold, up to 500,000 |
@@ -55,6 +55,7 @@ Sources: [changelog 2026-07-28](https://modelcontextprotocol.io/specification/20
 | `readOnlyHint` | read-only calls run in parallel |
 | `idempotentHint` / `readOnlyHint` | a call pending when a connection closed may be repeated once |
 | Long calls | a call still running after 2 minutes moves to a background task |
+| `_meta["anthropic/requiresUserInteraction"]: true` | shows the tool's permission prompt on every call; with `--permission-prompt-tool` (non-interactive mode) the prompt tool's `allow` is turned into a **deny** (`MCP tool requires user interaction; not supported via --permission-prompt-tool`) |
 
 ## 3. Tool design: what the guidance agrees on
 
@@ -62,15 +63,22 @@ From Anthropic's [Writing effective tools for agents](https://www.anthropic.com/
 and the 2026 practice around it:
 
 - **Few tools, built for the job**: not one tool per endpoint. Merge steps that always go
-  together. Every tool listed costs context on every request (100 to 500 tokens each). Around
-  15 tools is a comfortable ceiling for one agent.
+  together, and tools that are near-duplicates, behind an `action` or a detail parameter. Every
+  tool listed costs context on every request (100 to 500 tokens each). Around 15 tools is a
+  comfortable ceiling for one agent. Anthropic's own line for tool search
+  ([Advanced tool use](https://www.anthropic.com/engineering/advanced-tool-use)) is more than 10
+  tools or 10k tokens of definitions: below both, loading everything upfront is the right call.
 - **Names are a namespace**: prefixes by family (`fs_`, `commands_`, `agent_`), parameters that
   cannot be misread (`agent_id`, not `agent`).
 - **Descriptions for a new colleague**:
   - say what the tool does and when to use it rather than another tool;
   - say its side effects and when it refuses;
   - put the important part first;
-  - a few hundred characters, rarely more than 1,000.
+  - a few hundred characters, rarely more than 1,000;
+  - where an argument is easy to get wrong, one or two valid calls, written in the description
+    (MCP has no field for the API's `input_examples`);
+  - a parameter that asks why a call is made (`why`) asks for **one sentence**, never the
+    model's reasoning.
 - **High-signal results**: names rather than opaque ids, no low-level fields. A concise default
   with more detail on request. Pagination and limits with defaults, and the way to get the
   next part written in the result.
@@ -89,7 +97,12 @@ and the 2026 practice around it:
 2. **Fixed tool list, deterministic order**, no `listChanged`. The list is part of the prompt
    cache.
 3. **Use no deprecated feature**: no roots, sampling, logging or elicitation. A tool never asks
-   for input mid-call; what needs the user is a delivery, later.
+   for input mid-call; what needs the user is a delivery, later. **MCP tasks** (the
+   `io.modelcontextprotocol/tasks` extension, which Claude Code is starting to support) are not
+   used: a call that outlasts its wait answers with a run id and is read again, which is what
+   `commands_run` and `commands_status` do. **`anthropic/requiresUserInteraction` is never set**:
+   in a non-interactive session with a permission prompt tool, which is how Flottille drives
+   `claude`, it turns every call of the tool into a deny.
 4. **Every tool has `title`, a short description following §3, and annotations**:
    - `readOnlyHint` on reads;
    - `idempotentHint` where a repeat is harmless;
@@ -106,22 +119,35 @@ and the 2026 practice around it:
 7. **Every tool loads upfront.** An agent in bare mode has nothing but Flottille's tools, so it
    must see them without a search step:
    - `_meta["anthropic/alwaysLoad"]: true` on every tool;
+   - `"alwaysLoad": true` on the server's entry in the bridge's `--mcp-config`;
    - `ENABLE_TOOL_SEARCH=false` in the agent's environment.
 
-   Both: the bridge's `--mcp-config` gives `claude` the server's type, URL and token header only,
-   so the mark on each tool and the variable, which the bridge passes to `claude` from the bare
-   options' `env`, are what keep the tools upfront.
+   All three: the entry gives `claude` the server's type, URL, token header and `alwaysLoad`, and
+   the variable, which the bridge passes to `claude` from the bare options' `env`, keeps search
+   off. Any one keeps the tools upfront; together, a change in `claude`'s defaults (an
+   `ENABLE_TOOL_SEARCH=auto` default, say) does not defer them.
 8. **A result saved to a file is lost.** An agent in bare mode has no tool to read Claude
    Code's `tool-results` files. Rule 5 is therefore a hard limit here: fs_read pages, search
    results, command tails and agent conversations are cut and paged below the threshold, never
-   above it.
+   above it. The reads whose full result can be long (`agent_status` for all the children,
+   `forge_read`, `ticket_read`) answer **short by default**, with the way to ask for the rest
+   written in the short result.
 9. **The tool list depends on what the agent can do**, and stays fixed for its life:
    - an agent at the depth limit gets no `agent_*` tools;
    - only an agent that can have children gets `approval_answer`;
    - a root gets `ask_user`, a child gets `ask_parent`.
 
-   A lead has about 18 tools, a leaf worker 12, four more each in a workspace (`forge_read`,
-   `ticket_read`, `forge_write`, `workspace_remove`).
+   - `forge_write` and `workspace_remove` are listed only to an agent whose procedure run grants
+     what they do (`pr-create`, `pr-merge-squash` or `pipeline-rerun` for the first,
+     `workspace-remove` for the second): the run's root, and its children in the run's workspace
+     when the run gives them its grants. A tool that could only refuse is not listed. The run's
+     grants are known when the list is frozen, since the run is made with its root agent and a
+     child is made by a parent whose run is known; listing grants nothing, the gate still decides
+     each call.
+
+   A lead has 16 tools, a leaf worker 11, two more each in a workspace (`forge_read`,
+   `ticket_read`), and up to two more inside a run that grants them (`forge_write`,
+   `workspace_remove`).
 10. **The idempotency key** of a call is read from the call's `_meta` (`claudecode/toolUseId` for
     Claude). `claude` calls Flottille's server itself and sends it with every call; the bridge
     never sees MCP calls. Check that the `claude` version Flottille pins still sends it, and fall

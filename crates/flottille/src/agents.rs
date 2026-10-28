@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use flottille_core::agent::{Agent, AgentState, Choices, new_id};
 use flottille_core::approval;
+use flottille_core::procedure::Grants;
 use flottille_core::project::Project;
 use flottille_core::protocol::{AgentName, AgentRun, AgentSend, AgentTrees};
 use flottille_core::secrets::{self, Secrets};
@@ -280,6 +281,7 @@ fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
             provider: asked.provider,
             model: asked.model,
             effort: asked.effort,
+            grants: Grants::new(),
         },
     )?;
     // The root's brief is its first message: a replacement supersedes it by its id, as any
@@ -310,6 +312,9 @@ pub struct New {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// What the procedure run it works in grants it, known now: it decides which of its tools are
+    /// listed (`Provider::tools`).
+    pub grants: Grants,
 }
 
 /// Writes a new agent, its instructions and tools frozen in it; nothing is sent to it yet.
@@ -378,6 +383,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         new.parent.is_none(),
         at_depth_limit,
         new.workspace.is_some(),
+        &new.grants,
     );
     let files = roles::project_files(&project.folder, &repositories);
     let references: Vec<(String, String)> = project

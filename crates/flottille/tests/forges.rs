@@ -570,13 +570,29 @@ fn forge_read_returns_its_workspace_s_pull_requests_and_refuses_another_reposito
         "https://github.com/acme/api/pull/12",
         "review: changes requested",
         "checks: pending (build passing, lint pending)",
-        "- alice: Looks good to me",
-        "- bob, changes requested: Rename the form",
+        "comments: 1, read them with forge_read {\"detail\": \"full\"}",
+        "reviews: 1, read them with forge_read {\"detail\": \"full\"}",
         "web (acme/web): no pull request for app/login.",
         &format!("lib: {NO_FORGE}."),
     ] {
         assert!(text.contains(said), "{said} in {text}");
     }
+    // The texts come only when asked for.
+    assert!(!text.contains("Looks good to me"), "{text}");
+    let full = mcp.call("forge_read", json!({"detail": "full"}));
+    assert!(!full.error, "{}", full.text);
+    for said in [
+        "- alice: Looks good to me",
+        "- bob, changes requested: Rename the form",
+    ] {
+        assert!(full.text.contains(said), "{said} in {}", full.text);
+    }
+    let refused = mcp.call("forge_read", json!({"detail": "all"}));
+    assert!(
+        refused.error && refused.text.contains("has no detail \"all\""),
+        "{}",
+        refused.text
+    );
 
     let answer = mcp.call("forge_read", json!({"repository": "api"}));
     assert!(!answer.error, "{}", answer.text);
@@ -603,6 +619,24 @@ fn forge_read_returns_its_workspace_s_pull_requests_and_refuses_another_reposito
     assert!(folder.is_dir());
     let listed = user.call("approval.list", json!({})).unwrap();
     assert!(listed["requests"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn the_short_forge_read_of_a_named_repository_points_at_that_repository() {
+    let user = User::with_fake_agent().with_fake_gh();
+    fixture(&user);
+    one_pull_request(&user, pull(12, "Add the login page"));
+    let (_, mcp) = agent_in(&user, Some("login"));
+
+    let answer = mcp.call("forge_read", json!({"repository": "api"}));
+
+    assert!(!answer.error, "{}", answer.text);
+    for said in [
+        "comments: 1, read them with forge_read {\"repository\": \"api\", \"detail\": \"full\"}",
+        "reviews: 1, read them with forge_read {\"repository\": \"api\", \"detail\": \"full\"}",
+    ] {
+        assert!(answer.text.contains(said), "{said} in {}", answer.text);
+    }
 }
 
 #[test]
@@ -1036,7 +1070,7 @@ fn forge_read_returns_the_bitbucket_pull_requests_of_the_workspace() {
     bitbucket_pull_requests(&user);
     let (_, mcp) = agent_in(&user, Some("login"));
 
-    let answer = mcp.call("forge_read", json!({}));
+    let answer = mcp.call("forge_read", json!({"detail": "full"}));
 
     assert!(!answer.error, "{}", answer.text);
     for said in [

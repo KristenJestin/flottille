@@ -405,6 +405,7 @@ fn start(daemon: &Arc<Daemon>, asked: Start) -> Answer {
             provider: None,
             model: None,
             effort: None,
+            grants: procedure.grants.clone(),
         },
     )?;
     let run = ProcedureRun {
@@ -520,17 +521,24 @@ fn pull_requests_text(project: &Project) -> String {
     text
 }
 
-/// The grants of the run an agent works in, as the gate applies them: those of the run whose root
-/// is the agent, or its root when the run gives its grants to children; only in the run's own
-/// workspace, and only while the run goes on (its root has not reported nor ended).
-pub fn run_of(daemon: &Daemon, grant: &mcp::Grant) -> Option<gate::Run> {
-    let workspace = grant.place.workspace.as_ref()?;
-    let root = tree::root_of(daemon, &grant.agent);
+/// The run an agent works in, while it goes on: the run whose root is the agent, or its root when
+/// the run gives its grants to children; only in the run's own workspace, and only while the run
+/// goes on (its root has not reported nor ended). `as_child`: the agent is not made yet, and
+/// `agent` is its parent, so the run must give its grants to children even when the parent is the
+/// root.
+fn live_run(
+    daemon: &Daemon,
+    agent: &str,
+    project: &str,
+    workspace: &str,
+    as_child: bool,
+) -> Option<ProcedureRun> {
+    let root = tree::root_of(daemon, agent);
     let run = daemon.read(|store| store.procedure_run(&root)).ok()??;
     if run.ended_at.is_some()
-        || (root != grant.agent && !run.children)
-        || run.project != grant.place.project
-        || run.workspace != *workspace
+        || ((as_child || root != agent) && !run.children)
+        || run.project != project
+        || run.workspace != workspace
     {
         return None;
     }
@@ -538,6 +546,13 @@ pub fn run_of(daemon: &Daemon, grant: &mcp::Grant) -> Option<gate::Run> {
     if root.state.is_final() {
         return None;
     }
+    Some(run)
+}
+
+/// The grants of the run an agent works in, as the gate applies them (`live_run`).
+pub fn run_of(daemon: &Daemon, grant: &mcp::Grant) -> Option<gate::Run> {
+    let workspace = grant.place.workspace.as_ref()?;
+    let run = live_run(daemon, &grant.agent, &grant.place.project, workspace, false)?;
     let workspace = daemon
         .read(|store| store.workspace(&run.project, &run.workspace))
         .ok()??;
@@ -550,6 +565,21 @@ pub fn run_of(daemon: &Daemon, grant: &mcp::Grant) -> Option<gate::Run> {
             .map(|r| (workspace.folder_of(&r.path), r.base.remote.clone()))
             .collect(),
     })
+}
+
+/// What a child about to be launched by `parent` into `workspace` is granted, by the same rules
+/// as `run_of`: its tools are listed from this, and frozen with it. Nothing for a child of
+/// another workspace than the run's, or of a run that does not give its grants to children.
+pub fn granted_to_child(
+    daemon: &Daemon,
+    parent: &str,
+    project: &str,
+    workspace: Option<&str>,
+) -> Grants {
+    workspace
+        .and_then(|workspace| live_run(daemon, parent, project, workspace, true))
+        .map(|run| run.grants)
+        .unwrap_or_default()
 }
 
 /// Ends the run whose root is that agent, if it has one going: its grants are given no more.

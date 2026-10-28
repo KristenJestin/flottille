@@ -89,7 +89,7 @@ const REPLACED: &str = "refused: this session has been replaced: a new session o
 
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
 /// the order frozen in the agent.
-const SERVED: [Definition; 23] = [
+const SERVED: [Definition; 21] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -186,7 +186,7 @@ const SERVED: [Definition; 23] = [
                         "old": {"type": "string", "minLength": 1, "description": "The text to replace, appearing once."},
                         "new": {"type": "string"}
                     }, "required": ["old", "new"], "additionalProperties": false}},
-                "why": {"type": "string"}
+                "why": {"type": "string", "description": "One sentence: why this edit."}
             }, "required": ["path", "edits"], "additionalProperties": false})
         },
     },
@@ -207,7 +207,9 @@ const SERVED: [Definition; 23] = [
         description: "Runs a catalogue command or one line, without a shell: a pipe, a \
             redirection, a variable, a glob or && is refused, put them in a script of the \
             repository. Waits up to timeout seconds (30 by default, 600 at most) and answers \
-            with the end of the output; a longer run keeps going under its run id.",
+            with the end of the output; a longer run keeps going under its run id. Give command \
+            or line: {\"command\": \"test\"}, or {\"line\": \"cargo test -p core\", \
+            \"repository\": \"api\", \"timeout\": 120}.",
         read_only: false,
         idempotent: false,
         destructive: true,
@@ -217,39 +219,29 @@ const SERVED: [Definition; 23] = [
                 "line": {"type": "string", "description": "One command line, split on spaces, quotes kept whole."},
                 "repository": {"type": "string", "description": "Where it runs; the place's top by default."},
                 "timeout": {"type": "integer", "minimum": 1, "maximum": 600},
-                "why": {"type": "string"}
+                "why": {"type": "string", "description": "One sentence: why this run."}
             }, "additionalProperties": false})
         },
     },
     Definition {
-        name: "commands_output",
-        title: "Read a run's output",
-        description: "The state of a run this agent started, and lines of its output: the last \
-            tail lines (40 by default, 1000 at most), or those from start. The answer says how \
-            to read the lines before or after. Only the last 64 KiB of an output are kept.",
-        read_only: true,
-        idempotent: true,
-        destructive: false,
-        schema: || {
-            json!({"type": "object", "properties": {
-                "run": {"type": "string", "description": "The run id commands_run gave."},
-                "tail": {"type": "integer", "minimum": 1, "maximum": 1000},
-                "start": {"type": "integer", "minimum": 1, "description": "The first line to show."}
-            }, "required": ["run"], "additionalProperties": false})
-        },
-    },
-    Definition {
-        name: "commands_stop",
-        title: "Stop a run",
-        description: "Stops a run this agent started, with everything it started: asked to \
-            end, then killed 5 seconds later. Answers once it ended, with the end of its \
-            output. A run that already ended is left as it is.",
+        name: "commands_status",
+        title: "Follow or stop a run",
+        description: "A run this agent started, by the run id commands_run gave. action output \
+            (the default): its state and lines of its output, the last tail lines (40 by \
+            default, 1000 at most) or those from start; the answer says how to read the lines \
+            before or after; only the last 64 KiB of an output are kept. action stop: ends it \
+            with everything it started, asked to end, then killed 5 seconds later, and answers \
+            once it ended; a run that already ended is left as it is. {\"run\": \"a1b2c3\", \
+            \"action\": \"stop\"}",
         read_only: false,
         idempotent: true,
         destructive: true,
         schema: || {
             json!({"type": "object", "properties": {
-                "run": {"type": "string"}
+                "run": {"type": "string", "description": "The run id commands_run gave."},
+                "action": {"type": "string", "enum": ["output", "stop"], "description": "output by default."},
+                "tail": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "output: the last lines."},
+                "start": {"type": "integer", "minimum": 1, "description": "output: the first line to show."}
             }, "required": ["run"], "additionalProperties": false})
         },
     },
@@ -258,15 +250,17 @@ const SERVED: [Definition; 23] = [
         title: "Read the workspace's pull requests",
         description: "Reads, on the forge, the pull request of this workspace's branch in each of \
             its repositories (or the one named): its number, state, base and link, its review, \
-            its checks and their states, its comments and reviews. Read only; it reaches no \
-            repository outside the workspace. A repository on a host Flottille cannot read yet \
-            says so. Use it rather than a forge's command line, which has no sign-in here.",
+            its checks and their states, and how many comments and reviews it has: detail full \
+            gives their texts. Read only; it reaches no repository outside the workspace. A \
+            repository on a host Flottille cannot read yet says so. Use it rather than a forge's \
+            command line, which has no sign-in here.",
         read_only: true,
         idempotent: true,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "repository": {"type": "string", "description": "One of the workspace's repositories, by its path; all of them when left out."}
+                "repository": {"type": "string", "description": "One of the workspace's repositories, by its path; all of them when left out."},
+                "detail": {"type": "string", "enum": ["short", "full"], "description": "short by default; full adds the texts of the comments and reviews."}
             }, "additionalProperties": false})
         },
     },
@@ -297,30 +291,33 @@ const SERVED: [Definition; 23] = [
         name: "ticket_read",
         title: "Read the workspace's ticket",
         description: "Reads, on its tracker, the ticket this workspace is linked to (a GitHub \
-            issue, #123, or a Jira key, ABC-123): its title, state, description and comments; or \
-            another ticket of the same tracker when `ticket` names it. Read only: it writes \
-            nothing to the tracker, and drafts of comments go to the user, who posts them. Use \
-            it rather than a tracker's command line, which has no sign-in here.",
+            issue, #123, or a Jira key, ABC-123): its title, state and description, and how many \
+            comments it has: detail full gives their texts. Another ticket of the same tracker \
+            when `ticket` names it. Read only: it writes nothing to the tracker, and drafts of \
+            comments go to the user, who posts them. Use it rather than a tracker's command \
+            line, which has no sign-in here.",
         read_only: true,
         idempotent: true,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "ticket": {"type": "string", "description": "A ticket of the same tracker as the workspace's, by its key (#123 or ABC-123); the workspace's own ticket when left out."}
+                "ticket": {"type": "string", "description": "A ticket of the same tracker as the workspace's, by its key (#123 or ABC-123); the workspace's own ticket when left out."},
+                "detail": {"type": "string", "enum": ["short", "full"], "description": "short by default; full adds the texts of the comments."}
             }, "additionalProperties": false})
         },
     },
     Definition {
         name: "forge_write",
         title: "Write to the workspace's forge",
-        description: "Inside a procedure that grants it, and only then: opens the pull request of \
+        description: "Listed because your procedure grants some of it. Opens the pull request of \
             this workspace's branch in one of its repositories (pr-create, with a title and a \
             body, into the repository's base), merges it by squash (pr-merge-squash), or re-runs \
-            the failed jobs of the pipelines of its branch's last commit (pipeline-rerun). Run \
-            by Flottille with the user's own forge sign-in, with the project's reviewers. Refused \
-            outside a procedure and for an action the procedure does not grant; held for the \
-            user when it grants it with ask. A merge is refused while the pull request's checks \
-            fail or run, or a review asks for changes, unless the user waives it.",
+            the failed jobs of its branch's last pipelines (pipeline-rerun). Run by Flottille \
+            with the user's own forge sign-in; refused for an action the procedure does not \
+            grant, held for the user when it grants it with ask. A merge is refused while the \
+            checks fail or run, or a review asks for changes, unless the user waives it. \
+            {\"action\": \"pr-create\", \"repository\": \"api\", \"title\": \"fix(api): ...\", \
+            \"body\": \"...\"}; {\"action\": \"pr-merge-squash\", \"repository\": \"api\"}.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -338,11 +335,11 @@ const SERVED: [Definition; 23] = [
     Definition {
         name: "workspace_remove",
         title: "Remove the workspace",
-        description: "Inside a procedure that grants it, and only then: removes this agent's own \
-            workspace, as `flottille workspace remove` does. It refuses, touching nothing, while a \
-            repository holds uncommitted work or commits on no remote, and names them; otherwise \
-            it removes every worktree and the folder, and deletes the branches that hold no \
-            commit of their own. Nothing is left to work in afterwards: report next.",
+        description: "Listed because your procedure grants it. Removes this agent's own \
+            workspace, as `flottille workspace remove` does. It refuses, touching nothing, while \
+            a repository holds uncommitted work or commits on no remote, and names them; \
+            otherwise it removes every worktree and the folder, and deletes the branches that \
+            hold no commit of their own. Nothing is left to work in afterwards: report next.",
         read_only: false,
         idempotent: false,
         destructive: true,
@@ -354,10 +351,13 @@ const SERVED: [Definition; 23] = [
         description: "Starts a child agent on one precise task and answers at once with its \
             agent_id. It works on its own: you are told when it reports, asks, fails, is stuck or \
             idles, so never poll. The brief is all it knows: the task and only it, what to read, \
-            the checks, the deliverable. workspace: an existing workspace's name, {\"new\": \
-            {\"name\"}} for a new one, or left out for your own place. provider: yours when left \
-            out; a refusal names the ready ones and their models. Refused above the project's \
-            children cap or the depth limit.",
+            the checks, the deliverable. Where it works: workspace names an existing workspace, \
+            new_workspace makes one (repositories picks its repositories), neither is your own \
+            place. provider: yours when left out; a refusal names the ready ones and their \
+            models. Refused above the project's children cap or the depth limit. \
+            {\"title\": \"Fix login\", \"brief\": \"...\", \"workspace\": \"login\"}; \
+            {\"title\": \"Add API\", \"brief\": \"...\", \"new_workspace\": \"api\", \
+            \"repositories\": [\"api\"]}.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -369,14 +369,9 @@ const SERVED: [Definition; 23] = [
                 "model": {"type": "string", "description": "The model; the provider's default when left out."},
                 "effort": {"type": "string", "description": "The model's effort; its default when left out."},
                 "role": {"type": "string", "enum": ["worker", "lead"], "description": "worker by default."},
-                "workspace": {"description": "Where it works: your place when left out.", "anyOf": [
-                    {"type": "string", "description": "An existing workspace of the project."},
-                    {"type": "object", "properties": {"new": {"type": "object", "properties": {
-                        "name": {"type": "string"},
-                        "repositories": {"type": "array", "items": {"type": "string"}}
-                    }, "required": ["name"], "additionalProperties": false}},
-                     "required": ["new"], "additionalProperties": false}
-                ]}
+                "workspace": {"type": "string", "description": "An existing workspace of the project, to work in."},
+                "new_workspace": {"type": "string", "description": "The name of a new workspace to make for it. Not with workspace."},
+                "repositories": {"type": "array", "items": {"type": "string"}, "description": "With new_workspace: its repositories, by path; the project's when left out."}
             }, "required": ["title", "brief"], "additionalProperties": false})
         },
     },
@@ -399,33 +394,24 @@ const SERVED: [Definition; 23] = [
     Definition {
         name: "agent_status",
         title: "See how children are doing",
-        description: "The state of one of your children, or of all of them without agent_id: \
-            what it does now (thinking, which command runs and for how long, waiting for \
-            approval #n, waiting on the provider), the time since its last sign of activity, \
-            its context use and its last messages.",
+        description: "How your children are doing. Without agent_id: one line per child, what it \
+            does now (thinking, which command runs and for how long, waiting for approval #n, \
+            waiting on the provider), the time since its last sign of activity and its context \
+            use; detail full adds their last messages. With agent_id: that child, in full. \
+            action conversation: a page of that child's conversation, oldest first (what it was \
+            sent, its messages and its tool calls), ending with the after to pass for the next \
+            one; read the lines that matter rather than whole transcripts. \
+            {\"agent_id\": \"a1b2\", \"action\": \"conversation\"}.",
         read_only: true,
         idempotent: true,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "agent_id": {"type": "string"}
+                "agent_id": {"type": "string", "description": "One of your children, as agent_launch gave it; required for action conversation."},
+                "action": {"type": "string", "enum": ["status", "conversation"], "description": "status by default."},
+                "detail": {"type": "string", "enum": ["short", "full"], "description": "status: short for all the children, full for one, by default."},
+                "after": {"type": "integer", "minimum": 0, "description": "conversation: the number a previous page ended with."}
             }, "additionalProperties": false})
-        },
-    },
-    Definition {
-        name: "agent_read",
-        title: "Read a child's conversation",
-        description: "A page of one of your children's conversation, oldest first: what it was \
-            sent, its messages and its tool calls. The page ends with the after to pass for the \
-            next one. Read the lines that matter rather than whole transcripts.",
-        read_only: true,
-        idempotent: true,
-        destructive: false,
-        schema: || {
-            json!({"type": "object", "properties": {
-                "agent_id": {"type": "string"},
-                "after": {"type": "integer", "minimum": 0, "description": "The number a previous page ended with."}
-            }, "required": ["agent_id"], "additionalProperties": false})
         },
     },
     Definition {
@@ -577,6 +563,17 @@ pub fn arguments<T: DeserializeOwned>(tool: &str, args: Value) -> Result<T, Outc
             "refused: the arguments do not fit {tool}: {error}; see its input schema"
         ))
     })
+}
+
+/// Whether a read is asked in full: `detail` is `short` (the default) or `full`.
+pub fn full_detail(tool: &str, detail: Option<&str>) -> Result<bool, Outcome> {
+    match detail {
+        None | Some("short") => Ok(false),
+        Some("full") => Ok(true),
+        Some(other) => Err(Outcome::Refused(format!(
+            "refused: {tool} has no detail {other:?}: its details are short (the default) and full"
+        ))),
+    }
 }
 
 /// A text masked of the daemon's secrets and of those of the place's secret files.
@@ -1260,8 +1257,7 @@ async fn perform(
             let lifted = lifted(daemon, grant, &args);
             runs::commands_run(daemon, &grant.agent, &grant.place, args, lifted, cancelled).await
         }
-        "commands_output" => runs::commands_output(daemon, &grant.agent, args),
-        "commands_stop" => runs::commands_stop(daemon, &grant.agent, args).await,
+        "commands_status" => runs::commands_status(daemon, &grant.agent, args).await,
         "forge_read" => crate::forge::forge_read(daemon, &grant.place, args).await,
         "ticket_read" => crate::tickets::ticket_read(daemon, &grant.place, args).await,
         "forge_write" => crate::forge::forge_write(daemon, &grant.place, args).await,
@@ -1341,6 +1337,17 @@ mod tests {
         assert_eq!(base64url(&[0u8; 32]).len(), 43);
     }
 
+    /// The grants of a run that lets through everything `forge_write` and `workspace_remove` do.
+    fn all_grants() -> procedure::Grants {
+        [
+            procedure::Grant::PrCreate,
+            procedure::Grant::WorkspaceRemove,
+        ]
+        .into_iter()
+        .map(|grant| (grant, procedure::Mode::Allow))
+        .collect()
+    }
+
     #[test]
     fn every_tool_is_described_for_a_new_colleague() {
         for definition in &SERVED {
@@ -1351,8 +1358,12 @@ mod tests {
             assert_eq!(tool["inputSchema"]["type"], "object");
             let name = format!("mcp__flottille__{}", definition.name);
             assert!(
-                claude::PROVIDER.tools(true, false, true).contains(&name)
-                    || claude::PROVIDER.tools(false, false, true).contains(&name),
+                claude::PROVIDER
+                    .tools(true, false, true, &all_grants())
+                    .contains(&name)
+                    || claude::PROVIDER
+                        .tools(false, false, true, &all_grants())
+                        .contains(&name),
                 "{} is a tool agents get",
                 definition.name
             );
@@ -1361,8 +1372,8 @@ mod tests {
 
     #[test]
     fn a_grant_holds_the_agent_s_served_tools_in_its_own_order() {
-        let mut leaf = claude::PROVIDER.tools(false, true, true);
-        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 16);
+        let mut leaf = claude::PROVIDER.tools(false, true, true, &all_grants());
+        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 15);
         leaf.reverse();
         leaf.retain(|tool| !tool.ends_with("__search"));
         leaf.push("fs_read".into());
@@ -1370,7 +1381,36 @@ mod tests {
         assert_eq!(served.first(), Some(&"ask_parent"));
         assert_eq!(served.last(), Some(&"fs_read"));
         assert!(!served.contains(&"search"));
-        assert_eq!(served.len(), 15);
+        assert_eq!(served.len(), 14);
+    }
+
+    #[test]
+    fn an_agent_stored_with_the_old_tool_names_gets_the_merged_ones_from_the_daemon() {
+        // What the store holds for a worker and a lead made before the merges, once the
+        // migration renamed their tools (`store.rs`): the names the daemon gives today.
+        let worker = [
+            "mcp__flottille__fs_read",
+            "mcp__flottille__commands_status",
+            "mcp__flottille__report",
+        ]
+        .map(String::from);
+        let lead = ["mcp__flottille__agent_status", "mcp__flottille__report"].map(String::from);
+
+        for stored in [&worker[..], &lead[..]] {
+            let given = claude::PROVIDER.tools(false, false, true, &all_grants());
+            assert!(stored.iter().all(|tool| given.contains(tool)), "{stored:?}");
+        }
+        let served_worker = served(&claude::PROVIDER, &worker);
+        assert_eq!(served_worker, ["fs_read", "commands_status", "report"]);
+        let served_lead = served(&claude::PROVIDER, &lead);
+        assert_eq!(served_lead, ["agent_status", "report"]);
+        let meta = claude::session_meta("text", &worker);
+        assert_eq!(meta["claudeCode"]["options"]["allowedTools"], json!(worker));
+        let server = crate::codex::server("http://x", &json!({}), &worker);
+        assert_eq!(
+            server["flottille"]["enabled_tools"],
+            json!(["fs_read", "commands_status", "report"])
+        );
     }
 
     #[test]
@@ -1433,5 +1473,20 @@ mod tests {
         );
         assert!(!shown.contains("hunter2"));
         assert!(shown.chars().count() <= ERROR_LIMIT);
+    }
+
+    #[test]
+    fn the_biggest_list_stays_far_under_the_threshold_of_tool_search() {
+        // About 4 characters a token: Anthropic suggests tool search past 10k tokens of
+        // definitions (`docs/reference/mcp.md` §3).
+        let biggest = claude::PROVIDER.tools(true, false, true, &all_grants());
+        let chars: usize = served(&claude::PROVIDER, &biggest)
+            .into_iter()
+            .map(|name| {
+                let tool = serde_json::to_string(&tool_of(definition(name).unwrap(), true));
+                tool.unwrap().len()
+            })
+            .sum();
+        assert!(chars < 20_000, "{chars} characters of definitions");
     }
 }

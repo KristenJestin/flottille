@@ -1556,8 +1556,7 @@ mod tests {
                     "fs_edit",
                     "commands_list",
                     "commands_run",
-                    "commands_output",
-                    "commands_stop",
+                    "commands_status",
                 ],
                 place: Place {
                     project: "app".into(),
@@ -2311,7 +2310,7 @@ mod tests {
         ] {
             assert_eq!(fixture.file(tool, path), Verdict::Allow, "{tool} {path}");
         }
-        for tool in ["commands_list", "commands_output", "commands_stop"] {
+        for tool in ["commands_list", "commands_status"] {
             assert_eq!(
                 fixture.judge(tool, json!({"run": "r1"}), Some(&fixture.never)),
                 Verdict::Allow,

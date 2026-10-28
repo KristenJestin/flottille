@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
 use crate::git::{self, Class};
-use crate::mcp::{Outcome, arguments};
+use crate::mcp::{Outcome, arguments, full_detail};
 use crate::place::Place;
 use crate::projects::{self, Failure};
 
@@ -838,6 +838,7 @@ pub fn poll(daemon: &Arc<Daemon>) {
 #[serde(deny_unknown_fields)]
 struct ForgeRead {
     repository: Option<String>,
+    detail: Option<String>,
 }
 
 /// `forge_read`: the pull requests of the agent's own workspace's repositories, their checks and
@@ -845,6 +846,10 @@ struct ForgeRead {
 pub async fn forge_read(daemon: &Daemon, place: &Place, args: Value) -> Outcome {
     let asked: ForgeRead = match arguments("forge_read", args) {
         Ok(asked) => asked,
+        Err(refusal) => return refusal,
+    };
+    let full = match full_detail("forge_read", asked.detail.as_deref()) {
+        Ok(full) => full,
         Err(refusal) => return refusal,
     };
     let Some(name) = &place.workspace else {
@@ -874,7 +879,12 @@ pub async fn forge_read(daemon: &Daemon, place: &Place, args: Value) -> Outcome 
         repositories.retain(|r| &r.path == asked);
     }
     let read = read(&repositories, &workspace.branch, obsolete).await;
-    Outcome::Done(read_text(&workspace, &read))
+    Outcome::Done(read_text(
+        &workspace,
+        &read,
+        full,
+        asked.repository.as_deref(),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -1142,8 +1152,16 @@ async fn gh_text(args: &[&str]) -> Result<String, String> {
     }
 }
 
-/// What `forge_read` answers.
-fn read_text(workspace: &Workspace, read: &Read) -> String {
+/// What `forge_read` answers: the texts of the comments and reviews only when `full`, otherwise
+/// their number and the way to get them, for the `repository` that was asked when one was.
+fn read_text(workspace: &Workspace, read: &Read, full: bool, asked: Option<&str>) -> String {
+    let again = match asked {
+        Some(repository) => format!(
+            "{{\"repository\": {}, \"detail\": \"full\"}}",
+            Value::from(repository)
+        ),
+        None => "{\"detail\": \"full\"}".to_owned(),
+    };
     let mut text = format!(
         "The pull requests of workspace {}, branch {}:\n",
         workspace.name, workspace.branch
@@ -1205,6 +1223,13 @@ fn read_text(workspace: &Workspace, read: &Read) -> String {
         for (title, comments) in [("comments", &pull.comments), ("reviews", &pull.reviews)] {
             let said: Vec<&Comment> = comments.iter().filter(|c| !c.body.is_empty()).collect();
             if said.is_empty() {
+                continue;
+            }
+            if !full {
+                text.push_str(&format!(
+                    "  {title}: {}, read them with forge_read {again}\n",
+                    said.len()
+                ));
                 continue;
             }
             text.push_str(&format!("  {title} ({}):\n", said.len()));
