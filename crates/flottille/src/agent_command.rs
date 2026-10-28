@@ -67,6 +67,12 @@ pub enum AgentAction {
         #[arg(long)]
         json: bool,
     },
+    /// Start an ended root again on its own session
+    Resume {
+        agent: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// The agents, of every project or of one
     List {
         #[arg(long)]
@@ -216,6 +222,22 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                     "Stopped agent {} and its tree; it is {} now. Its workspace stays.",
                     text(agent, "id"),
                     text(agent, "state")
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        AgentAction::Resume { agent, json } => {
+            let resumed = Client::connect_or_start(paths)?.request(
+                "agent.resume",
+                serde_json::to_value(AgentName { agent, after: None })?,
+            )?;
+            if json {
+                println!("{resumed}");
+            } else {
+                println!(
+                    "Resumed agent {} on its own session; it is {} now. Its next message starts it.",
+                    text(&resumed["agent"], "id"),
+                    text(&resumed["agent"], "state")
                 );
             }
             Ok(ExitCode::SUCCESS)
@@ -547,6 +569,8 @@ fn show_text(shown: &Value) -> String {
             "agent.compacted" => "[context compacted]".into(),
             "agent.died" => "[the process died]".into(),
             "agent.failed" => format!("[failed: {}]", text(data, "reason")),
+            "agent.ended" => format!("[ended: {}]", text(data, "reason")),
+            "agent.resumed" => "[resumed by the user]".into(),
             _ => continue,
         };
         speaking = None;
