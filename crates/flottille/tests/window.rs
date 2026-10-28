@@ -2028,6 +2028,7 @@ fn the_card_of_a_procedure_an_agent_starts_says_what_it_runs_and_is_confirmed_on
         card.says,
         [
             "Start the procedure ship in workspace w: Ship the workspace",
+            "Its agent is told: Push the branch.",
             "Its agents may push the workspace's branch to its remote (git push), after asking \
              you, each time",
             "The agents the run starts may do none of it",
@@ -2130,10 +2131,11 @@ fn the_card_of_a_line_outside_the_catalogue_in_main_offers_once_and_always(
 
     assert_eq!(card.asked.as_deref(), Some("Run cat README.md"));
     assert_eq!(card.says[0], "Run cat README.md in the project folder");
-    assert!(
-        card.says[1].contains("catalogue as cat-readme-md"),
-        "{:?}",
-        card.says
+    assert_eq!(
+        card.says[1],
+        "Always adds it to the project's catalogue as cat-readme-md. Flottille does not check \
+         that it only reads. It will run in your project folder without asking, for every agent \
+         of this project."
     );
     cx.update(|window, _| {
         assert!(window.find(format!("allow-always-{number}")).visible());
@@ -2162,6 +2164,34 @@ fn the_card_of_a_line_outside_the_catalogue_in_main_offers_once_and_always(
         std::fs::read_to_string(user.project_file("app"))
             .unwrap()
             .contains("[commands.cat-readme-md]")
+    });
+}
+
+#[gpui_kit::test]
+fn a_sensitive_line_outside_the_catalogue_is_not_offered_always(cx: &mut TestAppContext) {
+    let user = team_user();
+    project(&user, "app");
+    let answer = user
+        .call(
+            "agent.run",
+            json!({"project": "app", "message": "lead the work"}),
+        )
+        .unwrap();
+    let lead = answer["agent"]["id"].as_str().unwrap().to_owned();
+    let mcp = mcp_session(&user, |prompt| prompt.contains("You are the root"));
+    eventually("the lead's first turn", || {
+        user.call("agent.show", json!({"agent": lead})).unwrap()["agent"]["state"] == "idle"
+    });
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+
+    let number = held_number(mcp.call("commands_run", json!({"line": "cat .env"})));
+    let card = card_for(&shell, number, cx);
+
+    assert!(card.sensitive);
+    cx.update(|window, _| {
+        assert!(window.find(format!("allow-once-{number}")).visible());
+        assert!(window.try_find(format!("allow-always-{number}")).is_none());
+        assert!(window.try_find(format!("allow-tree-{number}")).is_none());
     });
 }
 
@@ -6160,6 +6190,34 @@ fn the_settings_page_sets_a_family_to_run_on_its_own(cx: &mut TestAppContext) {
     });
     let file = std::fs::read_to_string(user.project_file("atlas")).unwrap();
     assert!(!file.contains("agent_actions"), "{file}");
+}
+
+#[gpui_kit::test]
+fn the_procedures_switch_says_an_agent_may_then_start_any_procedure_anywhere(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project_settings(&shell, "atlas", cx);
+
+    cx.update(|window, _| {
+        assert!(window.find("agent-actions-warning-procedures").visible());
+        assert_eq!(
+            ProjectSettingsPage::warning("procedures"),
+            Some(
+                "An agent may then start any procedure in any of the project's workspaces without \
+             asking, with the procedure's own grants."
+            )
+        );
+        for family in ["settings", "references"] {
+            assert!(
+                window
+                    .try_find(format!("agent-actions-warning-{family}"))
+                    .is_none()
+            );
+        }
+    });
 }
 
 #[gpui_kit::test]

@@ -2163,7 +2163,8 @@ impl Row {
                             false,
                         ))
                     })
-                    .when(card.kind == "catalogue", |c| {
+                    // A sensitive line asks each time: the daemon never allows it always.
+                    .when(card.kind == "catalogue" && !card.sensitive, |c| {
                         c.action(button("allow-always", "Always", Answer::Always, false))
                     })
                     .action(match card.kind.as_str() {

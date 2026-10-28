@@ -486,6 +486,14 @@ impl ProjectSettingsPage {
         cx.notify();
     }
 
+    /// What a family let run on its own opens beyond what its switch says, shown under it.
+    pub fn warning(family: &str) -> Option<&'static str> {
+        (family == "procedures").then_some(
+            "An agent may then start any procedure in any of the project's workspaces without \
+             asking, with the procedure's own grants.",
+        )
+    }
+
     fn agent_actions_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let rows = [
@@ -493,20 +501,24 @@ impl ProjectSettingsPage {
                 "procedures",
                 "Start a procedure",
                 "The run starts without the confirmation; its grants are still the procedure's.",
+                Self::warning("procedures"),
             ),
             (
                 "settings",
                 "Change the forges and the tracker",
-                "Each forge is still checked against its repository's remote.",
+                "Each forge is still checked against its repository's remote; a change of the \
+                 tracker still asks.",
+                Self::warning("settings"),
             ),
             (
                 "references",
                 "Add or remove a reference",
                 "A reference still stays inside the project folder.",
+                Self::warning("references"),
             ),
         ];
         let mut card = Card::new().title("What an agent may do");
-        for (family, what, still) in rows {
+        for (family, what, still, warning) in rows {
             let on = self.agent_actions.mode(family) == Some(Mode::Allow);
             let switch = Switch::new(
                 ElementId::Name(format!("on-its-own-{family}").into()),
@@ -535,7 +547,19 @@ impl ProjectSettingsPage {
                                     true => format!("On their own. {still}"),
                                     false => "After asking me, each time.".to_owned(),
                                 }),
-                            )),
+                            ))
+                            .when_some(warning, |d, warning| {
+                                d.child(
+                                    div()
+                                        .id(ElementId::Name(
+                                            format!("agent-actions-warning-{family}").into(),
+                                        ))
+                                        .text_size(px(12.))
+                                        .text_color(p.mute)
+                                        .child(warning)
+                                        .test_support(),
+                                )
+                            }),
                     )
                     .child(switch)
                     .test_support(),
