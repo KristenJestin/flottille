@@ -128,6 +128,8 @@ pub struct SessionPage {
     /// The session's state, as the shell's tree draws it.
     status: Entity<Status>,
     pill: Entity<Pill>,
+    /// What the header's pill shows: the left tree's state, or the root's once it ended.
+    pill_status: Entity<Status>,
     /// The agent whose conversation is shown: the root, or a sub-agent read.
     shown: String,
     link: Option<SessionLink>,
@@ -195,6 +197,7 @@ impl SessionPage {
             shell,
             follow,
             layout,
+            pill_status: status.clone(),
             status,
             pill,
             shown,
@@ -231,6 +234,11 @@ impl SessionPage {
     /// The session's state, as the shell's tree draws it.
     pub fn status(&self) -> &Entity<Status> {
         &self.status
+    }
+
+    /// The state the header's pill shows.
+    pub fn header_state(&self, cx: &gpui_kit::App) -> AgentState {
+        self.pill_status.read(cx).state()
     }
 
     /// The agent whose conversation is shown.
@@ -376,9 +384,16 @@ impl SessionPage {
         Some((format!("This session ended: {why}."), root.resumable))
     }
 
-    /// Starts the ended session's root again on its own session.
+    /// Whether Resume is enabled: offered, not asked already, and the root's last process gone.
+    pub fn can_resume(&self) -> bool {
+        !self.resuming
+            && !self.root().is_some_and(|root| root.stopping)
+            && self.ended_line().is_some_and(|(_, resumable)| resumable)
+    }
+
+    /// Starts the ended session's root again on its own session, once its last process is gone.
     pub fn resume(&mut self, cx: &mut Context<Self>) {
-        if self.resuming || !self.ended_line().is_some_and(|(_, resumable)| resumable) {
+        if !self.can_resume() {
             return;
         }
         self.resuming = true;
@@ -391,9 +406,14 @@ impl SessionPage {
     /// What the daemon answered to a resume: the composer comes back with the tree read again, or
     /// the line says why it was refused.
     pub fn resumed(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
-        self.resuming = false;
+        // Taken: Resume stays disabled until the tree shows the root going again.
+        self.resuming = refused.is_none() && self.ended_line().is_some();
         self.resume_error = refused.map(Into::into);
         cx.notify();
+    }
+
+    pub fn resume_error(&self) -> Option<&str> {
+        self.resume_error.as_deref()
     }
 
     pub fn set_title(&mut self, title: &str, cx: &mut Context<Self>) {
@@ -692,7 +712,35 @@ impl SessionPage {
             .collect();
         self.rail.update(cx, |rail, cx| rail.set_agents(rows, cx));
         let changed = self.tree != tree;
+        let ended = |tree: &[TreeAgent]| {
+            tree.iter()
+                .find(|a| a.parent.is_none())
+                .map(|root| matches!(root.state.as_str(), "ended" | "failed"))
+        };
+        let (was_ended, now_ended) = (ended(&self.tree), ended(&tree));
         self.tree = tree;
+        if let Some(now_ended) = now_ended.filter(|now| was_ended != Some(*now)) {
+            if was_ended.is_some() {
+                // Ended or resumed: what was said before it is over.
+                self.resume_error = None;
+                self.reply.update(cx, |reply, cx| reply.clear_error(cx));
+            }
+            if !now_ended {
+                self.resuming = false;
+            }
+            // Ended, the header says how, as the rail does; else what the left tree shows.
+            let status = match now_ended {
+                true => self
+                    .root()
+                    .and_then(|root| self.statuses.get(&root.id))
+                    .cloned(),
+                false => None,
+            }
+            .unwrap_or_else(|| self.status.clone());
+            self.pill_status = status.clone();
+            self.pill = cx.new(|cx| Pill::new(status, cx));
+            cx.notify();
+        }
         if std::mem::take(&mut self.unchecked) && !self.tree.iter().any(|a| a.id == self.shown) {
             let root = self.opened.id.clone();
             self.show(&root, cx);
@@ -981,7 +1029,7 @@ impl SessionPage {
                     .when(resumable, |d| {
                         d.child(
                             Button::quiet("session-resume", "Resume")
-                                .disabled(self.resuming)
+                                .disabled(!self.can_resume())
                                 .on_click(cx.listener(|this, _, _, cx| this.resume(cx))),
                         )
                     })
@@ -3272,6 +3320,12 @@ impl Reply {
         self.running
     }
 
+    fn clear_error(&mut self, cx: &mut Context<Self>) {
+        if self.error.take().is_some() {
+            cx.notify();
+        }
+    }
+
     fn set_running(&mut self, running: bool, cx: &mut Context<Self>) {
         if self.running != running {
             self.running = running;
@@ -3790,6 +3844,7 @@ mod tests {
             waiting_on: None,
             needs_user: false,
             resumable: false,
+            stopping: false,
         }
     }
 

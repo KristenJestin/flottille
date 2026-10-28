@@ -42,6 +42,8 @@ pub struct TreeAgent {
     pub needs_user: bool,
     /// An ended root the daemon can start again on its own session (`agent.resume`).
     pub resumable: bool,
+    /// An agent that ended whose process is still stopping: it cannot be resumed yet.
+    pub stopping: bool,
 }
 
 impl TreeAgent {
@@ -62,6 +64,7 @@ impl TreeAgent {
             waiting_on: text(&entry["waiting_on"]),
             needs_user: entry["needs_user"] == true,
             resumable: agent["resumable"] == true,
+            stopping: agent["stopping"] == true,
         }
     }
 }

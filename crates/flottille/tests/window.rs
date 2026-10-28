@@ -4919,11 +4919,17 @@ fn open_ended<'a>(
     cx.update(|window, cx| window.click("ended-app", cx));
     settle(cx);
     cx.update(|window, cx| window.click(session_id(lead), cx));
-    until(&shell, cx, "the ended session's page", |cx| {
-        session_page(&shell, cx).read_with(cx, |page, cx| {
-            !page.conversation().read(cx).rows().is_empty() && !page.tree().is_empty()
-        })
-    });
+    until(
+        &shell,
+        cx,
+        "the ended session's page, its process gone",
+        |cx| {
+            session_page(&shell, cx).read_with(cx, |page, cx| {
+                !page.conversation().read(cx).rows().is_empty()
+                    && page.tree().first().is_some_and(|root| !root.stopping)
+            })
+        },
+    );
     settle(cx);
     (shell, cx)
 }
@@ -5124,6 +5130,192 @@ fn no_resume_when_the_agent_can_neither_resume_nor_load(cx: &mut TestAppContext)
         assert!(window.try_find("session-ended").is_some());
         assert!(window.try_find("session-resume").is_none());
         assert!(window.try_find("reply-field").is_none());
+    });
+}
+
+/// The composer's error as it says it.
+fn reply_error(reply: &Entity<Reply>, cx: &mut VisualTestContext) -> Option<String> {
+    reply.read_with(cx, |r, _| r.error().map(str::to_owned))
+}
+
+/// The daemon refusing what the composer sent, as it answers.
+fn refuse_reply(reply: &Entity<Reply>, why: &str, cx: &mut VisualTestContext) {
+    cx.update(|window, cx| reply.update(cx, |r, cx| r.replied(Some(why.to_owned()), window, cx)));
+}
+
+fn the_composer_is_back(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    until(shell, cx, "the composer is back", |cx| {
+        cx.update(|window, _| {
+            window.try_find("reply-field").is_some() && window.try_find("session-ended").is_none()
+        })
+    });
+}
+
+#[gpui_kit::test]
+fn the_composer_s_old_error_goes_when_the_session_ends_and_when_it_is_resumed(
+    cx: &mut TestAppContext,
+) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let reply = shell
+        .read_with(cx, |s, _| s.reply_of(&lead).cloned())
+        .unwrap();
+    refuse_reply(&reply, "refused: an old error", cx);
+    assert!(reply_error(&reply, cx).is_some());
+
+    user.call("agent.stop", json!({"agent": lead})).unwrap();
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the session ended, its process gone", |cx| {
+        page.read_with(cx, |p, _| {
+            p.ended_line().is_some() && p.tree().first().is_some_and(|root| !root.stopping)
+        })
+    });
+    assert_eq!(reply_error(&reply, cx), None, "gone with the end");
+
+    // An answer that came late, while it was ended, is not shown once it is resumed.
+    refuse_reply(&reply, "refused: a late error", cx);
+    settle(cx);
+    cx.update(|window, cx| window.click("session-resume", cx));
+    the_composer_is_back(&shell, cx);
+    assert_eq!(reply_error(&reply, cx), None, "gone with the resume");
+}
+
+#[gpui_kit::test]
+fn a_refused_resume_s_error_goes_when_the_session_is_resumed_and_stays_gone_at_its_next_end(
+    cx: &mut TestAppContext,
+) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    user.call("agent.stop", json!({"agent": lead})).unwrap();
+    let (shell, cx) = open_ended(&user, &lead, cx);
+    let page = session_page(&shell, cx);
+    // Taken, Resume stays disabled until the tree shows the root going again.
+    page.update(cx, |p, cx| p.resumed(None, cx));
+    assert!(!page.read_with(cx, |p, _| p.can_resume()));
+    page.update(cx, |p, cx| {
+        p.resumed(Some("refused: it is still stopping".into()), cx)
+    });
+    settle(cx);
+    assert!(
+        page.read_with(cx, |p, _| p.can_resume()),
+        "refused, it can be asked again"
+    );
+    cx.update(|window, _| assert!(window.try_find("session-resume-error").is_some()));
+
+    // Resumed from elsewhere (the command line), then ended again.
+    user.resume(&lead);
+    the_composer_is_back(&shell, cx);
+    assert_eq!(
+        page.read_with(cx, |p, _| p.resume_error().map(str::to_owned)),
+        None
+    );
+    user.call("agent.stop", json!({"agent": lead})).unwrap();
+    until(&shell, cx, "the session ended again", |cx| {
+        cx.update(|window, _| window.try_find("session-ended").is_some())
+    });
+
+    assert_eq!(
+        page.read_with(cx, |p, _| p.resume_error().map(str::to_owned)),
+        None
+    );
+    cx.update(|window, _| assert!(window.try_find("session-resume-error").is_none()));
+}
+
+#[gpui_kit::test]
+fn resume_waits_for_the_ended_process_to_be_gone(cx: &mut TestAppContext) {
+    // An agent slow to stop: deaf to SIGTERM and running on once its input closes, it is killed
+    // 2 s after the stop.
+    let user = team_user();
+    let slow = user.path("slow-agent");
+    std::fs::write(
+        &slow,
+        format!(
+            "#!/bin/sh\ntrap '' TERM\nexec '{}' \"$@\"\n",
+            common::fake_agent().display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&slow, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let user = user.with_env("FLOTTILLE_AGENT_COMMAND", slow.to_str().unwrap());
+    user.fake_script(json!({"linger": true}));
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+
+    user.call("agent.stop", json!({"agent": lead})).unwrap();
+    until(
+        &shell,
+        cx,
+        "the session ended, its process stopping",
+        |cx| {
+            page.read_with(cx, |p, _| {
+                p.ended_line().is_some() && p.tree().first().is_some_and(|root| root.stopping)
+            })
+        },
+    );
+    settle(cx);
+    cx.update(|window, _| assert!(window.find("session-resume").visible()));
+    assert!(!page.read_with(cx, |p, _| p.can_resume()), "disabled");
+
+    until(&shell, cx, "its process is gone", |cx| {
+        page.read_with(cx, |p, _| p.can_resume())
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("session-resume", cx));
+    the_composer_is_back(&shell, cx);
+}
+
+#[gpui_kit::test]
+fn the_conversation_says_the_session_ended_then_was_resumed(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    user.call("agent.stop", json!({"agent": lead})).unwrap();
+    let (shell, cx) = open_ended(&user, &lead, cx);
+    let page = session_page(&shell, cx);
+
+    cx.update(|window, cx| window.click("session-resume", cx));
+    the_composer_is_back(&shell, cx);
+
+    until(&shell, cx, "the resumed notice", |cx| {
+        let kinds: Vec<String> = blocks(&page, cx)
+            .iter()
+            .filter_map(|block| match block {
+                Block::Notice { kind, .. } => Some(kind.clone()),
+                _ => None,
+            })
+            .collect();
+        kinds.ends_with(&["ended".to_owned(), "resumed".to_owned()])
+    });
+}
+
+#[gpui_kit::test]
+fn an_ended_session_s_header_says_stopped_or_failed_as_its_rail_does(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    assert_eq!(
+        page.read_with(cx, |p, cx| p.header_state(cx)),
+        AgentState::Idle
+    );
+
+    user.call("agent.stop", json!({"agent": lead})).unwrap();
+    until(&shell, cx, "the header says stopped", |cx| {
+        page.read_with(cx, |p, cx| p.header_state(cx) == AgentState::Stopped)
+    });
+
+    // Resumed, it says what the left tree says again.
+    user.resume(&lead);
+    until(&shell, cx, "the header follows the left tree again", |cx| {
+        page.read_with(cx, |p, cx| p.header_state(cx) == AgentState::Idle)
+    });
+
+    // Failed: its process dies at each message, until it is replaced too often.
+    user.fake_script(json!({"turns": [{"when": "DIE", "do": [{"die": 3}]}]}));
+    send(&user, &lead, "DIE");
+    until(&shell, cx, "the header says failed", |cx| {
+        page.read_with(cx, |p, cx| p.header_state(cx) == AgentState::Failed)
     });
 }
 

@@ -405,7 +405,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   and its tree, after a confirmation that counts the agents that end. An ended session leaves its
   place in the left tree for its project's "Ended" group, folded at the bottom, and its page shows,
   in place of the composer, why it ended and Resume when its agent can resume or load its session
-  (`agent.resume`), which brings the composer back. Selecting a child shows its
+  (`agent.resume`), enabled once its process is gone, which brings the composer back; its header
+  says `STOPPED` or `FAILED`, as its rail does, and its conversation says it ended, then resumed. Selecting a child shows its
   conversation read-only;
 - narrow and portrait windows: the rail, then the left tree, become drawers.
 - a history of the pages shown (project pages, sessions with the agent shown in them, settings),
