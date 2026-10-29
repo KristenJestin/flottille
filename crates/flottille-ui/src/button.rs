@@ -1,5 +1,7 @@
 //! Buttons (primary, secondary, icon), the badge an icon button can carry, and the tooltip.
 
+use std::sync::Arc;
+
 use gpui_kit::{
     AnyView, App, AppContext as _, ClickEvent, Context, ElementId, FontWeight, InteractiveElement,
     IntoElement, ParentElement, Render, RenderOnce, SharedString, StatefulInteractiveElement,
@@ -8,7 +10,7 @@ use gpui_kit::{
 
 use crate::color::mix;
 use crate::icons::{Icon, icon};
-use crate::interact::{choose, feel, wire};
+use crate::interact::{choose, fade, feel, wire};
 use crate::motion::{HOVER, Motion};
 use crate::theme::{palette, radius};
 use crate::typography::Type;
@@ -240,9 +242,20 @@ impl RenderOnce for Button {
         if let Some(text) = tooltip.filter(|_| !self.tooltip_hidden) {
             button = button.tooltip(move |_, cx| Tooltip::view(text.clone(), cx));
         }
-        if self.disabled {
-            button = button.opacity(0.35);
-        } else if let Some(on_click) = self.on_click {
+        // Enabled or not is a state: it fades over HOVER instead of switching.
+        let enabled = fade(
+            ElementId::NamedChild(Arc::new(self.id.clone()), "enabled".into()),
+            !self.disabled,
+            HOVER,
+            window,
+            cx,
+        );
+        if enabled < 1.0 {
+            button = button.opacity(0.35 + 0.65 * enabled);
+        }
+        if !self.disabled
+            && let Some(on_click) = self.on_click
+        {
             button = button.on_click(on_click);
         }
         wire(button, state, true).test_support()

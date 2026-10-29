@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use common::{Desktop, advance, init, pending_frames};
 use flottille_ui::motion::{ENTER, HOVER, MAX_STAGGER, PANEL, RISE, STAGGER};
-use flottille_ui::{Button, Item, Listing, enter, presence, presence_of, selectable};
+use flottille_ui::{Button, Item, Listing, Segmented, enter, presence, presence_of, selectable};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     Context, InteractiveElement as _, IntoElement, ParentElement, Pixels, Render, SharedString,
@@ -150,6 +150,114 @@ fn a_choice_button_moves_its_fill_over_frames_and_then_stops(cx: &mut TestAppCon
     assert!(pending_frames(cx) > 0, "the fill is moving");
     advance(cx, PANEL * 2);
     assert_eq!(pending_frames(cx), 0, "it stopped once it was there");
+}
+
+struct Modes {
+    auto: bool,
+    chosen: Rc<Cell<Option<usize>>>,
+}
+
+impl Render for Modes {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let chosen = self.chosen.clone();
+        div().size_full().child(
+            Segmented::new(
+                "mode",
+                "Mode",
+                [("ask", "Ask"), ("auto", "Auto")],
+                usize::from(self.auto),
+            )
+            .on_choose(move |index, _, _| chosen.set(Some(index))),
+        )
+    }
+}
+
+#[gpui_kit::test]
+fn a_segmented_control_reports_the_segment_clicked_and_its_chosen_one_is_selected(
+    cx: &mut TestAppContext,
+) {
+    init(cx, Desktop::new(false).env());
+    let chosen = Rc::new(Cell::new(None));
+    let seen = chosen.clone();
+    let (view, cx) = cx.add_window_view(move |_, _| Modes {
+        auto: false,
+        chosen: seen,
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+    cx.update(|window, _| {
+        assert_eq!(window.find("mode-ask").selected(), Some(true));
+        assert_eq!(window.find("mode-auto").selected(), Some(false));
+    });
+    // The chosen segment is not a click; the other one is.
+    cx.update(|window, cx| window.click("mode-ask", cx));
+    assert_eq!(chosen.get(), None);
+    cx.update(|window, cx| window.click("mode-auto", cx));
+    assert_eq!(chosen.get(), Some(1));
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.auto = true;
+            cx.notify();
+        })
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+    cx.update(|window, _| assert_eq!(window.find("mode-auto").selected(), Some(true)));
+}
+
+#[gpui_kit::test]
+fn a_segmented_control_slides_its_highlight_over_frames_and_then_stops(cx: &mut TestAppContext) {
+    init(cx, Desktop::new(false).env());
+    let (view, cx) = cx.add_window_view(|_, _| Modes {
+        auto: false,
+        chosen: Rc::default(),
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+    advance(cx, PANEL);
+    assert_eq!(pending_frames(cx), 0, "at rest nothing is drawn");
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.auto = true;
+            cx.notify();
+        })
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+    assert!(pending_frames(cx) > 0, "the highlight is moving");
+    advance(cx, PANEL * 2);
+    assert_eq!(pending_frames(cx), 0, "it stopped once it was there");
+}
+
+struct Enabling {
+    on: bool,
+}
+
+impl Render for Enabling {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .child(Button::quiet("go", "Go").disabled(!self.on))
+    }
+}
+
+#[gpui_kit::test]
+fn a_button_that_becomes_enabled_fades_to_it_and_then_stops(cx: &mut TestAppContext) {
+    init(cx, Desktop::new(false).env());
+    let (view, cx) = cx.add_window_view(|_, _| Enabling { on: false });
+    cx.update(|window, cx| window.render_frame(cx));
+    advance(cx, PANEL);
+    assert_eq!(
+        pending_frames(cx),
+        0,
+        "a button first drawn disabled is just disabled"
+    );
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.on = true;
+            cx.notify();
+        })
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+    assert!(pending_frames(cx) > 0, "it fades in");
+    advance(cx, HOVER * 3);
+    assert_eq!(pending_frames(cx), 0, "and stops");
 }
 
 // ── Rows of a list ─────────────────────────────────────────────────────────────────────────────

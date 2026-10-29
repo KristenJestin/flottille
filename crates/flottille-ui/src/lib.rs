@@ -17,6 +17,7 @@ pub mod motion;
 pub mod omarchy;
 pub mod reveal;
 pub mod rows;
+pub mod segmented;
 pub mod state;
 pub mod switch;
 pub mod theme;
@@ -43,6 +44,7 @@ pub use reveal::{
 pub use rows::{
     ListRow, TreeLevel, TreeRow, meta, section_label, toggle_id, tree_children, turning,
 };
+pub use segmented::Segmented;
 pub use state::{AgentState, Pill, StateIcon, Status};
 pub use switch::Switch;
 pub use theme::{Palette, palette};
