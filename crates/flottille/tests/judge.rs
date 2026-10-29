@@ -75,8 +75,14 @@ fn eventually(what: &str, check: impl Fn() -> bool) {
     }
 }
 
+/// No fake `sudo`, `doas`, `pkexec`, `run0` or `su` ran: the gate held the call.
+fn no_escalation(user: &User) {
+    assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
+}
+
 /// The request a held call made, as `approval.list` gives it.
 fn held(user: &User, answer: Answer) -> Value {
+    no_escalation(user);
     assert!(!answer.error, "an error: {}", answer.text);
     let number: u64 = answer
         .text
@@ -773,7 +779,9 @@ fn a_push_with_a_receive_pack_or_exec_is_base() {
 
 #[test]
 fn sudo_doas_and_pkexec_are_base_in_any_form() {
-    let user = User::with_fake_agent().with_allowing_judge();
+    let user = User::with_fake_agent()
+        .with_fake_escalation()
+        .with_allowing_judge();
     let (_, mcp, _) = session(&user, false);
 
     base_in_auto(
@@ -787,6 +795,7 @@ fn sudo_doas_and_pkexec_are_base_in_any_form() {
             line("nice sudo ls"),
         ],
     );
+    no_escalation(&user);
 }
 
 #[test]
