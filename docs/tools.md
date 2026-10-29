@@ -81,12 +81,17 @@ A path is resolved this way:
 - relative to the place's top, or to a repository's folder when the call names `repository`
   (one of the project's repositories by its path, else
   `refused: the project has no repository X: it has …`); `~` is the home folder;
-- `.` and `..` are taken on the text first: a path that is not under the place as written is
-  outside, and the disk is not looked at;
-- then the real path: every link is followed, at most 32; a missing file is its real folder and
-  its name, and a dangling link leads to its target. A link that leads out is outside; anything
-  that cannot be resolved is outside;
+- then the real path, on the disk, in the order the kernel takes it: every link is followed (at
+  most 40, as Linux does), and each `..` steps up from where the links before it led, so
+  `src/cfg/../x` is beside where `src/cfg` leads, never `src/x` when `src/cfg` is a link. A
+  missing file is its real folder and its name, and a dangling link leads to its target. Below
+  `/proc`, links are not followed: `/proc/self` is the reading program's own. A link that leads
+  out is outside, shown where it leads; a path that cannot be followed (more than 40 links, a
+  folder that cannot be read) is outside, and base (below);
 - containment is by segments: `..notes` is a name inside, `../x` a step out.
+
+The tools open the real path the gate checked. A run's program resolves its own paths: the gate's
+checks on the words of a run are a first filter, not a guarantee of what the program will open.
 
 Paths are shown relative to the place's top.
 
@@ -412,11 +417,17 @@ says who answers a call to judge (`docs/design.md` §7.1).
      logins (`.claude`, `.claude.json`, `.codex`, `.local/share/opencode`) wherever they sit along
      the path, `/etc/shadow`, `/etc/sudoers`, `/etc/sudoers.d`, and Flottille's own folders (data,
      configuration, state, runtime). Inside the place only what sits below it counts. A path
-     outside is checked as written and as it leads, through the links of its longest existing
-     part (a link anyone made, a configuration folder that is a link), against Flottille's
-     folders as named and resolved;
+     outside is checked as written and where it leads (a link anyone made, a configuration
+     folder that is a link, a `..` after a link), against Flottille's folders as named and
+     resolved;
+   - a write, a move or a removal of a folder above Flottille's own (`mv ~/.config ~/c.bak`, `rm
+     -r` of it, `fs_write` over it), which would take its configuration or data away: by a file
+     tool that writes, or by a run that is not known to only read;
    - a path in `/proc` through what of any process leads elsewhere on the disk: its `root`,
-     `cwd`, `fd`, `exe` or `map_files` (`/proc/self/root/…`, `/proc/<pid>/cwd/…`);
+     `cwd`, `fd`, `exe` or `map_files` (`/proc/self/root/…`, `/proc/<pid>/cwd/…`), under any
+     name it is reached by (`/dev/fd/3`, `/dev/stdin`, a link to `/proc/self/cwd`);
+   - a path that cannot be followed on the disk (more than 40 links, a folder that cannot be
+     read): where it leads is not known;
    - a recursive deletion that would take a repository: `rm` with `-r`, `-R` or `--recursive`,
      and `find` with `-delete` (or `-exec rm -r`), when a target, resolved from the folder the
      run starts in, is the place's folder, a repository's, or a folder above one (`rm -rf .`,

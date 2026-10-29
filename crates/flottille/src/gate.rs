@@ -301,6 +301,9 @@ fn files(call: &Call) -> Verdict {
                 path.shown
             ));
         }
+        if write && let Some(why) = above_own(call.own, path) {
+            found.base(why);
+        }
         if let Some(why) = process(call.groups, path) {
             found.base(why);
         } else if let Some(place) = sensitive(call.own, path) {
@@ -595,6 +598,13 @@ fn run(call: &Call) -> Verdict {
             "{} is not a command the rules know to only read",
             shown_words(call.words)
         ));
+    }
+    if !reads {
+        for path in &reached {
+            if let Some(why) = above_own(call.own, path) {
+                found.base(why);
+            }
+        }
     }
     found.verdict(Kind::Call)
 }
@@ -1080,11 +1090,8 @@ fn holds_secret(own: &[PathBuf], root: &Path, folder: &Path) -> Option<String> {
             let Ok(relative) = path.strip_prefix(root) else {
                 continue;
             };
-            let resolved = Resolved {
-                shown: relative.to_string_lossy().into_owned(),
-                path: path.clone(),
-                inside: true,
-            };
+            let resolved =
+                Resolved::real_inside(relative.to_string_lossy().into_owned(), path.clone());
             if let Some(place) = sensitive(own, &resolved) {
                 return Some(format!(
                     "which holds a sensitive file: {} ({place})",
@@ -1100,14 +1107,15 @@ fn holds_secret(own: &[PathBuf], root: &Path, folder: &Path) -> Option<String> {
     None
 }
 
-/// What a process's folder in `/proc` holds that leads elsewhere: its root, its working folder,
-/// its open files, its program, its mapped files.
-const LEADS_ELSEWHERE: [&str; 5] = ["root", "cwd", "fd", "exe", "map_files"];
-
-/// Why a path in `/proc` is base: what leads elsewhere (`LEADS_ELSEWHERE`) of any process, a
+/// Why a path in `/proc` is base: what leads elsewhere (`place::LEADS_ELSEWHERE`) of any process, a
 /// process's environment, with its secrets, or anything of a process that is not one of the
 /// agent's runs. The reading program's own (`self`) is its own.
-fn process(groups: &[u32], path: &Resolved) -> Option<String> {
+pub fn process(groups: &[u32], path: &Resolved) -> Option<String> {
+    // Where it leads is not known: through a process's folder under another name, or a path the
+    // disk would not let the gate follow.
+    if let Some(why) = &path.unfollowed {
+        return Some(format!("{} {why}", path.shown));
+    }
     if path.inside {
         return None;
     }
@@ -1119,7 +1127,7 @@ fn process(groups: &[u32], path: &Resolved) -> Option<String> {
     let process = parts.first()?;
     if let Some(part) = parts[1..]
         .iter()
-        .find(|part| LEADS_ELSEWHERE.contains(&part.as_str()))
+        .find(|part| place::LEADS_ELSEWHERE.contains(&part.as_str()))
     {
         return Some(format!(
             "{} goes through a process's {part}, which leads anywhere on the disk, Flottille's \
@@ -2366,15 +2374,10 @@ pub fn sensitive(own: &[PathBuf], path: &Resolved) -> Option<String> {
     if path.inside {
         return sensitive_names(Path::new(&path.shown));
     }
-    // A path outside is taken as written and as it leads, through the links of its longest
-    // existing part: a link anyone made, `/proc/self/root`, a configuration folder that is a link.
-    let real = place::real_path(&path.path).unwrap_or_else(|_| path.path.clone());
-    let own: Vec<PathBuf> = own
-        .iter()
-        .flat_map(|own| [Some(own.clone()), place::real_path(own).ok()])
-        .flatten()
-        .collect();
-    for path in [&path.path, &real] {
+    // A path outside is taken as written and where it leads (`path.path`, every link and `..`
+    // followed): a link anyone made, `/proc/self/root`, a configuration folder that is a link.
+    let own = own_folders(own);
+    for path in [&path.written, &path.path] {
         if own.iter().any(|own| path.starts_with(own)) {
             return Some("Flottille's own folder".into());
         }
@@ -2382,7 +2385,31 @@ pub fn sensitive(own: &[PathBuf], path: &Resolved) -> Option<String> {
             return Some((*system).into());
         }
     }
-    sensitive_names(&path.path).or_else(|| sensitive_names(&real))
+    sensitive_names(&path.written).or_else(|| sensitive_names(&path.path))
+}
+
+/// Flottille's own folders, as named and as they are on the disk.
+fn own_folders(own: &[PathBuf]) -> Vec<PathBuf> {
+    own.iter()
+        .flat_map(|own| [Some(own.clone()), place::real_path(own).ok()])
+        .flatten()
+        .collect()
+}
+
+/// Why writing over, moving or removing a path would take Flottille's own folders away: it is one
+/// of them, or a folder above one.
+fn above_own(own: &[PathBuf], path: &Resolved) -> Option<String> {
+    let own = own_folders(own);
+    [&path.written, &path.path]
+        .iter()
+        .any(|path| own.iter().any(|own| own.starts_with(path)))
+        .then(|| {
+            format!(
+                "{} holds Flottille's own folders (its configuration, its data): writing over, \
+                 moving or removing it takes them away",
+                path.shown
+            )
+        })
 }
 
 /// The sensitive place a path names along its parts, if any.
@@ -3536,6 +3563,154 @@ mod tests {
         std::os::unix::fs::symlink(base.join("home/.ssh"), base.join("elsewhere/keys")).unwrap();
         let path = base.join("elsewhere/keys/id_ed25519").display().to_string();
         assert!(base_class(&fixture.file("fs_read", &path)));
+    }
+
+    const FS_TOOLS: [&str; 4] = ["fs_read", "fs_list", "fs_write", "fs_edit"];
+
+    #[test]
+    fn dot_dot_after_a_link_is_taken_where_the_link_leads() {
+        let fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        let home = base.join("home");
+        std::fs::create_dir_all(home.join(".config/nvim")).unwrap();
+        std::fs::create_dir_all(home.join(".config/gh")).unwrap();
+        std::fs::write(home.join(".config/gh/hosts.yml"), "token").unwrap();
+        std::fs::create_dir_all(&fixture.own[0]).unwrap();
+        std::fs::create_dir_all(base.join("xdg/data/other")).unwrap();
+        // Links inside the place, and one outside it.
+        std::os::unix::fs::symlink(home.join(".config/nvim"), fixture.root.join("src/cfg"))
+            .unwrap();
+        std::os::unix::fs::symlink(base.join("xdg/data/other"), fixture.root.join("src/data"))
+            .unwrap();
+        std::fs::create_dir_all(base.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(home.join(".config/nvim"), base.join("elsewhere/cfg")).unwrap();
+        std::os::unix::fs::symlink(base.join("xdg/data/other"), base.join("elsewhere/data"))
+            .unwrap();
+        let outside = |path: &str| base.join("elsewhere").join(path).display().to_string();
+
+        for (path, place) in [
+            ("src/cfg/../gh/hosts.yml".to_owned(), "~/.config/gh"),
+            (outside("cfg/../gh/hosts.yml"), "~/.config/gh"),
+            (
+                "src/data/../flottille/judge.md".to_owned(),
+                "Flottille's own folder",
+            ),
+            (
+                outside("data/../flottille/judge.md"),
+                "Flottille's own folder",
+            ),
+        ] {
+            for tool in FS_TOOLS {
+                let verdict = fixture.file(tool, &path);
+                assert!(base_class(&verdict), "{tool} {path}: {verdict:?}");
+                assert!(
+                    reasons(&verdict).contains(place),
+                    "{tool} {path}: {verdict:?}"
+                );
+            }
+            let verdict = fixture.run(&format!("cat {path}"));
+            assert!(base_class(&verdict), "cat {path}: {verdict:?}");
+            assert!(reasons(&verdict).contains(place), "cat {path}: {verdict:?}");
+        }
+        // What the tools open is what the gate checked: where the link leads.
+        let resolved = fixture
+            .grant
+            .place
+            .resolve(&fixture.root, "src/cfg/../gh/hosts.yml");
+        assert!(!resolved.inside);
+        assert_eq!(resolved.path, home.join(".config/gh/hosts.yml"));
+        // A `..` that stays inside is still inside.
+        assert_eq!(fixture.file("fs_read", "src/../src/a.rs"), Verdict::Allow);
+    }
+
+    #[test]
+    fn a_path_that_cannot_be_followed_is_base() {
+        let fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        std::fs::create_dir_all(&fixture.own[0]).unwrap();
+        let chain = base.join("chain");
+        std::fs::create_dir_all(&chain).unwrap();
+        // 33 links, then 41 (Linux follows 40), ending in Flottille's own folder.
+        let link_chain = |name: &str, links: usize| {
+            let mut target = fixture.own[0].clone();
+            for n in (0..links).rev() {
+                let link = chain.join(format!("{name}{n}"));
+                std::os::unix::fs::symlink(&target, &link).unwrap();
+                target = link;
+            }
+            target.join("judge.md").display().to_string()
+        };
+        let long = link_chain("a", 33);
+        let longer = link_chain("b", 41);
+
+        for tool in FS_TOOLS {
+            let verdict = fixture.file(tool, &long);
+            assert!(base_class(&verdict), "{tool}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains("Flottille's own folder"),
+                "{tool}: {verdict:?}"
+            );
+            let verdict = fixture.file(tool, &longer);
+            assert!(base_class(&verdict), "{tool}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains("could not be followed"),
+                "{tool}: {verdict:?}"
+            );
+        }
+        for path in [&long, &longer] {
+            let verdict = fixture.run(&format!("cat {path}"));
+            assert!(base_class(&verdict), "{verdict:?}");
+        }
+    }
+
+    #[test]
+    fn a_link_into_proc_under_another_name_is_base() {
+        let fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        std::fs::create_dir_all(base.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink("/proc/self/cwd", base.join("elsewhere/here")).unwrap();
+        std::os::unix::fs::symlink("/proc/self/cwd", fixture.root.join("src/here")).unwrap();
+        let here = base.join("elsewhere/here/judge.md").display().to_string();
+        for path in ["/dev/fd/3", "/dev/stdin", &here, "src/here/judge.md"] {
+            for tool in FS_TOOLS {
+                let verdict = fixture.file(tool, path);
+                assert!(base_class(&verdict), "{tool} {path}: {verdict:?}");
+            }
+            let verdict = fixture.run(&format!("cat {path}"));
+            assert!(base_class(&verdict), "cat {path}: {verdict:?}");
+        }
+        // The reading program's own status is still its own.
+        assert!(!base_class(&fixture.run("cat /proc/self/status")));
+    }
+
+    #[test]
+    fn moving_or_removing_a_folder_above_flottille_s_own_is_base() {
+        let mut fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        let config = base.join("home/.config");
+        fixture.own = vec![config.join("flottille")];
+        std::fs::create_dir_all(config.join("flottille")).unwrap();
+        let shown = config.display();
+
+        for line in [
+            format!("mv {shown} {shown}.bak"),
+            format!("rm -r {}", base.join("home").display()),
+            format!("rm -r {shown}/../.config"),
+        ] {
+            let verdict = fixture.run(&line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains("Flottille's own folders"),
+                "{line}: {verdict:?}"
+            );
+        }
+        for path in [config.display().to_string(), "~/.config".to_owned()] {
+            let verdict = fixture.file("fs_write", &path);
+            assert!(base_class(&verdict), "{path}: {verdict:?}");
+        }
+        // Reading it is not taking it away.
+        assert!(to_judge(&fixture.run(&format!("ls {shown}"))));
+        assert!(to_judge(&fixture.file("fs_list", "~/.config")));
     }
 
     #[test]

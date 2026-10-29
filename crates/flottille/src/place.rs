@@ -1,9 +1,9 @@
 //! Where an agent works, and how the paths it names are resolved and contained
 //! (`docs/tools.md`, `docs/reference/hemera.md` §3 "Path resolution").
 //!
-//! "Outside" is decided on the text first: a path that is not under the place as written is never
-//! looked up. A path under it is then resolved on the disk, links followed (at most 32), and
-//! contained by its segments: `..notes` is a name inside, `../x` a step out.
+//! A path is resolved on the disk, links and `..` followed in the order the kernel follows them (at
+//! most 40 links), and contained by its segments: `..notes` is a name inside, `../x` a step out.
+//! `src/cfg/../x` is where `src/cfg` leads, then up: never `src/x` when `src/cfg` is a link.
 
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
@@ -11,8 +11,12 @@ use std::path::{Component, Path, PathBuf};
 
 use flottille_core::secrets;
 
-/// Links followed at most, resolving one path.
-const LINKS_MAX: usize = 32;
+/// Links followed at most, resolving one path: Linux follows 40.
+const LINKS_MAX: usize = 40;
+
+/// What a process's folder in `/proc` holds that leads elsewhere: its root, its working folder,
+/// its open files, its program, its mapped files.
+pub const LEADS_ELSEWHERE: [&str; 5] = ["root", "cwd", "fd", "exe", "map_files"];
 
 /// The place of an agent: its folder, the project's repositories in it, and what a command run
 /// there is given.
@@ -38,9 +42,28 @@ pub struct Place {
 pub struct Resolved {
     /// As the place shows it: relative to its folder when inside, `~/…` or absolute when not.
     pub shown: String,
-    /// Absolute: the real path when inside, the path as written when outside.
+    /// Absolute: the real path, every link and `..` followed, which the tools open; the path as
+    /// written when it cannot be followed (`unfollowed`).
     pub path: PathBuf,
     pub inside: bool,
+    /// Absolute, as written: `.` and `..` taken on the text. Checked by its names too.
+    pub written: PathBuf,
+    /// Why the path could not be followed on the disk, or the process's folder in `/proc` it goes
+    /// through, which leads anywhere: where it leads is not known.
+    pub unfollowed: Option<String>,
+}
+
+impl Resolved {
+    /// A path known to be inside, already real.
+    pub fn real_inside(shown: String, path: PathBuf) -> Resolved {
+        Resolved {
+            shown,
+            written: path.clone(),
+            path,
+            inside: true,
+            unfollowed: None,
+        }
+    }
 }
 
 impl Place {
@@ -94,41 +117,65 @@ impl Place {
             }
             _ => PathBuf::from(named),
         };
-        let written = lexical(&base.join(expanded));
-        let real_root = std::fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
-        if !written.starts_with(&self.root) && !written.starts_with(&real_root) {
-            return self.outside(written);
-        }
-        match real_path(&written) {
-            Ok(real) => match real.strip_prefix(&real_root) {
-                Ok(relative) => Resolved {
-                    shown: shown_inside(relative),
-                    path: real,
-                    inside: true,
-                },
-                // A link that leads out: outside, and shown where it leads.
-                Err(_) => self.outside(real),
-            },
-            // Anything that cannot be resolved is not taken for inside.
-            Err(_) => self.outside(written),
-        }
+        self.at(&base.join(expanded))
     }
 
-    fn outside(&self, path: PathBuf) -> Resolved {
-        Resolved {
-            shown: self.shown_outside(&path),
-            path,
+    /// An absolute path, resolved.
+    pub fn at(&self, joined: &Path) -> Resolved {
+        let written = lexical(joined);
+        let real_root = std::fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
+        let unfollowed = |why: String| Resolved {
+            shown: self.shown_outside(&written),
+            path: written.clone(),
             inside: false,
+            written: written.clone(),
+            unfollowed: Some(why),
+        };
+        match follow(joined) {
+            Ok(Followed {
+                through: Some(process),
+                ..
+            }) => unfollowed(format!(
+                "goes through {}, which leads anywhere on the disk",
+                process.display()
+            )),
+            Ok(Followed { path: real, .. }) => match real.strip_prefix(&real_root) {
+                Ok(relative) => Resolved {
+                    shown: shown_inside(relative),
+                    path: real.clone(),
+                    inside: true,
+                    written,
+                    unfollowed: None,
+                },
+                // A link that leads out: outside, and shown where it leads.
+                Err(_) => Resolved {
+                    shown: self.shown_outside(&real),
+                    path: real,
+                    inside: false,
+                    written,
+                    unfollowed: None,
+                },
+            },
+            // Anything that cannot be resolved is neither inside nor known.
+            Err(error) => unfollowed(format!("could not be followed on the disk ({error})")),
         }
     }
 
     /// A path outside the place, with the home folder as `~`.
     fn shown_outside(&self, path: &Path) -> String {
-        match self.home.as_deref().map(|home| path.strip_prefix(home)) {
-            Some(Ok(rest)) if rest.as_os_str().is_empty() => "~".into(),
-            Some(Ok(rest)) => format!("~/{}", rest.display()),
-            _ => path.display().to_string(),
+        let homes = self
+            .home
+            .iter()
+            .flat_map(|home| [Some(home.clone()), std::fs::canonicalize(home).ok()])
+            .flatten();
+        for home in homes {
+            match path.strip_prefix(&home) {
+                Ok(rest) if rest.as_os_str().is_empty() => return "~".into(),
+                Ok(rest) => return format!("~/{}", rest.display()),
+                Err(_) => {}
+            }
         }
+        path.display().to_string()
     }
 
     /// The values of the files holding secrets (`.env`, `.env.*`) at the top of the place and of
@@ -194,10 +241,26 @@ fn lexical(path: &Path) -> PathBuf {
     out
 }
 
+/// A path followed on the disk.
+pub struct Followed {
+    /// The real path; below a process's folder in `/proc`, as written from there.
+    pub path: PathBuf,
+    /// The first of a process's folders in `/proc` that leads elsewhere (`LEADS_ELSEWHERE`) the
+    /// path went through, under whatever name it was reached (`/dev/fd`, a link).
+    pub through: Option<PathBuf>,
+}
+
 /// The real path, every link followed (at most `LINKS_MAX`); a missing part and what follows it
 /// are taken as written, so a file about to be made resolves to its real folder and its name. A
 /// dangling link resolves to its target.
 pub fn real_path(path: &Path) -> std::io::Result<PathBuf> {
+    follow(path).map(|followed| followed.path)
+}
+
+/// `real_path`, saying which process's folder in `/proc` it went through. Below `/proc`, links
+/// are not followed: `/proc/self` is the reader's own, which is not Flottille's, and what a
+/// process's folder leads to is its own.
+pub fn follow(path: &Path) -> std::io::Result<Followed> {
     let mut pending: Vec<PathBuf> = path
         .components()
         .rev()
@@ -206,6 +269,7 @@ pub fn real_path(path: &Path) -> std::io::Result<PathBuf> {
     let mut real = PathBuf::from("/");
     let mut links = 0;
     let mut missing = false;
+    let mut through = None;
     while let Some(part) = pending.pop() {
         match part.components().next() {
             Some(Component::RootDir) => {
@@ -220,15 +284,20 @@ pub fn real_path(path: &Path) -> std::io::Result<PathBuf> {
             _ => {}
         }
         let next = real.join(&part);
-        if missing {
+        if missing || real.starts_with("/proc") {
             real = next;
+            if through.is_none() && leads_elsewhere(&real) {
+                through = Some(real.clone());
+            }
             continue;
         }
         match std::fs::symlink_metadata(&next) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 links += 1;
                 if links > LINKS_MAX {
-                    return Err(std::io::Error::other("too many links"));
+                    return Err(std::io::Error::other(format!(
+                        "more than {LINKS_MAX} links"
+                    )));
                 }
                 let target = std::fs::read_link(&next)?;
                 pending.extend(
@@ -246,7 +315,20 @@ pub fn real_path(path: &Path) -> std::io::Result<PathBuf> {
             Err(error) => return Err(error),
         }
     }
-    Ok(real)
+    Ok(Followed {
+        path: real,
+        through,
+    })
+}
+
+/// Whether a path is a process's folder in `/proc` that leads elsewhere, or below one.
+fn leads_elsewhere(path: &Path) -> bool {
+    let Ok(rest) = path.strip_prefix("/proc") else {
+        return false;
+    };
+    rest.components()
+        .skip(1)
+        .any(|part| LEADS_ELSEWHERE.contains(&part.as_os_str().to_string_lossy().as_ref()))
 }
 
 #[cfg(test)]
