@@ -5,6 +5,7 @@
 //! its request says what it changes in words. No argument names another project: only the user
 //! does that.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use flottille_core::commands::{self, Command};
@@ -15,6 +16,7 @@ use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
 use crate::mcp::{Grant, Outcome, arguments};
+use crate::place::{Place, Resolved};
 use crate::projects::{self, Failure};
 
 /// The tools of this module.
@@ -129,6 +131,91 @@ pub fn line_of<'a>(tool: &str, args: &'a Value) -> Option<&'a str> {
         ("setup", "add" | "edit") => args["step"]["run"].as_str(),
         _ => None,
     }
+}
+
+/// What a write of a task or a setup step leaves to run later without the gate, as the run of
+/// it will be: the task it runs (its name for a task or a task step, none for a `run` step),
+/// with the line and the repository the run takes, and whether it runs in each repository.
+pub struct Sets {
+    pub name: Option<String>,
+    pub task: Task,
+    pub each: bool,
+}
+
+/// What a write sets to run, `None` for a call that sets nothing or does not fit (the tool
+/// refuses it). For the gate, which judges setting it as running it.
+pub fn sets(tasks: &BTreeMap<String, Task>, tool: &str, args: &Value) -> Option<Sets> {
+    let action = args["action"].as_str()?;
+    match (tool, action) {
+        ("tasks", "add" | "edit") => {
+            let call: TasksCall = serde_json::from_value(args.clone()).ok()?;
+            let name = call.name.clone()?;
+            let was = match action {
+                "add" => Task {
+                    line: call.line.clone()?,
+                    repository: None,
+                    serve: false,
+                    check: false,
+                    read_only: false,
+                    ask_before_running: false,
+                    added_by: None,
+                },
+                _ => tasks.get(&name)?.clone(),
+            };
+            Some(Sets {
+                name: Some(name),
+                task: edited(&was, &call),
+                each: false,
+            })
+        }
+        ("setup", "add" | "edit") => {
+            let step: SetupStep = serde_json::from_value(args["step"].clone()).ok()?;
+            let (name, mut task) = match (&step.run, &step.task) {
+                (Some(line), _) => (
+                    None,
+                    Task {
+                        line: line.trim().to_owned(),
+                        repository: None,
+                        serve: false,
+                        check: false,
+                        read_only: false,
+                        ask_before_running: false,
+                        added_by: None,
+                    },
+                ),
+                (None, Some(name)) => (Some(name.clone()), tasks.get(name)?.clone()),
+                (None, None) => return None,
+            };
+            // Where the setup plays it (`workspaces.rs`): the step's repository, else the
+            // task's.
+            if step.repository.is_some() {
+                task.repository = step.repository.clone();
+            }
+            Some(Sets {
+                name,
+                task,
+                each: step.for_each_repository,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The folders a run of what a write sets would start in, resolved in this place: a workspace
+/// created later is laid out as the agent's own, or the project folder in `main`. None when it
+/// names no repository of the project (the tool refuses it).
+pub fn folders(place: &Place, sets: &Sets) -> Vec<Resolved> {
+    if sets.each {
+        return place
+            .repositories
+            .iter()
+            .map(|(_, folder)| place.resolve(folder, "."))
+            .collect();
+    }
+    place
+        .base(sets.task.repository.as_deref())
+        .map(|(_, base)| vec![place.resolve(base, ".")])
+        .unwrap_or_default()
 }
 
 /// A call checked before the gate is asked: what a write changes, in words (nothing for a read),

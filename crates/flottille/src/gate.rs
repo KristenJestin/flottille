@@ -5,6 +5,7 @@
 //! is not a permission but a call that cannot be made as it is: shell syntax, a malformed call,
 //! a login printed, the daemon driven from a command.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use flottille_core::approval::Kind;
@@ -26,8 +27,12 @@ pub struct Call<'a> {
     /// The paths the call reaches, resolved: for a run, the folder it runs in first. Empty for a
     /// call that names none, or names one that cannot be read (the tool refuses it).
     pub paths: &'a [Resolved],
-    /// The task a run names, with its name.
+    /// The task a run names, with its name. For a write of a task or a setup step, the task it
+    /// leaves to run (as the write leaves it), and `words`, `paths` (each folder it would start
+    /// in) and `pushed` are those of that run.
     pub command: Option<(&'a str, &'a Task)>,
+    /// The project's tasks: a line one of them holds keeps its rules under any other name.
+    pub tasks: &'a BTreeMap<String, Task>,
     /// The project's never list; `None` when the project's configuration cannot be read.
     pub never: Option<&'a [Vec<String>]>,
     /// Flottille's own folders (its data, configuration, state): sensitive places.
@@ -216,36 +221,47 @@ pub fn decide(call: &Call) -> Verdict {
         } else {
             found.judge(crate::actions::asked(family));
         }
+        if let Some(line) = crate::actions::line_of(call.tool, call.args)
+            && let Err(why) = flottille_core::command::split_line(line)
+        {
+            return Verdict::Deny(why);
+        }
         // A line a task or a setup step holds runs later without this gate (a task in a
         // workspace is harmless, a workspace's setup runs on its own): setting it is judged as
-        // running it, base when that would be.
-        if let Some(line) = crate::actions::line_of(call.tool, call.args) {
-            let words = match flottille_core::command::split_line(line) {
-                Ok(words) => words,
-                Err(why) => return Verdict::Deny(why),
+        // running it, in each folder it would start in, base when that would be.
+        if !call.words.is_empty() {
+            let args = match call.command {
+                Some((name, _)) => serde_json::json!({"task": name}),
+                None => serde_json::json!({"line": shown_words(call.words)}),
             };
-            let args = serde_json::json!({"line": line});
-            let as_run = run(&Call {
-                tool: "run",
-                args: &args,
-                words: &words,
-                paths: &[],
-                command: None,
-                ..*call
-            });
-            match as_run {
-                Verdict::Deny(why) => return Verdict::Deny(why),
-                Verdict::Ask(ask) => {
-                    for reason in ask.reasons {
-                        let reason = format!("the line it sets, {}: {reason}", shown_words(&words));
-                        match ask.class {
-                            Class::Base => found.base(reason),
-                            Class::Judge => found.judge(reason),
+            let folders: Vec<&[Resolved]> = match call.paths {
+                [] => vec![&[]],
+                paths => paths.iter().map(std::slice::from_ref).collect(),
+            };
+            for paths in folders {
+                match run(&Call {
+                    tool: "run",
+                    args: &args,
+                    paths,
+                    ..*call
+                }) {
+                    Verdict::Deny(why) => return Verdict::Deny(why),
+                    Verdict::Ask(ask) => {
+                        for reason in ask.reasons {
+                            let reason =
+                                format!("the line it sets, {}: {reason}", shown_words(call.words));
+                            match ask.class {
+                                Class::Base => found.base(reason),
+                                Class::Judge => found.judge(reason),
+                            }
                         }
                     }
+                    Verdict::Allow => {}
                 }
-                Verdict::Allow => {}
             }
+        }
+        for why in later(call) {
+            found.base(why);
         }
         return found.verdict(Kind::Action);
     }
@@ -340,6 +356,112 @@ fn forge_write(call: &Call) -> Verdict {
     found.verdict(Kind::Call)
 }
 
+/// The tasks whose line is `words`.
+fn holding<'a>(
+    tasks: &'a BTreeMap<String, Task>,
+    words: &'a [String],
+) -> impl Iterator<Item = (&'a str, &'a Task)> {
+    tasks
+        .iter()
+        .filter(move |(_, task)| {
+            flottille_core::command::split_line(&task.line).is_ok_and(|line| line == words)
+        })
+        .map(|(name, task)| (name.as_str(), task))
+}
+
+/// Why a write of a task or a setup step is base for what it leaves to happen later without
+/// this gate, beside the line it sets: what only the user's word may say of a task, and a step
+/// that reaches the user's checkout or copies a secret into every workspace.
+fn later(call: &Call) -> Vec<String> {
+    let args = call.args;
+    let mut why = Vec::new();
+    match (call.tool, args["action"].as_str()) {
+        ("tasks", Some(action @ ("add" | "edit"))) => {
+            if action == "edit" && args["ask_before_running"] == false {
+                why.push(
+                    "it turns off asking before the task runs: only the user lets a task run \
+                     unasked"
+                        .into(),
+                );
+            }
+            for (flag, said) in [("check", "is a check"), ("read_only", "changes nothing")] {
+                if args[flag] == true {
+                    why.push(format!(
+                        "it says the task {said}, which the window shows as the user's word"
+                    ));
+                }
+            }
+            if let Some((name, task)) = call.command
+                && !task.ask_before_running
+                && let Some((other, _)) = holding(call.tasks, call.words)
+                    .find(|(other, task)| *other != name && task.ask_before_running)
+            {
+                why.push(format!(
+                    "its line is that of the task {other}, marked to ask before it runs, which a \
+                     copy under another name would not"
+                ));
+            }
+        }
+        ("setup", Some("add" | "edit")) => {
+            let step = &args["step"];
+            if step.get("link").is_some() || step.get("root_entries").is_some() {
+                why.push(
+                    "a link step makes what is written in each workspace reach the user's \
+                     checkout"
+                        .into(),
+                );
+            }
+            let globs = step["copy"].as_array().into_iter().flatten();
+            for glob in globs.filter_map(Value::as_str) {
+                if let Some(name) = sensitive_glob(glob) {
+                    why.push(format!(
+                        "it copies {glob} into every workspace, which matches a sensitive name \
+                         ({name}): only the user chooses to spread it"
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+    why
+}
+
+/// Names a `copy` glob is tried against for keys, beside the sensitive places.
+const KEY_NAMES: [&str; 6] = [
+    "server.pem",
+    "server.key",
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+    "id_dsa",
+];
+
+/// The sensitive name a setup's `copy` glob may match (`glob.rs` matches it part by part): a
+/// `.env` but a template, a key, a sensitive place or a folder holding one.
+fn sensitive_glob(glob: &str) -> Option<String> {
+    use flottille_core::glob::matches;
+    let parts: Vec<&str> = glob.split('/').filter(|part| !part.is_empty()).collect();
+    for (at, part) in parts.iter().enumerate() {
+        let template = TEMPLATES.iter().any(|t| part.ends_with(t));
+        if matches(part, ".env")
+            || matches(part, ".env.local")
+            || (part.starts_with(".env.") && !template)
+        {
+            return Some(".env".into());
+        }
+        if let Some(key) = KEY_NAMES.iter().find(|key| matches(part, key)) {
+            return Some((*key).into());
+        }
+        for place in SENSITIVE {
+            let names: Vec<&str> = place.split('/').collect();
+            if names.iter().zip(&parts[at..]).all(|(n, p)| matches(p, n)) {
+                return Some(place.into());
+            }
+        }
+    }
+    None
+}
+
 /// `run`: a task in a workspace, and a known read-only line inside the
 /// place, are harmless.
 fn run(call: &Call) -> Verdict {
@@ -365,9 +487,15 @@ fn run(call: &Call) -> Verdict {
     let mut found = Found::default();
     match call.never {
         Some(never) => {
-            let task = call.command.map(|(name, _)| name);
+            // A never-listed task's line is never allowed under another name either.
+            let names: Vec<&str> = call
+                .command
+                .map(|(name, _)| name)
+                .into_iter()
+                .chain(holding(call.tasks, call.words).map(|(name, _)| name))
+                .collect();
             if let Some(entry) = never.iter().find(|entry| {
-                (entry.len() == 1 && task == Some(entry[0].as_str()))
+                (entry.len() == 1 && names.contains(&entry[0].as_str()))
                     || layers.iter().any(|layer| starts_anywhere(layer, entry))
             }) {
                 found.base(format!(
@@ -2376,17 +2504,34 @@ mod tests {
                     let (line, command) = match args["task"].as_str() {
                         Some(name) => {
                             let (name, command) = self.commands.get_key_value(name).unwrap();
-                            (command.line.clone(), Some((name.as_str(), command)))
+                            (command.line.clone(), Some(Ok((name.as_str(), command))))
                         }
                         None => (args["line"].as_str().unwrap().to_owned(), None),
                     };
                     let words = flottille_core::command::split_line(&line).unwrap_or_default();
                     (words, vec![place.resolve(&self.root, ".")], command)
                 }
-                _ => match args["path"].as_str() {
-                    Some(path) => (Vec::new(), vec![place.resolve(&self.root, path)], None),
-                    None => (Vec::new(), Vec::new(), None),
+                // As `mcp::classify` resolves what a write sets.
+                _ => match crate::actions::sets(&self.commands, tool, &args) {
+                    Some(sets) => (
+                        flottille_core::command::split_line(&sets.task.line).unwrap_or_default(),
+                        crate::actions::folders(place, &sets),
+                        sets.name.map(|name| Err((name, sets.task))),
+                    ),
+                    None => match args["path"].as_str() {
+                        Some(path) => (Vec::new(), vec![place.resolve(&self.root, path)], None),
+                        None => (Vec::new(), Vec::new(), None),
+                    },
                 },
+            };
+            let owned;
+            let command = match command {
+                Some(Ok(command)) => Some(command),
+                Some(Err((name, task))) => {
+                    owned = (name, task);
+                    Some((owned.0.as_str(), &owned.1))
+                }
+                None => None,
             };
             decide(&Call {
                 grant: &self.grant,
@@ -2395,6 +2540,7 @@ mod tests {
                 words: &words,
                 paths: &paths,
                 command,
+                tasks: &self.commands,
                 never,
                 own: &self.own,
                 pushed: self.pushed,
@@ -2659,14 +2805,15 @@ mod tests {
 
     #[test]
     fn a_line_a_task_or_a_setup_step_sets_is_judged_as_a_run_of_it() {
-        let fixture = Fixture::workspace();
+        let fixture = Fixture::workspace().command("build", "cargo build", |_| {});
         let task = |line: &str| json!({"action": "add", "name": "build", "line": line});
         let step = |line: &str| json!({"action": "add", "step": {"run": line}});
         // A harmless line is judged as the write it is.
         let verdict = fixture.judge("tasks", task("cargo build"), Some(&fixture.never));
         assert!(to_judge(&verdict), "{verdict:?}");
-        // A line that would be judged to run is judged to set, said as the line it sets.
-        let verdict = fixture.judge("tasks", task("git commit -m x"), Some(&fixture.never));
+        // A line that would be judged to run as a task is judged to set, said as the line it
+        // sets.
+        let verdict = fixture.judge("tasks", task("sh run.sh"), Some(&fixture.never));
         assert!(to_judge(&verdict), "{verdict:?}");
         assert!(
             reasons(&verdict).contains("the line it sets"),
@@ -2697,12 +2844,44 @@ mod tests {
             Some(&fixture.never)
         )));
         // A step that sets no line is judged for what it does.
-        let copy = json!({"action": "add", "step": {"copy": [".env"]}});
+        let copy = json!({"action": "add", "step": {"copy": ["dist"]}});
         assert!(to_judge(&fixture.judge(
             "setup",
             copy,
             Some(&fixture.never)
         )));
+    }
+
+    #[test]
+    fn a_copy_glob_is_sensitive_when_it_matches_a_secret_s_name_but_a_template_is_not() {
+        for glob in [
+            ".env",
+            ".env*",
+            ".env.*",
+            "config/.env.production",
+            "*.pem",
+            "certs/*.key",
+            "id_*",
+            "*",
+            ".ssh",
+            ".npmrc",
+            "home/.netrc",
+            ".docker/*.json",
+            ".config",
+        ] {
+            assert!(sensitive_glob(glob).is_some(), "{glob}");
+        }
+        for glob in [
+            ".env.example",
+            ".env.sample",
+            "README.md",
+            "dist",
+            "node_modules",
+            "*.lock",
+            ".config/app.toml",
+        ] {
+            assert_eq!(sensitive_glob(glob), None, "{glob}");
+        }
     }
 
     #[test]

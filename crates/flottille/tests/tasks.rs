@@ -164,7 +164,7 @@ fn a_task_a_root_adds_edits_or_removes_is_held_then_written_on_approval() {
 
     let number = held(mcp.call(
         "tasks",
-        json!({"action": "add", "name": "say", "line": "./say.sh", "check": true}),
+        json!({"action": "add", "name": "say", "line": "./say.sh", "repository": "."}),
     ));
     let asked = request(&user, number);
     assert_eq!(asked["kind"], "action");
@@ -172,25 +172,25 @@ fn a_task_a_root_adds_edits_or_removes_is_held_then_written_on_approval() {
     assert!(
         asked["says"]
             .to_string()
-            .contains("Add the task say: `./say.sh` (a check)"),
+            .contains("Add the task say: `./say.sh` (in .)"),
         "{asked}"
     );
     assert!(!file(&user).contains("[tasks.say]"));
     approve(&user, number);
     let text = file(&user);
     assert!(text.contains("[tasks.say]"), "{text}");
-    assert!(text.contains("check = true"), "{text}");
+    assert!(text.contains("repository = \".\""), "{text}");
 
     let number = held(mcp.call(
         "tasks",
-        json!({"action": "edit", "name": "say", "check": false, "serve": true}),
+        json!({"action": "edit", "name": "say", "repository": null, "serve": true}),
     ));
     let says = request(&user, number)["says"].to_string();
-    assert!(says.contains("It was: `./say.sh` (a check)"), "{says}");
+    assert!(says.contains("It was: `./say.sh` (in .)"), "{says}");
     approve(&user, number);
     let text = file(&user);
     assert!(
-        text.contains("serve = true") && !text.contains("check"),
+        text.contains("serve = true") && !text.contains("repository"),
         "{text}"
     );
 
@@ -207,8 +207,8 @@ fn a_setup_step_is_added_moved_edited_and_removed_on_approval() {
     let (_, mcp) = root(&user);
 
     for step in [
-        json!({"copy": [".env"]}),
-        json!({"link": "node_modules", "for_each_repository": true}),
+        json!({"copy": ["say.sh"]}),
+        json!({"copy": ["dist"], "for_each_repository": true}),
     ] {
         let number = held(mcp.call("setup", json!({"action": "add", "step": step})));
         assert_eq!(request(&user, number)["class"], "judge");
@@ -216,26 +216,26 @@ fn a_setup_step_is_added_moved_edited_and_removed_on_approval() {
     }
     let number = held(mcp.call("setup", json!({"action": "move", "number": 2, "to": 1})));
     let says = request(&user, number)["says"].to_string();
-    assert!(says.contains("link node_modules"), "{says}");
+    assert!(says.contains("copy dist"), "{says}");
     approve(&user, number);
     let text = file(&user);
     assert!(
-        text.find("link = ").unwrap() < text.find("copy = ").unwrap(),
+        text.find("\"dist\"").unwrap() < text.find("\"say.sh\"").unwrap(),
         "{text}"
     );
 
     let number = held(mcp.call(
         "setup",
-        json!({"action": "edit", "number": 2, "step": {"copy": [".env", ".env.local"]}}),
+        json!({"action": "edit", "number": 2, "step": {"copy": ["say.sh", "docs"]}}),
     ));
     approve(&user, number);
-    assert!(file(&user).contains(r#"".env.local""#), "{}", file(&user));
+    assert!(file(&user).contains(r#""docs""#), "{}", file(&user));
 
     let number = held(mcp.call("setup", json!({"action": "remove", "number": 1})));
     approve(&user, number);
     let text = file(&user);
     assert!(
-        !text.contains("node_modules") && text.contains("[[setup]]"),
+        !text.contains("dist") && text.contains("[[setup]]"),
         "{text}"
     );
 
@@ -427,4 +427,233 @@ fn the_old_tool_names_still_work_under_their_new_ones() {
     let status = done(mcp.call("commands_status", json!({"run": run})));
     assert!(status.contains("second"), "{status}");
     assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
+}
+
+/// A user whose sessions start in Auto with a judge that allows every call to judge: what is
+/// still held is base.
+fn judged_user() -> User {
+    User::with_fake_agent()
+        .with_fake_escalation()
+        .with_allowing_judge()
+}
+
+/// The request a held call made is base, with a reason holding `why`.
+fn base_held(user: &User, answer: Answer, why: &str) {
+    let number = held(answer);
+    let asked = request(user, number);
+    assert_eq!(asked["class"], "base", "{asked}");
+    assert!(asked["reasons"].to_string().contains(why), "{why}: {asked}");
+}
+
+/// The project's never list becomes `never`, written as the user would.
+fn never(user: &User, never: &str) {
+    let file = user.project_file("app");
+    let text: String = std::fs::read_to_string(&file)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with("never"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    std::fs::write(&file, format!("never = {never}\n{text}")).unwrap();
+}
+
+#[test]
+fn an_agent_in_auto_setting_a_line_that_copies_a_home_key_is_base_for_a_task_and_a_step() {
+    let user = judged_user();
+    project(&user);
+    let key = user.path("home/.ssh/id_ed25519");
+    std::fs::create_dir_all(key.parent().unwrap()).unwrap();
+    std::fs::write(&key, "invented\n").unwrap();
+    let line = format!("cp {} k.txt", key.display());
+    let (_, mcp) = root(&user);
+
+    base_held(
+        &user,
+        mcp.call("setup", json!({"action": "add", "step": {"run": line}})),
+        ".ssh",
+    );
+    base_held(
+        &user,
+        mcp.call(
+            "tasks",
+            json!({"action": "add", "name": "steal", "line": line}),
+        ),
+        ".ssh",
+    );
+    assert!(!file(&user).contains("id_ed25519"), "{}", file(&user));
+    assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
+}
+
+#[test]
+fn a_setup_step_naming_a_never_listed_or_force_pushing_task_is_base() {
+    let user = judged_user();
+    project(&user);
+    user.call("task.add", add_say()).unwrap();
+    user.call(
+        "task.add",
+        json!({"project": "app", "name": "ship", "line": "git push --force origin main"}),
+    )
+    .unwrap();
+    never(&user, r#"[["say"]]"#);
+    let (_, mcp) = root(&user);
+
+    base_held(
+        &user,
+        mcp.call("setup", json!({"action": "add", "step": {"task": "say"}})),
+        "never list holds say",
+    );
+    base_held(
+        &user,
+        mcp.call("setup", json!({"action": "add", "step": {"task": "ship"}})),
+        "the line it sets",
+    );
+    assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
+}
+
+#[test]
+fn a_task_cloning_a_never_listed_or_ask_before_running_task_is_base_to_set_and_to_run() {
+    let user = judged_user();
+    project(&user);
+    user.call("task.add", add_say()).unwrap();
+    user.call(
+        "task.add",
+        json!({"project": "app", "name": "careful", "line": "./say.sh first",
+               "ask_before_running": true}),
+    )
+    .unwrap();
+    // The user's own copy of the never-listed line, under another name.
+    user.call(
+        "task.add",
+        json!({"project": "app", "name": "again", "line": "./say.sh"}),
+    )
+    .unwrap();
+    never(&user, r#"[["say"]]"#);
+    let (_, mcp) = root(&user);
+
+    base_held(
+        &user,
+        mcp.call(
+            "tasks",
+            json!({"action": "add", "name": "copy", "line": "./say.sh"}),
+        ),
+        "never list holds say",
+    );
+    base_held(
+        &user,
+        mcp.call(
+            "tasks",
+            json!({"action": "add", "name": "hasty", "line": "./say.sh first"}),
+        ),
+        "the task careful",
+    );
+    // Its copy still asks: allowed as a task like the original would.
+    done(mcp.call(
+        "tasks",
+        json!({"action": "add", "name": "fine", "line": "./say.sh first",
+               "ask_before_running": true}),
+    ));
+    base_held(
+        &user,
+        mcp.call("run", json!({"task": "again"})),
+        "never list holds say",
+    );
+    assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
+}
+
+#[test]
+fn turning_off_asking_before_a_task_runs_is_base() {
+    let user = judged_user();
+    project(&user);
+    user.call(
+        "task.add",
+        json!({"project": "app", "name": "careful", "line": "./say.sh",
+               "ask_before_running": true}),
+    )
+    .unwrap();
+    let (_, mcp) = root(&user);
+
+    base_held(
+        &user,
+        mcp.call(
+            "tasks",
+            json!({"action": "edit", "name": "careful", "ask_before_running": false}),
+        ),
+        "asking before the task runs",
+    );
+}
+
+#[test]
+fn an_agent_adding_a_link_or_a_root_entries_step_is_base() {
+    let user = judged_user();
+    project(&user);
+    let (_, mcp) = root(&user);
+
+    for step in [
+        json!({"link": "node_modules"}),
+        json!({"root_entries": true}),
+    ] {
+        base_held(
+            &user,
+            mcp.call("setup", json!({"action": "add", "step": step})),
+            "the user's checkout",
+        );
+    }
+    user.call(
+        "setup.add",
+        json!({"project": "app", "step": {"copy": [".env.example"]}}),
+    )
+    .unwrap();
+    base_held(
+        &user,
+        mcp.call(
+            "setup",
+            json!({"action": "edit", "number": 1, "step": {"link": "data"}}),
+        ),
+        "the user's checkout",
+    );
+}
+
+#[test]
+fn a_copy_step_whose_glob_matches_a_sensitive_name_is_base() {
+    let user = judged_user();
+    project(&user);
+    let (_, mcp) = root(&user);
+
+    for glob in [".env", ".env*", "*.pem", "config/.npmrc", ".ssh"] {
+        base_held(
+            &user,
+            mcp.call(
+                "setup",
+                json!({"action": "add", "step": {"copy": ["README.md", glob]}}),
+            ),
+            "sensitive",
+        );
+    }
+    // A template is no secret: judged, and the judge allows it.
+    let added = done(mcp.call(
+        "setup",
+        json!({"action": "add", "step": {"copy": [".env.example"]}}),
+    ));
+    assert!(added.contains("copy .env.example"), "{added}");
+}
+
+#[test]
+fn an_agent_marking_a_task_a_check_or_read_only_is_base() {
+    let user = judged_user();
+    project(&user);
+    user.call(
+        "task.add",
+        json!({"project": "app", "name": "say", "line": "./say.sh"}),
+    )
+    .unwrap();
+    let (_, mcp) = root(&user);
+
+    for (flag, why) in [("check", "a check"), ("read_only", "changes nothing")] {
+        let mut add = json!({"action": "add", "name": format!("new-{flag}"), "line": "./say.sh x"});
+        add[flag] = true.into();
+        base_held(&user, mcp.call("tasks", add), why);
+        let mut edit = json!({"action": "edit", "name": "say"});
+        edit[flag] = true.into();
+        base_held(&user, mcp.call("tasks", edit), why);
+    }
 }

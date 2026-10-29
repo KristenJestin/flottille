@@ -9,7 +9,7 @@
 //! and calls only the tools of that agent, in the order frozen in it. A call with a call key
 //! (`claudecode/toolUseId`) is played once: a retry waits for the first and gets its answer.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
 use std::io::Read;
 use std::sync::{Arc, Mutex};
@@ -40,6 +40,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::VERSION;
+use crate::actions::Sets;
 use crate::approvals;
 use crate::daemon::Daemon;
 use crate::deliveries;
@@ -1296,20 +1297,35 @@ async fn played(
 /// The gate's verdict on a call of one of the agent's tools.
 pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gate::Verdict {
     let project = projects::load_project(daemon, &grant.place.project).ok();
-    let (paths, words, command) = reached(daemon, &grant.place, tool, args);
-    // A line equal to a task's is that task, with its own flags.
-    let command = match command.as_deref() {
-        Some(name) => project
-            .as_ref()
-            .and_then(|project| project.tasks.get_key_value(name)),
-        None if !words.is_empty() => project.as_ref().and_then(|project| {
-            project.tasks.iter().find(|(_, command)| {
-                flottille_core::command::split_line(&command.line).is_ok_and(|line| line == words)
+    let no_tasks = BTreeMap::new();
+    let tasks = project.as_ref().map_or(&no_tasks, |project| &project.tasks);
+    // A write of a task or a setup step is judged as the run it leaves for later, resolved the
+    // way that run will be.
+    let sets =
+        crate::actions::family(tool, args).and_then(|_| crate::actions::sets(tasks, tool, args));
+    let (paths, words, command) = match &sets {
+        Some(sets) => (
+            crate::actions::folders(&grant.place, sets),
+            flottille_core::command::split_line(&sets.task.line).unwrap_or_default(),
+            sets.name.clone(),
+        ),
+        None => reached(daemon, &grant.place, tool, args),
+    };
+    // A line equal to a task's is that task, with its own flags; a write's task is as the write
+    // leaves it.
+    let command = match (&sets, command.as_deref()) {
+        (Some(Sets { task, .. }), Some(name)) => Some((name, task)),
+        (_, Some(name)) => tasks
+            .get_key_value(name)
+            .map(|(name, task)| (name.as_str(), task)),
+        (_, None) if !words.is_empty() => tasks
+            .iter()
+            .find(|(_, task)| {
+                flottille_core::command::split_line(&task.line).is_ok_and(|line| line == words)
             })
-        }),
-        None => None,
-    }
-    .map(|(name, command)| (name.as_str(), command));
+            .map(|(name, task)| (name.as_str(), task)),
+        (_, None) => None,
+    };
     let paths_of = &daemon.paths;
     let own = [
         paths_of.data.clone(),
@@ -1322,7 +1338,7 @@ pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gat
     let place = &grant.place;
     let repository = paths
         .first()
-        .filter(|_| tool == "run")
+        .filter(|_| tool == "run" || sets.is_some())
         .and_then(|folder| {
             place
                 .repositories
@@ -1348,6 +1364,7 @@ pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gat
         words: &words,
         paths: &paths,
         command,
+        tasks,
         never: project.as_ref().map(|project| project.never.as_slice()),
         own: &own,
         pushed,
