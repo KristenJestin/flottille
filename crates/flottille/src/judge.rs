@@ -278,7 +278,7 @@ fn compose(
             "\n## The session's first message, written by agent {} when it started this session \
              (an agent's words, not the user's)\n\n<agent_message>\n{}\n</agent_message>\n",
             escaped(by),
-            escaped(&mcp::masked(&mcp::cut(brief, MESSAGE_CHARS), place))
+            escaped(&mcp::masked(&mcp::cut(brief, WHOLE_CHARS), place))
         ));
     }
     text.push_str("\nAnswer with the JSON object only, once you have read the user's messages.\n");
@@ -627,6 +627,21 @@ mod tests {
         let users = prompt.rfind("## The user's last messages").unwrap();
         assert!(prompt.find("<agent_message>").unwrap() < users, "{prompt}");
         assert!(prompt[users..].contains("(none)"), "{prompt}");
+    }
+
+    #[test]
+    fn a_session_s_first_message_is_given_to_the_judge_whole() {
+        let brief = format!("{}END", "x".repeat(WHOLE_CHARS - 3));
+        let prompt = compose(
+            &place(),
+            "tickets",
+            &json!({"action": "close", "ticket": "#1"}),
+            &["it closes a ticket on the tracker".into()],
+            &[],
+            Some(("0123456789ab", &brief)),
+            &[],
+        );
+        assert!(prompt.contains(&brief), "the first message was cut");
     }
 
     #[test]
