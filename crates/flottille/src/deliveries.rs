@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use flottille_core::agent::{AgentState, new_id};
 use flottille_core::approval::{self, Delivery};
+use flottille_core::paths::Paths;
 use flottille_core::secrets;
 use flottille_core::store::{AgentChange, now_ms};
 
@@ -193,7 +194,20 @@ pub fn deliver(
     body: &str,
     urgency: &str,
 ) -> Option<String> {
-    let id = store(daemon, agent, kind, id, body, urgency)?;
+    deliver_with_images(daemon, agent, kind, id, body, urgency, Vec::new())
+}
+
+/// `deliver`, with the images of the message: names of files of the agent's folder of images.
+pub fn deliver_with_images(
+    daemon: &Arc<Daemon>,
+    agent: &str,
+    kind: &str,
+    id: Option<String>,
+    body: &str,
+    urgency: &str,
+    images: Vec<String>,
+) -> Option<String> {
+    let id = store(daemon, agent, kind, id, body, urgency, images)?;
     ring(daemon, agent);
     Some(id)
 }
@@ -206,7 +220,15 @@ pub fn queue(
     id: Option<String>,
     body: &str,
 ) -> Option<String> {
-    store(daemon, agent, kind, id, body, approval::BETWEEN_TURNS)
+    store(
+        daemon,
+        agent,
+        kind,
+        id,
+        body,
+        approval::BETWEEN_TURNS,
+        Vec::new(),
+    )
 }
 
 fn store(
@@ -216,6 +238,7 @@ fn store(
     id: Option<String>,
     body: &str,
     urgency: &str,
+    images: Vec<String>,
 ) -> Option<String> {
     let id = id.unwrap_or_else(|| format!("{kind}-{}", new_id().unwrap_or_default()));
     let delivery = Delivery {
@@ -227,6 +250,7 @@ fn store(
         state: "queued".into(),
         created_at: 0,
         sent_at: None,
+        images,
     };
     if let Err(error) = daemon.write(|store| Ok(((), store.deliver(&delivery)?))) {
         eprintln!("flottille daemon: agent {agent}: a delivery cannot be stored: {error}");
@@ -259,9 +283,16 @@ pub fn ring(daemon: &Arc<Daemon>, agent: &str) {
     agents::order(daemon, agent, Order::Ring);
 }
 
+/// A prompt as it is sent: the text of the deliveries taken, and the images they carry.
+pub struct Prompt {
+    pub text: String,
+    /// Names of files of the agent's folder of images.
+    pub images: Vec<String>,
+}
+
 /// The agent's queued deliveries as one prompt, taken: those that start a session first, then the
 /// others in their order. `None` when there is none, or the agent has ended.
-pub fn pump(daemon: &Daemon, agent: &str) -> Option<String> {
+pub fn pump(daemon: &Daemon, agent: &str) -> Option<Prompt> {
     let found = daemon.read(|store| store.agent(agent)).ok()??;
     if found.state.is_final() {
         return None;
@@ -280,6 +311,7 @@ pub fn pump(daemon: &Daemon, agent: &str) -> Option<String> {
     };
     queued.sort_by_key(|d| rank(&d.kind));
     daemon.notes.unpin(agent);
+    queued.truncate(fitting_images(daemon, agent, &queued));
     let ids: Vec<String> = queued.iter().map(|d| d.id.clone()).collect();
     let moved = daemon
         .write(|store| store.move_deliveries(agent, &ids, "queued", "sending", "prompt"))
@@ -290,13 +322,83 @@ pub fn pump(daemon: &Daemon, agent: &str) -> Option<String> {
     }
     let kinds: Vec<String> = taken.iter().map(|d| d.kind.clone()).collect();
     took(daemon, agent, &kinds);
-    Some(
-        taken
+    Some(Prompt {
+        images: taken.iter().flat_map(|d| d.images.clone()).collect(),
+        text: taken
             .into_iter()
             .map(render)
             .collect::<Vec<_>>()
             .join("\n\n"),
-    )
+    })
+}
+
+/// Most images one message carries, and the biggest one (the least any agent takes).
+pub const MAX_IMAGES: usize = 4;
+pub const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+/// The most bytes of images one prompt carries once the queued messages are merged: 10 MiB, which is about
+/// 14 MB in base64, well under the 32 MB a request to the Claude API may weigh, and that request
+/// also holds the history. A message is never split, and the first one is always taken whole
+/// (one message may hold 20 MiB), so a message never waits for ever; the others wait for the
+/// next turn.
+pub const MAX_PROMPT_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// How many of the queued deliveries, in order, one prompt takes without more than `MAX_IMAGES`
+/// images or `MAX_PROMPT_IMAGE_BYTES` bytes of them; at least one.
+fn fitting_images(daemon: &Daemon, agent: &str, queued: &[Delivery]) -> usize {
+    let (mut count, mut bytes) = (0, 0);
+    for (at, delivery) in queued.iter().enumerate() {
+        let size: u64 = delivery
+            .images
+            .iter()
+            .map(|name| {
+                std::fs::metadata(daemon.paths.images(agent).join(name)).map_or(0, |m| m.len())
+            })
+            .sum();
+        if at > 0
+            && (count + delivery.images.len() > MAX_IMAGES || bytes + size > MAX_PROMPT_IMAGE_BYTES)
+        {
+            return at;
+        }
+        count += delivery.images.len();
+        bytes += size;
+    }
+    queued.len()
+}
+
+/// The images of the agent's folder go: the agent is forgotten.
+pub fn forget_images(paths: &Paths, agent: &str) {
+    let _ = std::fs::remove_dir_all(paths.images(agent));
+}
+
+/// The files of these images go, because the message that carried them was not stored.
+pub fn discard_images(paths: &Paths, agent: &str, names: &[String]) {
+    for name in names {
+        let _ = std::fs::remove_file(paths.images(agent).join(name));
+    }
+}
+
+/// The kinds of image a prompt takes, by the extension of the file that holds it.
+pub const IMAGE_TYPES: [(&str, &str); 4] = [
+    ("image/png", "png"),
+    ("image/jpeg", "jpg"),
+    ("image/gif", "gif"),
+    ("image/webp", "webp"),
+];
+
+/// An image of the agent's folder, as its MIME type and its bytes in base64; `None` when the name
+/// is not one Flottille made or the file is gone.
+pub fn read_image(daemon: &Daemon, agent: &str, name: &str) -> Option<(&'static str, String)> {
+    use base64::Engine as _;
+    let (_, extension) = name.rsplit_once('.')?;
+    let (mime, _) = IMAGE_TYPES.iter().find(|(_, e)| *e == extension)?;
+    if name.contains('/') || name.starts_with('.') {
+        return None;
+    }
+    let bytes = std::fs::read(daemon.paths.images(agent).join(name)).ok()?;
+    Some((
+        mime,
+        base64::engine::general_purpose::STANDARD.encode(bytes),
+    ))
 }
 
 /// The agents whose notes were not taken in time: their notes are unpinned and their turn
@@ -330,6 +432,51 @@ pub fn fall_back(daemon: &Daemon) {
 mod tests {
     use super::*;
 
+    fn paths_in(dir: &std::path::Path) -> Paths {
+        Paths {
+            runtime: dir.join("run"),
+            state: dir.join("state"),
+            config: dir.join("config"),
+            data: dir.join("data"),
+        }
+    }
+
+    #[test]
+    fn the_images_of_a_forgotten_agent_go_and_those_of_the_others_stay() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        for agent in ["a", "b"] {
+            std::fs::create_dir_all(paths.images(agent)).unwrap();
+            std::fs::write(paths.images(agent).join("x.png"), b"x").unwrap();
+        }
+
+        forget_images(&paths, "a");
+        forget_images(&paths, "never-had-any");
+
+        assert!(!paths.images("a").exists());
+        assert!(paths.images("b").join("x.png").exists());
+    }
+
+    #[test]
+    fn the_files_of_a_message_that_was_not_stored_go_and_the_others_stay() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        std::fs::create_dir_all(paths.images("a")).unwrap();
+        for name in ["1-0.png", "1-1.png", "0-0.png"] {
+            std::fs::write(paths.images("a").join(name), b"x").unwrap();
+        }
+
+        discard_images(
+            &paths,
+            "a",
+            &["1-0.png".into(), "1-1.png".into(), "gone.png".into()],
+        );
+
+        assert!(!paths.images("a").join("1-0.png").exists());
+        assert!(!paths.images("a").join("1-1.png").exists());
+        assert!(paths.images("a").join("0-0.png").exists());
+    }
+
     fn delivery(body: &str) -> Delivery {
         Delivery {
             id: "d1".into(),
@@ -340,6 +487,7 @@ mod tests {
             state: "queued".into(),
             created_at: 0,
             sent_at: None,
+            images: Vec::new(),
         }
     }
 

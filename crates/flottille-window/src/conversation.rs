@@ -30,6 +30,10 @@ pub enum Block {
     Text {
         text: String,
     },
+    /// The images that went with the message before it: names the daemon gives back as pictures.
+    Images {
+        names: Vec<String>,
+    },
     /// Its tool calls, one after the other.
     Steps {
         calls: Vec<Call>,
@@ -87,6 +91,25 @@ impl Call {
     /// How long it took, once it ended.
     pub fn duration_ms(&self) -> Option<u64> {
         self.until.map(|until| until.saturating_sub(self.since))
+    }
+}
+
+/// What the agent does while a turn runs, as the line above the composer says it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Activity {
+    Thinking,
+    Writing,
+    /// A tool call still running, by its name.
+    Running(String),
+}
+
+impl Activity {
+    pub fn line(&self) -> String {
+        match self {
+            Activity::Thinking => "Thinking…".into(),
+            Activity::Writing => "Writing…".into(),
+            Activity::Running(tool) => format!("Running {tool}…"),
+        }
     }
 }
 
@@ -173,6 +196,25 @@ impl Conversation {
 
     pub fn last_seq(&self) -> u64 {
         self.last_seq
+    }
+
+    /// What the agent does now, from the last thing it did: a tool call that runs, text it
+    /// writes, else it thinks (a turn just started, a call just done).
+    pub fn activity(&self) -> Activity {
+        for block in self.blocks.iter().rev() {
+            match block {
+                Block::Steps { calls } => {
+                    return match calls.iter().rev().find(|c| c.state == CallState::Running) {
+                        Some(call) => Activity::Running(call.name.clone()),
+                        None => Activity::Thinking,
+                    };
+                }
+                Block::Text { .. } => return Activity::Writing,
+                Block::Thought { .. } | Block::Message { .. } => return Activity::Thinking,
+                _ => {}
+            }
+        }
+        Activity::Thinking
     }
 
     pub fn set_names(&mut self, names: HashMap<String, String>) {
@@ -322,9 +364,22 @@ impl Conversation {
             "agent.tool_call" => self.update_call(event),
             "agent.prompted" => {
                 let mut changes = self.close(Some(event.at));
+                let names: Vec<String> = data["images"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|name| name.as_str().map(str::to_owned))
+                    .collect();
                 for (kind, body) in sections(&text("text")) {
+                    // A picture sent alone has no words: its thumbnails are the message.
+                    if body.trim().is_empty() && !names.is_empty() {
+                        continue;
+                    }
                     let block = self.delivered(&kind, body);
                     changes.extend(self.push(block));
+                }
+                if !names.is_empty() {
+                    changes.extend(self.push(Block::Images { names }));
                 }
                 changes
             }
@@ -801,6 +856,58 @@ mod tests {
                 ]
             }
         );
+    }
+
+    #[test]
+    fn what_the_agent_does_follows_its_last_event() {
+        let mut c = Conversation::new("lead".into(), None);
+        assert_eq!(c.activity(), Activity::Thinking, "a turn that just started");
+        c.apply(&event(
+            1,
+            "agent.prompted",
+            json!({"text": "[flottille:user]\nhi"}),
+        ));
+        assert_eq!(c.activity(), Activity::Thinking);
+        c.apply(&event(2, "agent.thought", json!({"text": "hm"})));
+        assert_eq!(c.activity(), Activity::Thinking);
+        c.apply(&event(3, "agent.message", json!({"text": "On it"})));
+        assert_eq!(c.activity(), Activity::Writing);
+        c.apply(&running_call(4, "a"));
+        assert_eq!(c.activity(), Activity::Running("fs_read".into()));
+        assert_eq!(c.activity().line(), "Running fs_read…");
+        c.apply(&event(
+            5,
+            "agent.tool_call",
+            json!({"update": true, "id": "a", "status": "completed"}),
+        ));
+        assert_eq!(
+            c.activity(),
+            Activity::Thinking,
+            "its call is done, the next is awaited"
+        );
+    }
+
+    #[test]
+    fn a_picture_sent_alone_is_its_thumbnails_and_no_empty_bubble() {
+        let mut c = Conversation::new("lead".into(), None);
+        c.apply(&event(
+            1,
+            "agent.prompted",
+            json!({"text": "[flottille:user]\n", "images": ["a-0.png"]}),
+        ));
+        assert_eq!(
+            c.blocks(),
+            [Block::Images {
+                names: vec!["a-0.png".into()]
+            }]
+        );
+        c.apply(&event(
+            2,
+            "agent.prompted",
+            json!({"text": "[flottille:user]\nlook", "images": ["b-0.png"]}),
+        ));
+        assert!(matches!(&c.blocks()[1], Block::Message { text, .. } if text == "look"));
+        assert!(matches!(&c.blocks()[2], Block::Images { .. }));
     }
 
     fn running_call(seq: u64, id: &str) -> Event {

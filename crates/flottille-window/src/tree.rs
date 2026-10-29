@@ -226,8 +226,8 @@ impl Render for ProjectNode {
         .when_some(self.mark.shown, |row, _| {
             row.trailing(self.mark.icon.clone())
         })
-        .on_click(cx.listener(move |this, _, window, cx| {
-            this.toggle(cx);
+        .on_toggle(cx.listener(|this, _, _, cx| this.toggle(cx)))
+        .on_click(cx.listener(move |_, _, window, cx| {
             let project = name.clone();
             shell
                 .update(cx, |shell, cx| {

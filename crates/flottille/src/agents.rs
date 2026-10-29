@@ -13,9 +13,12 @@ use std::time::Duration;
 
 use flottille_core::agent::{Agent, AgentState, Choices, new_id};
 use flottille_core::approval;
+use flottille_core::paths::ensure_private_dir;
 use flottille_core::procedure::Grants;
 use flottille_core::project::Project;
-use flottille_core::protocol::{AgentName, AgentRun, AgentSend, AgentTrees};
+use flottille_core::protocol::{
+    AgentImage, AgentName, AgentRun, AgentSend, AgentTrees, ImageUpload,
+};
 use flottille_core::secrets::{self, Secrets};
 use flottille_core::store::{AgentChange, Store, now_ms};
 use flottille_core::workspace::State;
@@ -75,7 +78,7 @@ pub enum Order {
 
 /// The prompt taken for the agent, kept across its processes, and whether one is being played.
 pub struct Turns {
-    pub queued: VecDeque<String>,
+    pub queued: VecDeque<deliveries::Prompt>,
     pub running: bool,
 }
 
@@ -102,18 +105,32 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let agent = find(daemon, &asked.agent)?;
             refuse_child(daemon, &agent, "writes to it")?;
             refuse_final(&agent)?;
-            refuse_empty(&asked.message)?;
+            if asked.images.is_empty() {
+                refuse_empty(&asked.message)?;
+            }
+            let images = keep_images(daemon, &agent, &asked.images)?;
             let after = daemon.read(Store::last_seq)?;
-            let delivery = deliveries::deliver(
+            let delivery = deliveries::deliver_with_images(
                 daemon,
                 &agent.id,
                 "user",
                 None,
                 &asked.message,
                 approval::BETWEEN_TURNS,
+                images.clone(),
             )
-            .ok_or_else(|| Failure::new("unavailable", "the message could not be stored"))?;
+            .ok_or_else(|| {
+                deliveries::discard_images(&daemon.paths, &agent.id, &images);
+                Failure::new("unavailable", "the message could not be stored")
+            })?;
             Ok(json!({"agent": agent.to_json(), "after": after, "delivery": delivery}))
+        }
+        "agent.image" => {
+            let asked: AgentImage = serde_json::from_value(params)?;
+            let agent = find(daemon, &asked.agent)?;
+            let (mime, data) = deliveries::read_image(daemon, &agent.id, &asked.name)
+                .ok_or_else(|| Failure::new("not-found", format!("no image {}", asked.name)))?;
+            Ok(json!({"mime": mime, "data": data}))
         }
         "agent.stop" => {
             let asked: AgentName = serde_json::from_value(params)?;
@@ -275,6 +292,78 @@ fn refuse_final(agent: &Agent) -> Result<(), Failure> {
         )));
     }
     Ok(())
+}
+
+use deliveries::{MAX_IMAGE_BYTES, MAX_IMAGES};
+
+/// The images of a message, checked and written to the agent's folder of images in the data
+/// folder (never the project's): the names of the files.
+fn keep_images(
+    daemon: &Daemon,
+    agent: &Agent,
+    images: &[ImageUpload],
+) -> Result<Vec<String>, Failure> {
+    use base64::Engine as _;
+    if images.is_empty() {
+        return Ok(Vec::new());
+    }
+    if agent.images == Some(false) {
+        return Err(Failure::refused(format!(
+            "the agent of {} takes no images",
+            agent.id
+        )));
+    }
+    if images.len() > MAX_IMAGES {
+        return Err(Failure::refused(format!(
+            "a message carries {MAX_IMAGES} images at most"
+        )));
+    }
+    let mut checked = Vec::new();
+    for image in images {
+        let (_, extension) = deliveries::IMAGE_TYPES
+            .iter()
+            .find(|(mime, _)| *mime == image.mime)
+            .ok_or_else(|| {
+                Failure::refused(format!(
+                    "an image of type {} is not taken: png, jpeg, gif and webp are",
+                    image.mime
+                ))
+            })?;
+        // Judged before it is decoded: a huge request is not turned into bytes to be refused.
+        if image.data.len() > MAX_IMAGE_BYTES * 4 / 3 + 4 {
+            return Err(Failure::refused(format!(
+                "an image is empty or over {} MiB",
+                MAX_IMAGE_BYTES / 1024 / 1024
+            )));
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&image.data)
+            .map_err(|_| Failure::refused("an image is not valid base64"))?;
+        if bytes.is_empty() || bytes.len() > MAX_IMAGE_BYTES {
+            return Err(Failure::refused(format!(
+                "an image is empty or over {} MiB",
+                MAX_IMAGE_BYTES / 1024 / 1024
+            )));
+        }
+        checked.push((extension, bytes));
+    }
+    let folder = daemon.paths.images(&agent.id);
+    ensure_private_dir(&folder).map_err(|e| Failure::new("unavailable", e.to_string()))?;
+    // Without a stamp two messages could share their names: none is better than a collision.
+    let stamp = new_id().map_err(|e| Failure::new("unavailable", format!("no stamp: {e}")))?;
+    let mut names = Vec::new();
+    for (at, (extension, bytes)) in checked.into_iter().enumerate() {
+        let name = format!("{stamp}-{at}.{extension}");
+        if let Err(error) = std::fs::write(folder.join(&name), bytes) {
+            deliveries::discard_images(&daemon.paths, &agent.id, &names);
+            return Err(Failure::new(
+                "unavailable",
+                format!("an image cannot be stored: {error}"),
+            ));
+        }
+        names.push(name);
+    }
+    Ok(names)
 }
 
 fn refuse_empty(message: &str) -> Result<(), Failure> {
@@ -466,6 +555,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         quiet_turns: 0,
         waiting_on_answer: false,
         reopens: false,
+        images: None,
     };
     daemon.write(|store| {
         let event = store.create_agent(
@@ -631,6 +721,7 @@ async fn agent_task(daemon: Arc<Daemon>, id: String, orders: mpsc::UnboundedRece
         }
         (provider.forget_agent)(&daemon.paths, &agent.id);
     }
+    deliveries::forget_images(&daemon.paths, &id);
 }
 
 /// Forgets the sessions of the ended roots kept longer than `tree::KEPT_MS`: they are resumed no
@@ -665,6 +756,7 @@ pub fn forget_kept_sessions(daemon: &Daemon) {
         tokio::task::spawn_blocking(move || {
             (provider.forget_session)(&paths, &native);
             (provider.forget_agent)(&paths, &agent.id);
+            deliveries::forget_images(&paths, &agent.id);
         });
     }
 }
@@ -678,7 +770,7 @@ async fn agent_life(daemon: Arc<Daemon>, id: String, mut orders: mpsc::Unbounded
     loop {
         if turns.queued.is_empty() {
             match deliveries::pump(&daemon, &id) {
-                Some(text) => turns.queued.push_back(text),
+                Some(prompt) => turns.queued.push_back(prompt),
                 None => match orders.recv().await {
                     None | Some(Order::Stop) => return,
                     Some(Order::Cancel(answer)) => {
@@ -1173,8 +1265,12 @@ impl acp::Events for Recorder {
         }
     }
 
-    fn pump(&self) -> Option<String> {
+    fn pump(&self) -> Option<deliveries::Prompt> {
         deliveries::pump(&self.daemon, &self.agent)
+    }
+
+    fn image(&self, name: &str) -> Option<(&'static str, String)> {
+        deliveries::read_image(&self.daemon, &self.agent, name)
     }
 
     fn offered(&self, options: &Value, fresh: bool) {
@@ -1188,6 +1284,7 @@ impl acp::Events for Recorder {
         agent_version: &str,
         taken: Choices,
         reopens: bool,
+        images: bool,
     ) {
         let result = self.daemon.write(|store| {
             let data = json!({"agent": self.agent, "pid": self.pid, "opened": opened,
@@ -1199,6 +1296,7 @@ impl acp::Events for Recorder {
                     native_id: Some(native_id.to_owned()),
                     agent_version: Some(agent_version.to_owned()),
                     reopens: Some(reopens),
+                    images: Some(images),
                     taken: Some(taken),
                     ..AgentChange::default()
                 },
@@ -1211,13 +1309,17 @@ impl acp::Events for Recorder {
         }
     }
 
-    fn turn_started(&self, text: &str) {
+    fn turn_started(&self, text: &str, images: &[String]) {
+        let mut data = json!({"text": text});
+        if !images.is_empty() {
+            data["images"] = json!(images);
+        }
         change(
             &self.daemon,
             &self.agent,
             AgentState::Working,
             None,
-            Some(("agent.prompted", json!({"text": text}))),
+            Some(("agent.prompted", data)),
         );
     }
 

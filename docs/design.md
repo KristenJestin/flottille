@@ -387,7 +387,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
 - a top bar with search and a bell counting what waits for the user;
 - left: the tree project › place › session. `main` and the workspaces sit at the same level
   under their project; sessions sit under their place, with a mark when running or when the
-  root needs the user; a folded level shows the strongest mark it holds;
+  root needs the user; a folded level shows the strongest mark it holds; a click on a project's name
+  opens its page and leaves its places as they were, only its chevron folds and unfolds them;
 - a project page: its repositories, its places with their sessions, creating and removing a
   workspace (with the preparation's progress and failure output), and the composer that starts
   a session (place, agent, model, first message); its procedures (added from a list of the
@@ -400,7 +401,14 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   their result, the children launched, reports, diffs), the approvals that reach the user, inline,
   with deny / allow for the tree / allow once (a line outside the catalogue in `main`: deny / always
   / once; a change of the project an agent asks for, said in words: deny / confirm), and a composer that writes to the root, whose Stop
-  button and `Escape` interrupt the turn that runs (the agent stays), and where `/` at the start
+  button and `Escape` interrupt the turn that runs (the agent stays), which grows with its lines up to
+  about ten and then scrolls, and takes pictures (pasted from the clipboard, dropped from a file or
+  picked with Attach: thumbnails with a remove button, sent with the message as ACP image blocks,
+  stored in Flottille's data folder so the conversation shows them again; said in one sentence and
+  left out when the session's agent takes none); a line just above it says what the root does while
+  a turn runs (`Thinking…`, `Writing…`, `Running <tool>…`) and goes with the turn. A running agent is
+  drawn by its icon alone, in the tree and in the rail: no text badge, nothing in the header. In the
+  composer, `/` at the start
   of a message lists the project's procedures, filtered as the user types: picking one shows what
   it runs, the workspace and each grant in words, and Confirm runs it in the session's workspace
   (in `main` the list says procedures run in a workspace; a `/word` that names none is sent as

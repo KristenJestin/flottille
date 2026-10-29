@@ -300,7 +300,7 @@ impl Bridge {
             "protocolVersion": 1,
             "agentCapabilities": {
                 "loadSession": true,
-                "promptCapabilities": {"image": false, "audio": false, "embeddedContext": false},
+                "promptCapabilities": {"image": true, "audio": false, "embeddedContext": false},
                 "mcpCapabilities": {"http": true, "sse": false},
                 "sessionCapabilities": sessions,
             },
@@ -452,11 +452,14 @@ impl Bridge {
         if self.turn.is_some() {
             return Err((INVALID, "a prompt is playing already".into()));
         }
-        // Text only, as `initialize` said (`embeddedContext: false`).
+        // Text and images, as `initialize` said (`embeddedContext: false`).
         let mut texts = Vec::new();
+        let mut images = Vec::new();
         for block in params["prompt"].as_array().into_iter().flatten() {
             match block["type"].as_str() {
                 Some("text") => texts.push(block["text"].as_str().unwrap_or_default()),
+                Some("image") => images.push(json!({"type": "image", "source": {
+                    "type": "base64", "media_type": block["mimeType"], "data": block["data"]}})),
                 other => {
                     return Err((
                         INVALID,
@@ -477,9 +480,11 @@ impl Bridge {
             limited: false,
             error: None,
         });
+        let mut content = vec![json!({"type": "text", "text": text})];
+        content.extend(images);
         self.write_claude(
             json!({"type": "user", "session_id": session, "parent_tool_use_id": null,
-            "message": {"role": "user", "content": [{"type": "text", "text": text}]}}),
+            "message": {"role": "user", "content": content}}),
         )
         .await;
         Ok(None)

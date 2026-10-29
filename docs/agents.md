@@ -527,8 +527,9 @@ bridge runs one session.
   `_meta.contextCompaction`; an `api_retry` a `session_info_update` with a `jetbrains.air`
   `sessionFailure` of severity `warning` (a provider wait). A sub-agent's messages
   (`parent_tool_use_id` set) are ignored: there is none in bare mode.
-- **A prompt** is its text blocks, parted by a blank line; any other block is refused, as
-  `initialize` says (`embeddedContext: false`).
+- **A prompt** is its text blocks, parted by a blank line, then its image blocks (`initialize`
+  says `image: true`; each goes to `claude` as a base64 `image` block of the same user message); any
+  other block is refused, as `initialize` says (`embeddedContext: false`).
 - **A line of `claude`'s output** that is not JSON, or not UTF-8, is skipped.
 - **A turn** is one `user` message written to `claude`; its `result` ends it: first a
   `usage_update` (the context in use, as the last message or compaction said, the model's

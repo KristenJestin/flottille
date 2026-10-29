@@ -553,6 +553,17 @@ impl Shell {
                     composer.update(cx, |composer, cx| composer.not_started(&why, cx));
                 }
             }
+            Outcome::ImageRead {
+                session,
+                name,
+                image,
+            } => {
+                if let Some(page) = self.session_page.clone()
+                    && page.read(cx).shown() == session
+                {
+                    page.update(cx, |page, cx| page.picture_read(name, image, cx));
+                }
+            }
             Outcome::Replied { session, refused } => {
                 if let Some(reply) = self.replies.get(&session).cloned() {
                     reply.update(cx, |reply, cx| reply.replied(refused, window, cx));
