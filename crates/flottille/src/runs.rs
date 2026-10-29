@@ -80,6 +80,8 @@ struct Going {
     /// What its output is masked with: its environment and the place's secret files.
     env: BTreeMap<OsString, OsString>,
     secrets: Vec<String>,
+    /// Its process, which leads its process group.
+    pid: u32,
 }
 
 #[derive(Default)]
@@ -365,13 +367,7 @@ fn environment(
     place: &Place,
     repository: &str,
 ) -> Result<BTreeMap<OsString, OsString>, String> {
-    let names = Names {
-        workspace: place.workspace.clone().unwrap_or_else(|| "main".into()),
-        workspace_path: place.root.to_string_lossy().into_owned(),
-        project: place.project.clone(),
-        branch: place.branch.clone(),
-        repository: repository.to_owned(),
-    };
+    let names = names(place, repository);
     let mut filled = BTreeMap::new();
     for (name, template) in &place.variables {
         filled.insert(name.clone(), variables::fill(template, &names)?);
@@ -383,6 +379,40 @@ fn environment(
     // Where the daemon's socket is: a client a run starts is refused anyway (`daemon.rs`).
     env.remove(&OsString::from("XDG_RUNTIME_DIR"));
     Ok(env)
+}
+
+fn names(place: &Place, repository: &str) -> Names {
+    Names {
+        workspace: place.workspace.clone().unwrap_or_else(|| "main".into()),
+        workspace_path: place.root.to_string_lossy().into_owned(),
+        project: place.project.clone(),
+        branch: place.branch.clone(),
+        repository: repository.to_owned(),
+    }
+}
+
+/// Where a run in the place looks for a program named bare: the `PATH` of its environment.
+pub fn search_path(place: &Place, repository: &str) -> Option<OsString> {
+    match place.variables.get("PATH") {
+        Some(template) => variables::fill(template, &names(place, repository))
+            .ok()
+            .map(OsString::from),
+        None => std::env::var_os("PATH"),
+    }
+}
+
+/// The process groups of the agent's runs that go on: each run leads its own.
+pub fn groups_of(daemon: &Daemon, agent: &str) -> Vec<u32> {
+    daemon
+        .mcp
+        .runs
+        .runs
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|going| going.run.agent == agent)
+        .map(|going| going.pid)
+        .collect()
 }
 
 /// No forge token, the forge command lines' configuration in `empty` (`forge_write` is the way to
@@ -488,6 +518,7 @@ fn start(
         stopped_as: Mutex::new(None),
         env,
         secrets,
+        pid,
     });
     daemon
         .mcp

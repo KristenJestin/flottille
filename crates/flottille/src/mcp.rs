@@ -1206,6 +1206,17 @@ pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gat
         paths_of.runtime.clone(),
     ];
     let pushed = rewrites(&words) && pushed(&grant.place, paths.first());
+    let search = runs::search_path(&grant.place, ".");
+    let mut writable = vec![grant.place.root.clone()];
+    if let Some(project) = &project {
+        writable.extend([project.folder.clone(), project.workspaces_root.clone()]);
+    }
+    let real: Vec<_> = writable
+        .iter()
+        .filter_map(|folder| std::fs::canonicalize(folder).ok())
+        .collect();
+    writable.extend(real);
+    let groups = runs::groups_of(daemon, &grant.agent);
     gate::decide(&gate::Call {
         grant,
         tool,
@@ -1216,6 +1227,9 @@ pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gat
         never: project.as_ref().map(|project| project.never.as_slice()),
         own: &own,
         pushed,
+        search: search.as_deref(),
+        writable: &writable,
+        groups: &groups,
     })
 }
 

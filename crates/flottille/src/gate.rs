@@ -35,6 +35,13 @@ pub struct Call<'a> {
     /// The workspace's branch is on a remote: rewriting its history rewrites what others may
     /// have. Always false in the project folder, where every rewrite is base anyway.
     pub pushed: bool,
+    /// Where a run looks for a program named bare: its `PATH`. `None` for any other call.
+    pub search: Option<&'a std::ffi::OsStr>,
+    /// The folders the agent can write: the project folder, its workspaces, the place. A program
+    /// found there is the agent's own file, whatever its name.
+    pub writable: &'a [PathBuf],
+    /// The process groups of the agent's runs: reading their `/proc` is reading its own.
+    pub groups: &'a [u32],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -97,11 +104,11 @@ const WRITES: [&str; 2] = ["fs_write", "fs_edit"];
 const FILES: [&str; 5] = ["fs_read", "fs_list", "search", "fs_write", "fs_edit"];
 /// Programs that only read, whatever their arguments but those `writes_anyway` names: a line of
 /// one of them, alone, inside the place, is harmless.
-const READS: [&str; 40] = [
+const READS: [&str; 38] = [
     "ls", "pwd", "cat", "head", "tail", "wc", "grep", "rg", "egrep", "fgrep", "find", "fd", "stat",
     "file", "tree", "du", "df", "ps", "pgrep", "pidof", "which", "whoami", "uname", "date", "echo",
     "diff", "cmp", "basename", "dirname", "realpath", "readlink", "id", "hostname", "uptime",
-    "free", "less", "more", "true", "test", "lsof",
+    "free", "true", "test", "lsof",
 ];
 /// Git's subcommands that only read.
 const GIT_READS: [&str; 17] = [
@@ -236,7 +243,9 @@ fn files(call: &Call) -> Verdict {
                 path.shown
             ));
         }
-        if let Some(place) = sensitive(call.own, path) {
+        if let Some(why) = process(call.groups, path) {
+            found.base(why);
+        } else if let Some(place) = sensitive(call.own, path) {
             found.base(format!("{} is a sensitive place ({place})", path.shown));
         } else if !path.inside {
             found.judge(format!("{} is outside this agent's place", path.shown));
@@ -303,7 +312,7 @@ fn run(call: &Call) -> Verdict {
         }
         return Verdict::Allow;
     }
-    let layers = match layers(call.words) {
+    let layers = match lines(call.words) {
         Ok(layers) => layers,
         Err(why) => return Verdict::Deny(why),
     };
@@ -350,7 +359,9 @@ fn run(call: &Call) -> Verdict {
                 path.shown
             ));
         }
-        if let Some(place) = sensitive(call.own, path) {
+        if let Some(why) = process(call.groups, path) {
+            found.base(why);
+        } else if let Some(place) = sensitive(call.own, path) {
             found.base(format!("{} is a sensitive place ({place})", path.shown));
         } else if !path.inside {
             found.judge(format!("{} is outside this agent's place", path.shown));
@@ -359,18 +370,37 @@ fn run(call: &Call) -> Verdict {
     if let Some(why) = deletion(call, &layers) {
         found.base(why);
     }
+    if let Some(why) = layers.iter().find_map(|layer| unwalls(layer)) {
+        found.base(why);
+    }
     let mut reads = layers.len() == 1;
     for layer in &layers {
-        match program(layer, main, call.pushed) {
-            Line::Reads | Line::Files => {}
-            Line::Writes => reads = false,
-            Line::Judge(why) => {
-                reads = false;
-                found.judge(why);
+        for (at, suffix) in suffixes(layer) {
+            let line = program(call, suffix);
+            // A word inside a line may start a program the gate does not know runs it: only
+            // what would be base there counts.
+            if at > 0 {
+                if let Line::Base(why) = line {
+                    found.base(why);
+                }
+                continue;
             }
-            Line::Base(why) => {
-                reads = false;
-                found.base(why);
+            match line {
+                Line::Reads => {}
+                Line::Files if main => found.judge(format!(
+                    "{} writes a file in the project folder (main), the user's own checkout",
+                    shown_words(layer)
+                )),
+                Line::Files => {}
+                Line::Writes => reads = false,
+                Line::Judge(why) => {
+                    reads = false;
+                    found.judge(why);
+                }
+                Line::Base(why) => {
+                    reads = false;
+                    found.base(why);
+                }
             }
         }
     }
@@ -405,13 +435,35 @@ fn run(call: &Call) -> Verdict {
 enum Line {
     /// It only reads.
     Reads,
-    /// It writes the files of the workspace, and nothing else: harmless.
+    /// It writes the files of the place, and nothing else: harmless in a workspace.
     Files,
     /// It writes, in a way the rules have nothing to say about: harmless only as a catalogue
     /// command in a workspace.
     Writes,
     Judge(String),
     Base(String),
+}
+
+impl Line {
+    fn rank(&self) -> u8 {
+        match self {
+            Line::Reads => 0,
+            Line::Files => 1,
+            Line::Writes => 2,
+            Line::Judge(_) => 3,
+            Line::Base(_) => 4,
+        }
+    }
+
+    /// The stronger of two, with the reasons of both when they are as strong.
+    fn or(self, other: Line) -> Line {
+        match (self, other) {
+            (Line::Judge(a), Line::Judge(b)) => Line::Judge(format!("{a}; {b}")),
+            (Line::Base(a), Line::Base(b)) => Line::Base(format!("{a}; {b}")),
+            (a, b) if b.rank() > a.rank() => b,
+            (a, _) => a,
+        }
+    }
 }
 
 /// What is refused, whatever the user would say: a login printed, the daemon driven from a
@@ -444,13 +496,14 @@ fn prints_token(args: &[String]) -> bool {
             }))
 }
 
-/// What a layer's program does.
-fn program(layer: &[String], main: bool, pushed: bool) -> Line {
+/// What a layer's program does. A program counts as one the rules know only when it is the
+/// system's: named bare and found through `PATH` outside the folders the agent writes.
+fn program(call: &Call, layer: &[String]) -> Line {
     let program = base(&layer[0]);
     let args = &layer[1..];
     let any = |names: &[&str]| args.iter().any(|w| names.contains(&w.as_str()));
-    match program {
-        "git" => git(layer, main, pushed),
+    let line = match program {
+        "git" => git(call, layer),
         "gh" | "glab" if forge_reads(program, args) => Line::Reads,
         "gh" | "glab" => Line::Judge(format!(
             "{} writes to the forge, or is not one of its reads",
@@ -473,21 +526,422 @@ fn program(layer: &[String], main: bool, pushed: bool) -> Line {
         }
         "twine" if any(&["upload"]) => Line::Base(publishing(layer)),
         "gem" | "dotnet" | "nuget" if any(&["push"]) => Line::Base(publishing(layer)),
-        "find" if find_writes(args) => Line::Writes,
-        _ if READS.contains(&program) => Line::Reads,
+        _ if READS.contains(&program) => reads(call, layer),
         _ => Line::Writes,
+    };
+    match line {
+        Line::Reads | Line::Files => match installed(call, &layer[0]) {
+            Ok(()) => line,
+            Err(why) => Line::Judge(why),
+        },
+        line => line,
     }
 }
 
-/// Whether a `find` does more than list: deletes, runs a command or writes a file.
-fn find_writes(args: &[String]) -> bool {
-    args.iter().any(|word| {
-        [
-            "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf",
-            "-fls",
-        ]
-        .contains(&word.as_str())
-    })
+/// Whether a program named in a line is the system's: a bare name `PATH` leads to, outside the
+/// folders the agent writes. Anything else may be a file the agent wrote, whatever its name.
+fn installed(call: &Call, word: &str) -> Result<(), String> {
+    let own = |what: String| {
+        Err(format!(
+            "{what}: the gate takes it for the agent's own file, which may do anything, not for \
+             the program of that name it knows"
+        ))
+    };
+    if word.contains('/') {
+        return own(format!("{word} names its program by a path"));
+    }
+    let folder = call.paths.first().map(|folder| folder.path.as_path());
+    for dir in std::env::split_paths(call.search.unwrap_or_default()) {
+        let dir = match folder {
+            Some(folder) if dir.is_relative() => folder.join(dir),
+            _ if dir.is_relative() => continue,
+            _ => dir,
+        };
+        let candidate = dir.join(word);
+        let executable = std::fs::metadata(&candidate).is_ok_and(|meta| {
+            use std::os::unix::fs::PermissionsExt;
+            meta.is_file() && meta.permissions().mode() & 0o111 != 0
+        });
+        if !executable {
+            continue;
+        }
+        let real = std::fs::canonicalize(&candidate).unwrap_or(candidate);
+        if call
+            .writable
+            .iter()
+            .any(|folder| real.starts_with(folder) || dir.starts_with(folder))
+        {
+            return own(format!(
+                "{word} is found in {}, a folder the agent writes",
+                dir.display()
+            ));
+        }
+        return Ok(());
+    }
+    own(format!(
+        "{word} is not found where PATH leads outside the agent's folders"
+    ))
+}
+
+/// What a program that only reads does with these arguments: an option that runs a program is
+/// to judge, one that writes a file writes, a recursive read over a folder that holds a
+/// sensitive file is to judge.
+fn reads(call: &Call, layer: &[String]) -> Line {
+    let program = base(&layer[0]);
+    let args = &layer[1..];
+    let short = |letters: &[char]| shorts(args).any(|word| word[1..].contains(letters));
+    if let Some((why, _)) = executed(layer) {
+        return Line::Judge(why);
+    }
+    match program {
+        "find" if args.iter().any(|w| w == "-delete") => return Line::Writes,
+        "date" if short(&['s']) || args.iter().any(|w| abbreviates(w, "set", 2)) => {
+            return Line::Judge("date -s sets the system's clock".into());
+        }
+        _ => {}
+    }
+    let writes = match program {
+        "find" => args
+            .iter()
+            .any(|w| ["-fprint", "-fprint0", "-fprintf", "-fls"].contains(&w.as_str())),
+        "tree" => args.iter().any(|w| w.starts_with("-o")),
+        "file" => short(&['C']) || args.iter().any(|w| abbreviates(w, "compile", 3)),
+        _ => false,
+    };
+    if writes {
+        return Line::Files;
+    }
+    match walks_secrets(call, layer) {
+        Some(why) => Line::Judge(why),
+        None => Line::Reads,
+    }
+}
+
+/// The short options of a line's arguments (`-rn`), before any `--`.
+fn shorts(args: &[String]) -> impl Iterator<Item = &str> {
+    args.iter()
+        .map(String::as_str)
+        .take_while(|word| *word != "--")
+        .filter(|word| word.len() > 1 && word.starts_with('-') && !word.starts_with("--"))
+}
+
+/// Whether a word is a long option that names `option`, whole or by a start of at least `min`
+/// letters, as getopt and git take it.
+fn abbreviates(word: &str, option: &str, min: usize) -> bool {
+    word.strip_prefix("--")
+        .map(|long| long.split_once('=').map_or(long, |(name, _)| name))
+        .is_some_and(|name| name.len() >= min.min(option.len()) && option.starts_with(name))
+}
+
+/// Why a layer's options run a program, and the lines they run that the gate can read: `find
+/// -exec`, `fd -x`, `rg --pre`, `git grep -O`, git's external diff and text conversion.
+fn executed(layer: &[String]) -> Option<(String, Vec<Vec<String>>)> {
+    let program = base(&layer[0]);
+    let args = &layer[1..];
+    let mut lines = Vec::new();
+    let mut runs = None;
+    let until = |from: &[String], end: &[&str]| -> Vec<String> {
+        from.iter()
+            .take_while(|w| !end.contains(&w.as_str()))
+            .filter(|w| *w != "{}")
+            .cloned()
+            .collect()
+    };
+    match program {
+        "find" => {
+            for (at, word) in args.iter().enumerate() {
+                if ["-exec", "-execdir", "-ok", "-okdir"].contains(&word.as_str()) {
+                    runs = Some(format!("find {word} runs a program on what it finds"));
+                    lines.push(until(&args[at + 1..], &[";", "+"]));
+                }
+            }
+        }
+        "fd" => {
+            for (at, word) in args.iter().enumerate() {
+                let rest = &args[at + 1..];
+                let mut line = if ["-x", "-X", "--exec", "--exec-batch"].contains(&word.as_str()) {
+                    until(rest, &[";"])
+                } else if let Some(first) = word
+                    .strip_prefix("--exec=")
+                    .or_else(|| word.strip_prefix("--exec-batch="))
+                {
+                    std::iter::once(first.to_owned())
+                        .chain(until(rest, &[";"]))
+                        .collect()
+                } else if !word.starts_with("--")
+                    && word.starts_with('-')
+                    && let Some(x) = word.find(['x', 'X'])
+                {
+                    let attached = &word[x + 1..];
+                    let mut line = until(rest, &[";"]);
+                    if !attached.is_empty() {
+                        line.insert(0, attached.to_owned());
+                    }
+                    line
+                } else {
+                    continue;
+                };
+                line.retain(|w| !w.is_empty());
+                runs = Some(format!("fd {word} runs a program on what it finds"));
+                lines.push(line);
+            }
+        }
+        "rg" => {
+            for (at, word) in args.iter().enumerate() {
+                for option in ["--pre", "--hostname-bin"] {
+                    let value = if word == option {
+                        args.get(at + 1).cloned()
+                    } else {
+                        word.strip_prefix(&format!("{option}=")).map(str::to_owned)
+                    };
+                    if let Some(value) = value {
+                        runs = Some(format!("rg {option} runs a program"));
+                        lines.push(vec![value]);
+                    }
+                }
+            }
+        }
+        "git" => {
+            let (at, _) = git_globals(args);
+            let command = args.get(at).map(String::as_str).unwrap_or_default();
+            let rest = args.get(at + 1..).unwrap_or_default();
+            let options = rest.iter().take_while(|w| *w != "--");
+            for word in options {
+                let pager = word == "-O"
+                    || (word.starts_with('-') && !word.starts_with("--") && word.contains('O'))
+                    || abbreviates(word, "open-files-in-pager", 2);
+                if command == "grep" && pager {
+                    runs = Some(format!(
+                        "git grep {word} opens what it finds in a program it runs"
+                    ));
+                    let value = word
+                        .split_once('=')
+                        .map(|(_, v)| v)
+                        .or_else(|| word.strip_prefix("-O"))
+                        .filter(|v| !v.is_empty());
+                    if let Some(line) =
+                        value.and_then(|v| flottille_core::command::split_line(v).ok())
+                    {
+                        lines.push(line);
+                    }
+                }
+                let converts = abbreviates(word, "ext-diff", 3)
+                    || abbreviates(word, "textconv", 5)
+                    || (command == "cat-file" && abbreviates(word, "filters", 3));
+                if converts && !word.starts_with("--no-") {
+                    runs = Some(format!(
+                        "git {command} {word} runs a program the configuration names on what it \
+                         reads"
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+    lines.retain(|line| !line.is_empty());
+    runs.map(|why| (why, lines))
+}
+
+/// Why a recursive read would read a sensitive file: it walks hidden or ignored files (or every
+/// file, for grep), over a folder that holds one.
+fn walks_secrets(call: &Call, layer: &[String]) -> Option<String> {
+    let program = base(&layer[0]);
+    let args = &layer[1..];
+    let short = |letters: &[char]| shorts(args).any(|word| word[1..].contains(letters));
+    let long = |names: &[&str]| {
+        args.iter()
+            .any(|word| names.iter().any(|name| abbreviates(word, name, 4)))
+    };
+    let walks = match program {
+        "grep" | "egrep" | "fgrep" => {
+            short(&['r', 'R'])
+                || long(&["recursive", "dereference-recursive"])
+                || args.windows(2).any(|w| w[0] == "-d" && w[1] == "recurse")
+                || args
+                    .iter()
+                    .any(|w| w == "-drecurse" || w == "--directories=recurse")
+        }
+        "rg" => {
+            short(&['u', '.', 'L'])
+                || long(&["unrestricted", "hidden", "follow"])
+                || args.iter().any(|w| w.starts_with("--no-ignore"))
+        }
+        "fd" => {
+            short(&['H', 'I', 'u', 'L'])
+                || long(&["hidden", "unrestricted", "follow"])
+                || args.iter().any(|w| w.starts_with("--no-ignore"))
+        }
+        "find" => args
+            .iter()
+            .any(|w| ["-H", "-L", "-follow"].contains(&w.as_str())),
+        "git" => long(&["untracked", "no-index", "no-exclude-standard"]),
+        _ => false,
+    };
+    if !walks {
+        return None;
+    }
+    let from = call.paths.first()?;
+    let place = &call.grant.place;
+    let mut folders: Vec<Resolved> = args
+        .iter()
+        .filter(|word| !word.starts_with('-'))
+        .map(|word| place.resolve(&from.path, word))
+        .filter(|folder| folder.inside && folder.path.is_dir())
+        .collect();
+    if folders.is_empty() {
+        folders.push(from.clone());
+    }
+    let real_root = std::fs::canonicalize(&place.root).unwrap_or_else(|_| place.root.clone());
+    for folder in folders {
+        if let Some(what) = holds_secret(call.own, &real_root, &folder.path) {
+            return Some(format!(
+                "{} reads hidden, ignored or every file below {}, {what}",
+                shown_words(layer),
+                if folder.shown.is_empty() {
+                    "the place's folder"
+                } else {
+                    &folder.shown
+                }
+            ));
+        }
+    }
+    None
+}
+
+/// Files looked through for a sensitive one, at most, before a folder is taken for holding one.
+const WALKED_MAX: usize = 20_000;
+
+/// Whether a folder of the place holds a sensitive file, said as a reason: the first found, or
+/// that it holds more files than the gate looks through. Links are not followed; `.git` folders
+/// are not entered.
+fn holds_secret(own: &[PathBuf], root: &Path, folder: &Path) -> Option<String> {
+    let mut walked = 0;
+    let mut pending = vec![folder.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            walked += 1;
+            if walked > WALKED_MAX {
+                return Some(format!(
+                    "which holds more than {WALKED_MAX} files: too many to tell that none is \
+                     sensitive"
+                ));
+            }
+            let path = entry.path();
+            let Ok(relative) = path.strip_prefix(root) else {
+                continue;
+            };
+            let resolved = Resolved {
+                shown: relative.to_string_lossy().into_owned(),
+                path: path.clone(),
+                inside: true,
+            };
+            if let Some(place) = sensitive(own, &resolved) {
+                return Some(format!(
+                    "which holds a sensitive file: {} ({place})",
+                    resolved.shown
+                ));
+            }
+            let directory = entry.file_type().is_ok_and(|kind| kind.is_dir());
+            if directory && entry.file_name() != ".git" {
+                pending.push(path);
+            }
+        }
+    }
+    None
+}
+
+/// Why a path in `/proc` is base: a process's environment, with its secrets, or anything of a
+/// process that is not one of the agent's runs. The reading program's own (`self`) is its own.
+fn process(groups: &[u32], path: &Resolved) -> Option<String> {
+    if path.inside {
+        return None;
+    }
+    let rest = path.path.strip_prefix("/proc").ok()?;
+    let parts: Vec<String> = rest
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    let process = parts.first()?;
+    let id = process.parse::<u32>().ok();
+    if id.is_none() && process != "self" && process != "thread-self" {
+        return None;
+    }
+    if parts.iter().any(|part| part == "environ") {
+        return Some(format!(
+            "{} is a process's environment, which holds its secrets",
+            path.shown
+        ));
+    }
+    let id = id?;
+    if group_of(id).is_some_and(|group| groups.contains(&group)) {
+        return None;
+    }
+    Some(format!(
+        "{} belongs to a process that is not one of this agent's runs: its command line, its \
+         memory and its files are not the agent's",
+        path.shown
+    ))
+}
+
+/// A process's group, from `/proc/<pid>/stat`.
+fn group_of(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // After the name in parentheses: state, parent, group.
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(2)?
+        .parse()
+        .ok()
+}
+
+/// Why a layer would lift what keeps an agent's git from pushing and running hooks: git's
+/// configuration set or cleared through the environment.
+fn unwalls(layer: &[String]) -> Option<String> {
+    let program = base(&layer[0]);
+    if READS.contains(&program) {
+        return None;
+    }
+    let args = &layer[1..];
+    let git_config = |name: &str| name.starts_with("GIT_CONFIG");
+    if let Some(word) = args
+        .iter()
+        .find(|word| assignment(word) && word.split_once('=').is_some_and(|(n, _)| git_config(n)))
+    {
+        return Some(format!(
+            "{} sets git's configuration through the environment, which can lift Flottille's \
+             wall on pushes and hooks",
+            word.split_once('=').map_or(word.as_str(), |(name, _)| name)
+        ));
+    }
+    if program != "env" {
+        return None;
+    }
+    let mut words = args.iter().map(String::as_str);
+    while let Some(word) = words.next() {
+        if !word.starts_with('-') {
+            break;
+        }
+        let unset = match word {
+            "-u" | "--unset" => words.next(),
+            _ => word
+                .strip_prefix("--unset=")
+                .or_else(|| word.strip_prefix("-u").filter(|_| !word.starts_with("--"))),
+        };
+        let clears = word == "-"
+            || abbreviates(word, "ignore-environment", 2)
+            || (!word.starts_with("--") && word.contains('i') && unset.is_none());
+        if clears || unset.is_some_and(git_config) {
+            return Some(format!(
+                "env {word} clears the environment that keeps git from pushing and running \
+                 hooks behind the gate"
+            ));
+        }
+    }
+    None
 }
 
 fn publishing(layer: &[String]) -> String {
@@ -502,58 +956,85 @@ fn shown_words(words: &[String]) -> String {
     text
 }
 
+/// What git's configuration under `key` can do that a call must not do behind the user's back,
+/// for the sections that run programs, lead pushes elsewhere or bring in other files.
+fn risky_setting(key: &str) -> Option<&'static str> {
+    let section = key.split('.').next().unwrap_or(key).to_ascii_lowercase();
+    Some(match section.as_str() {
+        "core" => "can run a program or move git's hooks",
+        "alias" => "can make a git command run any program",
+        "remote" | "url" => "changes where git fetches and pushes",
+        "push" => "changes what a push sends",
+        "credential" => "changes how git finds the user's credentials",
+        _ if section.starts_with("include") => "brings in another configuration file",
+        _ => return None,
+    })
+}
+
 /// What a git line does: its reads are harmless, adding or moving files in a workspace too;
-/// forcing a push, rewriting a pushed branch and discarding the work of the user's checkout are
-/// base; the rest is to judge.
-fn git(layer: &[String], main: bool, pushed: bool) -> Line {
+/// forcing a push, rewriting a pushed branch, discarding the work of the user's checkout and
+/// setting what runs programs or leads pushes are base; the rest is to judge. Global options are
+/// skipped to class the command, and count too: the stronger wins.
+fn git(call: &Call, layer: &[String]) -> Line {
     let args = &layer[1..];
-    let mut at = 0;
-    let mut options = Vec::new();
-    while let Some(word) = args.get(at) {
-        let word = word.as_str();
-        if !word.starts_with('-') {
-            break;
-        }
-        if (word.starts_with("-c") && !word.starts_with("--")) || word.starts_with("--config-env") {
-            return Line::Judge(
-                "git -c and --config-env change git's configuration for this one command".into(),
-            );
-        }
-        if [
-            "-C",
-            "--git-dir",
-            "--work-tree",
-            "--namespace",
-            "--super-prefix",
-            "--attr-source",
-            "--list-cmds",
-        ]
-        .contains(&word)
-        {
-            at += 2;
-        } else {
-            at += 1;
-        }
-        if !["-C", "--no-pager", "-P", "--paginate"].contains(&word) {
-            options.push(word);
-        }
+    let (at, globals) = git_globals(args);
+    let mut options: Option<Line> = None;
+    for (option, value) in globals {
+        let line = match option {
+            "-C"
+            | "--no-pager"
+            | "-P"
+            | "-p"
+            | "--paginate"
+            | "--no-replace-objects"
+            | "--literal-pathspecs"
+            | "--glob-pathspecs"
+            | "--noglob-pathspecs"
+            | "--icase-pathspecs"
+            | "--no-optional-locks"
+            | "--no-advice"
+            | "--no-lazy-fetch" => {
+                continue;
+            }
+            "-c" | "--config-env" => {
+                let key = value.unwrap_or_default();
+                let key = key.split_once('=').map_or(key, |(key, _)| key);
+                match risky_setting(key) {
+                    Some(why) => Line::Base(format!("git {option} {key}: it {why}")),
+                    None => Line::Judge(format!(
+                        "git {option} {key} changes git's configuration for this one command"
+                    )),
+                }
+            }
+            _ => Line::Judge(format!(
+                "git {option} points git at another repository or changes how it runs"
+            )),
+        };
+        options = Some(match options {
+            Some(before) => before.or(line),
+            None => line,
+        });
     }
-    let Some(command) = args.get(at).map(String::as_str) else {
-        return Line::Reads;
+    let line = match args.get(at) {
+        Some(command) => command_line(call, layer, command, &args[at + 1..]),
+        None => Line::Reads,
     };
-    let rest = &args[at + 1..];
-    if let Some(option) = options.first() {
-        return Line::Judge(format!(
-            "git {option} points git at another repository or changes how it runs"
-        ));
+    match options {
+        Some(options) => line.or(options),
+        None => line,
     }
-    if main && let Some(why) = discards_work(layer) {
+}
+
+/// What git's command does, with its arguments.
+fn command_line(call: &Call, layer: &[String], command: &str, rest: &[String]) -> Line {
+    let main = call.grant.place.workspace.is_none();
+    if main && let Some(why) = discards_work(call, layer, command, rest) {
         return Line::Base(why);
     }
     let any = |names: &[&str]| rest.iter().any(|w| names.contains(&w.as_str()));
     // Rewriting a branch others may have, or the user's own, is base.
     let rewrite = |what: String| {
-        if main || pushed {
+        if main || call.pushed {
             Line::Base(format!(
                 "{what}, on a branch that is {}",
                 if main {
@@ -566,8 +1047,34 @@ fn git(layer: &[String], main: bool, pushed: bool) -> Line {
             Line::Judge(what)
         }
     };
+    if GIT_READS.contains(&command) || command == "format-patch" {
+        if let Some((why, _)) = executed(layer) {
+            return Line::Judge(why);
+        }
+        if command == "help" && rest.iter().any(|w| w.starts_with('-')) {
+            return Line::Judge(format!(
+                "git help {} may open a browser or a viewer",
+                rest.join(" ")
+            ));
+        }
+        let writes = match command {
+            "format-patch" => !any(&["--stdout"]),
+            "diff" | "log" | "show" | "whatchanged" => {
+                rest.iter().any(|w| abbreviates(w, "output", 3))
+            }
+            _ => false,
+        };
+        if writes {
+            return Line::Files;
+        }
+        if command == "grep"
+            && let Some(why) = walks_secrets(call, layer)
+        {
+            return Line::Judge(why);
+        }
+        return Line::Reads;
+    }
     match command {
-        _ if GIT_READS.contains(&command) => Line::Reads,
         "push" | "send-pack" | "http-push" => push(rest),
         "subtree" | "lfs" if any(&["push"]) => push(rest),
         "filter-branch" | "filter-repo" => Line::Base(format!(
@@ -591,7 +1098,9 @@ fn git(layer: &[String], main: bool, pushed: bool) -> Line {
         }
         "branch" if branch_reads(rest) => Line::Reads,
         "config" if config_reads(rest) => Line::Reads,
+        "config" => config_writes(rest),
         "remote" if remote_reads(rest) => Line::Reads,
+        "remote" => remote_writes(rest),
         "symbolic-ref" if !symbolic_ref_writes(rest) => Line::Reads,
         "replace" if replace_reads(rest) => Line::Reads,
         "notes" if notes_reads(rest) => Line::Reads,
@@ -606,33 +1115,127 @@ fn git(layer: &[String], main: bool, pushed: bool) -> Line {
     }
 }
 
+/// `git config` that writes: base for a setting that runs programs or leads pushes, to judge
+/// otherwise.
+fn config_writes(rest: &[String]) -> Line {
+    let mut positional = Vec::new();
+    let mut edit = false;
+    let mut renames = false;
+    let mut words = rest.iter().map(String::as_str);
+    while let Some(word) = words.next() {
+        match word {
+            "-f" | "--file" | "--blob" | "-t" | "--type" | "--default" | "--comment"
+            | "--value" => {
+                words.next();
+            }
+            "-e" | "--edit" => edit = true,
+            "--rename-section" => renames = true,
+            _ if word.starts_with('-') => {}
+            _ => positional.push(word),
+        }
+    }
+    let keys: Vec<&str> = match positional.first().copied() {
+        Some("edit") => {
+            edit = true;
+            Vec::new()
+        }
+        Some("set" | "unset" | "remove-section") => {
+            positional.get(1).copied().into_iter().collect()
+        }
+        Some("rename-section") => positional.iter().skip(1).take(2).copied().collect(),
+        _ if renames => positional.iter().take(2).copied().collect(),
+        _ => positional.first().copied().into_iter().collect(),
+    };
+    if edit {
+        return Line::Base(
+            "git config --edit opens the whole configuration to change, whatever it sets".into(),
+        );
+    }
+    for key in keys {
+        if let Some(why) = risky_setting(key) {
+            return Line::Base(format!("git config writes {key}: it {why}"));
+        }
+    }
+    Line::Judge("git config changes git's configuration".into())
+}
+
+/// `git remote` that writes: changing a remote's URL or the remotes themselves is base, since a
+/// push trusts where a remote leads.
+fn remote_writes(rest: &[String]) -> Line {
+    let command = rest
+        .iter()
+        .find(|w| !w.starts_with('-'))
+        .map(String::as_str)
+        .unwrap_or_default();
+    if ["add", "rename", "remove", "rm", "set-url", "set-branches"].contains(&command) {
+        Line::Base(format!(
+            "git remote {command} changes where git fetches and pushes"
+        ))
+    } else {
+        Line::Judge(format!("git remote {command} changes a remote"))
+    }
+}
+
 /// Whether a line pushes with git, at any of its layers: the run checks its remote first.
 pub fn pushes(words: &[String]) -> bool {
-    layers(words).is_ok_and(|layers| {
-        layers
-            .iter()
-            .any(|layer| base(&layer[0]) == "git" && subcommand(&layer[1..]) == Some("push"))
+    lines(words).is_ok_and(|layers| {
+        layers.iter().any(|layer| {
+            suffixes(layer).iter().any(|(_, suffix)| {
+                base(&suffix[0]) == "git" && {
+                    let args = &suffix[1..];
+                    args.get(git_globals(args).0).is_some_and(|w| w == "push")
+                }
+            })
+        })
     })
 }
 
-/// git's command, past its global options.
-fn subcommand(args: &[String]) -> Option<&str> {
+/// git's global options before its command: where the command is, and each option with its
+/// value.
+fn git_globals(args: &[String]) -> (usize, Vec<(&str, Option<&str>)>) {
+    const VALUED: [&str; 8] = [
+        "-C",
+        "-c",
+        "--git-dir",
+        "--work-tree",
+        "--namespace",
+        "--super-prefix",
+        "--config-env",
+        "--attr-source",
+    ];
     let mut at = 0;
+    let mut options = Vec::new();
     while let Some(word) = args.get(at) {
+        let word = word.as_str();
         if !word.starts_with('-') {
-            return Some(word);
+            break;
         }
-        at += match word.as_str() {
-            "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--super-prefix"
-            | "--attr-source" | "--config-env" => 2,
-            _ => 1,
-        };
+        at += 1;
+        if VALUED.contains(&word) {
+            options.push((word, args.get(at).map(String::as_str)));
+            at += 1;
+        } else if let Some(value) = word.strip_prefix("-c").filter(|_| !word.starts_with("--")) {
+            options.push(("-c", Some(value)));
+        } else if let Some((name, value)) = word.split_once('=') {
+            options.push((name, Some(value)));
+        } else {
+            options.push((word, None));
+        }
     }
-    None
+    (at, options)
 }
 
-/// A push: forcing it or deleting on the remote is base, anything else to judge.
+/// A push: forcing it or deleting on the remote is base, anything else to judge. Git takes any
+/// unambiguous start of a long option.
 fn push(rest: &[String]) -> Line {
+    const FORCING: [&str; 6] = [
+        "force",
+        "force-with-lease",
+        "force-if-includes",
+        "mirror",
+        "delete",
+        "prune",
+    ];
     let mut options = true;
     for word in rest {
         let word = word.as_str();
@@ -641,7 +1244,10 @@ fn push(rest: &[String]) -> Line {
             continue;
         }
         let forced = if options && word.starts_with("--") {
-            word.starts_with("--force") || ["--mirror", "--delete", "--prune"].contains(&word)
+            let name = word[2..].split('=').next().unwrap_or_default();
+            !name.is_empty()
+                && !name.starts_with("no-")
+                && FORCING.iter().any(|option| option.starts_with(name))
         } else if options && word.starts_with('-') && word.len() > 1 {
             word[1..].contains(['f', 'd'])
         } else {
@@ -770,6 +1376,53 @@ fn layers(words: &[String]) -> Result<Vec<Vec<String>>, String> {
     Ok(layers)
 }
 
+/// The layers of a line, then those of each line an option of theirs runs (`find -exec`, `fd
+/// -x`…), unwrapped in turn.
+fn lines(words: &[String]) -> Result<Vec<Vec<String>>, String> {
+    let mut all = layers(words)?;
+    let mut at = 0;
+    while at < all.len() {
+        for line in executed(&all[at])
+            .map(|(_, lines)| lines)
+            .unwrap_or_default()
+        {
+            for layer in layers(&line)? {
+                if all.len() == LAYERS_MAX {
+                    return Err(format!(
+                        "refused: the line runs programs in more than {LAYERS_MAX} layers: run \
+                         them directly"
+                    ));
+                }
+                all.push(layer);
+            }
+        }
+        at += 1;
+    }
+    Ok(all)
+}
+
+/// The lines a layer may run: itself, then, unless its program only reads, each of its ends that
+/// starts with a word that is not an option, since a wrapper the gate does not know runs one of
+/// them. A git layer's start only after its command (`git bisect run …`): `git rm` is not `rm`.
+fn suffixes(layer: &[String]) -> Vec<(usize, &[String])> {
+    let mut all = vec![(0, layer)];
+    let program = base(&layer[0]);
+    if READS.contains(&program) {
+        return all;
+    }
+    let from = if program == "git" {
+        git_globals(&layer[1..]).0 + 2
+    } else {
+        1
+    };
+    all.extend(
+        (from..layer.len())
+            .filter(|&at| !layer[at].starts_with('-'))
+            .map(|at| (at, &layer[at..])),
+    );
+    all
+}
+
 /// The words a wrapper runs, `None` when the program is not one (or runs nothing), or the
 /// refusal of a line it runs that cannot be split.
 fn inner(words: &[String]) -> Result<Option<Vec<String>>, String> {
@@ -870,6 +1523,28 @@ fn inner(words: &[String]) -> Result<Option<Vec<String>>, String> {
         )),
         "sh" | "bash" | "zsh" | "dash" | "ksh" | "mksh" | "ash" | "fish" => {
             return shell(program, args);
+        }
+        "script" => {
+            for (at, word) in args.iter().enumerate() {
+                if word == "-c" || word == "--command" {
+                    return split(program, args.get(at + 1).map(String::as_str), &[]);
+                }
+                if let Some(line) = word.strip_prefix("--command=") {
+                    return split(program, Some(line), &[]);
+                }
+            }
+            None
+        }
+        // Without -x, watch runs its words joined, through a shell.
+        "watch" => {
+            let at = skip(args, &["-n", "--interval", "-q", "--equexit"], false);
+            if args[..at].iter().any(|w| w == "-x" || w == "--exec") {
+                from(at)
+            } else if at < args.len() {
+                return split(program, Some(&args[at..].join(" ")), &[]);
+            } else {
+                None
+            }
         }
         _ => None,
     })
@@ -1044,7 +1719,7 @@ fn deletion(call: &Call, layers: &[Vec<String>]) -> Option<String> {
         .filter_map(|folder| std::fs::canonicalize(folder).ok())
         .collect();
     guarded.extend(real);
-    for layer in layers {
+    for (_, layer) in layers.iter().flat_map(|layer| suffixes(layer)) {
         for named in deleted(layer) {
             let target = place.resolve(&folder.path, named);
             if guarded
@@ -1272,52 +1947,70 @@ fn api_reads(args: &[String]) -> bool {
         .is_some_and(|endpoint| *endpoint != "graphql")
 }
 
-/// Why a git line discards or rewrites the work of the user's own checkout, when it does: in the
-/// project folder, that is base.
-fn discards_work(layer: &[String]) -> Option<String> {
-    let args = &layer[1..];
-    let (at, _) = git_subcommand(args);
-    let subcommand = args.get(at)?.as_str();
-    let rest = &args[at + 1..];
+/// Why a git command discards the work of the user's own checkout, or moves the branch it has
+/// checked out, when it does: in the project folder, that is base.
+fn discards_work(call: &Call, layer: &[String], command: &str, rest: &[String]) -> Option<String> {
     let any = |names: &[&str]| rest.iter().any(|word| names.contains(&word.as_str()));
-    let discards = match subcommand {
-        "checkout" => any(&["--", ".", "-f", "--force"]),
-        "restore" | "clean" | "reset" => true,
-        "stash" => !matches!(rest.first().map(String::as_str), Some("list" | "show")),
-        "worktree" => rest.first().is_some_and(|word| word == "remove"),
-        "branch" => rest.iter().any(|word| {
-            word == "--delete"
-                || (!word.starts_with("--") && word.starts_with('-') && word.contains(['d', 'D']))
-        }),
+    let short = |letters: &[char]| shorts(rest).any(|word| word[1..].contains(letters));
+    let first = rest.first().map(String::as_str);
+    let discards = match command {
+        "checkout" => {
+            any(&[
+                "--",
+                ".",
+                "--force",
+                "--ours",
+                "--theirs",
+                "--patch",
+                "--pathspec-from-file",
+            ]) || short(&['f', 'B', 'p'])
+                || checks_out_paths(call, rest)
+        }
+        "switch" => any(&["--force", "--discard-changes", "--force-create"]) || short(&['f', 'C']),
+        "checkout-index" => any(&["--force"]) || short(&['f']),
+        "read-tree" => short(&['u']),
+        "restore" | "clean" | "reset" | "update-ref" => true,
+        "stash" => !matches!(first, Some("list" | "show")),
+        "worktree" => first == Some("remove"),
+        "branch" => {
+            any(&["--delete", "--force", "--move"]) || short(&['d', 'D', 'f', 'M', 'm', 'C'])
+        }
+        "rm" => !any(&["--cached"]),
+        "apply" | "am" if any(&["--reject"]) => !any(&["--cached", "--check"]),
+        "merge" | "cherry-pick" | "revert" | "am" => any(&["--abort"]),
+        "symbolic-ref" => symbolic_ref_writes(rest),
+        "submodule" => {
+            matches!(first, Some("update" | "deinit")) && (any(&["--force"]) || short(&['f']))
+        }
         _ => false,
     };
     discards.then(|| {
         format!(
-            "{} discards or rewrites the work in the user's own checkout (main)",
+            "{} discards the work in the user's own checkout (main), or moves the branch it has \
+             checked out",
             shown_words(layer)
         )
     })
 }
 
-/// Where git's subcommand is among its arguments, and whether nothing but `--no-pager` comes
-/// before it.
-fn git_subcommand(args: &[String]) -> (usize, bool) {
-    let mut at = 0;
-    let mut plain = true;
-    while let Some(word) = args.get(at) {
-        if !word.starts_with('-') {
-            break;
-        }
-        if word != "--no-pager" {
-            plain = false;
-        }
-        at += if ["-C", "-c", "--git-dir", "--work-tree", "--namespace"].contains(&word.as_str()) {
-            2
-        } else {
-            1
-        };
+/// Whether a `git checkout` without `--` names paths, which it then overwrites from the index or
+/// a commit: a word that is a file or a folder of the place, a pattern or a pathspec magic. A new
+/// branch (`-b`, `--orphan`) carries the work along.
+fn checks_out_paths(call: &Call, rest: &[String]) -> bool {
+    if rest
+        .iter()
+        .any(|word| word == "-b" || word == "--orphan" || word.starts_with("--orphan="))
+    {
+        return false;
     }
-    (at, plain)
+    let folder = call.paths.first().map(|folder| folder.path.as_path());
+    rest.iter()
+        .filter(|word| !word.starts_with('-'))
+        .any(|word| {
+            word.contains(['*', '?', '['])
+                || word.starts_with(':')
+                || folder.is_some_and(|folder| folder.join(word).exists())
+        })
 }
 
 /// The sensitive place a path is in, if it is in one: inside the place, only what sits below it
@@ -1387,6 +2080,9 @@ mod tests {
         never: Vec<Vec<String>>,
         commands: BTreeMap<String, CatalogueCommand>,
         pushed: bool,
+        /// Where the system's programs are: a folder beside the project, every known program in it.
+        search: std::ffi::OsString,
+        groups: Vec<u32>,
     }
 
     impl Fixture {
@@ -1396,6 +2092,11 @@ mod tests {
             let root = base.join("work/app");
             std::fs::create_dir_all(root.join("src")).unwrap();
             std::fs::create_dir_all(base.join("home")).unwrap();
+            let bin = base.join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            for program in READS.iter().chain(&["git", "gh", "glab", "less", "more"]) {
+                installed(&bin.join(program));
+            }
             let grant = Grant {
                 agent: "a1".into(),
                 epoch: 0,
@@ -1431,6 +2132,8 @@ mod tests {
                 ],
                 commands: BTreeMap::new(),
                 pushed: false,
+                search: bin.into_os_string(),
+                groups: Vec::new(),
             }
         }
 
@@ -1491,6 +2194,9 @@ mod tests {
                 never,
                 own: &self.own,
                 pushed: self.pushed,
+                search: Some(&self.search),
+                writable: std::slice::from_ref(&self.root),
+                groups: &self.groups,
             })
         }
 
@@ -1509,6 +2215,20 @@ mod tests {
                 _ => json!({"path": path}),
             };
             self.judge(tool, args, Some(&self.never))
+        }
+    }
+
+    /// An executable file.
+    fn installed(path: &Path) {
+        std::fs::write(path, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+    }
+
+    fn reasons(verdict: &Verdict) -> String {
+        match verdict {
+            Verdict::Ask(ask) => ask.reasons.join(" | "),
+            other => format!("{other:?}"),
         }
     }
 
@@ -1626,7 +2346,7 @@ mod tests {
                 "git fetch origin",
                 "git checkout main",
                 "git config user.name someone",
-                "git -c core.pager=less log",
+                "git -c color.ui=never log",
                 "git --git-dir=other log",
                 "cargo build",
                 "npm run dev",
@@ -1882,5 +2602,384 @@ mod tests {
             ask.reasons[0].starts_with("/etc/hosts is outside"),
             "{ask:?}"
         );
+    }
+
+    #[test]
+    fn a_program_the_agent_wrote_is_judged_whatever_its_name() {
+        let fixture = Fixture::workspace();
+        let root = fixture.root.display().to_string();
+        let bin = fixture.root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        installed(&bin.join("ls"));
+        installed(&bin.join("git"));
+        let mut inside = Fixture::workspace();
+        let system = PathBuf::from(&inside.search);
+        inside.search = std::env::join_paths([inside.root.join("bin"), system]).unwrap();
+        std::fs::create_dir_all(inside.root.join("bin")).unwrap();
+        installed(&inside.root.join("bin/cat"));
+        for (fixture, line) in [
+            (&fixture, "./ls".to_owned()),
+            (&fixture, "./ls -la src".to_owned()),
+            (&fixture, format!("{root}/bin/ls")),
+            (&fixture, "./git status".to_owned()),
+            (&fixture, "bin/git log".to_owned()),
+            (&fixture, "/usr/bin/../../tmp/ls".to_owned()),
+            (&inside, "cat src/a.rs".to_owned()),
+        ] {
+            let verdict = fixture.run(&line);
+            assert!(to_judge(&verdict), "{line}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains("agent's own file"),
+                "{line}: {verdict:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_read_only_program_with_an_option_that_runs_a_program_is_judged() {
+        for fixture in [Fixture::main(), Fixture::workspace()] {
+            for line in [
+                "find . -exec cat {} ';'",
+                "find . -execdir cat {} +",
+                "find . -ok cat {} ';'",
+                "fd -x cat",
+                "fd -X cat",
+                "fd --exec cat",
+                "fd --exec-batch cat",
+                "fd needle -x cat",
+                "rg --pre cat needle",
+                "rg --pre=cat needle",
+                "rg --hostname-bin hostname needle",
+                "git grep -O needle",
+                "git grep --open-files-in-pager=cat needle",
+                "git log -p --ext-diff",
+                "git diff --ext-diff",
+                "git diff --textconv",
+                "git show --ext-diff HEAD",
+                "git cat-file --textconv HEAD:a",
+                "git cat-file --filters HEAD:a",
+                "less src/a.rs",
+                "more src/a.rs",
+                "git help -w log",
+                "date -s 2020-01-01",
+                "date --set=2020-01-01",
+            ] {
+                let verdict = fixture.run(line);
+                assert!(to_judge(&verdict), "{line}: {verdict:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_base_line_an_option_runs_is_base() {
+        let fixture = Fixture::workspace();
+        for line in [
+            "fd -X git push -f",
+            "fd -x cargo publish",
+            "find . -exec git push --force ';'",
+            "find . -execdir npm publish ';'",
+            "git grep --open-files-in-pager='git push -f' needle",
+            "rg --pre=deploy needle",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+        }
+    }
+
+    #[test]
+    fn a_global_git_option_does_not_hide_its_subcommand() {
+        let main = Fixture::main();
+        for line in [
+            "git -c color.ui=never push --force",
+            "git -ccolor.ui=never push -f",
+            "git --no-pager -c color.ui=never push --mirror",
+            "git --git-dir=other push --delete origin x",
+            "git --work-tree other -c a.b=c push origin +x",
+            "git -c color.ui=never reset --hard",
+            "git --config-env=color.ui=X clean -fd",
+        ] {
+            let verdict = main.run(line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+        }
+        for line in [
+            "git -c color.ui=never status",
+            "git -c color.ui=never commit -m x",
+            "git --git-dir=other log",
+        ] {
+            let verdict = main.run(line);
+            assert!(to_judge(&verdict), "{line}: {verdict:?}");
+        }
+    }
+
+    #[test]
+    fn a_global_git_setting_that_runs_or_redirects_is_base() {
+        let fixture = Fixture::workspace();
+        for line in [
+            "git -c core.pager=cat log",
+            "git -c core.sshCommand=x fetch",
+            "git -c alias.st=!x st",
+            "git -c remote.origin.url=x fetch",
+            "git -c url.x.insteadOf=y fetch",
+            "git -c push.default=matching push",
+            "git -c include.path=x status",
+            "git -cinclude.path=x status",
+            "git -c includeIf.onbranch:x.path=y status",
+            "git -c credential.helper=x fetch",
+            "git --config-env core.hooksPath=X commit -m x",
+            "git --config-env=alias.x=X status",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+        }
+    }
+
+    #[test]
+    fn a_push_option_shortened_to_a_unique_prefix_is_base() {
+        let fixture = Fixture::workspace();
+        for line in [
+            "git push --mirr",
+            "git push --dele origin x",
+            "git push --prun origin",
+            "git push --forc origin x",
+            "git push --force-w origin x",
+            "git push --force-with-lease=x:y origin x",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+        }
+        for line in [
+            "git push --dry-run",
+            "git push --set-upstream origin x",
+            "git push --no-force origin x",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(to_judge(&verdict), "{line}: {verdict:?}");
+        }
+    }
+
+    #[test]
+    fn an_unlisted_wrapper_cannot_turn_base_into_judge() {
+        let workspace = Fixture::workspace();
+        for line in [
+            "setsid git push -f",
+            "ionice -c3 git push --force",
+            "taskset 1 git push -f",
+            "flock /tmp/lock git push -f",
+            "chrt 1 git push --mirror",
+            "script -c 'git push -f' /dev/null",
+            "script --command='git push -f'",
+            "watch git push -f",
+            "watch -n 5 'git push -f'",
+            "strace -f git push -f",
+            "setsid cargo publish",
+            "setsid rm -rf .git",
+            "setsid rm -rf .",
+            "setsid deploy now",
+            "setsid ./git push -f",
+        ] {
+            let verdict = workspace.run(line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+        }
+        let main = Fixture::main();
+        for line in ["setsid git reset --hard", "flock x git checkout -- ."] {
+            let verdict = main.run(line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+        }
+    }
+
+    #[test]
+    fn clearing_or_setting_git_s_configuration_through_the_environment_is_base() {
+        let fixture = Fixture::workspace();
+        for line in [
+            "env GIT_CONFIG_COUNT=0 cargo test",
+            "env GIT_CONFIG_PARAMETERS=x git commit -m x",
+            "env GIT_CONFIG_GLOBAL=x git status",
+            "env -i cargo test",
+            "env - cargo test",
+            "env --ignore-environment cargo test",
+            "env -u GIT_CONFIG_COUNT cargo test",
+            "env --unset=GIT_CONFIG_KEY_0 cargo test",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+        }
+    }
+
+    #[test]
+    fn writing_a_sensitive_git_setting_is_base() {
+        for fixture in [Fixture::main(), Fixture::workspace()] {
+            for line in [
+                "git config core.hooksPath x",
+                "git config set alias.x y",
+                "git config --add remote.origin.pushurl x",
+                "git config --global url.x.insteadOf y",
+                "git config --unset push.default",
+                "git config unset push.default",
+                "git config --replace-all credential.helper x",
+                "git config --rename-section remote.a remote.b",
+                "git config --remove-section credential",
+                "git config include.path x",
+                "git config --file .git/config core.x y",
+                "git config -e",
+                "git remote set-url origin x",
+                "git remote set-url --push origin x",
+                "git remote add other x",
+                "git remote rename origin o",
+                "git remote remove origin",
+                "git remote set-branches origin x",
+            ] {
+                let verdict = fixture.run(line);
+                assert!(base_class(&verdict), "{line}: {verdict:?}");
+            }
+            for line in ["git config user.name someone", "git remote prune origin"] {
+                let verdict = fixture.run(line);
+                assert!(to_judge(&verdict), "{line}: {verdict:?}");
+            }
+            assert_eq!(fixture.run("git config --get core.editor"), Verdict::Allow);
+        }
+    }
+
+    #[test]
+    fn discarding_work_in_main_is_base_in_all_its_forms() {
+        let main = Fixture::main();
+        std::fs::write(main.root.join("src/a.rs"), "a\n").unwrap();
+        let workspace = Fixture::workspace();
+        for line in [
+            "git checkout src",
+            "git checkout src/a.rs",
+            "git checkout HEAD src/a.rs",
+            "git checkout '*.rs'",
+            "git checkout :/src",
+            "git checkout --ours src",
+            "git checkout -B topic",
+            "git checkout --force main",
+            "git switch -f main",
+            "git switch --discard-changes main",
+            "git switch -C topic",
+            "git switch --force-create topic",
+            "git checkout-index -f -a",
+            "git checkout-index -af",
+            "git read-tree --reset -u HEAD",
+            "git read-tree -m -u HEAD",
+            "git branch -f main HEAD~1",
+            "git branch --force main HEAD~1",
+            "git branch -M x",
+            "git branch -m x",
+            "git update-ref refs/heads/main HEAD~1",
+            "git rm src/a.rs",
+            "git apply --reject x.patch",
+            "git am --reject x.mbox",
+            "git merge --abort",
+            "git cherry-pick --abort",
+            "git revert --abort",
+            "git symbolic-ref HEAD refs/heads/other",
+            "git submodule update --force",
+            "git submodule deinit -f x",
+        ] {
+            let verdict = main.run(line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+            assert!(
+                !matches!(workspace.run(line), Verdict::Deny(_)),
+                "{line}: {:?}",
+                workspace.run(line)
+            );
+        }
+        for line in [
+            "git checkout main",
+            "git checkout -b topic",
+            "git switch main",
+            "git rm --cached src/a.rs",
+            "git apply x.patch",
+        ] {
+            let verdict = main.run(line);
+            assert!(to_judge(&verdict), "{line}: {verdict:?}");
+        }
+    }
+
+    #[test]
+    fn an_option_that_writes_a_file_is_judged_in_main_and_harmless_inside_a_workspace() {
+        let main = Fixture::main();
+        let workspace = Fixture::workspace();
+        for line in [
+            "git diff --output=out.patch",
+            "git diff --output out.patch",
+            "git log -p --outp=out.txt",
+            "git show --output=out.txt HEAD",
+            "git format-patch -o patches HEAD~1",
+            "tree -o out.txt",
+            "find . -fprint out.txt",
+            "file -C -m magic",
+        ] {
+            let verdict = main.run(line);
+            assert!(to_judge(&verdict), "{line}: {verdict:?}");
+            assert_eq!(workspace.run(line), Verdict::Allow, "{line}");
+        }
+        for line in [
+            "git diff --output=../../home/out.patch",
+            "tree -o ../../home/out.txt",
+        ] {
+            let verdict = workspace.run(line);
+            assert!(to_judge(&verdict), "{line}: {verdict:?}");
+        }
+    }
+
+    #[test]
+    fn a_recursive_reader_over_a_folder_with_a_sensitive_file_is_judged() {
+        let fixture = Fixture::workspace();
+        std::fs::create_dir_all(fixture.root.join("config")).unwrap();
+        std::fs::write(fixture.root.join("config/.env"), "A=b\n").unwrap();
+        for line in [
+            "grep -r needle .",
+            "grep -rn needle",
+            "grep -R needle config",
+            "grep --recursive needle",
+            "grep -d recurse needle .",
+            "rg -u needle",
+            "rg -uu needle",
+            "rg --hidden needle",
+            "rg --no-ignore needle",
+            "git grep --untracked needle",
+            "git grep --no-index needle",
+            "fd -H env",
+            "fd --hidden env",
+            "fd -I env",
+            "find -L .",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(to_judge(&verdict), "{line}: {verdict:?}");
+            assert!(reasons(&verdict).contains(".env"), "{line}: {verdict:?}");
+        }
+        for line in [
+            "grep -rn needle src",
+            "rg needle",
+            "fd env",
+            "git grep needle",
+        ] {
+            assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
+        }
+    }
+
+    #[test]
+    fn reading_another_process_s_proc_is_base() {
+        let mut fixture = Fixture::workspace();
+        for verdict in [
+            fixture.file("fs_read", "/proc/1/status"),
+            fixture.file("fs_read", "/proc/self/environ"),
+            fixture.run("cat /proc/1/cmdline"),
+            fixture.run("cat /proc/self/environ"),
+            fixture.run("cat /proc/thread-self/environ"),
+            fixture.run("cat /proc/self/task/1/environ"),
+        ] {
+            assert!(base_class(&verdict), "{verdict:?}");
+        }
+        assert!(to_judge(&fixture.file("fs_read", "/proc/self/status")));
+        // The agent's own runs are its own processes.
+        let me = std::process::id();
+        fixture.groups = vec![unsafe { libc::getpgid(0) } as u32];
+        let verdict = fixture.file("fs_read", &format!("/proc/{me}/status"));
+        assert!(to_judge(&verdict), "{verdict:?}");
+        assert!(base_class(
+            &fixture.file("fs_read", &format!("/proc/{me}/environ"))
+        ));
     }
 }
