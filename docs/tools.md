@@ -448,7 +448,9 @@ says who answers a call to judge (`docs/design.md` §7.1).
    - a write, a move or a removal of a folder above Flottille's own (`mv ~/.config ~/c.bak`, `rm
      -r` of it, `fs_write` over it), which would take its configuration or data away: by a file
      tool that writes, or by a run that is not known to only read and names it as a word (the
-     folder a run starts in may hold Flottille's: a project in the home folder);
+     folder a run starts in may hold Flottille's: a project in the home folder). What deletes the
+     untracked files of the folder it runs in without naming it (every `git clean`, `git stash`
+     with `-u`, `--include-untracked`, `-a` or `--all`) counts that folder;
    - a path in `/proc` through what of any process leads elsewhere on the disk: its `root`,
      `cwd`, `fd`, `exe` or `map_files` (`/proc/self/root/…`, `/proc/<pid>/cwd/…`), under any
      name it is reached by (`/dev/fd/3`, a link to `/proc/self/cwd`; `/dev/stdin` for a file

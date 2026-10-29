@@ -635,7 +635,40 @@ fn run(call: &Call) -> Verdict {
             }
         }
     }
+    // What deletes the untracked files of the folder it runs in names none: its folder is what
+    // it takes away.
+    if layers
+        .iter()
+        .flat_map(|layer| suffixes(layer))
+        .any(|(_, layer)| removes_untracked(layer))
+        && let Some(why) = call
+            .paths
+            .first()
+            .and_then(|folder| above_own(call.own, folder))
+    {
+        found.base(why);
+    }
     found.verdict(Kind::Call)
+}
+
+/// Whether a layer deletes the untracked files of its folder: every `git clean`, a `git stash`
+/// that takes them (`-u`, `--include-untracked`, `-a`, `--all`).
+fn removes_untracked(layer: &[String]) -> bool {
+    if base(&layer[0]) != "git" {
+        return false;
+    }
+    let args = &layer[1..];
+    let (at, _) = git_globals(args);
+    let rest = args.get(at + 1..).unwrap_or_default();
+    match args.get(at).map(String::as_str) {
+        Some("clean") => true,
+        Some("stash") => {
+            rest.iter().take_while(|word| *word != "--").any(|word| {
+                abbreviates(word, "include-untracked", 1) || abbreviates(word, "all", 1)
+            }) || shorts(rest).any(|short| short.contains(['u', 'a']))
+        }
+        _ => false,
+    }
 }
 
 /// What a layer of a line does, by its program.
@@ -3973,6 +4006,30 @@ mod tests {
         }
         // The file tools still refuse it.
         assert!(denied(&fixture.file("fs_read", "m/../x")));
+    }
+
+    #[test]
+    fn deleting_untracked_files_in_a_folder_above_flottille_s_is_base() {
+        let mut fixture = Fixture::workspace();
+        fixture.own = vec![fixture.root.join("sub/flottille")];
+        std::fs::create_dir_all(&fixture.own[0]).unwrap();
+        for line in [
+            "git clean -fdx",
+            "git clean -fd",
+            "git stash -u",
+            "git stash push --include-untracked",
+            "git stash -a",
+            "git stash --all",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains("Flottille's own folders"),
+                "{line}: {verdict:?}"
+            );
+        }
+        // Stashing tracked changes only takes nothing of Flottille's.
+        assert!(!base_class(&fixture.run("git stash")));
     }
 
     #[test]
