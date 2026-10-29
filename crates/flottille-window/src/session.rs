@@ -61,6 +61,18 @@ pub const RAIL: f32 = 290.;
 /// How the screen names the root agent, which has no name of its own there.
 pub const THE_CONVERSATION: &str = "the conversation";
 
+/// What the confirmation of ending a session says: how many agents end.
+pub fn end_sentence(count: usize) -> String {
+    match count {
+        0 | 1 => format!("This ends {THE_CONVERSATION}. Its workspace stays."),
+        n => format!(
+            "This ends {n} agents: {THE_CONVERSATION} and its {} sub-agent{}. Workspaces stay.",
+            n - 1,
+            if n == 2 { "" } else { "s" }
+        ),
+    }
+}
+
 /// The reply field's placeholder and its send button's tooltip: the field writes to the root.
 pub const REPLY_PLACEHOLDER: &str = "Reply…";
 pub const SEND: &str = "Send";
@@ -354,15 +366,7 @@ impl SessionPage {
         if !self.ending {
             return None;
         }
-        Some(match self.end_count() {
-            0 | 1 => format!("This ends {THE_CONVERSATION}. Its workspace stays."),
-            n => format!(
-                "This ends {n} agents: {THE_CONVERSATION} and its {} sub-agent{}. Workspaces \
-                 stay.",
-                n - 1,
-                if n == 2 { "" } else { "s" }
-            ),
-        })
+        Some(end_sentence(self.end_count()))
     }
 
     /// Opens the confirmation of ending the session, from the root's menu.

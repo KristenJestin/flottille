@@ -15,9 +15,14 @@ use flottille_ui::omarchy::Environment;
 use flottille_ui::state::icon_id;
 use flottille_ui::toggle_id;
 use flottille_window::Shell;
+use flottille_window::composer::Choice;
 use flottille_window::link::Connect;
 use flottille_window::session::{Reply, SessionPage};
-use flottille_window::tree::{place_id, project_id, session_id};
+use flottille_window::shell::Selection;
+use flottille_window::tree::{
+    ended_id, place_id, place_new_id, project_id, session_end_id, session_id, session_menu_id,
+    session_resume_id,
+};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
@@ -39,6 +44,16 @@ fn project(user: &User, name: &str) {
     std::fs::write(folder.join("README.md"), format!("{name}\n")).unwrap();
     user.git(&folder, &["add", "README.md"]);
     user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    let remote = user.path(&format!("remotes/{name}.git"));
+    user.git(
+        &user.path(""),
+        &["init", "--quiet", "--bare", remote.to_str().unwrap()],
+    );
+    user.git(
+        &folder,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    user.git(&folder, &["push", "--quiet", "origin", "main"]);
     user.call("project.add", json!({"folder": folder, "name": name}))
         .unwrap();
 }
@@ -278,5 +293,392 @@ fn the_user_s_own_message_is_selectable_like_the_agent_s(cx: &mut TestAppContext
         selecting_all_in(&page, mine, cx),
         "keep *this* as_typed [here]",
         "the user's own message, marks and all"
+    );
+}
+
+/// A workspace of `project`, ready.
+fn workspace(user: &User, project: &str, name: &str) {
+    user.call(
+        "workspace.create",
+        json!({"project": project, "name": name}),
+    )
+    .unwrap();
+    eventually("the workspace is ready", || {
+        user.call("workspace.show", json!({"project": project, "name": name}))
+            .unwrap()["state"]
+            == "ready"
+    });
+}
+
+/// The width of the left tree: what is drawn to its right belongs to the page.
+const TREE: f32 = 300.;
+
+/// The folds of the left tree: what lies in one that is shut is clipped away, though drawn.
+const FOLDS: [&str; 3] = ["fold-project-app", "fold-place-app-main", "fold-ended"];
+
+/// Whether the left tree shows what is drawn at `bounds`: left of the page, and in no fold that
+/// is shut.
+fn shown_in_tree(
+    bounds: gpui_kit::Bounds<gpui_kit::Pixels>,
+    window: &mut gpui_kit::Window,
+) -> bool {
+    bounds.origin.x < px(TREE)
+        && !FOLDS.iter().any(|fold| {
+            window.try_find(*fold).is_some_and(|fold| {
+                fold.bounds().size.height == px(0.) && bounds.origin.y >= fold.bounds().origin.y
+            })
+        })
+}
+
+/// The spinners the left tree shows; the project page draws its own beside it.
+fn running_icons(cx: &mut VisualTestContext) -> usize {
+    cx.update(|window, _| {
+        let icons = window.find_all(icon_id(AgentState::Running));
+        icons
+            .iter()
+            .filter(|icon| shown_in_tree(icon.bounds(), window))
+            .count()
+    })
+}
+
+/// Whether the left tree shows `id`.
+fn in_tree(id: impl Into<gpui_kit::ElementId>, cx: &mut VisualTestContext) -> bool {
+    cx.update(|window, _| {
+        window
+            .try_find(id)
+            .is_some_and(|row| shown_in_tree(row.bounds(), window))
+    })
+}
+
+fn mark_of(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> Option<AgentState> {
+    shell.read_with(cx, |shell, cx| {
+        shell.session(id).and_then(|row| row.read(cx).mark())
+    })
+}
+
+/// A window on the tree of the user's daemon, its rows drawn.
+fn tree_of<'a>(
+    user: &User,
+    shown: &[&str],
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    let (shell, cx) = window(user, Arc::new(user.connector()), 1280., cx);
+    until(&shell, cx, "the sessions are in the tree", |cx| {
+        cx.update(|window, _| {
+            shown
+                .iter()
+                .all(|id| window.try_find(session_id(id)).is_some())
+        })
+    });
+    settle(cx);
+    (shell, cx)
+}
+
+#[gpui_kit::test]
+fn a_running_agent_shows_one_spinner_on_its_own_row_and_a_folded_parent_shows_one_for_what_runs_inside(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "app");
+    let id = start(&user, "app", "hello");
+    send(&user, &id, "HANG");
+    let (shell, cx) = tree_of(&user, &[&id], cx);
+    until(&shell, cx, "the session runs", |cx| {
+        mark_of(&shell, &id, cx) == Some(AgentState::Running)
+    });
+    settle(cx);
+    let (project, main) = shell.read_with(cx, |s, _| {
+        (
+            s.project("app").unwrap().clone(),
+            s.place("app", &None).unwrap().clone(),
+        )
+    });
+    assert_eq!(
+        running_icons(cx),
+        1,
+        "its row, and neither its place nor its project"
+    );
+    assert_eq!(project.read_with(cx, |p, _| p.mark()), None);
+    assert_eq!(main.read_with(cx, |p, _| p.mark()), None);
+
+    // The place folded: it shows one for what runs inside, and the row is out of sight.
+    cx.update(|window, cx| window.click(place_id("app", &None), cx));
+    settle(cx);
+    assert_eq!(
+        main.read_with(cx, |p, _| p.mark()),
+        Some(AgentState::Running)
+    );
+    assert_eq!(project.read_with(cx, |p, _| p.mark()), None);
+    assert_eq!(running_icons(cx), 1, "the place alone");
+
+    // The project folded too: it shows the one, the place is out of sight.
+    cx.update(|window, cx| window.click(toggle_id(project_id("app")), cx));
+    settle(cx);
+    assert_eq!(
+        project.read_with(cx, |p, _| p.mark()),
+        Some(AgentState::Running)
+    );
+    assert_eq!(running_icons(cx), 1, "the project alone");
+
+    // Unfolded again, the mark goes back to the row: it goes with a fade, not at once.
+    cx.update(|window, cx| window.click(toggle_id(project_id("app")), cx));
+    settle(cx);
+    cx.update(|window, cx| window.click(place_id("app", &None), cx));
+    moving(cx);
+    assert!(
+        running_icons(cx) >= 1,
+        "the marks are still drawn while they fold away"
+    );
+    settle(cx);
+    assert_eq!(running_icons(cx), 1, "its row, again alone");
+    assert_eq!(project.read_with(cx, |p, _| p.mark()), None);
+    assert_eq!(main.read_with(cx, |p, _| p.mark()), None);
+}
+
+#[gpui_kit::test]
+fn a_session_stops_spinning_as_soon_as_its_agent_ended(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let id = start(&user, "app", "hello");
+    send(&user, &id, "HANG");
+    let (shell, cx) = tree_of(&user, &[&id], cx);
+    until(&shell, cx, "the session runs", |cx| {
+        mark_of(&shell, &id, cx) == Some(AgentState::Running)
+    });
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+    until(&shell, cx, "the row stops spinning", |cx| {
+        mark_of(&shell, &id, cx).is_none()
+    });
+    settle(cx);
+    assert_eq!(running_icons(cx), 0, "nothing spins anywhere in the window");
+}
+
+/// The sessions the "Ended" group lists, and whether it is open.
+fn ended_group(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> (Vec<String>, bool) {
+    shell.read_with(cx, |s, cx| {
+        let Some(node) = s.ended() else {
+            return (Vec::new(), false);
+        };
+        let node = node.read(cx);
+        let ids = node
+            .sessions(cx)
+            .iter()
+            .map(|row| row.read(cx).id().to_owned())
+            .collect();
+        (ids, node.is_open())
+    })
+}
+
+#[gpui_kit::test]
+fn ended_is_one_folded_group_at_the_bottom_of_the_sidebar_below_every_project(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "app");
+    project(&user, "notes");
+    let old_app = start(&user, "app", "old in app");
+    let old_notes = start(&user, "notes", "old in notes");
+    let live_app = start(&user, "app", "alive in app");
+    let live_notes = start(&user, "notes", "alive in notes");
+    for id in [&old_app, &old_notes] {
+        user.call("agent.stop", json!({"agent": id})).unwrap();
+    }
+    let (shell, cx) = tree_of(&user, &[&live_app, &live_notes], cx);
+    until(
+        &shell,
+        cx,
+        "both ended sessions are in the Ended group",
+        |cx| ended_group(&shell, cx).0.len() == 2,
+    );
+    settle(cx);
+
+    let (ids, open) = ended_group(&shell, cx);
+    assert!(!open, "folded by default");
+    assert!(
+        ids.contains(&old_app) && ids.contains(&old_notes),
+        "the sessions of every project"
+    );
+    cx.update(|window, _| {
+        let y = |id| window.find(id).bounds().origin.y;
+        assert!(
+            y(ended_id()) > y(session_id(&live_notes)),
+            "below the last project's sessions, not under a project's"
+        );
+        assert!(y(ended_id()) > y(project_id("notes")));
+    });
+    assert!(
+        !in_tree(session_id(&old_app), cx),
+        "its sessions are folded away"
+    );
+
+    // It opens on a click, and the sessions of every project are there.
+    cx.update(|window, cx| window.click(ended_id(), cx));
+    settle(cx);
+    assert!(in_tree(session_id(&old_app), cx));
+    assert!(in_tree(session_id(&old_notes), cx));
+}
+
+#[gpui_kit::test]
+fn a_session_row_ends_its_session_from_its_menu_without_opening_it(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let id = start(&user, "app", "hello");
+    let (shell, cx) = tree_of(&user, &[&id], cx);
+
+    // The menu is there while the pointer is on the row, not at rest.
+    assert!(!has_id(session_menu_id(&id), cx), "no menu at rest");
+    cx.update(|window, cx| window.hover(session_id(&id), cx));
+    settle(cx);
+    assert!(
+        has_id(session_menu_id(&id), cx),
+        "the row offers its menu under the pointer"
+    );
+    cx.update(|window, cx| window.click(session_menu_id(&id), cx));
+    settle(cx);
+    assert!(
+        has_id(session_resume_id(&id), cx) == false,
+        "a running session has no Resume"
+    );
+    cx.update(|window, cx| window.click(session_end_id(&id), cx));
+    settle(cx);
+    let selected = shell.read_with(cx, |s, _| s.selected().cloned());
+    assert!(
+        !matches!(selected, Some(Selection::Session(_))),
+        "no session opened"
+    );
+    cx.update(|window, _| assert!(window.find("sidebar-end-modal").visible()));
+
+    // Cancel ends nothing.
+    cx.update(|window, cx| window.click("sidebar-end-modal-cancel", cx));
+    settle(cx);
+    assert_eq!(state_of(&user, &id), "idle");
+
+    // Confirmed, it ends and moves to Ended.
+    cx.update(|window, cx| window.hover(session_id(&id), cx));
+    settle(cx);
+    cx.update(|window, cx| window.click(session_menu_id(&id), cx));
+    settle(cx);
+    cx.update(|window, cx| window.click(session_end_id(&id), cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("sidebar-end-confirm", cx));
+    until(&shell, cx, "the session is in Ended", |cx| {
+        ended_group(&shell, cx).0 == [id.clone()]
+    });
+    assert_eq!(state_of(&user, &id), "ended");
+    assert!(
+        !matches!(
+            shell.read_with(cx, |s, _| s.selected().cloned()),
+            Some(Selection::Session(_))
+        ),
+        "no session opened"
+    );
+}
+
+#[gpui_kit::test]
+fn an_ended_session_row_resumes_from_its_menu_when_its_agent_can(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let id = start(&user, "app", "hello");
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    until(&shell, cx, "the Ended group", |cx| {
+        cx.update(|window, _| window.try_find(ended_id()).is_some())
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click(ended_id(), cx));
+    settle(cx);
+    until(&shell, cx, "the process is gone", |_| {
+        user.call("agent.list", json!({})).unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["id"] == id.as_str() && a["stopping"] == false)
+    });
+    cx.update(|window, cx| window.hover(session_id(&id), cx));
+    settle(cx);
+    cx.update(|window, cx| window.click(session_menu_id(&id), cx));
+    settle(cx);
+    assert!(
+        !has_id(session_end_id(&id), cx),
+        "an ended session has no End"
+    );
+    cx.update(|window, cx| window.click(session_resume_id(&id), cx));
+    until(&shell, cx, "the session is back in its place", |cx| {
+        listed_in_main(&shell, cx) == [id.clone()]
+    });
+    assert!(
+        !matches!(
+            shell.read_with(cx, |s, _| s.selected().cloned()),
+            Some(Selection::Session(_))
+        ),
+        "no session opened"
+    );
+}
+
+fn has_id(id: gpui_kit::ElementId, cx: &mut VisualTestContext) -> bool {
+    cx.update(|window, _| window.try_find(id).is_some())
+}
+
+fn listed_in_main(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
+    shell.read_with(cx, |s, cx| {
+        s.place("app", &None)
+            .map(|node| {
+                node.read(cx)
+                    .sessions(cx)
+                    .iter()
+                    .map(|row| row.read(cx).id().to_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+#[gpui_kit::test]
+fn a_plus_on_a_place_row_starts_a_session_there_with_the_field_focused(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    workspace(&user, "app", "login");
+    let id = start(&user, "app", "hello");
+    let (shell, cx) = tree_of(&user, &[&id], cx);
+    cx.update(|window, _| {
+        assert!(
+            window
+                .try_find(place_new_id("app", &Some("login".into())))
+                .is_none(),
+            "no + at rest"
+        )
+    });
+
+    // On a workspace.
+    cx.update(|window, cx| window.hover(place_id("app", &Some("login".into())), cx));
+    settle(cx);
+    cx.update(|window, cx| window.click(place_new_id("app", &Some("login".into())), cx));
+    settle(cx);
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(Selection::Project("app".into()))
+    );
+    let composer = shell
+        .read_with(cx, |s, _| s.composer_of("app").cloned())
+        .unwrap();
+    assert_eq!(
+        composer.read_with(cx, |c, _| c.choice().clone()),
+        Choice::Workspace("login".into())
+    );
+    cx.simulate_input("fix the login");
+    assert_eq!(
+        composer.read_with(cx, |c, cx| c.field().read(cx).value().to_string()),
+        "fix the login",
+        "the field has the focus"
+    );
+
+    // On `main`.
+    cx.update(|window, cx| window.hover(place_id("app", &None), cx));
+    settle(cx);
+    cx.update(|window, cx| window.click(place_new_id("app", &None), cx));
+    settle(cx);
+    assert_eq!(
+        composer.read_with(cx, |c, _| c.choice().clone()),
+        Choice::Main
     );
 }

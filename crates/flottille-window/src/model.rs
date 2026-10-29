@@ -136,6 +136,10 @@ pub struct Session {
     pub mark: Option<AgentState>,
     /// How many agents its tree holds, the root included.
     pub agents: usize,
+    /// How many of them have not ended: what ending the session ends.
+    pub live: usize,
+    /// Its root can be started again on its own session (`agent.resume`).
+    pub resumable: bool,
     /// Its root ended or failed: the left tree lists it in its project's "Ended" group.
     pub ended: bool,
     /// The last sign of activity of its tree, in milliseconds since the Unix epoch.
@@ -294,7 +298,7 @@ impl Snapshot {
             .filter(|agent| ended(agent))
             .filter_map(|agent| agent["id"].as_str())
             .collect();
-        let mut trees: HashMap<&str, (bool, u64, usize)> = HashMap::new();
+        let mut trees: HashMap<&str, (bool, u64, usize, usize)> = HashMap::new();
         for agent in agents {
             let id = agent["id"].as_str().unwrap_or_default();
             let root = root_of(&parents, id);
@@ -308,6 +312,7 @@ impl Snapshot {
             entry.0 |= busy;
             entry.1 = entry.1.max(active);
             entry.2 += 1;
+            entry.3 += usize::from(!ended(agent));
         }
         let running = list(answers.commands, "commands");
         let commands_of = |key: &str, name: &str| {
@@ -321,7 +326,8 @@ impl Snapshot {
             .filter(|agent| agent["parent"].is_null())
             .map(|agent| {
                 let id = text(agent, "id");
-                let (busy, active_at, size) = trees.get(id.as_str()).copied().unwrap_or_default();
+                let (busy, active_at, size, live) =
+                    trees.get(id.as_str()).copied().unwrap_or_default();
                 let mark = if ended(agent) {
                     None
                 } else if answers.needs_user.contains(&id) {
@@ -342,6 +348,8 @@ impl Snapshot {
                     place: agent["workspace"].as_str().map(str::to_owned),
                     mark,
                     agents: size.max(1),
+                    live,
+                    resumable: agent["resumable"] == true,
                     ended: ended(agent),
                     active_at,
                     created_at: number(agent, "created_at"),
