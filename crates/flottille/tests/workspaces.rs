@@ -784,6 +784,38 @@ fn offline_the_creation_proceeds_on_the_last_tracking_refs_and_says_their_age() 
 }
 
 #[test]
+fn a_program_set_in_the_git_config_of_a_repository_is_never_run_by_the_daemon() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    let marker = fixture.user.path("ran");
+    let program = fixture.script(
+        "fsmonitor",
+        &format!("#!/bin/sh\ntouch {}\n", marker.display()),
+    );
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let hook = fixture.folder.join("lib/.git/hooks/post-checkout");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(&hook, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for repository in ["web", "api", "lib"] {
+        fixture.user.git(
+            &fixture.folder.join(repository),
+            &["config", "core.fsmonitor", program.to_str().unwrap()],
+        );
+    }
+
+    fixture.create(json!({})).unwrap();
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    // A change to look at: status and the diff both read the index.
+    std::fs::write(fixture.workspace("login").join("lib/new.rs"), "fn f() {}\n").unwrap();
+    fixture.show("login").unwrap();
+    fixture.remove("login").ok();
+
+    assert!(!marker.exists(), "a program of the git config was run");
+}
+
+#[test]
 fn a_branch_name_git_refuses_is_refused_before_anything_is_written() {
     let fixture = Fixture::new(false);
     fixture.configure("");

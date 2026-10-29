@@ -160,7 +160,14 @@ async fn changes(folder: &Path, base: &str) -> Option<Value> {
     // agent's own `git add` or `commit` in the same worktree.
     let diff = git::run(
         folder,
-        &["diff-index", "--numstat", base, "--"],
+        &[
+            "diff-index",
+            "--numstat",
+            "--no-ext-diff",
+            "--no-textconv",
+            base,
+            "--",
+        ],
         Class::Read,
     )
     .await
