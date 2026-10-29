@@ -215,15 +215,21 @@ pub fn decide(call: &Call) -> Verdict {
     }
     match call.tool {
         "forge_write" => forge_write(call),
-        "workspace_remove" => Found {
-            base: Vec::new(),
-            judge: vec![
-                "it removes the agent's workspace and deletes its branches that hold nothing of \
-                 their own"
-                    .into(),
-            ],
+        "workspace_remove" => {
+            // In `main` it names the workspace; elsewhere it is the agent's own.
+            let named = call.args["workspace"].as_str();
+            let which = match named.or(call.grant.place.workspace.as_deref()) {
+                Some(name) => format!("the workspace {name}"),
+                None => "a workspace".to_owned(),
+            };
+            Found {
+                base: Vec::new(),
+                judge: vec![format!(
+                    "it removes {which} and deletes its branches that hold nothing of their own"
+                )],
+            }
+            .verdict(Kind::Call)
         }
-        .verdict(Kind::Call),
         "commands_run" => run(call),
         tool if FILES.contains(&tool) => files(call),
         // Reads, the tree's tools, the outputs of the agent's own runs.
@@ -2417,6 +2423,25 @@ mod tests {
             json!({}),
             Some(&fixture.never)
         )));
+    }
+
+    #[test]
+    fn workspace_remove_in_main_is_judged_and_names_the_workspace_it_removes() {
+        let fixture = Fixture::main();
+        let verdict = fixture.judge(
+            "workspace_remove",
+            json!({"workspace": "login"}),
+            Some(&fixture.never),
+        );
+        assert!(to_judge(&verdict), "{verdict:?}");
+        let Verdict::Ask(ask) = verdict else {
+            unreachable!()
+        };
+        assert!(
+            ask.reasons[0].starts_with("it removes the workspace login and deletes"),
+            "{:?}",
+            ask.reasons
+        );
     }
 
     #[test]
