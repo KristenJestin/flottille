@@ -6,6 +6,7 @@
 
 mod common;
 
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -1180,4 +1181,109 @@ fn judge_instructions_longer_than_their_limit_are_refused() {
     assert_eq!(code, "refused", "{message}");
     assert!(message.contains("4000"), "{message}");
     assert!(!user.path("config/flottille/judge.md").exists());
+}
+
+#[test]
+fn a_user_who_chose_none_before_judge_none_existed_gets_no_judge_picked() {
+    // Claude installed and signed in, but disabled: nothing is picked at the first start.
+    let user = User::with_fake_claude().with_fake_escalation();
+    user.write_providers("[claude]\nenabled = false\n");
+    user.status();
+    // Until `judge = "none"`, choosing no judge removed `[judge]`, and said so in the store.
+    user.call("provider.set_judge", json!({"provider": null}))
+        .unwrap();
+    user.run(&["daemon", "stop"]);
+    user.write_providers("[claude]\nenabled = true\n");
+
+    user.status();
+
+    let file = providers_file(&user);
+    let written: toml_edit::DocumentMut = file.parse().unwrap();
+    assert_eq!(written["judge"].as_str(), Some("none"), "{file}");
+    assert!(user.call("provider.list", json!({})).unwrap()["judge"].is_null());
+    no_escalation(&user);
+}
+
+#[test]
+fn a_judge_md_over_the_limit_or_unreadable_makes_the_judgement_fail_and_ask() {
+    let user = User::with_fake_agent()
+        .with_fake_escalation()
+        .with_allowing_judge();
+    let (_, mcp, _) = session(&user, false);
+    let file = user.path("config/flottille/judge.md");
+    for (bytes, wrong) in [
+        ("a".repeat(4_001).into_bytes(), "4001 characters"),
+        (b"Ask about \xff everything.".to_vec(), "not UTF-8"),
+    ] {
+        std::fs::write(&file, &bytes).unwrap();
+
+        let request = held(&user, mcp.call("run", json!({"line": "touch made.txt"})));
+
+        assert_eq!(request["judgement"]["verdict"], "failed", "{request}");
+        let reason = request["judgement"]["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("judge.md") && reason.contains(wrong),
+            "{reason}"
+        );
+        let shown = user.call("judge.show", json!({})).unwrap();
+        assert_eq!(shown["source"], "global", "{shown}");
+        let error = shown["error"].as_str().unwrap();
+        assert!(
+            error.contains("judge.md") && error.contains(wrong),
+            "{shown}"
+        );
+    }
+    assert!(judge_prompts(&user).is_empty(), "the judge was asked");
+    std::fs::write(&file, "Ask about every migration.").unwrap();
+    assert!(user.call("judge.show", json!({})).unwrap()["error"].is_null());
+}
+
+#[test]
+fn an_empty_judge_set_is_a_reset() {
+    let user = User::with_fake_agent();
+    user.call("judge.set", json!({"text": "Ask about everything."}))
+        .unwrap();
+    for empty in ["", "  \n\t "] {
+        let shown = user.call("judge.set", json!({"text": empty})).unwrap();
+        assert_eq!(shown["source"], "default", "{shown}");
+        assert_eq!(shown["text"], shown["default"], "{shown}");
+        assert!(!user.path("config/flottille/judge.md").exists());
+    }
+}
+
+#[test]
+fn judge_sets_at_once_leave_one_text_whole() {
+    let user = User::with_fake_agent();
+    user.status();
+    let texts: Vec<String> = (0..6)
+        .map(|n| format!("{n}").repeat(3_900 - n * 600))
+        .collect();
+    std::thread::scope(|scope| {
+        for text in &texts {
+            let user = &user;
+            scope.spawn(move || {
+                // Straight on the socket, so that the sets meet in the daemon.
+                for _ in 0..10 {
+                    let mut stream = std::os::unix::net::UnixStream::connect(
+                        user.path("runtime/flottille/daemon.sock"),
+                    )
+                    .unwrap();
+                    let request =
+                        json!({"id": "1", "method": "judge.set", "params": {"text": text}});
+                    writeln!(stream, "{request}").unwrap();
+                    let mut answer = String::new();
+                    std::io::BufReader::new(stream)
+                        .read_line(&mut answer)
+                        .unwrap();
+                    assert!(answer.contains("\"result\""), "{answer}");
+                }
+            });
+        }
+    });
+    let written = std::fs::read_to_string(user.path("config/flottille/judge.md")).unwrap();
+    assert!(
+        texts.contains(&written),
+        "mixed: {} characters",
+        written.len()
+    );
 }

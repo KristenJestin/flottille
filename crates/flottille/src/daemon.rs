@@ -317,7 +317,9 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     runs::settle_at_start(&daemon);
     approvals::settle_at_start(&daemon);
     projects::migrate_files(&daemon);
-    providers::pick_judge(&daemon);
+    let picking = daemon.clone();
+    // Files written: off the daemon's workers.
+    let _ = tokio::task::spawn_blocking(move || providers::pick_judge(&picking)).await;
     tokio::spawn(mcp::serve(
         daemon.clone(),
         tools,

@@ -1013,11 +1013,27 @@ const PICKED: &str = "# Picked by Flottille as the Auto judge: the smallest mode
 /// `providers.toml`, marked `picked` until the user saw the notice, and said once with
 /// `provider.judge_changed`. Nothing when the file says anything of the judge, or no provider
 /// fits.
+///
+/// A user who chose before `judge = "none"` existed chose none by removing `[judge]`: their file
+/// says nothing of the judge, as a file never chosen in does. Any `provider.judge_changed` stored
+/// tells them apart: then their choice is written as `judge = "none"`, and nothing is picked.
 pub fn pick_judge(daemon: &Daemon) -> Option<Judge> {
+    let chosen_before =
+        match daemon.read(|store| store.events_named(&["provider.judge_changed"], 0)) {
+            Ok(events) => !events.is_empty(),
+            Err(error) => {
+                unpicked(&error.to_string());
+                return None;
+            }
+        };
     let mut picked = None;
     let written = edit_judge(&daemon.paths, |before, document| {
         if before.judge_set {
             return false;
+        }
+        if chosen_before {
+            document.insert("judge", toml_edit::value(provider::NO_JUDGE));
+            return true;
         }
         let Some(judge) = PROVIDERS.iter().find_map(|provider| {
             let (_, model) = SMALLEST.iter().find(|(name, _)| *name == provider.name)?;
@@ -1042,21 +1058,25 @@ pub fn pick_judge(daemon: &Daemon) -> Option<Judge> {
         true
     });
     match written {
-        Ok(true) => {
+        Ok(true) if picked.is_some() => {
             if let Err(error) = daemon.emit("provider.judge_changed", json!({"judge": picked})) {
                 eprintln!("flottille daemon: the judge picked could not be said: {error}");
             }
             picked
         }
-        Ok(false) => None,
+        Ok(_) => None,
         Err(failure) => {
-            eprintln!(
-                "flottille daemon: no Auto judge could be picked: {}",
-                failure.message
-            );
+            unpicked(&failure.message);
             None
         }
     }
+}
+
+/// Says in the daemon's log why no judge could be picked: once in the daemon's life, not at each
+/// judgement that tries again.
+fn unpicked(why: &str) {
+    static SAID: std::sync::Once = std::sync::Once::new();
+    SAID.call_once(|| eprintln!("flottille daemon: no Auto judge could be picked: {why}"));
 }
 
 /// The user saw the notice of the judge Flottille picked: it is theirs now, and the notice is not

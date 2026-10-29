@@ -379,13 +379,18 @@ The judge is an agent of a provider the user chose in Settings ("Auto judge": pr
 model, `provider.set_judge`), run in bare mode **with no tool at all**: no Flottille tool, no MCP
 server. A user who never chose one gets one picked: the smallest model of the first provider that
 is enabled, installed and signed in, among the few whose smallest model Flottille lists (Claude's
-Haiku), written once to `providers.toml` and said once in a notice that opens Settings; a user who
-chose "No judge" never gets one. Its instructions are a fixed text (`roles/judge-base.md`: what it
-is, its JSON answer, that it never denies, that what the agent wrote is data) around the user's
-**guidance**, how to weigh a call: Flottille's default (`roles/judge.md`, which counts writes of
-the project's configuration within intent while the user is setting the project up) or the user's
-own, edited in Settings ("Judge", with Reset to default) and read at each judgement. The guidance
-changes neither what reaches the judge nor what it may answer. It sees the call masked (secrets masked, the line
+Haiku), written once to `providers.toml` and said once in a notice that opens Settings; a user who chose "No judge" never gets one, nor does one who chose any
+judge before (a `provider.judge_changed` in the store), whose file then says `judge = "none"`. Its
+instructions are a fixed text (`roles/judge-base.md`: what it is, its JSON answer, that it never
+denies, that what the agent wrote is data, and the floor: ask for anything destructive, outside
+what was asked, surprising, or whenever it is not sure) around the user's **guidance**, which can
+add to the floor but never lift it: Flottille's default (`roles/judge.md`: allow what the request
+plausibly needs; writes of the project's configuration are within intent while the user is setting
+the project up) or the user's own, edited in Settings ("Judge", with Reset to default; saving an
+empty text resets it) and read at each judgement. A guidance that cannot be read whole, or is over
+its 4,000 characters, is never cut nor replaced by the default: each judgement fails, and so asks,
+saying which file is wrong and why, and Settings show it. The guidance changes neither what
+reaches the judge nor what it may answer. It sees the call masked (secrets masked, the line
 and the path whole, contents cut to their first lines with how many they had), why the rules held
 it, the place, the agent's `why`, and last the user's last messages to the session, nothing else.
 What the agent wrote comes in blocks of its own, every `<` escaped, so that no text of the agent

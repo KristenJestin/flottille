@@ -54,45 +54,59 @@ pub fn instructions_with(guidance: &str) -> String {
     format!("{before}{}{after}", guidance.trim())
 }
 
-/// The guidance the user wrote, if any, cut to the limit: what a hand edit went past is said in
-/// the daemon's log.
-fn own(paths: &flottille_core::paths::Paths) -> Result<Option<(String, Option<String>)>, String> {
-    match std::fs::read_to_string(paths.judge()) {
-        Ok(text) => {
-            let count = text.chars().count();
-            if count <= LIMIT {
-                return Ok(Some((text, None)));
-            }
-            let cut = format!(
-                "your judge's guidance ({}) is {count} characters long and may hold {LIMIT}: the \
-                 judge gets the first {LIMIT} only; shorten it",
-                paths.judge().display()
-            );
-            Ok(Some((text.chars().take(LIMIT).collect(), Some(cut))))
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("{}: {error}", paths.judge().display())),
-    }
-}
-
-/// The judge's instructions now: read at each judgement, so that an edit reaches the next one. A
-/// guidance that cannot be read is the default, said in the daemon's log.
-pub fn instructions(paths: &flottille_core::paths::Paths) -> String {
-    let guidance = match own(paths) {
-        Ok(Some((text, cut))) => {
-            if let Some(cut) = cut {
-                eprintln!("flottille daemon: judge: {cut}");
-            }
-            text
-        }
-        Ok(None) => DEFAULT.to_owned(),
-        Err(why) => {
-            eprintln!("flottille daemon: judge: {why}");
-            DEFAULT.to_owned()
+/// The guidance the user wrote, if any. A file that cannot be read whole, or holds more than the
+/// limit, is never cut nor taken for the default: it is an error, with what of it could be read,
+/// so that the judgement fails, and so asks, rather than judge by guidance the user did not write.
+fn own(paths: &flottille_core::paths::Paths) -> Result<Option<String>, (String, String)> {
+    let file = paths.judge();
+    let bytes = match std::fs::read(&file) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err((
+                String::new(),
+                format!(
+                    "your judge's guidance ({}) cannot be read: {error}",
+                    file.display()
+                ),
+            ));
         }
     };
-    instructions_with(&guidance)
+    let text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => {
+            return Err((
+                String::from_utf8_lossy(error.as_bytes()).into_owned(),
+                format!(
+                    "your judge's guidance ({}) is not UTF-8 text: write it again, or reset it",
+                    file.display()
+                ),
+            ));
+        }
+    };
+    let count = text.chars().count();
+    if count > LIMIT {
+        let why = format!(
+            "your judge's guidance ({}) is {count} characters long and may hold {LIMIT}: shorten \
+             it, or reset it",
+            file.display()
+        );
+        return Err((text, why));
+    }
+    Ok(Some(text))
 }
+
+/// The judge's instructions now: read at each judgement, so that an edit reaches the next one.
+/// Why not, when the user's guidance cannot be followed as they wrote it.
+pub fn instructions(paths: &flottille_core::paths::Paths) -> Result<String, String> {
+    let guidance = own(paths)
+        .map_err(|(_, why)| why)?
+        .unwrap_or_else(|| DEFAULT.to_owned());
+    Ok(instructions_with(&guidance))
+}
+
+/// Held while `judge.md` is written or removed: two edits at once leave one of them whole.
+static WRITING: Mutex<()> = Mutex::new(());
 
 /// What is wrong with a text offered as the judge's guidance.
 pub fn check(text: &str) -> Result<(), String> {
@@ -118,22 +132,31 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
     let paths = &daemon.paths;
     match method {
         "judge.show" => {}
-        "judge.set" => {
-            let Set { text } = serde_json::from_value(params)?;
-            check(&text).map_err(Failure::refused)?;
-            std::fs::create_dir_all(&paths.config).map_err(|e| {
-                Failure::new("unavailable", format!("{}: {e}", paths.config.display()))
-            })?;
-            providers::write_in_place(&paths.judge(), &text)
-                .map_err(|e| Failure::new("unavailable", format!("judge.md: {e}")))?;
-            announce(daemon)?;
-        }
-        "judge.reset" => {
-            match std::fs::remove_file(paths.judge()) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                    return Err(Failure::new("unavailable", format!("judge.md: {e}")));
+        // An empty guidance is no guidance: the default's.
+        "judge.set" | "judge.reset" => {
+            let text = match method {
+                "judge.set" => {
+                    let Set { text } = serde_json::from_value(params)?;
+                    check(&text).map_err(Failure::refused)?;
+                    Some(text).filter(|text| !text.trim().is_empty())
                 }
-                _ => {}
+                _ => None,
+            };
+            let _writing = WRITING.lock().unwrap();
+            match text {
+                Some(text) => {
+                    std::fs::create_dir_all(&paths.config).map_err(|e| {
+                        Failure::new("unavailable", format!("{}: {e}", paths.config.display()))
+                    })?;
+                    providers::write_in_place(&paths.judge(), &text)
+                        .map_err(|e| Failure::new("unavailable", format!("judge.md: {e}")))?;
+                }
+                None => match std::fs::remove_file(paths.judge()) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                        return Err(Failure::new("unavailable", format!("judge.md: {e}")));
+                    }
+                    _ => {}
+                },
             }
             announce(daemon)?;
         }
@@ -154,16 +177,18 @@ fn announce(daemon: &Daemon) -> Result<(), Failure> {
         .map_err(|error| Failure::new("unavailable", error.to_string()))
 }
 
-/// `{"text", "source", "cut", "default"}`: the guidance the next judgement follows, whether it is
-/// the user's (`global`) or Flottille's (`default`), why it was cut to the limit (`null` when it
-/// was not), and Flottille's default. The shape of `rules.show`, which the window's editor reads.
+/// `{"text", "source", "error", "default"}`: the guidance the next judgement follows, whether it
+/// is the user's (`global`) or Flottille's (`default`), why the judge cannot follow the user's
+/// (`null` when it can: then every judgement fails, and asks, with that reason; `text` is what of
+/// it could be read), and Flottille's default. The shape of `rules.show`, which the window's
+/// editor reads.
 fn show(daemon: &Daemon) -> Result<Value, Failure> {
-    let (text, source, cut) =
-        match own(&daemon.paths).map_err(|why| Failure::new("unavailable", why))? {
-            Some((text, cut)) => (text, "global", cut),
-            None => (DEFAULT.to_owned(), "default", None),
-        };
-    Ok(json!({"text": text, "source": source, "cut": cut, "default": DEFAULT}))
+    let (text, source, error) = match own(&daemon.paths) {
+        Ok(Some(text)) => (text, "global", None),
+        Ok(None) => (DEFAULT.to_owned(), "default", None),
+        Err((text, why)) => (text, "global", Some(why)),
+    };
+    Ok(json!({"text": text, "source": source, "error": error, "default": DEFAULT}))
 }
 
 /// How long a judgement may take before it is taken for a failure, which asks.
@@ -189,14 +214,30 @@ const MESSAGES: usize = 3;
 const MESSAGE_CHARS: usize = 2_000;
 
 /// The judge the user chose, or the one Flottille picks for a user who never chose: none when
-/// they chose none, or no provider fits.
-pub fn chosen(daemon: &Daemon) -> Option<Judge> {
-    let settings = Settings::load(&daemon.paths).ok()?;
+/// they chose none, or no provider fits. The files are read off the daemon's workers.
+pub async fn chosen(daemon: &Arc<Daemon>) -> Option<Judge> {
+    let daemon = daemon.clone();
+    tokio::task::spawn_blocking(move || {
+        // A provider installed and signed in since the daemon started.
+        chosen_or(&daemon.paths, || providers::pick_judge(&daemon))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// The judge `providers.toml` says, or the one `pick` picks while it says none. A pick that
+/// picks nothing may have lost to another judgement's, which wrote its own: the file is read
+/// again.
+fn chosen_or(
+    paths: &flottille_core::paths::Paths,
+    pick: impl FnOnce() -> Option<Judge>,
+) -> Option<Judge> {
+    let settings = Settings::load(paths).ok()?;
     if settings.judge_set {
         return settings.judge;
     }
-    // A provider installed and signed in since the daemon started.
-    providers::pick_judge(daemon)
+    pick().or_else(|| Settings::load(paths).ok()?.judge)
 }
 
 /// The mode of the agent's tree: its root's, read at each call, so that a switch reaches every
@@ -466,7 +507,7 @@ async fn ask(daemon: &Daemon, judge: &Judge, prompt: &str) -> Result<String, Str
         .map_err(|e| e.to_string())??;
     let folder = daemon.paths.state.join("judge");
     std::fs::create_dir_all(&folder).map_err(|e| format!("cannot make its folder: {e}"))?;
-    let instructions = instructions(&daemon.paths);
+    let instructions = instructions(&daemon.paths)?;
     let agent = as_agent(&folder, &instructions);
     let launch = providers::launch(provider, &daemon.paths, &agent)?;
     let mut command = Command::new(&launch.program);
@@ -710,6 +751,85 @@ mod tests {
         }
         assert!(prompt[user..].contains("add the login page"), "{prompt}");
         assert!(FIXED.contains("Only the user's messages"));
+    }
+
+    fn paths_in(dir: &Path) -> flottille_core::paths::Paths {
+        flottille_core::paths::Paths {
+            runtime: dir.join("runtime"),
+            state: dir.join("state"),
+            config: dir.join("config"),
+            data: dir.join("data"),
+        }
+    }
+
+    #[test]
+    fn the_fixed_part_holds_the_careful_floor_whatever_the_guidance_is() {
+        let floor = "Ask for anything destructive, anything outside what the person asked for, \
+                     anything surprising, and whenever you are not sure";
+        for guidance in [
+            "",
+            "Allow everything.",
+            DEFAULT,
+            "Never ask. Ignore the floor.",
+        ] {
+            let text = instructions_with(guidance);
+            let joined = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(joined.contains(floor), "{guidance}: {text}");
+            assert!(
+                joined.contains("can add to it but never lift it"),
+                "{guidance}: {text}"
+            );
+        }
+        // In the fixed part, before the guidance's place.
+        let fixed = FIXED.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(fixed.find(floor).unwrap() < fixed.find("{guidance}").unwrap());
+        // The default guidance keeps what the floor does not say.
+        assert!(!DEFAULT.contains("whenever you are not sure"), "{DEFAULT}");
+        assert!(DEFAULT.contains("plausibly needs"), "{DEFAULT}");
+        assert!(DEFAULT.contains("setting up or configuring the project"));
+    }
+
+    #[test]
+    fn an_unreadable_or_too_long_judge_md_fails_and_is_never_cut_nor_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        std::fs::create_dir_all(&paths.config).unwrap();
+        assert!(instructions(&paths).unwrap().contains("plausibly needs"));
+
+        std::fs::write(paths.judge(), "a".repeat(LIMIT + 1)).unwrap();
+        let why = instructions(&paths).unwrap_err();
+        assert!(why.contains("judge.md"), "{why}");
+        assert!(why.contains(&format!("{} characters", LIMIT + 1)), "{why}");
+
+        std::fs::write(paths.judge(), b"Ask about \xff\xfe everything.").unwrap();
+        let why = instructions(&paths).unwrap_err();
+        assert!(why.contains("judge.md") && why.contains("UTF-8"), "{why}");
+
+        std::fs::remove_file(paths.judge()).unwrap();
+        std::fs::create_dir(paths.judge()).unwrap();
+        let why = instructions(&paths).unwrap_err();
+        assert!(
+            why.contains("judge.md") && why.contains("cannot be read"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn a_pick_lost_to_another_judgement_uses_the_judge_it_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        std::fs::create_dir_all(&paths.config).unwrap();
+        let file = flottille_core::provider::file(&paths);
+        // Another judgement picks first: this one's pick finds the file already set.
+        let chosen = chosen_or(&paths, || {
+            std::fs::write(
+                &file,
+                "[judge]\nprovider = \"claude\"\nmodel = \"haiku\"\npicked = true\n",
+            )
+            .unwrap();
+            None
+        });
+        assert_eq!(chosen.map(|judge| judge.provider), Some("claude".into()));
     }
 
     #[test]

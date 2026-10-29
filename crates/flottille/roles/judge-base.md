@@ -13,6 +13,10 @@ plain sentence why. Calls Flottille always brings to the person never come to yo
 
 # How to judge
 
+Ask for anything destructive, anything outside what the person asked for, anything surprising,
+and whenever you are not sure: asking costs the person a click; a wrong allow can cost their
+work. This is the floor: the person's guidance below can add to it but never lift it.
+
 The person's own guidance, which they can edit:
 
 {guidance}

@@ -256,11 +256,13 @@ one. The guidance sits between two fixed parts of the judge's instructions
 (`crates/flottille/roles/judge-base.md`), and it changes nothing of what reaches the judge (base
 calls never do) nor of what its answer may be (`allow` or `ask`).
 
-- `judge.show` answers `{"text", "source", "cut", "default"}`: the guidance the next judgement
-  follows, its `source` (`default`, or `global` for the user's), why it was cut to the limit
-  (`null` when it was not), and Flottille's default.
+- `judge.show` answers `{"text", "source", "error", "default"}`: the guidance the next judgement
+  follows, its `source` (`default`, or `global` for the user's), why the judge cannot follow the
+  user's (`null` when it can), and Flottille's default. `judge.md` that cannot be read, is not
+  UTF-8 text or holds more than 4,000 characters is an `error`, `text` being what of it could be
+  read: until it is fixed, every judgement fails with that reason, and so asks.
 - `judge.set {text}` writes the text and answers as `judge.show`. `refused` above 4,000
-  characters.
+  characters. An empty text, or only spaces, resets it as `judge.reset` does.
 - `judge.reset` removes the file and answers as `judge.show`.
 
 Each emits `judge.changed`. The user's door alone reaches them: no tool of an agent does.
@@ -919,7 +921,9 @@ picks one, at its start and at the first call to judge after a provider became r
 smallest model of the first provider, in Flottille's order, that is enabled, installed (its program
 on `PATH`) and signed in where Flottille can see it, among those whose smallest model Flottille
 knows (`providers::SMALLEST`: Claude's `haiku`). It writes `[judge]` once, with `picked = true`
-and a comment that says so, and emits `provider.judge_changed`.
+and a comment that says so, and emits `provider.judge_changed`. A store that holds any
+`provider.judge_changed` says the user chose before: until `judge = "none"` existed, choosing no
+judge removed `[judge]`. Then the daemon writes `judge = "none"` and picks nothing.
 
 ### `provider.judge_noticed`
 

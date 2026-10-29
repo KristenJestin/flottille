@@ -1258,7 +1258,9 @@ async fn played(
                         // In Auto, the judge decides a call to judge; base never reaches it, and
                         // without a judge chosen Auto asks as Ask does.
                         let judged = match (ask.class, judge::mode(daemon, &grant.agent)) {
-                            (gate::Class::Judge, GateMode::Auto) => match judge::chosen(daemon) {
+                            (gate::Class::Judge, GateMode::Auto) => match judge::chosen(daemon)
+                                .await
+                            {
                                 Some(chosen) => Some(
                                     judge::judge(daemon, &chosen, grant, tool, &args, &ask.reasons)
                                         .await,
