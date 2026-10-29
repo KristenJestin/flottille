@@ -235,3 +235,48 @@ fn stop_takes_send_s_place_while_the_agent_works_and_the_swap_moves(cx: &mut Tes
     );
     assert_eq!(state_of(&user, &lead), "idle", "the agent stays");
 }
+
+/// The text selecting everything in the row `at` of the conversation gives.
+fn selecting_all_in(page: &Entity<SessionPage>, at: usize, cx: &mut VisualTestContext) -> String {
+    let row = page.read_with(cx, |p, cx| p.conversation().read(cx).rows()[at].clone());
+    row.update(cx, |row, cx| row.select_all(cx));
+    frames(cx);
+    row.read_with(cx, |row, cx| row.selected_text(cx).trim().to_owned())
+}
+
+#[gpui_kit::test]
+fn the_user_s_own_message_is_selectable_like_the_agent_s(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let lead = start(&user, "app", "keep *this* as_typed [here]");
+    let (shell, _reply, cx) = open_session(&user, &lead, cx);
+    settle(cx);
+    let page = page_of(&shell, cx);
+    let (mine, theirs) = page.read_with(cx, |p, cx| {
+        let rows = p.conversation().read(cx).rows().to_vec();
+        let drawn = |row: &Entity<flottille_window::session::Row>| {
+            row.read(cx).rendered(cx).map(|text| text.trim().to_owned())
+        };
+        (
+            rows.iter()
+                .position(|row| drawn(row).as_deref() == Some("keep *this* as_typed [here]")),
+            rows.iter()
+                .position(|row| drawn(row).as_deref() == Some("ok")),
+        )
+    });
+    let (mine, theirs) = (
+        mine.expect("the user's message, as typed"),
+        theirs.expect("the reply"),
+    );
+
+    assert_eq!(
+        selecting_all_in(&page, theirs, cx),
+        "ok",
+        "the agent's reply"
+    );
+    assert_eq!(
+        selecting_all_in(&page, mine, cx),
+        "keep *this* as_typed [here]",
+        "the user's own message, marks and all"
+    );
+}

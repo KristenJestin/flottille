@@ -1728,8 +1728,27 @@ impl Row {
             .iter()
             .map(|piece| piece.read(cx).state.read(cx));
         let rendered = pieces.map(|state| state.rendered_text().as_str().to_owned());
-        matches!(*self.block, Block::Text { .. } | Block::Thought { .. })
-            .then(|| rendered.collect())
+        matches!(
+            *self.block,
+            Block::Text { .. } | Block::Thought { .. } | Block::Message { .. }
+        )
+        .then(|| rendered.collect())
+    }
+
+    /// Selects all the text the row shows, as `Ctrl+A` over it does.
+    pub fn select_all(&self, cx: &mut Context<Self>) {
+        for piece in &self.markdown {
+            let state = piece.read(cx).state.clone();
+            state.update(cx, |state, cx| state.select_all(cx));
+        }
+    }
+
+    /// What the user selected in the text the row shows.
+    pub fn selected_text(&self, cx: &gpui_kit::App) -> String {
+        self.markdown
+            .iter()
+            .map(|piece| piece.read(cx).state.read(cx).selected_text())
+            .collect()
     }
 
     /// The pieces of a reply past its first, which the list draws as items of their own.
@@ -1793,6 +1812,10 @@ impl Row {
         if let Block::Text { text } | Block::Thought { text, .. } = &block {
             let muted = matches!(block, Block::Thought { .. });
             self.set_markdown(text, muted, cx);
+        }
+        // The user's own message is selectable like a reply: the same view, fed what was typed.
+        if let Block::Message { text, .. } = &block {
+            self.set_markdown(&as_typed(text), false, cx);
         }
         match &block {
             Block::Thought { since, until, .. } => {
@@ -1894,6 +1917,26 @@ impl Row {
         self.error = refused;
         cx.notify();
     }
+}
+
+/// What the user typed, as the Markdown that draws it as typed: each mark is escaped, each line
+/// keeps its break and its indentation.
+fn as_typed(text: &str) -> String {
+    let line = |line: &str| {
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        let mut out = "\u{a0}".repeat(indent);
+        for c in line[indent..].chars() {
+            if "\\`*_{}[]()#+-.!|<>~&$".contains(c) {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        out
+    };
+    text.split("\n\n")
+        .map(|paragraph| paragraph.lines().map(line).collect::<Vec<_>>().join("\\\n"))
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// A reply or a thought, its Markdown pieces one under the other.
@@ -2002,7 +2045,7 @@ impl Render for Row {
         // The row's own block, not a copy of it.
         let block = self.block.clone();
         match &*block {
-            Block::Message { text, .. } => div()
+            Block::Message { .. } => div()
                 .id(id("message"))
                 .flex()
                 .flex_col()
@@ -2030,7 +2073,7 @@ impl Render for Row {
                                     .test_support(),
                             )
                         })
-                        .child(SharedString::from(text.clone())),
+                        .child(markdown_view(&self.markdown)),
                 )
                 .test_support()
                 .into_any_element(),
