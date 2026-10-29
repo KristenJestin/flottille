@@ -15,8 +15,9 @@ use gpui_kit::{
     TestSupportExt, Window, anchored, deferred, div, hsla, point, px,
 };
 
+use crate::color::mix;
 use crate::icons::{Icon, icon};
-use crate::interact::{dismiss_on_navigate, open_overlay};
+use crate::interact::{dismiss_on_navigate, hoverable, open_overlay};
 use crate::motion::{ENTER, HOVER, Motion, RISE};
 use crate::theme::palette;
 use crate::typography::Type;
@@ -131,11 +132,8 @@ impl RenderOnce for Dropdown {
             .items_center()
             .gap(px(6.))
             .text_size(px(12.5))
-            .text_color(if self.strong { p.text } else { p.mute })
             .when(self.strong, |d| d.medium())
             .when(self.mono, |d| d.mono(12.))
-            .when(self.open, |d| d.bg(p.hover).text_color(p.text))
-            .hover(|d| d.bg(p.hover).text_color(p.text))
             .when_some(self.leading, |d, glyph| {
                 d.child(icon(glyph).size(px(14.)).text_color(p.faint))
             })
@@ -143,8 +141,12 @@ impl RenderOnce for Dropdown {
             .child(icon(Icon::Choose).size(px(10.)).text_color(p.faint))
             .when_some(toggle, |d, toggle| {
                 d.on_click(move |_, window, cx| toggle(window, cx))
-            })
-            .test_support();
+            });
+        let (open, ink) = (self.open, if self.strong { p.text } else { p.mute });
+        let button = hoverable(button, move |d, t| {
+            let t = if open { 1.0 } else { t };
+            d.bg(p.hover.opacity(t)).text_color(mix(ink, p.text, t))
+        });
         let root = div().relative().flex_none().child(button);
         // The list comes and goes like the "⋯" menu's: it stays drawn until its close ends.
         let fade = window.use_keyed_state(
@@ -326,7 +328,7 @@ impl RenderOnce for MenuItem {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let p = palette(cx);
         let active = self.on_click.is_some();
-        div()
+        let item = div()
             .id(self.id)
             .flex_none()
             .min_h(px(28.))
@@ -339,7 +341,6 @@ impl RenderOnce for MenuItem {
             .text_size(px(12.5))
             .text_color(if active { p.text } else { p.faint })
             .when(self.selected, |d| d.bg(p.sel))
-            .when(active && !self.selected, |d| d.hover(|d| d.bg(p.hover)))
             .when_some(self.leading, |d, glyph| {
                 d.child(icon(glyph).size(px(14.)).text_color(p.faint))
             })
@@ -350,7 +351,13 @@ impl RenderOnce for MenuItem {
             .when_some(self.on_click, |d, f| {
                 d.cursor_pointer()
                     .on_click(move |_, window, cx| f(window, cx))
-            })
-            .test_support()
+            });
+        let hovers = active && !self.selected;
+        hoverable(
+            item,
+            move |d, t| {
+                if hovers { d.bg(p.hover.opacity(t)) } else { d }
+            },
+        )
     }
 }

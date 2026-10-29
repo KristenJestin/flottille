@@ -16,7 +16,7 @@ use gpui_kit::{
 };
 
 use crate::color::mix;
-use crate::motion::{ENTER, Motion, PANEL, RISE, STAGGER};
+use crate::motion::{ENTER, MAX_STAGGER, Motion, PANEL, RISE, STAGGER};
 use crate::theme::palette;
 
 /// A level of the tree or a card's body that folds and unfolds over [`PANEL`].
@@ -141,7 +141,7 @@ pub struct Enter {
 
 impl RenderOnce for Enter {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let delay = STAGGER * self.index as u32;
+        let delay = STAGGER * self.index.min(MAX_STAGGER) as u32;
         let key = ElementId::NamedChild(Arc::new(self.id.clone()), "enter".into());
         let state = window.use_keyed_state(key, cx, |_, cx| {
             let mut m = Motion::settled(0.0);
@@ -162,6 +162,205 @@ impl RenderOnce for Enter {
             .opacity(t)
             .child(self.child)
             .test_support()
+    }
+}
+
+/// What a block that comes and goes remembers between frames: how far it is shown and its own
+/// height, which a fold needs to start from.
+pub(crate) struct Shown {
+    pub motion: Motion,
+    pub height: Rc<Cell<Pixels>>,
+    /// The last line a [`PresenceOf`] had, drawn again while it folds away.
+    pub last: SharedString,
+    /// A row's slide to its new place and the move it answers: see [`Item`](crate::Item).
+    pub slide: Motion,
+    pub moved: u64,
+}
+
+impl Shown {
+    pub fn new(motion: Motion) -> Self {
+        Self {
+            motion,
+            height: Rc::new(Cell::new(px(0.))),
+            last: SharedString::default(),
+            slide: Motion::settled(0.0),
+            moved: 0,
+        }
+    }
+}
+
+/// Where a [`Shown`] is: how far (0 to 1), whether it still runs, and its own height.
+pub(crate) struct Driven {
+    pub t: f32,
+    pub running: bool,
+    pub height: Rc<Cell<Pixels>>,
+}
+
+/// Moves a [`Shown`] toward `open` and says where it is now; asks for the next frame while it
+/// runs.
+pub(crate) fn drive(
+    state: &gpui_kit::Entity<Shown>,
+    open: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> Driven {
+    let now = cx.background_executor().now();
+    let reduce = cx.reduce_motion();
+    let target = if open { 1.0 } else { 0.0 };
+    let (motion, height) = state.update(cx, |shown, _| {
+        if shown.motion.target() != target {
+            shown.motion.animate(target, PANEL, now, reduce);
+        }
+        (shown.motion, shown.height.clone())
+    });
+    let running = motion.is_running(now);
+    if running {
+        window.request_animation_frame();
+    } else {
+        state.update(cx, |shown, _| shown.motion.settle(now));
+    }
+    Driven {
+        t: motion.value(now),
+        running,
+        height,
+    }
+}
+
+/// `content` folded to `t`, with the `gap` its parent puts between siblings folding with it, so
+/// that nothing jumps when the block ends. Nothing at all while it is closed and at rest. With
+/// `rising`, a block that arrives is at its full size from its first frame and rises into place
+/// while it fades in, as the design has a row enter; it still folds away when it leaves.
+pub(crate) fn shown_frame(
+    id: ElementId,
+    open: bool,
+    rising: bool,
+    at: &Driven,
+    gap: f32,
+    offset: f32,
+    content: AnyElement,
+) -> AnyElement {
+    let Driven { t, running, height } = at;
+    let (t, running) = (*t, *running);
+    if !open && !running {
+        return div().hidden().into_any_element();
+    }
+    if open && rising {
+        return div()
+            .w_full()
+            .relative()
+            .top(px(offset + RISE * (1.0 - t)))
+            .opacity(t)
+            .child(
+                div()
+                    .id(id)
+                    .aria_expanded(open)
+                    .w_full()
+                    .child(content)
+                    .test_support(),
+            )
+            .into_any_element();
+    }
+    div()
+        .w_full()
+        .relative()
+        .top(px(offset))
+        .mt(px(-gap * (1.0 - t)))
+        .child(fold_frame(id, open, running, t, height, content))
+        .into_any_element()
+}
+
+/// A block that comes and goes while its view stays: it unfolds and fades in when `present`
+/// turns true and folds away when it turns false (over [`PANEL`]). Build it on every frame, also
+/// when it is absent, and not inside a `when`: it is its own state. Present at its first frame,
+/// it is simply there (the page's entrance covers it).
+pub fn presence(id: impl Into<ElementId>, present: bool, content: impl IntoElement) -> Presence {
+    Presence {
+        id: id.into(),
+        present,
+        gap: 0.0,
+        content: content.into_any_element(),
+    }
+}
+
+#[derive(IntoElement)]
+pub struct Presence {
+    id: ElementId,
+    present: bool,
+    gap: f32,
+    content: AnyElement,
+}
+
+impl Presence {
+    /// The gap the parent flex puts between its children, which comes and goes with the block.
+    pub fn gap(mut self, gap: Pixels) -> Self {
+        self.gap = f32::from(gap);
+        self
+    }
+}
+
+impl RenderOnce for Presence {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let key = ElementId::NamedChild(Arc::new(self.id.clone()), "presence".into());
+        let open = self.present;
+        let state = window.use_keyed_state(key, cx, move |_, _| {
+            Shown::new(Motion::settled(if open { 1.0 } else { 0.0 }))
+        });
+        let at = drive(&state, open, window, cx);
+        shown_frame(self.id, open, false, &at, self.gap, 0.0, self.content)
+    }
+}
+
+/// Like [`presence`] for a block made of a line that goes away with it (a message, an error):
+/// while it folds away it still shows the last line. `build` draws a line.
+pub fn presence_of(
+    id: impl Into<ElementId>,
+    line: Option<SharedString>,
+    build: impl FnOnce(SharedString) -> AnyElement + 'static,
+) -> PresenceOf {
+    PresenceOf {
+        id: id.into(),
+        line,
+        gap: 0.0,
+        build: Box::new(build),
+    }
+}
+
+#[derive(IntoElement)]
+pub struct PresenceOf {
+    id: ElementId,
+    line: Option<SharedString>,
+    gap: f32,
+    build: Box<dyn FnOnce(SharedString) -> AnyElement>,
+}
+
+impl PresenceOf {
+    /// See [`Presence::gap`].
+    pub fn gap(mut self, gap: Pixels) -> Self {
+        self.gap = f32::from(gap);
+        self
+    }
+}
+
+impl RenderOnce for PresenceOf {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let key = ElementId::NamedChild(Arc::new(self.id.clone()), "presence".into());
+        let open = self.line.is_some();
+        let state = window.use_keyed_state(key, cx, move |_, _| {
+            Shown::new(Motion::settled(if open { 1.0 } else { 0.0 }))
+        });
+        let line = state.update(cx, |shown, _| {
+            if let Some(line) = self.line {
+                shown.last = line;
+            }
+            shown.last.clone()
+        });
+        let at = drive(&state, open, window, cx);
+        let content = if open || at.running {
+            (self.build)(line)
+        } else {
+            div().into_any_element()
+        };
+        shown_frame(self.id, open, false, &at, self.gap, 0.0, content)
     }
 }
 

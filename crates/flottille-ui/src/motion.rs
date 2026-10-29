@@ -22,6 +22,8 @@ pub const MODAL: Duration = Duration::from_millis(180);
 
 /// The gap between siblings that arrive together.
 pub const STAGGER: Duration = Duration::from_millis(70);
+/// The most siblings an entrance waits for: a long list is not drawn for seconds.
+pub const MAX_STAGGER: usize = 8;
 /// How far an entrance rises while it fades in, in pixels.
 pub const RISE: f32 = 6.0;
 /// The size a new state icon or pill starts from.

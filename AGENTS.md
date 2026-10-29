@@ -78,6 +78,28 @@ git config core.hooksPath .githooks     # once per clone: the commit-msg and pre
   weight is said in the pull request.
 - A comment says why, not what.
 
+## Motion in the window (non-negotiable)
+
+**Everything that moves in the window is animated.** The maintainer said it once, and a window
+pull request is not asked to be told again. The same durations and easing as everywhere
+(`crates/flottille-ui/src/motion.rs`, `docs/design.md` §10), through the helpers of
+`flottille-ui`, never a second system:
+
+- hover and press of every interactive element (a button, a row, a link, a chip, a toggle): its
+  colours fade over `HOVER`. GPUI's own `.hover(..)` switches at once and is never used (a test
+  refuses it);
+- a state that changes (selected, chosen, focused, open): the fill, the ink, the ring, the
+  chevron move over `PANEL` or `HOVER`;
+- an element that appears or leaves, a message, an error, a block that is shown or hidden:
+  it unfolds and fades in, folds away and fades out, with the gap around it;
+- a row inserted into, removed from or moved in a list: it unfolds, folds away or slides;
+- a fold or an unfold, a panel or a menu that opens and closes, a page and each of its
+  sections that show up (staggered).
+
+A window pull request, and a window issue, without its animations is incomplete: the review
+sends it back. The pull request lists each element it animated; the checklist in
+`docs/reference/gpui.md` is ticked in it.
+
 ## Agents and safety (non-negotiable)
 
 - **Bare mode is the product.** An agent Flottille runs has no built-in tool, no user setting,

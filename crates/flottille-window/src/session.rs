@@ -19,10 +19,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use flottille_ui::motion::{Motion, PANEL};
+use flottille_ui::color::mix;
+use flottille_ui::motion::{HOVER, Motion, PANEL};
 use flottille_ui::{
     AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Menu, Modal, Palette, Pill,
-    PulsingLabel, Side, StateIcon, Status, Type, enter, fold_frame, icon, palette, section_label,
+    PulsingLabel, Side, StateIcon, Status, Type, enter, fade, fold_frame, hoverable, icon, palette,
+    presence, presence_of, section_label, selectable, turning,
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{
@@ -1993,7 +1995,7 @@ fn call_state(call: &Call) -> AgentState {
 }
 
 impl Render for Row {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
         let p = palette(cx);
         let id = |part: &str| ElementId::Name(format!("row-{}-{part}", self.at).into());
@@ -2078,17 +2080,26 @@ impl Render for Row {
                     .text_color(p.faint)
                     .child(label)
                     .child(timer);
+                let turn = turning(id("thought-toggle"), self.open, window, cx);
                 let head = match said {
-                    true => head
-                        .id(id("thought-toggle"))
-                        .cursor_pointer()
-                        .child(icon(Icon::Chevron).size(px(12.)).text_color(p.faint))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.open = !this.open;
-                            cx.notify();
-                        }))
-                        .test_support()
-                        .into_any_element(),
+                    true => hoverable(
+                        head.id(id("thought-toggle"))
+                            .cursor_pointer()
+                            .child(
+                                icon(Icon::Chevron)
+                                    .size(px(12.))
+                                    .text_color(p.faint)
+                                    .with_transformation(Transformation::rotate(radians(
+                                        -FRAC_PI_2 * turn,
+                                    ))),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.open = !this.open;
+                                cx.notify();
+                            })),
+                        move |d, t| d.text_color(mix(p.faint, p.mute, t)),
+                    )
+                    .into_any_element(),
                     false => head.into_any_element(),
                 };
                 div()
@@ -2096,21 +2107,21 @@ impl Render for Row {
                     .flex()
                     .flex_col()
                     .child(head)
-                    .when(said && self.open, |d| {
-                        d.child(
-                            div()
-                                .id(id("thought-text"))
-                                .mt(px(8.))
-                                .ml(px(6.))
-                                .pl(px(14.))
-                                .border_l_1()
-                                .border_color(p.line)
-                                .text_size(px(13.))
-                                .text_color(p.mute)
-                                .child(markdown_view(&self.markdown))
-                                .test_support(),
-                        )
-                    })
+                    .child(presence(
+                        id("thought-body"),
+                        said && self.open,
+                        div()
+                            .id(id("thought-text"))
+                            .mt(px(8.))
+                            .ml(px(6.))
+                            .pl(px(14.))
+                            .border_l_1()
+                            .border_color(p.line)
+                            .text_size(px(13.))
+                            .text_color(p.mute)
+                            .child(markdown_view(&self.markdown))
+                            .test_support(),
+                    ))
                     .test_support()
                     .into_any_element()
             }
@@ -2215,10 +2226,12 @@ impl Render for Row {
                                 ))
                                 .test_support()
                         });
-                let toggle = cx.listener(|this, _, _, cx| {
-                    this.open = !this.open;
-                    cx.notify();
-                });
+                let toggle = || {
+                    cx.listener(|this, _, _, cx| {
+                        this.open = !this.open;
+                        cx.notify();
+                    })
+                };
                 let chevron = |turn: f32| {
                     icon(Icon::Chevron)
                         .size(px(12.))
@@ -2226,56 +2239,48 @@ impl Render for Row {
                         .with_transformation(Transformation::rotate(radians(-FRAC_PI_2 * turn)))
                 };
                 // Folded to one discreet line until a click opens it: a long run of calls
-                // would push the conversation down.
-                if !self.open {
-                    let last = calls.last().expect("a block of steps holds a call");
-                    let count = calls.len();
-                    let line = SharedString::from(format!(
-                        "{count} {} · {}",
-                        if count == 1 { "step" } else { "steps" },
-                        last.name
-                    ));
-                    return div()
-                        .id(id("steps"))
-                        .child(
-                            div()
-                                .id(id("steps-toggle"))
-                                .flex()
-                                .items_center()
-                                .gap(px(7.))
-                                .py(px(2.))
-                                .cursor_pointer()
-                                .mono(12.)
-                                .text_color(p.faint)
-                                .hover(|d| d.text_color(p.mute))
-                                .child(chevron(1.))
-                                .aria_label(line.clone())
-                                .child(line)
-                                .on_click(toggle)
-                                .test_support(),
-                        )
-                        .test_support()
-                        .into_any_element();
-                }
+                // would push the conversation down. The line and the card fold into each other.
+                let last = calls.last().expect("a block of steps holds a call");
+                let count = calls.len();
+                let line = SharedString::from(format!(
+                    "{count} {} · {}",
+                    if count == 1 { "step" } else { "steps" },
+                    last.name
+                ));
+                let folded = hoverable(
+                    div()
+                        .id(id("steps-toggle"))
+                        .flex()
+                        .items_center()
+                        .gap(px(7.))
+                        .py(px(2.))
+                        .cursor_pointer()
+                        .mono(12.)
+                        .child(chevron(1.))
+                        .aria_label(line.clone())
+                        .child(line)
+                        .on_click(toggle()),
+                    move |d, t| d.text_color(mix(p.faint, p.mute, t)),
+                );
+                let card = Card::new()
+                    .title(hoverable(
+                        div()
+                            .id(id("steps-toggle"))
+                            .flex()
+                            .items_center()
+                            .gap(px(7.))
+                            .cursor_pointer()
+                            .child("Agent steps")
+                            .child(chevron(0.))
+                            .on_click(toggle()),
+                        move |d, t| d.text_color(mix(p.mute, p.text, t)),
+                    ))
+                    .meta(meta)
+                    .child(div().px(px(12.)).py(px(6.)).children(rows));
                 div()
                     .id(id("steps"))
-                    .child(
-                        Card::new()
-                            .title(
-                                div()
-                                    .id(id("steps-toggle"))
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(7.))
-                                    .cursor_pointer()
-                                    .child("Agent steps")
-                                    .child(chevron(0.))
-                                    .on_click(toggle)
-                                    .test_support(),
-                            )
-                            .meta(meta)
-                            .child(div().px(px(12.)).py(px(6.)).children(rows)),
-                    )
+                    .child(presence(id("steps-folded"), !self.open, folded))
+                    .child(presence(id("steps-open"), self.open, card))
                     .test_support()
                     .into_any_element()
             }
@@ -2322,27 +2327,37 @@ impl Render for Row {
                     .into_any_element()
             }
             // Folded to its one line until a click opens it.
-            Block::Report { text, .. } => div()
-                .id(id("report"))
-                .child(
-                    Card::new()
-                        .title(
-                            div()
-                                .id(id("report-toggle"))
-                                .flex()
-                                .items_center()
-                                .gap(px(7.))
-                                .cursor_pointer()
-                                .child(SharedString::from(self.label().unwrap_or_default()))
-                                .child(icon(Icon::Chevron).size(px(12.)).text_color(p.faint))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.open = !this.open;
-                                    cx.notify();
-                                }))
-                                .test_support(),
-                        )
-                        .when(self.open, |card| {
-                            card.child(
+            Block::Report { text, .. } => {
+                let turn = turning(id("report-toggle"), self.open, window, cx);
+                div()
+                    .id(id("report"))
+                    .child(
+                        Card::new()
+                            .title(hoverable(
+                                div()
+                                    .id(id("report-toggle"))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(7.))
+                                    .cursor_pointer()
+                                    .child(SharedString::from(self.label().unwrap_or_default()))
+                                    .child(
+                                        icon(Icon::Chevron)
+                                            .size(px(12.))
+                                            .text_color(p.faint)
+                                            .with_transformation(Transformation::rotate(radians(
+                                                -FRAC_PI_2 * turn,
+                                            ))),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.open = !this.open;
+                                        cx.notify();
+                                    })),
+                                move |d, t| d.text_color(mix(p.mute, p.text, t)),
+                            ))
+                            .child(presence(
+                                id("report-body"),
+                                self.open,
                                 div()
                                     .id(id("report-text"))
                                     .px(px(14.))
@@ -2353,11 +2368,11 @@ impl Render for Row {
                                             .image_source(no_image),
                                     )
                                     .test_support(),
-                            )
-                        }),
-                )
-                .test_support()
-                .into_any_element(),
+                            )),
+                    )
+                    .test_support()
+                    .into_any_element()
+            }
             Block::Notice { kind, text } => div()
                 .id(id("notice"))
                 .flex()
@@ -2948,6 +2963,20 @@ impl Render for SessionRail {
                     AgentState::Failed | AgentState::Completed | AgentState::Stopped
                 )
         });
+        let listed = self.rows_among(&drawn_open);
+        // The chevrons of the "ended" rows turn as their level folds.
+        let turns: HashMap<String, f32> = listed
+            .iter()
+            .filter_map(|row| match row {
+                RailRow::Ended { parent, .. } => Some(parent.clone()),
+                _ => None,
+            })
+            .map(|parent| {
+                let open = self.open_ended.contains(&parent);
+                let id = ElementId::Name(format!("rail-ended-{parent}").into());
+                (parent, turning(id, open, window, cx))
+            })
+            .collect();
         let agent_menu = self.agent_menu.clone();
         let agent_row = |agent: &RailAgent| {
             let (mark, pill) = self.marks[&agent.id].clone();
@@ -2973,10 +3002,10 @@ impl Render for SessionRail {
                             .h(px(32.)),
                     ))
                 })
-                .child(
+                .child({
                     // The name over the provider and model: a rail is too narrow for both on one
                     // line.
-                    div()
+                    let row = div()
                         .id(ElementId::Name(format!("rail-row-{}", agent.id).into()))
                         .flex_1()
                         .min_w_0()
@@ -2987,8 +3016,6 @@ impl Render for SessionRail {
                         .py(px(6.))
                         .rounded(px(8.))
                         .cursor_pointer()
-                        .when(agent.id == self.selected, |d| d.bg(p.card2))
-                        .when(agent.id != self.selected, |d| d.hover(|s| s.bg(p.hover)))
                         .child(
                             div()
                                 .w(px(16.))
@@ -3039,13 +3066,15 @@ impl Render for SessionRail {
                             if let Some(page) = page.upgrade() {
                                 page.update(cx, |page, cx| page.select(&target, cx));
                             }
-                        })
-                        .test_support(),
-                )
+                        });
+                    selectable(row, agent.id == self.selected, move |d, hover, chosen| {
+                        d.bg(mix(p.hover.opacity(hover), p.card2, chosen))
+                    })
+                })
                 .when(!kid && endable, |d| d.child(agent_menu.clone()))
                 .test_support()
         };
-        let ended_row = |parent: &str, count: usize, open: bool| {
+        let ended_row = |parent: &str, count: usize, open: bool, turn: f32| {
             let depth = self
                 .agents
                 .iter()
@@ -3066,8 +3095,8 @@ impl Render for SessionRail {
                         .w(px(10.))
                         .h(px(32.)),
                 ))
-                .child(
-                    div()
+                .child({
+                    let row = div()
                         .id(ElementId::Name(format!("rail-ended-{parent}").into()))
                         .aria_expanded(open)
                         .flex()
@@ -3078,25 +3107,27 @@ impl Render for SessionRail {
                         .rounded(px(8.))
                         .cursor_pointer()
                         .text_size(px(12.5))
-                        .text_color(p.faint)
-                        .hover(|s| s.bg(p.hover).text_color(p.text))
-                        .child(div().w(px(16.)).flex_none().flex().justify_center().child(
-                            icon(Icon::Chevron).size(px(12.)).text_color(p.faint).when(
-                                !open,
-                                |i| {
-                                    i.with_transformation(Transformation::rotate(radians(
-                                        -FRAC_PI_2,
-                                    )))
-                                },
+                        .child(
+                            div().w(px(16.)).flex_none().flex().justify_center().child(
+                                icon(Icon::Chevron)
+                                    .size(px(12.))
+                                    .text_color(p.faint)
+                                    .with_transformation(Transformation::rotate(radians(
+                                        -FRAC_PI_2 * turn,
+                                    ))),
                             ),
-                        ))
+                        )
                         .child(SharedString::from(format!("{count} ended")))
-                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_ended(&target, cx)))
-                        .test_support(),
-                )
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.toggle_ended(&target, cx)),
+                        );
+                    hoverable(row, move |d, t| {
+                        d.bg(p.hover.opacity(t)).text_color(mix(p.faint, p.text, t))
+                    })
+                })
         };
         let mut rows: Vec<AnyElement> = Vec::new();
-        let mut listed = self.rows_among(&drawn_open).into_iter();
+        let mut listed = listed.into_iter();
         while let Some(row) = listed.next() {
             match row {
                 RailRow::Agent(id) => {
@@ -3113,8 +3144,13 @@ impl Render for SessionRail {
                     open,
                 } => {
                     rows.push(
-                        ended_row(&parent, count, self.open_ended.contains(&parent))
-                            .into_any_element(),
+                        ended_row(
+                            &parent,
+                            count,
+                            self.open_ended.contains(&parent),
+                            turns.get(&parent).copied().unwrap_or(0.0),
+                        )
+                        .into_any_element(),
                     );
                     if !open {
                         continue;
@@ -3234,8 +3270,8 @@ impl Render for SessionRail {
             div()
                 .flex()
                 .items_start()
-                .child(
-                    div()
+                .child({
+                    let row = div()
                         .id("rail-ticket")
                         .flex_1()
                         .flex()
@@ -3244,7 +3280,6 @@ impl Render for SessionRail {
                         .py(px(4.))
                         .rounded(px(6.))
                         .when(url.is_some(), |d| d.cursor_pointer())
-                        .hover(|s| s.bg(p.hover))
                         .aria_label(SharedString::from(format!("{} {said}", ticket.reference)))
                         .child(
                             div()
@@ -3266,9 +3301,9 @@ impl Render for SessionRail {
                             if let Some(url) = &url {
                                 page.update(cx, |page, _| page.open_link(url)).ok();
                             }
-                        })
-                        .test_support(),
-                )
+                        });
+                    hoverable(row, move |d, t| d.bg(p.hover.opacity(t)))
+                })
                 .child(
                     Button::quiet("rail-ticket-unlink", "Unlink").on_click(move |_, _, cx| {
                         rail.update(cx, |rail, cx| rail.link_ticket(None, cx)).ok();
@@ -3337,7 +3372,7 @@ impl Render for SessionRail {
                 let pull = pull.map(|pull| {
                     let page = self.page.clone();
                     let url = pull.url.clone();
-                    pull_row(
+                    let row = pull_row(
                         ElementId::Name(format!("rail-pull-{path}").into()),
                         &pull,
                         cx,
@@ -3345,8 +3380,8 @@ impl Render for SessionRail {
                     .pl(px(29.))
                     .on_click(move |_, _, cx| {
                         page.update(cx, |page, _| page.open_link(&url)).ok();
-                    })
-                    .test_support()
+                    });
+                    pull_hover(row, cx)
                 });
                 let forge = forge.map(|line| {
                     div()
@@ -3439,11 +3474,17 @@ pub(crate) fn pull_row(id: ElementId, pull: &PullRequest, cx: &App) -> Stateful<
         .rounded(px(6.))
         .cursor_pointer()
         .mono(11.)
-        .text_color(p.mute)
-        .hover(|s| s.bg(p.hover).text_color(p.text))
         .aria_label(SharedString::from(format!("{}, {said}", pull.label())))
         .child(SharedString::from(pull.label()))
         .child(div().text_color(color).child(glyph))
+}
+
+/// A [`pull_row`] once its handlers and children are on: its hover fades in.
+pub(crate) fn pull_hover(row: Stateful<Div>, cx: &App) -> flottille_ui::Hoverable {
+    let p = palette(cx);
+    hoverable(row, move |d, t| {
+        d.bg(p.hover.opacity(t)).text_color(mix(p.mute, p.text, t))
+    })
 }
 
 /// The drawn link from a parent to its child in the rail: down, then right, with a round corner.
@@ -4034,7 +4075,8 @@ impl Reply {
 }
 
 impl Render for Reply {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let focus = fade("reply-focus", self.focused, HOVER, window, cx);
         self.renders += 1;
         let p = palette(cx);
         let can_send = (self.has_text || !self.attachments.is_empty()) && !self.sending;
@@ -4055,7 +4097,7 @@ impl Render for Reply {
                             .rounded(px(8.))
                             .object_fit(gpui_kit::ObjectFit::Cover),
                     )
-                    .child(
+                    .child(hoverable(
                         div()
                             .id(ElementId::Name(format!("attachment-remove-{at}").into()))
                             .absolute()
@@ -4070,13 +4112,15 @@ impl Render for Reply {
                             .items_center()
                             .justify_center()
                             .text_size(px(12.))
-                            .text_color(p.mute)
                             .cursor_pointer()
                             .aria_label("Remove the picture")
                             .child("×")
-                            .on_click(cx.listener(move |this, _, _, cx| this.detach(at, cx)))
-                            .test_support(),
-                    )
+                            .on_click(cx.listener(move |this, _, _, cx| this.detach(at, cx))),
+                        move |d, t| {
+                            d.text_color(mix(p.mute, p.text, t))
+                                .bg(mix(p.card2, p.hover, t))
+                        },
+                    ))
                     .test_support()
                     .into_any_element()
             })
@@ -4134,20 +4178,23 @@ impl Render for Reply {
             .shadow_lg()
             .ui_text()
             .text_color(p.text)
-            .when_some(status, |d, line| {
-                d.child(
+            .child(presence_of(
+                "reply-status-line",
+                status.map(SharedString::from),
+                move |line| {
                     div()
                         .id("reply-status")
-                        .aria_label(SharedString::from(line.clone()))
+                        .aria_label(line.clone())
                         .px(px(10.))
                         .pb(px(6.))
                         .pt(px(2.))
                         .text_size(px(12.5))
                         .text_color(p.faint)
-                        .child(SharedString::from(line))
-                        .test_support(),
-                )
-            })
+                        .child(line)
+                        .test_support()
+                        .into_any_element()
+                },
+            ))
             .when(!thumbs.is_empty(), |d| {
                 d.child(
                     div()
@@ -4167,11 +4214,7 @@ impl Render for Reply {
                     .rounded(px(11.))
                     .bg(p.field)
                     .border_1()
-                    .border_color(if self.focused {
-                        p.focus_line
-                    } else {
-                        p.field_line
-                    })
+                    .border_color(mix(p.field_line, p.focus_line, focus))
                     .min_h(px(60.))
                     .px(px(14.))
                     .py(px(12.))
@@ -4203,11 +4246,13 @@ impl Render for Reply {
                     )
                     .child(div().flex_1())
                     .when(self.running, |d| {
-                        d.child(
+                        d.child(enter(
+                            "reply-stop-enter",
+                            0,
                             Button::icon("reply-stop", Icon::Stop, STOP)
                                 .disabled(self.interrupting)
                                 .on_click(cx.listener(|this, _, _, cx| this.interrupt(cx))),
-                        )
+                        ))
                     })
                     .child(
                         Button::round("reply-send", Icon::Send, SEND)
@@ -4215,8 +4260,10 @@ impl Render for Reply {
                             .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
                     ),
             )
-            .when_some(self.error.clone(), |d, error| {
-                d.child(
+            .child(presence_of(
+                "reply-error-line",
+                self.error.clone(),
+                move |error| {
                     div()
                         .id("reply-error")
                         .aria_label(error.clone())
@@ -4225,9 +4272,10 @@ impl Render for Reply {
                         .text_size(px(12.5))
                         .text_color(p.fail)
                         .child(error)
-                        .test_support(),
-                )
-            })
+                        .test_support()
+                        .into_any_element()
+                },
+            ))
             .test_support()
     }
 }

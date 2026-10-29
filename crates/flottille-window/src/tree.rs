@@ -4,8 +4,8 @@
 
 use flottille_ui::rows::TreeLevel;
 use flottille_ui::{
-    AgentState, Button, Fold, Icon, StateIcon, Status, TreeRow, enter, meta, palette,
-    section_label, tree_children,
+    AgentState, Button, Fold, Icon, Item, Listing, StateIcon, Status, TreeRow, enter, meta,
+    palette, section_label, tree_children,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -122,6 +122,8 @@ impl Mark {
 pub struct Sidebar {
     shell: WeakEntity<Shell>,
     projects: Vec<Entity<ProjectNode>>,
+    /// The rows as drawn: a project that went folds away before it is gone.
+    list: Listing<Entity<ProjectNode>>,
 }
 
 impl Sidebar {
@@ -129,6 +131,7 @@ impl Sidebar {
         Self {
             shell,
             projects: Vec::new(),
+            list: Listing::default(),
         }
     }
 
@@ -144,9 +147,38 @@ impl Sidebar {
     }
 }
 
+/// The rows of a level inside their frames: one that comes unfolds, one that goes folds away.
+fn framed<V: Render>(
+    list: &mut Listing<Entity<V>>,
+    rows: &[Entity<V>],
+    scope: &str,
+    cx: &mut App,
+) -> Vec<gpui_kit::AnyElement> {
+    let now = cx.background_executor().now();
+    let reduce = cx.reduce_motion();
+    list.sync(
+        rows.iter()
+            .map(|row| (row.entity_id().as_u64().to_string(), row.clone())),
+        now,
+        reduce,
+    );
+    list.rows()
+        .map(|row| {
+            Item::new(
+                ElementId::Name(format!("{scope}-{}", row.key).into()),
+                row.placement,
+                row.value.clone(),
+            )
+            .rising()
+            .into_any_element()
+        })
+        .collect()
+}
+
 impl Render for Sidebar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
+        let projects = framed(&mut self.list, &self.projects, "tree-project", cx);
         let shell = self.shell.clone();
         let adds = self.shell.clone();
         div()
@@ -193,7 +225,7 @@ impl Render for Sidebar {
                                 ),
                             ),
                     )
-                    .children(self.projects.iter().cloned()),
+                    .children(projects),
             )
     }
 }
@@ -311,11 +343,15 @@ impl Render for ProjectNode {
 /// The rows of one level, on a guide line: the places of a project, the sessions of a place.
 pub struct Level<V> {
     rows: Vec<Entity<V>>,
+    list: Listing<Entity<V>>,
 }
 
 impl<V> Level<V> {
     fn new() -> Self {
-        Self { rows: Vec::new() }
+        Self {
+            rows: Vec::new(),
+            list: Listing::default(),
+        }
     }
 
     fn set(&mut self, rows: Vec<Entity<V>>, cx: &mut Context<Self>)
@@ -331,14 +367,11 @@ impl<V> Level<V> {
 
 impl<V: Render> Render for Level<V> {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.rows.is_empty() {
+        let rows = framed(&mut self.list, &self.rows, "tree-row", cx);
+        if rows.is_empty() {
             return div().into_any_element();
         }
-        tree_children(
-            self.rows.iter().map(|row| row.clone().into_any_element()),
-            cx,
-        )
-        .into_any_element()
+        tree_children(rows, cx).into_any_element()
     }
 }
 

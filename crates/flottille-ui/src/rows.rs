@@ -13,8 +13,9 @@ use gpui_kit::{
     Transformation, Window, div, px, radians,
 };
 
+use crate::color::mix;
 use crate::icons::{Icon, icon};
-use crate::interact::{feel, wire};
+use crate::interact::{choose, feel, wire};
 use crate::motion::{Motion, PANEL};
 use crate::theme::{palette, radius};
 use crate::typography::Type;
@@ -98,34 +99,16 @@ impl RenderOnce for TreeRow {
         let p = palette(cx);
         let (state, now) = feel(&self.id, window, cx);
         let project = self.level == TreeLevel::Project;
-        let ink = if project || self.selected {
+        let chosen = choose(&state, self.selected, window, cx);
+        let ink = if project {
             p.text
         } else {
-            crate::color::mix(p.mute, p.text, now.hover)
+            mix(mix(p.mute, p.text, now.hover), p.text, chosen)
         };
-        let background = if self.selected {
-            p.sel
-        } else {
-            p.hover.opacity(now.hover)
-        };
-        let chevron_turn = self.expanded.map(|open| {
-            let angle = window.use_keyed_state(
-                ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "chevron".into()),
-                cx,
-                |_, _| Motion::settled(if open { 0.0 } else { 1.0 }),
-            );
-            let t = cx.background_executor().now();
-            let reduce = cx.reduce_motion();
-            let target = if open { 0.0 } else { 1.0 };
-            if angle.read(cx).target() != target {
-                angle.update(cx, |m, _| m.animate(target, PANEL, t, reduce));
-            }
-            let m = *angle.read(cx);
-            if m.is_running(t) {
-                window.request_animation_frame();
-            }
-            m.value(t)
-        });
+        let background = mix(p.hover.opacity(now.hover), p.sel, chosen);
+        let chevron_turn = self
+            .expanded
+            .map(|open| turning(self.id.clone(), open, window, cx));
 
         let mut row = div()
             .id(self.id.clone())
@@ -191,6 +174,27 @@ impl RenderOnce for TreeRow {
         }
         wire(row, state, false).test_support()
     }
+}
+
+/// How far a chevron has turned from open (0) to folded (1), turning over [`PANEL`] when `open`
+/// changes. `id` is the chevron's, which keeps the state.
+pub fn turning(id: impl Into<ElementId>, open: bool, window: &mut Window, cx: &mut App) -> f32 {
+    let angle = window.use_keyed_state(
+        ElementId::NamedChild(std::sync::Arc::new(id.into()), "chevron".into()),
+        cx,
+        |_, _| Motion::settled(if open { 0.0 } else { 1.0 }),
+    );
+    let t = cx.background_executor().now();
+    let reduce = cx.reduce_motion();
+    let target = if open { 0.0 } else { 1.0 };
+    if angle.read(cx).target() != target {
+        angle.update(cx, |m, _| m.animate(target, PANEL, t, reduce));
+    }
+    let m = *angle.read(cx);
+    if m.is_running(t) {
+        window.request_animation_frame();
+    }
+    m.value(t)
 }
 
 /// The level below a tree row, indented on a 1 px guide line.
@@ -304,11 +308,11 @@ impl RenderOnce for ListRow {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let p = palette(cx);
         let (state, now) = feel(&self.id, window, cx);
-        let background = if self.selected {
-            p.card2
-        } else {
-            p.hover.opacity(now.hover)
-        };
+        let background = mix(
+            p.hover.opacity(now.hover),
+            p.card2,
+            choose(&state, self.selected, window, cx),
+        );
         let mut row = div()
             .id(self.id.clone())
             .aria_label(self.title.clone())

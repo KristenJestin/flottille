@@ -5,9 +5,10 @@
 
 use std::collections::HashMap;
 
+use flottille_ui::color::mix;
 use flottille_ui::{
     AgentState, Button, Card, Icon, ListRow, Modal, Pill, StateIcon, Status, Switch, Type, enter,
-    icon, palette,
+    hoverable, icon, palette, selectable,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -20,7 +21,7 @@ use gpui_kit::{
 use crate::actions::{Changes, Command, Details};
 use crate::composer::{Choice, Composer, agents_label};
 use crate::model::{Place, Preparation, ago};
-use crate::session::pull_row;
+use crate::session::{pull_hover, pull_row};
 use crate::session_link::PullRequest;
 use crate::shell::{Selection, Shell, now_ms};
 use crate::tasks::ProjectTasks;
@@ -467,7 +468,11 @@ impl Render for ProjectPage {
                         ))
                         .child(grid)
                     })
-                    .child(div().mt(px(34.)).child(self.tasks.clone())),
+                    .child(enter(
+                        key("tasks"),
+                        5 + places,
+                        div().mt(px(34.)).child(self.tasks.clone()),
+                    )),
             )
     }
 }
@@ -725,7 +730,7 @@ impl Render for PlaceCard {
                 .children(self.pulls.iter().map(|pull| {
                     let (shell, url) = (self.shell.clone(), pull.url.clone());
                     let label = repository_label(&project, &pull.repository);
-                    pull_row(
+                    let row = pull_row(
                         ElementId::Name(format!("pull-{name}-{label}").into()),
                         pull,
                         cx,
@@ -733,8 +738,8 @@ impl Render for PlaceCard {
                     .child(div().text_color(p.faint).child(SharedString::from(label)))
                     .on_click(move |_, _, cx| {
                         shell.update(cx, |shell, _| shell.open_link(&url)).ok();
-                    })
-                    .test_support()
+                    });
+                    pull_hover(row, cx)
                 }))
         });
 
@@ -877,22 +882,23 @@ impl Render for PlaceCard {
             .border_color(p.line)
             .rounded_b(px(12.))
             .text_size(px(12.5))
-            .text_color(p.faint)
             .when(ready, |d| {
-                d.hover(|d| d.bg(p.hover).text_color(p.text))
-                    .on_click(move |_, window, cx| {
-                        let choice = choice.clone();
-                        shell
-                            .update(cx, |shell, cx| {
-                                shell.compose_in(&project, choice, window, cx)
-                            })
-                            .ok();
-                    })
+                d.on_click(move |_, window, cx| {
+                    let choice = choice.clone();
+                    shell
+                        .update(cx, |shell, cx| {
+                            shell.compose_in(&project, choice, window, cx)
+                        })
+                        .ok();
+                })
             })
             .when(!ready, |d| d.opacity(0.5))
             .child(icon(Icon::Plus).size(px(12.)).text_color(p.faint))
-            .child(SharedString::from(format!("New session in {name}")))
-            .test_support();
+            .child(SharedString::from(format!("New session in {name}")));
+        let add = hoverable(add, move |d, t| {
+            let t = if ready { t } else { 0.0 };
+            d.bg(p.hover.opacity(t)).text_color(mix(p.faint, p.text, t))
+        });
 
         div()
             .id(card_id(&place))
@@ -1321,9 +1327,7 @@ impl Render for NewWorkspace {
             .flex_col()
             .items_center()
             .justify_center()
-            .text_color(p.faint)
             .text_size(px(13.))
-            .hover(|d| d.bg(p.hover).text_color(p.text))
             .child(icon(Icon::Plus).size(px(18.)).text_color(p.faint))
             .child(
                 div()
@@ -1334,8 +1338,7 @@ impl Render for NewWorkspace {
                     .child("New workspace"),
             )
             .child("a branch of its own in every repository")
-            .on_click(cx.listener(|this, _, window, cx| this.open(window, cx)))
-            .test_support();
+            .on_click(cx.listener(|this, _, window, cx| this.open(window, cx)));
         let creating = self.creating.is_some();
         let this = cx.entity().downgrade();
         let modal = Modal::new("new-workspace-modal", "New workspace")
@@ -1390,7 +1393,7 @@ impl Render for NewWorkspace {
                         .children(self.repositories.iter().map(|path| {
                             let taken = self.chosen.contains(path);
                             let toggled = path.clone();
-                            div()
+                            let chip = div()
                                 .id(ElementId::Name(format!("new-workspace-take-{path}").into()))
                                 .h(px(24.))
                                 .px(px(8.))
@@ -1401,16 +1404,16 @@ impl Render for NewWorkspace {
                                 .gap(px(6.))
                                 .mono(11.5)
                                 // By shape as well as colour: a tick when it is taken.
-                                .when(taken, |d| {
-                                    d.bg(p.card).border_color(p.focus_line).text_color(p.text)
-                                })
-                                .when(!taken, |d| d.border_color(p.line).text_color(p.faint))
                                 .child(if taken { "✓" } else { "·" })
                                 .child(SharedString::from(repository_label(&self.project, path)))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.toggle_repository(&toggled, cx)
-                                }))
-                                .test_support()
+                                }));
+                            selectable(chip, taken, move |d, hover, taken| {
+                                d.bg(mix(p.hover.opacity(hover), p.card, taken))
+                                    .border_color(mix(p.line, p.focus_line, taken))
+                                    .text_color(mix(p.faint, p.text, taken))
+                            })
                         })),
                 )
             })
@@ -1469,6 +1472,9 @@ impl Render for NewWorkspace {
                 .child(modal)
                 .into_any_element();
         }
-        card.child(modal).into_any_element()
+        hoverable(card.child(modal), move |d, t| {
+            d.bg(p.hover.opacity(t)).text_color(mix(p.faint, p.text, t))
+        })
+        .into_any_element()
     }
 }

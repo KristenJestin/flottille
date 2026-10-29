@@ -8,7 +8,8 @@ use gpui_kit::{
 
 use crate::color::mix;
 use crate::icons::{Icon, icon};
-use crate::interact::{feel, wire};
+use crate::interact::{choose, feel, wire};
+use crate::motion::{HOVER, Motion};
 use crate::theme::{palette, radius};
 use crate::typography::Type;
 
@@ -39,6 +40,7 @@ pub struct Button {
     badge: Option<Badge>,
     full_width: bool,
     disabled: bool,
+    chosen: Option<bool>,
     on_click: Option<OnClick>,
 }
 
@@ -54,6 +56,7 @@ impl Button {
             badge: None,
             full_width: false,
             disabled: false,
+            chosen: None,
             on_click: None,
         }
     }
@@ -83,6 +86,14 @@ impl Button {
         let mut button = Self::new(id, ButtonKind::Round);
         button.icon = Some(glyph);
         button.tooltip = Some(tooltip.into());
+        button
+    }
+
+    /// A quiet button that is one of several choices: it fills with the accent when it is the
+    /// chosen one, and the fill moves over [`PANEL`](crate::motion::PANEL) when the choice does.
+    pub fn choice(id: impl Into<ElementId>, label: impl Into<SharedString>, chosen: bool) -> Self {
+        let mut button = Self::new(id, ButtonKind::Quiet).label(label);
+        button.chosen = Some(chosen);
         button
     }
 
@@ -145,13 +156,18 @@ impl RenderOnce for Button {
             ButtonKind::Primary | ButtonKind::Round => mix(p.acc, p.on_acc, 0.08),
             _ => p.hover,
         };
-        let background = match fill {
+        let mut background = match fill {
             Some(fill) => mix(fill, hover_bg, now.hover),
             None => hover_bg.opacity(now.hover),
         };
+        let mut ink_now = mix(ink, hover_ink, now.hover);
+        if let Some(chosen) = self.chosen {
+            let t = choose(&state, chosen, window, cx);
+            background = mix(background, p.acc, t);
+            ink_now = mix(ink_now, p.on_acc, t);
+        }
         // GPUI cannot scale an element: pressing shrinks the background layer instead.
         let inset = px(height * (1.0 - now.scale) / 2.0);
-        let ink_now = mix(ink, hover_ink, now.hover);
         let label = self.label.clone();
         let tooltip = self.tooltip.clone();
         let accessible = label
@@ -273,21 +289,30 @@ impl RenderOnce for Badge {
     }
 }
 
-/// A short label shown on hover.
+/// A short label shown on hover: it fades in over [`HOVER`](crate::motion::HOVER).
 pub struct Tooltip {
     text: SharedString,
+    shown: Motion,
 }
 
 impl Tooltip {
     pub fn view(text: SharedString, cx: &mut App) -> AnyView {
-        cx.new(|_| Self { text }).into()
+        let now = cx.background_executor().now();
+        let mut shown = Motion::settled(0.0);
+        shown.animate(1.0, HOVER, now, cx.reduce_motion());
+        cx.new(|_| Self { text, shown }).into()
     }
 }
 
 impl Render for Tooltip {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
+        let now = cx.background_executor().now();
+        if self.shown.is_running(now) {
+            window.request_animation_frame();
+        }
         div()
+            .opacity(self.shown.value(now))
             .px(px(8.))
             .py(px(4.))
             .rounded(px(6.))
