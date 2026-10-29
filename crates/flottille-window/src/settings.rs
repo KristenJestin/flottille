@@ -8,12 +8,14 @@ use std::collections::HashMap;
 use flottille_ui::{Card, Switch, Type, enter, palette};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Context, ElementId, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, Window, div, px,
+    Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, Render,
+    SharedString, StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, Window, div,
+    px,
 };
 
 use crate::actions::Command;
 use crate::providers::{Provider, Providers};
+use crate::rules::RulesEditor;
 use crate::shell::Shell;
 
 pub struct SettingsPage {
@@ -24,17 +26,24 @@ pub struct SettingsPage {
     /// The daemon's refusal of the last switch, by provider.
     refused: HashMap<String, String>,
     narrow: bool,
+    /// The user's rules for every project, edited on this page.
+    rules: Entity<RulesEditor>,
 }
 
 impl SettingsPage {
-    pub fn new(shell: WeakEntity<Shell>) -> Self {
+    pub fn new(shell: WeakEntity<Shell>, rules: Entity<RulesEditor>) -> Self {
         Self {
+            rules,
             shell,
             providers: Providers::default(),
             pending: HashMap::new(),
             refused: HashMap::new(),
             narrow: false,
         }
+    }
+
+    pub fn rules(&self) -> &Entity<RulesEditor> {
+        &self.rules
     }
 
     pub fn providers(&self) -> &Providers {
@@ -280,6 +289,7 @@ impl Render for SettingsPage {
                 )
             })
             .collect();
+        let count = cards.len();
         div()
             .id("settings-page")
             .size_full()
@@ -309,7 +319,12 @@ impl Render for SettingsPage {
                     .when(!self.providers.known, |d| {
                         d.child(div().text_color(p.faint).child("Asking the daemon…"))
                     })
-                    .children(cards),
+                    .children(cards)
+                    .child(enter(
+                        key("rules"),
+                        3 + count,
+                        div().mt(px(24.)).child(self.rules.clone()),
+                    )),
             )
     }
 }

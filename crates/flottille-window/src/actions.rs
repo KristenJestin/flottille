@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use crate::link::{Conn, Connect, Update};
 use crate::procedures::ProcedureInfo;
 use crate::references::Reference;
+use crate::rules::Shown;
 use crate::session_link::{PullRequest, pull_requests};
 
 /// Where a session is started.
@@ -140,6 +141,15 @@ pub enum Command {
         workspace: String,
         grants: Value,
         children: bool,
+    },
+    /// The rules agents are told to work by: the user's for every project, or a project's own.
+    RulesRead {
+        project: Option<String>,
+    },
+    /// Saves the rules, or with no text resets them to the default (`rules.set`, `rules.reset`).
+    RulesWrite {
+        project: Option<String>,
+        text: Option<String>,
     },
     References {
         project: String,
@@ -338,6 +348,12 @@ pub enum Outcome {
     ProcedureStarted {
         project: String,
         started: Result<String, String>,
+    },
+    /// The rules as the daemon says them, after a read (`written` false) or a save or a reset.
+    Rules {
+        project: Option<String>,
+        written: bool,
+        shown: Result<Shown, String>,
     },
     References {
         project: String,
@@ -761,6 +777,40 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                     .ok_or_else(|| "the daemon did not say which agent it started".to_owned())
             });
             Outcome::ProcedureStarted { project, started }
+        }
+        Command::RulesRead { project } => {
+            let shown = ask_alone(
+                connect,
+                "rules.show",
+                json!({"project": project}),
+                bounds.quick,
+            );
+            Outcome::Rules {
+                shown: shown.and_then(|shown| shown).map(|shown| Shown::of(&shown)),
+                written: false,
+                project,
+            }
+        }
+        Command::RulesWrite { project, text } => {
+            let shown = match &text {
+                Some(text) => ask_alone(
+                    connect,
+                    "rules.set",
+                    json!({"project": project, "text": text}),
+                    bounds.quick,
+                ),
+                None => ask_alone(
+                    connect,
+                    "rules.reset",
+                    json!({"project": project}),
+                    bounds.quick,
+                ),
+            };
+            Outcome::Rules {
+                shown: shown.and_then(|shown| shown).map(|shown| Shown::of(&shown)),
+                written: true,
+                project,
+            }
         }
         Command::References { project } => {
             let listed = ask_alone(

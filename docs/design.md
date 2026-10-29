@@ -400,7 +400,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   choices, No, After asking me (`ask`) and On its own (`allow`), removed) and its references (add
   with a path picked in the project folder, remove); its Settings: each repository's forge, the
   tracker, and a switch per family of an agent's changes (start a procedure, change the settings,
-  add or remove a reference) that lets it run on its own;
+  add or remove a reference) that lets it run on its own, and its Rules (a text editor, Reset to default, and a line saying a change reaches new sessions only);
+- Settings: the providers, and the Rules for every project, edited the same way;
 - a session page: the root's conversation, live (messages, thoughts collapsed, tool calls with
   their result, the children launched, reports, diffs), the approvals that reach the user, inline,
   with deny / allow for the tree / allow once (a line outside the catalogue in `main`: deny / always

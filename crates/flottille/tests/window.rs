@@ -7027,3 +7027,149 @@ fn agent_steps_are_folded_until_clicked_and_stay_open_while_the_session_is_shown
         );
     });
 }
+
+/// Types `text` in a rules editor, as the user would have: the field takes it and fires its change.
+fn type_rules(
+    editor: &Entity<flottille_window::rules::RulesEditor>,
+    text: &str,
+    cx: &mut VisualTestContext,
+) {
+    let field = editor
+        .read_with(cx, |editor, _| editor.field().cloned())
+        .unwrap();
+    cx.update(|window, cx| field.update(cx, |field, cx| field.set_value(text, window, cx)));
+    cx.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn the_rules_page_edits_the_rules_of_every_project_saves_them_and_resets_them_to_the_default(
+    cx: &mut TestAppContext,
+) {
+    use flottille_window::rules::Source;
+    let user = user();
+    project(&user, "atlas");
+    let default = user.call("rules.show", json!({})).unwrap()["default"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    // Tall enough to show the whole page: a click reaches only what is on screen.
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    let page = open_settings(&shell, cx);
+    let editor = page.read_with(cx, |page, _| page.rules().clone());
+    until(&shell, cx, "the default rules are shown", |cx| {
+        editor.read_with(cx, |e, _| e.shown().is_some())
+    });
+    settle(cx);
+
+    // The editor shows Flottille's default, says where a change goes, and has nothing to reset.
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.typed(cx)),
+        Some(default.clone())
+    );
+    editor.read_with(cx, |e, _| {
+        assert_eq!(e.shown().unwrap().source, Source::Default);
+        assert!(!e.is_own());
+    });
+    cx.update(|window, _| {
+        assert!(window.find("rules-text-").visible());
+        assert!(window.find("rules-reach-").visible());
+        assert!(flottille_window::rules::REACH.contains("sessions you start after saving"));
+        assert!(window.find("rules-save-").visible());
+        assert!(window.find("rules-reset-").visible());
+    });
+
+    type_rules(&editor, "Answer in French.", cx);
+    assert!(editor.read_with(cx, |e, cx| e.is_edited(cx)));
+    cx.update(|window, cx| window.click("rules-save-", cx));
+    until(&shell, cx, "the rules are saved", |cx| {
+        editor.read_with(cx, |e, _| e.is_own())
+    });
+    assert_eq!(
+        std::fs::read_to_string(user.path("config/flottille/rules.md")).unwrap(),
+        "Answer in French."
+    );
+    assert!(!editor.read_with(cx, |e, cx| e.is_edited(cx)));
+
+    // A new session gets them.
+    let agent = start(&user, "atlas", None, "hello");
+    let text = user.call("agent.show", json!({"agent": agent})).unwrap()["agent"]["instructions"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        text.contains("# How to work\n\nAnswer in French."),
+        "{text}"
+    );
+
+    cx.update(|window, cx| window.click("rules-reset-", cx));
+    until(&shell, cx, "the rules are reset", |cx| {
+        editor.read_with(cx, |e, _| !e.is_own())
+    });
+    assert_eq!(editor.read_with(cx, |e, cx| e.typed(cx)), Some(default));
+    assert!(!user.path("config/flottille/rules.md").exists());
+}
+
+#[gpui_kit::test]
+fn a_project_s_settings_have_a_rules_section_that_replaces_the_global_rules_and_resets(
+    cx: &mut TestAppContext,
+) {
+    use flottille_window::rules::Source;
+    let user = user();
+    project(&user, "atlas");
+    user.call("rules.set", json!({"text": "Answer in French."}))
+        .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    let page = open_project_settings(&shell, "atlas", cx);
+    let editor = page.read_with(cx, |page, _| page.rules().clone());
+    until(&shell, cx, "the rules are shown", |cx| {
+        editor.read_with(cx, |e, _| e.shown().is_some())
+    });
+    settle(cx);
+
+    // Without rules of its own the project follows the global ones, and shows them.
+    editor.read_with(cx, |e, _| {
+        assert_eq!(e.project(), Some("atlas"));
+        assert_eq!(e.shown().unwrap().source, Source::Global);
+        assert!(!e.is_own());
+    });
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.typed(cx)),
+        Some("Answer in French.".to_owned())
+    );
+    cx.update(|window, _| {
+        assert!(window.find("rules-text-atlas").visible());
+        assert!(window.find("rules-reach-atlas").visible());
+    });
+
+    type_rules(&editor, "Answer in Spanish.", cx);
+    cx.update(|window, cx| window.click("rules-save-atlas", cx));
+    until(&shell, cx, "the project's rules are saved", |cx| {
+        editor.read_with(cx, |e, _| e.is_own())
+    });
+    let file = std::fs::read_to_string(user.project_file("atlas")).unwrap();
+    assert!(file.contains("Answer in Spanish."), "{file}");
+    // The user's own are untouched.
+    assert_eq!(
+        user.call("rules.show", json!({})).unwrap()["text"],
+        "Answer in French."
+    );
+
+    cx.update(|window, cx| window.click("rules-reset-atlas", cx));
+    until(
+        &shell,
+        cx,
+        "the project follows the global rules again",
+        |cx| editor.read_with(cx, |e, _| !e.is_own()),
+    );
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.typed(cx)),
+        Some("Answer in French.".to_owned())
+    );
+    assert!(
+        !std::fs::read_to_string(user.project_file("atlas"))
+            .unwrap()
+            .contains("Spanish")
+    );
+}
