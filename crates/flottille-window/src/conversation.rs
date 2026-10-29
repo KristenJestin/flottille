@@ -209,6 +209,9 @@ pub struct Conversation {
     /// The commands whose end was told by a line, for a delivery pinned and then sent to say it
     /// once.
     ended_lines: HashSet<String>,
+    /// The message the last row of text may still grow with: the id its pieces share, `Some(None)`
+    /// when its source gives none. Nothing once a delivery came after it, hidden or not.
+    open_text: Option<Option<String>>,
 }
 
 impl Conversation {
@@ -228,6 +231,7 @@ impl Conversation {
             pending_approvals: VecDeque::new(),
             judged: HashSet::new(),
             ended_lines: HashSet::new(),
+            open_text: None,
         }
     }
 
@@ -367,8 +371,13 @@ impl Conversation {
             },
             "agent.message" => {
                 let mut changes = self.end_thought(event.at);
+                // The pieces of one message share its id; a delivery between two messages leaves
+                // no row, and they still are two.
+                let id = Some(data["message_id"].as_str().map(str::to_owned));
+                let same = self.open_text == id;
+                self.open_text = id;
                 match self.blocks.last_mut() {
-                    Some(Block::Text { text: said }) if changes.is_empty() => {
+                    Some(Block::Text { text: said }) if changes.is_empty() && same => {
                         let piece = text("text");
                         said.push_str(&piece);
                         changes.push(Change::Appended(last, piece));
@@ -420,6 +429,7 @@ impl Conversation {
             }
             "agent.tool_call" => self.update_call(event),
             "agent.prompted" => {
+                self.open_text = None;
                 let mut changes = self.close(Some(event.at));
                 let names: Vec<String> = data["images"]
                     .as_array()
@@ -650,10 +660,10 @@ impl Conversation {
         changes
     }
 
-    /// The daemon's list of the session's commands: a card still running whose run ended takes its
-    /// end from it (a stop by the agent, a daemon that stopped, a run read again after a restart),
-    /// with the end of its output when the list gives it.
-    pub fn update_commands(&mut self, rows: &[CommandRow]) -> Vec<Change> {
+    /// The daemon's list of the session's commands, read at `now`: a card still running follows
+    /// its run's row, its time and the end of its output while it runs, and how it ended once the
+    /// row says (a stop by the agent, a daemon that stopped, a run read again after a restart).
+    pub fn update_commands(&mut self, rows: &[CommandRow], now: u64) -> Vec<Change> {
         let mut changes = Vec::new();
         for (at, block) in self.blocks.iter_mut().enumerate() {
             let Block::Command(card) = block else {
@@ -662,15 +672,18 @@ impl Conversation {
             if card.ending != Ending::Running {
                 continue;
             }
-            let Some(row) = rows.iter().find(|r| r.run == card.run && !r.running()) else {
+            let Some(row) = rows.iter().find(|r| r.run == card.run) else {
                 continue;
             };
+            let before = card.clone();
             card.ending = row.ending();
-            card.seconds = Some(row.elapsed_ms(0) as f64 / 1000.0);
+            card.seconds = Some(row.elapsed_ms(now) as f64 / 1000.0);
             if !row.tail.is_empty() {
                 card.lines = row.tail.clone();
             }
-            changes.push(Change::Changed(at));
+            if *card != before {
+                changes.push(Change::Changed(at));
+            }
         }
         changes
     }
@@ -1679,14 +1692,21 @@ mod tests {
         let mut c = root();
         running_card(&mut c);
 
-        assert!(c.update_commands(&[row("running", None, &[])]).is_empty());
-        let changes = c.update_commands(&[
-            row("exited", Some(3), &["start", "boom"]),
-            CommandRow {
-                run: "other".into(),
-                ..row("exited", Some(1), &[])
-            },
-        ]);
+        assert!(
+            c.update_commands(&[row("running", None, &[])], 2_000)
+                .is_empty(),
+            "a running card that reads what it already shows is not drawn again"
+        );
+        let changes = c.update_commands(
+            &[
+                row("exited", Some(3), &["start", "boom"]),
+                CommandRow {
+                    run: "other".into(),
+                    ..row("exited", Some(1), &[])
+                },
+            ],
+            9_000,
+        );
 
         assert_eq!(changes, [Change::Changed(1)]);
         let card = cards(&c)[0];
@@ -1694,7 +1714,7 @@ mod tests {
         assert_eq!(card.seconds, Some(3.5));
         assert_eq!(card.lines, ["start", "boom"]);
         assert!(
-            c.update_commands(&[row("exited", Some(3), &["start", "boom"])])
+            c.update_commands(&[row("exited", Some(3), &["start", "boom"])], 9_000)
                 .is_empty(),
             "an ended card is not drawn again"
         );
@@ -1705,9 +1725,86 @@ mod tests {
         let mut c = root();
         running_card(&mut c);
 
-        c.update_commands(&[row("interrupted", None, &[])]);
+        c.update_commands(&[row("interrupted", None, &[])], 9_000);
 
         assert_eq!(cards(&c)[0].ending, Ending::Interrupted);
         assert_eq!(cards(&c)[0].lines, ["start"], "no tail: what it had stays");
+    }
+
+    #[test]
+    fn a_running_card_ticks_with_the_live_row_of_its_run() {
+        let mut c = root();
+        running_card(&mut c);
+
+        let changes = c.update_commands(&[row("running", None, &[])], 25_000);
+
+        assert_eq!(changes, [Change::Changed(1)]);
+        assert_eq!(cards(&c)[0].seconds, Some(24.0), "now minus its start");
+        assert_eq!(cards(&c)[0].ending, Ending::Running);
+        assert!(
+            c.update_commands(&[row("running", None, &[])], 25_000)
+                .is_empty(),
+            "the same second is not drawn again"
+        );
+        let changes = c.update_commands(&[row("running", None, &[])], 26_000);
+        assert_eq!(changes, [Change::Changed(1)]);
+        assert_eq!(cards(&c)[0].seconds, Some(25.0));
+    }
+
+    #[test]
+    fn a_running_card_shows_the_last_lines_of_the_live_row() {
+        let mut c = root();
+        running_card(&mut c);
+
+        let changes = c.update_commands(&[row("running", None, &["a", "b", "c"])], 2_000);
+
+        assert_eq!(changes, [Change::Changed(1)]);
+        assert_eq!(cards(&c)[0].lines, ["a", "b", "c"]);
+        assert_eq!(cards(&c)[0].ending, Ending::Running);
+    }
+
+    fn said(seq: u64, text: &str, id: Option<&str>) -> Event {
+        let mut data = json!({"text": text});
+        if let Some(id) = id {
+            data["message_id"] = id.into();
+        }
+        event(seq, "agent.message", data)
+    }
+
+    fn texts(c: &Conversation) -> Vec<&str> {
+        c.blocks()
+            .iter()
+            .filter_map(|b| match b {
+                Block::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn two_messages_with_a_hidden_delivery_between_stay_two_blocks() {
+        let mut c = root();
+        running_card(&mut c);
+        c.apply(&said(10, "The slow check is running.", None));
+
+        // The end of the command is the card's business: it adds no row.
+        c.apply(&event(
+            20,
+            "agent.prompted",
+            json!({"text": ended_delivery("exited with code 3")}),
+        ));
+        c.apply(&said(30, "ok", None));
+
+        assert_eq!(texts(&c), ["The slow check is running.", "ok"]);
+    }
+
+    #[test]
+    fn two_messages_with_other_ids_stay_two_blocks_and_the_pieces_of_one_are_joined() {
+        let mut c = root();
+        c.apply(&said(1, "The slow ", Some("m1")));
+        c.apply(&said(2, "check.", Some("m1")));
+        c.apply(&said(3, "ok", Some("m2")));
+
+        assert_eq!(texts(&c), ["The slow check.", "ok"]);
     }
 }

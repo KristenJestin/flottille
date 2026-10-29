@@ -105,27 +105,28 @@ fn list(daemon: &Daemon, asked: List) -> Answer {
     for stored in daemon.read(|store| store.running_runs_of(&ids))? {
         if let Some(view) = runs::view(daemon, &stored.id) {
             let last = last_line(&view.output);
-            commands.push(listed(daemon, &by_id, &view.run, last, None));
+            // The card of its call follows it, as the rail does.
+            let tail = tail_lines(end_of(&view.output, TAIL_CHARS));
+            commands.push(listed(daemon, &by_id, &view.run, last, tail));
         }
     }
     if ended_listed {
         for stored in daemon.read(|store| store.ended_runs_of(&ids, ENDED_LISTED, TAIL_CHARS))? {
             let last = last_line(&stored.output);
             let tail = tail_lines(&stored.output);
-            commands.push(listed(daemon, &by_id, &stored, last, Some(tail)));
+            commands.push(listed(daemon, &by_id, &stored, last, tail));
         }
     }
     Ok(json!({"commands": commands}))
 }
 
-/// A run of a list: the run, where it is, its last line, and for one that ended the lines of its
-/// output a card shows.
+/// A run of a list: the run, where it is, its last line and the lines of its output a card shows.
 fn listed(
     daemon: &Daemon,
     agents: &HashMap<&str, &Agent>,
     run: &Run,
     last_line: String,
-    tail: Option<Vec<String>>,
+    tail: Vec<String>,
 ) -> Value {
     let agent = agents.get(run.agent.as_str());
     let mut shown = run_json(run);
@@ -133,9 +134,7 @@ fn listed(
     shown["project"] = agent.map(|a| a.project.clone()).into();
     shown["workspace"] = agent.and_then(|a| a.workspace.clone()).into();
     shown["last_line"] = last_line.into();
-    if let Some(tail) = tail {
-        shown["tail"] = tail.into();
-    }
+    shown["tail"] = tail.into();
     shown
 }
 
@@ -203,6 +202,18 @@ fn run_json(run: &Run) -> Value {
         "started_at": run.started_at,
         "ended_at": run.ended_at,
     })
+}
+
+/// The last `chars` characters of an output, or all of it.
+fn end_of(output: &str, chars: usize) -> &str {
+    let count = output.chars().count();
+    match count.checked_sub(chars) {
+        Some(skip) if skip > 0 => {
+            let from = output.char_indices().nth(skip).map_or(0, |(at, _)| at);
+            &output[from..]
+        }
+        _ => output,
+    }
 }
 
 /// The last lines of the end of an output, to the card's size. An output cut by the store's
