@@ -16,6 +16,7 @@ pub mod page;
 pub mod project;
 pub mod project_settings;
 pub mod providers;
+pub mod rules;
 pub mod session;
 pub mod session_link;
 pub mod settings;

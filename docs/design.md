@@ -163,16 +163,18 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
   temp file + rename, all-or-nothing edits);
 - commands: `commands_list`, `commands_run` (a task or one line, **never a shell**),
   `commands_status` (a run's output, or its stop);
-- forges (an agent in a workspace): `forge_read`, the pull requests of its workspace's
-  repositories and their checks, read only (`forges.md`), and `forge_write`, which opens or merges
-  them or re-runs a failed pipeline, each call to judge (§7);
-- the workspace (an agent in a workspace): `workspace_remove`, which removes the agent's own
-  workspace once nothing in it would be lost, a call to judge;
+- forges (every agent of a project whose repositories declare a forge, in `main` as in a
+  workspace): `forge_read`, the pull requests of a workspace's repositories and their checks, read
+  only (`forges.md`), and `forge_write`, which opens or merges them or re-runs a failed pipeline,
+  each call to judge (§7); in `main` they name the workspace;
+- the workspace (every agent): `workspace_remove`, which removes a workspace once nothing in
+  it would be lost, the agent's own or, in `main`, the one it names, a call to judge;
 - skills: `skill_read`, one of the project's skills, texts read when relevant (`skills.md`);
-- tickets (an agent in a workspace): `ticket_read`, the ticket its workspace is linked to, or
-  another of the same tracker, read only (`tickets.md`);
+- tickets (every agent of a project that declares a tracker, in `main` as in a workspace):
+  `ticket_read`, the ticket a workspace is linked to, or another of the same tracker, read only
+  (`tickets.md`);
 - the project (a root): `skills` and `commands` (list, show, add, edit, remove) and `project` (its
-  settings, its forges and tracker), what the window does, each change a call to judge
+  settings, its forges and tracker, its rules), what the window does, each change a call to judge
   (`tools.md`, "The project", `projects.md`);
 
 Flottille's own tools:
@@ -199,8 +201,9 @@ Flottille's own tools:
 The tool list of a session is fixed for its whole life (prompt cache, `reference/hemera.md` §7)
 and depends on what the agent can do, known when it starts: a root gets `ask_user`, `skills`,
 `commands` and `project`, a child `ask_parent`; an agent at the depth limit gets no `agent_*` tools
-and no `approval_answer`. A root lead has 19 tools, a leaf worker 11, four more each in a workspace (`forge_read`,
-`ticket_read`, `forge_write`, `workspace_remove`) (`reference/mcp.md` §4).
+and no `approval_answer`. A root lead has 20 tools, a leaf worker 12; two more each when the
+project's repositories declare a forge (`forge_read`, `forge_write`), one more when it declares a
+tracker (`ticket_read`), whatever the place (`reference/mcp.md` §4).
 
 ### 4.4 Roles
 
@@ -409,7 +412,13 @@ a command grants nothing, each call the session makes goes through its mode like
 ## 8. Instructions
 
 Built as in `reference/hemera.md` §7: a shared base, the role template, a cache boundary, the
-per-session part, then the project layer, frozen per session. The project layer holds, per
+per-session part, then the project layer, frozen per session. The base has two parts. **What
+Flottille enforces** is fixed text that states what the gate does, so that an agent does not take
+it for its own discipline. **How to work** is the user's: a default text, the user's own for all
+projects, or a project's own (`projects.md`, "Rules"). The global rules sit in the base, before the
+boundary, where every project shares them; a project's own sit just after the per-session part,
+since they would otherwise make the shared part differ from one project to the next. Alongside, the
+MCP server's `instructions` explain Flottille itself to the agent (`tools.md`, "The server"). The project layer holds, per
 repository and for the project folder: `CLAUDE.md` or `AGENTS.md` (the agent's own name first),
 **and the local files `CLAUDE.local.md` / `AGENTS.local.md` when present** (they hold rules the
 user keeps out of the repository).
@@ -442,9 +451,12 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   opens its page and leaves its places as they were, only its chevron folds and unfolds them;
 - a project page: its repositories, its places with their sessions, creating and removing a
   workspace (with the preparation's progress and failure output), and the composer that starts
-  a session (place, agent, model, first message); its Settings: each repository's forge and the
-  tracker, its Skills (a path picked in the project folder, or a text; added, edited, removed) and
-  its Commands (added from a list of the templates and a blank one, edited, removed);
+  a session (place, agent, model, first message); its Settings: each repository's forge, the
+  tracker, its Rules (a text editor, Reset to default, and a line saying a change reaches the
+  agents created from now on), its Skills (a path picked in the project folder, or a text; added,
+  edited, removed) and its Commands (added from a list of the templates and a blank one, edited,
+  removed);
+- Settings: the providers, the Auto judge, and the Rules for every project, edited the same way;
 - a session page: the root's conversation, live (messages, thoughts collapsed, tool calls with
   their result, the children launched, reports, diffs), the approvals that reach the user, inline,
   each a card that says what the call does, then its class, then the judge's reason when one was

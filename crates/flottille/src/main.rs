@@ -31,6 +31,7 @@ mod project_command;
 mod projects;
 mod providers;
 mod roles;
+mod rules;
 mod runs;
 mod skill_command;
 mod skills;

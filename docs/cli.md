@@ -259,12 +259,12 @@ Removed skill react from shop. The project's files were not touched.
 
 ## Workspaces
 
-A workspace is one git worktree per repository, on one branch, prepared by the project's recipe
+A workspace is one git worktree per repository, on one branch, prepared by the project's setup
 (`docs/workspaces.md`).
 
 ### `flottille workspace create <project> <name>`
 
-Fetches the base of each repository, makes the worktrees, then goes on with the recipe in the
+Fetches the base of each repository, makes the worktrees, then goes on with the setup in the
 background. `--repositories a,b` takes some repositories only, `--branch <branch>` names the
 branch (`<branch prefix>/<name>` otherwise), `--offline` fetches nothing, `--ticket <ticket>`
 links it to a ticket (`#123`, `123` or a Jira key such as `ABC-123`, [`tickets.md`](tickets.md)).

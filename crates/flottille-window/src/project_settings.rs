@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 use crate::actions::Command;
 use crate::commands::CommandsSection;
 use crate::project::repository_label;
+use crate::rules::RulesEditor;
 use crate::shell::Shell;
 use crate::skills::SkillsSection;
 
@@ -220,6 +221,8 @@ pub struct ProjectSettingsPage {
     removing: bool,
     removed: Option<String>,
     narrow: bool,
+    /// This project's own rules (`docs/projects.md`, "Rules").
+    rules: Entity<RulesEditor>,
     skills: Entity<SkillsSection>,
     commands: Entity<CommandsSection>,
 }
@@ -231,6 +234,10 @@ impl ProjectSettingsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let rules = {
+            let (shell, project) = (shell.clone(), name.clone());
+            cx.new(|_| RulesEditor::new(shell, Some(project)))
+        };
         let skills = cx.new(|_| SkillsSection::new(shell.clone(), name.clone()));
         let commands = cx.new(|_| CommandsSection::new(shell.clone(), name.clone()));
         // Asked once the shell, which is making this page, is no longer being updated.
@@ -260,9 +267,14 @@ impl ProjectSettingsPage {
             removing: false,
             removed: None,
             narrow: false,
+            rules,
             skills,
             commands,
         }
+    }
+
+    pub fn rules(&self) -> &Entity<RulesEditor> {
+        &self.rules
     }
 
     pub fn skills(&self) -> &Entity<SkillsSection> {
@@ -992,6 +1004,11 @@ impl Render for ProjectSettingsPage {
                         d.child(said("project-settings-saved", &saved))
                     })
                     .child(footer)
+                    .child(enter(
+                        key("rules"),
+                        6 + count,
+                        div().mb(px(12.)).child(self.rules.clone()),
+                    ))
                     .child(self.skills.clone())
                     .child(self.commands.clone()),
             )

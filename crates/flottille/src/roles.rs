@@ -1,7 +1,7 @@
 //! Roles, and the instructions of an agent built from its role (`docs/design.md` §4.4, §8,
-//! `docs/reference/hemera.md` §7): a shared base, the role's template, the cache boundary, the
-//! part of this session, then the project's own instruction files. Built once, when the agent is
-//! created, and frozen in it.
+//! `docs/reference/hemera.md` §7): a shared base (what Flottille enforces, then the rules the user
+//! edits), the role's template, the cache boundary, the part of this session, then the project's
+//! own instruction files. Built once, when the agent is created, and frozen in it.
 //!
 //! A role is data: a template (a file of `roles/`) and a few flags. Another role is another file
 //! and another entry of `ROLES`.
@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use flottille_core::secrets;
 
 use crate::claude::BOUNDARY;
+use crate::rules::{Rules, Source};
 
 pub struct Role {
     pub name: &'static str,
@@ -54,6 +55,8 @@ pub struct Session<'a> {
     pub at_depth_limit: bool,
     /// The project's skills: name and one line each, never the content (`skill_read`).
     pub skills: &'a [(String, String)],
+    /// How the user wants it to work.
+    pub rules: &'a Rules,
 }
 
 /// One instruction file found for the project layer: its heading and its text.
@@ -63,13 +66,19 @@ pub struct File {
 }
 
 /// The agent's instructions, frozen in it. Everything before the boundary names no project nor
-/// session, so that the provider's cache serves it to the next agent of the same role.
+/// session, so that the provider's cache serves it to the next agent of the same role. The rules
+/// are the same for every project until a project has its own: they stay before the boundary,
+/// and a project's own go after it, since they would otherwise make the shared part differ
+/// from one project to the next.
 pub fn instructions(role: &Role, session: &Session, files: &[File]) -> String {
-    let shared = format!(
-        "{}\n\n---\n\n{}",
-        BASE.trim_end().replace("{role}", role.name),
-        role.template.trim_end()
-    );
+    let env = std::env::vars_os().collect();
+    let rules = secrets::mask(session.rules.text.trim(), &env);
+    let own = session.rules.source == Source::Project;
+    let mut shared = BASE.trim_end().replace("{role}", role.name);
+    if !own && !rules.is_empty() {
+        shared.push_str(&format!("\n\n---\n\n# How to work\n\n{rules}"));
+    }
+    let shared = format!("{shared}\n\n---\n\n{}", role.template.trim_end());
     let mut part = vec![format!(
         "You work for the project {}, in {}: the folder {}.",
         session.project,
@@ -93,8 +102,10 @@ pub fn instructions(role: &Role, session: &Session, files: &[File]) -> String {
         );
     }
     let mut text = format!("{shared}\n\n{BOUNDARY}\n\n{}", part.join(" "));
+    if own && !rules.is_empty() {
+        text.push_str(&format!("\n\n# How to work, in this project\n\n{rules}"));
+    }
     if !session.skills.is_empty() {
-        let env = std::env::vars_os().collect();
         text.push_str(
             "\n\n# The project's skills\n\nTexts of the project that are not loaded here: \
              read one with the tool skill_read when your task needs it.\n\n",
@@ -177,7 +188,119 @@ mod tests {
             title: None,
             at_depth_limit: false,
             skills: &[],
+            rules: &DEFAULT_RULES,
         }
+    }
+
+    static DEFAULT_RULES: std::sync::LazyLock<Rules> = std::sync::LazyLock::new(|| Rules {
+        text: crate::rules::DEFAULT.to_owned(),
+        source: Source::Default,
+    });
+
+    #[test]
+    fn the_enforced_text_comes_first_then_the_rules_then_the_role_and_all_before_the_boundary() {
+        let folder = Path::new("/work/zebra");
+        let text = instructions(role(WORKER).unwrap(), &session(folder), &[]);
+        let (before, after) = text.split_once(BOUNDARY).unwrap();
+        let at = |needle: &str| before.find(needle).unwrap_or_else(|| panic!("no {needle}"));
+        assert!(at("# What Flottille enforces") < at("# How to work"));
+        assert!(at("# How to work") < at("# Your role: worker"));
+        assert!(before.contains("Commit only when your brief or the user asks for it"));
+        assert!(!after.contains("How to work"));
+    }
+
+    #[test]
+    fn the_user_s_global_rules_replace_the_default_before_the_boundary() {
+        let rules = Rules {
+            text: "Answer in French.\n".into(),
+            source: Source::Global,
+        };
+        let folder = Path::new("/work/zebra");
+        let text = instructions(
+            role(WORKER).unwrap(),
+            &Session {
+                rules: &rules,
+                ..session(folder)
+            },
+            &[],
+        );
+
+        let (before, _) = text.split_once(BOUNDARY).unwrap();
+        assert!(before.contains("# How to work\n\nAnswer in French.\n\n---"));
+        assert!(!text.contains("Commit only when"));
+    }
+
+    #[test]
+    fn a_project_s_rules_replace_the_global_ones_and_go_after_the_boundary() {
+        let global = Rules {
+            text: "Answer in French.".into(),
+            source: Source::Global,
+        };
+        let own = Rules {
+            text: "Answer in Spanish.".into(),
+            source: Source::Project,
+        };
+        let folder = Path::new("/work/zebra");
+        let with = |rules: &Rules, project: &str| {
+            instructions(
+                role(WORKER).unwrap(),
+                &Session {
+                    rules,
+                    project,
+                    ..session(folder)
+                },
+                &[],
+            )
+        };
+
+        let text = with(&own, "zebra");
+        let (before, after) = text.split_once(BOUNDARY).unwrap();
+        assert!(!before.contains("How to work") && !before.contains("Spanish"));
+        assert!(after.contains("# How to work, in this project\n\nAnswer in Spanish."));
+        assert!(!text.contains("French") && !text.contains("Commit only when"));
+        // The shared part is the same for every project that has its own rules, and so is the
+        // one of those that follow the global rules.
+        assert_eq!(
+            text.split_once(BOUNDARY).unwrap().0,
+            with(&own, "other").split_once(BOUNDARY).unwrap().0
+        );
+        assert_eq!(
+            with(&global, "zebra").split_once(BOUNDARY).unwrap().0,
+            with(&global, "other").split_once(BOUNDARY).unwrap().0
+        );
+    }
+
+    #[test]
+    fn rules_left_empty_leave_no_section_and_a_token_in_them_is_masked() {
+        let folder = Path::new("/work/zebra");
+        for source in [Source::Global, Source::Project] {
+            let rules = Rules {
+                text: " \n".into(),
+                source,
+            };
+            let text = instructions(
+                role(WORKER).unwrap(),
+                &Session {
+                    rules: &rules,
+                    ..session(folder)
+                },
+                &[],
+            );
+            assert!(!text.contains("How to work"), "{source:?}");
+        }
+        let rules = Rules {
+            text: "Deploy with token=ghp_abcdefghijklmnopqrstuvwxyz0123".into(),
+            source: Source::Global,
+        };
+        let text = instructions(
+            role(WORKER).unwrap(),
+            &Session {
+                rules: &rules,
+                ..session(folder)
+            },
+            &[],
+        );
+        assert!(text.contains("Deploy with token=[masked]"));
     }
 
     #[test]

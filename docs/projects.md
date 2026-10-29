@@ -163,6 +163,45 @@ always) are no longer read: a file that still has them is accepted, `project sho
 first three under "Not read", and the daemon removes them from the file at its start, keeping everything else
 the user wrote.
 
+## Rules
+
+An agent's instructions hold two texts about conduct. **What Flottille enforces** is fixed
+(`crates/flottille/roles/base.md`): it says what the gate does, so that an agent does not take it
+for its own discipline: the three classes, the mode (Ask or Auto, one per tree, the user's alone)
+and the judge, what always comes to the user, what is refused, and that a refusal or a held
+request is an answer, never to be reached another way. A test checks each sentence against the
+gate's answers (`tests/rules.rs`). **How to work** is the user's: commits only when asked, say what you did,
+and whatever else they want.
+
+| Level | Where it lives | Edited |
+|---|---|---|
+| Default | `crates/flottille/roles/rules.md`, in the binary | never; it is what Reset to default returns to |
+| All projects | `rules.md` in Flottille's configuration folder (`$XDG_CONFIG_HOME/flottille/`), absent while the default holds | the window's Settings, "Rules"; by hand |
+| One project | the `rules` key of its file | the project's Settings, "Rules"; by hand; `project {action: "set_rules"}` of an agent, held |
+
+The project's rules **replace** the global ones, they do not extend them: a project that wants
+both copies the global text and adds to it. A project without its own follows the global rules,
+or the default when there are none. Rules are at most 8,000 characters; an empty text is no rules. A `rules.md` or a `rules` key
+edited by hand past the limit is cut to it: agents get the first 8,000 characters, and the
+daemon's log, `rules.show`, `project {action: "rules"}` and the editor say why.
+
+```toml
+rules = """
+Answer in French.
+Commit only when asked.
+"""
+```
+
+Reset to default removes the file (global) or the key (project), and the level below shows again.
+
+The text is read when an agent is created and frozen in its instructions (`docs/design.md` §8),
+so a change reaches the agents created after it, and no agent created before. The global rules sit
+before the cache boundary, where every project shares them, so editing them changes the shared
+part once for everyone. A project's own rules would make that part differ from one project to
+the next, so they sit after the boundary. An agent reads the rules the agents created next will get with
+`project {action: "rules"}` and proposes a change with `set_rules {text}`, a call to judge like
+the project's other changes (`docs/tools.md`, "The project").
+
 ## Tasks
 
 `[tasks.<name>]` lists the project's command lines its agents run by name with `commands_run`

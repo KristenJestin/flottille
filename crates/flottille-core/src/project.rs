@@ -302,6 +302,10 @@ pub struct Project {
     /// The tracker of its tickets, as the user declared it; none is read without one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tracker: Option<ProjectTracker>,
+    /// How its agents are told to work, in place of the user's global rules; none follows them
+    /// (`docs/projects.md`, "Rules").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules: Option<String>,
     /// Keys of the file that are no longer read, each with what replaces it: said, never
     /// followed nor refused.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -362,6 +366,7 @@ struct File {
     tracker: Option<ProjectTracker>,
     /// Obsolete: read as nothing, and said (`OBSOLETE_AGENT_ACTIONS`).
     agent_actions: Option<toml::Value>,
+    rules: Option<String>,
     /// Obsolete: read as nothing, and said (`OBSOLETE_FORGES`).
     forges: Option<toml::Value>,
 }
@@ -411,6 +416,7 @@ impl Project {
             commands: BTreeMap::new(),
             pull_requests: PullRequests::default(),
             tracker: None,
+            rules: None,
             obsolete: Vec::new(),
         }
     }
@@ -711,6 +717,7 @@ fn check(name: &str, mut file: File, data: &Path) -> Result<Project, String> {
         commands,
         pull_requests: file.pull_requests,
         tracker,
+        rules: file.rules,
         obsolete,
     })
 }

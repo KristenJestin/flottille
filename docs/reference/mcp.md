@@ -137,25 +137,38 @@ and the 2026 practice around it:
    - only an agent that can have children gets `approval_answer`;
    - a root gets `ask_user`, a child gets `ask_parent`.
 
-   - `forge_write` and `workspace_remove` are listed to an agent in a workspace, as
-     `forge_read` and `ticket_read` are: listing grants nothing, each call goes through the gate's
-     classes and the session's mode (`docs/tools.md`, "The gate").
+   - `forge_read` and `forge_write` are listed to every agent whose project's repositories
+     declare a forge, `ticket_read` to every agent whose project declares a tracker, in `main` as
+     in a workspace, and `workspace_remove` to every agent: the same tools wherever it works. A
+     tool that could only refuse is not listed: without a forge or a tracker there is nothing for
+     them to read or write. Listing grants nothing: each call goes through the gate's classes and
+     the session's mode (`docs/tools.md`, "The gate"). In `main` they name the workspace they act
+     on (`workspace`).
 
    - only a root gets `skills`, `commands` and `project`, the project's skills, commands and
      settings (`docs/tools.md`, "The project"): a child does its brief.
 
-   A root lead has 19 tools, a leaf worker 11, four more each in a workspace (`forge_read`,
-   `ticket_read`, `forge_write`, `workspace_remove`).
+   A root lead has 20 tools, a leaf worker 12; two more each when the project's repositories
+   declare a forge (`forge_read`, `forge_write`), one more when it declares a tracker
+   (`ticket_read`).
 10. **The idempotency key** of a call is read from the call's `_meta` (`claudecode/toolUseId` for
     Claude). `claude` calls Flottille's server itself and sends it with every call; the bridge
     never sees MCP calls. Check that the `claude` version Flottille pins still sends it, and fall
     back to no deduplication, said once per agent in the daemon's log, when a call has none.
 
+11. **The server explains Flottille to the agent.** The `initialize` result (and `server/discover`'s)
+    carries the `instructions` of `crates/flottille/roles/guide.md`: under 400 words, well under
+    the 4,096 characters Claude Code keeps, one text for every agent. Anthropic's guidance asks
+    that a tool's description tell a new colleague what the tool is for; an agent that is told
+    nothing of the system around its tools invents it (it claimed that tools "may appear during the
+    session"). It says only what holds in the code, and a test checks that every tool it names
+    exists.
+
 ### Pilot door
 
-11. **The outside agent probably uses tool search**, so the pilot door's server instructions
+12. **The outside agent probably uses tool search**, so the pilot door's server instructions
     (under 4,096 characters) say what Flottille is and when to reach for its tools: start and
     follow agents, read their state and conversations, and catch up with events.
-12. **Waiting without polling**: `events_since {after, wait_seconds?}` holds the call up to
+13. **Waiting without polling**: `events_since {after, wait_seconds?}` holds the call up to
     `wait_seconds` (at most 90, under Claude Code's 2-minute backgrounding) and returns as soon
     as an event arrives, with the next sequence number to ask for.

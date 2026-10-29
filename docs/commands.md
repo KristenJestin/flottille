@@ -119,7 +119,9 @@ the same checks (the remote kept, the workspace's own pull request, not a fork's
 base), through `bkt pr create`, `bkt pr merge --strategy squash` and, on Cloud only, `bkt pipeline
 run --ref <branch>` after the branch's newest pipeline failed: what each does, and what differs
 from `gh`, is in [`forges.md`](forges.md#bitbucket).
-
+It is listed to every agent of a project whose repositories declare a forge, in `main` as in a
+workspace (its tool list is fixed when it starts). Listing allows nothing: each call goes through
+the gate's classes and the session's mode.
 
 The checks of a call's arguments that need the forge (a draft on Bitbucket, the title's format)
 are made when it is performed: after the judge or the user allowed it.

@@ -9,12 +9,14 @@ use std::collections::HashMap;
 use flottille_ui::{Align, Card, Dropdown, MenuItem, Switch, Type, enter, palette};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, Window, div, px,
+    App, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, Render,
+    SharedString, StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, Window, div,
+    px,
 };
 
 use crate::actions::Command;
 use crate::providers::{Provider, Providers};
+use crate::rules::RulesEditor;
 use crate::shell::Shell;
 
 pub struct SettingsPage {
@@ -25,6 +27,8 @@ pub struct SettingsPage {
     /// The daemon's refusal of the last switch, by provider.
     refused: HashMap<String, String>,
     narrow: bool,
+    /// The user's rules for every project, edited on this page.
+    rules: Entity<RulesEditor>,
     /// The judge's picker whose list is open.
     judge_menu: Option<JudgeMenu>,
     /// A judge chosen, until the daemon lists it.
@@ -47,8 +51,9 @@ pub const JUDGE_QUOTA: &str =
     "Each judgement is a turn of the judge's model: it uses your quota on that provider.";
 
 impl SettingsPage {
-    pub fn new(shell: WeakEntity<Shell>) -> Self {
+    pub fn new(shell: WeakEntity<Shell>, rules: Entity<RulesEditor>) -> Self {
         Self {
+            rules,
             shell,
             providers: Providers::default(),
             pending: HashMap::new(),
@@ -58,6 +63,10 @@ impl SettingsPage {
             judge_pending: false,
             judge_refused: None,
         }
+    }
+
+    pub fn rules(&self) -> &Entity<RulesEditor> {
+        &self.rules
     }
 
     pub fn providers(&self) -> &Providers {
@@ -498,6 +507,7 @@ impl Render for SettingsPage {
                 )
             })
             .collect();
+        let count = cards.len();
         div()
             .id("settings-page")
             .size_full()
@@ -528,7 +538,12 @@ impl Render for SettingsPage {
                     .when(!self.providers.known, |d| {
                         d.child(div().text_color(p.faint).child("Asking the daemon…"))
                     })
-                    .children(cards),
+                    .children(cards)
+                    .child(enter(
+                        key("rules"),
+                        3 + count,
+                        div().mt(px(24.)).child(self.rules.clone()),
+                    )),
             )
     }
 }
