@@ -743,7 +743,7 @@ fn a_write_into_flottille_s_config_through_proc_or_a_link_is_base_in_auto() {
             write(format!("/proc/self/root{}", judge.display())),
             write(format!("/proc/thread-self/root{}", judge.display())),
             write(format!("/proc/1/root{}", judge.display())),
-            write(format!("/proc/self/cwd/judge.md")),
+            write("/proc/self/cwd/judge.md".into()),
             write(
                 user.path("real-config/flottille/judge.md")
                     .display()

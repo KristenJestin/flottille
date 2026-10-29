@@ -3484,7 +3484,7 @@ mod tests {
             format!("/proc/{me}/root{judge}"),
             format!("/proc/1/root{judge}"),
             format!("/proc/{me}/cwd/judge.md"),
-            format!("/proc/self/fd/3"),
+            "/proc/self/fd/3".into(),
             format!("/proc/self/task/{me}/root{judge}"),
             format!("/proc/{me}/exe"),
         ] {
