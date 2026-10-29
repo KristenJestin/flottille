@@ -538,6 +538,69 @@ fn an_image_dropped_from_a_file_works_like_a_pasted_one(cx: &mut TestAppContext)
 }
 
 #[gpui_kit::test]
+fn a_clipboard_with_an_image_and_its_url_attaches_the_image_and_pastes_no_text(
+    cx: &mut TestAppContext,
+) {
+    use gpui_kit::{ClipboardEntry, ClipboardString};
+    let user = user(true);
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", "hello");
+    let (_shell, reply, cx) = open_session(&user, &lead, cx);
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("keep this");
+
+    // A copy in a browser: the picture, and the address of the picture as text.
+    let copied = ClipboardItem {
+        entries: vec![
+            ClipboardEntry::String(ClipboardString::new("https://example.org/p.png".into())),
+            ClipboardEntry::Image(Image::from_bytes(ImageFormat::Png, png())),
+        ],
+    };
+    paste(copied, cx);
+
+    assert_eq!(attachments(&reply, cx), 1, "the image wins over the text");
+    assert_eq!(
+        reply.read_with(cx, |r, cx| r.field().read(cx).value().to_string()),
+        "keep this",
+        "and the text is not pasted"
+    );
+
+    // A clipboard with text only still goes to the field.
+    paste(ClipboardItem::new_string(" and more".into()), cx);
+    assert_eq!(attachments(&reply, cx), 1);
+    assert_eq!(
+        reply.read_with(cx, |r, cx| r.field().read(cx).value().to_string()),
+        "keep this and more"
+    );
+}
+
+#[gpui_kit::test]
+fn a_send_removes_the_thumbnails_it_sent_and_not_those_changed_meanwhile(cx: &mut TestAppContext) {
+    let user = user(true);
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", "hello");
+    let (_shell, reply, cx) = open_session(&user, &lead, cx);
+    let other: Vec<u8> = png().into_iter().rev().collect();
+
+    // Sent with picture A; while the daemon answers, A is removed and B is added.
+    reply.update_in(cx, |reply, window, cx| {
+        reply.attach(Image::from_bytes(ImageFormat::Png, png()), cx);
+        reply.send(window, cx);
+        reply.detach(0, cx);
+        reply.attach(Image::from_bytes(ImageFormat::Png, other.clone()), cx);
+        reply.replied(None, window, cx);
+    });
+
+    let left = reply.read_with(cx, |r, _| {
+        r.attachments()
+            .iter()
+            .map(|i| i.bytes.clone())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(left, vec![other], "picture B was not sent: it stays");
+}
+
+#[gpui_kit::test]
 fn the_image_shows_again_when_the_page_is_opened_after_a_restart(cx: &mut TestAppContext) {
     let user = user(true);
     project(&user, "atlas");

@@ -3348,8 +3348,9 @@ pub struct Reply {
     activity: Option<Activity>,
     /// Pictures pasted or dropped, sent with the next message.
     attachments: Vec<Arc<gpui_kit::Image>>,
-    /// How many of them the message being sent holds.
-    sent_images: usize,
+    /// The ones the message being sent holds: they leave when it is taken, whatever was removed
+    /// or added meanwhile.
+    sent_images: Vec<Arc<gpui_kit::Image>>,
     /// Whether the root's agent takes images; `None` until it first started.
     images: Option<bool>,
     error: Option<SharedString>,
@@ -3429,7 +3430,7 @@ impl Reply {
             sent: None,
             activity: None,
             attachments: Vec::new(),
-            sent_images: 0,
+            sent_images: Vec::new(),
             images: None,
             error: None,
             renders: 0,
@@ -3530,7 +3531,7 @@ impl Reply {
         cx.notify();
     }
 
-    fn detach(&mut self, at: usize, cx: &mut Context<Self>) {
+    pub fn detach(&mut self, at: usize, cx: &mut Context<Self>) {
         if at < self.attachments.len() {
             self.attachments.remove(at);
             self.error = None;
@@ -3538,13 +3539,18 @@ impl Reply {
         }
     }
 
-    /// Paste: a clipboard that holds a picture and no text attaches it, else the field takes it.
+    /// Paste: a clipboard that holds a picture attaches it, whatever text comes with it (a copy in
+    /// a browser gives the picture's address or its HTML as well); else the field takes it.
     fn pasted(&mut self, cx: &mut Context<Self>) -> bool {
         use gpui_kit::ClipboardEntry;
         let Some(clipboard) = cx.read_from_clipboard() else {
             return false;
         };
-        if clipboard.text().is_some() {
+        let has_image = clipboard
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry, ClipboardEntry::Image(_)));
+        if clipboard.text().is_some() && !has_image {
             return false;
         }
         let mut taken = false;
@@ -3842,7 +3848,7 @@ impl Reply {
         }
         self.sending = true;
         self.sent = Some(typed);
-        self.sent_images = self.attachments.len();
+        self.sent_images = self.attachments.clone();
         self.error = None;
         let images = self
             .attachments
@@ -3876,8 +3882,9 @@ impl Reply {
         match refused {
             None => {
                 self.error = None;
-                let images = self.sent_images.min(self.attachments.len());
-                self.attachments.drain(..images);
+                let sent_images = std::mem::take(&mut self.sent_images);
+                self.attachments
+                    .retain(|image| !sent_images.iter().any(|sent| Arc::ptr_eq(sent, image)));
                 let now = self.field.read(cx).value().to_string();
                 // A sent text changed meanwhile is left as it is: nothing typed is lost.
                 if let Some(rest) = sent.as_deref().and_then(|sent| now.strip_prefix(sent)) {
