@@ -310,6 +310,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     agents::settle_at_start(&daemon);
     runs::settle_at_start(&daemon);
     approvals::settle_at_start(&daemon);
+    projects::migrate_files(&daemon);
     tokio::spawn(mcp::serve(
         daemon.clone(),
         tools,
@@ -546,7 +547,6 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                 "project.show",
                 "project.settings",
                 "project.set_settings",
-                "project.set_agent_actions",
                 "project.ticket",
             ]
             .contains(&request.method.as_str())
@@ -569,8 +569,6 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     projects::settings(daemon, request.params).await
                 } else if request.method == "project.set_settings" {
                     projects::set_settings(daemon, request.params).await
-                } else if request.method == "project.set_agent_actions" {
-                    projects::set_agent_actions(&daemon, request.params)
                 } else if request.method == "project.ticket" {
                     tickets::preview(daemon, request.params).await
                 } else {

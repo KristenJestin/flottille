@@ -735,6 +735,62 @@ fn a_provider_disabled_then_enabled_is_written_in_providers_toml_with_its_commen
 }
 
 #[test]
+fn the_auto_judge_chosen_by_the_user_is_written_in_providers_toml_listed_and_announced() {
+    let user = User::with_fake_providers();
+    user.write_providers("# Which agents run here.\n[opencode]\nenabled = true\n");
+    assert!(
+        user.call("provider.list", Value::Null).unwrap()["judge"].is_null(),
+        "no judge until the user chooses one"
+    );
+
+    let chosen = user
+        .call(
+            "provider.set_judge",
+            json!({"provider": "claude", "model": "fake-small"}),
+        )
+        .unwrap();
+
+    assert_eq!(
+        chosen,
+        json!({"judge": {"provider": "claude", "model": "fake-small"}})
+    );
+    let text = providers_file(&user);
+    assert!(text.contains("# Which agents run here."), "{text}");
+    assert!(
+        text.contains("[judge]\nprovider = \"claude\"\nmodel = \"fake-small\""),
+        "{text}"
+    );
+    assert_eq!(
+        user.call("provider.list", Value::Null).unwrap()["judge"],
+        json!({"provider": "claude", "model": "fake-small"})
+    );
+    // An unknown provider is refused, and nothing changes.
+    let (code, _) = user
+        .call("provider.set_judge", json!({"provider": "gemini"}))
+        .unwrap_err();
+    assert_eq!(code, "not-found");
+    assert!(providers_file(&user).contains("provider = \"claude\""));
+    // None: Auto asks as Ask does again.
+    user.call("provider.set_judge", json!({"provider": null}))
+        .unwrap();
+    assert!(!providers_file(&user).contains("[judge]"));
+    let watch = user.watch(&["--after", "0"]);
+    let changes: Vec<Value> = watch
+        .until(|e| e["name"] == "provider.judge_changed" && e["data"]["judge"].is_null())
+        .into_iter()
+        .filter(|e| e["name"] == "provider.judge_changed")
+        .map(|e| e["data"].clone())
+        .collect();
+    assert_eq!(
+        changes,
+        [
+            json!({"judge": {"provider": "claude", "model": "fake-small"}}),
+            json!({"judge": null}),
+        ]
+    );
+}
+
+#[test]
 fn an_unknown_provider_or_a_providers_toml_that_cannot_be_read_is_refused_and_left_as_it_is() {
     let user = User::with_fake_providers();
 

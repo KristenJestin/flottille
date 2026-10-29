@@ -16,9 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use bytes::Bytes;
-use flottille_core::agent::Agent;
-use flottille_core::approval::Kind;
-use flottille_core::procedure;
+use flottille_core::agent::{Agent, GateMode};
+use flottille_core::approval::Judgement;
 use flottille_core::secrets;
 use http::{Request, Response, StatusCode};
 use http_body_util::combinators::BoxBody;
@@ -46,8 +45,8 @@ use crate::daemon::Daemon;
 use crate::deliveries;
 use crate::files::{self, Context};
 use crate::gate;
+use crate::judge;
 use crate::place::{Place, Resolved};
-use crate::procedures;
 use crate::projects;
 use crate::providers::{self, Provider};
 use crate::references;
@@ -310,13 +309,13 @@ const SERVED: [Definition; 23] = [
     Definition {
         name: "forge_write",
         title: "Write to the workspace's forge",
-        description: "Listed because your procedure grants some of it. Opens the pull request of \
-            this workspace's branch in one of its repositories (pr-create, with a title and a \
-            body, into the repository's base), merges it by squash (pr-merge-squash), or re-runs \
-            the failed jobs of its branch's last pipelines (pipeline-rerun). Run by Flottille \
-            with the user's own forge sign-in; refused for an action the procedure does not \
-            grant, held for the user when it grants it with ask. A merge is refused while the \
-            checks fail or run, or a review asks for changes, unless the user waives it. \
+        description: "Opens the pull request of this workspace's branch in one of its \
+            repositories (pr-create, with a title and a body, into the repository's base), merges \
+            it by squash (pr-merge-squash), or re-runs the failed jobs of its branch's last \
+            pipelines (pipeline-rerun). Run by Flottille with the user's own forge sign-in, once \
+            the session's judge or the user allows it: you are answered at once, the result may \
+            come later. A merge is refused while the checks fail or run, or a review asks for \
+            changes, unless the user waives it, and a waived merge always asks the user. \
             {\"action\": \"pr-create\", \"repository\": \"api\", \"title\": \"fix(api): ...\", \
             \"body\": \"...\"}; {\"action\": \"pr-merge-squash\", \"repository\": \"api\"}.",
         read_only: false,
@@ -336,8 +335,8 @@ const SERVED: [Definition; 23] = [
     Definition {
         name: "workspace_remove",
         title: "Remove the workspace",
-        description: "Listed because your procedure grants it. Removes this agent's own \
-            workspace, as `flottille workspace remove` does. It refuses, touching nothing, while \
+        description: "Removes this agent's own workspace, as `flottille workspace remove` does, \
+            once the session's judge or the user allows it. It refuses, touching nothing, while \
             a repository holds uncommitted work or commits on no remote, and names them; \
             otherwise it removes every worktree and the folder, and deletes the branches that \
             hold no commit of their own. Nothing is left to work in afterwards: report next.",
@@ -351,10 +350,10 @@ const SERVED: [Definition; 23] = [
         title: "The project's procedures",
         description: "The project's procedures, the named multi-step actions the user runs in a \
             workspace (open the pull requests, merge a stack, close a workspace). list and show \
-            read them, with what each grants. start runs one in a workspace (yours when left \
-            out) as a new session of its own: it is held for the user, who sees what it grants \
-            and confirms it, unless the project lets procedures start on their own; you are \
-            answered at once, and the result comes later. You never give nor change a grant. \
+            read them. start runs one in a workspace (yours when left out) as a new session of \
+            its own, once the session's judge or the user allows it; you are answered at once, \
+            and the result may come later. A run grants nothing: its calls go through the gate \
+            like yours. \
             {\"action\": \"list\"}; {\"action\": \"start\", \"name\": \"open-prs\", \
             \"workspace\": \"login\"}.",
         read_only: false,
@@ -372,11 +371,11 @@ const SERVED: [Definition; 23] = [
         name: "project",
         title: "The project's settings",
         description: "This project's settings, as its Settings page shows them. settings reads \
-            each repository's forge, the tracker, the references and what agents may do on their \
-            own. set_settings declares a repository's forge or the tracker (null removes it; a \
-            tracker left out is kept); add_reference and remove_reference edit the references. \
-            A change is held for the user unless the project lets it run on its own: you are \
-            answered at once, the result comes later. {\"action\": \"set_settings\", \
+            each repository's forge, the tracker and the references. set_settings declares a \
+            repository's forge or the tracker (null removes it; a tracker left out is kept); \
+            add_reference and remove_reference edit the references. A change is done once the \
+            session's judge or the user allows it, a change of the tracker only once the user \
+            does: you are answered at once, the result may come later. {\"action\": \"set_settings\", \
             \"repositories\": [{\"path\": \"api\", \"forge\": {\"kind\": \"github\", \
             \"repository\": \"acme/api\"}}]}.",
         read_only: false,
@@ -1102,6 +1101,7 @@ async fn played(
     let started = Instant::now();
     let recorded = record_of(&args, &grant.place);
     let mut verdict = None;
+    let mut judgement = None;
     let replaced = daemon
         .read(|store| store.agent(&grant.agent))
         .ok()
@@ -1115,19 +1115,7 @@ async fn played(
         match crate::actions::prepared(daemon, grant, tool, &args).await {
             Err(refused) => refused,
             Ok(says) => {
-                let (decided, identity) = judge(daemon, grant, tool, &args);
-                // A call the user allowed for the tree goes through, never one reaching a
-                // sensitive place.
-                let decided = match decided {
-                    gate::Verdict::Ask(ask)
-                        if !ask.sensitive
-                            && ask.kind == Kind::Call
-                            && approvals::granted(daemon, &grant.agent, &identity) =>
-                    {
-                        gate::Verdict::Allow
-                    }
-                    decided => decided,
-                };
+                let decided = classify(daemon, grant, tool, &args);
                 verdict = Some(decided.word());
                 match decided {
                     gate::Verdict::Allow => {
@@ -1135,11 +1123,28 @@ async fn played(
                     }
                     gate::Verdict::Deny(why) => Outcome::Refused(why),
                     gate::Verdict::Ask(ask) => {
-                        let says = match ask.kind {
-                            Kind::Catalogue => crate::actions::catalogue_says(daemon, grant, &args),
-                            _ => says,
+                        // In Auto, the judge decides a call to judge; base never reaches it, and
+                        // without a judge chosen Auto asks as Ask does.
+                        let judged = match (ask.class, judge::mode(daemon, &grant.agent)) {
+                            (gate::Class::Judge, GateMode::Auto) => match judge::chosen(daemon) {
+                                Some(chosen) => Some(
+                                    judge::judge(daemon, &chosen, grant, tool, &args, &ask.reasons)
+                                        .await,
+                                ),
+                                None => None,
+                            },
+                            _ => None,
                         };
-                        approvals::ask(daemon, grant, tool, &args, key, ask, identity, says)
+                        judgement = judged.clone();
+                        match judged {
+                            Some(judged) if judged.verdict == "allow" => {
+                                verdict = Some("judged");
+                                perform(daemon, grant, tool, args, cancelled, true).await
+                            }
+                            judged => {
+                                approvals::ask(daemon, grant, tool, &args, key, ask, says, judged)
+                            }
+                        }
                     }
                 }
             }
@@ -1151,7 +1156,16 @@ async fn played(
         ))
     };
     record(
-        daemon, grant, tool, key, recorded, verdict, &outcome, started, None,
+        daemon,
+        grant,
+        tool,
+        key,
+        recorded,
+        verdict,
+        judgement.as_ref(),
+        &outcome,
+        started,
+        None,
     );
     let error = matches!(outcome, Outcome::Refused(_) | Outcome::Failed(_));
     let (text, limit) = shown(outcome, &grant.place);
@@ -1167,41 +1181,23 @@ async fn played(
     (with_notes(text, &notes), error)
 }
 
-/// The gate's verdict on a call of one of the agent's tools, and the call's identity for a grant.
-pub fn judge(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> (gate::Verdict, String) {
-    considered(daemon, grant, tool, args, |call| {
-        (gate::decide(call), gate::identity(call))
-    })
-}
-
-/// The grant the procedure run the agent works in lets this `commands_run` through by, if any: its
-/// run's environment is then lifted for it (`gate::lifted`).
-fn lifted(daemon: &Daemon, grant: &Grant, args: &Value) -> Option<procedure::Grant> {
-    considered(daemon, grant, "commands_run", args, gate::lifted)
-}
-
-/// The call as the gate sees it, handed to `consider`.
-fn considered<T>(
-    daemon: &Daemon,
-    grant: &Grant,
-    tool: &str,
-    args: &Value,
-    consider: impl FnOnce(&gate::Call) -> T,
-) -> T {
+/// The gate's verdict on a call of one of the agent's tools.
+pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gate::Verdict {
     let project = projects::load_project(daemon, &grant.place.project).ok();
-    let (paths, words, mut command) = reached(daemon, &grant.place, tool, args);
-    // In the project folder, a line the catalogue holds where it runs is that command, with its
-    // own flags: what the user allowed Always runs from then on without asking, and a command
-    // the user marked to ask is never a line to allow again.
-    if command.is_none() && grant.place.workspace.is_none() && !words.is_empty() {
-        command = project
+    let (paths, words, command) = reached(daemon, &grant.place, tool, args);
+    // A line equal to a catalogue command's is that command, with its own flags.
+    let command = match command.as_deref() {
+        Some(name) => project
             .as_ref()
-            .and_then(|project| crate::actions::catalogued(project, args, &words));
+            .and_then(|project| project.commands.get_key_value(name)),
+        None if !words.is_empty() => project.as_ref().and_then(|project| {
+            project.commands.iter().find(|(_, command)| {
+                flottille_core::command::split_line(&command.line).is_ok_and(|line| line == words)
+            })
+        }),
+        None => None,
     }
-    let command = command.as_deref().and_then(|name| {
-        let (name, command) = project.as_ref()?.commands.get_key_value(name)?;
-        Some((name.as_str(), command))
-    });
+    .map(|(name, command)| (name.as_str(), command));
     let paths_of = &daemon.paths;
     let own = [
         paths_of.data.clone(),
@@ -1209,8 +1205,19 @@ fn considered<T>(
         paths_of.state.clone(),
         paths_of.runtime.clone(),
     ];
-    let run = procedures::run_of(daemon, grant);
-    let call = gate::Call {
+    let pushed = rewrites(&words) && pushed(&grant.place, paths.first());
+    let search = runs::search_path(&grant.place, ".");
+    let mut writable = vec![grant.place.root.clone()];
+    if let Some(project) = &project {
+        writable.extend([project.folder.clone(), project.workspaces_root.clone()]);
+    }
+    let real: Vec<_> = writable
+        .iter()
+        .filter_map(|folder| std::fs::canonicalize(folder).ok())
+        .collect();
+    writable.extend(real);
+    let groups = runs::groups_of(daemon, &grant.agent);
+    gate::decide(&gate::Call {
         grant,
         tool,
         args,
@@ -1219,10 +1226,46 @@ fn considered<T>(
         command,
         never: project.as_ref().map(|project| project.never.as_slice()),
         own: &own,
-        run: run.as_ref(),
-        actions: project.as_ref().map(|project| &project.agent_actions),
+        pushed,
+        search: search.as_deref(),
+        writable: &writable,
+        groups: &groups,
+    })
+}
+
+/// Whether a line may rewrite a branch's history, which is base once the branch is on a remote:
+/// only then is the remote looked at.
+fn rewrites(words: &[String]) -> bool {
+    words
+        .iter()
+        .any(|word| word == "git" || word.ends_with("/git"))
+        && words
+            .iter()
+            .any(|word| ["rebase", "commit", "reset", "update-ref"].contains(&word.as_str()))
+}
+
+/// Whether the workspace's branch is on a remote of the repository the line runs in.
+fn pushed(place: &Place, folder: Option<&Resolved>) -> bool {
+    if place.workspace.is_none() || place.branch.is_empty() {
+        return false;
+    }
+    let Some(folder) = folder else {
+        return false;
     };
-    consider(&call)
+    let listed = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&folder.path)
+        .args(["for-each-ref", "--format=%(refname)", "refs/remotes"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output();
+    match listed {
+        Ok(output) => String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|name| name.ends_with(&format!("/{}", place.branch))),
+        // What cannot be told is taken for pushed: the safer class.
+        Err(_) => true,
+    }
 }
 
 /// Performs a call the user allowed, recorded as the agent's: the request's answer.
@@ -1244,6 +1287,7 @@ pub async fn performed(
         None,
         recorded,
         verdict,
+        None,
         &outcome,
         started,
         Some(request),
@@ -1260,13 +1304,14 @@ fn record(
     key: Option<&str>,
     recorded: Value,
     verdict: Option<&str>,
+    judgement: Option<&Judgement>,
     outcome: &Outcome,
     started: Instant,
     request: Option<u64>,
 ) {
     let duration = started.elapsed().as_millis() as u64;
     let data = json!({"agent": grant.agent, "tool": tool, "call_key": key,
-        "arguments": recorded, "gate": verdict, "outcome": outcome.word(),
+        "arguments": recorded, "gate": verdict, "judgement": judgement, "outcome": outcome.word(),
         "duration_ms": duration, "request": request});
     if let Err(error) = daemon.write(|store| {
         let event = store.append_agent_event(&grant.agent, "agent.tool_served", data, true)?;
@@ -1330,8 +1375,15 @@ async fn perform(
     match tool {
         "commands_list" => runs::commands_list(daemon, &grant.place, args),
         "commands_run" => {
-            let lifted = lifted(daemon, grant, &args);
-            runs::commands_run(daemon, &grant.agent, &grant.place, args, lifted, cancelled).await
+            runs::commands_run(
+                daemon,
+                &grant.agent,
+                &grant.place,
+                args,
+                approved,
+                cancelled,
+            )
+            .await
         }
         "commands_status" => runs::commands_status(daemon, &grant.agent, args).await,
         "forge_read" => crate::forge::forge_read(daemon, &grant.place, args).await,
@@ -1416,17 +1468,6 @@ mod tests {
         assert_eq!(base64url(&[0u8; 32]).len(), 43);
     }
 
-    /// The grants of a run that lets through everything `forge_write` and `workspace_remove` do.
-    fn all_grants() -> procedure::Grants {
-        [
-            procedure::Grant::PrCreate,
-            procedure::Grant::WorkspaceRemove,
-        ]
-        .into_iter()
-        .map(|grant| (grant, procedure::Mode::Allow))
-        .collect()
-    }
-
     #[test]
     fn every_tool_is_described_for_a_new_colleague() {
         for definition in &SERVED {
@@ -1437,12 +1478,8 @@ mod tests {
             assert_eq!(tool["inputSchema"]["type"], "object");
             let name = format!("mcp__flottille__{}", definition.name);
             assert!(
-                claude::PROVIDER
-                    .tools(true, false, true, &all_grants())
-                    .contains(&name)
-                    || claude::PROVIDER
-                        .tools(false, false, true, &all_grants())
-                        .contains(&name),
+                claude::PROVIDER.tools(true, false, true).contains(&name)
+                    || claude::PROVIDER.tools(false, false, true).contains(&name),
                 "{} is a tool agents get",
                 definition.name
             );
@@ -1451,7 +1488,7 @@ mod tests {
 
     #[test]
     fn a_grant_holds_the_agent_s_served_tools_in_its_own_order() {
-        let mut leaf = claude::PROVIDER.tools(false, true, true, &all_grants());
+        let mut leaf = claude::PROVIDER.tools(false, true, true);
         assert_eq!(served(&claude::PROVIDER, &leaf).len(), 15);
         leaf.reverse();
         leaf.retain(|tool| !tool.ends_with("__search"));
@@ -1476,7 +1513,7 @@ mod tests {
         let lead = ["mcp__flottille__agent_status", "mcp__flottille__report"].map(String::from);
 
         for stored in [&worker[..], &lead[..]] {
-            let given = claude::PROVIDER.tools(false, false, true, &all_grants());
+            let given = claude::PROVIDER.tools(false, false, true);
             assert!(stored.iter().all(|tool| given.contains(tool)), "{stored:?}");
         }
         let served_worker = served(&claude::PROVIDER, &worker);
@@ -1558,7 +1595,7 @@ mod tests {
     fn the_biggest_list_stays_far_under_the_threshold_of_tool_search() {
         // About 4 characters a token: Anthropic suggests tool search past 10k tokens of
         // definitions (`docs/reference/mcp.md` §3), 40,000 characters.
-        let biggest = claude::PROVIDER.tools(true, false, true, &all_grants());
+        let biggest = claude::PROVIDER.tools(true, false, true);
         let chars: usize = served(&claude::PROVIDER, &biggest)
             .into_iter()
             .map(|name| {

@@ -826,7 +826,7 @@ fn an_agent_in_the_project_folder_has_no_ticket_read() {
 }
 
 #[test]
-fn an_agent_cannot_run_acli_by_itself_the_gate_refuses_it() {
+fn an_agent_s_acli_always_asks_the_user_and_never_runs_before() {
     let user = User::with_fake_agent().with_fake_acli();
     fixture(&user);
     jira(&user, json!({"ABC-1": work_item("ABC-1", "Jira")}));
@@ -837,8 +837,20 @@ fn an_agent_cannot_run_acli_by_itself_the_gate_refuses_it() {
         "acli jira workitem comment create --key ABC-1 --body hi",
     ] {
         let answer = mcp.call("commands_run", json!({"line": line}));
-        assert!(answer.error, "{line}: {}", answer.text);
-        assert!(answer.text.contains("acli"), "{}", answer.text);
+        assert!(
+            answer.text.starts_with("Waiting for the user's approval"),
+            "{line}: {}",
+            answer.text
+        );
+    }
+    let requests = user.call("approval.list", json!({})).unwrap()["requests"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(requests.len(), 2);
+    for request in &requests {
+        assert_eq!(request["class"], "base", "{request}");
+        assert!(request.to_string().contains("acli"), "{request}");
     }
     assert!(user.acli_received().is_empty(), "the fake was never run");
 }

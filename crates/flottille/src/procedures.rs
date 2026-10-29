@@ -1,13 +1,11 @@
 //! The `procedure.*` methods and the runs of procedures (`docs/procedures.md`): a project's named
-//! actions, kept in its file beside its recipe, each run by a root agent in a workspace with the
-//! grants the user confirmed. The grants belong to the run, held by the daemon for its root
-//! agent: no tool nor argument of an agent changes them, and they end with the run.
+//! actions, kept in its file beside its recipe, each run by a root agent in a workspace as plain
+//! instructions. A run grants nothing: its agents' calls go through the gate's classes.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use flottille_core::approval;
-use flottille_core::procedure::{self, Grant, Grants, Procedure};
+use flottille_core::procedure::{self, Procedure};
 use flottille_core::project::Project;
 use flottille_core::store::{ProcedureRun, Store, now_ms};
 use flottille_core::workspace::Workspace;
@@ -17,13 +15,8 @@ use serde_json::{Value, json};
 use crate::agents::{self, New};
 use crate::daemon::Daemon;
 use crate::deliveries;
-use crate::forge;
-use crate::gate;
-use crate::mcp;
-use crate::place::Place;
 use crate::projects::{self, Failure};
 use crate::roles;
-use crate::tree;
 
 type Answer = Result<Value, Failure>;
 
@@ -48,8 +41,6 @@ struct Add {
     name: Option<String>,
     description: Option<String>,
     instructions: Option<String>,
-    grants: Option<Grants>,
-    children: Option<bool>,
     /// One of Flottille's procedures, written as it is (`procedure::TEMPLATES`).
     template: Option<String>,
 }
@@ -71,16 +62,12 @@ impl Add {
                 Procedure {
                     description,
                     instructions,
-                    grants: self.grants.unwrap_or_default(),
-                    children: self.children.unwrap_or(true),
+                    grants: None,
+                    children: None,
                 },
             ));
         };
-        if self.description.is_some()
-            || self.instructions.is_some()
-            || self.grants.is_some()
-            || self.children.is_some()
-        {
+        if self.description.is_some() || self.instructions.is_some() {
             return Err(Failure::refused(
                 "a template is added as it is: edit the procedure once it is in the project's \
                  file",
@@ -106,8 +93,6 @@ struct Edit {
     name: String,
     description: Option<String>,
     instructions: Option<String>,
-    grants: Option<Grants>,
-    children: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -130,9 +115,6 @@ struct Start {
     project: String,
     name: String,
     workspace: String,
-    /// The grants the user was shown and confirmed.
-    grants: Grants,
-    children: bool,
 }
 
 /// Answers a `procedure.*` request.
@@ -181,12 +163,6 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 if let Some(instructions) = asked.instructions {
                     procedure.instructions = instructions;
                 }
-                if let Some(grants) = asked.grants {
-                    procedure.grants = grants;
-                }
-                if let Some(children) = asked.children {
-                    procedure.children = children;
-                }
                 procedure.check(&name).map_err(Failure::refused)?;
                 write(document, &project.name, &name, &procedure)
             })?;
@@ -212,8 +188,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         "procedure.run" => {
             let asked: Run = serde_json::from_value(params)?;
             let (project, procedure) = runnable(&daemon, &asked.project, &asked.name)?;
-            let workspace = workspace_of(&daemon, &project, &asked.workspace)?;
-            forges_set(&project, &workspace, &asked.name, &procedure)?;
+            workspace_of(&daemon, &project, &asked.workspace)?;
             let mut shown = to_json(&asked.name, &procedure, false);
             shown["project"] = project.name.clone().into();
             shown["workspace"] = asked.workspace.into();
@@ -226,9 +201,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let run = daemon.read(|store| store.procedure_run(&asked.agent))?;
             Ok(json!({"agent": asked.agent, "run": run.map(|run| json!({
                 "procedure": run.procedure, "project": run.project,
-                "workspace": run.workspace, "grants": run.grants,
-                "children": run.children, "says": says(&run.grants),
-                "ended": run.ended_at.is_some(),
+                "workspace": run.workspace, "ended": run.ended_at.is_some(),
             }))}))
         }
         method => Err(Failure::new(
@@ -264,52 +237,6 @@ fn workspace_of(daemon: &Daemon, project: &Project, name: &str) -> Result<Worksp
         })
 }
 
-/// A procedure that writes to the forge starts only when a forge is declared for each repository
-/// of its workspace: none is guessed, and the run would stop halfway otherwise.
-fn forges_set(
-    project: &Project,
-    workspace: &Workspace,
-    name: &str,
-    procedure: &Procedure,
-) -> Result<(), Failure> {
-    let writes: Vec<&str> = procedure
-        .grants
-        .keys()
-        .filter(|grant| {
-            matches!(
-                grant,
-                Grant::PrCreate | Grant::PrMergeSquash | Grant::PipelineRerun
-            )
-        })
-        .map(|grant| grant.word())
-        .collect();
-    if writes.is_empty() {
-        return Ok(());
-    }
-    let unset: Vec<&str> = workspace
-        .repositories
-        .iter()
-        .filter(|taken| {
-            !project
-                .repositories
-                .iter()
-                .any(|r| r.path == taken.path && r.forge.is_some())
-        })
-        .map(|taken| taken.path.as_str())
-        .collect();
-    if unset.is_empty() {
-        return Ok(());
-    }
-    Err(Failure::refused(format!(
-        "procedure {name} writes to the forge ({}), and no forge is set for {} of workspace {}: \
-         choose it in the project's Settings (the window), or write its `forge` in the project's \
-         file; nothing was started",
-        writes.join(", "),
-        unset.join(", "),
-        workspace.name
-    )))
-}
-
 fn not_a_table(project: &str) -> Failure {
     Failure::new(
         "invalid-config",
@@ -327,18 +254,6 @@ fn write(
     let mut table = toml_edit::Table::new();
     table.insert("description", toml_edit::value(&procedure.description));
     table.insert("instructions", toml_edit::value(&procedure.instructions));
-    // Written only when it is not the default, so that a file that keeps the grants from the
-    // children says so, and keeps saying so across edits.
-    if !procedure.children {
-        table.insert("children", toml_edit::value(false));
-    }
-    if !procedure.grants.is_empty() {
-        let mut grants = toml_edit::Table::new();
-        for (grant, mode) in &procedure.grants {
-            grants.insert(grant.word(), toml_edit::value(mode.word()));
-        }
-        table.insert("grants", toml_edit::Item::Table(grants));
-    }
     let procedures = document.entry("procedures").or_insert_with(|| {
         let mut procedures = toml_edit::Table::new();
         // `[procedures.<name>]` alone, without an empty `[procedures]` above it.
@@ -352,22 +267,11 @@ fn write(
     Ok(())
 }
 
-/// One sentence per grant, as a client shows them.
-fn says(grants: &Grants) -> Vec<Value> {
-    grants
-        .iter()
-        .map(|(grant, mode)| json!({"grant": grant, "mode": mode, "says": grant.says()}))
-        .collect()
-}
-
 /// A procedure as the protocol shows it; with its instructions when `whole`.
 fn to_json(name: &str, procedure: &Procedure, whole: bool) -> Value {
     let mut shown = json!({
         "name": name,
         "description": procedure.description,
-        "grants": procedure.grants,
-        "children": procedure.children,
-        "says": says(&procedure.grants),
     });
     if whole {
         shown["instructions"] = procedure.instructions.clone().into();
@@ -375,21 +279,11 @@ fn to_json(name: &str, procedure: &Procedure, whole: bool) -> Value {
     shown
 }
 
-/// `procedure.start`: the confirmed run. Refused when the grants shown are no longer the
-/// procedure's; otherwise a root agent starts in the workspace with the procedure's instructions,
-/// and its run holds the grants from then on.
+/// `procedure.start`: a root agent starts in the workspace with the procedure's instructions as
+/// its first message, with no grant: its calls go through the gate's classes like any agent's.
 fn start(daemon: &Arc<Daemon>, asked: Start) -> Answer {
     let (project, procedure) = runnable(daemon, &asked.project, &asked.name)?;
-    if procedure.grants != asked.grants || procedure.children != asked.children {
-        return Err(Failure::refused(format!(
-            "the grants of procedure {} changed since they were shown: it grants {} now; run it \
-             again to see them",
-            asked.name,
-            procedure::shown(&procedure.grants)
-        )));
-    }
     let workspace = workspace_of(daemon, &project, &asked.workspace)?;
-    forges_set(&project, &workspace, &asked.name, &procedure)?;
     let after = daemon.read(Store::last_seq)?;
     let brief = brief(&project, &workspace, &asked.name, &procedure);
     let agent = agents::create(
@@ -405,7 +299,7 @@ fn start(daemon: &Arc<Daemon>, asked: Start) -> Answer {
             provider: None,
             model: None,
             effort: None,
-            grants: procedure.grants.clone(),
+            gate_mode: None,
         },
     )?;
     let run = ProcedureRun {
@@ -413,8 +307,6 @@ fn start(daemon: &Arc<Daemon>, asked: Start) -> Answer {
         project: project.name.clone(),
         workspace: asked.workspace,
         procedure: asked.name,
-        grants: procedure.grants,
-        children: procedure.children,
         started_at: now_ms(),
         ended_at: None,
     };
@@ -428,15 +320,11 @@ fn start(daemon: &Arc<Daemon>, asked: Start) -> Answer {
         &brief,
         approval::BETWEEN_TURNS,
     );
-    Ok(
-        json!({"agent": agent.to_json(), "after": after, "procedure": run.procedure,
-        "grants": run.grants}),
-    )
+    Ok(json!({"agent": agent.to_json(), "after": after, "procedure": run.procedure}))
 }
 
-/// The first message of a run's agent: what it runs, what it is granted, the workspace's
-/// repositories by dependency level and what the project says of its pull requests, then the
-/// instructions.
+/// The first message of a run's agent: what it runs, the workspace's repositories by dependency
+/// level and what the project says of its pull requests, then the instructions.
 fn brief(project: &Project, workspace: &Workspace, name: &str, procedure: &Procedure) -> String {
     let mut text = format!(
         "You run the procedure {name} of project {}, in workspace {} (branch {}): {}\n\n",
@@ -445,30 +333,8 @@ fn brief(project: &Project, workspace: &Workspace, name: &str, procedure: &Proce
         workspace.branch,
         procedure.description.trim()
     );
-    if procedure.grants.is_empty() {
-        text.push_str("It grants nothing beyond what agents may always do.\n");
-    } else {
-        text.push_str("For this run only, it grants:\n");
-        for (grant, mode) in &procedure.grants {
-            let how = match mode {
-                procedure::Mode::Allow => "allowed",
-                procedure::Mode::Ask => "each one held for the user's approval",
-            };
-            text.push_str(&format!("- {grant}: {} ({how})\n", grant.says()));
-        }
-        text.push_str(if procedure.children {
-            "Your children get these grants too.\n"
-        } else {
-            "Your children get none of them.\n"
-        });
-        text.push_str(
-            "Everything else is decided as for any agent, and the grants end when you report.\n",
-        );
-    }
     text.push_str(&repositories_text(project, workspace));
-    if procedure.grants.contains_key(&procedure::Grant::PrCreate) {
-        text.push_str(&pull_requests_text(project));
-    }
+    text.push_str(&pull_requests_text(project));
     if let Some(ticket) = &workspace.ticket {
         text.push_str(&format!(
             "\nThe workspace is linked to the ticket {ticket} (ticket_read).\n"
@@ -521,94 +387,9 @@ fn pull_requests_text(project: &Project) -> String {
     text
 }
 
-/// The run an agent works in, while it goes on: the run whose root is the agent, or its root when
-/// the run gives its grants to children; only in the run's own workspace, and only while the run
-/// goes on (its root has not reported nor ended). `as_child`: the agent is not made yet, and
-/// `agent` is its parent, so the run must give its grants to children even when the parent is the
-/// root.
-fn live_run(
-    daemon: &Daemon,
-    agent: &str,
-    project: &str,
-    workspace: &str,
-    as_child: bool,
-) -> Option<ProcedureRun> {
-    let root = tree::root_of(daemon, agent);
-    let run = daemon.read(|store| store.procedure_run(&root)).ok()??;
-    if run.ended_at.is_some()
-        || ((as_child || root != agent) && !run.children)
-        || run.project != project
-        || run.workspace != workspace
-    {
-        return None;
-    }
-    let root = daemon.read(|store| store.agent(&root)).ok()??;
-    if root.state.is_final() {
-        return None;
-    }
-    Some(run)
-}
-
-/// The grants of the run an agent works in, as the gate applies them (`live_run`).
-pub fn run_of(daemon: &Daemon, grant: &mcp::Grant) -> Option<gate::Run> {
-    let workspace = grant.place.workspace.as_ref()?;
-    let run = live_run(daemon, &grant.agent, &grant.place.project, workspace, false)?;
-    let workspace = daemon
-        .read(|store| store.workspace(&run.project, &run.workspace))
-        .ok()??;
-    Some(gate::Run {
-        procedure: run.procedure,
-        grants: run.grants,
-        remotes: workspace
-            .repositories
-            .iter()
-            .map(|r| (workspace.folder_of(&r.path), r.base.remote.clone()))
-            .collect(),
-    })
-}
-
-/// What a child about to be launched by `parent` into `workspace` is granted, by the same rules
-/// as `run_of`: its tools are listed from this, and frozen with it. Nothing for a child of
-/// another workspace than the run's, or of a run that does not give its grants to children.
-pub fn granted_to_child(
-    daemon: &Daemon,
-    parent: &str,
-    project: &str,
-    workspace: Option<&str>,
-) -> Grants {
-    workspace
-        .and_then(|workspace| live_run(daemon, parent, project, workspace, true))
-        .map(|run| run.grants)
-        .unwrap_or_default()
-}
-
-/// Ends the run whose root is that agent, if it has one going: its grants are given no more.
+/// Ends the run whose root is that agent, if it has one going.
 pub fn end(daemon: &Daemon, agent: &str, reason: &str) {
     if let Err(error) = daemon.write(|store| Ok(((), store.end_procedure_run(agent, reason)?))) {
         eprintln!("flottille daemon: agent {agent}: its procedure run cannot end: {error}");
     }
-}
-
-/// Refuses a push a procedure grants unless the repository's remote leads where it led when the
-/// workspace was created (`forge::remote_kept`).
-pub async fn remote_kept(
-    daemon: &Daemon,
-    place: &Place,
-    repository: &str,
-    folder: &Path,
-) -> Result<(), String> {
-    let workspace = place.workspace.as_ref().and_then(|name| {
-        daemon
-            .read(|store| store.workspace(&place.project, name))
-            .ok()?
-    });
-    let base = workspace
-        .iter()
-        .flat_map(|workspace| &workspace.repositories)
-        .find(|r| r.path == repository)
-        .map(|r| &r.base)
-        .ok_or_else(|| {
-            format!("refused: {repository} is not a repository of this agent's workspace")
-        })?;
-    forge::remote_kept(folder, base).await
 }

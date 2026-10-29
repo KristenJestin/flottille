@@ -404,6 +404,11 @@ impl Shell {
                 cx.new(|cx| Reply::new(this, id, project, place, window, cx))
             })
             .clone();
+        if self.providers.known {
+            let mode = reply.read(cx).mode.clone();
+            let chosen = self.providers.judge.is_some();
+            mode.update(cx, |mode, cx| mode.set_judge_chosen(chosen, cx));
+        }
         let (follow, layout, status) = (self.follow.clone(), self.layout, status.clone());
         let page = cx.new(|cx| SessionPage::new(this, opened, status, reply, follow, layout, cx));
         self._chose = Some(cx.subscribe(&page, |shell, page, Chose(agent), cx| {
@@ -583,6 +588,12 @@ impl Shell {
                     page.update(cx, |page, cx| page.resumed(refused, cx));
                 }
             }
+            Outcome::ModeSet { session, refused } => {
+                if let Some(reply) = self.replies.get(&session) {
+                    let mode = reply.read(cx).mode.clone();
+                    mode.update(cx, |mode, cx| mode.answered(refused, cx));
+                }
+            }
             Outcome::Interrupted { session, refused } => {
                 if let Some(reply) = self.replies.get(&session).cloned() {
                     reply.update(cx, |reply, cx| reply.interrupted(refused, cx));
@@ -604,6 +615,13 @@ impl Shell {
             }
             Outcome::Providers(read, Some(providers)) => self.set_providers(read, providers, cx),
             Outcome::Providers(_, None) => {}
+            Outcome::JudgeSet { refused } => {
+                if refused.is_none() {
+                    self.actions.send(Command::ReadProviders);
+                }
+                self.settings
+                    .update(cx, |page, cx| page.judge_answered(refused, cx));
+            }
             Outcome::ProviderSet { name, refused } => {
                 // The change shows once the providers are read again: now, rather than only when
                 // its event comes, since a change to what the file already said emits none.
@@ -622,13 +640,6 @@ impl Shell {
                     && page.read(cx).name() == project
                 {
                     page.update(cx, |page, cx| page.answered(read, saved, window, cx));
-                }
-            }
-            Outcome::AgentActions { project, read } => {
-                if let Some(page) = self.project_settings.clone()
-                    && page.read(cx).name() == project
-                {
-                    page.update(cx, |page, cx| page.actions_answered(read, cx));
                 }
             }
             Outcome::ProjectChecked { project, read } => {
@@ -925,6 +936,11 @@ impl Shell {
         self.providers_read = read;
         self.settings
             .update(cx, |page, cx| page.set_providers(&providers, cx));
+        let chosen = providers.judge.is_some();
+        for reply in self.replies.values() {
+            let mode = reply.read(cx).mode.clone();
+            mode.update(cx, |mode, cx| mode.set_judge_chosen(chosen, cx));
+        }
         for (name, (composer, _)) in &self.forms {
             let project = self.snapshot.projects.iter().find(|p| &p.name == name);
             let default = (

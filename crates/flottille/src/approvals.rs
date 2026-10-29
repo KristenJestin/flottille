@@ -1,6 +1,6 @@
 //! The gate's requests (`docs/design.md` §7, `docs/reference/hemera.md` §4 "Requests"): a held
-//! call is written as a request and answered at once with the waiting text; the user denies it,
-//! allows it once or for the root's tree; an allowed request is checked again, performed, and its
+//! call is written as a request and answered at once with the waiting text; the user allows it or
+//! denies it, once (there is no grant); an allowed request is checked again, performed, and its
 //! answer stored as the `approval` delivery of the agent that asked, which the deliveries (#7)
 //! send.
 //!
@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use flottille_core::approval::{self, Decision, Kind, Request, RequestState};
+use flottille_core::approval::{self, Decision, Judgement, Kind, Request, RequestState};
 use flottille_core::store::Store;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -53,17 +53,9 @@ fn holder(daemon: &Daemon, agent: &str) -> String {
         .unwrap_or_else(|| approval::USER.to_owned())
 }
 
-/// Whether the user allowed this exact call for the agent's tree.
-pub fn granted(daemon: &Daemon, agent: &str, identity: &str) -> bool {
-    // The root is read first: the store's lock is not reentrant.
-    let root = tree::root_of(daemon, agent);
-    daemon
-        .read(|store| store.tree_granted(&root, identity))
-        .unwrap_or(false)
-}
-
 /// Writes the request for a held call, or finds the one its call key already made, and answers
-/// the agent at once. `says` is what it changes, in words, for the user.
+/// the agent at once. `says` is what it changes, in words, for the user; `judgement` what the
+/// judge said of it, in Auto.
 #[allow(clippy::too_many_arguments)]
 pub fn ask(
     daemon: &Arc<Daemon>,
@@ -72,8 +64,8 @@ pub fn ask(
     args: &Value,
     key: Option<&str>,
     ask: gate::Ask,
-    identity: String,
     says: Vec<String>,
+    judgement: Option<Judgement>,
 ) -> Outcome {
     let asked = Request {
         number: 0,
@@ -87,13 +79,13 @@ pub fn ask(
             .iter()
             .map(|reason| mcp::masked(reason, &grant.place))
             .collect(),
-        sensitive: ask.sensitive,
+        base: ask.class == gate::Class::Base,
         kind: ask.kind,
         says: says
             .iter()
             .map(|said| mcp::masked(said, &grant.place))
             .collect(),
-        identity,
+        judgement,
         held_by: holder(daemon, &grant.agent),
         forwards: Vec::new(),
         state: RequestState::Pending,
@@ -133,11 +125,6 @@ struct List {
 #[serde(deny_unknown_fields)]
 struct Approve {
     number: u64,
-    #[serde(default)]
-    for_tree: bool,
-    /// A line outside the catalogue: added to it.
-    #[serde(default)]
-    always: bool,
 }
 
 #[derive(Deserialize)]
@@ -166,18 +153,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         }
         "approval.approve" => {
             let asked: Approve = serde_json::from_value(params)?;
-            let decision = match (asked.for_tree, asked.always) {
-                (true, true) => {
-                    return Err(Failure::new(
-                        "invalid-params",
-                        "for_tree and always are exclusive",
-                    ));
-                }
-                (true, false) => Decision::Tree,
-                (false, true) => Decision::Always,
-                (false, false) => Decision::Once,
-            };
-            decide(&daemon, asked.number, decision)
+            decide(&daemon, asked.number, Decision::Once)
         }
         "approval.deny" => {
             let asked: Deny = serde_json::from_value(params)?;
@@ -190,8 +166,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
     }
 }
 
-/// The user's decision: refused for a request they do not hold, one already decided, and a
-/// grant for the tree of a sensitive place. A denial is answered to the agent now; an allowed
+/// The user's decision: refused for a request they do not hold, and one already decided. A denial is answered to the agent now; an allowed
 /// request is performed in the background, and the user is answered once it is decided.
 fn decide(daemon: &Arc<Daemon>, number: u64, decision: Decision) -> Answer {
     let request = daemon
@@ -206,41 +181,11 @@ fn decide(daemon: &Arc<Daemon>, number: u64, decision: Decision) -> Answer {
     if request.state != RequestState::Pending {
         return Err(already(&request));
     }
-    if decision == Decision::Tree && request.sensitive {
-        return Err(Failure::refused(format!(
-            "request #{number} reaches a sensitive place, or its procedure asks for each one: it \
-             can be allowed once, never for the tree"
-        )));
-    }
-    if decision == Decision::Always && request.sensitive {
-        return Err(Failure::refused(format!(
-            "request #{number} reaches a sensitive place: it can be allowed once, never always"
-        )));
-    }
-    if !request.kind.takes(decision) {
-        return Err(Failure::refused(match (decision, request.kind) {
-            (Decision::Tree, Kind::Catalogue) => format!(
-                "request #{number} is a line outside the catalogue: allowed once or always, never \
-                 for the tree"
-            ),
-            (Decision::Tree, _) => format!(
-                "request #{number} is a change the agent asks for, allowed once each time: never \
-                 for the tree"
-            ),
-            _ => format!(
-                "request #{number} is not a line outside the catalogue: only such a line is \
-                 allowed always"
-            ),
-        }));
-    }
-    let tree = tree::root_of(daemon, &request.agent);
     let decided = daemon.write(|store| {
-        Ok(
-            match store.decide(number, decision, &tree, approval::USER)? {
-                Some((request, event)) => (Some(request), Some(event)),
-                None => (None, None),
-            },
-        )
+        Ok(match store.decide(number, decision, approval::USER)? {
+            Some((request, event)) => (Some(request), Some(event)),
+            None => (None, None),
+        })
     })?;
     let Some(request) = decided else {
         // Decided meanwhile.
@@ -300,7 +245,7 @@ async fn performed(daemon: &Arc<Daemon>, request: &Request) -> (&'static str, St
         return not_executed(format!("the agent has no tool {tool}."));
     }
     // The situation may have changed since the request was made.
-    let changed = match mcp::judge(daemon, &grant, tool, &request.arguments).0 {
+    let changed = match mcp::classify(daemon, &grant, tool, &request.arguments) {
         Verdict::Deny(why) => Some(why),
         Verdict::Ask(ask) => {
             let new: Vec<String> = ask
@@ -343,32 +288,8 @@ async fn performed(daemon: &Arc<Daemon>, request: &Request) -> (&'static str, St
             }
         }
     }
-    let mut added = None;
-    if request.decision == Some(Decision::Always) {
-        match actions::add_to_catalogue(daemon, &grant, &request.arguments) {
-            Ok(name) => added = Some(name),
-            Err(why) => {
-                return (
-                    "failed",
-                    mcp::masked(
-                        &format!(
-                            "Request #{number} ({tool}) was approved by the user, but nothing was \
-                             done: its line could not be added to the project's catalogue: {why}"
-                        ),
-                        &grant.place,
-                    ),
-                );
-            }
-        }
-    }
     let outcome = mcp::performed(daemon, &grant, tool, request.arguments.clone(), number).await;
-    let approved = match &added {
-        Some(name) => format!(
-            "was approved by the user, who added it to the project's catalogue as {name} (run it \
-             with commands_run {{\"command\": \"{name}\"}} from now on)"
-        ),
-        None => "was approved by the user".into(),
-    };
+    let approved = "was approved by the user";
     let (word, body) = match outcome {
         Outcome::Done(text) => (
             "done",

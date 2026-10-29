@@ -981,7 +981,12 @@ fn bare_options(meta: &Value) -> Result<(String, Vec<String>), String> {
 
 /// Flottille's MCP server, the only one bare mode takes, as the thread's configuration names it.
 fn mcp_server(servers: &Value, tools: &[String]) -> Result<Value, String> {
-    let [server] = servers.as_array().map(Vec::as_slice).unwrap_or_default() else {
+    let servers = servers.as_array().map(Vec::as_slice).unwrap_or_default();
+    // The Auto judge has no tool, and so no server at all (`judge.rs`).
+    if servers.is_empty() && tools.is_empty() {
+        return Ok(json!({}));
+    }
+    let [server] = servers else {
         return Err("not bare: a session needs Flottille's MCP server, and no other".into());
     };
     let url = server["url"].as_str();
@@ -1089,6 +1094,9 @@ mod tests {
         ] {
             assert!(mcp_server(&servers, &tools).is_err(), "{servers}");
         }
+        // A session with no tool, the Auto judge's, takes no server.
+        assert_eq!(mcp_server(&json!([]), &[]).unwrap(), json!({}));
+        assert!(mcp_server(&ours, &[]).is_ok());
     }
 
     #[test]

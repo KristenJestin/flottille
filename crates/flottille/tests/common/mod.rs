@@ -13,7 +13,7 @@ use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 /// None of the machine's git settings, and a throwaway identity.
@@ -89,6 +89,53 @@ impl User {
         }
         user.write_providers("[opencode]\nenabled = true\n");
         user
+    }
+
+    /// A user whose Auto judge is OpenCode standing on a fake ACP agent of its own, in the folder
+    /// `fake-judge`, every prompt of which plays `steps`: what the judge says, or `[{"hang":
+    /// true}]` for a judge that never answers. Its `[judge]` is added to `providers.toml`, and
+    /// OpenCode enabled there.
+    pub fn with_judge(self, steps: Value) -> User {
+        let dir = self.path("fake-judge");
+        std::fs::create_dir(&dir).unwrap();
+        // Its own folder, whatever folder the user's other fake agents are given.
+        let agent = dir.join("agent");
+        std::fs::write(
+            &agent,
+            format!(
+                "#!/bin/sh\nFLOTTILLE_FAKE_AGENT_DIR='{}' exec '{}' \"$@\"\n",
+                dir.display(),
+                fake_agent().display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&agent, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        std::fs::write(
+            dir.join("script.json"),
+            json!({"turns": [{"when": "", "do": steps}]}).to_string(),
+        )
+        .unwrap();
+        let file = self.path("config/flottille/providers.toml");
+        let mut before = std::fs::read_to_string(&file).unwrap_or_default();
+        // A judge runs on a provider that is enabled.
+        if !before.contains("[opencode]") {
+            before.push_str("\n[opencode]\nenabled = true\n");
+        }
+        self.write_providers(&format!("{before}\n[judge]\nprovider = \"opencode\"\n"));
+        self.with_env("FLOTTILLE_AGENT_COMMAND_OPENCODE", agent.to_str().unwrap())
+    }
+
+    /// `with_judge`, the judge allowing every call it is asked about.
+    pub fn with_allowing_judge(self) -> User {
+        self.with_judge(
+            json!([{"say": "{\"verdict\": \"allow\", \"reason\": \"It fits the task.\"}"}]),
+        )
+    }
+
+    /// What the fake judge received: every message of every judgement.
+    pub fn judge_received(&self) -> Vec<Value> {
+        records(&self.path("fake-judge/received.jsonl"))
     }
 
     /// The user's `providers.toml`.

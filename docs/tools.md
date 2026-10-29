@@ -4,9 +4,8 @@ The tools of the agents Flottille runs, and the MCP server that serves them: the
 `docs/design.md` §1. It follows `docs/reference/hemera.md` §3, with the rules of
 `docs/reference/mcp.md` §4 where they differ. A session lists the tools of its agent, which
 depend on what it can do (`docs/agents.md`): the file and command tools below for every agent,
-`reference_read`, then `forge_read` and `ticket_read` for an agent in a workspace, and
-`forge_write` or `workspace_remove` for one whose procedure run grants what they do
-(`docs/procedures.md`: a tool that could only refuse is not listed),
+`reference_read`, then `forge_read`, `ticket_read`, `forge_write` and `workspace_remove` for an
+agent in a workspace,
 `procedure` and `project` for a root (below, "The project"),
 and the tree's tools (`agent_*`, `report`, `ask_user` or `ask_parent`,
 `approval_answer`).
@@ -146,7 +145,7 @@ not a lock: a swap between it and the rename is not seen.
 
 | Tool | Arguments | |
 |---|---|---|
-| `commands_list` | none | The project's catalogue (`docs/projects.md`), one line each: `name: line`, and where it runs, whether it keeps running, is a check, changes nothing, is held for approval, was allowed always by the user (`allowed always by the user in the project folder, never checked to change nothing`). |
+| `commands_list` | none | The project's catalogue (`docs/projects.md`), one line each: `name: line`, and where it runs, whether it keeps running, is a check, changes nothing, is held for approval. |
 | `commands_run` | `command` or `line` (exactly one), `repository?`, `timeout? 1..600`, `why?` | Runs a catalogue command (`refused: the catalogue has no command X: list them with commands_list`) or one line, in the repository's folder (the catalogue's, or the one named) or the place's top. Its description holds a call of each form: `{"command": "test"}`, `{"line": "cargo test -p core", "repository": "api", "timeout": 120}`. |
 | `commands_status` | `run`, `action? output \| stop`, `tail? 1..1000`, `start?` | `action output` (the default): the run's state and lines of its output, the last `tail` (40 by default), or `tail` lines from line `start`. `action stop`: stops the run and everything in its process group, `SIGTERM`, then `SIGKILL` 5 s later, and answers once it ended; `tail` and `start` are refused with it. |
 
@@ -182,20 +181,19 @@ not a lock: a swap between it and the rename is not seen.
     `BKT_TOKEN`;
   - `GH_CONFIG_DIR`, `GLAB_CONFIG_DIR` and `BKT_CONFIG_DIR` pointed at an empty folder
     (`$XDG_STATE_HOME/flottille/empty`), so that the forge command lines find no login;
-  - `git push` made to fail where the environment can: `GIT_CONFIG_COUNT` incremented, with
-    `GIT_CONFIG_KEY_<n>=url./dev/null/flottille-refused-push/.pushInsteadOf` and an empty
-    `GIT_CONFIG_VALUE_<n>`, which rewrites every push URL to a path that is no repository. The
-    one exception is a run whose line the gate let through as a push a procedure grants
-    (`docs/procedures.md`): that run alone keeps its push URLs;
-  - for a line the gate let through by a procedure's grant (a commit, a push, a rebase), no hook:
-    `core.hooksPath=/dev/null` added the same way, since the hooks are files the agent can write;
+  - no git hook: `GIT_CONFIG_COUNT` incremented, with `GIT_CONFIG_KEY_<n>=core.hooksPath` and
+    `GIT_CONFIG_VALUE_<n>=/dev/null`, since the hooks are files the agent can write, and would
+    run outside the gate's sight;
   - no `XDG_RUNTIME_DIR`, which says where the daemon's socket is (a client a run starts is
-    refused anyway).
-- **The environment does not stop every push**: `git -c url.<x>.pushInsteadOf=<x> push`,
-  `env -u GIT_CONFIG_COUNT git push`, a remote with a push URL of its own
-  (`remote.<name>.pushurl`, which git does not rewrite) and a `git config` write all get past it.
-  The gate refuses each of these in the words of a line (below); a script the agent wrote and runs
-  is not read, and there the environment is the only wall.
+    refused anyway);
+  - no push: `url./dev/null/flottille-refused-push/.pushInsteadOf` set the same way, which
+    rewrites every push URL to a path that is no remote, unless the run is itself a `git push`
+    (its own line, no wrapper) the user or the judge let through.
+- **A push is the gate's**: `git push` is a call to judge, a forced one base, and only the push
+  the gate read and let through goes out. A harmless command (a catalogue command, a test run)
+  cannot push from a script the gate never read. A push from a workspace is also refused, before
+  git runs, when a repository's remote no longer leads where it did when the workspace was made
+  (`docs/procedures.md`, "Where the remote leads").
 - **A stop ends the run's process group, not every descendant.** `commands_status` with `action stop`, a timeout of
   the call's client and the daemon's stop signal the group the run was spawned in (`SIGTERM`,
   then `SIGKILL` after 5 s), and what the run left in its group is killed when its own process
@@ -216,16 +214,16 @@ not a lock: a swap between it and the rename is not seen.
 |---|---|
 | `forge_read {repository?, detail? short \| full}` | The pull request of the workspace's branch in each of its repositories, or the one named: number, state, base, link, review, checks with their states, and how many comments and reviews it has (`comments: 2, read them with forge_read {"detail": "full"}`); `detail full` gives their texts, cut and under the result limit. Read only, through the user's own `gh`, run by the daemon; an agent has no forge sign-in of its own. A repository the workspace does not take is refused (`refused: X is not a repository of this agent's workspace: it has …`). Only an agent in a workspace has it. |
 
-| `forge_write {action, repository, title?, body?, draft?, waive?}` | Opens the pull request of the workspace's branch (`pr-create`, with the project's reviewers), merges it by squash (`pr-merge-squash`; refused while its checks fail or run or a review asks for changes, unless `waive` gives the user's words, which holds the merge for their approval) or re-runs the failed jobs of its last commit's pipelines (`pipeline-rerun`), in one of the workspace's repositories, through the user's own `gh` run by the daemon. Only inside a procedure's run that grants an action (`docs/procedures.md`): the tool is **listed** only to an agent in a workspace whose run grants `pr-create`, `pr-merge-squash` or `pipeline-rerun` (the run's own root, and its children in the run's workspace when the run gives them its grants), the list being fixed when the agent is made; the gate still decides each call, refusing an action the run does not grant (`refused: the procedure P does not grant pr-create: it grants …`) and holding one granted with `ask` for the user. Its description holds a call of `pr-create` and of `pr-merge-squash`. |
+| `forge_write {action, repository, title?, body?, draft?, waive?}` | Opens the pull request of the workspace's branch (`pr-create`, with the project's reviewers), merges it by squash (`pr-merge-squash`; refused while its checks fail or run or a review asks for changes, unless `waive` gives the user's words, which holds the merge for their approval) or re-runs the failed jobs of its last commit's pipelines (`pipeline-rerun`), in one of the workspace's repositories, through the user's own `gh` run by the daemon (`docs/procedures.md`, "`forge_write`"). Only an agent in a workspace has it. Its description holds a call of `pr-create` and of `pr-merge-squash`. |
 
-`forge_read` goes through the gate like every call, which allows it; `forge_write` is allowed,
-asked or refused by its run's grants.
+`forge_read` goes through the gate like every call, which allows it; a `forge_write` call is to
+judge, and one that waives the checks base.
 
 ## The workspace
 
 | Tool | |
 |---|---|
-| `workspace_remove {}` | Removes the agent's own workspace as `flottille workspace remove` does (`docs/workspaces.md`, "Removal"): refused, nothing touched, while a repository holds uncommitted work or commits on no remote, or while an agent outside the run's tree works in the workspace or a command run not the run's own runs there (`refused: workspace … is not removed, nothing was touched: the agent …, outside this run, works in it…`), each named; then deletes, in each repository, the workspace's branch when it holds no commit of its own (every commit of it is in its base's tracking ref), and keeps the others. Only inside a procedure's run that grants `workspace-remove`, and so only for the run's own workspace (`docs/procedures.md`): **listed** only to an agent in a workspace whose run grants it, as `forge_write` is. |
+| `workspace_remove {}` | Removes the agent's own workspace as `flottille workspace remove` does (`docs/workspaces.md`, "Removal"): refused, nothing touched, while a repository holds uncommitted work or commits on no remote, or while another agent than the caller's tree works in the workspace or a command run not the tree's own runs there (`refused: workspace … is not removed, nothing was touched: the agent …, outside this agent's tree, works in it…`), each named; then deletes, in each repository, the workspace's branch when it holds no commit of its own (every commit of it is in its base's tracking ref), and keeps the others. Only an agent in a workspace has it, for its own workspace; each call is to judge. |
 
  How the forge is read, and what it never touches (a token,
 `gh auth token`), is in [`forges.md`](forges.md).
@@ -247,25 +245,21 @@ own project: a root has these two tools, a child none (it does its brief). Two f
 
 | Tool | |
 |---|---|
-| `procedure {action: list \| show \| start, name?, workspace?}` | `list` and `show` read the project's procedures, with what each grants (`docs/procedures.md`). `start` runs one in a workspace, the agent's own when `workspace` is left out (one in the project folder must name one), as a new root of its own: the same as the window's confirmation, with the procedure's own grants as its file says them. Refused, nothing asked, for a procedure or a workspace the project has not, or one that writes to a forge none is declared for. |
-| `project {action: settings \| set_settings \| add_reference \| remove_reference, …}` | `settings` reads each repository's forge (and what its remote proposes), the tracker, the references and what agents do on their own (`docs/projects.md`). `set_settings {repositories?: [{path, forge}], tracker?}` declares a repository's forge or the tracker (`null` removes it; a tracker left out is kept), checked as `project.set_settings` checks them; `add_reference {name, description, path}` and `remove_reference {name}` edit the references as `flottille reference add` and `remove` do. The file is written where it stands, its comments kept. |
+| `procedure {action: list \| show \| start, name?, workspace?}` | `list` and `show` read the project's procedures (`docs/procedures.md`). `start` runs one in a workspace, the agent's own when `workspace` is left out (one in the project folder must name one), as a new root of its own, in Auto: the same as the window's confirmation. Refused, nothing asked, for a procedure or a workspace the project has not. |
+| `project {action: settings \| set_settings \| add_reference \| remove_reference, …}` | `settings` reads each repository's forge (and what its remote proposes), the tracker and the references (`docs/projects.md`). `set_settings {repositories?: [{path, forge}], tracker?}` declares a repository's forge or the tracker (`null` removes it; a tracker left out is kept), checked as `project.set_settings` checks them; `add_reference {name, description, path}` and `remove_reference {name}` edit the references as `flottille reference add` and `remove` do. The file is written where it stands, its comments kept. |
 
 - **Reads run at once.** `procedure` `list` and `show`, `project` `settings`.
-- **Every write is held** for the user, as any held call is (answered at once that it waits, the
-  result later as a delivery), unless the project's `[agent_actions]` lets its family run on its
-  own (`docs/projects.md`, "What agents do on their own"): `procedures` for `start`, `settings`
-  for `set_settings`, `references` for the other two. Its request is an `action`: it says what it
-  changes in words, one sentence each (`Start the procedure ship in workspace login: …`, then each
-  grant and whether the run's children get them; `Set the tracker to Jira on acme.atlassian.net
-  (ABC)`; `Add the reference style (docs/STYLE.md): …`), the user confirms it once (never for the
-  tree), and it is done only while those words still hold: a procedure whose grants or
-  instructions (`Its agent is told: …`) changed meanwhile is not started (`Request #n (procedure) was not executed: what it does changed since
-  the user allowed it; it would now: …`).
-- **What an agent never does, whatever the file says**: give a grant (`start` takes none; the
-  run's grants are the procedure's), change a run's grants, set what runs on its own
-  (`agent_actions` is not an argument), or reach another project (`project` is not an argument).
-  A change of the tracker always asks, whatever `settings` says: nothing checks it against the
-  project, as a forge is checked against its remote. An agent's reference is never the project
+- **Every write is to judge** (a card in Ask, the judge in Auto), as any call is (answered at
+  once that it waits, the result later as a delivery). Its request is an `action`: it says what
+  it changes in words, one sentence each (`Start the procedure ship in workspace login: …`;
+  `Set the tracker to Jira on acme.atlassian.net (ABC)`; `Add the reference style
+  (docs/STYLE.md): …`), allowed once, and it is done only while those words still hold: a
+  procedure whose instructions (`Its agent is told: …`) changed meanwhile is not started
+  (`Request #n (procedure) was not executed: what it does changed since the user allowed it; it
+  would now: …`). A change of the tracker is base: nothing checks it against the project, as a
+  forge is checked against its remote.
+- **What an agent never does**: change a session's mode or choose the judge (no tool has them),
+  or reach another project (`project` is not an argument). An agent's reference is never the project
   folder itself nor a repository's root (`.`, `api`, or a link to one): what a whole checkout
   holds is not a document to read.
   Such an argument is refused as one that does not fit the tool. A write that cannot be done (an
@@ -298,111 +292,134 @@ daemon's secrets before anyone else reads them.
 ## The gate
 
 Every call goes through `gate::decide` once (`docs/design.md` §7), in the order of
-`docs/reference/hemera.md` §4 without the remote judge. It is given the agent's grant, the tool,
-the arguments, the words of the line a run would start, the catalogue command it names, the paths
-the call reaches, the project's never list and Flottille's own folders, and answers:
+`docs/reference/hemera.md` §4. It is given the agent's place, the tool, the arguments, the words
+of the line a run would start, the catalogue command it names, the paths the call reaches, the
+project's never list, Flottille's own folders and whether the workspace's branch is on a remote,
+and answers with the call's class, or a refusal. The class does not depend on the mode: the mode
+says who answers a call to judge (`docs/design.md` §7.1).
 
-1. **The project folder is read-only for agents** (`docs/design.md` §6.2; no project grants
-   writing there yet): `fs_write` and `fs_edit` are refused there, and `commands_run` runs at once
-   only a catalogue command that is both `check` and `read_only`, or one the user allowed always
-   (`added_by = "approval"`) in the repository it was allowed in; another catalogue command is
-   refused. A line is judged as the catalogue command it is, whatever its flags, when the
-   catalogue holds the same words where it runs (a command marked `ask_before_running` still
-   asks, as that command, and one that is not a read-only check is refused); a line the catalogue
-   does not hold goes through the rest of the gate (the refusals of 2 still refuse it, shell
-   syntax included) and is then held for the user (3), as a `catalogue` request: Once runs it,
-   Always adds it to the project's catalogue (`[commands.<its words as a name>]` with
-   `added_by = "approval"`, and its `repository` when not the folder's top, in the project's file
-   where it stands) and runs it, after which it runs there without asking. Flottille does not
-   check that such a line only reads: the request says so. Always is not offered for a line that
-   reaches a sensitive place, which asks each time. A line that discards or rewrites the user's
-   own work there is refused, never held, whatever the catalogue says: `git checkout` with `--`,
-   `.`, `-f` or `--force`; `git restore`, `git clean` and `git reset`, in any form; `git stash`
-   but `list` and `show`; `git worktree remove`; `git branch -d`, `-D` or `--delete`. A workspace
-   is where an agent writes and runs.
-2. **Deny**, with a sentence saying why and what to do instead (under 2,000 characters):
-   - the project's `never` list: an entry matches a line's words from any position (its first
-     word is a program, in any folder), or a catalogue command by its name;
-   - a write under a `.git` folder or file (`fs_write`, `fs_edit`, a link that leads there), and a
-     command any of whose words (or an option's value after `=`, or a `NAME=value`'s value) names
-     a path in one;
-   - a recursive deletion that names no `.git` but would take one: `rm` with `-r`, `-R` or
-     `--recursive`, and `find` with `-delete` (or `-exec rm -r`), when a target, resolved from the
-     folder the run starts in, is the place's folder, a repository's, or a folder above one
-     (`rm -rf .`, `rm -r ./`, `rm -R <repository>`, `find . -delete`). Deleting inside a
-     repository stays allowed (`rm -r target`), and so does a deletion of a nested folder that
-     holds a `.git` of its own: only the repositories the place lists are guarded;
-   - git: `push`, `send-pack`, `http-push`, `subtree push`, `lfs push`; `-c` and `--config-env`
-     before the subcommand; `merge`, `rebase`, `reset`, `switch`, `filter-branch`, `update-ref`;
-     `commit`, `cherry-pick`, `revert`, `am`, `commit-tree` (no project grants commits yet);
-     `fast-import`, `update-index`; `symbolic-ref` that points a ref (`git symbolic-ref HEAD
-     refs/heads/other` switches the branch) or deletes one, where `symbolic-ref HEAD` (with
-     `--short`, `-q`) reads; `replace` but listing (`-l`, `--list`); `notes` but listing and
-     showing (no subcommand, `list`, `show`, `get-ref`); `tag` but listing (no argument, `-l`,
-     `--list`); `checkout` but `checkout -- <paths>`; `branch -d`, `-D`, `--delete`; `config` but
-     its reads (`--get`, `--get-all`, `--get-regexp`, `--list`, `-l`, `get`, `list`); `remote` but
-     its reads (no subcommand, `-v`, `show`, `get-url`), since a procedure's push and
-     `forge_write` trust where a remote leads;
-   - the forge command lines beyond their reads: for `gh`, `pr view/list/diff/checks/status`,
-     `issue view/list`, `run view/list`; for `glab`, `mr view/list/diff`, `issue view/list`,
-     `ci view/list/status`; for both, `repo view`, `auth status` and `api` with GET, no field,
-     no input and not `graphql`; `auth token` and `auth status` with `--show-token` (`-t`) are
-     refused, since they print a login;
-   - `acli`, Atlassian's command line: every line, reads included. Its Jira sign-in is the user's,
-     in a place no variable of ours moves, so it cannot be emptied as `gh`'s is; an agent reads a
-     ticket with `ticket_read` and says what should be written to it;
-   - `bkt`, Bitbucket's command line: every line, reads included, for the same reason. Its token
-     is in the OS keychain (or an encrypted file under the user's configuration folder), keyed by
-     the host; `BKT_CONFIG_DIR` moves only the file that lists hosts and contexts, so any
-     configuration that names the host reaches the token, `bkt api` with any method included
-     (`docs/forges.md`, "Bitbucket"). An agent reads the pull requests with `forge_read`;
-   - publishing: `npm`, `pnpm`, `yarn`, `bun`, `cargo`, `poetry`, `flit`, `hatch`, `uv` with
-     `publish` or `unpublish`, `twine upload`, `gem`, `dotnet` and `nuget` with `push`;
+1. **Refused**, with a sentence saying why and what to do instead (under 2,000 characters): what
+   cannot be made as it is, in every mode.
+   - shell syntax in a line (`commands_run` splits a line without a shell, and refuses what it
+     cannot split), and a call whose arguments do not fit the tool;
+   - a login printed: `gh auth token`, `glab auth token`, `auth status` with `--show-token` (`-t`);
    - `flottille` itself: it drives the daemon, and agents act only through their tools. A copy
      of it under another name, or any program that speaks to the socket, is refused by the
      daemon itself (`docs/protocol.md`, "Transport").
+2. **Base**: a card for the user in every mode, never the judge's, with a strong warning.
+   - the project's `never` list: an entry matches a line's words from any position (its first
+     word is a program, in any folder), or a catalogue command by its name; and a run when the
+     project's configuration cannot be read, since what it never allows is not known;
+   - a write under a `.git` folder or file (`fs_write`, `fs_edit`, a link that leads there), and a
+     command any of whose words (or an option's value after `=`, or a `NAME=value`'s value) names
+     a path in one;
+   - a sensitive place, read or written: `.env` and `.env.*` anywhere but the templates
+     (`.example`, `.sample`, `.template`, `.dist`), `.ssh`, `.gnupg`, `.aws`, `.azure`,
+     `.config/gcloud`, `.kube`, `.docker/config.json`, `.config/gh`, `.netrc`, `.npmrc`,
+     `.pypirc`, `.git-credentials`, `.local/share/keyrings`, `Library/Keychains` and the agents'
+     logins (`.claude`, `.claude.json`, `.codex`, `.local/share/opencode`) wherever they sit along
+     the path, `/etc/shadow`, `/etc/sudoers`, `/etc/sudoers.d`, and Flottille's own folders (data,
+     configuration, state, runtime). Inside the place only what sits below it counts;
+   - a recursive deletion that would take a repository: `rm` with `-r`, `-R` or `--recursive`,
+     and `find` with `-delete` (or `-exec rm -r`), when a target, resolved from the folder the
+     run starts in, is the place's folder, a repository's, or a folder above one (`rm -rf .`,
+     `rm -R <repository>`, `find . -delete`). Deleting inside a repository is not (`rm -r
+     target`);
+   - a push forced or that deletes: `--force`, `-f`, `--force-with-lease`, `--force-if-includes`,
+     `--mirror`, `--delete`, `-d`, `--prune` (or any start of their names, as git takes them:
+     `--forc`, `--mirr`), a `+refspec` or a `:branch`;
+   - git settings that run programs, lead pushes elsewhere or bring in other files: a key of
+     `core.*`, `alias.*`, `remote.*`, `url.*`, `push.*`, `credential.*` or `include*` given to
+     `git -c` or `--config-env`, or written by `git config` in any write form (`--edit`
+     included); `git remote add`, `rename`, `remove`, `set-url` and `set-branches`; and git's
+     configuration set or cleared through the environment (`GIT_CONFIG*=…`, `env -i`, `env -u
+     GIT_CONFIG…`), which would lift the wall on pushes and hooks;
+   - reading a process's environment (`/proc/<pid>/environ`, `self` included), or anything under
+     `/proc/<pid>/` of a process that is not one of the agent's runs;
+   - rewriting history that is on a remote, or the user's own checkout's: `git rebase`,
+     `git commit --amend` (and the fixups that amend or reword), `git reset <commit>`,
+     `git update-ref`, when the workspace's branch is already on a remote or the agent works in
+     `main`; `git filter-branch` and `filter-repo` anywhere;
+   - discarding work in the project folder (`main`), or moving the branch it has checked out:
+     `git checkout` with `--`, `.`, `-f`, `-B`, `-p`, `--ours`, `--theirs`, or a word that is a
+     file or folder there, a pattern or a pathspec magic (not with `-b` or `--orphan`); `git
+     switch -f`, `--discard-changes`, `-C`; `git checkout-index -f`; `git read-tree -u`; `git
+     restore`, `git clean`, `git reset` and `git update-ref`, in any form; `git stash` but `list`
+     and `show`; `git worktree remove`; `git branch -d`, `-D`, `-f`, `-m`, `-M`, `-C`; `git rm`
+     but `--cached`; `git apply` and `am` with `--reject`; `--abort` of a merge, a cherry-pick, a
+     revert or `am`; `git symbolic-ref` that writes; `git submodule update` or `deinit` forced;
+   - publishing: `npm`, `pnpm`, `yarn`, `bun`, `cargo`, `poetry`, `flit`, `hatch`, `uv` with
+     `publish` or `unpublish`, `twine upload`, `gem`, `dotnet` and `nuget` with `push`;
+   - `acli` and `bkt`, Atlassian's and Bitbucket's command lines, every line, reads included:
+     they run with the user's own sign-in, in a place no variable of ours moves, so it cannot be
+     emptied as `gh`'s is (`docs/forges.md`, "Bitbucket"). An agent reads a ticket with
+     `ticket_read` and the pull requests with `forge_read`;
+   - a `forge_write` merge that waives the checks or a review; a change of the project's tracker.
+3. **Harmless**: passes in every mode.
+   - reading inside the agent's place (the project folder or the workspace), the tree's tools,
+     `commands_list`, `commands_status`, `reference_read`, `forge_read`, `ticket_read`;
+   - writing inside a workspace (`fs_write`, `fs_edit`, and `git add`, `mv`, `rm` there);
+   - a line the rules know to only read, inside the place: the reads of git (`status`, `log`,
+     `diff`, `show`, `branch` and `tag` listings, `config` and `remote` reads…), of `gh` and
+     `glab` (`pr view/list/diff/checks/status`, `issue view/list`, `run view/list`, `mr
+     view/list/diff`, `ci view/list/status`, `repo view`, `auth status`, `api` with GET, no
+     field, no input and not `graphql`), and the common reading programs (`ls`, `cat`, `grep`,
+     `rg`, `find`, `fd`, `tree`, `ps`, `pgrep`…; not `less` and `more`, whose commands run
+     programs). A program counts as one of them only when it is the system's: named bare, and
+     found through the run's `PATH` outside the project folder, its workspaces and the place.
+     `./ls`, `/path/to/git` or an `ls` the agent put in a folder of `PATH` is the agent's own
+     file, to judge, and the judge is told so;
+   - an option of those programs that writes a file, inside a workspace only (`git diff`,
+     `log`, `show` `--output`, `git format-patch`, `tree -o`, `find -fprint`, `file -C`): in
+     `main`, it is to judge;
+   - a catalogue command in a workspace, not marked `ask_before_running` and whose program is not
+     a shell. A line is the catalogue command it is when the catalogue holds the same words where
+     it runs.
+4. **To judge**: everything else, a card in Ask and the judge in Auto. Among them: writing in the
+   project folder (`main`); a path outside the place, or one that cannot be resolved; a catalogue
+   command in `main`, marked `ask_before_running`, or whose program is a shell; a line the rules
+   do not know to only read, or whose program is the agent's own file; an option of a reading
+   program that runs one (`find -exec`, `-execdir`, `-ok`; `fd -x`, `-X`; `rg --pre`,
+   `--hostname-bin`; `git grep -O`; `--ext-diff`, `--textconv`, `cat-file --filters`; `git help`
+   with an option; `date -s`); a recursive read that reaches hidden or ignored files (`grep -r`,
+   `-R`; `rg -u`, `--hidden`, `--no-ignore`; `git grep --untracked`, `--no-index`; `fd -H`, `-I`,
+   `-u`; `find -L`, `-H`) over a folder that holds a sensitive file, or more files than the gate
+   looks through (20,000), the judge told which; `git commit`, `git push`, `git rebase` of a
+   branch on no remote, `git reset --hard` in a workspace, `git -c` or `--config-env` of other
+   keys, git's other global options, `git remote` and `git config` writes of other keys; the
+   forge command lines beyond their reads; `forge_write`, `workspace_remove`, and a write of
+   `procedure` or `project` ("The project").
 
-   These are judged on the line and on every program a wrapper runs, unwrapped in turn (16 at
-   most): `env` (its options, `NAME=value` words and `-S` line), `sudo`, `doas`, `nice`, `nohup`,
-   `timeout`, `time`, `stdbuf`, `command`, `exec`, `xargs`, `npx` (and its `-c` line),
-   `pnpm dlx`/`exec`, `yarn dlx`/`exec`, `bunx`, `uvx`, and a shell (`sh`, `bash`, `zsh`, `dash`,
-   `ksh`, `mksh`, `ash`, `fish`) with `-c`, whose line is split as `commands_run` splits one and
-   judged in turn: a line that cannot be split is refused. A shell running a script is not
-   unwrapped: the script is not read.
+   The rules of 1 and 2 are judged on the line and on every program a wrapper runs, unwrapped in
+   turn (16 at most): `env` (its options, `NAME=value` words and `-S` line), `sudo`, `doas`,
+   `nice`, `nohup`, `timeout`, `time`, `stdbuf`, `command`, `exec`, `xargs`, `npx` (and its `-c`
+   line), `pnpm dlx`/`exec`, `yarn dlx`/`exec`, `bunx`, `uvx`, and a shell (`sh`, `bash`, `zsh`,
+   `dash`, `ksh`, `mksh`, `ash`, `fish`) with `-c`, `script -c` and `watch`, whose line is split
+   as `commands_run` splits one and judged in turn: a line that cannot be split is refused. A
+   shell running a script is not unwrapped: the script is not read. The line an option of a
+   reading program runs (`fd -X git push -f`) is read the same way. git's global options are
+   skipped to class its command, and count too: the stronger wins.
+
+   The base rules are also judged on every end of every layer whose program is not a reading
+   one, from each word that is not an option (from after the command, for git): a wrapper the
+   gate does not know (`setsid`, `ionice`, `taskset`, `flock`, `chrt`, `strace`, `git bisect
+   run`…) cannot turn a base line into one to judge.
 
    **Known gaps**, which no command gate closes: a script written with `fs_write` and then run
-   (`./script.sh`, `sh script.sh`) is not read, so what it does is out of the gate's reach; a git
-   alias in the user's own configuration (`alias.<name> = push`) is run by git itself, and the
-   gate sees only the alias's name. For a push, the run's environment (above) is the only wall
-   left there.
-3. **Ask**: a sensitive place; a path outside the place, or one that cannot be resolved; a
-   catalogue command marked `ask_before_running`, or whose program is a shell; a run when the
-   project's configuration cannot be read; a line outside the catalogue in the project folder (1);
-   a write of `procedure` or `project` whose family the project does not let run on its own
-   ("The project"). Sensitive places are `.env` and `.env.*` anywhere but
-   the templates (`.example`, `.sample`, `.template`, `.dist`), `.ssh`, `.gnupg`, `.aws`, `.azure`,
-   `.config/gcloud`, `.kube`, `.docker/config.json`, `.config/gh`, `.netrc`, `.npmrc`, `.pypirc`,
-   `.git-credentials`, `.local/share/keyrings`, `Library/Keychains` and the agents' logins
-   (`.claude`, `.claude.json`, `.codex`, `.local/share/opencode`) wherever they sit along the path,
-   `/etc/shadow`, `/etc/sudoers`, `/etc/sudoers.d`, and Flottille's own folders (data,
-   configuration, state, runtime). Inside the place only what sits below it counts.
-4. **Allow** anything else: reads, `commands_list`, `commands_status`, a
-   catalogue command not marked, a line inside the place, a write inside the place.
-
-**Inside a procedure's run** (`docs/procedures.md`), for the agents it grants and only in its
-workspace, the run's grants come between 1 and 2: a line that is `git commit`, `git push` or `git
-rebase` itself, with nothing but `--no-pager` before the subcommand and never wrapped, is let
-through as its grant says (`allow`, or `ask`: held, never for the tree) once it fits the grant (the
-workspace's own branch, the repository's remote, no force without a lease, no `--amend`…), and
-refused with why when it does not. The deny rules of 2 that are not a program's (the `never` list,
-`.git`, recursive deletions) and the reasons to ask of 3 still apply. `git stash` and `git reset
---hard` are refused in a run whatever it grants. Outside a run, none of this applies: the rules
-above are the whole gate.
+   (`./script.sh`, `sh script.sh`) is not read, so what it does is out of the gate's reach, but
+   for a push, which the environment walls; a git alias in the user's own configuration
+   (`alias.<name> = push`) is run by git itself, and the gate sees only the alias's name.
+   Running a script the agent wrote is itself a line to judge.
 
 The words of a line that name paths (every word but the program, an option's value after `=`, a
 `NAME=value`'s value) are resolved from the folder the run starts in, as a file tool's path is.
 
-**A held call** ("ask") is written as a request (`flottille approvals`, `docs/protocol.md`) and
+**In Auto**, a call to judge first goes to the judge, when one is chosen (`docs/design.md` §7.1):
+an `allow` performs it at once, recorded as an `agent.tool_served` whose `gate` is `judged` and
+whose `judgement` says who judged and why; an `ask`, a failure or a silence makes the request
+below, the judgement in it. A base call, and every call in Ask, makes the request directly.
+
+**A held call** is written as a request (`flottille approvals`, `docs/protocol.md`) and
 answered at once, not as an error; a root is answered:
 
 > Waiting for the user's approval, request #n. This action has not happened; do not assume it
@@ -416,8 +433,9 @@ and a child, whose request goes to its parent:
 > or end your turn saying you wait. The answer will be handed to you.
 
 A request holds its number (counted across every agent), the call frozen whole (what is
-performed once it is allowed; it is shown cut and masked), the reasons, masked, whether it
-reaches a sensitive place, the agent that asked, and who holds it: the user for a root's request,
+performed once it is allowed; it is shown cut and masked), the reasons, masked, its class
+(`judge` or `base`), the judge's verdict when one was asked (`judgement`: `by`, `verdict`,
+`reason`), the agent that asked, and who holds it: the user for a root's request,
 the parent for a child's, which is told at once (`child-asks`, urgent) and denies it or forwards
 it up with one sentence of why (`approval_answer`), one level at a time, every why kept in the
 request's `forwards`. The same call key (`claudecode/toolUseId`) of the same agent asked
@@ -425,18 +443,14 @@ twice gives the same request. A request that cannot be written refuses the call:
 request for the user could not be made, so nothing was done; say so and go on with what does not
 depend on it`.
 
-**The user answers** a request they hold: deny, allow once, or allow for the root's tree (a
-`call` only: never a `catalogue` request, which is allowed once or always, nor an `action`, which is
-allowed once), which grants that exact call (its tool, its paths, its words or its catalogue command with its line,
-not a write's content nor a read's page) to every agent of the tree from then on without asking;
-it is never given for a request that reaches a sensitive place, and a sensitive place asks every
-time; so does a request a procedure's `ask` grant held. A request held by an agent is not listed
+**The user answers** a request they hold: allow it once, or deny it. Nothing they answer allows
+a later call: the next one goes through the gate again. A request held by an agent is not listed
 for the user and cannot be answered by them.
 
 | Command | |
 |---|---|
-| `flottille approvals [--json]` | The requests the user holds, each with its number, the agent, the call and why. |
-| `flottille approve <n> [--for-tree \| --always]` | Allows the request once, for the root's tree, or always (a line outside the catalogue, added to it). Refused for a request held by an agent, one already decided, `--for-tree` on a sensitive place or a request that is not a `call`, and `--always` on one that is not a `catalogue` request or that reaches a sensitive place. |
+| `flottille approvals [--json]` | The requests the user holds, each with its number, the agent, the call, its class, why, and the judge's verdict when one was asked. |
+| `flottille approve <n>` | Allows the request once. Refused for a request held by an agent, or one already decided. |
 | `flottille deny <n>` | Denies it: the agent is told nothing was done. |
 
 **An allowed request** is checked again (the gate on the frozen call: a refusal now, or a reason
@@ -445,8 +459,7 @@ to ask that the request did not have, stops it), performed as the agent's call (
 delivery, urgent and masked, then sent to it (`docs/agents.md`):
 
 - `Request #n (tool) was approved by the user, and Flottille has now done it. Its result:` and
-  the result (`…approved by the user, who added it to the project's catalogue as <name> (run it
-  with commands_run {"command": "<name>"} from now on), and Flottille…` for Always);
+  the result;
 - `Request #n (tool) was approved by the user, but nothing was done: …` for a failure;
 - `Request #n (tool) was not executed: …` for a refusal, or when the situation changed;
 - `Request #n (tool) was refused by the user. Nothing was done.` for a denial;

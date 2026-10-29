@@ -19,6 +19,7 @@ mod gate;
 mod git;
 mod inbox;
 mod inbox_command;
+mod judge;
 mod mcp;
 mod opencode;
 mod pilot;
@@ -107,17 +108,7 @@ enum Command {
         json: bool,
     },
     /// Allow a request: its call is checked again, performed, and its result handed to the agent
-    Approve {
-        number: u64,
-        /// Allow the same call, exactly, for the whole tree of the agent's root from now on
-        /// (never for a sensitive place)
-        #[arg(long, conflicts_with = "always")]
-        for_tree: bool,
-        /// Allow a line run in the project folder, and add it to the project's catalogue as a
-        /// read-only check, so that it runs there without asking from now on
-        #[arg(long)]
-        always: bool,
-    },
+    Approve { number: u64 },
     /// Deny a request: the agent is told nothing was done
     Deny { number: u64 },
     /// Whether Claude agents can run here: claude, its version and its login
@@ -267,11 +258,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             }
         }
         Command::Approvals { json } => approval_command::approvals(&paths, json)?,
-        Command::Approve {
-            number,
-            for_tree,
-            always,
-        } => approval_command::approve(&paths, number, for_tree, always)?,
+        Command::Approve { number } => approval_command::approve(&paths, number)?,
         Command::Deny { number } => approval_command::deny(&paths, number)?,
         Command::Inbox { after, limit, json } => inbox_command::inbox(&paths, after, limit, json)?,
         Command::Mcp => pilot::run(&paths)?,

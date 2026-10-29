@@ -204,13 +204,12 @@ exists.
 
 `{"name"}`. The project's forges and tracker as its Settings show them (`docs/forges.md`, "The
 forge of a repository"): `{"name", "folder", "repositories": [{"path", "remote", "url", "forge",
-"proposal", "disagrees"}], "tracker", "agent_actions", "obsolete"}`. `agent_actions` is what its
-agents do without asking (`docs/projects.md`, "What agents do on their own"):
-`{"procedures", "settings", "references"}`, each `ask` or `allow`. `url` is the remote's address (credentials taken
+"proposal", "disagrees"}], "tracker", "obsolete"}`. `url` is the remote's address (credentials taken
 out, masked; `null` when it has none), `forge` the one declared (`null` when none), `proposal` what
 the address proposes (`null` when nothing), `disagrees` why the declared forge is not where the
 remote leads (`null` when it is). `obsolete` lists the keys of the file that are no longer read
-(the old `[forges]`), each with what replaces it. Nothing is asked of a forge.
+(the old `[forges]`, `[agent_actions]`, a procedure's `grants` and `children`), each with what
+replaces it. Nothing is asked of a forge.
 
 #### `project.set_settings`
 
@@ -221,13 +220,6 @@ when `null` or left out) in its file, where they stand, what is around them kept
 forge or the tracker cannot be used (naming its key), or a forge is not where its repository's
 remote leads (`api cannot be declared on GitHub acme/api: its remote origin: it leads to
 github.com/other/api, not to GitHub acme/api; nothing was saved`).
-
-#### `project.set_agent_actions`
-
-`{"name", "agent_actions": {"procedures", "settings", "references"}}`, each `ask` or `allow`. Writes
-the project's `[agent_actions]` in its file, where it stands, what is around it kept (removed when
-every family asks, the default), and answers `{"name", "agent_actions"}`. The user's door alone
-sets it: no tool of an agent does (`docs/tools.md`, "The project").
 
 #### `project.ticket`
 
@@ -424,12 +416,10 @@ every one.
 ### The procedure methods
 
 A project's procedures and their runs (`docs/procedures.md`). A procedure in a result is `{"name",
-"description", "grants", "children", "says"}`, `grants` an object of grant to mode (`{"push":
-"allow", "pr-create": "ask"}`), `says` one `{"grant", "mode", "says"}` per grant with the sentence a
-client shows; `procedure.show` and the edits add `instructions`. `not-found` for a project or a
-procedure that does not exist, `invalid-params` for a grant outside the vocabulary or a mode other
-than `allow` and `ask`, `refused` for an empty description or instructions, `invalid-config` when
-the project's file cannot be used.
+"description"}`; `procedure.show` and the edits add `instructions`. A procedure grants nothing:
+each call of its run goes through the gate's classes and the session's mode. `not-found` for a
+project or a procedure that does not exist, `refused` for an empty description or instructions,
+`invalid-config` when the project's file cannot be used.
 
 #### `procedure.list`
 
@@ -441,16 +431,16 @@ the project's file cannot be used.
 
 #### `procedure.add`
 
-`{"project", "name", "description", "instructions", "grants"?, "children"?}`, or `{"project",
-"template", "name"?}` for one of Flottille's templates as it is (`open-prs`, `merge-stack`,
-`close`; `name` the template's when left out, and nothing else given). Writes
-`[procedures.<name>]` in the project's file, what is around it kept, and answers the procedure.
-`refused` when the project has one of that name, `not-found` for a template Flottille has not.
+`{"project", "name", "description", "instructions"}`, or `{"project", "template", "name"?}` for one
+of Flottille's templates as it is (`open-prs`, `merge-stack`, `close`; `name` the template's when
+left out, and nothing else given). Writes `[procedures.<name>]` in the project's file, what is
+around it kept, and answers the procedure. `refused` when the project has one of that name,
+`not-found` for a template Flottille has not.
 
 #### `procedure.edit`
 
-`{"project", "name", "description"?, "instructions"?, "grants"?, "children"?}`: what is given
-replaces what the procedure had (`grants` whole). Answers the procedure.
+`{"project", "name", "description"?, "instructions"?}`: what is given replaces what the procedure
+had. Answers the procedure.
 
 #### `procedure.remove`
 
@@ -458,24 +448,21 @@ replaces what the procedure had (`grants` whole). Answers the procedure.
 
 #### `procedure.run`
 
-`{"project", "name", "workspace"}`: what a run would grant, to show the user; it starts nothing.
+`{"project", "name", "workspace"}`: what a run would start, to show the user; it starts nothing.
 The procedure with `{"project", "workspace", "started": false}`. `not-found` when the workspace does
 not exist.
 
 #### `procedure.start`
 
-`{"project", "name", "workspace", "grants", "children"}`, the grants and `children` the user was
-shown by `procedure.run`. `refused` when they are no longer the procedure's (it was edited
-meanwhile): nothing starts. Otherwise a root agent starts in the workspace with the procedure's
-instructions, as `agent.start` starts one, and its run holds the grants from then on:
-`{"agent", "after", "procedure", "grants"}`, `agent` and `after` as `agent.start` answers them.
+`{"project", "name", "workspace"}`. A root agent starts in the workspace, in Auto, with the
+procedure's first message, as `agent.start` starts one: `{"agent", "after", "procedure"}`, `agent`
+and `after` as `agent.start` answers them.
 
 #### `procedure.of`
 
-`{"agent"}`: the run whose root is that agent, for a client that shows its grants while it goes on:
+`{"agent"}`: the run whose root is that agent, for a client that shows it while it goes on:
 `{"agent", "run"}`, `run` null when the agent has none, else `{"procedure", "project", "workspace",
-"grants", "children", "says", "ended"}` (`grants` and `says` as in a procedure, `ended` once the
-run is over).
+"ended"}` (`ended` once the run is over).
 
 ### The agent methods
 
@@ -497,6 +484,7 @@ there. An agent in a result:
   "reported_at": null,
   "quiet_turns": 0,
   "waiting_on_answer": false,
+  "gate_mode": "auto",
   "project": "app",
   "workspace": "login",
   "folder": "/work/app-work/login",
@@ -531,7 +519,8 @@ launched it (`null` for a root), `depth` its depth in the tree, `epoch` the numb
 (each replacement adds one), `title` and `brief` a child's task, `reported_at` when it reported,
 `quiet_turns` its turns ended without a report in a row, `waiting_on_answer` whether a question of
 it waits for an answer: a child's from its parent, a root's from the user, until that one writes to
-it (`docs/agents.md`, "The tree").
+it (`docs/agents.md`, "The tree"). `gate_mode` is its session's mode, `ask` or `auto`
+(`agent.mode`).
 
 Each method answers `not-found` when the agent does not exist.
 
@@ -607,6 +596,17 @@ went with it), one whose agent can neither resume nor load a session, that never
 whose session was forgotten (7 days after it ended), one whose workspace or project is gone: what
 `resumable` says, in short (`agent.tree`); and one whose last process is still stopping
 (`stopping`), with a sentence to try again in a moment.
+
+#### `agent.mode`
+
+`{"agent", "mode"}`, `mode` `ask` or `auto`. Puts the agent's tree in that mode (`docs/design.md`
+§7.1): how the gate answers its calls to judge from then on. A tree has one mode, its root's: a
+child named switches its root, and every agent of the tree reads the root's mode at each call
+(an agent's `gate_mode` is its root's). A new session starts in `auto`, and the mode is kept when
+it resumes. Answers `{"agent"}`, the root, with its `gate_mode`, and emits
+`agent.gate_mode_changed` for the root (`docs/events.md`).
+`invalid-params` for another mode, `not-found` for an agent that does not exist. The user's door
+alone reaches it: no tool of an agent changes a mode.
 
 #### `agent.tree`
 
@@ -694,7 +694,8 @@ when they name none:
      "why": "is not enabled (`enabled = true` under [codex] in providers.toml enables it)", "…": "…",
      "models": null, "models_outdated": false}
   ],
-  "project": {"name": "app", "provider": "claude", "model": "sonnet"}
+  "project": {"name": "app", "provider": "claude", "model": "sonnet"},
+  "judge": {"provider": "claude", "model": "haiku"}
 }
 ```
 
@@ -708,7 +709,9 @@ session had that model; `name` is what the provider shows the model by; `default
 on the model a new session takes when none is asked, once one said it. `models_outdated` is `true`
 when they were said by another version of the program or with other API keys set: they are listed
 as they were, but refuse no model and no effort until a session says them again. `project` is there only when one is named; its `provider` is `null` when
-none is enabled, its `model` `null` when the project names none. `not-found` when the project
+none is enabled, its `model` `null` when the project names none. `judge` is the Auto judge the user
+chose (`provider.set_judge`), its `model` `null` for the provider's default, or `null` when none is
+chosen. `not-found` when the project
 does not exist; `invalid-config` when `providers.toml` cannot be read (the sentence names the key
 at fault).
 
@@ -728,6 +731,18 @@ on it go on, and each fails at the next start of its process, saying why (`agent
 `not-found` when there is no provider of that name (the sentence names the providers);
 `invalid-config` when `providers.toml` cannot be read (the sentence names the key at fault), and
 the file is then left as it is.
+
+### `provider.set_judge`
+
+`{"provider", "model"?}`. Chooses the Auto judge (`docs/design.md` §7.1): the provider whose agent
+judges the calls to judge of sessions in Auto, and its model (the provider's default when left
+out or empty); `provider` `null` chooses none, and Auto then asks the user as Ask does. The daemon
+writes `[judge]` in `providers.toml` (`provider`, `model`), or removes it, the rest of the file
+kept as `provider.enable` keeps it, and answers `{"judge"}`, as `provider.list` gives it. When this
+changes the file it emits `provider.judge_changed`. `not-found` when there is no provider of that
+name; `invalid-config` when `providers.toml` cannot be read. The provider is checked when it
+judges: one not enabled or not ready makes each judgement fail, which asks the user. The user's
+door alone reaches it: no tool of an agent chooses the judge.
 
 ### `inbox.list`
 
@@ -757,9 +772,10 @@ The requests of the gate (`docs/tools.md`, "The gate"). A request in a result:
   "tool": "fs_read",
   "call": {"path": ".env"},
   "reasons": [".env is a sensitive place (.env)"],
-  "sensitive": true,
+  "class": "base",
   "kind": "call",
   "says": [],
+  "judgement": null,
   "held_by": "user",
   "forwards": [],
   "state": "pending",
@@ -773,11 +789,13 @@ The requests of the gate (`docs/tools.md`, "The gate"). A request in a result:
 kept whole, to be performed, and never sent. `held_by` is `user` or the id of the agent that holds
 the request; `forwards` are the `{"by", "why"}` of each agent that passed it up. `state` is
 `pending`, `denied`, `allowed`, or `cancelled` when the agent that asked or the one that held it
-ended first; `decision` is `deny`, `once`, `tree` or `always` once it is decided. `kind` says what
-the user may answer: `call` (once, or for the tree unless it is `sensitive`), `catalogue` (a line
-outside the catalogue run in the project folder: once, or always) or `action` (a change of the
-project an agent asked for, `docs/tools.md`, "The project": once). `says` is what it does, in
-words, one sentence each: what the user allows (empty for a `call`).
+ended first; `decision` is `deny` or `once` once it is decided (a request decided `tree` or
+`always` before the classes reads as `once`). `class` is `judge` or `base` (`docs/tools.md`, "The
+gate"). `kind` is `call`, or `action` (a change of the project an agent asked for, `docs/tools.md`,
+"The project"). `says` is what it does, in words, one sentence each: what the user allows (empty
+for a `call`). `judgement` is the judge's verdict when one was asked in Auto, else `null`:
+`{"by", "verdict", "reason"}`, `by` the provider and model that judged (`claude haiku`),
+`verdict` `ask` or `failed` (it could not decide: `reason` says why), `reason` its sentence.
 
 #### `approval.list`
 
@@ -788,17 +806,11 @@ there is no such agent).
 
 #### `approval.approve`
 
-`{"number", "for_tree"?, "always"?}`. Allows the request, once, with `for_tree: true` for the
-root's tree (the same call goes through without asking from then on), or with `always: true` for a
-`catalogue` request: its line is added to the project's catalogue as allowed always
-(`[commands.<name>]` with `added_by = "approval"` in its file, what is around it kept), then run. Answered `{"request"}` once it
+`{"number"}`. Allows the request, once: nothing it answers allows a later call. Answered `{"request"}` once it
 is decided; the call is then checked again, performed in the background, and its answer stored for
 the agent (`approval.settled`). An `action` is done only while what it `says` still holds (a
-procedure edited meanwhile is not started). `not-found` when there is no such request;
-`invalid-params` for both `for_tree` and `always`; `refused` when it is held by an agent, already
-decided, with `for_tree` when it reaches a sensitive place, is held by a procedure's `ask` grant
-(`docs/procedures.md`) or is not a `call`, and with `always` when it is not a `catalogue`
-request or reaches a sensitive place.
+procedure edited meanwhile is not started). `not-found` when there is no such request; `refused` when it is held by an agent, or already
+decided.
 
 #### `approval.deny`
 

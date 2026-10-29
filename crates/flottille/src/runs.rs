@@ -3,8 +3,7 @@
 //!
 //! A run is a line split without a shell and spawned in a process group of its own, with the
 //! place's variables and an environment that keeps forges out of reach: no forge token, the forge
-//! command lines' configuration in an empty folder, and `git push` made to fail in the common case
-//! (the gate refuses every form of it it can read). The call waits
+//! command lines' configuration in an empty folder, and no git hook. The call waits
 //! for its end a while, then answers that it keeps going; its output is kept (its end), masked
 //! when shown or stored.
 
@@ -17,7 +16,6 @@ use std::time::Duration;
 
 use flottille_core::agent::new_id;
 use flottille_core::command::split_line;
-use flottille_core::procedure::Grant;
 use flottille_core::run::{Run, RunState};
 use flottille_core::secrets;
 use flottille_core::store::{Store, now_ms};
@@ -32,7 +30,6 @@ use crate::daemon::Daemon;
 use crate::gate::{self, Verdict};
 use crate::mcp::{Outcome, arguments, masked};
 use crate::place::{Place, Resolved};
-use crate::procedures;
 use crate::projects;
 
 /// What the call waits for the end of a run, by default and at most, in seconds.
@@ -83,6 +80,8 @@ struct Going {
     /// What its output is masked with: its environment and the place's secret files.
     env: BTreeMap<OsString, OsString>,
     secrets: Vec<String>,
+    /// Its process, which leads its process group.
+    pid: u32,
 }
 
 #[derive(Default)]
@@ -148,13 +147,6 @@ pub fn commands_list(daemon: &Daemon, place: &Place, args: Value) -> Outcome {
                 if set {
                     notes.push(note.to_owned());
                 }
-            }
-            if command.added_by.is_some() {
-                notes.push(
-                    "allowed always by the user in the project folder, never checked to change \
-                     nothing"
-                        .to_owned(),
-                );
             }
             let notes = if notes.is_empty() {
                 String::new()
@@ -258,14 +250,13 @@ pub fn reaches(
         })
 }
 
-/// `lifted` is the grant of a procedure the gate let this line through by: its environment is
-/// lifted for it, and only it (`defend`).
+/// `approved` when the user or the judge let the call through: it may then run outside the place.
 pub async fn commands_run(
     daemon: &Arc<Daemon>,
     agent: &str,
     place: &Place,
     args: Value,
-    lifted: Option<Grant>,
+    approved: bool,
     cancelled: CancellationToken,
 ) -> Outcome {
     let args: RunArguments = match arguments("commands_run", args) {
@@ -290,12 +281,11 @@ pub async fn commands_run(
         Ok(request) => request,
         Err(refusal) => return refusal,
     };
-    if let Verdict::Deny(why) = gate::contained(std::slice::from_ref(&folder)) {
+    if !approved && let Verdict::Deny(why) = gate::contained(std::slice::from_ref(&folder)) {
         return Outcome::Refused(why);
     }
-    if matches!(lifted, Some(Grant::Push | Grant::PushForceWithLease))
-        && let Err(refusal) =
-            procedures::remote_kept(daemon, place, &repository, &folder.path).await
+    if gate::pushes(&words)
+        && let Err(refusal) = remote_kept(daemon, place, &repository, &folder.path).await
     {
         return Outcome::Refused(refusal);
     }
@@ -313,7 +303,9 @@ pub async fn commands_run(
     {
         return Outcome::Done(describe(daemon, &going.run.id, None, None, true));
     }
-    let env = match environment(daemon, place, &repository, lifted) {
+    // Only a push the gate read, and that the user or the judge let through, goes out.
+    let lift = approved && gate::is_push(&words);
+    let env = match environment(daemon, place, &repository, lift) {
         Ok(env) => env,
         Err(why) => return Outcome::Failed(why),
     };
@@ -371,20 +363,14 @@ fn wait_for_end(daemon: &Daemon, id: &str) -> impl Future<Output = ()> + use<> {
 }
 
 /// The environment of a run in the place: the daemon's, the place's variables filled, the forges
-/// and the daemon kept out of reach; lifted for the grant of a procedure the line goes through by.
+/// and the daemon kept out of reach, and pushes too unless `lift`.
 fn environment(
     daemon: &Daemon,
     place: &Place,
     repository: &str,
-    lifted: Option<Grant>,
+    lift: bool,
 ) -> Result<BTreeMap<OsString, OsString>, String> {
-    let names = Names {
-        workspace: place.workspace.clone().unwrap_or_else(|| "main".into()),
-        workspace_path: place.root.to_string_lossy().into_owned(),
-        project: place.project.clone(),
-        branch: place.branch.clone(),
-        repository: repository.to_owned(),
-    };
+    let names = names(place, repository);
     let mut filled = BTreeMap::new();
     for (name, template) in &place.variables {
         filled.insert(name.clone(), variables::fill(template, &names)?);
@@ -392,27 +378,61 @@ fn environment(
     let mut env = variables::environment(std::env::vars_os(), &[&filled]);
     let empty = daemon.paths.state.join("empty");
     flottille_core::paths::ensure_private_dir(&empty).map_err(|e| e.to_string())?;
-    defend(&mut env, &empty, lifted);
+    defend(&mut env, &empty, lift);
     // Where the daemon's socket is: a client a run starts is refused anyway (`daemon.rs`).
     env.remove(&OsString::from("XDG_RUNTIME_DIR"));
     Ok(env)
 }
 
-/// No forge token, the forge command lines' configuration in `empty`, and, unless the run is a
-/// push a procedure grants, every push URL rewritten to a path that is no remote
-/// (`url.<nowhere>.pushInsteadOf` of every URL). A line a procedure's grant lets through runs no
-/// hook: the hooks are files the agent writes, run where the grant lifts the gate.
-fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path, lifted: Option<Grant>) {
+fn names(place: &Place, repository: &str) -> Names {
+    Names {
+        workspace: place.workspace.clone().unwrap_or_else(|| "main".into()),
+        workspace_path: place.root.to_string_lossy().into_owned(),
+        project: place.project.clone(),
+        branch: place.branch.clone(),
+        repository: repository.to_owned(),
+    }
+}
+
+/// Where a run in the place looks for a program named bare: the `PATH` of its environment.
+pub fn search_path(place: &Place, repository: &str) -> Option<OsString> {
+    match place.variables.get("PATH") {
+        Some(template) => variables::fill(template, &names(place, repository))
+            .ok()
+            .map(OsString::from),
+        None => std::env::var_os("PATH"),
+    }
+}
+
+/// The process groups of the agent's runs that go on: each run leads its own.
+pub fn groups_of(daemon: &Daemon, agent: &str) -> Vec<u32> {
+    daemon
+        .mcp
+        .runs
+        .runs
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|going| going.run.agent == agent)
+        .map(|going| going.pid)
+        .collect()
+}
+
+/// No forge token, the forge command lines' configuration in `empty` (`forge_write` is the way to
+/// the forge), and no hook: the hooks are files the agent writes, and a commit or a push the gate
+/// let through would run them where it does not look. Every push URL is rewritten to a path that
+/// is no remote (`url.<nowhere>.pushInsteadOf` of every URL), unless `lift`: the run is itself a
+/// `git push` the user or the judge let through. A harmless command cannot push from a script
+/// the gate never read (`docs/design.md` §7).
+fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path, lift: bool) {
     for name in FORGE_TOKENS {
         env.insert(name.into(), OsString::new());
     }
     for name in FORGE_CONFIGS {
         env.insert(name.into(), empty.into());
     }
-    if lifted.is_some() {
-        configure(env, "core.hooksPath", "/dev/null");
-    }
-    if !matches!(lifted, Some(Grant::Push | Grant::PushForceWithLease)) {
+    configure(env, "core.hooksPath", "/dev/null");
+    if !lift {
         configure(
             env,
             "url./dev/null/flottille-refused-push/.pushInsteadOf",
@@ -431,6 +451,33 @@ fn configure(env: &mut BTreeMap<OsString, OsString>, key: &str, value: &str) {
     env.insert(format!("GIT_CONFIG_KEY_{count}").into(), key.into());
     env.insert(format!("GIT_CONFIG_VALUE_{count}").into(), value.into());
     env.insert("GIT_CONFIG_COUNT".into(), (count + 1).to_string().into());
+}
+
+/// Refuses a push from a workspace unless the repository's remote leads where it led when the
+/// workspace was created (`forge::remote_kept`): neither the judge nor the user reads where a
+/// remote leads now. A push from the project folder has nothing to compare with.
+async fn remote_kept(
+    daemon: &Daemon,
+    place: &Place,
+    repository: &str,
+    folder: &Path,
+) -> Result<(), String> {
+    let Some(name) = &place.workspace else {
+        return Ok(());
+    };
+    let workspace = daemon
+        .read(|store| store.workspace(&place.project, name))
+        .ok()
+        .flatten();
+    let base = workspace
+        .iter()
+        .flat_map(|workspace| &workspace.repositories)
+        .find(|r| r.path == repository)
+        .map(|r| &r.base)
+        .ok_or_else(|| {
+            format!("refused: {repository} is not a repository of this agent's workspace")
+        })?;
+    crate::forge::remote_kept(folder, base).await
 }
 
 /// Spawns the run, records it, and leaves a task of its own to follow it to its end.
@@ -483,6 +530,7 @@ fn start(
         stopped_as: Mutex::new(None),
         env,
         secrets,
+        pid,
     });
     daemon
         .mcp
@@ -867,7 +915,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_run_gets_no_forge_token_and_no_push() {
+    fn a_run_s_pushes_are_walled_unless_it_is_a_push_that_passed_the_gate() {
+        for lift in [false, true] {
+            let mut env = BTreeMap::new();
+            defend(&mut env, Path::new("/state/empty"), lift);
+            let keys: Vec<&str> = (0..3)
+                .filter_map(|n| env.get(&OsString::from(format!("GIT_CONFIG_KEY_{n}"))))
+                .map(|key| key.to_str().unwrap())
+                .collect();
+            assert_eq!(
+                keys.contains(&"url./dev/null/flottille-refused-push/.pushInsteadOf"),
+                !lift,
+                "{keys:?}"
+            );
+            assert!(keys.contains(&"core.hooksPath"));
+        }
+    }
+
+    #[test]
+    fn a_run_gets_no_forge_token_and_no_hook() {
         let mut env: BTreeMap<OsString, OsString> = [
             ("GH_TOKEN", "ghp_x"),
             ("GIT_CONFIG_COUNT", "2"),
@@ -877,64 +943,17 @@ mod tests {
         .map(|(k, v)| (k.into(), v.into()))
         .collect();
 
-        defend(&mut env, Path::new("/state/empty"), None);
+        defend(&mut env, Path::new("/state/empty"), true);
 
         let get = |name: &str| env[&OsString::from(name)].to_str().unwrap().to_owned();
         assert_eq!(get("GH_TOKEN"), "");
         assert_eq!(get("GITHUB_TOKEN"), "");
         assert_eq!(get("GH_CONFIG_DIR"), "/state/empty");
         assert_eq!(get("GIT_CONFIG_COUNT"), "3");
-        assert_eq!(
-            get("GIT_CONFIG_KEY_2"),
-            "url./dev/null/flottille-refused-push/.pushInsteadOf"
-        );
-        assert_eq!(get("GIT_CONFIG_VALUE_2"), "");
-        assert_eq!(get("PATH"), "/bin");
-    }
-
-    #[test]
-    fn a_push_a_procedure_grants_keeps_its_push_url_and_still_gets_no_forge_token() {
-        let mut env: BTreeMap<OsString, OsString> =
-            [("GH_TOKEN", "ghp_x"), ("GIT_CONFIG_COUNT", "2")]
-                .into_iter()
-                .map(|(k, v)| (k.into(), v.into()))
-                .collect();
-
-        defend(&mut env, Path::new("/state/empty"), Some(Grant::Push));
-
-        let get = |name: &str| env[&OsString::from(name)].to_str().unwrap().to_owned();
-        assert_eq!(get("GH_TOKEN"), "");
-        assert_eq!(get("GH_CONFIG_DIR"), "/state/empty");
-        assert_eq!(get("GIT_CONFIG_COUNT"), "3");
         assert_eq!(get("GIT_CONFIG_KEY_2"), "core.hooksPath");
         assert_eq!(get("GIT_CONFIG_VALUE_2"), "/dev/null");
         assert!(!env.contains_key(&OsString::from("GIT_CONFIG_KEY_3")));
-    }
-
-    #[test]
-    fn a_granted_commit_push_or_rebase_runs_with_its_hooks_off_and_only_a_push_without_the_wall() {
-        for grant in [
-            Grant::Commit,
-            Grant::Rebase,
-            Grant::Push,
-            Grant::PushForceWithLease,
-        ] {
-            let mut env = BTreeMap::new();
-
-            defend(&mut env, Path::new("/state/empty"), Some(grant));
-
-            let get = |name: &str| env[&OsString::from(name)].to_str().unwrap().to_owned();
-            assert_eq!(get("GIT_CONFIG_KEY_0"), "core.hooksPath", "{grant}");
-            assert_eq!(get("GIT_CONFIG_VALUE_0"), "/dev/null", "{grant}");
-            let walled = matches!(grant, Grant::Commit | Grant::Rebase);
-            assert_eq!(get("GIT_CONFIG_COUNT"), if walled { "2" } else { "1" });
-            assert_eq!(
-                env.get(&OsString::from("GIT_CONFIG_KEY_1"))
-                    .map(|key| key.to_str().unwrap()),
-                walled.then_some("url./dev/null/flottille-refused-push/.pushInsteadOf"),
-                "{grant}"
-            );
-        }
+        assert_eq!(get("PATH"), "/bin");
     }
 
     #[test]

@@ -41,6 +41,7 @@ use gpui_kit::{
 use crate::actions::{Answer, Command, Picture};
 use crate::conversation::{Activity, Block, Call, CallState, Change, Conversation, DiffLine, USER};
 use crate::link::{Connect, Update};
+use crate::mode::ModeSwitch;
 use crate::model::Place;
 use crate::open::Opener;
 use crate::procedures::ProcedureInfo;
@@ -770,6 +771,9 @@ impl SessionPage {
             let runs_on = (root.provider.clone(), root.model.clone());
             let facts = self.reply.read(cx).facts.clone();
             facts.update(cx, |facts, cx| facts.set_model(runs_on, cx));
+            let mode = self.reply.read(cx).mode.clone();
+            let gate_mode = root.gate_mode.clone();
+            mode.update(cx, |mode, cx| mode.set_mode(gate_mode, cx));
             let running = root.state == "working";
             let images = root.images;
             self.reply.update(cx, |reply, cx| {
@@ -918,7 +922,13 @@ impl SessionPage {
         }
         Some(ApprovalCard {
             number,
-            sensitive: request.is_some_and(|r| r.sensitive),
+            base: request.is_some_and(|r| r.base),
+            judgement: request
+                .and_then(|r| r.judgement.as_ref())
+                .map(|(by, verdict, reason)| match verdict.as_str() {
+                    "failed" => format!("The judge ({by}) could not decide: {reason}"),
+                    _ => format!("The judge ({by}) asks you: {reason}"),
+                }),
             kind: request.map_or_else(|| "call".to_owned(), |r| r.kind.clone()),
             says: request.map(|r| r.says.clone()).unwrap_or_default(),
             asked: request.map(Request::asked),
@@ -1479,9 +1489,11 @@ pub struct SubAgent {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ApprovalCard {
     pub number: u64,
-    /// It reaches a sensitive place: it is never allowed for the tree.
-    pub sensitive: bool,
-    /// `call`, `catalogue` or `action`: what the user may answer.
+    /// In the base: it always comes back to the user, whatever the mode.
+    pub base: bool,
+    /// What the Auto judge said, in one line, when it was judged.
+    pub judgement: Option<String>,
+    /// `call`, or `action` (a change of the project the agent asks for).
     pub kind: String,
     /// What it changes, in words, one line each.
     pub says: Vec<String>,
@@ -1489,7 +1501,7 @@ pub struct ApprovalCard {
     pub why: Option<String>,
     pub source: Option<String>,
     pub asker: Option<String>,
-    /// `deny`, `once`, `tree`, `always` or `cancelled`, once decided.
+    /// `deny`, `once` or `cancelled`, once decided.
     pub decision: Option<String>,
 }
 
@@ -1498,9 +1510,7 @@ impl ApprovalCard {
     pub fn record(&self) -> Option<String> {
         let said = match self.decision.as_deref()? {
             "deny" => "Denied",
-            "once" => "Allowed once",
-            "tree" => "Allowed for this tree",
-            "always" => "Allowed always, added to the catalogue",
+            "once" => "Allowed",
             "cancelled" => "Cancelled",
             other => other,
         };
@@ -2338,6 +2348,7 @@ impl Row {
             .child(
                 Card::new()
                     .attention()
+                    .when(card.base, Card::alarm)
                     .child(
                         div()
                             .px(px(16.))
@@ -2365,6 +2376,45 @@ impl Row {
                                     .child(SharedString::from(said.clone()))
                                     .test_support()
                             }))
+                            .child({
+                                let class = match card.base {
+                                    true => "Base",
+                                    false => "To judge",
+                                };
+                                div()
+                                    .id(ElementId::Name(format!("approval-class-{number}").into()))
+                                    .aria_label(class)
+                                    .mono(11.)
+                                    .text_color(if card.base { p.fail } else { p.wait })
+                                    .child(class)
+                                    .test_support()
+                            })
+                            .when(card.base, |d| {
+                                d.child(
+                                    div()
+                                        .id(ElementId::Name(
+                                            format!("approval-base-{number}").into(),
+                                        ))
+                                        .aria_label(BASE_SAYS)
+                                        .text_size(px(13.))
+                                        .semibold()
+                                        .text_color(p.fail)
+                                        .child(BASE_SAYS)
+                                        .test_support(),
+                                )
+                            })
+                            .when_some(card.judgement.clone(), |d, judgement| {
+                                d.child(
+                                    div()
+                                        .id(ElementId::Name(
+                                            format!("approval-judge-{number}").into(),
+                                        ))
+                                        .aria_label(SharedString::from(judgement.clone()))
+                                        .text_size(px(13.))
+                                        .child(SharedString::from(judgement))
+                                        .test_support(),
+                                )
+                            })
                             .when_some(card.why.clone(), |d, why| {
                                 d.child(
                                     div()
@@ -2395,31 +2445,16 @@ impl Row {
                             }),
                     )
                     .action(button("deny", "Deny", Answer::Deny, false))
-                    // The daemon never allows a sensitive place, nor a change the agent asks
-                    // for, for the tree: not offered. A line outside the catalogue is allowed
-                    // once or always.
-                    .when(card.kind == "call" && !card.sensitive, |c| {
-                        c.action(button(
-                            "allow-tree",
-                            "Allow for this tree",
-                            Answer::Tree,
-                            false,
-                        ))
-                    })
-                    // A sensitive line asks each time: the daemon never allows it always.
-                    .when(card.kind == "catalogue" && !card.sensitive, |c| {
-                        c.action(button("allow-always", "Always", Answer::Always, false))
-                    })
-                    .action(match card.kind.as_str() {
-                        "catalogue" => button("allow-once", "Once", Answer::Once, true),
-                        "action" => button("allow-once", "Confirm", Answer::Once, true),
-                        _ => button("allow-once", "Allow once", Answer::Once, true),
-                    }),
+                    .action(button("allow", "Allow", Answer::Once, true)),
             )
             .test_support()
             .into_any_element()
     }
 }
+
+/// Why a base card comes back whatever the mode, said on it.
+pub const BASE_SAYS: &str = "Flottille always asks you for this, in Ask and in Auto: it may lose \
+                             work or reach what must stay private, so no judge decides it.";
 
 /// The time a thought took, or has taken so far: it ticks only while the thought runs.
 pub struct ThinkingTimer {
@@ -3335,6 +3370,7 @@ pub struct Reply {
     dismissed: bool,
     field: Entity<TextareaState>,
     facts: Entity<ReplyFacts>,
+    pub mode: Entity<ModeSwitch>,
     has_text: bool,
     focused: bool,
     sending: bool,
@@ -3407,6 +3443,7 @@ impl Reply {
                 _ => {}
             },
         )];
+        let mode = cx.new(|_| ModeSwitch::new(shell.clone(), session.clone()));
         Self {
             shell,
             session,
@@ -3422,6 +3459,7 @@ impl Reply {
                 model: None,
                 context: None,
             }),
+            mode,
             has_text: false,
             focused: false,
             sending: false,
@@ -4061,6 +4099,7 @@ impl Render for Reply {
                     .pt(px(6.))
                     .px(px(2.))
                     .child(self.facts.clone())
+                    .child(self.mode.clone())
                     .child(
                         Button::quiet("attach", "Attach")
                             .tooltip("Attach pictures")
@@ -4226,6 +4265,7 @@ mod tests {
             resumable: false,
             stopping: false,
             images: None,
+            gate_mode: Some("auto".into()),
         }
     }
 
@@ -4339,19 +4379,17 @@ mod tests {
     fn a_decided_card_folds_into_one_line() {
         let card = ApprovalCard {
             number: 4,
-            sensitive: false,
+            base: false,
+            judgement: None,
             kind: "call".into(),
             says: Vec::new(),
             asked: Some("Read .env".into()),
             why: None,
             source: None,
             asker: Some("lead".into()),
-            decision: Some("tree".into()),
+            decision: Some("once".into()),
         };
-        assert_eq!(
-            card.record().as_deref(),
-            Some("Allowed for this tree · Read .env · lead")
-        );
+        assert_eq!(card.record().as_deref(), Some("Allowed · Read .env · lead"));
         let pending = ApprovalCard {
             decision: None,
             ..card

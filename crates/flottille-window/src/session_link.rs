@@ -46,6 +46,8 @@ pub struct TreeAgent {
     pub stopping: bool,
     /// Whether its agent takes images in a prompt; `None` until its process first started.
     pub images: Option<bool>,
+    /// `ask` or `auto`: how the gate answers the calls to judge of the agent.
+    pub gate_mode: Option<String>,
 }
 
 impl TreeAgent {
@@ -68,6 +70,7 @@ impl TreeAgent {
             resumable: agent["resumable"] == true,
             stopping: agent["stopping"] == true,
             images: agent["images"].as_bool(),
+            gate_mode: text(&agent["gate_mode"]),
         }
     }
 }
@@ -84,16 +87,17 @@ pub struct Request {
     pub reasons: Vec<String>,
     /// The agents that passed it up, each with its sentence.
     pub forwards: Vec<(String, String)>,
-    /// It reaches a sensitive place: the daemon never allows it for the tree.
-    pub sensitive: bool,
-    /// `call`, `catalogue` (a line outside the catalogue: once or always) or `action` (a change
-    /// of the project the agent asks for: once).
+    /// In the base: it always comes back to the user, whatever the mode.
+    pub base: bool,
+    /// What the Auto judge said of it, when it was judged: `(by, verdict, reason)`.
+    pub judgement: Option<(String, String, String)>,
+    /// `call`, or `action` (a change of the project the agent asks for).
     pub kind: String,
     /// What it changes, in words, one sentence each.
     pub says: Vec<String>,
     /// When it was asked.
     pub created_at: u64,
-    /// `deny`, `once`, `tree` once decided, `cancelled` when nobody answered it.
+    /// `deny`, `once` once decided, `cancelled` when nobody answered it.
     pub decision: Option<String>,
 }
 
@@ -117,7 +121,15 @@ impl Request {
                 .flatten()
                 .map(|f| (text(&f["by"]), text(&f["why"])))
                 .collect(),
-            sensitive: request["sensitive"] == true,
+            base: request["class"] == "base",
+            judgement: request["judgement"].is_object().then(|| {
+                let judgement = &request["judgement"];
+                (
+                    text(&judgement["by"]),
+                    text(&judgement["verdict"]),
+                    text(&judgement["reason"]),
+                )
+            }),
             kind: request["kind"].as_str().unwrap_or("call").to_owned(),
             says: request["says"]
                 .as_array()
@@ -348,6 +360,7 @@ const TREE_EVENTS: &[&str] = &[
     "agent.failed",
     "agent.ended",
     "agent.resumed",
+    "agent.gate_mode_changed",
     "agent.reported",
     "agent.asked",
     "delivery.queued",

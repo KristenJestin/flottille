@@ -22,6 +22,28 @@ pub const QUALIFIED_ONLY: [&str; 2] = ["opencode", "codex"];
 pub struct Settings {
     enabled: BTreeMap<&'static str, bool>,
     unqualified: Vec<&'static str>,
+    /// The Auto judge the user chose (`[judge]`): none until they choose one.
+    pub judge: Option<Judge>,
+}
+
+/// The model that judges the calls to judge in Auto (`docs/design.md` §7), as `[judge]` holds it.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Judge {
+    pub provider: String,
+    /// The provider's default model when none is named.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+impl Judge {
+    /// Who judged, as a verdict records it: `claude haiku`.
+    pub fn who(&self) -> String {
+        match &self.model {
+            Some(model) => format!("{} {model}", self.provider),
+            None => self.provider.clone(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -39,6 +61,7 @@ impl Default for Settings {
                 .map(|name| (*name, ENABLED_BY_DEFAULT.contains(name)))
                 .collect(),
             unqualified: Vec::new(),
+            judge: None,
         }
     }
 }
@@ -67,10 +90,30 @@ impl Settings {
     /// that a typo is never silently ignored.
     pub fn parse(text: &str) -> Result<Settings, String> {
         let refuse = |message: String| format!("providers.toml: {message}");
-        let reading = toml::Deserializer::parse(text).map_err(|e| refuse(e.message().into()))?;
-        let entries: BTreeMap<String, Entry> = serde_path_to_error::deserialize(reading)
+        let mut table: toml::Table = text
+            .parse()
+            .map_err(|e: toml::de::Error| refuse(e.message().into()))?;
+        let judge = table.remove("judge");
+        let entries: BTreeMap<String, Entry> = serde_path_to_error::deserialize(table)
             .map_err(|error| refuse(format!("{}: {}", error.path(), error.inner().message())))?;
         let mut settings = Settings::default();
+        if let Some(judge) = judge {
+            let judge: Judge = serde_path_to_error::deserialize(judge).map_err(|error| {
+                refuse(format!(
+                    "judge.{}: {}",
+                    error.path(),
+                    error.inner().message()
+                ))
+            })?;
+            if !known(&judge.provider) {
+                return Err(refuse(format!(
+                    "judge.provider: unknown provider {}: the providers are {}",
+                    judge.provider,
+                    NAMES.join(", ")
+                )));
+            }
+            settings.judge = Some(judge);
+        }
         for (name, entry) in entries {
             let known = NAMES.iter().find(|known| **known == name).ok_or_else(|| {
                 refuse(format!(
@@ -115,6 +158,30 @@ pub fn known(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_auto_judge_is_read_from_its_table_and_none_is_chosen_by_default() {
+        assert_eq!(Settings::default().judge, None);
+        let settings = Settings::parse(
+            "[claude]\nenabled = true\n[judge]\nprovider = \"claude\"\nmodel = \"haiku\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            settings.judge,
+            Some(Judge {
+                provider: "claude".into(),
+                model: Some("haiku".into())
+            })
+        );
+        assert!(settings.enabled("claude"));
+        let unknown = Settings::parse("[judge]\nprovider = \"gemini\"\n").unwrap_err();
+        assert!(
+            unknown.starts_with("providers.toml: judge.provider"),
+            "{unknown}"
+        );
+        let key = Settings::parse("[judge]\nprovider = \"claude\"\nwho = 1\n").unwrap_err();
+        assert!(key.contains("judge"), "{key}");
+    }
 
     #[test]
     fn without_a_file_claude_is_enabled_and_opencode_is_not() {

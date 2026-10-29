@@ -11,8 +11,6 @@ use std::time::{Duration, Instant};
 
 use common::User;
 use common::mcp::Mcp;
-use flottille_core::procedure::Mode;
-use flottille_core::project::AgentActions;
 use flottille_ui::AgentState;
 use flottille_ui::omarchy::Environment;
 use flottille_ui::state::icon_id;
@@ -1899,7 +1897,7 @@ fn a_worker_s_request_held_by_the_lead_waits_on_it_then_forwarded_needs_me_with_
         |cx| {
             page.read_with(cx, |p, cx| p.state(&lead, cx)) == Some(AgentState::NeedsYou)
                 && mark_of(&shell, &lead, cx) == Some(AgentState::NeedsYou)
-                && cx.update(|window, _| window.try_find(format!("allow-once-{number}")).is_some())
+                && cx.update(|window, _| window.try_find(format!("allow-{number}")).is_some())
         },
     );
     assert_eq!(
@@ -1938,17 +1936,17 @@ fn approving_once_from_the_card_performs_the_call_and_leaves_the_record(cx: &mut
     let (shell, cx) = open_session(&user, &lead, 1280., cx);
     let number = held_number(mcp.call("fs_read", json!({"path": ".env"})));
     until(&shell, cx, "the card is shown", |cx| {
-        cx.update(|window, _| window.try_find(format!("allow-once-{number}")).is_some())
+        cx.update(|window, _| window.try_find(format!("allow-{number}")).is_some())
     });
     settle(cx);
 
-    cx.update(|window, cx| window.click(format!("allow-once-{number}"), cx));
+    cx.update(|window, cx| window.click(format!("allow-{number}"), cx));
     until(&shell, cx, "the card folds into its record", |cx| {
         cx.update(|window, _| {
             window
                 .try_find(format!("approval-record-{number}"))
                 .is_some()
-                && window.try_find(format!("allow-once-{number}")).is_none()
+                && window.try_find(format!("allow-{number}")).is_none()
         })
     });
     let record = session_page(&shell, cx).read_with(cx, |p, cx| {
@@ -1960,7 +1958,7 @@ fn approving_once_from_the_card_performs_the_call_and_leaves_the_record(cx: &mut
     });
     assert_eq!(
         record.as_deref(),
-        Some("Allowed once · Read .env · the conversation")
+        Some("Allowed · Read .env · the conversation")
     );
     assert!(
         user.call("approval.list", json!({})).unwrap()["requests"]
@@ -1992,7 +1990,7 @@ fn card_for(
     cx: &mut VisualTestContext,
 ) -> flottille_window::session::ApprovalCard {
     until(shell, cx, "the card is shown", |cx| {
-        cx.update(|window, _| window.try_find(format!("allow-once-{number}")).is_some())
+        cx.update(|window, _| window.try_find(format!("allow-{number}")).is_some())
     });
     settle(cx);
     session_page(shell, cx)
@@ -2015,7 +2013,7 @@ fn the_card_of_a_procedure_an_agent_starts_says_what_it_runs_and_is_confirmed_on
     user.call(
         "procedure.add",
         json!({"project": "app", "name": "ship", "description": "Ship the workspace",
-            "instructions": "Push the branch.", "grants": {"push": "ask"}, "children": false}),
+            "instructions": "Push the branch."}),
     )
     .unwrap();
     let (shell, cx) = open_session(&user, &lead, 1280., cx);
@@ -2029,17 +2027,12 @@ fn the_card_of_a_procedure_an_agent_starts_says_what_it_runs_and_is_confirmed_on
         [
             "Start the procedure ship in workspace w: Ship the workspace",
             "Its agent is told: Push the branch.",
-            "Its agents may push the workspace's branch to its remote (git push), after asking \
-             you, each time",
-            "The agents the run starts may do none of it",
         ]
     );
     cx.update(|window, _| {
         assert!(window.find(format!("approval-says-{number}-1")).visible());
-        assert!(window.try_find(format!("allow-tree-{number}")).is_none());
-        assert!(window.try_find(format!("allow-always-{number}")).is_none());
     });
-    cx.update(|window, cx| window.click(format!("allow-once-{number}"), cx));
+    cx.update(|window, cx| window.click(format!("allow-{number}"), cx));
     until(&shell, cx, "the card folds into its record", |cx| {
         cx.update(|window, _| {
             window
@@ -2098,21 +2091,15 @@ fn the_card_of_a_settings_change_or_a_reference_says_what_changes(cx: &mut TestA
                 .find(format!("approval-says-{reference}-0"))
                 .visible()
         );
-        assert!(window.try_find(format!("allow-tree-{reference}")).is_none());
-        assert!(
-            window
-                .try_find(format!("allow-always-{reference}"))
-                .is_none()
-        );
     });
 }
 
-#[gpui_kit::test]
-fn the_card_of_a_line_outside_the_catalogue_in_main_offers_once_and_always(
-    cx: &mut TestAppContext,
-) {
-    let user = team_user();
-    project(&user, "app");
+/// A lead in the project folder of `app`, its MCP session, and its session open in the window.
+fn lead_in_main<'a>(
+    user: &User,
+    cx: &'a mut TestAppContext,
+) -> (String, Mcp, Entity<Shell>, &'a mut VisualTestContext) {
+    project(user, "app");
     let answer = user
         .call(
             "agent.run",
@@ -2120,28 +2107,39 @@ fn the_card_of_a_line_outside_the_catalogue_in_main_offers_once_and_always(
         )
         .unwrap();
     let lead = answer["agent"]["id"].as_str().unwrap().to_owned();
-    let mcp = mcp_session(&user, |prompt| prompt.contains("You are the root"));
+    let mcp = mcp_session(user, |prompt| prompt.contains("You are the root"));
     eventually("the lead's first turn", || {
         user.call("agent.show", json!({"agent": lead})).unwrap()["agent"]["state"] == "idle"
     });
-    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let (shell, cx) = open_session(user, &lead, 1280., cx);
+    (lead, mcp, shell, cx)
+}
 
-    let number = held_number(mcp.call("commands_run", json!({"line": "cat README.md"})));
+#[gpui_kit::test]
+fn writing_in_main_in_ask_makes_a_card_to_judge_with_allow_and_deny_only(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, mcp, shell, cx) = lead_in_main(&user, cx);
+    user.call("agent.mode", json!({"agent": lead, "mode": "ask"}))
+        .unwrap();
+
+    let number = held_number(mcp.call(
+        "fs_write",
+        json!({"path": "notes.txt", "content": "made-up notes"}),
+    ));
     let card = card_for(&shell, number, cx);
 
-    assert_eq!(card.asked.as_deref(), Some("Run cat README.md"));
-    assert_eq!(card.says[0], "Run cat README.md in the project folder");
+    assert!(!card.base);
+    assert_eq!(card.judgement, None, "in Ask, no judge is asked");
     assert_eq!(
-        card.says[1],
-        "Always adds it to the project's catalogue as cat-readme-md. Flottille does not check \
-         that it only reads. It will run in your project folder without asking, for every agent \
-         of this project."
+        text_of(&format!("approval-class-{number}"), cx).as_deref(),
+        Some("To judge")
     );
     cx.update(|window, _| {
-        assert!(window.find(format!("allow-always-{number}")).visible());
-        assert!(window.try_find(format!("allow-tree-{number}")).is_none());
+        assert!(window.find(format!("allow-{number}")).visible());
+        assert!(window.find(format!("deny-{number}")).visible());
+        assert!(window.try_find(format!("approval-base-{number}")).is_none());
     });
-    cx.update(|window, cx| window.click(format!("allow-always-{number}"), cx));
+    cx.update(|window, cx| window.click(format!("allow-{number}"), cx));
     until(&shell, cx, "the card folds into its record", |cx| {
         cx.update(|window, _| {
             window
@@ -2149,49 +2147,116 @@ fn the_card_of_a_line_outside_the_catalogue_in_main_offers_once_and_always(
                 .is_some()
         })
     });
-    let record = session_page(&shell, cx).read_with(cx, |p, cx| {
-        p.conversation()
-            .read(cx)
-            .rows()
-            .iter()
-            .find_map(|row| row.read(cx).card().and_then(|c| c.record()))
+    eventually("the file is written", || {
+        std::fs::read_to_string(user.path("work/app/notes.txt")).is_ok_and(|t| t == "made-up notes")
     });
-    assert_eq!(
-        record.as_deref(),
-        Some("Allowed always, added to the catalogue · Run cat README.md · the conversation")
+}
+
+/// What the mode switch of the open session's composer shows, and the sentence beside it.
+fn mode_shown(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+) -> (Option<String>, Option<String>) {
+    let page = session_page(shell, cx);
+    page.read_with(cx, |page, cx| {
+        let mode = page.reply().unwrap().read(cx).mode.read(cx);
+        (mode.mode().map(str::to_owned), mode.said())
+    })
+}
+
+#[gpui_kit::test]
+fn the_mode_switch_shows_auto_says_once_to_choose_a_judge_and_puts_the_session_in_ask(
+    cx: &mut TestAppContext,
+) {
+    let user = team_user();
+    let (lead, _mcp, shell, cx) = lead_in_main(&user, cx);
+    let no_judge = Some(flottille_window::mode::NO_JUDGE.to_owned());
+    until(
+        &shell,
+        cx,
+        "a new session shows Auto, without a judge",
+        |cx| mode_shown(&shell, cx) == (Some("auto".into()), no_judge.clone()),
     );
-    eventually("the line is in the catalogue", || {
-        std::fs::read_to_string(user.project_file("app"))
-            .unwrap()
-            .contains("[commands.cat-readme-md]")
+    cx.update(|window, _| {
+        assert!(window.find("reply-mode-switch").visible());
+        assert!(window.find("reply-mode-said").visible());
+    });
+
+    cx.update(|window, cx| window.click("reply-mode-switch", cx));
+    eventually("the daemon puts the session in Ask", || {
+        user.call("agent.show", json!({"agent": lead})).unwrap()["agent"]["gate_mode"] == "ask"
+    });
+    until(&shell, cx, "the switch shows Ask, and no sentence", |cx| {
+        mode_shown(&shell, cx) == (Some("ask".into()), None)
+    });
+
+    // The command line changes it too, and the window follows.
+    user.call("agent.mode", json!({"agent": lead, "mode": "auto"}))
+        .unwrap();
+    until(&shell, cx, "the switch follows the daemon", |cx| {
+        mode_shown(&shell, cx).0.as_deref() == Some("auto")
     });
 }
 
 #[gpui_kit::test]
-fn a_sensitive_line_outside_the_catalogue_is_not_offered_always(cx: &mut TestAppContext) {
-    let user = team_user();
-    project(&user, "app");
-    let answer = user
-        .call(
-            "agent.run",
-            json!({"project": "app", "message": "lead the work"}),
-        )
-        .unwrap();
-    let lead = answer["agent"]["id"].as_str().unwrap().to_owned();
-    let mcp = mcp_session(&user, |prompt| prompt.contains("You are the root"));
-    eventually("the lead's first turn", || {
-        user.call("agent.show", json!({"agent": lead})).unwrap()["agent"]["state"] == "idle"
+fn the_auto_judge_is_chosen_in_settings_which_say_it_uses_the_quota(cx: &mut TestAppContext) {
+    let user = providers_user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_settings(&shell, cx);
+    until(&shell, cx, "the judge's picker shows none", |cx| {
+        page.read_with(cx, |page, _| page.judge_shown().0 == "None")
     });
-    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    cx.update(|window, _| assert!(window.find("judge-provider").visible()));
+    assert_eq!(
+        text_of("judge-quota", cx).as_deref(),
+        Some(flottille_window::settings::JUDGE_QUOTA)
+    );
+
+    cx.update(|window, cx| window.click("judge-provider", cx));
+    cx.update(|window, cx| window.click("judge-choice-opencode", cx));
+    until(&shell, cx, "the page shows the judge chosen", |cx| {
+        page.read_with(cx, |page, _| {
+            page.judge_shown() == ("OpenCode".into(), Some("default model".into()))
+        })
+    });
+    let file = std::fs::read_to_string(user.path("config/flottille/providers.toml")).unwrap();
+    assert!(
+        file.contains("[judge]") && file.contains("provider = \"opencode\""),
+        "{file}"
+    );
+    cx.update(|window, _| assert!(window.find("judge-model").visible()));
+
+    cx.update(|window, cx| window.click("judge-provider", cx));
+    cx.update(|window, cx| window.click("judge-choice-none", cx));
+    until(&shell, cx, "the page shows no judge again", |cx| {
+        page.read_with(cx, |page, _| page.judge_shown().0 == "None")
+    });
+    let file = std::fs::read_to_string(user.path("config/flottille/providers.toml")).unwrap();
+    assert!(!file.contains("[judge]"), "{file}");
+}
+
+#[gpui_kit::test]
+fn a_base_card_in_auto_is_distinct_and_says_why_it_always_comes_back(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (_lead, mcp, shell, cx) = lead_in_main(&user, cx);
 
     let number = held_number(mcp.call("commands_run", json!({"line": "cat .env"})));
     let card = card_for(&shell, number, cx);
 
-    assert!(card.sensitive);
+    assert!(card.base);
+    assert_eq!(
+        text_of(&format!("approval-class-{number}"), cx).as_deref(),
+        Some("Base")
+    );
+    assert_eq!(
+        text_of(&format!("approval-base-{number}"), cx).as_deref(),
+        Some(flottille_window::session::BASE_SAYS)
+    );
     cx.update(|window, _| {
-        assert!(window.find(format!("allow-once-{number}")).visible());
-        assert!(window.try_find(format!("allow-always-{number}")).is_none());
-        assert!(window.try_find(format!("allow-tree-{number}")).is_none());
+        assert!(window.find(format!("approval-base-{number}")).visible());
+        assert!(window.find(format!("allow-{number}")).visible());
+        assert!(window.find(format!("deny-{number}")).visible());
     });
 }
 
@@ -2532,7 +2597,7 @@ fn a_card_appears_while_another_session_streams_without_pause(cx: &mut TestAppCo
     let number = held_number(mcp.call("fs_read", json!({"path": ".env"})));
     let asked = Instant::now();
     until(&shell, cx, "the card is shown", |cx| {
-        cx.update(|window, _| window.try_find(format!("allow-once-{number}")).is_some())
+        cx.update(|window, _| window.try_find(format!("allow-{number}")).is_some())
     });
 
     let state =
@@ -2725,7 +2790,7 @@ fn an_answered_request_keeps_its_record_when_the_page_is_opened_again(cx: &mut T
         records,
         [
             "Denied · Read .env · read the settings",
-            "Allowed once · Read .env · the conversation"
+            "Allowed · Read .env · the conversation"
         ]
     );
 }
@@ -2818,12 +2883,12 @@ fn an_answer_given_on_one_session_s_page_is_not_applied_to_another(cx: &mut Test
     let (shell, cx) = open_session(&user, &lead, 1280., cx);
     let number = held_number(mcp.call("fs_read", json!({"path": ".env"})));
     until(&shell, cx, "the card is shown", |cx| {
-        cx.update(|window, _| window.try_find(format!("allow-once-{number}")).is_some())
+        cx.update(|window, _| window.try_find(format!("allow-{number}")).is_some())
     });
     settle(cx);
 
     // Answered, then another session opened before the daemon's answer is taken.
-    cx.update(|window, cx| window.click(format!("allow-once-{number}"), cx));
+    cx.update(|window, cx| window.click(format!("allow-{number}"), cx));
     cx.update(|window, cx| window.click(session_id(&other), cx));
     eventually("the request is decided", || {
         user.call("approval.list", json!({})).unwrap()["requests"]
@@ -2876,35 +2941,6 @@ fn text_typed_while_a_reply_sends_is_kept(cx: &mut TestAppContext) {
     );
     let prompts = user.received_requests("session/prompt");
     assert!(prompts.iter().any(|p| p.to_string().contains("first")));
-}
-
-#[gpui_kit::test]
-fn the_card_offers_allow_for_this_tree_only_when_the_place_is_not_sensitive(
-    cx: &mut TestAppContext,
-) {
-    let user = team_user();
-    let (lead, mcp, _) = lead_in_w(&user);
-    let (shell, cx) = open_session(&user, &lead, 1280., cx);
-    let sensitive = held_number(mcp.call("fs_read", json!({"path": ".env"})));
-    let outside = user.path("elsewhere/notes.txt");
-    let plain = held_number(mcp.call(
-        "fs_write",
-        json!({"path": outside, "content": "made-up notes"}),
-    ));
-    until(&shell, cx, "both cards are shown", |cx| {
-        cx.update(|window, _| {
-            window.try_find(format!("allow-once-{sensitive}")).is_some()
-                && window.try_find(format!("allow-once-{plain}")).is_some()
-        })
-    });
-
-    cx.update(|window, _| {
-        assert!(
-            window.try_find(format!("allow-tree-{sensitive}")).is_none(),
-            "never for a sensitive place"
-        );
-        assert!(window.try_find(format!("allow-tree-{plain}")).is_some());
-    });
 }
 
 // Providers (#27).
@@ -5698,7 +5734,7 @@ fn agents_started(user: &User) -> usize {
 }
 
 #[gpui_kit::test]
-fn a_procedure_added_from_a_template_appears_on_the_page_with_its_grants(cx: &mut TestAppContext) {
+fn a_procedure_added_from_a_template_appears_on_the_page(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
@@ -5724,13 +5760,6 @@ fn a_procedure_added_from_a_template_appears_on_the_page_with_its_grants(cx: &mu
     let listed = procedures_listed(&shell, cx);
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].name, "open-prs");
-    assert_eq!(listed[0].mode_of("push"), Some("ask"));
-    assert_eq!(listed[0].mode_of("pr-create"), Some("ask"));
-    assert!(
-        text_of("procedure-grants-open-prs", cx)
-            .unwrap()
-            .contains("push (ask)")
-    );
     assert!(
         text_of("procedure-description-open-prs", cx)
             .unwrap()
@@ -5772,7 +5801,6 @@ fn a_blank_procedure_is_written_from_the_form_and_a_refusal_says_why(cx: &mut Te
     cx.update(|window, cx| {
         instructions.update(cx, |f, cx| f.set_value("Remove the dead code.", window, cx))
     });
-    cx.update(|window, cx| window.click("grant-commit-allow", cx));
     cx.update(|window, cx| window.click("save-procedure", cx));
     until(&shell, cx, "the procedure is listed", |cx| {
         !procedures_listed(&shell, cx).is_empty()
@@ -5780,7 +5808,7 @@ fn a_blank_procedure_is_written_from_the_form_and_a_refusal_says_why(cx: &mut Te
 
     let listed = procedures_listed(&shell, cx);
     assert_eq!(listed[0].name, "tidy");
-    assert_eq!(listed[0].mode_of("commit"), Some("allow"));
+    assert_eq!(listed[0].description, "Tidy the branch");
     assert!(
         !section.read_with(cx, |s, _| s.is_open()),
         "the modal closed"
@@ -5788,7 +5816,7 @@ fn a_blank_procedure_is_written_from_the_form_and_a_refusal_says_why(cx: &mut Te
 }
 
 #[gpui_kit::test]
-fn editing_a_grant_in_the_modal_writes_the_project_s_file_and_a_removal_asks_twice(
+fn editing_a_procedure_in_the_modal_writes_the_project_s_file_and_a_removal_asks_twice(
     cx: &mut TestAppContext,
 ) {
     let user = user();
@@ -5813,32 +5841,18 @@ fn editing_a_grant_in_the_modal_writes_the_project_s_file_and_a_removal_asks_twi
     });
     settle(cx);
     let section = page_of(&shell, cx).read_with(cx, |page, _| page.procedures().clone());
-    use flottille_core::procedure::{Grant, Mode};
-    assert_eq!(
-        section.read_with(cx, |s, _| s.grant_in_form(Grant::WorkspaceRemove)),
-        Some(Mode::Allow),
-        "the form starts from what the file says"
-    );
-    // The grants are longer than the window is high: the form scrolls to the last of them.
-    cx.update(|window, cx| {
-        window.scroll(
-            "procedure-form",
-            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-600.))),
-            cx,
-        )
-    });
-    settle(cx);
-    cx.update(|window, cx| window.click("grant-workspace-remove-ask", cx));
-    cx.update(|window, cx| window.click("grant-commit-allow", cx));
+    let description = section.read_with(cx, |s, _| s.description_field().unwrap().clone());
+    cx.update(|window, cx| description.update(cx, |f, cx| f.set_value("Close it all", window, cx)));
     cx.update(|window, cx| window.click("save-procedure", cx));
     until(&shell, cx, "the file says so", |_| {
-        let file = std::fs::read_to_string(user.project_file("atlas")).unwrap();
-        file.contains("workspace-remove = \"ask\"") && file.contains("commit = \"allow\"")
+        std::fs::read_to_string(user.project_file("atlas"))
+            .unwrap()
+            .contains("description = \"Close it all\"")
     });
     until(&shell, cx, "the list follows", |cx| {
         procedures_listed(&shell, cx)
             .first()
-            .is_some_and(|p| p.mode_of("workspace-remove") == Some("ask"))
+            .is_some_and(|p| p.description == "Close it all")
     });
     settle(cx);
 
@@ -5988,7 +6002,7 @@ fn picking_a_procedure_with_slash_shows_the_confirmation_and_starts_nothing_befo
     cx.simulate_keystrokes("down");
     cx.simulate_keystrokes("enter");
     let run = shell.read_with(cx, |s, _| s.procedure_run().clone());
-    until(&shell, cx, "the grants are shown", |cx| {
+    until(&shell, cx, "the procedure is shown", |cx| {
         run.read_with(cx, |run, _| run.shown().is_some())
     });
     settle(cx);
@@ -5998,9 +6012,11 @@ fn picking_a_procedure_with_slash_shows_the_confirmation_and_starts_nothing_befo
         assert_eq!((run.project(), run.workspace()), ("atlas", "login"));
         assert_eq!(run.chosen(), Some("open-prs"));
     });
-    let said = text_of("run-grant-push", cx).unwrap();
-    assert!(said.contains("Push the workspace's branch"), "{said}");
-    assert!(said.contains("after asking me"), "ask in words: {said}");
+    let said = text_of("run-says", cx).unwrap();
+    assert!(
+        said.starts_with("It grants nothing"),
+        "no grants screen: {said}"
+    );
     assert!(
         text_of("run-notice", cx)
             .unwrap()
@@ -6052,7 +6068,7 @@ fn confirm_runs_the_procedure_picked_with_slash_in_the_session_s_workspace(
     });
     cx.simulate_keystrokes("enter");
     let run = shell.read_with(cx, |s, _| s.procedure_run().clone());
-    until(&shell, cx, "the grants are shown", |cx| {
+    until(&shell, cx, "the procedure is shown", |cx| {
         run.read_with(cx, |run, _| run.shown().is_some())
     });
     settle(cx);
@@ -6071,18 +6087,14 @@ fn confirm_runs_the_procedure_picked_with_slash_in_the_session_s_workspace(
     let held = user.call("procedure.of", json!({"agent": agent})).unwrap();
     assert_eq!(held["run"]["procedure"], "open-prs");
     assert_eq!(held["run"]["workspace"], "login");
-    assert_eq!(
-        held["run"]["grants"],
-        json!({"pr-create": "ask", "push": "ask"})
-    );
+    assert!(held["run"].get("grants").is_none(), "a run grants nothing");
     assert!(!run.read_with(cx, |run, _| run.is_open()));
-    until(&shell, cx, "the rail shows the grants", |cx| {
-        cx.update(|window, _| window.try_find("rail-run-grant-push").is_some())
+    until(&shell, cx, "the rail shows the run", |cx| {
+        cx.update(|window, _| window.try_find("rail-run-title").is_some())
     });
-    assert!(
-        text_of("rail-run-grant-pr-create", cx)
-            .unwrap()
-            .contains("after asking me")
+    assert_eq!(
+        text_of("rail-run-title", cx).as_deref(),
+        Some("Running open-prs")
     );
 }
 
@@ -6150,75 +6162,6 @@ fn an_unknown_slash_word_is_sent_as_text(cx: &mut TestAppContext) {
     });
     assert_eq!(agents_started(&user), before);
     assert!(!shell.read_with(cx, |s, cx| s.procedure_run().read(cx).is_open()));
-}
-
-#[gpui_kit::test]
-fn the_editor_writes_ask_allow_and_removes_a_grant_from_the_three_choices(cx: &mut TestAppContext) {
-    let user = user();
-    project(&user, "atlas");
-    user.call(
-        "procedure.add",
-        json!({"project": "atlas", "template": "close"}),
-    )
-    .unwrap();
-    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    open_project(&shell, "atlas", cx);
-    until(&shell, cx, "the procedure is listed", |cx| {
-        !procedures_listed(&shell, cx).is_empty()
-    });
-    settle(cx);
-    cx.update(|window, cx| window.click("edit-procedure-close", cx));
-    let section = page_of(&shell, cx).read_with(cx, |page, _| page.procedures().clone());
-    until(&shell, cx, "the form is open on it", |cx| {
-        section.read_with(cx, |s, _| s.is_open())
-    });
-    settle(cx);
-
-    // Each grant is a sentence of what a run may do, with three choices in words.
-    let push = text_of("grant-push", cx).unwrap();
-    assert!(push.contains("Push the workspace's branch"), "{push}");
-    let merge = text_of("grant-pr-merge-squash", cx).unwrap();
-    assert!(
-        merge.contains("Merge the pull requests, by squash"),
-        "{merge}"
-    );
-    cx.update(|window, _| {
-        for (choice, words) in [
-            ("off", "No"),
-            ("ask", "After asking me"),
-            ("allow", "On its own"),
-        ] {
-            let found = window.find(format!("grant-push-{choice}"));
-            assert_eq!(found.label(), Some(words), "{choice}");
-        }
-        assert!(
-            window.try_find("procedure-children").is_none(),
-            "no switch for the children"
-        );
-    });
-
-    cx.update(|window, cx| {
-        window.scroll(
-            "procedure-form",
-            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-600.))),
-            cx,
-        )
-    });
-    settle(cx);
-    cx.update(|window, cx| window.click("grant-workspace-remove-off", cx));
-    cx.update(|window, cx| window.click("grant-push-ask", cx));
-    cx.update(|window, cx| window.click("grant-commit-allow", cx));
-    cx.update(|window, cx| window.click("save-procedure", cx));
-    until(&shell, cx, "the file says so", |_| {
-        let file = std::fs::read_to_string(user.project_file("atlas")).unwrap();
-        file.contains("push = \"ask\"") && file.contains("commit = \"allow\"")
-    });
-    let file = std::fs::read_to_string(user.project_file("atlas")).unwrap();
-    assert!(!file.contains("workspace-remove"), "{file}");
-    assert!(
-        !file.contains("\nchildren"),
-        "the default is not written: {file}"
-    );
 }
 
 #[gpui_kit::test]
@@ -6524,79 +6467,6 @@ fn the_settings_page_proposes_the_remote_s_forge_and_nothing_is_read_until_it_is
     assert!(file.contains("forge = {"), "{file}");
     page.read_with(cx, |page, _| {
         assert!(!page.repositories()[0].proposed(), "now declared");
-    });
-}
-
-#[gpui_kit::test]
-fn the_settings_page_sets_a_family_to_run_on_its_own(cx: &mut TestAppContext) {
-    let user = user();
-    project(&user, "atlas");
-    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    let page = open_project_settings(&shell, "atlas", cx);
-    page.read_with(cx, |page, _| {
-        assert_eq!(page.agent_actions(), AgentActions::default());
-    });
-    cx.update(|window, _| {
-        for family in ["procedures", "settings", "references"] {
-            assert!(window.try_find(format!("on-its-own-{family}")).is_some());
-        }
-    });
-
-    cx.update(|window, cx| window.click("on-its-own-procedures", cx));
-    until(&shell, cx, "the switch is saved", |cx| {
-        page.read_with(cx, |page, _| page.agent_actions().procedures == Mode::Allow)
-    });
-
-    let saved = user
-        .call("project.settings", json!({"name": "atlas"}))
-        .unwrap();
-    assert_eq!(
-        saved["agent_actions"],
-        json!({"procedures": "allow", "settings": "ask", "references": "ask"})
-    );
-    let file = std::fs::read_to_string(user.project_file("atlas")).unwrap();
-    assert!(
-        file.contains("[agent_actions]\nprocedures = \"allow\""),
-        "{file}"
-    );
-    assert!(!file.contains("forge"), "the forges wait for Save: {file}");
-
-    // Flipped back, the file says nothing of it: every family asks.
-    cx.update(|window, cx| window.click("on-its-own-procedures", cx));
-    until(&shell, cx, "the switch is saved again", |cx| {
-        page.read_with(cx, |page, _| {
-            page.agent_actions() == AgentActions::default()
-        })
-    });
-    let file = std::fs::read_to_string(user.project_file("atlas")).unwrap();
-    assert!(!file.contains("agent_actions"), "{file}");
-}
-
-#[gpui_kit::test]
-fn the_procedures_switch_says_an_agent_may_then_start_any_procedure_anywhere(
-    cx: &mut TestAppContext,
-) {
-    let user = user();
-    project(&user, "atlas");
-    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    open_project_settings(&shell, "atlas", cx);
-
-    cx.update(|window, _| {
-        assert!(window.find("agent-actions-warning-procedures").visible());
-        assert_eq!(
-            ProjectSettingsPage::warning("procedures"),
-            Some(
-                "An agent may then start any procedure in any of the project's workspaces without \
-             asking, with the procedure's own grants."
-            )
-        );
-        for family in ["settings", "references"] {
-            assert!(
-                window
-                    .try_find(format!("agent-actions-warning-{family}"))
-                    .is_none()
-            );
-        }
     });
 }
 

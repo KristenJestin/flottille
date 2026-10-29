@@ -92,15 +92,6 @@ pub struct ProjectSettings {
     pub tracker: Option<crate::declared::ProjectTracker>,
 }
 
-/// `project.set_agent_actions`: what the project's agents do without asking. The user's door
-/// alone sets it: no tool of an agent does.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProjectAgentActions {
-    pub name: String,
-    pub agent_actions: crate::project::AgentActions,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepositorySetting {
