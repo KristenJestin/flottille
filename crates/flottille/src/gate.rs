@@ -644,40 +644,88 @@ fn run(call: &Call) -> Verdict {
             }
         }
     }
-    // What deletes the untracked files of the folder it runs in names none: its folder is what
-    // it takes away.
-    if layers
+    // What deletes untracked files names none: the folder it runs in, or its whole worktree, is
+    // what it takes away.
+    let untracked: Vec<Untracked> = layers
         .iter()
         .flat_map(|layer| suffixes(layer))
-        .any(|(_, layer)| removes_untracked(layer))
-        && let Some(why) = call
-            .paths
-            .first()
-            .and_then(|folder| above_own(call.own, folder))
-    {
-        found.base(why);
+        .filter_map(|(_, layer)| removes_untracked(layer))
+        .collect();
+    if let Some(folder) = call.paths.first() {
+        let mut taken = Vec::new();
+        if untracked.contains(&Untracked::Folder) {
+            taken.push(folder.clone());
+        }
+        if untracked.contains(&Untracked::Worktree) {
+            taken.push(call.grant.place.at(&top(&call.grant.place, &folder.path)));
+        }
+        if let Some(why) = taken.iter().find_map(|taken| above_own(call.own, taken)) {
+            found.base(why);
+        }
     }
     found.verdict(Kind::Call)
 }
 
-/// Whether a layer deletes the untracked files of its folder: every `git clean`, a `git stash`
-/// that takes them (`-u`, `--include-untracked`, `-a`, `--all`).
-fn removes_untracked(layer: &[String]) -> bool {
+/// Where a layer deletes untracked files.
+#[derive(Debug, PartialEq)]
+enum Untracked {
+    /// In the folder it runs in: `git clean`.
+    Folder,
+    /// In the whole worktree: a `git stash` that takes them (`-u`, `--include-untracked`, `-a`,
+    /// `--all`), a `git clean` of a pathspec from the top (`:/`, `:(top)`).
+    Worktree,
+}
+
+/// Whether a layer deletes untracked files, and where.
+fn removes_untracked(layer: &[String]) -> Option<Untracked> {
     if base(&layer[0]) != "git" {
-        return false;
+        return None;
     }
     let args = &layer[1..];
     let (at, _) = git_globals(args);
     let rest = args.get(at + 1..).unwrap_or_default();
     match args.get(at).map(String::as_str) {
-        Some("clean") => true,
-        Some("stash") => {
-            rest.iter().take_while(|word| *word != "--").any(|word| {
+        Some("clean") if rest.iter().any(|word| from_top(word)) => Some(Untracked::Worktree),
+        Some("clean") => Some(Untracked::Folder),
+        Some("stash")
+            if rest.iter().take_while(|word| *word != "--").any(|word| {
                 abbreviates(word, "include-untracked", 1) || abbreviates(word, "all", 1)
-            }) || shorts(rest).any(|short| short.contains(['u', 'a']))
+            }) || shorts(rest).any(|short| short.contains(['u', 'a'])) =>
+        {
+            Some(Untracked::Worktree)
         }
-        _ => false,
+        _ => None,
     }
+}
+
+/// Whether a pathspec is taken from the top of the worktree: the magic `/` in its short form
+/// (`:/`, `:!/x`), `top` in its long one (`:(top,exclude)`).
+fn from_top(word: &str) -> bool {
+    let Some(magic) = word.strip_prefix(':') else {
+        return false;
+    };
+    match magic.strip_prefix('(') {
+        Some(long) => long
+            .split(')')
+            .next()
+            .is_some_and(|list| list.split(',').any(|word| word.trim() == "top")),
+        None => magic
+            .chars()
+            .take_while(|c| "/!^".contains(*c))
+            .any(|c| c == '/'),
+    }
+}
+
+/// The top of the worktree that holds `folder`: the deepest of the place's repositories that
+/// holds it, or the place's own folder.
+fn top(place: &place::Place, folder: &Path) -> PathBuf {
+    place
+        .repositories
+        .iter()
+        .map(|(_, repository)| place::real_path(repository).unwrap_or_else(|_| repository.clone()))
+        .filter(|repository| folder.starts_with(repository))
+        .max_by_key(|repository| repository.components().count())
+        .unwrap_or_else(|| place.root.clone())
 }
 
 /// What a layer of a line does, by its program.
@@ -2567,6 +2615,8 @@ mod tests {
         /// Where the system's programs are: a folder beside the project, every known program in it.
         search: std::ffi::OsString,
         groups: Vec<u32>,
+        /// Where a run runs, relative to the place.
+        folder: String,
     }
 
     impl Fixture {
@@ -2618,6 +2668,7 @@ mod tests {
                 pushed: false,
                 search: bin.into_os_string(),
                 groups: Vec::new(),
+                folder: ".".into(),
             }
         }
 
@@ -2661,7 +2712,11 @@ mod tests {
                         None => (args["line"].as_str().unwrap().to_owned(), None),
                     };
                     let words = flottille_core::command::split_line(&line).unwrap_or_default();
-                    (words, vec![place.resolve(&self.root, ".")], command)
+                    (
+                        words,
+                        vec![place.resolve(&self.root, &self.folder)],
+                        command,
+                    )
                 }
                 // As `mcp::classify` resolves what a write sets.
                 _ => match crate::actions::sets(&self.commands, tool, &args) {
@@ -4085,6 +4140,31 @@ mod tests {
         }
         // The file tools still refuse it.
         assert!(denied(&fixture.file("fs_write", "m/../notes.md")));
+    }
+
+    #[test]
+    fn deleting_the_untracked_files_of_the_whole_worktree_checks_its_top() {
+        let mut fixture = Fixture::workspace();
+        fixture.own = vec![fixture.root.join("sub/flottille")];
+        std::fs::create_dir_all(&fixture.own[0]).unwrap();
+        fixture.folder = "src".into();
+        for line in [
+            "git stash -u",
+            "git stash push --all",
+            "git clean -fdx :/",
+            "git clean -fdx :(top)",
+            "git clean -fdx -- :(top,exclude)x",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains("Flottille's own folders"),
+                "{line}: {verdict:?}"
+            );
+        }
+        // Without a pathspec, `git clean` cleans the folder it runs in only.
+        let verdict = fixture.run("git clean -fdx");
+        assert!(!base_class(&verdict), "{verdict:?}");
     }
 
     #[test]

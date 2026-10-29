@@ -453,8 +453,11 @@ says who answers a call to judge (`docs/design.md` §7.1).
      -r` of it, `fs_write` over it), which would take its configuration or data away: by a file
      tool that writes, or by a run that is not known to only read and names it as a word (the
      folder a run starts in may hold Flottille's: a project in the home folder). What deletes the
-     untracked files of the folder it runs in without naming it (every `git clean`, `git stash`
-     with `-u`, `--include-untracked`, `-a` or `--all`) counts that folder;
+     untracked files without naming where counts the folder it takes them from: the folder it
+     runs in for a `git clean`, the top of its worktree (the deepest of the place's repositories
+     holding that folder, else the place's own) for a `git stash` with `-u`,
+     `--include-untracked`, `-a` or `--all`, and for a `git clean` of a pathspec from the top
+     (`:/`, `:(top)`, `:(top,…)`);
    - a path in `/proc` through what of any process leads elsewhere on the disk: its `root`,
      `cwd`, `fd`, `exe` or `map_files` (`/proc/self/root/…`, `/proc/<pid>/cwd/…`), under any
      name it is reached by (`/dev/fd/3`, a link to `/proc/self/cwd`; `/dev/stdin` for a file
