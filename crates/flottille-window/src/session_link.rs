@@ -150,22 +150,29 @@ impl Request {
     pub fn asked(&self) -> String {
         let field = |name: &str| self.call[name].as_str().map(str::to_owned);
         match (self.tool.as_str(), field("line"), field("path")) {
-            ("commands_run", Some(line), _) => format!("Run {line}"),
-            ("commands_run", None, _) => match field("name") {
+            ("run", Some(line), _) => format!("Run {line}"),
+            ("run", None, _) => match field("task") {
                 Some(name) => format!("Run {name}"),
-                None => format!("commands_run {}", one_line(&self.call)),
+                None => format!("run {}", one_line(&self.call)),
             },
             ("fs_read" | "fs_list" | "search", _, Some(path)) => format!("Read {path}"),
             ("fs_write" | "fs_edit", _, Some(path)) => format!("Write {path}"),
-            ("skills" | "commands" | "project", _, _) => {
+            ("tasks" | "skills" | "commands" | "setup" | "project", _, _) => {
                 let name = field("name").unwrap_or_default();
-                let what = if self.tool == "skills" {
-                    "skill"
-                } else {
-                    "command"
+                let what = match self.tool.as_str() {
+                    "skills" => "skill",
+                    "tasks" => "task",
+                    _ => "command",
                 };
+                let number = self.call["number"].as_u64().unwrap_or_default();
                 match field("action").as_deref() {
                     Some("set_settings") => "Change the project's settings".into(),
+                    Some("add") if self.tool == "setup" => "Add a setup step".into(),
+                    Some("edit") if self.tool == "setup" => format!("Edit setup step {number}"),
+                    Some("remove") if self.tool == "setup" => {
+                        format!("Remove setup step {number}")
+                    }
+                    Some("move") => format!("Move setup step {number}"),
                     Some("add") => format!("Add the {what} {name}"),
                     Some("edit") => format!("Edit the {what} {name}"),
                     Some("remove") => format!("Remove the {what} {name}"),

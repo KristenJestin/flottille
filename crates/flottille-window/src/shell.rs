@@ -766,6 +766,59 @@ impl Shell {
                     section.update(cx, |section, cx| section.written(refused, cx));
                 }
             }
+            Outcome::Tasks { project, listed } => {
+                if let Some(page) = self.settings_of_project(&project, cx) {
+                    let section = page.read(cx).tasks().clone();
+                    section.update(cx, |section, cx| section.listed(listed.clone(), cx));
+                }
+                if let Some(tasks) = self.project_tasks_of(&project, cx) {
+                    tasks.update(cx, |tasks, cx| tasks.listed(listed, cx));
+                }
+            }
+            Outcome::TaskWritten { project, refused } => {
+                if let Some(page) = self.settings_of_project(&project, cx) {
+                    let section = page.read(cx).tasks().clone();
+                    section.update(cx, |section, cx| section.written(refused, cx));
+                }
+            }
+            Outcome::TaskRun {
+                project,
+                name,
+                refused,
+            } => {
+                if let Some(tasks) = self.project_tasks_of(&project, cx) {
+                    let _ = name;
+                    tasks.update(cx, |tasks, cx| tasks.started(refused, cx));
+                }
+            }
+            Outcome::ProjectRuns {
+                project,
+                listed,
+                output,
+            } => {
+                if let Some(tasks) = self.project_tasks_of(&project, cx) {
+                    tasks.update(cx, |tasks, cx| {
+                        tasks.runs_listed(listed, output.map(|o| *o), cx)
+                    });
+                }
+            }
+            Outcome::ProjectRunAnswered { project, refused } => {
+                if let Some(tasks) = self.project_tasks_of(&project, cx) {
+                    tasks.update(cx, |tasks, cx| tasks.run_answered(refused, cx));
+                }
+            }
+            Outcome::Setup { project, listed } => {
+                if let Some(page) = self.settings_of_project(&project, cx) {
+                    let section = page.read(cx).setup().clone();
+                    section.update(cx, |section, cx| section.listed(listed, cx));
+                }
+            }
+            Outcome::SetupWritten { project, refused } => {
+                if let Some(page) = self.settings_of_project(&project, cx) {
+                    let section = page.read(cx).setup().clone();
+                    section.update(cx, |section, cx| section.written(refused, cx));
+                }
+            }
             Outcome::WorkspaceDone { project, name } => {
                 self.workspace_answered(&project, &name, None, window, cx)
             }
@@ -773,6 +826,16 @@ impl Shell {
                 self.workspace_answered(&project, &name, Some(&why), window, cx)
             }
         }
+    }
+
+    /// The tasks of the open project page, when it is `project`'s.
+    fn project_tasks_of(
+        &self,
+        project: &str,
+        cx: &App,
+    ) -> Option<Entity<crate::tasks::ProjectTasks>> {
+        let page = self.main.read(cx).project_page()?.read(cx);
+        (page.name() == project).then(|| page.tasks().clone())
     }
 
     /// The open settings page, when it is `project`'s.
@@ -1145,7 +1208,13 @@ impl Shell {
             self.actions.send(Command::Commands {
                 project: project.clone(),
             });
-            self.actions.send(Command::Skills { project });
+            self.actions.send(Command::Skills {
+                project: project.clone(),
+            });
+            self.actions.send(Command::Tasks {
+                project: project.clone(),
+            });
+            self.actions.send(Command::Setup { project });
         }
     }
 

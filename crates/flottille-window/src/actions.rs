@@ -18,8 +18,10 @@ use serde_json::{Value, json};
 use crate::commands::CommandInfo;
 use crate::link::{Conn, Connect, Update};
 use crate::rules::Shown;
+use crate::runs::{CommandOutput, CommandRow};
 use crate::session_link::{PullRequest, pull_requests};
 use crate::skills::SkillInfo;
+use crate::tasks::TaskInfo;
 
 /// Where a session is started.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -156,6 +158,43 @@ pub enum Command {
     /// The project's skills.
     Skills {
         project: String,
+    },
+    /// The project's tasks.
+    Tasks {
+        project: String,
+    },
+    /// A change to the tasks: `task.add`, `task.edit` or `task.remove`, with its parameters.
+    TaskWrite {
+        project: String,
+        method: &'static str,
+        params: Value,
+    },
+    /// Runs a task in the project folder, for the user.
+    RunTask {
+        project: String,
+        name: String,
+    },
+    /// The tasks the user ran in the project, and the output of the one whose panel is open.
+    ProjectRuns {
+        project: String,
+        output: Option<String>,
+    },
+    /// Stops a task the user ran and everything it started, or dismisses one that ended.
+    ProjectRun {
+        project: String,
+        run: String,
+        dismiss: bool,
+    },
+    /// The project's setup.
+    Setup {
+        project: String,
+    },
+    /// A change to the setup: `setup.add`, `setup.edit`, `setup.remove` or `setup.move`, with
+    /// its parameters.
+    SetupWrite {
+        project: String,
+        method: &'static str,
+        params: Value,
     },
     /// One skill whole (a text skill's text), to edit it.
     SkillRead {
@@ -397,6 +436,41 @@ pub enum Outcome {
     },
     /// A change to the skills was made, or refused with why.
     SkillWritten {
+        project: String,
+        refused: Option<String>,
+    },
+    Tasks {
+        project: String,
+        listed: Result<Vec<TaskInfo>, String>,
+    },
+    /// A change to the tasks was made, or refused with why.
+    TaskWritten {
+        project: String,
+        refused: Option<String>,
+    },
+    /// A task was started for the user, or the daemon refused with why.
+    TaskRun {
+        project: String,
+        name: String,
+        refused: Option<String>,
+    },
+    /// The tasks the user ran in the project, and the output asked for.
+    ProjectRuns {
+        project: String,
+        listed: Result<Vec<CommandRow>, String>,
+        output: Option<Box<CommandOutput>>,
+    },
+    /// A task the user ran was stopped or dismissed, or the daemon refused with why.
+    ProjectRunAnswered {
+        project: String,
+        refused: Option<String>,
+    },
+    Setup {
+        project: String,
+        listed: Result<Vec<flottille_core::project::SetupStep>, String>,
+    },
+    /// A change to the setup was made, or refused with why.
+    SetupWritten {
         project: String,
         refused: Option<String>,
     },
@@ -864,6 +938,120 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 Ok(Err(why)) | Err(why) => Some(why),
             };
             Outcome::SkillWritten { project, refused }
+        }
+        Command::Tasks { project } => {
+            let listed = ask_alone(
+                connect,
+                "task.list",
+                json!({"project": project}),
+                bounds.quick,
+            );
+            Outcome::Tasks {
+                listed: listed.and_then(|listed| listed).map(|listed| {
+                    listed["tasks"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(TaskInfo::of)
+                        .collect()
+                }),
+                project,
+            }
+        }
+        Command::TaskWrite {
+            project,
+            method,
+            params,
+        } => {
+            let refused = match ask_alone(connect, method, params, bounds.quick) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::TaskWritten { project, refused }
+        }
+        Command::RunTask { project, name } => {
+            let refused = match ask_alone(
+                connect,
+                "task.run",
+                json!({"project": project, "name": name}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::TaskRun {
+                project,
+                name,
+                refused,
+            }
+        }
+        Command::ProjectRuns { project, output } => {
+            let listed = ask_alone(
+                connect,
+                "run.list",
+                json!({"project": project, "user": true, "ended": true}),
+                bounds.quick,
+            );
+            let output = output.and_then(|run| {
+                match ask_alone(connect, "run.output", json!({"run": run}), bounds.quick) {
+                    Ok(Ok(output)) => Some(Box::new(CommandOutput::of(&output))),
+                    Ok(Err(_)) | Err(_) => None,
+                }
+            });
+            Outcome::ProjectRuns {
+                listed: listed.and_then(|listed| listed).map(|listed| {
+                    listed["commands"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(CommandRow::of)
+                        .collect()
+                }),
+                project,
+                output,
+            }
+        }
+        Command::ProjectRun {
+            project,
+            run,
+            dismiss,
+        } => {
+            let method = if dismiss { "run.dismiss" } else { "run.stop" };
+            let refused = match ask_alone(connect, method, json!({"run": run}), bounds.quick) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::ProjectRunAnswered { project, refused }
+        }
+        Command::Setup { project } => {
+            let listed = ask_alone(
+                connect,
+                "setup.list",
+                json!({"project": project}),
+                bounds.quick,
+            );
+            Outcome::Setup {
+                listed: listed.and_then(|listed| listed).map(|listed| {
+                    listed["steps"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(crate::setup::step_of)
+                        .collect()
+                }),
+                project,
+            }
+        }
+        Command::SetupWrite {
+            project,
+            method,
+            params,
+        } => {
+            let refused = match ask_alone(connect, method, params, bounds.quick) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::SetupWritten { project, refused }
         }
         Command::Image { session, name } => {
             let image = match ask_alone(
