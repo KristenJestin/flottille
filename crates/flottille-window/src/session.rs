@@ -41,7 +41,7 @@ use gpui_kit::{
     point, px, radians,
 };
 
-use crate::actions::{Answer, Command, Picture};
+use crate::actions::{Answer, Command, Picture, RepositoryStatus};
 use crate::commands::CommandInfo;
 use crate::conversation::{Activity, Block, Call, CallState, Change, Conversation, DiffLine, USER};
 use crate::link::{Connect, Update};
@@ -3232,7 +3232,21 @@ impl Render for SessionRail {
                 .find(|(repository, _)| repository == path)
                 .map(|(_, line)| line.clone())
         };
-        let repositories: Vec<(String, String, Option<PullRequest>, Option<String>)> = self
+        let status_of = |path: &str| {
+            self.place
+                .iter()
+                .flat_map(|place| place.statuses.iter())
+                .find(|status| status.path == path)
+                .cloned()
+        };
+        #[allow(clippy::type_complexity)]
+        let repositories: Vec<(
+            String,
+            String,
+            Option<PullRequest>,
+            Option<String>,
+            Option<RepositoryStatus>,
+        )> = self
             .place
             .iter()
             .flat_map(|place| place.repositories.iter())
@@ -3256,6 +3270,7 @@ impl Render for SessionRail {
                     said,
                     pull_of(path),
                     forge_of(path),
+                    status_of(path),
                 )
             })
             .collect();
@@ -3386,51 +3401,85 @@ impl Render for SessionRail {
                     .child(div().flex_1().child(section_label("Workspace", cx)))
                     .child(self.menu.clone()),
             )
-            .children(repositories.into_iter().map(|(path, said, pull, forge)| {
-                let row = div()
-                    .id(ElementId::Name(format!("rail-repository-{path}").into()))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .px(px(8.))
-                    .py(px(6.))
-                    .text_size(px(12.5))
-                    .child(icon(Icon::Repository).size(px(13.)).text_color(p.faint))
-                    .child(SharedString::from(path.clone()))
-                    .child(
+            .children(
+                repositories
+                    .into_iter()
+                    .map(|(path, said, pull, forge, status)| {
+                        let row = div()
+                            .id(ElementId::Name(format!("rail-repository-{path}").into()))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .px(px(8.))
+                            .py(px(6.))
+                            .text_size(px(12.5))
+                            .child(icon(Icon::Repository).size(px(13.)).text_color(p.faint))
+                            .child(SharedString::from(path.clone()))
+                            .child(
+                                div()
+                                    .ml_auto()
+                                    .mono(11.)
+                                    .text_color(p.faint)
+                                    .child(SharedString::from(said)),
+                            )
+                            .test_support();
+                        let pull = pull.map(|pull| {
+                            let page = self.page.clone();
+                            let url = pull.url.clone();
+                            let row = pull_row(
+                                ElementId::Name(format!("rail-pull-{path}").into()),
+                                &pull,
+                                cx,
+                            )
+                            .pl(px(29.))
+                            .on_click(move |_, _, cx| {
+                                page.update(cx, |page, _| page.open_link(&url)).ok();
+                            });
+                            pull_hover(row, cx)
+                        });
+                        // Its branch, commits ahead, files not committed and setup played; it unfolds
+                        // once the daemon said.
+                        let status = presence(
+                            ElementId::Name(format!("rail-status-{path}-block").into()),
+                            status.is_some(),
+                            div()
+                                .id(ElementId::Name(format!("rail-status-{path}").into()))
+                                .pl(px(29.))
+                                .pb(px(4.))
+                                .flex()
+                                .flex_col()
+                                .mono(11.)
+                                .text_color(p.faint)
+                                .children(status.as_ref().map(|s| SharedString::from(s.line())))
+                                .children(status.as_ref().and_then(|s| s.note.clone()).map(
+                                    |note| div().text_color(p.mute).child(SharedString::from(note)),
+                                ))
+                                .aria_label(SharedString::from(status.as_ref().map_or(
+                                    String::new(),
+                                    |s| match &s.note {
+                                        Some(note) => format!("{} · {note}", s.line()),
+                                        None => s.line(),
+                                    },
+                                )))
+                                .test_support(),
+                        );
+                        let forge = forge.map(|line| {
+                            div()
+                                .id(ElementId::Name(format!("rail-forge-{path}").into()))
+                                .pl(px(29.))
+                                .pb(px(4.))
+                                .mono(11.)
+                                .text_color(p.faint)
+                                .child(SharedString::from(line))
+                                .test_support()
+                        });
                         div()
-                            .ml_auto()
-                            .mono(11.)
-                            .text_color(p.faint)
-                            .child(SharedString::from(said)),
-                    )
-                    .test_support();
-                let pull = pull.map(|pull| {
-                    let page = self.page.clone();
-                    let url = pull.url.clone();
-                    let row = pull_row(
-                        ElementId::Name(format!("rail-pull-{path}").into()),
-                        &pull,
-                        cx,
-                    )
-                    .pl(px(29.))
-                    .on_click(move |_, _, cx| {
-                        page.update(cx, |page, _| page.open_link(&url)).ok();
-                    });
-                    pull_hover(row, cx)
-                });
-                let forge = forge.map(|line| {
-                    div()
-                        .id(ElementId::Name(format!("rail-forge-{path}").into()))
-                        .pl(px(29.))
-                        .pb(px(4.))
-                        .mono(11.)
-                        .text_color(p.faint)
-                        .child(SharedString::from(line))
-                        .test_support()
-                });
-                div().child(row).children(forge).children(pull)
-            }))
+                            .child(row)
+                            .child(status)
+                            .children(forge)
+                            .children(pull)
+                    }),
+            )
             .children(forge_problem.map(|problem| {
                 div()
                     .id("rail-forge-problem")

@@ -1,0 +1,402 @@
+//! The scenarios of a project's repositories in the window (#140): the project page lists them
+//! and adds, removes and detects them again; the new-workspace form takes some of them, each from
+//! the base chosen for it; a workspace's card and the session's rail say where each repository
+//! stands. On GPUI's test platform in front of a real daemon, with throwaway repositories (one
+//! with no remote) and temporary XDG folders. No window opens on a screen.
+
+mod common;
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use common::User;
+use flottille_ui::omarchy::Environment;
+use flottille_window::Shell;
+use flottille_window::link::Connect;
+use flottille_window::project::{PlaceCard, ProjectPage};
+use flottille_window::repositories::ProjectRepositories;
+use flottille_window::session::SessionPage;
+use flottille_window::shell::Selection;
+use flottille_window::tree::session_id;
+use gpui_kit::test::TestWindowExt;
+use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
+use serde_json::json;
+
+fn user() -> User {
+    let user = User::with_fake_agent();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    user
+}
+
+/// A project `trio` of three repositories with a commit each: `api`, pushed to a bare remote
+/// and with a `develop` branch there and here; `web`, pushed too; `lib`, with no remote at all.
+/// Its file names the three; `docs`, a fourth repository of the folder, is left out of it.
+fn trio(user: &User) -> PathBuf {
+    let folder = user.path("work/trio");
+    for name in ["api", "web", "lib", "docs"] {
+        let dir = folder.join(name);
+        user.git_init(&dir);
+        std::fs::write(dir.join("README.md"), format!("{name}\n")).unwrap();
+        user.git(&dir, &["add", "."]);
+        user.git(&dir, &["commit", "--quiet", "-m", "start"]);
+        if name == "api" || name == "web" {
+            let remote = user.path(&format!("remotes/{name}.git"));
+            user.git(
+                &user.path(""),
+                &["init", "--quiet", "--bare", remote.to_str().unwrap()],
+            );
+            user.git(&dir, &["remote", "add", "origin", remote.to_str().unwrap()]);
+            user.git(&dir, &["push", "--quiet", "origin", "main"]);
+        }
+    }
+    let api = folder.join("api");
+    user.git(&api, &["branch", "develop"]);
+    user.git(&api, &["push", "--quiet", "origin", "develop"]);
+    user.write_project_file(
+        "trio",
+        &format!(
+            "# the trio, by hand\nfolder = \"{}\"\n\n[[repositories]]\npath = \"api\"\nbase = \
+             [\"develop\", \"main\"]\n\n[[repositories]]\npath = \"web\"\n\n# no remote\n\
+             [[repositories]]\npath = \"lib\"\n",
+            folder.display()
+        ),
+    );
+    folder
+}
+
+fn eventually(what: &str, check: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !check() {
+        assert!(Instant::now() < deadline, "{what} never happened");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn window<'a>(
+    user: &User,
+    connect: Connect,
+    width: f32,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    let env = Environment {
+        os_release: user.path("os-release"),
+        state_home: user.path("state"),
+    };
+    cx.update(|cx| flottille_ui::init_with(env, cx));
+    let (shell, cx) = cx.add_window_view(|window, cx| Shell::new_polled(connect, window, cx));
+    cx.simulate_resize(size(px(width), px(1600.)));
+    (shell, cx)
+}
+
+/// Runs the window until `check` holds, as real frames would.
+fn until(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+    what: &str,
+    check: impl Fn(&mut VisualTestContext) -> bool,
+) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        if check(cx) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "{what} never happened");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// Lets every motion end, then draws.
+fn settle(cx: &mut VisualTestContext) {
+    for _ in 0..90 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    }
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+}
+
+/// How many frames the window still asks for: none at rest.
+fn pending_frames(cx: &mut VisualTestContext) -> usize {
+    cx.update(|window, cx| window.simulate_next_frame(cx))
+}
+
+fn page_of(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<ProjectPage> {
+    shell
+        .read_with(cx, |s, cx| s.main().read(cx).project_page().cloned())
+        .expect("a project's page is open")
+}
+
+fn section_of(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<ProjectRepositories> {
+    page_of(shell, cx).read_with(cx, |page, _| page.repositories().clone())
+}
+
+fn open_project(shell: &Entity<Shell>, project: &str, cx: &mut VisualTestContext) {
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::Project(project.into()), window, cx)
+    });
+    until(shell, cx, "the project's page is shown", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .project_page()
+                .is_some_and(|page| page.read(cx).name() == project)
+        })
+    });
+    settle(cx);
+}
+
+fn label_of(id: &str, cx: &mut VisualTestContext) -> Option<String> {
+    let id = id.to_owned();
+    cx.update(|window, _| {
+        window
+            .try_find(id)
+            .and_then(|found| found.label().map(str::to_owned))
+    })
+}
+
+fn has(id: &str, cx: &mut VisualTestContext) -> bool {
+    let id = id.to_owned();
+    cx.update(|window, _| window.try_find(id).is_some_and(|found| found.visible()))
+}
+
+fn paths(section: &Entity<ProjectRepositories>, cx: &mut VisualTestContext) -> Vec<String> {
+    section.read_with(cx, |section, _| {
+        section
+            .repositories()
+            .map(|read| read.listed.iter().map(|r| r.path.clone()).collect())
+            .unwrap_or_default()
+    })
+}
+
+#[gpui_kit::test]
+fn the_project_page_lists_its_repositories_and_adds_removes_and_detects_them(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let folder = trio(&user);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "trio", cx);
+    let section = section_of(&shell, cx);
+    until(&shell, cx, "the repositories are read", |cx| {
+        section.read_with(cx, |s, _| s.repositories().is_some())
+    });
+    settle(cx);
+
+    assert_eq!(paths(&section, cx), ["api", "web", "lib"]);
+    let api = label_of("repository-meta-api", cx).unwrap();
+    assert!(api.starts_with("main · origin "), "{api}");
+    assert!(api.ends_with(" · no forge"), "{api}");
+    assert_eq!(
+        label_of("repository-meta-lib", cx).as_deref(),
+        Some("main · local only · no forge")
+    );
+    assert!(
+        has("found-repository-docs", cx),
+        "found, not in the project"
+    );
+    assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
+
+    // Add the one found: it joins the list, written in the file.
+    cx.update(|window, cx| window.click("add-found-repository-docs", cx));
+    until(&shell, cx, "docs is added", |cx| {
+        paths(&section, cx).contains(&"docs".to_owned())
+    });
+    settle(cx);
+    assert!(has("repository-row-docs", cx));
+    assert!(!has("found-repository-docs", cx), "it folded away");
+    let text = std::fs::read_to_string(user.project_file("trio")).unwrap();
+    assert!(text.starts_with("# the trio, by hand\n"), "{text}");
+    assert!(text.contains("path = \"docs\""), "{text}");
+
+    // Remove asks first, and says the folder stays.
+    cx.update(|window, cx| window.click("remove-repository-lib", cx));
+    settle(cx);
+    let note = label_of("forget-note-lib", cx);
+    assert!(has("forget-note-lib", cx), "{note:?}");
+    cx.update(|window, cx| window.click("confirm-remove-repository-lib", cx));
+    until(&shell, cx, "lib is forgotten", |cx| {
+        !paths(&section, cx).contains(&"lib".to_owned())
+    });
+    settle(cx);
+    assert!(folder.join("lib/.git").is_dir(), "its folder is kept");
+    assert!(has("found-repository-lib", cx), "found again in the folder");
+    let text = std::fs::read_to_string(user.project_file("trio")).unwrap();
+    assert!(!text.contains("path = \"lib\""), "{text}");
+
+    // A path typed that is no repository: refused in a line, the file untouched.
+    std::fs::create_dir_all(folder.join("notes")).unwrap();
+    cx.update(|window, cx| window.click("repository-path-field", cx));
+    cx.simulate_input("notes");
+    cx.update(|window, cx| window.click("add-repository", cx));
+    until(&shell, cx, "the refusal is said", |cx| {
+        section.read_with(cx, |s, _| s.problem().is_some())
+    });
+    settle(cx);
+    let problem = label_of("repositories-problem", cx);
+    assert!(has("repositories-problem", cx), "{problem:?}");
+    assert_eq!(
+        std::fs::read_to_string(user.project_file("trio")).unwrap(),
+        text
+    );
+
+    // Detect again: a repository made since shows up.
+    user.git_init(&folder.join("tools"));
+    cx.update(|window, cx| window.click("detect-repositories", cx));
+    until(&shell, cx, "tools is found", |cx| {
+        section.read_with(cx, |s, _| {
+            s.repositories()
+                .is_some_and(|r| r.new.contains(&"tools".to_owned()))
+        })
+    });
+    settle(cx);
+    assert!(has("found-repository-tools", cx));
+    assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
+}
+
+#[gpui_kit::test]
+fn the_new_workspace_form_creates_a_workspace_with_two_of_three_repositories(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    trio(&user);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "trio", cx);
+    let form = shell
+        .read_with(cx, |s, _| s.new_workspace_of("trio").cloned())
+        .unwrap();
+    cx.update(|window, cx| window.click("new-workspace", cx));
+    until(&shell, cx, "the rules are read", |cx| {
+        form.read_with(cx, |f, _| {
+            f.base_said("api").is_some_and(|s| s.contains("develop"))
+        })
+    });
+    settle(cx);
+    let placeholder = form.read_with(cx, |f, _| f.base_said("api").map(str::to_owned));
+    assert_eq!(
+        placeholder.as_deref(),
+        Some("base: develop, else main, the project's"),
+        "the default is the project's rule"
+    );
+
+    cx.simulate_input("login");
+    cx.update(|window, cx| window.click("new-workspace-take-web", cx));
+    settle(cx);
+    assert!(!has("new-workspace-base-web", cx), "its base folds away");
+    cx.update(|window, cx| window.click("new-workspace-base-api", cx));
+    cx.simulate_input("main");
+    cx.update(|window, cx| window.click("create-workspace", cx));
+    until(&shell, cx, "the workspace is made", |cx| {
+        !form.read_with(cx, |f, _| f.is_open() || f.creating().is_some())
+    });
+
+    let shown = user
+        .call(
+            "workspace.show",
+            json!({"project": "trio", "name": "login"}),
+        )
+        .unwrap();
+    let bases: Vec<String> = shown["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| format!("{} {}", r["path"].as_str().unwrap(), r["base"]["branch"]))
+        .collect();
+    assert_eq!(bases, ["api \"main\"", "lib \"main\""], "{shown}");
+    assert_eq!(
+        shown["repositories"][1]["base"]["note"],
+        "no remote origin: started from the local main"
+    );
+}
+
+#[gpui_kit::test]
+fn a_workspace_s_card_and_the_rail_show_where_each_repository_stands(cx: &mut TestAppContext) {
+    let user = user();
+    trio(&user);
+    user.call(
+        "workspace.create",
+        json!({"project": "trio", "name": "login", "repositories": ["api", "lib"]}),
+    )
+    .unwrap();
+    eventually("the workspace is ready", || {
+        user.call(
+            "workspace.show",
+            json!({"project": "trio", "name": "login"}),
+        )
+        .unwrap()["state"]
+            == "ready"
+    });
+    let api = user.path("data/flottille/workspaces/trio/login/api");
+    std::fs::write(api.join("a.rs"), "fn a() {}\n").unwrap();
+    user.git(&api, &["add", "."]);
+    user.git(&api, &["commit", "--quiet", "-m", "a"]);
+    std::fs::write(api.join("draft.rs"), "draft\n").unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "trio", cx);
+    let card = |cx: &mut VisualTestContext| -> Option<Entity<PlaceCard>> {
+        page_of(&shell, cx).read_with(cx, |page, cx| page.card(&Some("login".to_owned()), cx))
+    };
+    until(
+        &shell,
+        cx,
+        "the card says where its repositories stand",
+        |cx| card(cx).is_some_and(|card| card.read_with(cx, |c, _| !c.statuses().is_empty())),
+    );
+    settle(cx);
+
+    assert_eq!(
+        label_of("repository-status-login-api", cx).as_deref(),
+        Some("api trio/login · 1 ahead of develop · 1 uncommitted")
+    );
+    assert_eq!(
+        label_of("repository-status-login-lib", cx).as_deref(),
+        Some(
+            "lib trio/login · 0 ahead of main · clean · no remote origin: started from the \
+             local main"
+        )
+    );
+    assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
+
+    // The rail of a session in the workspace says the same.
+    let lead = {
+        let answer = user
+            .call(
+                "agent.start",
+                json!({"project": "trio", "workspace": "login", "message": "hello"}),
+            )
+            .unwrap();
+        answer["agent"]["id"].as_str().unwrap().to_owned()
+    };
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&lead)).is_some())
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click(session_id(&lead), cx));
+    until(&shell, cx, "the rail reads the workspace", |cx| {
+        shell
+            .read_with(cx, |s, cx| s.main().read(cx).session_page().cloned())
+            .is_some_and(|page: Entity<SessionPage>| {
+                page.read_with(cx, |page, cx| {
+                    page.rail()
+                        .read(cx)
+                        .place()
+                        .is_some_and(|place| !place.statuses.is_empty())
+                })
+            })
+    });
+    settle(cx);
+    assert_eq!(
+        label_of("rail-status-api", cx).as_deref(),
+        Some("trio/login · 1 ahead of develop · 1 uncommitted")
+    );
+    assert_eq!(
+        label_of("rail-status-lib", cx).as_deref(),
+        Some(
+            "trio/login · 0 ahead of main · clean · no remote origin: started from the local main"
+        )
+    );
+}

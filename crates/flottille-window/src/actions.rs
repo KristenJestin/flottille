@@ -97,8 +97,18 @@ pub enum Command {
         repositories: Option<Vec<String>>,
         /// Its branch; `<prefix>/<name>` when none.
         branch: Option<String>,
+        /// The base branch chosen for a repository, by path; its rule for the others.
+        bases: std::collections::BTreeMap<String, String>,
         /// Fetch nothing: base the branches on the tracking refs as they are.
         offline: bool,
+    },
+    /// The project's repositories as their checkouts stand (`project.repositories`), or one
+    /// added or removed (`project.add_repository`, `project.remove_repository`): each answers
+    /// the list.
+    Repositories {
+        project: String,
+        method: &'static str,
+        params: Value,
     },
     /// What the project's settings show: its declared forges and tracker, and what each
     /// repository's remote proposes.
@@ -319,6 +329,77 @@ pub struct Details {
     pub changes: HashMap<String, Changes>,
     /// The pull requests of each workspace's repositories.
     pub pulls: HashMap<String, Vec<PullRequest>>,
+    /// Where each repository of each workspace stands.
+    pub statuses: HashMap<String, Vec<RepositoryStatus>>,
+}
+
+/// Where one repository of a workspace stands (`workspace.show`): the branch its worktree is on,
+/// its commits ahead of its base, its files not committed, the setup steps played in it, and
+/// why it started from its local branch, when it did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RepositoryStatus {
+    pub path: String,
+    pub branch: Option<String>,
+    pub base: String,
+    pub ahead: Option<u64>,
+    pub uncommitted: Option<u64>,
+    /// The setup's steps done (or skipped) in it, and how many there are.
+    pub setup: (usize, usize),
+    pub note: Option<String>,
+}
+
+impl RepositoryStatus {
+    /// Each repository of a workspace as `workspace.show` says it.
+    pub fn of_workspace(shown: &Value) -> Vec<RepositoryStatus> {
+        let steps = shown["steps"].as_array().map_or(&[][..], Vec::as_slice);
+        shown["repositories"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|repository| {
+                let path = repository["path"].as_str().unwrap_or_default().to_owned();
+                // The worktree step is the workspace's own, not the setup's.
+                let setup: Vec<&Value> = steps
+                    .iter()
+                    .filter(|s| s["repository"] == path.as_str() && s["kind"] != "worktree")
+                    .collect();
+                let played = setup
+                    .iter()
+                    .filter(|s| s["state"] == "done" || s["state"] == "skipped")
+                    .count();
+                RepositoryStatus {
+                    branch: repository["branch"].as_str().map(str::to_owned),
+                    base: repository["base"]["branch"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                    ahead: repository["ahead"].as_u64(),
+                    uncommitted: repository["uncommitted"].as_u64(),
+                    setup: (played, setup.len()),
+                    note: repository["base"]["note"].as_str().map(str::to_owned),
+                    path,
+                }
+            })
+            .collect()
+    }
+
+    /// In one line: `app/login · 2 ahead of develop · 3 uncommitted · setup 2/2`.
+    pub fn line(&self) -> String {
+        let mut parts = Vec::new();
+        parts.extend(self.branch.clone());
+        if let Some(ahead) = self.ahead {
+            parts.push(format!("{ahead} ahead of {}", self.base));
+        }
+        match self.uncommitted {
+            Some(0) => parts.push("clean".into()),
+            Some(files) => parts.push(format!("{files} uncommitted")),
+            None => {}
+        }
+        if self.setup.1 > 0 {
+            parts.push(format!("setup {}/{}", self.setup.0, self.setup.1));
+        }
+        parts.join(" · ")
+    }
 }
 
 /// The lines added and removed in a workspace.
@@ -360,6 +441,11 @@ pub enum Outcome {
         project: String,
         read: Result<Value, String>,
         saved: bool,
+    },
+    /// The project's repositories, read, added to or removed from, or why not.
+    Repositories {
+        project: String,
+        read: Result<Value, String>,
     },
     /// The project's repositories detected again (`project.check`), or why not.
     ProjectChecked {
@@ -709,13 +795,15 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             ticket,
             repositories,
             branch,
+            bases,
             offline,
         } => workspace_outcome(
             ask_alone(
                 connect,
                 "workspace.create",
                 json!({"project": project, "name": name, "ticket": ticket,
-                    "repositories": repositories, "branch": branch, "offline": offline}),
+                    "repositories": repositories, "branch": branch, "bases": bases,
+                    "offline": offline}),
                 bounds.slow,
             ),
             project,
@@ -740,6 +828,14 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             )),
             project,
             saved: true,
+        },
+        Command::Repositories {
+            project,
+            method,
+            params,
+        } => Outcome::Repositories {
+            read: answer(ask_alone(connect, method, params, bounds.quick)),
+            project,
         },
         Command::CheckProject(project) => Outcome::ProjectChecked {
             read: answer(ask_alone(
@@ -1343,6 +1439,7 @@ fn details(
     .ok()?;
     let mut changes = HashMap::new();
     let mut pulls = HashMap::new();
+    let mut statuses = HashMap::new();
     for workspace in listed["workspaces"].as_array().into_iter().flatten() {
         let name = workspace["name"].as_str().unwrap_or_default();
         let Ok(Ok(shown)) = ask(
@@ -1362,6 +1459,7 @@ fn details(
             total.capped |= changes["capped"] == true;
         }
         changes.insert(name.to_owned(), total);
+        statuses.insert(name.to_owned(), RepositoryStatus::of_workspace(&shown));
         if let Ok(Ok(forge)) = ask(
             connect,
             conn,
@@ -1377,6 +1475,7 @@ fn details(
         branches,
         changes,
         pulls,
+        statuses,
     })
 }
 

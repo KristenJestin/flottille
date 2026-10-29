@@ -681,6 +681,22 @@ impl Shell {
                     page.update(cx, |page, cx| page.answered(read, saved, window, cx));
                 }
             }
+            Outcome::Repositories { project, read } => {
+                if let Ok(value) = &read
+                    && let Some(form) = self.new_workspace_of(&project).cloned()
+                {
+                    let rules = crate::repositories::rules_of(
+                        &crate::repositories::Repositories::of(value),
+                    );
+                    form.update(cx, |form, cx| form.set_rules(rules, cx));
+                }
+                if let Some(page) = self.main.read(cx).project_page().cloned()
+                    && page.read(cx).name() == project
+                {
+                    let section = page.read(cx).repositories().clone();
+                    section.update(cx, |section, cx| section.answered(read, window, cx));
+                }
+            }
             Outcome::ProjectChecked { project, read } => {
                 if let Some(page) = self.project_settings.clone()
                     && page.read(cx).name() == project
