@@ -983,6 +983,8 @@ pub fn write_in_place(file: &Path, text: &str) -> std::io::Result<()> {
         if let Some(mode) = mode {
             out.set_permissions(mode)?;
         }
+        // On the disk before it takes the file's name: a crash never leaves the file empty.
+        out.sync_all()?;
         drop(out);
         std::fs::rename(&writing, &real)
     })();
