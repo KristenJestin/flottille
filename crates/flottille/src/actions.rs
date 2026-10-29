@@ -296,8 +296,8 @@ async fn performed(
             let text = call.text.as_deref().unwrap_or_default();
             crate::rules::set_project(daemon, &name, Some(text)).map_err(refusal)?;
             Ok(
-                "Saved. The new rules reach the sessions started from now on; this session, and \
-                the ones already running, keep the rules they started with."
+                "Saved. The new rules reach the agents created from now on; you, and the agents \
+                already created, keep the rules you were created with."
                     .to_owned(),
             )
         }

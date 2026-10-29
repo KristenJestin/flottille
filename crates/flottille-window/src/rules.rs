@@ -3,8 +3,8 @@
 //! window writes nothing itself: Save and Reset to default are the daemon's (`rules.set`,
 //! `rules.reset`), and the editor shows what the daemon says next.
 //!
-//! The text is frozen in a session when it starts, so a change reaches new sessions only: the
-//! editor says so.
+//! The text is frozen in an agent when it is created, so a change reaches the agents created
+//! after it only: the editor says so.
 
 use flottille_ui::{Button, Card, palette};
 use gpui_kit::base::input::{InputEvent, TextareaState};
@@ -20,8 +20,8 @@ use crate::procedures::{editor_style, perform_later};
 use crate::shell::Shell;
 
 /// What the editor says of when a change takes effect.
-pub const REACH: &str = "A change reaches the sessions you start after saving it; a session \
-                         already running keeps the rules it started with.";
+pub const REACH: &str = "A change reaches the agents created from now on; an agent already \
+                         created keeps the rules it was created with.";
 
 /// Where the text the daemon last gave comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

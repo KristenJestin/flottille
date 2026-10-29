@@ -4,7 +4,7 @@
 //! What the gate enforces is not here: it is fixed (`roles/base.md`).
 //!
 //! The text is read when an agent is created and frozen in its instructions, so a change reaches
-//! the sessions started after it.
+//! the agents created after it.
 
 use flottille_core::paths::Paths;
 use flottille_core::project::Project;

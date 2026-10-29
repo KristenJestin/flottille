@@ -177,12 +177,12 @@ Commit only when asked.
 Reset to default removes the file (global) or the key (project), and the level below shows again.
 
 The text is read when an agent is created and frozen in its instructions (`docs/design.md` §8),
-so a change reaches the sessions started after it, and no session running. The global rules sit
+so a change reaches the agents created after it, and no agent created before. The global rules sit
 before the cache boundary, where every project shares them, so editing them changes the shared
 part once for everyone. A project's own rules would make that part differ from one project to
-the next, so they sit after the boundary. An agent reads the rules it will give new sessions with
-`project {action: "rules"}` and proposes a change with `set_rules {text}`, always held for the
-user (`docs/tools.md`, "The project"): `[agent_actions]` has no family for it.
+the next, so they sit after the boundary. An agent reads the rules the agents created next will get with
+`project {action: "rules"}` and proposes a change with `set_rules {text}`, a call to judge like
+the project's other changes (`docs/tools.md`, "The project").
 
 ## References
 

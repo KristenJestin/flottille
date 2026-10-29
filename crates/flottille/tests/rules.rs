@@ -291,7 +291,10 @@ fn an_agent_reads_the_rules_and_its_set_rules_is_held_and_applied_on_approval() 
     );
     cli(&user, &["approve", &number.to_string()]);
     let body = settled(&user, number).body;
-    assert!(body.contains("Saved."), "{body}");
+    assert!(
+        body.contains("Saved. The new rules reach the agents created from now on"),
+        "{body}"
+    );
 
     let text = std::fs::read_to_string(user.project_file("app")).unwrap();
     assert!(text.starts_with("# The user's own words.\n"), "{text}");

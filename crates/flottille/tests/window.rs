@@ -6944,7 +6944,7 @@ fn the_rules_page_edits_the_rules_of_every_project_saves_them_and_resets_them_to
     cx.update(|window, _| {
         assert!(window.find("rules-text-").visible());
         assert!(window.find("rules-reach-").visible());
-        assert!(flottille_window::rules::REACH.contains("sessions you start after saving"));
+        assert!(flottille_window::rules::REACH.contains("reaches the agents created from now on"));
         assert!(window.find("rules-save-").visible());
         assert!(window.find("rules-reset-").visible());
     });
