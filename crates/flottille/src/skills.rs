@@ -77,7 +77,17 @@ fn read(
         // The user's own file, which may be a link: read where it leads, which the file tools
         // open without following a link.
         let file = Skill::text_file(data, &project.name, name);
-        let file = Resolved::real_inside(name.to_owned(), file.canonicalize().unwrap_or(file));
+        let file = match file.canonicalize() {
+            Ok(real) => real,
+            Err(_) if file.is_symlink() => {
+                return Err(Outcome::Refused(format!(
+                    "refused: the text of the skill {name} cannot be read: the skill's file is a \
+                     link that leads nowhere; the user points it at the text or writes it again"
+                )));
+            }
+            Err(_) => file,
+        };
+        let file = Resolved::real_inside(name.to_owned(), file);
         return files::read_page(None, &file, offset, length).or_else(|error| {
             Ok(match error.kind() {
                 std::io::ErrorKind::NotFound => Outcome::Refused(format!(

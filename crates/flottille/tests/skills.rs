@@ -602,3 +602,32 @@ fn a_text_skill_whose_file_is_a_link_is_read_where_it_leads() {
     let read = ok(mcp.call("skill_read", json!({"name": "review"})));
     assert!(read.contains("Read it where it is kept."), "{read}");
 }
+
+#[test]
+fn a_text_skill_whose_file_is_a_dangling_link_says_it_leads_nowhere() {
+    let user = User::with_fake_agent();
+    project(&user);
+    stdout(
+        &user,
+        &[
+            "skill",
+            "add",
+            "app",
+            "review",
+            "--text",
+            "Read the diff twice.\n",
+            "--description",
+            "How we review",
+        ],
+    );
+    let kept = user.path("data/flottille/skills/app/review.md");
+    std::fs::remove_file(&kept).unwrap();
+    std::os::unix::fs::symlink(user.path("notes/gone.md"), &kept).unwrap();
+
+    let (mcp, _) = session(&user);
+    let message = refused(mcp.call("skill_read", json!({"name": "review"})));
+    assert!(
+        message.contains("the skill's file is a link that leads nowhere"),
+        "{message}"
+    );
+}
