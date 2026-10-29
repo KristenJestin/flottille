@@ -183,8 +183,9 @@ Flottille's own tools:
 
 - `agent_launch {title, brief, model?, role?, workspace? | new_workspace? + repositories?, root?}`, the parent's place when neither:
   starts a child, answers at once with its id. Refused (never queued) above the caps. With
-  `root`, a root only starts a session for the user instead, judged, in the tree's mode
-  (`tools.md`, "Sessions for the user").
+  `root`, a root only starts a session for the user instead, judged, in the tree's mode, its
+  first message the agent's and never the user's, base when that root was itself started by an
+  agent (`tools.md`, "Sessions for the user").
 - `agent_send {agent_id, message}`: a message to one of the caller's children.
 - `agent_status {agent_id?, action?, detail?, after?}`: for one child or all of them: state, what
   it is doing now (thinking, in a tool call, which command runs and for how long, waiting for
@@ -380,14 +381,16 @@ resumes.
 
 The judge is an agent of a provider the user chose in Settings ("Auto judge": provider and
 model, `provider.set_judge`), run in bare mode **with no tool at all**: no Flottille tool, no MCP
-server. Its instructions are `roles/judge.md`. It sees the call masked (secrets masked, the line
-and the path whole, contents cut to their first lines with how many they had), why the rules held
-it, the place, the agent's `why`, and last the user's last messages to the session, nothing else.
+server. Its instructions are `roles/judge.md`. It sees the call masked (secrets masked, the line,
+the path, a brief, a title and a body whole, contents cut to their first lines with how many they
+had), why the rules held it, the place, the agent's `why`, the first message of a session an agent
+started for the user (labelled as that agent's, never the user's), and last the user's last
+messages to the session, nothing else.
 What the agent wrote comes in blocks of its own, every `<` escaped, so that no text of the agent
 reads as the user's; only the user's messages say what is wanted. It answers one JSON object,
 `{"verdict": "allow" | "ask", "reason": "…"}`. A failure, an answer that is not that object, or
 30 seconds without one is an ask; a line or a path longer than the 8,000 characters it is given
-whole asks without it. A process of the provider is started for each judgement, and its whole
+whole asks without it, and the gate refuses a longer brief, title or body. A process of the provider is started for each judgement, and its whole
 process group stopped after it. Each verdict is recorded with the
 call (who judged, what, why: the `judgement` of its `agent.tool_served` event, and of its request
 when it asks), shown on the card and in `flottille approvals`.

@@ -182,7 +182,9 @@ or why the ticket is not taken, before anything is created.
 (by label and assignee), `search` with words, `show` the workspace's ticket or another of the
 project's tracker by its key; on GitHub, `create`, `comment`, `edit`, `close` and `reopen`, each
 to judge. A key the tracker does not take is refused, and nothing is asked of any tracker; a write
-on Jira is refused before anything is asked. Every agent of a project that declares a tracker has
+on Jira is refused before anything is asked. A GitHub search stays in the tracker's repository:
+a query holding `repo:`, `org:`, `user:`, `is:pr` or `type:pr` is refused, and only the issues
+whose link is the tracker repository's are kept, the others counted. Every agent of a project that declares a tracker has
 the tool, in `main` as in a workspace, whether a ticket is linked or not (the tool list of a
 session is fixed when it starts). Until #141 `show` was `ticket_read`.
 
@@ -192,7 +194,9 @@ Its page (<https://developer.atlassian.com/cloud/acli/reference/commands/jira-wo
 gives its flags (`--jql`, `--fields`, `--json`, `--limit`, `--paginate`) and no output. The
 reading takes an array of work items in the shape `view` prints, or Jira's REST search object
 (`{"issues": [...]}`), and reads `key`, `self`, `fields.summary`, `fields.status.name`,
-`fields.assignee.displayName` and `fields.labels`. The maintainer checks it on their work machine
+`fields.assignee.displayName` and `fields.labels`. An item whose `self` names another site is
+left out and counted; one with no `self` is kept, since the search was of the signed-in site's
+projects. The maintainer checks it on their work machine
 (`tickets list` from an agent of a Jira project); a different shape shows as an empty list.
 
 ## Tests

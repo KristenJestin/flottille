@@ -278,11 +278,19 @@ pending requests.
 - **`comment {number, repository?, body}`** posts a comment on a pull request of a repository of
   the place; **`edit {number, repository?, title?, body?}`** changes its title or description, at
   least one of them (`gh pr comment`, `gh pr edit`; `bkt pr comment --text`, `bkt pr edit --title
-  --description`).
+  --description`). A `title` on `comment` is refused before anything is asked (`refused: forge
+  comment takes no title: title is for edit and create`).
 
 `list` and `show` go through the gate like every call, which allows them; `create`, `comment`,
 `edit`, `merge` and `checks` are to judge, and a merge that waives the checks base. A write is
-done only once the repository's remote is checked to lead where its forge is declared.
+done only once the repository's remote is checked to lead where its forge is declared. **What a
+write posts is shown whole**: its request says `Its title: …` and `Its body: …` in full (the
+arguments recorded are cut at 500 characters), and the judge is given them whole. A title or a
+body longer than the 8,000 characters the judge is given whole is refused (`refused: the body is
+longer than the 8000 characters the user and the judge are shown whole (…): shorten it`); one
+that holds what the masking takes for a secret makes the write base (`its body holds what looks
+like a secret: the card shows it masked, and it is sent as it is written`), since the card shows
+it masked and the forge gets it as written.
 
 Until #141 the reads were `forge_read` and the writes `forge_write` (`pr-create`,
 `pr-merge-squash`, `pipeline-rerun`). For one release a call under an old name is the new
@@ -293,7 +301,7 @@ action's, and the store renamed them in the agents' fixed lists and their pendin
 | Tool | |
 |---|---|
 | `workspace {action: list \| show \| create \| prepare \| link_ticket \| remove, name?, repositories?, ticket?}` | The project's workspaces, as the window manages them (`docs/workspaces.md`). `list` gives each one's state, branch, repositories and ticket; `show {name?}` one whole, each step of its preparation with its state and why a failed one failed. `create {name, repositories?, ticket?}` makes one as `workspace.create` does: its worktrees, answered once they are made, then its setup in the background. `prepare {name?}` resumes a failed preparation (`workspace.prepare`); `link_ticket {name?, ticket}` links its ticket, and unlinks it with `ticket: null` (`workspace.link_ticket`). `name` is the agent's own workspace when left out, but for `create`; in `main` it names one. Every agent has it. A child reads the workspaces and removes its own; its other writes are refused (`refused: the agent the user talks to manages the project's workspaces; … ask your parent (ask_parent)`). |
-| `remove {name?}` | Removes a workspace, the agent's own when `name` is left out and the one named in `main`, where it is required, as `flottille workspace remove` does (`docs/workspaces.md`, "Removal"): refused, nothing touched, while a repository holds uncommitted work or commits on no remote, or while another agent than the caller's tree works in the workspace or a command run not the tree's own runs there (`refused: workspace … is not removed, nothing was touched: the agent …, outside this agent's tree, works in it…`), each named; then deletes, in each repository, the workspace's branch when it holds no commit of its own (every commit of it is in its base's tracking ref), and keeps the others. An agent in a workspace removes only its own; each call is to judge. Until #141 it was the tool `workspace_remove {workspace?}`, still answered for one release. |
+| `remove {name?}` | Removes a workspace, the agent's own when `name` is left out and the one named in `main`, where it is required, as `flottille workspace remove` does (`docs/workspaces.md`, "Removal"): refused, nothing touched, while a repository holds uncommitted work or commits on no remote, or while another agent than the caller works in the workspace, of its tree or not, or a command run not the tree's own runs there (`refused: workspace … is not removed, nothing was touched: the agent …, outside this agent's tree, works in it…`, `the agent …, of this agent's tree, works in it`), each named; then deletes, in each repository, the workspace's branch when it holds no commit of its own (every commit of it is in its base's tracking ref), and keeps the others. An agent in a workspace removes only its own, and a child in `main` none (`refused: a child removes only its own workspace, and this one works in main, …`); each call is to judge. Until #141 it was the tool `workspace_remove {workspace?}`, still answered for one release. |
 
 `list` and `show` run at once. `create`, `prepare`, `link_ticket` and `remove` are to judge, as any write
 of "The project" is: an `action` request, which says what it does in words and is done only while
@@ -328,7 +336,12 @@ reasons.
   on Jira, `acli jira workitem search --jql <JQL> --fields key,summary,status,assignee,labels
   --json --limit 200`, the JQL being the tracker's projects, the state as a status category
   (`statusCategory != Done`), each filter quoted, and the words as `text ~`. An item that says
-  another site than the tracker's is left out, and counted.
+  another site than the tracker's is left out, and counted; one that says no site is kept.
+  **A search stays in the tracker's repository**: on GitHub a `query` holding `repo:`, `org:`,
+  `user:`, `is:pr` or `type:pr`, in any case, is refused (`refused: tickets search looks in the
+  tracker's repository only: …`), and of what `gh` answers only the issues whose link is the
+  tracker repository's (`https://github.com/<owner>/<name>/issues/…`) are kept, the others left
+  out and counted (`(2 answered from outside the tracker's repository are left out)`).
 - **`show {ticket?, workspace?, detail?}`**: the ticket the agent's workspace (or the one
   `workspace` names, required in `main` unless `ticket` is given) is linked to, or `ticket`,
   another ticket of the same tracker by its key (`#123` or `ABC-123`): its reference, tracker,
@@ -342,7 +355,10 @@ reasons.
 - **The writes, GitHub issues only**: `create {title, body?, labels?}` (`gh issue create`),
   `comment {ticket?, body}`, `edit {ticket?, title?, body?}` (at least one), `close {ticket?}` and
   `reopen {ticket?}` (`gh issue comment`, `edit`, `close`, `reopen`), the ticket named as for
-  `show`. **Jira is read only**, by the user's decision: a write on a Jira tracker is refused
+  `show`. A `title` on `comment`, `close` or `reopen` is refused before anything is asked
+  (`refused: tickets comment takes no title: title is for edit and create`). The request shows
+  the title and the body whole, and a long one or one holding a secret is refused or base, as
+  for the forge's writes ("The forge"). **Jira is read only**, by the user's decision: a write on a Jira tracker is refused
   before anything is asked, plainly (`refused: tickets comment is not supported on Jira:
   Flottille reads Jira tickets and writes nothing to Jira; write the text for the user, who posts
   it`), and no `acli` write command appears anywhere in the code.
@@ -452,11 +468,24 @@ from the window: `agent_launch {"title", "brief", "root": true, workspace? | new
 - **It is to judge** (a card in Ask, the judge in Auto), as an `action` request whose words name
   the place and the title and give the first message whole (`Start a session for the user in the
   workspace login: "Fix login", theirs, not a child of this agent`, `Its first message: …`), done
-  only while they hold. With `new_workspace` it is also judged as `workspace create` is.
+  only while they hold. With `new_workspace` it is also judged as `workspace create` is. The
+  judge is given the brief whole too: a brief longer than its 8,000 characters is refused at the
+  launch (`refused: the brief is longer than …`), and one that holds what the masking takes for a
+  secret makes the launch base, since the card shows it masked and the session gets it as
+  written.
+- **No chain without the user.** The session keeps who started it (`launched_by`). A session an
+  agent started may start one in turn only as base, whatever its mode (`this agent is a session
+  another agent started for the user, and a session it starts comes to the user, …`): each step
+  of a chain is the user's.
 - **The session is the user's**: no parent, depth 0, in the project's tree list and the window's
-  sidebar like any root (`agent.created` with no parent); the brief is delivered as the user's
-  first message (`[flottille:user]`). It is a lead by default (`role`), on the caller's provider
-  unless `provider` names another, in `workspace`, a new workspace, or the caller's own place.
+  sidebar like any root (`agent.created` with no parent). **Its first message is the agent's,
+  never the user's**: it is delivered as `[flottille:launched]`, under a line naming the agent
+  that wrote it (`agent 0123456789ab started this session for the user with this message:`), the
+  window shows it as `started by` that agent, and the judge never takes it for the user's words:
+  it shows it in a block of its own, `written by agent <id> when it started this session`. A
+  replacement of the session delivers it again the same way. It is a lead by default (`role`), on
+  the caller's provider unless `provider` names another, in `workspace`, a new workspace, or the
+  caller's own place.
 - **It takes the tree's mode**: the mode of the caller's tree, never a looser one; only the user
   changes it afterwards. It counts in no children cap and no depth.
 - The caller is answered at once with the new session's id and name; the `agent_*` tools do not
@@ -547,6 +576,9 @@ says who answers a call to judge (`docs/design.md` §7.1).
      `tickets` and the pull requests with `forge`;
    - a `forge` merge that waives the checks or a review; a change of the project's tracker
      or of its rules (`set_rules`);
+   - a write of `forge` or `tickets` whose title or body, or a session for the user whose brief,
+     holds what the masking takes for a secret; a session for the user started by a session an
+     agent started ("Sessions for the user");
    - a write of `tasks` or `setup` whose line, or task, would be base to run, and one that says
      what only the user's word may say ("The project": asking turned off, `check` or `read_only`
      set, a `link` or `root_entries` step, a `copy` of a sensitive name).
