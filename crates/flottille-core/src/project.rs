@@ -9,7 +9,7 @@ use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::declared::{ProjectTracker, RepositoryForge};
-use crate::procedure::{Mode, Procedure};
+use crate::procedure::{OBSOLETE_GRANTS, Procedure};
 
 /// Children running at once per project: the bounds of `max_children`.
 pub const CHILDREN_CAP: std::ops::RangeInclusive<u8> = 1..=6;
@@ -99,56 +99,6 @@ impl PullRequests {
     }
 }
 
-/// What the project's agents do without asking the user first, by family of writes
-/// (`docs/projects.md`, "What agents do on their own"): each `ask` unless the file says `allow`.
-/// Only the user sets it: no tool of an agent writes it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AgentActions {
-    /// Starting one of the project's procedures.
-    #[serde(default = "ask")]
-    pub procedures: Mode,
-    /// Changing the forges and the tracker.
-    #[serde(default = "ask")]
-    pub settings: Mode,
-    /// Adding or removing a reference.
-    #[serde(default = "ask")]
-    pub references: Mode,
-}
-
-fn ask() -> Mode {
-    Mode::Ask
-}
-
-impl Default for AgentActions {
-    fn default() -> Self {
-        AgentActions {
-            procedures: Mode::Ask,
-            settings: Mode::Ask,
-            references: Mode::Ask,
-        }
-    }
-}
-
-impl AgentActions {
-    /// The families, by the name the file and the protocol give them.
-    pub const FAMILIES: [&str; 3] = ["procedures", "settings", "references"];
-
-    pub fn is_default(&self) -> bool {
-        *self == AgentActions::default()
-    }
-
-    /// The mode of a family named as in `FAMILIES`.
-    pub fn mode(&self, family: &str) -> Option<Mode> {
-        match family {
-            "procedures" => Some(self.procedures),
-            "settings" => Some(self.settings),
-            "references" => Some(self.references),
-            _ => None,
-        }
-    }
-}
-
 /// A named command of the project, for the user and for agents.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -170,26 +120,10 @@ pub struct CatalogueCommand {
     /// Held for approval each time an agent runs it.
     #[serde(default)]
     pub ask_before_running: bool,
-    /// Who added it, when not the user writing it: a line the user allowed always, which runs in
-    /// the project folder without asking though nothing checked that it changes nothing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub added_by: Option<AddedBy>,
-}
-
-/// Who added a catalogue command, when it was not written by the user.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AddedBy {
-    /// The user answered Always to an agent's request to run its line in the project folder.
-    Approval,
-}
-
-impl CatalogueCommand {
-    /// Whether an agent in the project folder runs it: one of the catalogue's read-only checks,
-    /// or a line the user allowed always there.
-    pub fn runs_in_project_folder(&self) -> bool {
-        (self.check && self.read_only) || self.added_by == Some(AddedBy::Approval)
-    }
+    /// Obsolete: who added it (a line the user allowed always). Read and not followed: the line
+    /// is a plain catalogue line, and the daemon's migration drops the key.
+    #[serde(default, skip_serializing)]
+    pub added_by: Option<toml::Value>,
 }
 
 /// One step of the recipe that prepares a new workspace, as written: exactly one of `copy`,
@@ -349,7 +283,7 @@ pub struct Project {
     /// Documents an agent reads with `reference_read`, by name.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub references: BTreeMap<String, Reference>,
-    /// Named actions run by an agent in a workspace, with their grants (`docs/procedures.md`).
+    /// Named actions run by an agent in a workspace, as plain instructions (`docs/procedures.md`).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub procedures: BTreeMap<String, Procedure>,
     #[serde(skip_serializing_if = "PullRequests::is_empty")]
@@ -357,9 +291,6 @@ pub struct Project {
     /// The tracker of its tickets, as the user declared it; none is read without one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tracker: Option<ProjectTracker>,
-    /// What its agents do without asking first.
-    #[serde(skip_serializing_if = "AgentActions::is_default")]
-    pub agent_actions: AgentActions,
     /// Keys of the file that are no longer read, each with what replaces it: said, never
     /// followed nor refused.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -371,6 +302,10 @@ pub struct Project {
 pub const OBSOLETE_FORGES: &str = "forges: no longer read: each repository declares its forge \
      (its `forge` key, or the project's Settings in the window), and Flottille never guesses it \
      from a host";
+
+/// What is said of an `[agent_actions]` table, which let agents' window actions run on their own.
+pub const OBSOLETE_AGENT_ACTIONS: &str = "agent_actions: no longer read: an agent's window \
+     actions go through the gate's classes, and Ask or Auto decides what comes to you";
 
 /// What `projects/<name>.toml` holds: the keys as written, before the defaults and the checks.
 #[derive(Deserialize)]
@@ -405,8 +340,8 @@ struct File {
     #[serde(default)]
     pull_requests: PullRequests,
     tracker: Option<ProjectTracker>,
-    #[serde(default)]
-    agent_actions: AgentActions,
+    /// Obsolete: read as nothing, and said (`OBSOLETE_AGENT_ACTIONS`).
+    agent_actions: Option<toml::Value>,
     /// Obsolete: read as nothing, and said (`OBSOLETE_FORGES`).
     forges: Option<toml::Value>,
 }
@@ -456,7 +391,6 @@ impl Project {
             procedures: BTreeMap::new(),
             pull_requests: PullRequests::default(),
             tracker: None,
-            agent_actions: AgentActions::default(),
             obsolete: Vec::new(),
         }
     }
@@ -728,10 +662,20 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
             }
         }
     }
-    let obsolete = match file.forges {
+    let mut obsolete = match file.forges {
         Some(_) => vec![OBSOLETE_FORGES.to_owned()],
         None => Vec::new(),
     };
+    if file.agent_actions.is_some() {
+        obsolete.push(OBSOLETE_AGENT_ACTIONS.to_owned());
+    }
+    for (name, procedure) in &file.procedures {
+        if procedure.grants.is_some() || procedure.children.is_some() {
+            obsolete.push(format!(
+                "procedures.{name}.grants, children: {OBSOLETE_GRANTS}"
+            ));
+        }
+    }
 
     Ok(Project {
         name: name.to_owned(),
@@ -752,7 +696,6 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
         procedures: file.procedures,
         pull_requests: file.pull_requests,
         tracker,
-        agent_actions: file.agent_actions,
         obsolete,
     })
 }
@@ -1044,27 +987,29 @@ mod tests {
     }
 
     #[test]
-    fn a_family_of_agent_writes_asks_unless_the_file_lets_it_run_on_its_own() {
-        let project = parse(MINIMAL).unwrap();
-        assert_eq!(project.agent_actions, AgentActions::default());
-        assert_eq!(project.agent_actions.mode("procedures"), Some(Mode::Ask));
+    fn the_migration_s_old_keys_are_read_said_and_never_followed() {
         let project = parse(&format!(
-            "{MINIMAL}\n[agent_actions]\nprocedures = \"allow\"\n"
+            "{MINIMAL}\n[agent_actions]\nprocedures = \"allow\"\n\
+             [commands.ls]\nline = \"ls\"\nadded_by = \"approval\"\n\
+             [procedures.p]\ndescription = \"d\"\ninstructions = \"i\"\nchildren = false\n\
+             [procedures.p.grants]\npush = \"allow\"\n"
         ))
         .unwrap();
-        assert_eq!(project.agent_actions.procedures, Mode::Allow);
-        assert_eq!(project.agent_actions.settings, Mode::Ask);
-        assert_eq!(project.agent_actions.references, Mode::Ask);
-        let unknown = refusal(&format!("{MINIMAL}\n[agent_actions]\ngrants = \"allow\"\n"));
-        assert!(
-            unknown.contains("agent_actions") && unknown.contains("unknown field `grants`"),
-            "{unknown}"
+        assert_eq!(
+            project.obsolete,
+            [
+                OBSOLETE_AGENT_ACTIONS.to_owned(),
+                format!("procedures.p.grants, children: {OBSOLETE_GRANTS}")
+            ]
         );
+        // A line the user once allowed always stays a plain catalogue line.
+        assert_eq!(project.commands["ls"].line, "ls");
+        let written = project.to_toml().unwrap();
         assert!(
-            refusal(&format!(
-                "{MINIMAL}\n[agent_actions]\nsettings = \"never\"\n"
-            ))
-            .contains("agent_actions.settings")
+            !written.contains("added_by")
+                && !written.contains("[procedures.p.grants]")
+                && !written.contains("children = false"),
+            "{written}"
         );
     }
 
@@ -1886,27 +1831,15 @@ mod tests {
         assert_eq!(slug("..."), "");
     }
     #[test]
-    fn a_procedure_is_read_with_its_grants_from_the_fixed_vocabulary() {
+    fn a_procedure_is_read_with_its_instructions() {
         let project = parse(&format!(
             "{MINIMAL}\n[procedures.open-prs]\ndescription = \"Open the pull requests\"\n\
-             instructions = \"Push, then open one per repository.\"\nchildren = true\n\
-             [procedures.open-prs.grants]\npush = \"allow\"\npr-create = \"ask\"\n"
+             instructions = \"Push, then open one per repository.\"\n"
         ))
         .unwrap();
 
         let procedure = &project.procedures["open-prs"];
         assert_eq!(procedure.description, "Open the pull requests");
-        assert!(procedure.children);
-        assert_eq!(
-            procedure.grants,
-            crate::procedure::Grants::from([
-                (crate::procedure::Grant::Push, crate::procedure::Mode::Allow),
-                (
-                    crate::procedure::Grant::PrCreate,
-                    crate::procedure::Mode::Ask
-                ),
-            ])
-        );
         assert_eq!(
             parse(&project.to_toml().unwrap()).unwrap().procedures,
             project.procedures
@@ -1914,20 +1847,8 @@ mod tests {
     }
 
     #[test]
-    fn a_grant_outside_the_vocabulary_or_an_empty_procedure_is_refused() {
+    fn an_empty_procedure_is_refused() {
         let with = |body: &str| format!("{MINIMAL}\n[procedures.p]\n{body}");
-        let refused = refusal(&with(
-            "description = \"d\"\ninstructions = \"i\"\n[procedures.p.grants]\nshell = \"allow\"\n",
-        ));
-        assert!(
-            refused.starts_with("projects/app.toml: procedures.p.grants")
-                && refused.contains("shell"),
-            "{refused}"
-        );
-        let refused = refusal(&with(
-            "description = \"d\"\ninstructions = \"i\"\n[procedures.p.grants]\npush = \"always\"\n",
-        ));
-        assert!(refused.contains("procedures.p.grants"), "{refused}");
         assert_eq!(
             refusal(&with("description = \"d\"\ninstructions = \" \"\n")),
             "projects/app.toml: procedures.p.instructions: must not be empty"

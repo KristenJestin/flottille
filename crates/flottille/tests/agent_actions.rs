@@ -1,9 +1,9 @@
 //! The scenarios of what an agent does of what the window does (`docs/tools.md`, "The project"):
-//! the project's procedures and settings read at once, every write held for the user unless the
-//! project lets its family run on its own, and a line outside the catalogue in the project
-//! folder held to be allowed once or always. The agents are the fake agent's sessions, driven
-//! through their MCP server as their client would, on throwaway repositories and temporary XDG
-//! folders.
+//! the project's procedures and settings read at once, every write of the project to judge (held
+//! for the user here, where no judge is chosen), a change of the tracker base, and the lines an
+//! agent runs in the project folder classed as anywhere else. The agents are the fake agent's
+//! sessions, driven through their MCP server as their client would, on throwaway repositories and
+//! temporary XDG folders.
 
 mod common;
 
@@ -17,7 +17,7 @@ use flottille_core::store::Store;
 use serde_json::{Value, json};
 
 /// A project `app` that is one repository with a docs folder, its file starting with a comment,
-/// its procedure `ship` (push, asked), and its ready workspace `login`.
+/// its procedure `ship`, and its ready workspace `login`.
 fn project(user: &User) -> PathBuf {
     let folder = user.path("work/app");
     user.git_init(&folder);
@@ -44,7 +44,7 @@ fn project(user: &User) -> PathBuf {
     user.call(
         "procedure.add",
         json!({"project": "app", "name": "ship", "description": "Ship the workspace",
-            "instructions": "Push the branch.", "grants": {"push": "ask"}}),
+            "instructions": "Push the branch."}),
     )
     .unwrap();
     let workspace = user
@@ -155,17 +155,12 @@ fn each_family_s_read_runs_at_once() {
 
     let listed = done(mcp.call("procedure", json!({"action": "list"})));
     assert!(listed.contains("- ship: Ship the workspace"), "{listed}");
-    assert!(listed.contains("push (ask)"), "{listed}");
     let shown = done(mcp.call("procedure", json!({"action": "show", "name": "ship"})));
     assert!(shown.contains("Push the branch."), "{shown}");
     let settings = done(mcp.call("project", json!({"action": "settings"})));
     assert!(settings.contains("Project app."), "{settings}");
     assert!(settings.contains("Tracker: none"), "{settings}");
-    assert!(
-        settings
-            .contains("What agents do on their own: procedures ask, settings ask, references ask"),
-        "{settings}"
-    );
+    assert!(!settings.contains("on their own"), "{settings}");
     assert!(
         user.call("approval.list", json!({})).unwrap()["requests"]
             .as_array()
@@ -210,17 +205,33 @@ fn a_write_is_held_then_done_on_approval_and_not_done_on_refusal() {
 }
 
 #[test]
-fn a_change_of_the_project_is_allowed_once_never_for_the_tree() {
+fn an_action_of_an_agent_is_to_judge_and_a_change_of_the_tracker_is_base() {
     let user = User::with_fake_agent();
     project(&user);
-    let (_, mcp) = root(&user, Some("login"));
-    let number = held(mcp.call("project", add_style()));
+    let (_, mcp) = root(&user, None);
 
-    let error = cli(&user, &["approve", &number.to_string(), "--for-tree"]).unwrap_err();
-    assert!(error.contains("never for the tree"), "{error}");
-    let error = cli(&user, &["approve", &number.to_string(), "--always"]).unwrap_err();
-    assert!(error.contains("only such a line"), "{error}");
-    assert_eq!(request(&user, number)["state"], "pending");
+    let reference = held(mcp.call("project", add_style()));
+    let start = held(mcp.call(
+        "procedure",
+        json!({"action": "start", "name": "ship", "workspace": "login"}),
+    ));
+    let forge = held(mcp.call(
+        "project",
+        json!({"action": "set_settings", "repositories": [{"path": ".", "forge": null}]}),
+    ));
+    let tracker = held(mcp.call(
+        "project",
+        json!({"action": "set_settings", "tracker": {"kind": "github", "repository": "acme/app"}}),
+    ));
+
+    for number in [reference, start, forge] {
+        assert_eq!(request(&user, number)["class"], "judge", "#{number}");
+        assert_eq!(request(&user, number)["kind"], "action", "#{number}");
+    }
+    assert_eq!(request(&user, tracker)["class"], "base");
+    let error = cli(&user, &["approve", &reference.to_string(), "--for-tree"]).unwrap_err();
+    assert!(error.contains("--for-tree"), "{error}");
+    assert!(!file(&user).contains("[tracker]"));
 }
 
 #[test]
@@ -255,7 +266,7 @@ fn a_settings_change_says_what_changes_and_keeps_the_file_s_comments() {
 }
 
 #[test]
-fn a_family_set_to_allow_runs_at_once() {
+fn an_old_agent_actions_table_lets_nothing_run_on_its_own() {
     let user = User::with_fake_agent();
     project(&user);
     let path = user.project_file("app");
@@ -267,11 +278,40 @@ fn a_family_set_to_allow_runs_at_once() {
     .unwrap();
     let (_, mcp) = root(&user, Some("login"));
 
-    let added = done(mcp.call("project", add_style()));
-    assert!(added.starts_with("Reference style added"), "{added}");
-    assert!(file(&user).contains("[references.style]"));
-    // Another family still asks.
-    held(mcp.call("procedure", json!({"action": "start", "name": "ship"})));
+    held(mcp.call("project", add_style()));
+    assert!(!file(&user).contains("[references.style]"));
+}
+
+#[test]
+fn the_daemon_s_start_removes_grants_families_and_always_from_the_project_s_file_keeping_the_rest()
+{
+    let user = User::with_fake_agent();
+    project(&user);
+    assert!(user.run(&["daemon", "stop"]).status.success());
+    let old = file(&user)
+        + "\n[agent_actions]\nprocedures = \"allow\"\n\
+           \n[procedures.ship.grants]\npush = \"allow\"\n\
+           \n[commands.ls]\nline = \"ls\"\nadded_by = \"approval\"\n";
+    std::fs::write(user.project_file("app"), &old).unwrap();
+
+    user.status();
+
+    let text = file(&user);
+    assert!(!text.contains("agent_actions"), "{text}");
+    assert!(
+        !text.contains("grants") && !text.contains("push = "),
+        "{text}"
+    );
+    assert!(!text.contains("added_by"), "{text}");
+    assert!(text.starts_with("# The user's own words.\n"), "{text}");
+    assert!(
+        text.contains("[procedures.ship]") && text.contains("[commands.ls]"),
+        "{text}"
+    );
+    let shown = user
+        .call("project.settings", json!({"name": "app"}))
+        .unwrap();
+    assert_eq!(shown["obsolete"], json!([]));
 }
 
 #[test]
@@ -295,9 +335,6 @@ fn an_agent_s_procedure_start_is_held_confirmed_then_started_in_its_workspace() 
         json!([
             "Start the procedure ship in workspace login: Ship the workspace",
             "Its agent is told: Push the branch.",
-            "Its agents may push the workspace's branch to its remote (git push), after asking \
-             you, each time",
-            "The agents the run starts may do the same"
         ])
     );
     assert_eq!(agents(), before, "nothing starts before the user confirms");
@@ -316,38 +353,13 @@ fn an_agent_s_procedure_start_is_held_confirmed_then_started_in_its_workspace() 
         .clone();
     assert_eq!(run["procedure"], "ship");
     assert_eq!(run["workspace"], "login");
-    assert_eq!(run["grants"], json!({"push": "ask"}));
+    assert!(run.get("grants").is_none(), "{run}");
     // The lead holds none of it.
     assert!(user.call("procedure.of", json!({"agent": lead})).unwrap()["run"].is_null());
 }
 
 #[test]
-fn a_procedure_edited_after_it_was_asked_is_not_started() {
-    let user = User::with_fake_agent();
-    project(&user);
-    let (_, mcp) = root(&user, Some("login"));
-    let number = held(mcp.call("procedure", json!({"action": "start", "name": "ship"})));
-    user.call(
-        "procedure.edit",
-        json!({"project": "app", "name": "ship", "grants": {"push": "allow"}}),
-    )
-    .unwrap();
-
-    cli(&user, &["approve", &number.to_string()]).unwrap();
-
-    let body = settled(&user, number).body;
-    assert!(
-        body.starts_with(&format!(
-            "Request #{number} (procedure) was not executed: what it does changed since the user \
-             allowed it"
-        )),
-        "{body}"
-    );
-    assert!(body.contains("on their own"), "{body}");
-}
-
-#[test]
-fn an_agent_never_gives_a_grant_sets_what_runs_on_its_own_nor_reaches_another_project() {
+fn an_agent_never_passes_a_grant_sets_what_runs_on_its_own_nor_reaches_another_project() {
     let user = User::with_fake_agent();
     project(&user);
     let (_, mcp) = root(&user, None);
@@ -394,71 +406,32 @@ fn an_agent_never_gives_a_grant_sets_what_runs_on_its_own_nor_reaches_another_pr
 }
 
 #[test]
-fn a_line_outside_the_catalogue_in_main_is_held_and_once_runs_it_without_changing_the_file() {
+fn in_main_a_known_read_runs_at_once_and_a_write_is_held_then_run_once() {
     let user = User::with_fake_agent();
-    project(&user);
+    let folder = project(&user);
     let (_, mcp) = root(&user, None);
     let before = file(&user);
 
-    let number = held(mcp.call("commands_run", json!({"line": "cat README.md"})));
+    let read = done(mcp.call("commands_run", json!({"line": "cat README.md"})));
+    assert!(read.contains("exited with code 0"), "{read}");
+    let number = held(mcp.call("commands_run", json!({"line": "touch notes.txt"})));
     let asked = request(&user, number);
-    assert_eq!(asked["kind"], "catalogue");
-    assert_eq!(
-        asked["says"],
-        json!([
-            "Run cat README.md in the project folder",
-            "Always adds it to the project's catalogue as cat-readme-md. Flottille does not \
-             check that it only reads. It will run in your project folder without asking, for \
-             every agent of this project."
-        ])
-    );
-    let error = cli(&user, &["approve", &number.to_string(), "--for-tree"]).unwrap_err();
-    assert!(error.contains("never"), "{error}");
+    assert_eq!(asked["kind"], "call");
+    assert_eq!(asked["class"], "judge");
+    assert!(!folder.join("notes.txt").exists());
     cli(&user, &["approve", &number.to_string()]).unwrap();
 
     let body = settled(&user, number).body;
     assert!(body.contains("and Flottille has now done it"), "{body}");
     assert!(body.contains("exited with code 0"), "{body}");
-    assert_eq!(file(&user), before);
+    assert!(folder.join("notes.txt").exists());
+    assert_eq!(file(&user), before, "nothing is added to the catalogue");
     // Once: the next run asks again.
-    held(mcp.call("commands_run", json!({"line": "cat README.md"})));
+    held(mcp.call("commands_run", json!({"line": "touch notes.txt"})));
 }
 
 #[test]
-fn always_runs_it_and_writes_it_in_the_catalogue() {
-    let user = User::with_fake_agent();
-    project(&user);
-    let (_, mcp) = root(&user, None);
-
-    let number = held(mcp.call("commands_run", json!({"line": "cat README.md"})));
-    let said = cli(&user, &["approve", &number.to_string(), "--always"]).unwrap();
-    assert!(said.contains("catalogue"), "{said}");
-
-    let body = settled(&user, number).body;
-    assert!(
-        body.starts_with(&format!(
-            "Request #{number} (commands_run) was approved by the user, who added it to the \
-             project's catalogue as cat-readme-md"
-        )),
-        "{body}"
-    );
-    assert!(body.contains("exited with code 0"), "{body}");
-    let text = file(&user);
-    assert!(text.starts_with("# The user's own words.\n"), "{text}");
-    assert!(
-        text.contains(
-            "[commands.cat-readme-md]\nline = \"cat README.md\"\nadded_by = \"approval\"\n"
-        ),
-        "{text}"
-    );
-    // From then on it runs there without asking, by its line or its name.
-    let ran = done(mcp.call("commands_run", json!({"line": "cat README.md"})));
-    assert!(ran.contains("app"), "{ran}");
-    done(mcp.call("commands_run", json!({"command": "cat-readme-md"})));
-}
-
-#[test]
-fn a_never_command_or_shell_syntax_in_main_is_still_refused() {
+fn in_main_shell_syntax_is_still_refused_and_a_never_command_is_base() {
     let user = User::with_fake_agent();
     project(&user);
     let path = user.project_file("app");
@@ -470,20 +443,20 @@ fn a_never_command_or_shell_syntax_in_main_is_still_refused() {
     std::fs::write(&path, format!("never = [[\"deploy\"]]\n{text}")).unwrap();
     let (_, mcp) = root(&user, None);
 
-    let never = refused(mcp.call("commands_run", json!({"line": "deploy now"})));
-    assert!(never.contains("never"), "{never}");
     // Refused in the words a workspace's run is refused in.
     let shell = mcp.call("commands_run", json!({"line": "cat README.md | wc -l"}));
     assert!(shell.error, "{}", shell.text);
     assert!(shell.text.contains("is shell syntax"), "{}", shell.text);
-    let push = refused(mcp.call("commands_run", json!({"line": "git push origin main"})));
-    assert!(push.starts_with("refused: "), "{push}");
     assert!(
         user.call("approval.list", json!({})).unwrap()["requests"]
             .as_array()
             .unwrap()
             .is_empty()
     );
+    let never = held(mcp.call("commands_run", json!({"line": "deploy now"})));
+    assert_eq!(request(&user, never)["class"], "base");
+    let push = held(mcp.call("commands_run", json!({"line": "git push origin main"})));
+    assert_eq!(request(&user, push)["class"], "judge");
 }
 
 #[test]
@@ -509,33 +482,6 @@ fn an_agent_s_reference_on_the_project_folder_or_a_repository_is_refused() {
         "nothing was asked"
     );
     assert!(!file(&user).contains("[references.all]"));
-}
-
-#[test]
-fn a_tracker_change_always_asks_whatever_settings_says() {
-    let user = User::with_fake_agent();
-    project(&user);
-    let path = user.project_file("app");
-    let text = file(&user);
-    std::fs::write(
-        &path,
-        format!("{text}\n[agent_actions]\nsettings = \"allow\"\n"),
-    )
-    .unwrap();
-    let (_, mcp) = root(&user, None);
-
-    let saved = done(mcp.call(
-        "project",
-        json!({"action": "set_settings", "repositories": [{"path": ".", "forge": null}]}),
-    ));
-    assert!(saved.starts_with("Saved."), "{saved}");
-    let number = held(mcp.call(
-        "project",
-        json!({"action": "set_settings", "tracker": {"kind": "github", "repository": "acme/app"}}),
-    ));
-    let asked = request(&user, number);
-    assert_eq!(asked["kind"], "action");
-    assert!(!file(&user).contains("[tracker]"));
 }
 
 #[test]
@@ -570,7 +516,7 @@ fn a_procedure_whose_instructions_changed_after_it_was_asked_is_not_started() {
 }
 
 #[test]
-fn a_line_equal_to_a_catalogue_command_is_that_command_with_its_own_flags() {
+fn a_line_equal_to_a_catalogue_command_is_that_command_and_is_judged_in_main() {
     let user = User::with_fake_agent();
     project(&user);
     let path = user.project_file("app");
@@ -578,7 +524,7 @@ fn a_line_equal_to_a_catalogue_command_is_that_command_with_its_own_flags() {
     std::fs::write(
         &path,
         format!(
-            "{text}\n[commands.readme]\nline = \"cat README.md\"\n\n\
+            "{text}\n[commands.build]\nline = \"touch built.txt\"\n\n\
              [commands.status]\nline = \"git status\"\ncheck = true\nread_only = true\n\
              ask_before_running = true\n"
         ),
@@ -587,77 +533,30 @@ fn a_line_equal_to_a_catalogue_command_is_that_command_with_its_own_flags() {
     let (_, mcp) = root(&user, None);
     let before = file(&user);
 
-    // Not a read-only check: refused in the project folder, never held to be allowed always.
-    let said = refused(mcp.call("commands_run", json!({"line": "cat README.md"})));
-    assert!(said.contains("readme is not one"), "{said}");
-    // Marked to ask: held as that command, which Always does not take.
-    let number = held(mcp.call("commands_run", json!({"line": "git  status"})));
-    assert_eq!(request(&user, number)["kind"], "call");
-    let error = cli(&user, &["approve", &number.to_string(), "--always"]).unwrap_err();
-    assert!(error.contains("only such a line"), "{error}");
+    // In the project folder, the user's own checkout: judged, as that command.
+    let build = held(mcp.call("commands_run", json!({"line": "touch  built.txt"})));
+    let asked = request(&user, build);
+    assert_eq!(asked["class"], "judge");
+    assert!(
+        asked["reasons"]
+            .to_string()
+            .contains("the catalogue command build runs in the project folder"),
+        "{asked}"
+    );
+    // Marked to ask: held as that command.
+    let status = held(mcp.call("commands_run", json!({"line": "git  status"})));
+    assert!(
+        request(&user, status)["reasons"]
+            .to_string()
+            .contains("marked to ask before it runs"),
+        "{}",
+        request(&user, status)
+    );
     assert_eq!(file(&user), before, "nothing duplicated");
 }
 
 #[test]
-fn a_line_allowed_always_is_listed_as_the_user_s_not_as_changing_nothing() {
-    let user = User::with_fake_agent();
-    project(&user);
-    let (_, mcp) = root(&user, None);
-    let number = held(mcp.call("commands_run", json!({"line": "cat README.md"})));
-    cli(&user, &["approve", &number.to_string(), "--always"]).unwrap();
-    settled(&user, number);
-
-    let listed = done(mcp.call("commands_list", json!({})));
-    let line = listed
-        .lines()
-        .find(|line| line.starts_with("cat-readme-md: "))
-        .unwrap_or_else(|| panic!("{listed}"));
-    assert!(!line.contains("changes nothing"), "{line}");
-    assert!(line.contains("allowed always by the user"), "{line}");
-}
-
-#[test]
-fn a_line_allowed_always_runs_only_in_the_repository_it_was_allowed_in() {
-    let user = User::with_fake_agent();
-    let folder = project(&user);
-    let lib = folder.join("lib");
-    user.git_init(&lib);
-    std::fs::write(lib.join("README.md"), "lib\n").unwrap();
-    user.git(&lib, &["add", "."]);
-    user.git(&lib, &["commit", "--quiet", "-m", "start"]);
-    let path = user.project_file("app");
-    let text = file(&user).replacen(
-        "[[repositories]]",
-        "[[repositories]]\npath = \"lib\"\n\n[[repositories]]",
-        1,
-    );
-    std::fs::write(&path, text).unwrap();
-    let (_, mcp) = root(&user, None);
-    let number = held(mcp.call(
-        "commands_run",
-        json!({"line": "cat README.md", "repository": "lib"}),
-    ));
-    cli(&user, &["approve", &number.to_string(), "--always"]).unwrap();
-    settled(&user, number);
-    assert!(
-        file(&user).contains("repository = \"lib\""),
-        "{}",
-        file(&user)
-    );
-
-    let ran = done(mcp.call("commands_run", json!({"command": "cat-readme-md"})));
-    assert!(ran.contains("lib"), "{ran}");
-    let said = refused(mcp.call(
-        "commands_run",
-        json!({"command": "cat-readme-md", "repository": "."}),
-    ));
-    assert!(said.contains("in lib only"), "{said}");
-    // Its line elsewhere is another line, held again.
-    held(mcp.call("commands_run", json!({"line": "cat README.md"})));
-}
-
-#[test]
-fn in_main_a_line_that_discards_the_user_s_work_is_refused_not_held() {
+fn in_main_a_line_that_discards_the_user_s_work_is_base() {
     let user = User::with_fake_agent();
     project(&user);
     let (_, mcp) = root(&user, None);
@@ -666,32 +565,69 @@ fn in_main_a_line_that_discards_the_user_s_work_is_refused_not_held() {
         "git checkout -- README.md",
         "git restore README.md",
         "git clean -fd",
-        "git stash",
+        "git stash drop",
         "git reset --hard",
         "git worktree remove ../w",
         "git branch -D old",
     ] {
-        let said = refused(mcp.call("commands_run", json!({"line": line})));
-        assert!(said.contains("the user's own checkout"), "{line}: {said}");
+        let number = held(mcp.call("commands_run", json!({"line": line})));
+        let asked = request(&user, number);
+        assert_eq!(asked["class"], "base", "{line}");
+        assert!(
+            asked["reasons"]
+                .to_string()
+                .contains("the user's own checkout"),
+            "{line}: {asked}"
+        );
     }
-    assert!(
-        user.call("approval.list", json!({})).unwrap()["requests"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
 }
 
 #[test]
-fn always_is_never_offered_for_a_sensitive_line() {
+fn a_sensitive_line_is_base_and_allowed_only_once() {
     let user = User::with_fake_agent();
     project(&user);
     let (_, mcp) = root(&user, None);
     let number = held(mcp.call("commands_run", json!({"line": "cat .env"})));
-    assert_eq!(request(&user, number)["sensitive"], true);
+    assert_eq!(request(&user, number)["class"], "base");
 
     let error = cli(&user, &["approve", &number.to_string(), "--always"]).unwrap_err();
-    assert!(error.contains("never always"), "{error}");
+    assert!(error.contains("--always"), "{error}");
     assert_eq!(request(&user, number)["state"], "pending");
     assert!(!file(&user).contains("[commands."));
+}
+
+#[test]
+fn an_agent_can_never_change_its_mode_nor_choose_the_judge() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (id, mcp) = root(&user, None);
+
+    // No tool of an agent sets either.
+    for name in mcp.names() {
+        assert!(!name.contains("mode") && !name.contains("judge"), "{name}");
+    }
+    for args in [
+        json!({"action": "set_settings", "gate_mode": "ask"}),
+        json!({"action": "set_settings", "judge": {"provider": "claude"}}),
+    ] {
+        let said = refused(mcp.call("project", args.clone()));
+        assert!(said.contains("the arguments do not fit"), "{args}: {said}");
+    }
+    // Nor through a command line: the daemon's own command is refused, and Flottille's own
+    // folder is base, which only the user allows.
+    let said = refused(mcp.call(
+        "commands_run",
+        json!({"line": format!("flottille agent mode {id} ask")}),
+    ));
+    assert!(said.contains("flottille drives the daemon"), "{said}");
+    let settings = user.path("config/flottille/providers.toml");
+    let number = held(mcp.call(
+        "fs_write",
+        json!({"path": settings, "content": "[judge]\nprovider = \"claude\"\n"}),
+    ));
+    assert_eq!(request(&user, number)["class"], "base");
+    assert_eq!(
+        user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["gate_mode"],
+        "auto"
+    );
 }

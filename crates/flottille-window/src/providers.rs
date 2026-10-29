@@ -73,6 +73,9 @@ pub struct Providers {
     pub error: Option<String>,
     /// Whether the daemon answered yet.
     pub known: bool,
+    /// The Auto judge the user chose: its provider and its model (the provider's default when
+    /// none).
+    pub judge: Option<(String, Option<String>)>,
 }
 
 fn text(value: &Value) -> Option<String> {
@@ -174,11 +177,14 @@ impl Providers {
                     .collect(),
                 error: None,
                 known: true,
+                judge: text(&answer["judge"]["provider"])
+                    .map(|provider| (provider, text(&answer["judge"]["model"]))),
             },
             Err(error) => Providers {
                 list: Vec::new(),
                 error: Some(error),
                 known: true,
+                judge: None,
             },
         }
     }

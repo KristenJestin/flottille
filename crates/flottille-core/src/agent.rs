@@ -59,10 +59,40 @@ pub struct Agent {
     pub reopens: bool,
     /// Its agent takes images in a prompt, as it said when it last started; `None` before it did.
     pub images: Option<bool>,
+    /// Ask or Auto: what becomes of a call to judge (`docs/design.md` §7). Only the user sets it.
+    #[serde(default)]
+    pub gate_mode: GateMode,
     /// The system prompt, frozen at creation, with its cache boundary.
     pub instructions: String,
     /// The exact names of its tools, frozen at creation (the prompt cache depends on it).
     pub tools: Vec<String>,
+}
+
+/// A session's mode (`docs/design.md` §7): in Ask a call to judge comes to the user; in Auto the
+/// judge decides it. A new session starts in Auto, a child in its parent's mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateMode {
+    Ask,
+    #[default]
+    Auto,
+}
+
+impl GateMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GateMode::Ask => "ask",
+            GateMode::Auto => "auto",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<GateMode> {
+        match text {
+            "ask" => Some(GateMode::Ask),
+            "auto" => Some(GateMode::Auto),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

@@ -8,6 +8,7 @@ pub mod composer;
 pub mod conversation;
 pub mod history;
 pub mod link;
+pub mod mode;
 pub mod model;
 pub mod open;
 pub mod page;

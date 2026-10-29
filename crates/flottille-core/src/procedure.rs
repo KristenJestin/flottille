@@ -1,122 +1,8 @@
 //! Procedures (`docs/procedures.md`): named multi-step actions of a project, run by an agent in a
-//! workspace, with the grants each run gives written in the procedure and shown before it runs.
-
-use std::collections::BTreeMap;
-use std::fmt;
+//! workspace as plain instructions. A run grants nothing: its agent's calls go through the gate's
+//! classes like any other (`docs/design.md` §7).
 
 use serde::{Deserialize, Serialize};
-
-/// What a procedure can grant: a fixed vocabulary, never free text. Each lets through, for the
-/// agents of a run, one kind of operation the gate refuses to agents otherwise.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Grant {
-    /// `git commit`, never `--amend` nor `--no-verify`.
-    Commit,
-    /// `git push` of the workspace's own branch to its repository's remote, never forced.
-    Push,
-    /// `git push --force-with-lease` of the workspace's own branch.
-    PushForceWithLease,
-    /// `git rebase` of the workspace's branch, never interactive nor with `--exec`.
-    Rebase,
-    /// `forge_write` creates the pull request of the workspace's branch.
-    PrCreate,
-    /// `forge_write` merges the pull request of the workspace's branch, by squash.
-    PrMergeSquash,
-    /// `forge_write` re-runs the failed jobs of a pipeline of the workspace's branch.
-    PipelineRerun,
-    /// `workspace_remove` removes the run's own workspace, as `flottille workspace remove` does.
-    WorkspaceRemove,
-}
-
-impl Grant {
-    pub const ALL: [Grant; 8] = [
-        Grant::Commit,
-        Grant::Push,
-        Grant::PushForceWithLease,
-        Grant::Rebase,
-        Grant::PrCreate,
-        Grant::PrMergeSquash,
-        Grant::PipelineRerun,
-        Grant::WorkspaceRemove,
-    ];
-
-    pub fn word(self) -> &'static str {
-        match self {
-            Grant::Commit => "commit",
-            Grant::Push => "push",
-            Grant::PushForceWithLease => "push-force-with-lease",
-            Grant::Rebase => "rebase",
-            Grant::PrCreate => "pr-create",
-            Grant::PrMergeSquash => "pr-merge-squash",
-            Grant::PipelineRerun => "pipeline-rerun",
-            Grant::WorkspaceRemove => "workspace-remove",
-        }
-    }
-
-    pub fn of(word: &str) -> Option<Grant> {
-        Grant::ALL.into_iter().find(|grant| grant.word() == word)
-    }
-
-    /// What it lets the agents of a run do, as shown before a run.
-    pub fn says(self) -> &'static str {
-        match self {
-            Grant::Commit => "make commits (git commit)",
-            Grant::Push => "push the workspace's branch to its remote (git push)",
-            Grant::PushForceWithLease => {
-                "force-push the workspace's branch with a lease (git push --force-with-lease)"
-            }
-            Grant::Rebase => "rebase the workspace's branch (git rebase)",
-            Grant::PrCreate => "open the workspace's pull requests (forge_write pr-create)",
-            Grant::PrMergeSquash => {
-                "merge the workspace's pull requests by squash (forge_write pr-merge-squash)"
-            }
-            Grant::PipelineRerun => {
-                "re-run the failed pipelines of the workspace's branch (forge_write \
-                 pipeline-rerun)"
-            }
-            Grant::WorkspaceRemove => {
-                "remove the workspace once nothing in it would be lost (workspace_remove)"
-            }
-        }
-    }
-}
-
-impl fmt::Display for Grant {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.word())
-    }
-}
-
-/// How a grant lets an operation through.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Mode {
-    /// At once.
-    Allow,
-    /// Held for the user each time, as the gate holds a call it asks about.
-    Ask,
-}
-
-impl Mode {
-    pub fn word(self) -> &'static str {
-        match self {
-            Mode::Allow => "allow",
-            Mode::Ask => "ask",
-        }
-    }
-
-    pub fn of(word: &str) -> Option<Mode> {
-        match word {
-            "allow" => Some(Mode::Allow),
-            "ask" => Some(Mode::Ask),
-            _ => None,
-        }
-    }
-}
-
-/// The grants of a procedure, or of a run.
-pub type Grants = BTreeMap<Grant, Mode>;
 
 /// One procedure of a project, as its file holds it under `[procedures.<name>]`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -126,21 +12,18 @@ pub struct Procedure {
     pub description: String,
     /// What the agent of a run is given as its first message.
     pub instructions: String,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub grants: Grants,
-    /// Whether the children of a run's agent get the run's grants too: they do unless the file
-    /// says `children = false`.
-    #[serde(default = "yes", skip_serializing_if = "is_true")]
-    pub children: bool,
+    /// Obsolete since the gate's classes: read, said, never followed, and dropped from the file
+    /// by the daemon's migration (`OBSOLETE_GRANTS`).
+    #[serde(default, skip_serializing)]
+    pub grants: Option<toml::Value>,
+    /// Obsolete with `grants`.
+    #[serde(default, skip_serializing)]
+    pub children: Option<toml::Value>,
 }
 
-fn yes() -> bool {
-    true
-}
-
-fn is_true(value: &bool) -> bool {
-    *value
-}
+/// What is said of a procedure's `grants` or `children`.
+pub const OBSOLETE_GRANTS: &str = "no longer read: a procedure grants nothing; its agent's calls \
+     go through the gate's classes, and Ask or Auto decides what comes to you";
 
 impl Procedure {
     /// The problem with it, as `<key>: <what is wrong>` under its own key.
@@ -162,55 +45,32 @@ impl Procedure {
     }
 }
 
-/// The grants as one line: `push (allow), pr-create (ask)`, or `none`.
-pub fn shown(grants: &Grants) -> String {
-    if grants.is_empty() {
-        return "none".into();
-    }
-    grants
-        .iter()
-        .map(|(grant, mode)| format!("{grant} ({})", mode.word()))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 /// The procedures Flottille ships, which a project adopts with `flottille procedure add
 /// --template <name>` and then edits as its own: the three of `docs/design.md` §13.
 pub const TEMPLATES: [&str; 3] = ["open-prs", "merge-stack", "close"];
 
 /// The template of that name, as it is written into a project's file.
 pub fn template(name: &str) -> Option<Procedure> {
-    let (description, instructions, grants): (&str, &str, &[(Grant, Mode)]) = match name {
+    let (description, instructions) = match name {
         "open-prs" => (
             "Open the pull requests of the workspace, one per repository with commits",
             OPEN_PRS,
-            // One confirmation per operation: each push and each pull request is the user's.
-            &[(Grant::Push, Mode::Ask), (Grant::PrCreate, Mode::Ask)],
         ),
         "merge-stack" => (
             "Merge the workspace's pull requests level by level, in dependency order",
             MERGE_STACK,
-            // What running it authorizes, as the case's own command did: Flottille refuses a
-            // merge its checks or a review block, unless the user waives it.
-            &[
-                (Grant::Rebase, Mode::Allow),
-                (Grant::PushForceWithLease, Mode::Allow),
-                (Grant::PrMergeSquash, Mode::Allow),
-                (Grant::PipelineRerun, Mode::Allow),
-            ],
         ),
         "close" => (
             "Close the workspace once nothing in it would be lost",
             CLOSE,
-            &[(Grant::WorkspaceRemove, Mode::Allow)],
         ),
         _ => return None,
     };
     Some(Procedure {
         description: description.into(),
         instructions: instructions.into(),
-        grants: grants.iter().copied().collect(),
-        children: true,
+        grants: None,
+        children: None,
     })
 }
 
@@ -235,9 +95,9 @@ none for the others. You change no file and make no commit.
    - open its pull request: `forge_write` with `pr-create`. Its title follows the project's
      format when one is given above, else says in one line what the change does; its body says
      what changed and why, in a few lines drawn from the commits and the ticket (`ticket_read`).
-   Each of these is held for the user's approval: that approval is their confirmation of that one
-   operation, so do not ask for it again, and never request anything the report did not show. A
-   repository with no commit of its own gets nothing.
+   Each of these may be held for the user's approval: that approval is their confirmation of that
+   one operation, so do not ask for it again, and never request anything the report did not show.
+   A repository with no commit of its own gets nothing.
 4. Once every request is answered, `report`: per repository, what was pushed and the pull
    request's link, what was refused or left out, and why.";
 
@@ -300,44 +160,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_grant_has_its_word_and_back() {
-        for grant in Grant::ALL {
-            assert_eq!(Grant::of(grant.word()), Some(grant));
-            let value = serde_json::to_value(grant).unwrap();
-            assert_eq!(value, grant.word());
-        }
-        assert_eq!(Grant::of("workspace-delete"), None);
-        assert_eq!(Mode::of("allow"), Some(Mode::Allow));
-        assert_eq!(Mode::of("deny"), None);
-    }
-
-    #[test]
-    fn each_template_is_a_valid_procedure_of_its_name_and_grants_what_it_says_it_does() {
+    fn each_template_is_a_valid_procedure_of_its_name_and_grants_nothing() {
         for name in TEMPLATES {
             let procedure = template(name).unwrap();
             procedure.check(name).unwrap();
-            assert!(procedure.children, "{name}");
+            assert_eq!(procedure.grants, None, "{name}");
         }
-        assert_eq!(
-            shown(&template("open-prs").unwrap().grants),
-            "push (ask), pr-create (ask)"
-        );
-        assert_eq!(
-            shown(&template("merge-stack").unwrap().grants),
-            "push-force-with-lease (allow), rebase (allow), pr-merge-squash (allow), \
-             pipeline-rerun (allow)"
-        );
-        assert_eq!(
-            shown(&template("close").unwrap().grants),
-            "workspace-remove (allow)"
-        );
         assert!(template("deploy").is_none());
-    }
-
-    #[test]
-    fn grants_are_shown_in_one_line() {
-        let grants = Grants::from([(Grant::PrCreate, Mode::Ask), (Grant::Push, Mode::Allow)]);
-        assert_eq!(shown(&grants), "push (allow), pr-create (ask)");
-        assert_eq!(shown(&Grants::new()), "none");
     }
 }

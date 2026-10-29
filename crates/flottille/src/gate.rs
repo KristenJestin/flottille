@@ -1,12 +1,15 @@
 //! The gate every tool call goes through, once, before it is performed (`docs/design.md` §7,
-//! `docs/reference/hemera.md` §4, without the remote judge).
+//! `docs/tools.md`, "The gate"). It does not grant rights: it puts each call in one of three
+//! classes. **Harmless** calls pass; **to judge** calls make a card in Ask and go to the judge in
+//! Auto (`judge.rs`); **base** calls always make a card, with a strong warning. What it refuses
+//! is not a permission but a call that cannot be made as it is: shell syntax, a malformed call,
+//! a login printed, the daemon driven from a command.
 
 use std::path::{Path, PathBuf};
 
 use flottille_core::approval::Kind;
-use flottille_core::procedure::{self, Grants, Mode};
-use flottille_core::project::{AgentActions, CatalogueCommand};
-use serde_json::{Value, json};
+use flottille_core::project::CatalogueCommand;
+use serde_json::Value;
 
 use crate::mcp::Grant;
 use crate::place::Resolved;
@@ -18,7 +21,7 @@ pub struct Call<'a> {
     pub tool: &'a str,
     pub args: &'a Value,
     /// The words of the line a run would start, split without a shell; empty for any other call,
-    /// and for a line that cannot be split (the tool refuses it with its own sentence).
+    /// and for a line that cannot be split (refused here with its sentence).
     pub words: &'a [String],
     /// The paths the call reaches, resolved: for a run, the folder it runs in first. Empty for a
     /// call that names none, or names one that cannot be read (the tool refuses it).
@@ -29,36 +32,36 @@ pub struct Call<'a> {
     pub never: Option<&'a [Vec<String>]>,
     /// Flottille's own folders (its data, configuration, state): sensitive places.
     pub own: &'a [PathBuf],
-    /// The procedure run whose grants the agent has, when it has some (`docs/procedures.md`).
-    pub run: Option<&'a Run>,
-    /// What the project's agents do without asking; `None` when its configuration cannot be read.
-    pub actions: Option<&'a AgentActions>,
-}
-
-/// The grants of the procedure run an agent works in, as the gate applies them.
-pub struct Run {
-    pub procedure: String,
-    pub grants: Grants,
-    /// Each repository's folder in the workspace, with the remote its branch goes to.
-    pub remotes: Vec<(PathBuf, String)>,
+    /// The workspace's branch is on a remote: rewriting its history rewrites what others may
+    /// have. Always false in the project folder, where every rewrite is base anyway.
+    pub pushed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Verdict {
+    /// Harmless: it passes in both modes.
     Allow,
     /// Refused, with the sentence that says why and what to do.
     Deny(String),
-    /// Held for an answer: a request is made.
+    /// To judge or base: a card, unless the judge allows a call to judge in Auto.
     Ask(Ask),
+}
+
+/// The class of a call that does not simply pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Class {
+    /// What the rules do not class elsewhere: the user's card in Ask, the judge's in Auto.
+    Judge,
+    /// What always comes to the user, with a strong warning, whatever the mode.
+    Base,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ask {
     /// Why, one sentence each.
     pub reasons: Vec<String>,
-    /// It reaches a sensitive place: it is never allowed for a tree.
-    pub sensitive: bool,
-    /// What the user may answer.
+    pub class: Class,
+    /// What the card shows: a call, or an action said in words.
     pub kind: Kind,
 }
 
@@ -73,8 +76,8 @@ impl Verdict {
     }
 }
 
-/// Programs that are shells: a catalogue command running one is never allowed without asking,
-/// and the line one runs with `-c` is judged in its place.
+/// Programs that are shells: a catalogue command running one is judged, and the line one runs
+/// with `-c` is judged in its place.
 const SHELLS: [&str; 11] = [
     "sh",
     "bash",
@@ -91,6 +94,35 @@ const SHELLS: [&str; 11] = [
 /// Wrappers unwrapped at most, one inside the other.
 const LAYERS_MAX: usize = 16;
 const WRITES: [&str; 2] = ["fs_write", "fs_edit"];
+const FILES: [&str; 5] = ["fs_read", "fs_list", "search", "fs_write", "fs_edit"];
+/// Programs that only read, whatever their arguments but those `writes_anyway` names: a line of
+/// one of them, alone, inside the place, is harmless.
+const READS: [&str; 40] = [
+    "ls", "pwd", "cat", "head", "tail", "wc", "grep", "rg", "egrep", "fgrep", "find", "fd", "stat",
+    "file", "tree", "du", "df", "ps", "pgrep", "pidof", "which", "whoami", "uname", "date", "echo",
+    "diff", "cmp", "basename", "dirname", "realpath", "readlink", "id", "hostname", "uptime",
+    "free", "less", "more", "true", "test", "lsof",
+];
+/// Git's subcommands that only read.
+const GIT_READS: [&str; 17] = [
+    "status",
+    "log",
+    "diff",
+    "show",
+    "blame",
+    "shortlog",
+    "describe",
+    "rev-parse",
+    "rev-list",
+    "ls-files",
+    "ls-tree",
+    "cat-file",
+    "grep",
+    "whatchanged",
+    "merge-base",
+    "name-rev",
+    "help",
+];
 /// Sensitive wherever they are along a path (`docs/reference/hemera.md` §4), with the agents'
 /// own logins.
 const SENSITIVE: [&str; 18] = [
@@ -118,205 +150,598 @@ const SYSTEM_SENSITIVE: [&str; 3] = ["/etc/shadow", "/etc/sudoers", "/etc/sudoer
 /// What makes a `.env.*` file a template, free to read and write.
 const TEMPLATES: [&str; 4] = [".example", ".sample", ".template", ".dist"];
 
-/// The verdict on a call, in the order of `docs/reference/hemera.md` §4: the role guards, the
-/// refusals, then what asks; anything else is allowed.
-pub fn decide(call: &Call) -> Verdict {
-    let run = call.tool == "commands_run";
-    let mut outside_catalogue = None;
-    // The project folder is read-only for agents (`docs/design.md` §6.2): no project grants
-    // writing there yet.
-    if call.grant.place.workspace.is_none() {
-        if WRITES.contains(&call.tool) {
-            return Verdict::Deny(
-                "refused: this agent works in the project folder, which is read-only for agents: \
-                 it writes files only in a workspace"
-                    .into(),
-            );
-        }
-        if run
-            && let Some((name, command)) = call.command
-            && command.added_by.is_some()
-        {
-            // Allowed always where it was asked for, and nowhere else.
-            let allowed = command.repository.as_deref().unwrap_or(".");
-            let asked = call.args["repository"].as_str().unwrap_or(allowed);
-            if asked != allowed {
-                return Verdict::Deny(format!(
-                    "refused: the user allowed {name} in {allowed} only, and this agent works in \
-                     the project folder, where it runs nowhere else"
-                ));
-            }
-        }
-        if run
-            && !call
-                .command
-                .is_some_and(|(_, c)| c.runs_in_project_folder())
-        {
-            match (call.command, call.args["line"].as_str()) {
-                // A line outside the catalogue is the user's to allow, once or always, after
-                // every other rule (`outside_catalogue`).
-                (None, Some(line)) if !call.words.is_empty() => outside_catalogue = Some(line),
-                (None, Some(line)) => {
-                    if let Err(why) = flottille_core::command::split_line(line) {
-                        return Verdict::Deny(why);
-                    }
-                }
-                (Some((name, _)), _) => {
-                    return Verdict::Deny(format!(
-                        "refused: this agent works in the project folder, which is read-only for \
-                         agents: it runs only the catalogue's read-only checks there, and {name} \
-                         is not one"
-                    ));
-                }
-                (None, None) => {}
-            }
+/// What the rules found in a call: why it is base, why it is to judge.
+#[derive(Default)]
+struct Found {
+    base: Vec<String>,
+    judge: Vec<String>,
+}
+
+impl Found {
+    fn base(&mut self, reason: String) {
+        if !self.base.contains(&reason) {
+            self.base.push(reason);
         }
     }
-    if let Some(family) = crate::actions::family(call.tool, call.args) {
-        // Nothing checks a tracker against the project, as a forge is against its remote: its
-        // change asks whatever the project lets run on its own.
-        if family == "settings" && call.args.get("tracker").is_some() {
+
+    fn judge(&mut self, reason: String) {
+        if !self.judge.contains(&reason) {
+            self.judge.push(reason);
+        }
+    }
+
+    /// The verdict: base wins over to judge, and nothing found is harmless.
+    fn verdict(self, kind: Kind) -> Verdict {
+        if !self.base.is_empty() {
+            let mut reasons = self.base;
+            reasons.extend(self.judge);
             return Verdict::Ask(Ask {
-                reasons: vec![
-                    "a change of the tracker always asks: nothing checks it against the project"
-                        .into(),
-                ],
-                sensitive: false,
-                kind: Kind::Action,
+                reasons,
+                class: Class::Base,
+                kind,
             });
         }
-        return match call.actions {
-            Some(actions) if crate::actions::on_its_own(actions, family) => Verdict::Allow,
-            Some(_) => Verdict::Ask(Ask {
-                reasons: vec![crate::actions::asked(family)],
-                sensitive: false,
-                kind: Kind::Action,
-            }),
-            None => Verdict::Ask(Ask {
-                reasons: vec![
-                    "the project's configuration cannot be read, so what its agents may do on \
-                     their own is not known"
-                        .into(),
-                ],
-                sensitive: false,
-                kind: Kind::Action,
-            }),
-        };
-    }
-    if call.tool == "forge_write" {
-        return forge_write(call);
-    }
-    if call.tool == "workspace_remove" {
-        return workspace_remove(call);
-    }
-    let layers = if run && !call.words.is_empty() {
-        match layers(call.words) {
-            Ok(layers) => layers,
-            Err(why) => return Verdict::Deny(why),
+        if !self.judge.is_empty() {
+            return Verdict::Ask(Ask {
+                reasons: self.judge,
+                class: Class::Judge,
+                kind,
+            });
         }
-    } else {
-        Vec::new()
-    };
-    if call.grant.place.workspace.is_none()
-        && let Some(why) = layers
-            .iter()
-            .filter(|layer| base(&layer[0]) == "git")
-            .find_map(|layer| discards_work(layer))
-    {
-        return Verdict::Deny(why);
+        Verdict::Allow
     }
-    // Inside a procedure run, its grants let through what the rules below refuse to agents;
-    // outside one, nothing here changes them.
-    let granted = match call.run {
-        Some(procedure) if run => match granted(call, procedure, &layers) {
-            Ok(granted) => granted,
-            Err(why) => return Verdict::Deny(why),
-        },
-        _ => None,
-    };
-    let reached = reached(call, &layers);
-    if let Some(why) = refusal(call, &layers, &reached, granted.is_some()) {
-        return Verdict::Deny(why);
+}
+
+/// The verdict on a call: refused when it cannot be made as it is, else its class.
+pub fn decide(call: &Call) -> Verdict {
+    if let Some(family) = crate::actions::family(call.tool, call.args) {
+        let mut found = Found::default();
+        // Nothing checks a tracker against the project, as a forge is against its remote.
+        if family == "settings" && call.args.get("tracker").is_some() {
+            found.base(
+                "it changes the project's tracker, which nothing checks against the project".into(),
+            );
+        } else {
+            found.judge(crate::actions::asked(family));
+        }
+        return found.verdict(Kind::Action);
     }
-    let mut ask = Ask {
-        reasons: Vec::new(),
-        sensitive: false,
-        kind: Kind::Call,
-    };
-    if let Some(line) = outside_catalogue {
-        ask.reasons.push(format!(
-            "{line} is not in the project's catalogue, and this agent works in the project \
-             folder, where agents run only the catalogue's read-only checks"
+    match call.tool {
+        "forge_write" => forge_write(call),
+        "workspace_remove" => Found {
+            base: Vec::new(),
+            judge: vec![
+                "it removes the agent's workspace and deletes its branches that hold nothing of \
+                 their own"
+                    .into(),
+            ],
+        }
+        .verdict(Kind::Call),
+        "commands_run" => run(call),
+        tool if FILES.contains(&tool) => files(call),
+        // Reads, the tree's tools, the outputs of the agent's own runs.
+        _ => Verdict::Allow,
+    }
+}
+
+/// A file tool: reading inside the place, and writing in a workspace, are harmless.
+fn files(call: &Call) -> Verdict {
+    let write = WRITES.contains(&call.tool);
+    let mut found = Found::default();
+    for path in call.paths {
+        if write && in_git(path) {
+            found.base(format!(
+                "{} is in a .git folder, which git keeps: writing there can rewrite the \
+                 repository or run code at its next command",
+                path.shown
+            ));
+        }
+        if let Some(place) = sensitive(call.own, path) {
+            found.base(format!("{} is a sensitive place ({place})", path.shown));
+        } else if !path.inside {
+            found.judge(format!("{} is outside this agent's place", path.shown));
+        }
+    }
+    if write && call.grant.place.workspace.is_none() {
+        found.judge(
+            "it writes in the project folder (main), the user's own checkout, not in a workspace"
+                .into(),
+        );
+    }
+    found.verdict(Kind::Call)
+}
+
+/// `forge_write`: a malformed call is refused; merging what the checks or a review block is
+/// base, since it is the user's own decision; the rest is to judge.
+fn forge_write(call: &Call) -> Verdict {
+    let action = call.args["action"].as_str().unwrap_or_default();
+    if !["pr-create", "pr-merge-squash", "pipeline-rerun"].contains(&action) {
+        return Verdict::Deny(format!(
+            "refused: forge_write has no action {action:?}: its actions are pr-create, \
+             pr-merge-squash and pipeline-rerun"
         ));
-        ask.kind = Kind::Catalogue;
     }
-    if let (Some((grant, Mode::Ask)), Some(procedure)) = (granted, call.run) {
-        ask.reasons
-            .push(asked_by_grant(&procedure.procedure, grant));
-        ask.sensitive = true;
-    }
-    for path in &reached {
-        let reason = match sensitive(call.own, path) {
-            Some(place) => {
-                ask.sensitive = true;
-                format!("{} is a sensitive place ({place})", path.shown)
-            }
-            None if !path.inside => format!("{} is outside this agent's place", path.shown),
-            None => continue,
-        };
-        if !ask.reasons.contains(&reason) {
-            ask.reasons.push(reason);
-        }
-    }
-    if run {
-        if call.never.is_none() {
-            ask.reasons.push(
-                "the project's configuration cannot be read, so what it never allows is not known"
+    let mut found = Found::default();
+    found.judge(match action {
+        "pr-create" => "it opens a pull request on the forge".into(),
+        "pr-merge-squash" => "it merges a pull request on the forge, by squash".into(),
+        _ => "it re-runs the failed jobs of a pipeline on the forge".into(),
+    });
+    if let Some(waived) = call.args.get("waive").filter(|w| !w.is_null()) {
+        if action != "pr-merge-squash" {
+            return Verdict::Deny(
+                "refused: waive is for pr-merge-squash only: it merges a pull request whose \
+                 checks or review block it, once the user allows it"
                     .into(),
             );
         }
-        if let Some((name, command)) = call.command {
-            if command.ask_before_running {
-                ask.reasons.push(format!(
-                    "the catalogue command {name} is marked to ask before it runs"
-                ));
-            }
-            if let Some(shell) = call.words.first().filter(|w| SHELLS.contains(&base(w))) {
-                ask.reasons.push(format!(
-                    "the catalogue command {name} runs a shell ({}), whose line the gate does not read",
-                    base(shell)
+        let Some(why) = waived.as_str().map(str::trim).filter(|w| !w.is_empty()) else {
+            return Verdict::Deny(
+                "refused: waive says why the user lets the pull request be merged as it is: give \
+                 their words"
+                    .into(),
+            );
+        };
+        found.base(format!(
+            "it merges a pull request whose checks or review block it, waived: {why}"
+        ));
+    }
+    found.verdict(Kind::Call)
+}
+
+/// `commands_run`: a catalogue command in a workspace, and a known read-only line inside the
+/// place, are harmless.
+fn run(call: &Call) -> Verdict {
+    if call.words.is_empty() {
+        // A line that cannot be split is shell syntax; a command the catalogue does not hold is
+        // refused by the tool itself.
+        if call.command.is_none()
+            && let Some(line) = call.args["line"].as_str()
+            && let Err(why) = flottille_core::command::split_line(line)
+        {
+            return Verdict::Deny(why);
+        }
+        return Verdict::Allow;
+    }
+    let layers = match layers(call.words) {
+        Ok(layers) => layers,
+        Err(why) => return Verdict::Deny(why),
+    };
+    if let Some(why) = layers.iter().find_map(|layer| refusal(layer)) {
+        return Verdict::Deny(why);
+    }
+    let main = call.grant.place.workspace.is_none();
+    let mut found = Found::default();
+    match call.never {
+        Some(never) => {
+            let catalogue = call.command.map(|(name, _)| name);
+            if let Some(entry) = never.iter().find(|entry| {
+                (entry.len() == 1 && catalogue == Some(entry[0].as_str()))
+                    || layers.iter().any(|layer| starts_anywhere(layer, entry))
+            }) {
+                found.base(format!(
+                    "the project's never list holds {}",
+                    entry.join(" ")
                 ));
             }
         }
+        None => found.base(
+            "the project's configuration cannot be read, so what it never allows is not known"
+                .into(),
+        ),
     }
-    if ask.reasons.is_empty() {
-        Verdict::Allow
-    } else {
-        Verdict::Ask(ask)
-    }
-}
-
-/// What a grant for the tree is given to: the exact call, without what changes each time it is
-/// made (a write's content, a read's page, a run's timeout and every why).
-pub fn identity(call: &Call) -> String {
-    let paths: Vec<String> = call
-        .paths
+    let git_word = layers
         .iter()
-        .map(|path| path.path.display().to_string())
-        .collect();
-    let what = match call.tool {
-        "commands_run" => match call.command {
-            Some((name, command)) => json!({"command": name, "line": command.line}),
-            None => json!({"words": call.words}),
-        },
-        "fs_read" | "fs_list" | "search" | "fs_write" | "fs_edit" => Value::Null,
-        _ => call.args.clone(),
-    };
-    let identity = json!({"tool": call.tool, "paths": paths, "what": what});
-    crate::files::sha256(identity.to_string().as_bytes())
+        .flat_map(|layer| &layer[1..])
+        .filter_map(|word| named_paths(word))
+        .find(|named| {
+            Path::new(named)
+                .components()
+                .any(|p| p.as_os_str() == ".git")
+        });
+    if let Some(word) = git_word {
+        found.base(format!("{word} reaches a .git folder, which git keeps"));
+    }
+    let reached = reached(call, &layers);
+    for path in &reached {
+        if in_git(path) {
+            found.base(format!(
+                "{} is in a .git folder, which git keeps",
+                path.shown
+            ));
+        }
+        if let Some(place) = sensitive(call.own, path) {
+            found.base(format!("{} is a sensitive place ({place})", path.shown));
+        } else if !path.inside {
+            found.judge(format!("{} is outside this agent's place", path.shown));
+        }
+    }
+    if let Some(why) = deletion(call, &layers) {
+        found.base(why);
+    }
+    let mut reads = layers.len() == 1;
+    for layer in &layers {
+        match program(layer, main, call.pushed) {
+            Line::Reads | Line::Files => {}
+            Line::Writes => reads = false,
+            Line::Judge(why) => {
+                reads = false;
+                found.judge(why);
+            }
+            Line::Base(why) => {
+                reads = false;
+                found.base(why);
+            }
+        }
+    }
+    if let Some((name, command)) = call.command {
+        if command.ask_before_running {
+            found.judge(format!(
+                "the catalogue command {name} is marked to ask before it runs"
+            ));
+        }
+        if let Some(shell) = call.words.first().filter(|w| SHELLS.contains(&base(w))) {
+            found.judge(format!(
+                "the catalogue command {name} runs a shell ({}), whose line the gate does not read",
+                base(shell)
+            ));
+        }
+        if main {
+            found.judge(format!(
+                "the catalogue command {name} runs in the project folder (main), the user's own \
+                 checkout, not in a workspace"
+            ));
+        }
+    } else if !reads {
+        found.judge(format!(
+            "{} is not a command the rules know to only read",
+            shown_words(call.words)
+        ));
+    }
+    found.verdict(Kind::Call)
 }
 
-/// The program a word names, without its folder.
+/// What a layer of a line does, by its program.
+enum Line {
+    /// It only reads.
+    Reads,
+    /// It writes the files of the workspace, and nothing else: harmless.
+    Files,
+    /// It writes, in a way the rules have nothing to say about: harmless only as a catalogue
+    /// command in a workspace.
+    Writes,
+    Judge(String),
+    Base(String),
+}
+
+/// What is refused, whatever the user would say: a login printed, the daemon driven from a
+/// command. These are not permissions; such a call cannot be made at all.
+fn refusal(layer: &[String]) -> Option<String> {
+    let program = base(&layer[0]);
+    let args = &layer[1..];
+    match program {
+        "flottille" => Some(
+            "refused: flottille drives the daemon, and agents act only through their tools: \
+             ask the user to run it"
+                .into(),
+        ),
+        "gh" | "glab" if prints_token(args) => Some(format!(
+            "refused: {program} auth prints a login token, and agents never see one: auth status \
+             says whether a login exists"
+        )),
+        _ => None,
+    }
+}
+
+/// Whether a forge's command line prints its login.
+fn prints_token(args: &[String]) -> bool {
+    let words = forge_words(args);
+    words.first() == Some(&"auth")
+        && (words.get(1) == Some(&"token")
+            || args.iter().any(|w| {
+                w == "--show-token"
+                    || (w.starts_with('-') && !w.starts_with("--") && w.contains('t'))
+            }))
+}
+
+/// What a layer's program does.
+fn program(layer: &[String], main: bool, pushed: bool) -> Line {
+    let program = base(&layer[0]);
+    let args = &layer[1..];
+    let any = |names: &[&str]| args.iter().any(|w| names.contains(&w.as_str()));
+    match program {
+        "git" => git(layer, main, pushed),
+        "gh" | "glab" if forge_reads(program, args) => Line::Reads,
+        "gh" | "glab" => Line::Judge(format!(
+            "{} writes to the forge, or is not one of its reads",
+            shown_words(layer)
+        )),
+        "bkt" => Line::Base(
+            "bkt is Bitbucket's command line, signed in as the user: whatever it runs, it runs \
+             with the user's own token"
+                .into(),
+        ),
+        "acli" => Line::Base(
+            "acli is Atlassian's command line, signed in as the user to Jira: whatever it runs, \
+             it runs with the user's own sign-in"
+                .into(),
+        ),
+        "npm" | "pnpm" | "yarn" | "bun" | "cargo" | "poetry" | "flit" | "hatch" | "uv"
+            if any(&["publish", "unpublish"]) =>
+        {
+            Line::Base(publishing(layer))
+        }
+        "twine" if any(&["upload"]) => Line::Base(publishing(layer)),
+        "gem" | "dotnet" | "nuget" if any(&["push"]) => Line::Base(publishing(layer)),
+        "find" if find_writes(args) => Line::Writes,
+        _ if READS.contains(&program) => Line::Reads,
+        _ => Line::Writes,
+    }
+}
+
+/// Whether a `find` does more than list: deletes, runs a command or writes a file.
+fn find_writes(args: &[String]) -> bool {
+    args.iter().any(|word| {
+        [
+            "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf",
+            "-fls",
+        ]
+        .contains(&word.as_str())
+    })
+}
+
+fn publishing(layer: &[String]) -> String {
+    format!("{} publishes a package or a release", shown_words(layer))
+}
+
+/// The first words of a line, as a reason names them.
+fn shown_words(words: &[String]) -> String {
+    let shown: Vec<&str> = words.iter().take(3).map(|word| base(word)).collect();
+    let mut text = shown.join(" ");
+    text.truncate(200);
+    text
+}
+
+/// What a git line does: its reads are harmless, adding or moving files in a workspace too;
+/// forcing a push, rewriting a pushed branch and discarding the work of the user's checkout are
+/// base; the rest is to judge.
+fn git(layer: &[String], main: bool, pushed: bool) -> Line {
+    let args = &layer[1..];
+    let mut at = 0;
+    let mut options = Vec::new();
+    while let Some(word) = args.get(at) {
+        let word = word.as_str();
+        if !word.starts_with('-') {
+            break;
+        }
+        if (word.starts_with("-c") && !word.starts_with("--")) || word.starts_with("--config-env") {
+            return Line::Judge(
+                "git -c and --config-env change git's configuration for this one command".into(),
+            );
+        }
+        if [
+            "-C",
+            "--git-dir",
+            "--work-tree",
+            "--namespace",
+            "--super-prefix",
+            "--attr-source",
+            "--list-cmds",
+        ]
+        .contains(&word)
+        {
+            at += 2;
+        } else {
+            at += 1;
+        }
+        if !["-C", "--no-pager", "-P", "--paginate"].contains(&word) {
+            options.push(word);
+        }
+    }
+    let Some(command) = args.get(at).map(String::as_str) else {
+        return Line::Reads;
+    };
+    let rest = &args[at + 1..];
+    if let Some(option) = options.first() {
+        return Line::Judge(format!(
+            "git {option} points git at another repository or changes how it runs"
+        ));
+    }
+    if main && let Some(why) = discards_work(layer) {
+        return Line::Base(why);
+    }
+    let any = |names: &[&str]| rest.iter().any(|w| names.contains(&w.as_str()));
+    // Rewriting a branch others may have, or the user's own, is base.
+    let rewrite = |what: String| {
+        if main || pushed {
+            Line::Base(format!(
+                "{what}, on a branch that is {}",
+                if main {
+                    "the user's own checkout's"
+                } else {
+                    "already on a remote"
+                }
+            ))
+        } else {
+            Line::Judge(what)
+        }
+    };
+    match command {
+        _ if GIT_READS.contains(&command) => Line::Reads,
+        "push" | "send-pack" | "http-push" => push(rest),
+        "subtree" | "lfs" if any(&["push"]) => push(rest),
+        "filter-branch" | "filter-repo" => Line::Base(format!(
+            "git {command} rewrites the whole history of the repository"
+        )),
+        "commit" if amends(rest) => rewrite("git commit --amend rewrites the last commit".into()),
+        "commit" => Line::Judge("git commit makes a commit".into()),
+        "rebase" => rewrite("git rebase rewrites the branch's history".into()),
+        "reset" if any(&["--hard"]) => {
+            Line::Judge("git reset --hard throws away the uncommitted work of the workspace".into())
+        }
+        "reset" if rest.iter().any(|w| !w.starts_with('-')) && !any(&["--"]) => {
+            rewrite("git reset moves the branch".into())
+        }
+        "update-ref" => rewrite("git update-ref moves a ref".into()),
+        "tag"
+            if rest.is_empty()
+                || any(&["-l", "--list"]) && !any(&["-d", "--delete", "-f", "--force"]) =>
+        {
+            Line::Reads
+        }
+        "branch" if branch_reads(rest) => Line::Reads,
+        "config" if config_reads(rest) => Line::Reads,
+        "remote" if remote_reads(rest) => Line::Reads,
+        "symbolic-ref" if !symbolic_ref_writes(rest) => Line::Reads,
+        "replace" if replace_reads(rest) => Line::Reads,
+        "notes" if notes_reads(rest) => Line::Reads,
+        "stash" if matches!(rest.first().map(String::as_str), Some("list" | "show")) => Line::Reads,
+        "worktree" if rest.first().is_some_and(|w| w == "list") => Line::Reads,
+        "reflog" if matches!(rest.first().map(String::as_str), None | Some("show")) => Line::Reads,
+        // Writing the files of a workspace, through git.
+        "add" | "mv" | "rm" if !main => Line::Files,
+        _ => Line::Judge(format!(
+            "git {command} changes the repository, its branches or a remote"
+        )),
+    }
+}
+
+/// Whether a line pushes with git, at any of its layers: the run checks its remote first.
+pub fn pushes(words: &[String]) -> bool {
+    layers(words).is_ok_and(|layers| {
+        layers
+            .iter()
+            .any(|layer| base(&layer[0]) == "git" && subcommand(&layer[1..]) == Some("push"))
+    })
+}
+
+/// git's command, past its global options.
+fn subcommand(args: &[String]) -> Option<&str> {
+    let mut at = 0;
+    while let Some(word) = args.get(at) {
+        if !word.starts_with('-') {
+            return Some(word);
+        }
+        at += match word.as_str() {
+            "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--super-prefix"
+            | "--attr-source" | "--config-env" => 2,
+            _ => 1,
+        };
+    }
+    None
+}
+
+/// A push: forcing it or deleting on the remote is base, anything else to judge.
+fn push(rest: &[String]) -> Line {
+    let mut options = true;
+    for word in rest {
+        let word = word.as_str();
+        if options && word == "--" {
+            options = false;
+            continue;
+        }
+        let forced = if options && word.starts_with("--") {
+            word.starts_with("--force") || ["--mirror", "--delete", "--prune"].contains(&word)
+        } else if options && word.starts_with('-') && word.len() > 1 {
+            word[1..].contains(['f', 'd'])
+        } else {
+            word.starts_with('+') || word.starts_with(':')
+        };
+        if forced {
+            return Line::Base(format!(
+                "git push {word} forces the push or deletes on the remote: it can rewrite or \
+                 remove what others have"
+            ));
+        }
+    }
+    Line::Judge("git push sends commits to a remote".into())
+}
+
+/// Whether a `git commit` rewrites the last commit: `--amend`, or a fixup that amends or
+/// rewords. Git takes any unambiguous start of a long option.
+fn amends(args: &[String]) -> bool {
+    let rewrites = |value: &str| value.starts_with("amend:") || value.starts_with("reword:");
+    let mut words = args.iter().map(String::as_str);
+    while let Some(word) = words.next() {
+        if word == "--" {
+            break;
+        }
+        if let Some(long) = word.strip_prefix("--") {
+            let (name, value) = long
+                .split_once('=')
+                .map_or((long, None), |(n, v)| (n, Some(v)));
+            let abbreviates = |option: &str| name.len() >= 3 && option.starts_with(name);
+            if abbreviates("amend") {
+                return true;
+            }
+            if abbreviates("fixup") && value.or_else(|| words.next()).is_some_and(rewrites) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Whether `git branch` with these words only lists.
+fn branch_reads(rest: &[String]) -> bool {
+    rest.iter().all(|word| {
+        [
+            "-a",
+            "--all",
+            "-r",
+            "--remotes",
+            "-v",
+            "-vv",
+            "--verbose",
+            "-l",
+            "--list",
+            "--show-current",
+            "--no-color",
+            "--color",
+        ]
+        .contains(&word.as_str())
+            || word.starts_with("--format=")
+            || word.starts_with("--sort=")
+    })
+}
+
+/// The first two words of a forge command line that are not options.
+fn forge_words(args: &[String]) -> Vec<&str> {
+    let mut words = Vec::new();
+    let mut at = 0;
+    while let Some(word) = args.get(at) {
+        let word = word.as_str();
+        if ["-R", "--repo", "--hostname"].contains(&word) {
+            at += 2;
+            continue;
+        }
+        at += 1;
+        if !word.starts_with('-') {
+            words.push(word);
+            if words.len() == 2 {
+                break;
+            }
+        }
+    }
+    words
+}
+
+/// Whether a forge command line only reads.
+fn forge_reads(program: &str, args: &[String]) -> bool {
+    match (program, forge_words(args).as_slice()) {
+        (_, ["api", ..]) => api_reads(args),
+        ("gh", ["pr", "view" | "list" | "diff" | "checks" | "status"])
+        | ("gh", ["issue", "view" | "list"])
+        | ("gh", ["run", "view" | "list"])
+        | ("glab", ["mr", "view" | "list" | "diff"])
+        | ("glab", ["issue", "view" | "list"])
+        | ("glab", ["ci" | "pipeline", "view" | "list" | "status"])
+        | (_, ["repo", "view"])
+        | (_, ["auth", "status"]) => true,
+        _ => false,
+    }
+}
+
 fn base(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
 }
@@ -606,74 +1031,10 @@ fn in_git(path: &Resolved) -> bool {
     parts.components().any(|part| part.as_os_str() == ".git")
 }
 
-/// The sentence refusing the call, if anything refuses it. `granted` says a procedure's grant
-/// lets the line's program do what it does: the rules of programs are not applied to it.
-fn refusal(
-    call: &Call,
-    layers: &[Vec<String>],
-    reached: &[Resolved],
-    granted: bool,
-) -> Option<String> {
-    if WRITES.contains(&call.tool) {
-        return reached.iter().find(|path| in_git(path)).map(|path| {
-            format!(
-                "refused: {} is in a .git folder, which agents never write: git keeps it",
-                path.shown
-            )
-        });
-    }
-    if call.tool != "commands_run" {
-        return None;
-    }
-    if let Some(never) = call.never {
-        let catalogue = call.command.map(|(name, _)| name);
-        let entry = never.iter().find(|entry| {
-            (entry.len() == 1 && catalogue == Some(entry[0].as_str()))
-                || layers.iter().any(|layer| starts_anywhere(layer, entry))
-        });
-        if let Some(entry) = entry {
-            return Some(format!(
-                "refused: the project never allows {}: its configuration says so; do without it, \
-                 or say why it is needed and the user runs it",
-                entry.join(" ")
-            ));
-        }
-    }
-    let git_word = layers
-        .iter()
-        .flat_map(|layer| &layer[1..])
-        .filter_map(|word| named_paths(word))
-        .find(|named| {
-            Path::new(named)
-                .components()
-                .any(|p| p.as_os_str() == ".git")
-        });
-    if let Some(word) = git_word {
-        return Some(format!(
-            "refused: {word} reaches a .git folder, and an agent's command never touches one: git \
-             keeps it"
-        ));
-    }
-    if let Some(path) = reached.iter().find(|path| in_git(path)) {
-        return Some(format!(
-            "refused: {} is in a .git folder, and an agent's command never touches one: git keeps \
-             it",
-            path.shown
-        ));
-    }
-    if let Some(why) = deletion_refusal(call, layers) {
-        return Some(why);
-    }
-    if granted {
-        return None;
-    }
-    layers.iter().find_map(|layer| program_refusal(layer))
-}
-
-/// The refusal of a recursive deletion that would take a repository's `.git` with it: its target
-/// is the place's folder, a repository's, or a folder above one. The words of a line that name a
-/// `.git` are refused before; this is the deletion that names only the folder holding it.
-fn deletion_refusal(call: &Call, layers: &[Vec<String>]) -> Option<String> {
+/// Why a recursive deletion would take a repository's `.git` with it: its target is the place's
+/// folder, a repository's, or a folder above one. The words of a line that name a `.git` are
+/// base already; this is the deletion that names only the folder holding it.
+fn deletion(call: &Call, layers: &[Vec<String>]) -> Option<String> {
     let folder = call.paths.first()?;
     let place = &call.grant.place;
     let mut guarded = vec![place.root.clone()];
@@ -691,9 +1052,8 @@ fn deletion_refusal(call: &Call, layers: &[Vec<String>]) -> Option<String> {
                 .any(|folder| folder.starts_with(&target.path))
             {
                 return Some(format!(
-                    "refused: {} would delete {}, which is the place's folder, a repository's or \
-                     a folder above one, and with it a .git folder, which agents never delete: \
-                     name what to delete inside it",
+                    "{} would delete {}, which is the place's folder, a repository's or a folder \
+                     above one, and with it a .git folder",
                     shown_words(layer),
                     target.shown
                 ));
@@ -772,157 +1132,6 @@ fn starts_anywhere(words: &[String], entry: &[String]) -> bool {
                 .zip(&words[at..])
                 .enumerate()
                 .all(|(i, (e, w))| e == w || (i == 0 && base(w) == e))
-    })
-}
-
-/// What agents are never let do, by program: push, rewrite history, write to a forge, publish.
-fn program_refusal(layer: &[String]) -> Option<String> {
-    let program = base(&layer[0]);
-    let args = &layer[1..];
-    let any = |names: &[&str]| args.iter().any(|w| names.contains(&w.as_str()));
-    match program {
-        "git" => git_refusal(args),
-        "gh" | "glab" => forge_refusal(program, args),
-        // Bitbucket's sign-in is the user's too: `bkt` keeps its token in the OS keychain, which
-        // no environment variable of ours moves, and any configuration that names the host
-        // reaches it (`BKT_CONFIG_DIR` moves the configuration only). A read, `bkt api`
-        // included, would run with the user's own token, so no word of `bkt` is let through
-        // (`forge_read` reads the pull requests).
-        "bkt" => Some(
-            "refused: bkt is Bitbucket's command line with the user's own sign-in, which agents \
-             never use: read the pull requests with forge_read, and say what should be written \
-             to Bitbucket, and the user does it"
-                .into(),
-        ),
-        // Jira's sign-in is the user's, in a place no environment variable of ours moves: no word
-        // of `acli` is let through, reads included (`ticket_read` reads a ticket).
-        "acli" => Some(
-            "refused: acli is Atlassian's command line with the user's own Jira sign-in, which \
-             agents never use: read a ticket with ticket_read, and say what should be written \
-             to it, and the user does it"
-                .into(),
-        ),
-        "npm" | "pnpm" | "yarn" | "bun" | "cargo" | "poetry" | "flit" | "hatch" | "uv"
-            if any(&["publish", "unpublish"]) =>
-        {
-            Some(publishing(layer))
-        }
-        "twine" if any(&["upload"]) => Some(publishing(layer)),
-        "gem" | "dotnet" | "nuget" if any(&["push"]) => Some(publishing(layer)),
-        "flottille" => Some(
-            "refused: flottille drives the daemon, and agents act only through their tools: \
-             ask the user to run it"
-                .into(),
-        ),
-        _ => None,
-    }
-}
-
-fn publishing(layer: &[String]) -> String {
-    format!(
-        "refused: {} publishes a package, and agents never publish: say what is ready, and the \
-         user publishes it",
-        shown_words(layer)
-    )
-}
-
-/// The first words of a line, as a refusal names them.
-fn shown_words(words: &[String]) -> String {
-    let shown: Vec<&str> = words.iter().take(3).map(String::as_str).collect();
-    let mut text = shown.join(" ");
-    text.truncate(200);
-    text
-}
-
-fn git_refusal(args: &[String]) -> Option<String> {
-    let mut at = 0;
-    while let Some(word) = args.get(at) {
-        let word = word.as_str();
-        if (word.starts_with("-c") && !word.starts_with("--")) || word.starts_with("--config-env") {
-            return Some(
-                "refused: git -c and --config-env change git's configuration for one command, \
-                 and agents never do: run git without them"
-                    .into(),
-            );
-        }
-        if [
-            "-C",
-            "--git-dir",
-            "--work-tree",
-            "--namespace",
-            "--super-prefix",
-            "--attr-source",
-            "--list-cmds",
-        ]
-        .contains(&word)
-        {
-            at += 2;
-        } else if word.starts_with('-') {
-            at += 1;
-        } else {
-            break;
-        }
-    }
-    let command = args.get(at)?.as_str();
-    let rest = &args[at + 1..];
-    let any = |names: &[&str]| rest.iter().any(|w| names.contains(&w.as_str()));
-    let refused = match command {
-        "push" | "send-pack" | "http-push" => "push",
-        "subtree" | "lfs" if any(&["push"]) => "push",
-        "merge" | "rebase" | "reset" | "switch" | "filter-branch" | "update-ref" => "history",
-        "commit" | "cherry-pick" | "revert" | "am" => "commit",
-        "tag"
-            if !(rest.is_empty()
-                || any(&["-l", "--list"]) && !any(&["-d", "--delete", "-f", "--force"])) =>
-        {
-            "tag"
-        }
-        "checkout" if !(rest.first().is_some_and(|w| w == "--") && rest.len() > 1) => "checkout",
-        "branch"
-            if rest.iter().any(|w| {
-                w == "--delete"
-                    || (w.starts_with('-') && !w.starts_with("--") && w.contains(['d', 'D']))
-            }) =>
-        {
-            "branch"
-        }
-        "config" if !config_reads(rest) => "config",
-        "remote" if !remote_reads(rest) => "remote",
-        "symbolic-ref" if symbolic_ref_writes(rest) => "history",
-        // Plumbing that writes the history or the index without `commit` or `reset`.
-        "fast-import" | "update-index" => "history",
-        "commit-tree" => "commit",
-        "replace" if !replace_reads(rest) => "history",
-        "notes" if !notes_reads(rest) => "history",
-        _ => return None,
-    };
-    Some(match refused {
-        "push" => "refused: git push is refused for agents: Flottille never lets an agent push; \
-                   say what is ready, and the user pushes it"
-            .into(),
-        "history" => format!(
-            "refused: git {command} moves a branch, rewrites its history or edits what git keeps, \
-             and agents never do: say what should be done, and the user does it"
-        ),
-        "commit" => format!(
-            "refused: git {command} makes a commit, and this project does not let agents commit: \
-             leave the change in the working tree and say it is ready"
-        ),
-        "tag" => "refused: git tag makes or removes a tag, and agents never do: git tag -l lists \
-                  them"
-            .into(),
-        "checkout" => "refused: git checkout changes the branch, and agents only restore files \
-                       with git checkout -- <paths>"
-            .into(),
-        "branch" => "refused: git branch deletes a branch, and agents never do: say which branch \
-                     should go, and the user removes it"
-            .into(),
-        "remote" => "refused: git remote changes where the repository's remotes lead, and agents \
-                     never do: git remote -v, git remote show and git remote get-url read them"
-            .into(),
-        _ => "refused: git config changes git's configuration, and agents only read it (--get, \
-              --get-all, --get-regexp, --list)"
-            .into(),
     })
 }
 
@@ -1017,63 +1226,6 @@ fn config_reads(rest: &[String]) -> bool {
     reads && !writes
 }
 
-/// The forge command lines' reads: anything else writes to the forge.
-fn forge_refusal(program: &str, args: &[String]) -> Option<String> {
-    let mut words = Vec::new();
-    let mut at = 0;
-    while let Some(word) = args.get(at) {
-        let word = word.as_str();
-        if ["-R", "--repo", "--hostname"].contains(&word) {
-            at += 2;
-            continue;
-        }
-        at += 1;
-        if !word.starts_with('-') {
-            words.push(word);
-            if words.len() == 2 {
-                break;
-            }
-        }
-    }
-    if words.first() == Some(&"auth")
-        && (words.get(1) == Some(&"token")
-            || args.iter().any(|w| {
-                w == "--show-token"
-                    || (w.starts_with('-') && !w.starts_with("--") && w.contains('t'))
-            }))
-    {
-        return Some(format!(
-            "refused: {program} auth prints a login token, and agents never see one: \
-             auth status says whether a login exists"
-        ));
-    }
-    let read = match (program, words.as_slice()) {
-        (_, ["api", ..]) => api_reads(args),
-        ("gh", ["pr", "view" | "list" | "diff" | "checks" | "status"])
-        | ("gh", ["issue", "view" | "list"])
-        | ("gh", ["run", "view" | "list"])
-        | ("glab", ["mr", "view" | "list" | "diff"])
-        | ("glab", ["issue", "view" | "list"])
-        | ("glab", ["ci" | "pipeline", "view" | "list" | "status"])
-        | (_, ["repo", "view"])
-        | (_, ["auth", "status"]) => true,
-        _ => false,
-    };
-    if read {
-        return None;
-    }
-    let reads = match program {
-        "gh" => "pr view, list, diff, checks and status; issue view and list; run view and list",
-        _ => "mr view, list and diff; issue view and list; ci view, list and status",
-    };
-    Some(format!(
-        "refused: {program} {} writes to the forge, or is not one of its reads, and agents only \
-         read it ({reads}; repo view; auth status; api with GET and no fields): say what should \
-         be done, and the user does it",
-        words.join(" ")
-    ))
-}
-
 /// Whether a forge's `api` call only reads: GET, no field, no input, not GraphQL.
 fn api_reads(args: &[String]) -> bool {
     let get = |method: Option<&str>| method.is_some_and(|m| m.eq_ignore_ascii_case("GET"));
@@ -1120,200 +1272,8 @@ fn api_reads(args: &[String]) -> bool {
         .is_some_and(|endpoint| *endpoint != "graphql")
 }
 
-/// The grant a procedure's run lets this `commands_run` line through by, when the gate lets it
-/// through: its environment is then lifted for it alone (`runs::defend`), hooks off, and the push
-/// wall down for a push.
-pub fn lifted(call: &Call) -> Option<procedure::Grant> {
-    let run = call.run?;
-    if call.tool != "commands_run" || call.words.is_empty() {
-        return None;
-    }
-    let layers = layers(call.words).ok()?;
-    let (grant, _) = granted(call, run, &layers).ok()??;
-    matches!(decide(call), Verdict::Allow | Verdict::Ask(_)).then_some(grant)
-}
-
-/// The reason a call is held when the procedure grants it with `ask`.
-fn asked_by_grant(procedure: &str, grant: procedure::Grant) -> String {
-    format!("the procedure {procedure} grants {grant} only with the user's approval of each one")
-}
-
-/// The verdict on `forge_write`: only what the agent's procedure run grants, by the action's
-/// grant.
-fn forge_write(call: &Call) -> Verdict {
-    let action = call.args["action"].as_str().unwrap_or_default();
-    let grant = match action {
-        "pr-create" | "pr-merge-squash" | "pipeline-rerun" => {
-            procedure::Grant::of(action).expect("an action is a grant")
-        }
-        _ => {
-            return Verdict::Deny(format!(
-                "refused: forge_write has no action {action:?}: its actions are pr-create, \
-                 pr-merge-squash and pipeline-rerun"
-            ));
-        }
-    };
-    let Some(run) = call.run else {
-        return Verdict::Deny(format!(
-            "refused: forge_write writes to the forge only inside a procedure that grants it, and \
-             this agent runs in none: say what should be done ({action}), and the user does it \
-             or runs a procedure for it"
-        ));
-    };
-    let verdict = by_grant(run, grant);
-    let Some(waived) = call.args.get("waive").filter(|w| !w.is_null()) else {
-        return verdict;
-    };
-    if matches!(verdict, Verdict::Deny(_)) {
-        return verdict;
-    }
-    if grant != procedure::Grant::PrMergeSquash {
-        return Verdict::Deny(
-            "refused: waive is for pr-merge-squash only: it merges a pull request whose checks \
-             or review block it, once the user allows it"
-                .into(),
-        );
-    }
-    let Some(why) = waived.as_str().map(str::trim).filter(|w| !w.is_empty()) else {
-        return Verdict::Deny(
-            "refused: waive says why the user lets the pull request be merged as it is: give \
-             their words"
-                .into(),
-        );
-    };
-    // Merging what the checks or a review block is the user's own decision, whatever the grant's
-    // mode: `forge_write` merges it so only once they allowed this very call.
-    Verdict::Ask(Ask {
-        reasons: vec![format!(
-            "it merges a pull request whose checks or review block it, waived: {why}"
-        )],
-        sensitive: true,
-        kind: Kind::Call,
-    })
-}
-
-/// The verdict on `workspace_remove`: only inside a procedure run that grants it, which applies
-/// to the run's own workspace alone (`procedures::run_of`).
-fn workspace_remove(call: &Call) -> Verdict {
-    let Some(run) = call.run else {
-        return Verdict::Deny(
-            "refused: workspace_remove removes a workspace only inside a procedure that grants \
-             it, and this agent runs in none: say that the workspace can be removed, and the \
-             user removes it (flottille workspace remove) or runs a procedure for it"
-                .into(),
-        );
-    };
-    by_grant(run, procedure::Grant::WorkspaceRemove)
-}
-
-/// The verdict the run's grant gives: refused without it, at once or held by its mode.
-fn by_grant(run: &Run, grant: procedure::Grant) -> Verdict {
-    match run.grants.get(&grant) {
-        None => Verdict::Deny(format!(
-            "refused: the procedure {} does not grant {grant}: {}; say what should be done, and \
-             the user does it",
-            run.procedure,
-            granted_words(run)
-        )),
-        Some(Mode::Allow) => Verdict::Allow,
-        Some(Mode::Ask) => Verdict::Ask(Ask {
-            reasons: vec![asked_by_grant(&run.procedure, grant)],
-            sensitive: true,
-            kind: Kind::Call,
-        }),
-    }
-}
-
-/// What a run grants, as a refusal says it.
-fn granted_words(run: &Run) -> String {
-    if run.grants.is_empty() {
-        return "it grants nothing".into();
-    }
-    format!("it grants {}", procedure::shown(&run.grants))
-}
-
-/// What a procedure run's grants decide of a line: `Ok(Some)` when a grant lets it through (it
-/// is then the line's only program, `git` itself, never wrapped), `Ok(None)` when no grant
-/// concerns it, and the refusal of what stays refused even inside a run (`git stash`, `git reset
-/// --hard`, a force push without a lease, a push of another branch or to another remote).
-fn granted(
-    call: &Call,
-    run: &Run,
-    layers: &[Vec<String>],
-) -> Result<Option<(procedure::Grant, Mode)>, String> {
-    use procedure::Grant;
-    for layer in layers {
-        if base(&layer[0]) != "git" {
-            continue;
-        }
-        let (at, _) = git_subcommand(&layer[1..]);
-        let rest = layer.get(at + 2..).unwrap_or_default();
-        match layer.get(at + 1).map(String::as_str) {
-            Some("stash") => {
-                return Err(
-                    "refused: git stash is refused even inside a procedure: it hides work where \
-                     nobody looks; commit it if the procedure grants commit, or leave it in the \
-                     working tree"
-                        .into(),
-                );
-            }
-            Some("reset") if rest.iter().any(|w| w == "--hard") => {
-                return Err(
-                    "refused: git reset --hard is refused even inside a procedure: it throws work \
-                     away; say what should be undone, and the user does it"
-                        .into(),
-                );
-            }
-            _ => {}
-        }
-    }
-    let [layer] = layers else {
-        return Ok(None);
-    };
-    if base(&layer[0]) != "git" {
-        return Ok(None);
-    }
-    let (at, plain) = git_subcommand(&layer[1..]);
-    let Some(command) = layer.get(at + 1).map(String::as_str) else {
-        return Ok(None);
-    };
-    let rest = &layer[at + 2..];
-    let concerned = match command {
-        "push" => [Grant::Push, Grant::PushForceWithLease]
-            .iter()
-            .any(|grant| run.grants.contains_key(grant)),
-        "commit" => run.grants.contains_key(&Grant::Commit),
-        "rebase" => run.grants.contains_key(&Grant::Rebase),
-        _ => false,
-    };
-    if !concerned {
-        return Ok(None);
-    }
-    if !plain {
-        return Err(format!(
-            "refused: inside a procedure, git {command} runs without git's options before it \
-             (-C, --git-dir, -c…): run it in the repository's folder, naming the repository with \
-             commands_run's repository"
-        ));
-    }
-    let grant = match command {
-        "push" => push_grant(call, run, rest)?,
-        "commit" => commit_check(rest).map(|()| Grant::Commit)?,
-        _ => rebase_check(rest).map(|()| Grant::Rebase)?,
-    };
-    match run.grants.get(&grant) {
-        Some(mode) => Ok(Some((grant, *mode))),
-        None => Err(format!(
-            "refused: this git {command} needs the grant {grant}, and the procedure {} does not \
-             give it: {}",
-            run.procedure,
-            granted_words(run)
-        )),
-    }
-}
-
-/// The refusal of a git line that discards or rewrites the work of the user's own checkout, which
-/// no agent runs in the project folder, whatever the user allowed.
+/// Why a git line discards or rewrites the work of the user's own checkout, when it does: in the
+/// project folder, that is base.
 fn discards_work(layer: &[String]) -> Option<String> {
     let args = &layer[1..];
     let (at, _) = git_subcommand(args);
@@ -1333,8 +1293,7 @@ fn discards_work(layer: &[String]) -> Option<String> {
     };
     discards.then(|| {
         format!(
-            "refused: {} discards or rewrites the work in the user's own checkout, which agents \
-             never do in the project folder: say what should be done there, and the user does it",
+            "{} discards or rewrites the work in the user's own checkout (main)",
             shown_words(layer)
         )
     })
@@ -1359,225 +1318,6 @@ fn git_subcommand(args: &[String]) -> (usize, bool) {
         };
     }
     (at, plain)
-}
-
-/// The grant a `git push` needs, once it is known to push the workspace's own branch to its
-/// repository's remote: `push`, or `push-force-with-lease` with a lease. Anything else is
-/// refused with why.
-fn push_grant(call: &Call, run: &Run, args: &[String]) -> Result<procedure::Grant, String> {
-    let place = &call.grant.place;
-    let branch = place.branch.as_str();
-    let ours = |name: &str| name == branch || name.strip_prefix("refs/heads/") == Some(branch);
-    let refuse = |what: &str| {
-        format!(
-            "refused: {what}; inside a procedure, git push sends the workspace's own branch \
-             ({branch}) to its repository's remote: git push <remote> {branch}, with \
-             --force-with-lease when the procedure grants push-force-with-lease"
-        )
-    };
-    let mut lease = false;
-    let mut operands = Vec::new();
-    let mut options = true;
-    for word in args {
-        let word = word.as_str();
-        if !options || !word.starts_with('-') || word == "-" {
-            operands.push(word);
-            continue;
-        }
-        match word {
-            "--" => options = false,
-            "--force-with-lease" => lease = true,
-            _ if word.starts_with("--force-with-lease=") => {
-                let value = &word["--force-with-lease=".len()..];
-                let named = value.split_once(':').map_or(value, |(name, _)| name);
-                if !ours(named) {
-                    return Err(refuse(&format!(
-                        "{word} leases {named}, which is not the workspace's branch"
-                    )));
-                }
-                lease = true;
-            }
-            "--force-if-includes"
-            | "--set-upstream"
-            | "--quiet"
-            | "--verbose"
-            | "--porcelain"
-            | "--dry-run"
-            | "--atomic"
-            | "--progress"
-            | "--no-progress" => {}
-            "--force" => {
-                return Err(refuse(
-                    "git push --force is refused even inside a procedure",
-                ));
-            }
-            "--delete" | "--prune" => {
-                return Err(refuse(&format!(
-                    "git push {word} deletes branches on the remote"
-                )));
-            }
-            "--mirror" | "--all" | "--branches" | "--tags" | "--follow-tags" => {
-                return Err(refuse(&format!(
-                    "git push {word} pushes more than the workspace's branch"
-                )));
-            }
-            _ if word.starts_with("--") => {
-                return Err(refuse(&format!(
-                    "git push {word} is not an option a procedure's push takes"
-                )));
-            }
-            _ => {
-                for letter in word[1..].chars() {
-                    match letter {
-                        'u' | 'q' | 'v' | 'n' => {}
-                        'f' => {
-                            return Err(refuse("git push -f is refused even inside a procedure"));
-                        }
-                        'd' => return Err(refuse("git push -d deletes branches on the remote")),
-                        _ => {
-                            return Err(refuse(&format!(
-                                "git push -{letter} is not an option a procedure's push takes"
-                            )));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let Some((remote, refspecs)) = operands.split_first() else {
-        return Err(refuse("this git push names no remote"));
-    };
-    let folder = call.paths.first();
-    let expected = run.remotes.iter().find(|(repository, _)| {
-        folder.is_some_and(|folder| place.resolve(repository, ".").path == folder.path)
-    });
-    let Some((_, expected)) = expected else {
-        return Err(refuse(
-            "this git push does not run in one of the workspace's repositories: name the \
-             repository with commands_run's repository",
-        ));
-    };
-    if remote != expected {
-        return Err(refuse(&format!(
-            "{remote} is not this repository's remote, {expected}"
-        )));
-    }
-    if refspecs.is_empty() {
-        return Err(refuse("this git push names no branch"));
-    }
-    for refspec in refspecs {
-        if refspec.starts_with('+') {
-            return Err(refuse(&format!(
-                "{refspec} forces the push without a lease, which is refused even inside a \
-                 procedure"
-            )));
-        }
-        let (source, target) = refspec.split_once(':').unwrap_or((refspec, refspec));
-        if source.is_empty() {
-            return Err(refuse(&format!("{refspec} deletes a branch on the remote")));
-        }
-        if target == "HEAD" {
-            return Err(refuse(&format!(
-                "{refspec} pushes to the branch HEAD is on, which may not be the workspace's: \
-                 name it, HEAD:{branch}"
-            )));
-        }
-        let source_ours = source == "HEAD" || ours(source);
-        if !source_ours || !ours(target) {
-            return Err(refuse(&format!("{refspec} is not the workspace's branch")));
-        }
-    }
-    Ok(if lease {
-        procedure::Grant::PushForceWithLease
-    } else {
-        procedure::Grant::Push
-    })
-}
-
-/// A `git commit` a procedure's `commit` grant lets through: never rewriting the last commit, never
-/// with `--no-verify`. Git takes any unambiguous start of a long option and groups short ones, so
-/// both are read as git reads them.
-fn commit_check(args: &[String]) -> Result<(), String> {
-    let amend =
-        || {
-            Err("refused: git commit --amend rewrites a commit, and a procedure's commit makes new \
-             ones only: commit the change on its own"
-            .into())
-        };
-    let no_verify = || {
-        Err(
-            "refused: git commit --no-verify is refused inside a procedure: commit without it"
-                .into(),
-        )
-    };
-    let rewrites = |value: &str| value.starts_with("amend:") || value.starts_with("reword:");
-    let mut words = args.iter().map(String::as_str);
-    while let Some(word) = words.next() {
-        if word == "--" {
-            break;
-        }
-        if let Some(long) = word.strip_prefix("--") {
-            let (name, value) = long
-                .split_once('=')
-                .map_or((long, None), |(n, v)| (n, Some(v)));
-            let abbreviates = |option: &str| !name.is_empty() && option.starts_with(name);
-            if abbreviates("amend") {
-                return amend();
-            }
-            if abbreviates("no-verify") {
-                return no_verify();
-            }
-            if abbreviates("fixup") && value.or_else(|| words.next()).is_some_and(rewrites) {
-                return amend();
-            }
-        } else if let Some(group) = word.strip_prefix('-') {
-            for letter in group.chars() {
-                if letter == 'n' {
-                    return no_verify();
-                }
-                // What follows an option that takes a value is that value.
-                if "mFcCtuS".contains(letter) {
-                    break;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// A `git rebase` a procedure's `rebase` grant lets through: of the branch checked out (the
-/// workspace's), onto one upstream, never interactive nor running commands.
-fn rebase_check(args: &[String]) -> Result<(), String> {
-    let refuse = |what: String| {
-        format!(
-            "refused: {what}; inside a procedure, git rebase replays the workspace's branch onto \
-             one upstream (git rebase [--onto <base>] <upstream>, --continue, --abort, --skip)"
-        )
-    };
-    let mut operands = 0;
-    let mut at = 0;
-    while let Some(word) = args.get(at) {
-        let word = word.as_str();
-        at += 1;
-        match word {
-            "--onto" => at += 1,
-            _ if word.starts_with("--onto=") => {}
-            "--continue" | "--abort" | "--skip" | "--quit" | "--keep-base" | "--quiet" | "-q"
-            | "--verbose" | "-v" => {}
-            _ if word.starts_with('-') => {
-                return Err(refuse(format!(
-                    "git rebase {word} is not an option a procedure's rebase takes"
-                )));
-            }
-            _ => operands += 1,
-        }
-    }
-    if operands > 1 {
-        return Err(refuse(
-            "git rebase with a branch after the upstream checks that branch out first".into(),
-        ));
-    }
-    Ok(())
 }
 
 /// The sensitive place a path is in, if it is in one: inside the place, only what sits below it
@@ -1637,8 +1377,8 @@ mod tests {
     use super::*;
     use crate::place::Place;
 
-    /// A workspace `w` of the project `app` in a temporary folder, with a home beside it and
-    /// Flottille's own folders under `xdg`.
+    /// A workspace `w` (or the project folder) of the project `app` in a temporary folder, with a
+    /// home beside it and Flottille's own folders under `xdg`.
     struct Fixture {
         _dir: tempfile::TempDir,
         root: PathBuf,
@@ -1646,9 +1386,7 @@ mod tests {
         grant: Grant,
         never: Vec<Vec<String>>,
         commands: BTreeMap<String, CatalogueCommand>,
-        /// The procedure run the agent works in, if any.
-        run: Option<Run>,
-        actions: Option<AgentActions>,
+        pushed: bool,
     }
 
     impl Fixture {
@@ -1676,7 +1414,7 @@ mod tests {
                     workspace: workspace.map(str::to_owned),
                     root: root.clone(),
                     repositories: vec![(".".into(), root.clone())],
-                    branch: String::new(),
+                    branch: workspace.map(|_| "app/login".into()).unwrap_or_default(),
                     variables: BTreeMap::new(),
                     home: Some(base.join("home")),
                 },
@@ -1692,8 +1430,7 @@ mod tests {
                     vec!["deploy".into()],
                 ],
                 commands: BTreeMap::new(),
-                run: None,
-                actions: Some(AgentActions::default()),
+                pushed: false,
             }
         }
 
@@ -1701,24 +1438,13 @@ mod tests {
             Fixture::new(Some("w"))
         }
 
-        /// The workspace, on the branch `app/login` whose remote is `origin`, in a run of the
-        /// procedure `ship` that grants these.
-        fn in_run(mut self, grants: &[(procedure::Grant, Mode)]) -> Fixture {
-            self.grant.place.branch = "app/login".into();
-            self.run = Some(Run {
-                procedure: "ship".into(),
-                grants: grants.iter().copied().collect(),
-                remotes: vec![(self.root.clone(), "origin".into())],
-            });
-            self
+        fn main() -> Fixture {
+            Fixture::new(None)
         }
 
-        fn forge(&self, action: &str) -> Verdict {
-            self.judge(
-                "forge_write",
-                json!({"action": action, "repository": "."}),
-                Some(&self.never),
-            )
+        fn pushed(mut self) -> Fixture {
+            self.pushed = true;
+            self
         }
 
         fn command(mut self, name: &str, line: &str, set: impl Fn(&mut CatalogueCommand)) -> Self {
@@ -1737,26 +1463,6 @@ mod tests {
         }
 
         fn judge(&self, tool: &str, args: Value, never: Option<&[Vec<String>]>) -> Verdict {
-            self.considered(tool, args, never, decide)
-        }
-
-        /// The grant a procedure lifts the line's environment for.
-        fn lifted(&self, line: &str) -> Option<procedure::Grant> {
-            self.considered(
-                "commands_run",
-                json!({"line": line}),
-                Some(&self.never),
-                super::lifted,
-            )
-        }
-
-        fn considered<T>(
-            &self,
-            tool: &str,
-            args: Value,
-            never: Option<&[Vec<String>]>,
-            consider: impl FnOnce(&Call) -> T,
-        ) -> T {
             let place = &self.grant.place;
             let (words, paths, command) = match tool {
                 "commands_run" => {
@@ -1767,7 +1473,7 @@ mod tests {
                         }
                         None => (args["line"].as_str().unwrap().to_owned(), None),
                     };
-                    let words = flottille_core::command::split_line(&line).unwrap();
+                    let words = flottille_core::command::split_line(&line).unwrap_or_default();
                     (words, vec![place.resolve(&self.root, ".")], command)
                 }
                 _ => match args["path"].as_str() {
@@ -1775,7 +1481,7 @@ mod tests {
                     None => (Vec::new(), Vec::new(), None),
                 },
             };
-            consider(&Call {
+            decide(&Call {
                 grant: &self.grant,
                 tool,
                 args: &args,
@@ -1784,8 +1490,7 @@ mod tests {
                 command,
                 never,
                 own: &self.own,
-                run: self.run.as_ref(),
-                actions: self.actions.as_ref(),
+                pushed: self.pushed,
             })
         }
 
@@ -1805,1205 +1510,90 @@ mod tests {
             };
             self.judge(tool, args, Some(&self.never))
         }
-
-        fn identity_of(&self, tool: &str, args: Value) -> String {
-            let place = &self.grant.place;
-            let (words, paths) = match args["line"].as_str() {
-                Some(line) => (
-                    flottille_core::command::split_line(line).unwrap(),
-                    vec![place.resolve(&self.root, ".")],
-                ),
-                None => (
-                    Vec::new(),
-                    vec![place.resolve(&self.root, args["path"].as_str().unwrap())],
-                ),
-            };
-            identity(&Call {
-                grant: &self.grant,
-                tool,
-                args: &args,
-                words: &words,
-                paths: &paths,
-                command: None,
-                never: Some(&self.never),
-                own: &self.own,
-                run: self.run.as_ref(),
-                actions: self.actions.as_ref(),
-            })
-        }
     }
 
     fn denied(verdict: &Verdict) -> bool {
-        matches!(verdict, Verdict::Deny(why) if why.starts_with("refused: ") && why.chars().count() < 2_000)
+        matches!(verdict, Verdict::Deny(why) if !why.is_empty() && why.chars().count() < 2_000)
     }
 
-    fn asked(verdict: &Verdict, sensitive: bool) -> bool {
-        matches!(verdict, Verdict::Ask(ask) if ask.sensitive == sensitive && !ask.reasons.is_empty())
+    fn to_judge(verdict: &Verdict) -> bool {
+        matches!(verdict, Verdict::Ask(ask) if ask.class == Class::Judge && !ask.reasons.is_empty())
     }
 
-    #[test]
-    fn each_refused_git_form_is_denied() {
-        let fixture = Fixture::workspace();
-        for line in [
-            "git push",
-            "git push origin main",
-            "/usr/bin/git push origin main",
-            "git -C src push",
-            "git --git-dir=other push",
-            "git --no-pager push --force",
-            "git -c url.x.pushInsteadOf=y push",
-            "git -c core.pager=less log",
-            "git --config-env=core.pager=PAGER log",
-            "git send-pack origin main",
-            "git subtree push --prefix=lib origin main",
-            "git merge topic",
-            "git rebase main",
-            "git reset --hard HEAD",
-            "git switch main",
-            "git tag v1",
-            "git tag -d v1",
-            "git tag -l -d v1",
-            "git checkout main",
-            "git checkout -b topic",
-            "git branch -d topic",
-            "git branch -D topic",
-            "git branch --delete topic",
-            "git branch -rd origin/topic",
-            "git commit -m change",
-            "git cherry-pick abc123",
-            "git revert abc123",
-            "git am change.patch",
-            "git config user.name someone",
-            "git config --unset user.name",
-            "git config --add remote.origin.pushurl somewhere",
-            "git config --get user.name --add x",
-            "git config set user.name someone",
-            "git symbolic-ref HEAD refs/heads/other",
-            "git symbolic-ref -m reason HEAD refs/heads/other",
-            "git symbolic-ref --short HEAD refs/heads/other",
-            "git symbolic-ref -d HEAD",
-            "git symbolic-ref --delete refs/remotes/origin/HEAD",
-            "git symbolic-ref -qd HEAD",
-            "env git symbolic-ref HEAD refs/heads/other",
-            "git fast-import",
-            "git fast-import --force",
-            "git commit-tree HEAD^{tree} -m change",
-            "git update-index --add --cacheinfo 100644,abc,a",
-            "git update-index --refresh",
-            "git update-ref refs/heads/main abc123",
-            "git replace abc123 def456",
-            "git replace -d abc123",
-            "git replace --graft abc123",
-            "git replace -l -d abc123",
-            "git notes add -m note",
-            "git notes append -m note",
-            "git notes edit",
-            "git notes remove HEAD",
-            "git notes copy a b",
-            "git notes merge topic",
-            "git notes prune",
-            "git notes --ref=review add -m note",
-            "git notes --ref review add -m note",
-            "git notes -m note",
-            "sh -c 'git fast-import'",
-        ] {
-            assert!(
-                denied(&fixture.run(line)),
-                "{line}: {:?}",
-                fixture.run(line)
-            );
-        }
+    fn base_class(verdict: &Verdict) -> bool {
+        matches!(verdict, Verdict::Ask(ask) if ask.class == Class::Base && !ask.reasons.is_empty())
     }
 
     #[test]
-    fn git_reads_and_local_work_are_allowed() {
-        let fixture = Fixture::workspace();
-        for line in [
-            "git status",
-            "git log --oneline",
-            "git diff HEAD",
-            "git add src",
-            "git stash",
-            "git tag",
-            "git tag -l",
-            "git tag --list 'v*'",
-            "git checkout -- src/a.rs",
-            "git branch",
-            "git branch -a",
-            "git config --get user.name",
-            "git config --get-all remote.origin.url",
-            "git config --get-regexp ^remote",
-            "git config --list",
-            "git config -l",
-            "git config get user.name",
-            "git config list",
-            "git symbolic-ref HEAD",
-            "git symbolic-ref --short HEAD",
-            "git symbolic-ref -q HEAD",
-            "git symbolic-ref -q --short HEAD",
-            "git replace",
-            "git replace -l",
-            "git replace --list 'abc*'",
-            "git replace -l --format=long",
-            "git notes",
-            "git notes list",
-            "git notes list HEAD",
-            "git notes show HEAD",
-            "git notes --ref=review show HEAD",
-            "git notes get-ref",
-            "git -C src status",
-            "git fetch origin",
-        ] {
-            assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
-        }
-    }
-
-    #[test]
-    fn each_forge_write_is_denied_and_its_reads_are_allowed() {
-        let fixture = Fixture::workspace();
-        for line in [
-            "gh pr create --fill",
-            "gh pr merge 1",
-            "gh pr comment 1 --body hi",
-            "gh issue create",
-            "gh repo delete o/r",
-            "gh release create v1",
-            "gh api -X POST repos/o/r/issues",
-            "gh api --method=PATCH repos/o/r",
-            "gh api repos/o/r/issues -f title=x",
-            "gh api repos/o/r/issues --field title=x",
-            "gh api repos/o/r/issues --input body.json",
-            "gh api graphql",
-            "gh",
-            "glab mr create",
-            "glab api -X DELETE projects/1",
-            "bkt pr create",
-            "env gh pr merge 1",
-            "gh auth status --show-token",
-            "gh auth status -t",
-            "gh auth status -ht",
-            "gh auth status --hostname github.com --show-token",
-            "gh auth token",
-            "gh auth token --hostname github.com",
-            "gh auth login",
-            "glab auth status --show-token",
-            "env gh auth token",
-        ] {
-            assert!(
-                denied(&fixture.run(line)),
-                "{line}: {:?}",
-                fixture.run(line)
-            );
-        }
-        for line in [
-            "gh pr view 1",
-            "gh pr list",
-            "gh pr diff 1",
-            "gh pr checks 1",
-            "gh pr status",
-            "gh issue view 2",
-            "gh issue list --state open",
-            "gh run view 3",
-            "gh run list",
-            "gh repo view",
-            "gh auth status",
-            "gh auth status --hostname github.com",
-            "gh api repos/o/r/pulls",
-            "gh api -X GET repos/o/r",
-            "gh -R o/r pr view 1",
-            "gh pr view 1 --repo o/r",
-            "glab mr view 1",
-            "glab mr list",
-            "glab ci status",
-        ] {
-            assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
-        }
-    }
-
-    #[test]
-    fn bkt_is_denied_whatever_it_is_asked_even_to_read() {
-        let fixture = Fixture::workspace();
-        for line in [
-            "bkt",
-            "bkt pr list",
-            "bkt pr view 1 --json",
-            "bkt pr checks 1",
-            "bkt pr create --title x --source a --target main",
-            "bkt pr merge 1",
-            "bkt pipeline list",
-            "bkt pipeline run --ref main",
-            "bkt api /repositories/acme/app/pullrequests",
-            "bkt context list",
-            "bkt auth status",
-            "bkt auth token",
-            "bkt --context work pr list",
-            "env bkt pr list",
-            "nice bkt pr list",
-        ] {
-            let verdict = fixture.run(line);
-            assert!(denied(&verdict), "{line}: {verdict:?}");
-        }
-    }
-
-    #[test]
-    fn acli_is_denied_whatever_it_is_asked_even_to_read() {
-        let fixture = Fixture::workspace();
-        for line in [
-            "acli",
-            "acli jira workitem view ABC-1 --json",
-            "acli jira workitem create --summary x",
-            "acli jira workitem comment create --key ABC-1 --body hi",
-            "acli jira auth status",
-            "env acli jira workitem view ABC-1",
-            "nice acli jira workitem transition --key ABC-1",
-        ] {
-            let verdict = fixture.run(line);
-            assert!(denied(&verdict), "{line}: {verdict:?}");
-        }
-    }
-
-    #[test]
-    fn each_publishing_command_is_denied() {
-        let fixture = Fixture::workspace();
-        for line in [
-            "npm publish",
-            "npm publish --access public",
-            "pnpm publish",
-            "yarn npm publish",
-            "bun publish",
-            "cargo publish",
-            "poetry publish",
-            "flit publish",
-            "hatch publish",
-            "uv publish",
-            "twine upload dist",
-            "gem push x.gem",
-            "dotnet nuget push x.nupkg",
-            "nuget push x.nupkg",
-            "npm unpublish x",
-        ] {
-            assert!(
-                denied(&fixture.run(line)),
-                "{line}: {:?}",
-                fixture.run(line)
-            );
-        }
-        for line in ["npm run build", "cargo test", "echo publish", "gem list"] {
-            assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
-        }
-    }
-
-    #[test]
-    fn the_wrappers_are_unwrapped() {
-        let fixture = Fixture::workspace();
-        for line in [
-            "env git push",
-            "env -u GIT_CONFIG_COUNT git push",
-            "env --unset=GIT_CONFIG_COUNT git push",
-            "env -i HOME=src git push",
-            "env -C src git push",
-            "env -S 'git push origin'",
-            "env --split-string='git push'",
-            "env -- git push",
-            "sudo git push",
-            "sudo -u root -E git push",
-            "sudo --user=root git push",
-            "doas -u root git push",
-            "nice git push",
-            "nice -n 5 git push",
-            "nice -5 git push",
-            "nohup git push",
-            "timeout 10 git push",
-            "timeout -s KILL -k 5 10 git push",
-            "timeout --signal=TERM 10s git push",
-            "time git push",
-            "time -p git push",
-            "stdbuf -oL git push",
-            "stdbuf -o L git push",
-            "npx git push",
-            "npx -y --package=x git push",
-            "npx -c 'git push'",
-            "pnpm dlx git push",
-            "pnpm exec git push",
-            "yarn dlx git push",
-            "yarn exec git push",
-            "bunx git push",
-            "uvx git push",
-            "uvx --from x git push",
-            "xargs git push",
-            "xargs -n 1 -P 2 git push",
-            "command git push",
-            "exec git push",
-            "sh -c 'git push'",
-            "bash -c 'git push origin main'",
-            "bash -lc 'git push'",
-            "bash -e -o pipefail -c 'git push'",
-            "zsh -c 'env git push'",
-            "dash -c 'git push'",
-            "fish -c 'git push'",
-            "fish --command='git push'",
-            "nice sudo env -u GIT_CONFIG_COUNT sh -c 'timeout 5 git push'",
-            "sudo rm -rf src",
-            "sh -c 'gh pr merge 1'",
-            "env npm publish",
-        ] {
-            assert!(
-                denied(&fixture.run(line)),
-                "{line}: {:?}",
-                fixture.run(line)
-            );
-        }
-        for line in [
-            "env A=b cargo test",
-            "sh -c 'cargo test'",
-            "nice -n 19 cargo build",
-            "timeout 60 cargo test",
-            "bash scripts/check.sh",
-        ] {
-            assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
-        }
-    }
-
-    #[test]
-    fn a_line_run_by_a_shell_that_cannot_be_split_is_denied() {
-        let fixture = Fixture::workspace();
-        for line in [
-            "sh -c 'git status; git push'",
-            "bash -c 'echo a | cat'",
-            "sh -c 'echo $HOME'",
-            "sh -c",
-            "env -S 'a | b'",
-        ] {
-            let verdict = fixture.run(line);
-            assert!(denied(&verdict), "{line}: {verdict:?}");
-        }
-        let Verdict::Deny(why) = fixture.run("sh -c 'a; b'") else {
-            unreachable!()
-        };
-        assert!(why.contains("“;”"), "{why}");
-    }
-
-    #[test]
-    fn a_never_list_entry_matches_at_any_word_position() {
-        let fixture = Fixture::workspace().command("deploy", "make deploy", |_| {});
-        for line in [
-            "rm -rf build",
-            "sudo rm -rf build",
-            "xargs rm -rf",
-            "env X=1 docker compose down",
-            "echo then rm -rf build",
-            "sh -c 'nice rm -rf build'",
-            "/bin/rm -rf build",
-        ] {
-            let verdict = fixture.run(line);
-            let Verdict::Deny(why) = &verdict else {
-                panic!("{line}: {verdict:?}");
-            };
-            assert!(
-                why.starts_with("refused: the project never allows "),
-                "{why}"
-            );
-        }
-        assert!(denied(&fixture.catalogue("deploy")));
-        for line in ["rm -r build", "rm build -rf", "docker compose up", "rm"] {
-            assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
-        }
-    }
-
-    #[test]
-    fn a_project_whose_never_list_cannot_be_read_asks_before_a_run() {
-        let fixture = Fixture::workspace();
-        let verdict = fixture.judge("commands_run", json!({"line": "cargo test"}), None);
-        assert!(asked(&verdict, false), "{verdict:?}");
-        // A read does not depend on it.
-        let verdict = fixture.judge("fs_read", json!({"path": "src/a.rs"}), None);
-        assert_eq!(verdict, Verdict::Allow);
-    }
-
-    #[test]
-    fn a_write_or_a_deletion_under_a_git_folder_is_denied() {
-        let fixture = Fixture::workspace();
-        std::fs::create_dir_all(fixture.root.join(".git/hooks")).unwrap();
-        std::os::unix::fs::symlink(".git/hooks", fixture.root.join("hooks")).unwrap();
-        for (tool, path) in [
-            ("fs_write", ".git/hooks/pre-commit"),
-            ("fs_write", "sub/.git"),
-            ("fs_write", "hooks/pre-commit"),
-            ("fs_edit", ".git/config"),
-            ("fs_write", "src/../.git/HEAD"),
-        ] {
-            let verdict = fixture.file(tool, path);
-            assert!(denied(&verdict), "{tool} {path}: {verdict:?}");
-        }
-        for line in [
-            "rm -rf .git",
-            "rm -r sub/.git",
-            "unlink .git",
-            "shred .git/config",
-            "cp evil .git/hooks/pre-commit",
-            "ln -s ../evil .git/hooks/pre-commit",
-            "find . -name .git -delete",
-            "git --git-dir=.git log",
-            "env GIT_DIR=.git git log",
-            "sh -c 'rm -rf .git'",
-        ] {
-            assert!(
-                denied(&fixture.run(line)),
-                "{line}: {:?}",
-                fixture.run(line)
-            );
-        }
-        assert_eq!(fixture.file("fs_read", ".git/config"), Verdict::Allow);
-        assert_eq!(fixture.file("fs_write", ".gitignore"), Verdict::Allow);
-        assert_eq!(fixture.run("rm -r target"), Verdict::Allow);
-        assert_eq!(fixture.run("cat .gitignore"), Verdict::Allow);
-    }
-
-    #[test]
-    fn a_recursive_deletion_of_a_place_or_a_repository_is_denied() {
-        // Without the never list, which already refuses `rm -rf`: this is the guard on its own.
-        let mut fixture = Fixture::workspace();
-        for folder in ["a/src", "b/src", "docs"] {
-            std::fs::create_dir_all(fixture.root.join(folder)).unwrap();
-        }
-        fixture.grant.place.repositories = vec![
-            ("a".into(), fixture.root.join("a")),
-            ("b".into(), fixture.root.join("b")),
-        ];
-        let free = |line: &str| fixture.judge("commands_run", json!({"line": line}), Some(&[]));
-        for line in [
-            "rm -rf .",
-            "rm -rf ./",
-            "rm -r .",
-            "rm -R .",
-            "rm --recursive .",
-            "rm --recursive --force .",
-            "rm -fr .",
-            "rm -rv ./",
-            "rm -r src/..",
-            "rm -r a",
-            "rm -R a/",
-            "rm -r docs b",
-            "rm -r -- a",
-            "rm -r ..",
-            "rm -rf ../..",
-            "rm -rf /",
-            "rm -r src ./",
-            "find . -delete",
-            "find -delete",
-            "find a -delete",
-            "find . -name '*.o' -delete",
-            "find -L . -type f -delete",
-            "find . -exec rm -rf {} +",
-            "find a -execdir rm -r {} ';'",
-            "sudo rm -rf .",
-            "sh -c 'rm -rf .'",
-            "env -i rm -r a",
-            "xargs rm -r .",
-        ] {
-            let verdict = free(line);
-            assert!(denied(&verdict), "{line}: {verdict:?}");
-        }
-        let Verdict::Deny(why) = free("rm -rf .") else {
-            unreachable!()
-        };
-        assert!(why.contains(".git"), "{why}");
-        for line in [
-            "rm -r target",
-            "rm -rf docs",
-            "rm -r a/src",
-            "rm -r a/src b/src",
-            "rm -rf -- docs",
-            "rm src/a.rs",
-            "rm .",
-            "rm -f a",
-            "rm -- -r",
-            "find src -name '*.o' -delete",
-            "find a/src -delete",
-            "find . -name '*.o'",
-            "find . -exec cat {} +",
-            "find docs -exec rm -r {} ';'",
-            "find a -exec rm {} ';'",
-            "ls -R .",
-        ] {
-            assert_eq!(free(line), Verdict::Allow, "{line}");
-        }
-    }
-
-    #[test]
-    fn dot_env_is_asked_and_its_templates_are_allowed() {
-        let fixture = Fixture::workspace();
-        for path in [".env", ".env.local", "api/.env", "api/.env.production"] {
-            for tool in ["fs_read", "fs_write"] {
-                let verdict = fixture.file(tool, path);
-                assert!(asked(&verdict, true), "{tool} {path}: {verdict:?}");
+    fn harmless_reading_inside_the_project_passes_in_main_and_in_a_workspace() {
+        for fixture in [Fixture::main(), Fixture::workspace()] {
+            for tool in ["fs_read", "fs_list", "search"] {
+                assert_eq!(fixture.file(tool, "src/a.rs"), Verdict::Allow, "{tool}");
             }
-        }
-        for path in [
-            ".env.example",
-            ".env.sample",
-            ".env.template",
-            ".env.dist",
-            "api/.env.example",
-            ".envrc.md",
-        ] {
-            assert_eq!(fixture.file("fs_read", path), Verdict::Allow, "{path}");
-        }
-        assert!(asked(&fixture.run("cat .env"), true));
-        assert!(asked(&fixture.run("cp .env.example api/.env"), true));
-        assert_eq!(fixture.run("cat .env.example"), Verdict::Allow);
-    }
-
-    #[test]
-    fn credentials_folders_and_flottille_s_own_are_sensitive_places() {
-        let fixture = Fixture::workspace();
-        let own = fixture.own[0].join("projects/app.toml");
-        for path in [
-            "~/.ssh/id_ed25519",
-            "~/.gnupg",
-            "~/.aws/credentials",
-            "~/.config/gcloud/x",
-            "~/.kube/config",
-            "~/.docker/config.json",
-            "~/.config/gh/hosts.yml",
-            "~/.netrc",
-            "~/.npmrc",
-            "~/.pypirc",
-            "~/.git-credentials",
-            "~/.local/share/keyrings/login.keyring",
-            "~/.claude/.credentials.json",
-            "~/.claude.json",
-            "~/.codex/auth.json",
-            "/etc/shadow",
-            "/etc/sudoers",
-            "/etc/sudoers.d/x",
-            own.to_str().unwrap(),
-        ] {
-            let verdict = fixture.file("fs_read", path);
-            assert!(asked(&verdict, true), "{path}: {verdict:?}");
-        }
-        // Inside the place, only what sits below it counts: its own path may run through any
-        // folder.
-        assert!(asked(&fixture.file("fs_read", ".ssh/known_hosts"), true));
-        assert_eq!(fixture.file("fs_read", "src/ssh.rs"), Verdict::Allow);
-    }
-
-    #[test]
-    fn anything_outside_the_place_is_asked() {
-        let fixture = Fixture::workspace();
-        for (tool, path) in [
-            ("fs_read", "/etc/hostname"),
-            ("fs_read", "../other/a.rs"),
-            ("fs_list", "~/notes"),
-            ("fs_write", "/tmp/x"),
-        ] {
-            let verdict = fixture.file(tool, path);
-            assert!(asked(&verdict, false), "{tool} {path}: {verdict:?}");
-        }
-        for line in [
-            "cat /etc/hostname",
-            "ls ../other",
-            "cp src/a.rs --target-directory=/tmp",
-        ] {
-            assert!(
-                asked(&fixture.run(line), false),
-                "{line}: {:?}",
-                fixture.run(line)
-            );
-        }
-        // The program itself is wherever it is installed.
-        assert_eq!(fixture.run("/usr/bin/cargo test"), Verdict::Allow);
-    }
-
-    #[test]
-    fn reads_listings_and_writes_inside_the_place_are_allowed() {
-        let fixture = Fixture::workspace();
-        for (tool, path) in [
-            ("fs_read", "src/a.rs"),
-            ("fs_list", "."),
-            ("search", "."),
-            ("fs_write", "src/new.rs"),
-            ("fs_edit", "src/a.rs"),
-        ] {
-            assert_eq!(fixture.file(tool, path), Verdict::Allow, "{tool} {path}");
-        }
-        for tool in ["commands_list", "commands_status"] {
-            assert_eq!(
-                fixture.judge(tool, json!({"run": "r1"}), Some(&fixture.never)),
-                Verdict::Allow,
-                "{tool}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_catalogue_command_is_allowed_unless_marked_or_a_shell() {
-        let fixture = Fixture::workspace()
-            .command("test", "cargo test", |_| {})
-            .command("seed", "npm run seed", |c| c.ask_before_running = true)
-            .command("script", "bash scripts/x.sh", |_| {})
-            .command("publish", "cargo publish", |_| {});
-        assert_eq!(fixture.catalogue("test"), Verdict::Allow);
-        assert!(asked(&fixture.catalogue("seed"), false));
-        assert!(asked(&fixture.catalogue("script"), false));
-        assert!(denied(&fixture.catalogue("publish")));
-    }
-
-    #[test]
-    fn the_project_folder_is_read_only_for_agents() {
-        let fixture = Fixture::new(None)
-            .command("check", "cargo clippy", |c| {
-                c.check = true;
-                c.read_only = true;
-            })
-            .command("fmt", "cargo fmt", |c| c.check = true);
-        assert!(denied(&fixture.file("fs_write", "src/new.rs")));
-        assert!(denied(&fixture.file("fs_edit", "src/a.rs")));
-        assert!(denied(&fixture.catalogue("fmt")));
-        assert_eq!(fixture.catalogue("check"), Verdict::Allow);
-        assert_eq!(fixture.file("fs_read", "src/a.rs"), Verdict::Allow);
-        let Verdict::Deny(why) = fixture.catalogue("fmt") else {
-            unreachable!()
-        };
-        assert!(why.contains("read-only"), "{why}");
-    }
-
-    #[test]
-    fn a_line_outside_the_catalogue_in_the_project_folder_is_held_to_be_allowed_once_or_always() {
-        let fixture = Fixture::new(None);
-        let Verdict::Ask(ask) = fixture.run("cargo test") else {
-            panic!("held")
-        };
-        assert_eq!(ask.kind, Kind::Catalogue);
-        assert!(!ask.sensitive);
-        assert!(
-            ask.reasons[0].starts_with("cargo test is not in the project's catalogue"),
-            "{:?}",
-            ask.reasons
-        );
-        // In a workspace a line is the agent's to run, as before.
-        assert_eq!(Fixture::workspace().run("cargo test"), Verdict::Allow);
-    }
-
-    #[test]
-    fn a_line_in_the_project_folder_is_still_refused_by_the_never_list_and_the_git_rules() {
-        let fixture = Fixture::new(None);
-        for line in [
-            "rm -rf build",
-            "deploy now",
-            "git push origin main",
-            "gh pr merge 3",
-        ] {
-            assert!(denied(&fixture.run(line)), "{line}");
-        }
-    }
-
-    #[test]
-    fn in_main_a_line_that_discards_the_user_s_work_is_refused_not_held() {
-        let fixture = Fixture::new(None);
-        for line in [
-            "git checkout -- src/a.rs",
-            "git checkout .",
-            "git checkout -f main",
-            "git restore src/a.rs",
-            "git restore --staged src/a.rs",
-            "git clean -fdx",
-            "git stash",
-            "git stash pop",
-            "git reset",
-            "git reset --hard HEAD~1",
-            "git -C . reset --soft HEAD",
-            "git worktree remove ../w",
-            "git branch -D old",
-            "git branch -d old",
-            "git branch --delete old",
-            "env git reset --hard",
-        ] {
-            let verdict = fixture.run(line);
-            assert!(denied(&verdict), "{line}: {verdict:?}");
-            let Verdict::Deny(why) = verdict else {
-                unreachable!()
-            };
-            assert!(why.contains("the user's own checkout"), "{line}: {why}");
-        }
-        // Reads are still the user's to allow, once or always.
-        for line in ["git status", "git stash list", "git branch -v"] {
-            let Verdict::Ask(ask) = fixture.run(line) else {
-                panic!("{line} held")
-            };
-            assert_eq!(ask.kind, Kind::Catalogue, "{line}");
-        }
-        // Even a line the user allowed always.
-        let fixture = Fixture::new(None).command("reset", "git reset --hard", |c| {
-            c.added_by = Some(flottille_core::project::AddedBy::Approval)
-        });
-        assert!(denied(&fixture.catalogue("reset")));
-        // A workspace is the agent's own.
-        assert_eq!(Fixture::workspace().run("git stash"), Verdict::Allow);
-    }
-
-    #[test]
-    fn a_line_allowed_always_runs_only_in_the_repository_it_was_allowed_in() {
-        let approved = |c: &mut CatalogueCommand| {
-            c.added_by = Some(flottille_core::project::AddedBy::Approval)
-        };
-        let fixture = Fixture::new(None).command("ls", "ls", approved);
-        assert_eq!(fixture.catalogue("ls"), Verdict::Allow);
-        let other = json!({"command": "ls", "repository": "lib"});
-        let Verdict::Deny(why) = fixture.judge("commands_run", other, Some(&fixture.never)) else {
-            panic!("refused")
-        };
-        assert!(why.contains("in . only"), "{why}");
-        let fixture = Fixture::new(None).command("ls", "ls", |c| {
-            approved(c);
-            c.repository = Some("lib".into());
-        });
-        let same = json!({"command": "ls", "repository": "lib"});
-        assert_eq!(
-            fixture.judge("commands_run", same, Some(&fixture.never)),
-            Verdict::Allow
-        );
-        let root = json!({"command": "ls", "repository": "."});
-        assert!(denied(&fixture.judge(
-            "commands_run",
-            root,
-            Some(&fixture.never)
-        )));
-    }
-
-    #[test]
-    fn a_tracker_change_always_asks_whatever_settings_says() {
-        let mut fixture = Fixture::new(None);
-        fixture.actions = Some(AgentActions {
-            settings: Mode::Allow,
-            ..AgentActions::default()
-        });
-        let forge =
-            json!({"action": "set_settings", "repositories": [{"path": ".", "forge": null}]});
-        assert_eq!(
-            fixture.judge("project", forge, Some(&fixture.never)),
-            Verdict::Allow
-        );
-        for tracker in [
-            json!({"action": "set_settings", "tracker": null}),
-            json!({"action": "set_settings", "tracker": {"kind": "github", "repository": "a/b"},
-                "repositories": [{"path": ".", "forge": null}]}),
-        ] {
-            let Verdict::Ask(ask) = fixture.judge("project", tracker, Some(&fixture.never)) else {
-                panic!("held")
-            };
-            assert_eq!(ask.kind, Kind::Action);
-            assert!(
-                ask.reasons[0].contains("tracker always asks"),
-                "{:?}",
-                ask.reasons
-            );
-        }
-    }
-
-    #[test]
-    fn an_agent_s_write_of_the_project_is_held_unless_its_family_runs_on_its_own() {
-        let mut fixture = Fixture::new(None);
-        let start = json!({"action": "start", "name": "open-prs", "workspace": "w"});
-        let Verdict::Ask(ask) = fixture.judge("procedure", start.clone(), Some(&fixture.never))
-        else {
-            panic!("held")
-        };
-        assert_eq!(ask.kind, Kind::Action);
-        assert!(!ask.sensitive);
-        for (tool, read) in [
-            ("procedure", json!({"action": "list"})),
-            ("procedure", json!({"action": "show", "name": "open-prs"})),
-            ("project", json!({"action": "settings"})),
-        ] {
-            assert_eq!(
-                fixture.judge(tool, read, Some(&fixture.never)),
-                Verdict::Allow
-            );
-        }
-        for write in [
-            json!({"action": "set_settings", "tracker": null}),
-            json!({"action": "add_reference", "name": "a", "description": "b", "path": "c"}),
-            json!({"action": "remove_reference", "name": "a"}),
-        ] {
-            assert!(asked(
-                &fixture.judge("project", write, Some(&fixture.never)),
-                false
-            ));
-        }
-        fixture.actions = Some(AgentActions {
-            procedures: Mode::Allow,
-            ..AgentActions::default()
-        });
-        assert_eq!(
-            fixture.judge("procedure", start.clone(), Some(&fixture.never)),
-            Verdict::Allow
-        );
-        assert!(asked(
-            &fixture.judge(
-                "project",
-                json!({"action": "set_settings", "tracker": null}),
-                Some(&fixture.never)
-            ),
-            false
-        ));
-        // A configuration that cannot be read lets nothing run on its own.
-        fixture.actions = None;
-        assert!(asked(
-            &fixture.judge("procedure", start, Some(&fixture.never)),
-            false
-        ));
-    }
-
-    #[test]
-    fn a_grant_s_identity_is_the_exact_call_without_a_write_s_content() {
-        let fixture = Fixture::workspace();
-        let write = |content: &str| {
-            fixture.identity_of("fs_write", json!({"path": "/tmp/x", "content": content}))
-        };
-        assert_eq!(write("a"), write("b"));
-        assert_ne!(
-            write("a"),
-            fixture.identity_of("fs_write", json!({"path": "/tmp/y", "content": "a"}))
-        );
-        assert_ne!(
-            write("a"),
-            fixture.identity_of("fs_read", json!({"path": "/tmp/x"}))
-        );
-        let run = |line: &str| fixture.identity_of("commands_run", json!({"line": line}));
-        assert_eq!(run("cat /etc/hostname"), run("cat  /etc/hostname"));
-        assert_ne!(run("cat /etc/hostname"), run("cat /etc/hosts"));
-        assert!(!write("a").is_empty());
-    }
-
-    #[test]
-    fn a_path_outside_is_shown_as_the_place_shows_it() {
-        let fixture = Fixture::workspace();
-        let Verdict::Ask(ask) = fixture.file("fs_read", "~/notes.txt") else {
-            unreachable!()
-        };
-        assert_eq!(
-            ask.reasons,
-            ["~/notes.txt is outside this agent's place".to_owned()]
-        );
-    }
-    use procedure::Grant::{
-        Commit, PrCreate, PrMergeSquash, Push, PushForceWithLease, Rebase, WorkspaceRemove,
-    };
-
-    /// Every grant, allowed.
-    fn every_grant() -> Vec<(procedure::Grant, Mode)> {
-        procedure::Grant::ALL
-            .iter()
-            .map(|grant| (*grant, Mode::Allow))
-            .collect()
-    }
-
-    #[test]
-    fn outside_a_run_what_a_procedure_could_grant_is_decided_as_before() {
-        let fixture = Fixture::workspace();
-        for line in [
-            "git push origin app/login",
-            "git push --force-with-lease origin app/login",
-            "git commit -m change",
-            "git rebase main",
-            "gh pr create --fill",
-        ] {
-            assert!(
-                denied(&fixture.run(line)),
-                "{line}: {:?}",
-                fixture.run(line)
-            );
-        }
-        // Allowed before procedures, and still.
-        assert_eq!(fixture.run("git stash"), Verdict::Allow);
-        for action in ["pr-create", "pr-merge-squash", "pipeline-rerun"] {
-            let verdict = fixture.forge(action);
-            assert!(denied(&verdict), "{action}: {verdict:?}");
-            assert!(
-                matches!(&verdict, Verdict::Deny(why) if why.contains("only inside a procedure")),
-                "{verdict:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn inside_a_run_a_granted_push_of_the_workspace_s_branch_goes_through_an_ask_one_is_held_and_an_ungranted_one_is_refused()
-     {
-        let allowed = Fixture::workspace().in_run(&[(Push, Mode::Allow)]);
-        for line in [
-            "git push origin app/login",
-            "git push -u origin app/login",
-            "git push --set-upstream origin HEAD:app/login",
-            "git push origin refs/heads/app/login:refs/heads/app/login",
-            "git --no-pager push -q origin app/login",
-        ] {
-            assert_eq!(allowed.run(line), Verdict::Allow, "{line}");
-        }
-
-        let asked = Fixture::workspace().in_run(&[(Push, Mode::Ask)]);
-        let verdict = asked.run("git push origin app/login");
-        // Asked every time: never allowed for the tree.
-        assert!(
-            asked_by(&verdict, "the procedure ship grants push"),
-            "{verdict:?}"
-        );
-
-        let ungranted = Fixture::workspace().in_run(&[(Commit, Mode::Allow)]);
-        assert!(denied(&ungranted.run("git push origin app/login")));
-    }
-
-    fn asked_by(verdict: &Verdict, reason: &str) -> bool {
-        matches!(verdict, Verdict::Ask(ask) if ask.sensitive
-            && ask.reasons.iter().any(|r| r.starts_with(reason)))
-    }
-
-    #[test]
-    fn a_push_of_another_branch_to_another_remote_or_a_deletion_is_refused_even_with_push() {
-        let fixture = Fixture::workspace().in_run(&every_grant());
-        for line in [
-            "git push",
-            "git push origin",
-            "git push origin main",
-            "git push origin app/login:main",
-            "git push origin HEAD:main",
-            "git push origin app/login other",
-            "git push upstream app/login",
-            "git push https://example.com/acme/app.git app/login",
-            "git push origin :app/login",
-            "git push --delete origin app/login",
-            "git push -d origin app/login",
-            "git push --mirror origin",
-            "git push --all origin",
-            "git push --tags origin app/login",
-            "git push --prune origin app/login",
-            "git push -o ci.skip origin app/login",
-            "git push --receive-pack=evil origin app/login",
-            "git push --force-with-lease=main origin app/login",
-            "git -C src push origin app/login",
-            "git -c remote.origin.pushurl=elsewhere push origin app/login",
-            "env git push origin app/login",
-            "sh -c 'git push origin app/login'",
-        ] {
-            assert!(
-                denied(&fixture.run(line)),
-                "{line}: {:?}",
-                fixture.run(line)
-            );
-        }
-    }
-
-    #[test]
-    fn reset_hard_stash_and_a_force_push_without_lease_are_refused_even_with_every_grant() {
-        let fixture = Fixture::workspace().in_run(&every_grant());
-        for line in [
-            "git reset --hard HEAD~1",
-            "git reset --hard",
-            "git stash",
-            "git stash pop",
-            "env git stash",
-            "git push --force origin app/login",
-            "git push -f origin app/login",
-            "git push -uf origin app/login",
-            "git push origin +app/login",
-            "git push origin +HEAD:app/login",
-            "git push --force --force-with-lease origin app/login",
-        ] {
-            assert!(
-                denied(&fixture.run(line)),
-                "{line}: {:?}",
-                fixture.run(line)
-            );
-        }
-        // A run with no grant at all refuses them too.
-        let none = Fixture::workspace().in_run(&[]);
-        assert!(denied(&none.run("git stash")));
-    }
-
-    #[test]
-    fn a_push_with_a_lease_needs_its_own_grant() {
-        let push = Fixture::workspace().in_run(&[(Push, Mode::Allow)]);
-        let verdict = push.run("git push --force-with-lease origin app/login");
-        assert!(
-            matches!(&verdict, Verdict::Deny(why) if why.contains("push-force-with-lease")),
-            "{verdict:?}"
-        );
-        let lease = Fixture::workspace().in_run(&[(PushForceWithLease, Mode::Allow)]);
-        for line in [
-            "git push --force-with-lease origin app/login",
-            "git push --force-with-lease=app/login origin app/login",
-            "git push --force-with-lease=app/login:abc123 --force-if-includes origin app/login",
-        ] {
-            assert_eq!(lease.run(line), Verdict::Allow, "{line}");
-        }
-        // The lease's grant does not give a plain push.
-        assert!(denied(&lease.run("git push origin app/login")));
-    }
-
-    #[test]
-    fn commit_and_rebase_go_through_only_as_their_grants_say() {
-        let fixture = Fixture::workspace().in_run(&[(Commit, Mode::Allow), (Rebase, Mode::Ask)]);
-        assert_eq!(fixture.run("git commit -m change"), Verdict::Allow);
-        assert_eq!(fixture.run("git commit -a -m change"), Verdict::Allow);
-        for line in [
-            "git commit --amend -m change",
-            "git commit --no-verify -m change",
-            "git commit -n -m change",
-        ] {
-            assert!(denied(&fixture.run(line)), "{line}");
-        }
-        for line in [
-            "git rebase main",
-            "git rebase --onto main old",
-            "git rebase --continue",
-            "git rebase --abort",
-        ] {
-            assert!(
-                asked_by(&fixture.run(line), "the procedure ship grants rebase"),
-                "{line}: {:?}",
-                fixture.run(line)
-            );
-        }
-        for line in [
-            "git rebase -i main",
-            "git rebase --interactive main",
-            "git rebase --exec make main",
-            "git rebase -x make main",
-            "git rebase --autostash main",
-            "git rebase main other-branch",
-        ] {
-            assert!(
-                denied(&fixture.run(line)),
-                "{line}: {:?}",
-                fixture.run(line)
-            );
-        }
-        // What no grant covers is decided as without a procedure.
-        for line in [
-            "git merge topic",
-            "git cherry-pick abc123",
-            "git branch -D topic",
-            "git tag v1",
-        ] {
-            assert!(denied(&fixture.run(line)), "{line}");
-        }
-        assert_eq!(fixture.run("git status"), Verdict::Allow);
-    }
-
-    #[test]
-    fn the_project_s_never_list_wins_over_a_grant() {
-        let mut fixture = Fixture::workspace().in_run(&every_grant());
-        fixture.never.push(vec!["git".into(), "push".into()]);
-        let verdict = fixture.run("git push origin app/login");
-        assert!(
-            matches!(&verdict, Verdict::Deny(why) if why.contains("the project never allows git push")),
-            "{verdict:?}"
-        );
-    }
-
-    #[test]
-    fn forge_write_follows_the_run_s_grants() {
-        let fixture =
-            Fixture::workspace().in_run(&[(PrCreate, Mode::Allow), (PrMergeSquash, Mode::Ask)]);
-        assert_eq!(fixture.forge("pr-create"), Verdict::Allow);
-        assert!(asked_by(
-            &fixture.forge("pr-merge-squash"),
-            "the procedure ship grants pr-merge-squash"
-        ));
-        let verdict = fixture.forge("pipeline-rerun");
-        assert!(
-            matches!(&verdict, Verdict::Deny(why)
-                if why.contains("does not grant pipeline-rerun")
-                    && why.contains("pr-create (allow), pr-merge-squash (ask)")),
-            "{verdict:?}"
-        );
-        assert!(denied(&fixture.forge("pr-close")));
-    }
-
-    #[test]
-    fn a_merge_whose_checks_block_it_is_waived_only_by_the_user_s_approval_of_it() {
-        let waived = |fixture: &Fixture, action: &str, waive: Value| {
-            fixture.judge(
-                "forge_write",
-                json!({"action": action, "repository": ".", "waive": waive}),
-                Some(&fixture.never),
-            )
-        };
-        let allowed = Fixture::workspace().in_run(&every_grant());
-        assert!(asked_by(
-            &waived(
-                &allowed,
-                "pr-merge-squash",
-                json!("the lint job is known flaky")
-            ),
-            "it merges a pull request whose checks or review block it, waived: the lint job"
-        ));
-        assert!(denied(&waived(&allowed, "pr-merge-squash", json!(" "))));
-        assert!(denied(&waived(&allowed, "pr-create", json!("why"))));
-        // Not granted stays refused, waived or not.
-        let none = Fixture::workspace().in_run(&[(PrCreate, Mode::Allow)]);
-        assert!(denied(&waived(&none, "pr-merge-squash", json!("why"))));
-    }
-
-    #[test]
-    fn workspace_remove_follows_the_run_s_grant_and_is_refused_outside_a_run() {
-        let remove =
-            |fixture: &Fixture| fixture.judge("workspace_remove", json!({}), Some(&fixture.never));
-        let verdict = remove(&Fixture::workspace());
-        assert!(
-            matches!(&verdict, Verdict::Deny(why) if why.contains("only inside a procedure")),
-            "{verdict:?}"
-        );
-        let verdict = remove(&Fixture::workspace().in_run(&[(Push, Mode::Allow)]));
-        assert!(
-            matches!(&verdict, Verdict::Deny(why) if why.contains("does not grant workspace-remove")),
-            "{verdict:?}"
-        );
-        assert!(denied(&remove(&Fixture::new(None))));
-        assert_eq!(
-            remove(&Fixture::workspace().in_run(&[(WorkspaceRemove, Mode::Allow)])),
-            Verdict::Allow
-        );
-        assert!(asked_by(
-            &remove(&Fixture::workspace().in_run(&[(WorkspaceRemove, Mode::Ask)])),
-            "the procedure ship grants workspace-remove"
-        ));
-    }
-
-    #[test]
-    fn an_agent_never_changes_where_a_remote_leads_even_with_every_grant() {
-        for fixture in [
-            Fixture::workspace(),
-            Fixture::workspace().in_run(&every_grant()),
-        ] {
-            for line in [
-                "git remote add evil https://evil.example/x.git",
-                "git remote set-url origin https://evil.example/x.git",
-                "git remote set-url --push origin https://evil.example/x.git",
-                "git remote rename origin old",
-                "git remote remove origin",
-                "git remote rm origin",
-                "git remote set-branches origin main",
-                "git remote set-head origin main",
-                "git remote -v add evil https://evil.example/x.git",
-                "git config remote.origin.url https://evil.example/x.git",
-                "git config set remote.origin.pushurl https://evil.example/x.git",
-                "git config --add remote.origin.pushurl https://evil.example/x.git",
-                "git config url.https://evil.example/.insteadOf git@github.com:",
+            for tool in [
+                "commands_list",
+                "commands_status",
+                "forge_read",
+                "agent_status",
             ] {
-                assert!(
-                    denied(&fixture.run(line)),
-                    "{line}: {:?}",
-                    fixture.run(line)
+                assert_eq!(
+                    fixture.judge(tool, json!({}), Some(&fixture.never)),
+                    Verdict::Allow
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_push_is_found_past_git_s_options_and_its_wrappers() {
+        let words = |line: &str| flottille_core::command::split_line(line).unwrap();
+        for line in [
+            "git push",
+            "git -C app push origin x",
+            "env A=b git push",
+            "nice git push",
+        ] {
+            assert!(pushes(&words(line)), "{line}");
+        }
+        for line in ["git status", "git -C push status", "echo git push"] {
+            assert!(!pushes(&words(line)), "{line}");
+        }
+    }
+
+    #[test]
+    fn harmless_writing_in_a_workspace_passes() {
+        let fixture = Fixture::workspace();
+        assert_eq!(fixture.file("fs_write", "src/a.rs"), Verdict::Allow);
+        assert_eq!(fixture.file("fs_edit", "src/a.rs"), Verdict::Allow);
+        for line in ["git add src", "git mv a b", "git rm src/a.rs"] {
+            assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
+        }
+    }
+
+    #[test]
+    fn harmless_known_read_only_commands_pass_in_main_and_in_a_workspace() {
+        for fixture in [Fixture::main(), Fixture::workspace()] {
             for line in [
-                "git remote",
+                "git status",
+                "git log --oneline",
+                "git diff HEAD",
+                "git -C src status",
+                "git --no-pager show HEAD",
+                "git branch",
+                "git branch -a",
+                "git tag -l",
+                "git config --get user.name",
                 "git remote -v",
-                "git remote --verbose",
-                "git remote show origin",
-                "git remote get-url origin",
-                "git remote get-url --push --all origin",
+                "git stash list",
+                "git symbolic-ref --short HEAD",
+                "ls -la src",
+                "pgrep -a cargo",
+                "ps aux",
+                "cat src/a.rs",
+                "grep -rn needle src",
+                "find src -name '*.rs'",
+                "gh pr view 1",
+                "wc -l src/a.rs",
             ] {
                 assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
             }
@@ -3011,80 +1601,286 @@ mod tests {
     }
 
     #[test]
-    fn a_push_of_a_bare_head_is_refused_since_head_may_be_another_branch() {
-        let fixture = Fixture::workspace().in_run(&every_grant());
-        for line in [
-            "git push origin HEAD",
-            "git push -u origin HEAD",
-            "git push origin HEAD:HEAD",
-            "git push --force-with-lease origin HEAD",
-        ] {
-            let verdict = fixture.run(line);
-            assert!(
-                matches!(&verdict, Verdict::Deny(why) if why.contains("HEAD:app/login")),
-                "{line}: {verdict:?}"
-            );
-        }
-        // Named, the branch it goes to is known whatever HEAD is.
-        assert_eq!(
-            fixture.run("git push origin HEAD:app/login"),
-            Verdict::Allow
-        );
+    fn harmless_a_catalogue_command_in_a_workspace_passes() {
+        let fixture = Fixture::workspace().command("test", "cargo test", |_| {});
+        assert_eq!(fixture.catalogue("test"), Verdict::Allow);
     }
 
     #[test]
-    fn abbreviated_or_grouped_options_that_amend_or_skip_hooks_are_refused() {
-        let fixture = Fixture::workspace().in_run(&[(Commit, Mode::Allow)]);
+    fn to_judge_writing_in_main_is_judged() {
+        let fixture = Fixture::main();
+        assert!(to_judge(&fixture.file("fs_write", "src/a.rs")));
+        assert!(to_judge(&fixture.file("fs_edit", "src/a.rs")));
+        let fixture = fixture.command("test", "cargo test", |_| {});
+        assert!(to_judge(&fixture.catalogue("test")));
+    }
+
+    #[test]
+    fn to_judge_what_the_rules_do_not_know_is_judged() {
+        for fixture in [Fixture::main(), Fixture::workspace()] {
+            for line in [
+                "git commit -m change",
+                "git push origin app/login",
+                "git push",
+                "git merge topic",
+                "git fetch origin",
+                "git checkout main",
+                "git config user.name someone",
+                "git -c core.pager=less log",
+                "git --git-dir=other log",
+                "cargo build",
+                "npm run dev",
+                "curl https://example.com",
+                "./script.sh",
+                "sed -i s/a/b/ src/a.rs",
+                "gh pr create --fill",
+                "env ls",
+                "sudo ls",
+            ] {
+                assert!(
+                    to_judge(&fixture.run(line)),
+                    "{line}: {:?}",
+                    fixture.run(line)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn to_judge_reading_outside_the_project_is_judged() {
+        let fixture = Fixture::workspace();
+        assert!(to_judge(&fixture.file("fs_read", "../../home/notes.txt")));
+        assert!(to_judge(&fixture.run("cat ../../home/notes.txt")));
+    }
+
+    #[test]
+    fn to_judge_a_marked_or_shell_catalogue_command_is_judged_even_in_a_workspace() {
+        let fixture = Fixture::workspace()
+            .command("deploy-check", "cargo check", |c| {
+                c.ask_before_running = true
+            })
+            .command("script", "sh run.sh", |_| {});
+        assert!(to_judge(&fixture.catalogue("deploy-check")));
+        assert!(to_judge(&fixture.catalogue("script")));
+    }
+
+    #[test]
+    fn to_judge_forge_writes_and_workspace_removal_are_judged() {
+        let fixture = Fixture::workspace();
+        for action in ["pr-create", "pr-merge-squash", "pipeline-rerun"] {
+            let verdict = fixture.judge(
+                "forge_write",
+                json!({"action": action, "repository": "."}),
+                Some(&fixture.never),
+            );
+            assert!(to_judge(&verdict), "{action}");
+        }
+        assert!(to_judge(&fixture.judge(
+            "workspace_remove",
+            json!({}),
+            Some(&fixture.never)
+        )));
+    }
+
+    #[test]
+    fn to_judge_the_window_actions_of_an_agent_are_judged_and_a_tracker_change_is_base() {
+        let fixture = Fixture::main();
+        let verdict = fixture.judge(
+            "procedure",
+            json!({"action": "start", "name": "ship", "workspace": "w"}),
+            Some(&fixture.never),
+        );
+        assert!(to_judge(&verdict), "{verdict:?}");
+        assert!(matches!(verdict, Verdict::Ask(ask) if ask.kind == Kind::Action));
+        let tracker = fixture.judge(
+            "project",
+            json!({"action": "set_settings", "tracker": null}),
+            Some(&fixture.never),
+        );
+        assert!(base_class(&tracker), "{tracker:?}");
+        for reading in [
+            json!({"action": "list"}),
+            json!({"action": "show", "name": "ship"}),
+        ] {
+            assert_eq!(
+                fixture.judge("procedure", reading, Some(&fixture.never)),
+                Verdict::Allow
+            );
+        }
+    }
+
+    #[test]
+    fn base_a_forced_push_or_a_deletion_on_the_remote_is_base() {
+        for fixture in [Fixture::main(), Fixture::workspace()] {
+            for line in [
+                "git push --force",
+                "git push -f origin app/login",
+                "git push --force-with-lease origin app/login",
+                "git push origin +app/login",
+                "git push origin :app/login",
+                "git push --delete origin app/login",
+                "git push --mirror",
+                "env git push -uf origin x",
+            ] {
+                assert!(
+                    base_class(&fixture.run(line)),
+                    "{line}: {:?}",
+                    fixture.run(line)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn base_a_history_rewrite_of_a_pushed_branch_is_base_and_of_an_unpushed_one_judged() {
+        let unpushed = Fixture::workspace();
+        let pushed = Fixture::workspace().pushed();
         for line in [
-            "git commit --amen -m change",
-            "git commit --ame -m change",
-            "git commit --am -m change",
-            "git commit --no-verif -m change",
-            "git commit --no-ver -m change",
-            "git commit -anm change",
-            "git commit -na -m change",
-            "git commit -an -m change",
+            "git rebase main",
+            "git commit --amend -m x",
+            "git commit --amen",
             "git commit --fixup=amend:HEAD",
-            "git commit --fixu=amend:HEAD",
-            "git commit --fix=reword:HEAD",
-            "git commit --fixup amend:HEAD",
-            "git commit --fixup reword:HEAD",
+            "git reset HEAD~1",
+            "git update-ref refs/heads/app/login abc",
         ] {
             assert!(
-                denied(&fixture.run(line)),
+                to_judge(&unpushed.run(line)),
+                "{line}: {:?}",
+                unpushed.run(line)
+            );
+            assert!(
+                base_class(&pushed.run(line)),
+                "{line}: {:?}",
+                pushed.run(line)
+            );
+        }
+        assert!(base_class(&unpushed.run("git filter-branch --all")));
+    }
+
+    #[test]
+    fn base_discarding_the_user_s_work_in_main_is_base_and_judged_in_a_workspace() {
+        let main = Fixture::main();
+        let workspace = Fixture::workspace();
+        for line in [
+            "git reset --hard",
+            "git clean -fd",
+            "git checkout -- .",
+            "git checkout -f",
+            "git restore src",
+            "git stash drop",
+            "git stash",
+            "git worktree remove x",
+            "git branch -D topic",
+        ] {
+            assert!(base_class(&main.run(line)), "{line}: {:?}", main.run(line));
+            assert!(
+                to_judge(&workspace.run(line)),
+                "{line}: {:?}",
+                workspace.run(line)
+            );
+        }
+    }
+
+    #[test]
+    fn base_the_git_folder_sensitive_places_publishing_and_the_never_list_are_base() {
+        let fixture = Fixture::workspace();
+        for verdict in [
+            fixture.file("fs_write", ".git/hooks/pre-commit"),
+            fixture.file("fs_read", ".env"),
+            fixture.file("fs_write", ".env.local"),
+            fixture.file("fs_read", "../../home/.ssh/id_ed25519"),
+            fixture.file("fs_read", "../../xdg/data/flottille/store.db"),
+            fixture.run("rm -rf .git"),
+            fixture.run("rm -r ."),
+            fixture.run("cat .git/config"),
+            fixture.run("cat ../../home/.aws/credentials"),
+            fixture.run("cargo publish"),
+            fixture.run("npm publish"),
+            fixture.run("gem push x.gem"),
+            fixture.run("docker compose down"),
+            fixture.run("nice deploy now"),
+            fixture.run("bkt pr list"),
+            fixture.run("acli jira workitem view ABC-1"),
+            fixture.judge(
+                "forge_write",
+                json!({"action": "pr-merge-squash", "repository": ".", "waive": "ship it"}),
+                Some(&fixture.never),
+            ),
+        ] {
+            assert!(base_class(&verdict), "{verdict:?}");
+        }
+        assert_eq!(fixture.file("fs_read", ".env.example"), Verdict::Allow);
+    }
+
+    #[test]
+    fn base_a_project_whose_never_list_cannot_be_read_makes_a_run_base() {
+        let fixture = Fixture::workspace();
+        assert!(base_class(&fixture.judge(
+            "commands_run",
+            json!({"line": "ls"}),
+            None
+        )));
+    }
+
+    #[test]
+    fn a_base_reason_wins_over_a_reason_to_judge() {
+        let fixture = Fixture::main();
+        let verdict = fixture.run("git push --force origin main");
+        assert!(base_class(&verdict));
+    }
+
+    #[test]
+    fn shell_syntax_a_malformed_call_a_login_printed_and_the_daemon_stay_refused() {
+        let fixture = Fixture::workspace();
+        for verdict in [
+            fixture.run("ls | wc"),
+            fixture.run("echo $HOME"),
+            fixture.run("sh -c 'ls | wc'"),
+            fixture.run("gh auth token"),
+            fixture.run("gh auth status --show-token"),
+            fixture.run("flottille agent list"),
+            fixture.judge(
+                "forge_write",
+                json!({"action": "pr-delete", "repository": "."}),
+                Some(&fixture.never),
+            ),
+            fixture.judge(
+                "forge_write",
+                json!({"action": "pr-create", "repository": ".", "waive": "x"}),
+                Some(&fixture.never),
+            ),
+        ] {
+            assert!(denied(&verdict), "{verdict:?}");
+        }
+    }
+
+    #[test]
+    fn the_wrappers_are_unwrapped_and_judged_as_what_they_run() {
+        let fixture = Fixture::workspace();
+        for line in [
+            "env FOO=1 git push --force",
+            "sudo cargo publish",
+            "timeout 10 git push -f",
+            "bash -c 'git push --force'",
+            "xargs rm -rf",
+        ] {
+            assert!(
+                base_class(&fixture.run(line)),
                 "{line}: {:?}",
                 fixture.run(line)
             );
         }
-        for line in [
-            "git commit -am change",
-            "git commit -m nothing-to-see",
-            "git commit -mnote",
-            "git commit --fixup HEAD",
-            "git commit --no-edit -m change",
-            "git commit --verbose -m change",
-        ] {
-            assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
-        }
     }
 
     #[test]
-    fn a_granted_commit_push_or_rebase_is_lifted_and_nothing_else_is() {
-        let fixture = Fixture::workspace().in_run(&[
-            (Commit, Mode::Allow),
-            (Push, Mode::Ask),
-            (Rebase, Mode::Allow),
-        ]);
-        assert_eq!(fixture.lifted("git commit -m change"), Some(Commit));
-        assert_eq!(fixture.lifted("git push origin app/login"), Some(Push));
-        assert_eq!(fixture.lifted("git rebase main"), Some(Rebase));
-        for line in ["git status", "git push origin main", "git commit --amend"] {
-            assert_eq!(fixture.lifted(line), None, "{line}");
-        }
-        assert_eq!(
-            Fixture::workspace().lifted("git commit -m change"),
-            None,
-            "outside a run"
+    fn a_path_outside_is_shown_as_the_place_shows_it() {
+        let fixture = Fixture::workspace();
+        let Verdict::Ask(ask) = fixture.file("fs_read", "/etc/hosts") else {
+            panic!("outside is judged");
+        };
+        assert!(
+            ask.reasons[0].starts_with("/etc/hosts is outside"),
+            "{ask:?}"
         );
     }
 }

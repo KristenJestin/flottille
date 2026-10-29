@@ -356,7 +356,8 @@ fn a_worker_that_dies_three_times_in_30_minutes_fails_and_the_lead_gets_child_fa
 
 #[test]
 fn a_silent_worker_with_its_own_command_running_is_not_stuck_and_without_one_is_replaced() {
-    let user = user();
+    // The judge lets its `sleep` run.
+    let user = user().with_allowing_judge();
     let (_, lead) = lead(&user);
     let id = launch(&lead, "patient", "HANG while a command runs");
     let worker = titled(&user, "patient");
@@ -630,16 +631,16 @@ fn a_lead_lists_the_agent_tools_ask_user_and_approval_answer_and_a_worker_at_the
         assert!(names.iter().any(|n| n == tool), "{tool} in {names:?}");
     }
     assert!(!names.iter().any(|n| n == "ask_parent"));
-    // In a workspace, it reads its pull requests and its ticket too; it writes to the forge only
-    // inside a procedure that grants it, so it has neither forge_write nor workspace_remove.
+    // In a workspace, it reads its pull requests and its ticket too, and writes to the forge and
+    // removes its workspace through the gate's classes, like any other call.
     assert!(names.iter().any(|n| n == "forge_read"));
     assert!(names.iter().any(|n| n == "ticket_read"));
-    assert!(!names.iter().any(|n| n == "forge_write"));
-    assert!(!names.iter().any(|n| n == "workspace_remove"));
+    assert!(names.iter().any(|n| n == "forge_write"));
+    assert!(names.iter().any(|n| n == "workspace_remove"));
     // A root also reads and asks for changes to its project's procedures and settings.
     assert!(names.iter().any(|n| n == "procedure"));
     assert!(names.iter().any(|n| n == "project"));
-    assert_eq!(names.len(), 20);
+    assert_eq!(names.len(), 22);
 
     let names = worker.names();
     assert!(names.iter().any(|n| n == "ask_parent"));
@@ -648,7 +649,7 @@ fn a_lead_lists_the_agent_tools_ask_user_and_approval_answer_and_a_worker_at_the
     assert!(!names.iter().any(|n| n == "procedure" || n == "project"));
 
     let names = leaf.names();
-    assert_eq!(names.len(), 13, "{names:?}");
+    assert_eq!(names.len(), 15, "{names:?}");
     assert!(!names.iter().any(|n| n.starts_with("agent_")));
     assert!(!names.iter().any(|n| n == "approval_answer"));
     assert!(!names.iter().any(|n| n == "ask_user"));
@@ -710,7 +711,8 @@ fn a_user_message_to_a_worker_is_refused_and_to_the_lead_is_delivered() {
 
 #[test]
 fn nothing_happening_for_20_minutes_gives_the_lead_children_status_then_after_40_more() {
-    let user = user();
+    // The judge lets their `sleep` run.
+    let user = user().with_allowing_judge();
     let (_, lead) = lead(&user);
     for title in ["one", "two"] {
         let id = launch(&lead, title, "HANG while the tests run");

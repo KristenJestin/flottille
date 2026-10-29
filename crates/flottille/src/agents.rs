@@ -11,10 +11,9 @@ use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use flottille_core::agent::{Agent, AgentState, Choices, new_id};
+use flottille_core::agent::{Agent, AgentState, Choices, GateMode, new_id};
 use flottille_core::approval;
 use flottille_core::paths::ensure_private_dir;
-use flottille_core::procedure::Grants;
 use flottille_core::project::Project;
 use flottille_core::protocol::{
     AgentImage, AgentName, AgentRun, AgentSend, AgentTrees, ImageUpload,
@@ -174,6 +173,42 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 Failure::refused(format!("agent {} was resumed already", agent.id))
             })?;
             tell_resumed(daemon, &agent, ended_at);
+            Ok(json!({"agent": agent.to_json()}))
+        }
+        "agent.mode" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Mode {
+                agent: String,
+                mode: String,
+            }
+            let asked: Mode = serde_json::from_value(params)?;
+            let mode = GateMode::parse(&asked.mode).ok_or_else(|| {
+                Failure::new(
+                    "invalid-params",
+                    format!(
+                        "there is no mode {}: the modes are ask and auto",
+                        asked.mode
+                    ),
+                )
+            })?;
+            let agent = find(daemon, &asked.agent)?;
+            // Only the user's door reaches this method: no tool of an agent changes a mode.
+            daemon.write(|store| {
+                let (_, event) = store.change_agent(
+                    &agent.id,
+                    flottille_core::store::AgentChange {
+                        gate_mode: Some(mode),
+                        ..Default::default()
+                    },
+                    Some((
+                        "agent.gate_mode_changed",
+                        json!({"agent": agent.id, "mode": mode.as_str()}),
+                    )),
+                )?;
+                Ok(((), event))
+            })?;
+            let agent = find(daemon, &agent.id)?;
             Ok(json!({"agent": agent.to_json()}))
         }
         "agent.tree" => {
@@ -405,7 +440,7 @@ fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
             provider: asked.provider,
             model: asked.model,
             effort: asked.effort,
-            grants: Grants::new(),
+            gate_mode: None,
         },
     )?;
     // The root's brief is its first message: a replacement supersedes it by its id, as any
@@ -436,9 +471,8 @@ pub struct New {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
-    /// What the procedure run it works in grants it, known now: it decides which of its tools are
-    /// listed (`Provider::tools`).
-    pub grants: Grants,
+    /// Ask or Auto: a child's is its parent's; `None` for a new root, which starts in Auto.
+    pub gate_mode: Option<GateMode>,
 }
 
 /// Writes a new agent, its instructions and tools frozen in it; nothing is sent to it yet.
@@ -507,7 +541,6 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         new.parent.is_none(),
         at_depth_limit,
         new.workspace.is_some(),
-        &new.grants,
     );
     let files = roles::project_files(&project.folder, &repositories);
     let references: Vec<(String, String)> = project
@@ -556,6 +589,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         waiting_on_answer: false,
         reopens: false,
         images: None,
+        gate_mode: new.gate_mode.unwrap_or_default(),
     };
     daemon.write(|store| {
         let event = store.create_agent(

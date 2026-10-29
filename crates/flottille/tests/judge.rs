@@ -1,0 +1,547 @@
+//! The scenarios of the session's mode and the Auto judge (`docs/design.md` §7): each class in
+//! each mode, the judge allowing, asking, failing and keeping silent, no judge chosen, the mode a
+//! child inherits and a resume keeps, and what the judge is given and never given. The agents and
+//! the judge are fake ACP agents (`crates/flottille-fake-agent`), in throwaway repositories and
+//! temporary XDG folders.
+
+mod common;
+
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use common::User;
+use common::mcp::{Answer, Mcp, server_of};
+use serde_json::{Value, json};
+
+/// A secret of the place's `.env`: never shown to the judge.
+const PASSWORD: &str = "hunter2-hunter2";
+/// A token of the kind `secrets` recognises anywhere: never shown to the judge either.
+const TOKEN: &str = "ghp_fakefakefakefakefakefakefakefake0001";
+
+/// A project `app` over a throwaway repository with a `.env`, its workspace `w` (where the `.env`
+/// is copied), and the session of a root agent working there, or in the project folder when
+/// `main`: the agent's id, its session, the place's folder.
+fn session(user: &User, main: bool) -> (String, Mcp, PathBuf) {
+    let folder = user.path("work/app");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "app\n").unwrap();
+    std::fs::write(folder.join(".gitignore"), ".env\n").unwrap();
+    std::fs::write(folder.join(".env"), format!("DB_PASSWORD={PASSWORD}\n")).unwrap();
+    user.git(&folder, &["add", "README.md", ".gitignore"]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    let remote = user.path("remotes/app.git");
+    user.git(
+        &user.path(""),
+        &["init", "--quiet", "--bare", remote.to_str().unwrap()],
+    );
+    user.git(
+        &folder,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    user.git(&folder, &["push", "--quiet", "origin", "main"]);
+    user.call("project.add", json!({"folder": folder, "name": "app"}))
+        .unwrap();
+    let file = user.project_file("app");
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    text.push_str("\n[[recipe]]\ncopy = [\".env\"]\n");
+    std::fs::write(&file, text).unwrap();
+    let mut params = json!({"project": "app", "message": "add the login page, then stop"});
+    let place = if main {
+        folder
+    } else {
+        let workspace = user
+            .call("workspace.create", json!({"project": "app", "name": "w"}))
+            .unwrap();
+        eventually("the workspace", || {
+            user.call("workspace.show", json!({"project": "app", "name": "w"}))
+                .unwrap()["state"]
+                == "ready"
+        });
+        params["workspace"] = "w".into();
+        PathBuf::from(workspace["folder"].as_str().unwrap())
+    };
+    let opened = user.received_requests("session/new").len();
+    let answer = user.call("agent.run", params).unwrap();
+    let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+    let (url, authorization) = server_of(user, opened);
+    (id, Mcp::initialize(&url, &authorization), place)
+}
+
+fn eventually(what: &str, check: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !check() {
+        assert!(Instant::now() < deadline, "{what} never happened");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The request a held call made, as `approval.list` gives it.
+fn held(user: &User, answer: Answer) -> Value {
+    assert!(!answer.error, "an error: {}", answer.text);
+    let number: u64 = answer
+        .text
+        .strip_prefix("Waiting for the user's approval, request #")
+        .and_then(|rest| rest.split_once('.'))
+        .map(|(number, _)| number.parse().unwrap())
+        .unwrap_or_else(|| panic!("not held: {}", answer.text));
+    user.call("approval.list", json!({})).unwrap()["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["number"] == number)
+        .cloned()
+        .unwrap()
+}
+
+fn done(answer: Answer) -> String {
+    assert!(!answer.error, "an error: {}", answer.text);
+    assert!(
+        !answer.text.starts_with("Waiting for"),
+        "held: {}",
+        answer.text
+    );
+    answer.text
+}
+
+fn set_mode(user: &User, agent: &str, mode: &str) {
+    let output = user.run(&["agent", "mode", agent, mode]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn mode_of(user: &User, agent: &str) -> Value {
+    user.call("agent.show", json!({"agent": agent})).unwrap()["agent"]["gate_mode"].clone()
+}
+
+/// The prompts the judge was given, in order.
+fn judge_prompts(user: &User) -> Vec<String> {
+    user.judge_received()
+        .iter()
+        .filter(|e| e["received"]["method"] == "session/prompt")
+        .map(|e| {
+            e["received"]["params"]["prompt"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect()
+}
+
+/// The last `agent.tool_served` event of the agent.
+fn last_served(user: &User, agent: &str) -> Value {
+    user.call("agent.show", json!({"agent": agent})).unwrap()["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|e| e["name"] == "agent.tool_served")
+        .cloned()
+        .unwrap()["data"]
+        .clone()
+}
+
+/// The judge's answer, as the fake judge says it.
+fn says(verdict: &str, reason: &str) -> Value {
+    json!([{"say": json!({"verdict": verdict, "reason": reason}).to_string()}])
+}
+
+#[test]
+fn a_new_session_starts_in_auto_and_the_user_sets_its_mode_from_the_command_line() {
+    let user = User::with_fake_agent();
+    let (id, _, _) = session(&user, false);
+    assert_eq!(mode_of(&user, &id), "auto");
+
+    let output = user.run(&["agent", "mode", &id, "ask"]);
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("Agent {id} is in ask mode now.\n")
+    );
+    assert_eq!(mode_of(&user, &id), "ask");
+    let watch = user.watch(&["--after", "0"]);
+    let seen = watch.until(|e| e["name"] == "agent.gate_mode_changed");
+    let changed = seen.last().unwrap();
+    assert_eq!(changed["data"], json!({"agent": id, "mode": "ask"}));
+    let refused = user.run(&["agent", "mode", &id, "yolo"]);
+    assert!(!refused.status.success());
+    assert_eq!(mode_of(&user, &id), "ask");
+}
+
+#[test]
+fn harmless_calls_pass_in_ask_and_in_auto_without_the_judge() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (id, mcp, _) = session(&user, false);
+
+    for mode in ["auto", "ask"] {
+        set_mode(&user, &id, mode);
+        done(mcp.call("fs_read", json!({"path": "README.md"})));
+        done(mcp.call(
+            "fs_write",
+            json!({"path": "src/login.rs", "content": "fn login() {}\n"}),
+        ));
+        let status = done(mcp.call("commands_run", json!({"line": "git status"})));
+        assert!(status.contains("exited with code 0"), "{mode}: {status}");
+        done(mcp.call(
+            "commands_run",
+            json!({"line": "pgrep -f nothing-runs-like-this"}),
+        ));
+    }
+    assert!(judge_prompts(&user).is_empty(), "the judge was asked");
+}
+
+#[test]
+fn a_call_to_judge_in_ask_makes_a_card_and_never_reaches_the_judge() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (id, mcp, _) = session(&user, false);
+    set_mode(&user, &id, "ask");
+
+    let request = held(
+        &user,
+        mcp.call("commands_run", json!({"line": "touch made.txt"})),
+    );
+
+    assert_eq!(request["class"], "judge");
+    assert!(request["judgement"].is_null(), "{request}");
+    assert!(judge_prompts(&user).is_empty());
+}
+
+#[test]
+fn writing_in_main_in_ask_makes_a_card() {
+    let user = User::with_fake_agent();
+    let (id, mcp, folder) = session(&user, true);
+    set_mode(&user, &id, "ask");
+
+    let request = held(
+        &user,
+        mcp.call(
+            "fs_write",
+            json!({"path": "notes.txt", "content": "notes\n"}),
+        ),
+    );
+
+    assert_eq!(request["class"], "judge");
+    assert!(
+        request["reasons"].to_string().contains("project folder"),
+        "{request}"
+    );
+    assert!(!folder.join("notes.txt").exists());
+}
+
+#[test]
+fn in_auto_the_judge_allows_a_call_and_it_is_done_at_once_with_its_verdict_recorded() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (id, mcp, folder) = session(&user, false);
+
+    let started = Instant::now();
+    let answer = done(mcp.call(
+        "commands_run",
+        json!({"line": "touch made.txt", "why": "the build needs the file"}),
+    ));
+    let took = started.elapsed();
+
+    assert!(answer.contains("exited with code 0"), "{answer}");
+    assert!(folder.join("made.txt").exists());
+    let served = last_served(&user, &id);
+    assert_eq!(served["gate"], "judged");
+    assert_eq!(served["judgement"]["verdict"], "allow");
+    assert_eq!(served["judgement"]["reason"], "It fits the task.");
+    assert_eq!(served["judgement"]["by"], "opencode");
+    assert!(
+        user.call("approval.list", json!({})).unwrap()["requests"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    // One judge process per judgement: how long one takes here, said in the test's output.
+    eprintln!("a judged call took {} ms", took.as_millis());
+    assert!(took < Duration::from_secs(10), "{took:?}");
+}
+
+#[test]
+fn in_auto_the_judge_asks_and_the_card_and_the_command_line_say_its_reason() {
+    let user = User::with_fake_agent().with_judge(says("ask", "Nothing in the task asks for it."));
+    let (_, mcp, folder) = session(&user, false);
+
+    let request = held(
+        &user,
+        mcp.call("commands_run", json!({"line": "touch made.txt"})),
+    );
+
+    assert_eq!(request["class"], "judge");
+    assert_eq!(
+        request["judgement"],
+        json!({"by": "opencode", "verdict": "ask", "reason": "Nothing in the task asks for it."})
+    );
+    assert!(!folder.join("made.txt").exists());
+    let listed = user.run(&["approvals"]);
+    let text = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        text.contains("judge opencode (ask): Nothing in the task asks for it."),
+        "{text}"
+    );
+}
+
+#[test]
+fn an_answer_of_the_judge_that_cannot_be_read_asks() {
+    let user = User::with_fake_agent().with_judge(json!([{"say": "Looks fine to me."}]));
+    let (_, mcp, _) = session(&user, false);
+
+    let request = held(
+        &user,
+        mcp.call("commands_run", json!({"line": "touch made.txt"})),
+    );
+
+    assert_eq!(request["judgement"]["verdict"], "failed", "{request}");
+    assert!(
+        request["judgement"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("not the JSON verdict"),
+        "{request}"
+    );
+}
+
+#[test]
+fn a_judge_that_never_answers_asks_once_its_time_is_up() {
+    let user = User::with_fake_agent()
+        .with_judge(json!([{"hang": true}]))
+        .with_env("FLOTTILLE_JUDGE_TIMEOUT_MS", "800");
+    let (_, mcp, _) = session(&user, false);
+
+    let started = Instant::now();
+    let request = held(
+        &user,
+        mcp.call("commands_run", json!({"line": "touch made.txt"})),
+    );
+
+    assert!(started.elapsed() >= Duration::from_millis(800));
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(request["judgement"]["verdict"], "failed", "{request}");
+    assert!(
+        request["judgement"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("gave no answer within 0.8 seconds"),
+        "{request}"
+    );
+}
+
+#[test]
+fn a_judge_that_says_anything_but_allow_or_ask_asks() {
+    let user = User::with_fake_agent().with_judge(says("deny", "No."));
+    let (_, mcp, _) = session(&user, false);
+
+    let request = held(
+        &user,
+        mcp.call("commands_run", json!({"line": "touch made.txt"})),
+    );
+
+    assert_eq!(request["judgement"]["verdict"], "failed", "{request}");
+}
+
+#[test]
+fn without_a_judge_auto_asks_as_ask_does() {
+    let user = User::with_fake_agent();
+    let (id, mcp, _) = session(&user, false);
+    assert_eq!(mode_of(&user, &id), "auto");
+
+    let request = held(
+        &user,
+        mcp.call("commands_run", json!({"line": "touch made.txt"})),
+    );
+
+    assert_eq!(request["class"], "judge");
+    assert!(request["judgement"].is_null(), "{request}");
+}
+
+#[test]
+fn a_base_call_in_auto_makes_a_card_and_never_reaches_the_judge() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (_, mcp, _) = session(&user, false);
+
+    for (tool, args) in [
+        ("fs_read", json!({"path": ".env"})),
+        (
+            "commands_run",
+            json!({"line": "git push --force origin HEAD"}),
+        ),
+        ("commands_run", json!({"line": "rm -rf .git"})),
+    ] {
+        let request = held(&user, mcp.call(tool, args.clone()));
+        assert_eq!(request["class"], "base", "{args}");
+        assert!(request["judgement"].is_null(), "{args}");
+    }
+    assert!(judge_prompts(&user).is_empty(), "the judge was asked");
+}
+
+#[test]
+fn a_base_call_in_ask_makes_a_card_too() {
+    let user = User::with_fake_agent();
+    let (id, mcp, _) = session(&user, false);
+    set_mode(&user, &id, "ask");
+
+    let request = held(&user, mcp.call("fs_read", json!({"path": ".env"})));
+
+    assert_eq!(request["class"], "base");
+}
+
+#[test]
+fn shell_syntax_and_a_malformed_call_stay_refused_in_both_modes() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (id, mcp, _) = session(&user, false);
+
+    for mode in ["auto", "ask"] {
+        set_mode(&user, &id, mode);
+        let shell = mcp.call("commands_run", json!({"line": "ls | wc -l"}));
+        assert!(shell.error, "{mode}: {}", shell.text);
+        let malformed = mcp.call(
+            "forge_write",
+            json!({"action": "pr-delete", "repository": "."}),
+        );
+        assert!(malformed.error, "{mode}: {}", malformed.text);
+    }
+    assert!(judge_prompts(&user).is_empty());
+}
+
+#[test]
+fn reading_outside_the_project_goes_to_the_judge() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let notes = user.path("home/notes.txt");
+    std::fs::create_dir_all(notes.parent().unwrap()).unwrap();
+    std::fs::write(&notes, "made-up notes\n").unwrap();
+    let (_, mcp, _) = session(&user, false);
+
+    let read = done(mcp.call("fs_read", json!({"path": notes})));
+
+    assert!(read.contains("made-up notes"), "{read}");
+    assert_eq!(judge_prompts(&user).len(), 1);
+}
+
+#[test]
+fn a_child_inherits_its_parent_s_mode() {
+    let user = User::with_fake_agent();
+    let (lead, mcp, _) = session(&user, false);
+    set_mode(&user, &lead, "ask");
+
+    let launched = mcp.call(
+        "agent_launch",
+        json!({"title": "worker", "brief": "Write the tests."}),
+    );
+    assert!(!launched.error, "{}", launched.text);
+
+    let agents = user.call("agent.list", json!({})).unwrap()["agents"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let child = agents
+        .iter()
+        .find(|a| a["parent"] == lead.as_str())
+        .unwrap();
+    assert_eq!(child["gate_mode"], "ask");
+}
+
+#[test]
+fn the_mode_survives_a_resume() {
+    let user = User::with_fake_agent();
+    let (id, _, _) = session(&user, false);
+    set_mode(&user, &id, "ask");
+
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+    user.resume(&id);
+
+    assert_eq!(mode_of(&user, &id), "ask");
+}
+
+#[test]
+fn the_judge_s_prompt_holds_the_call_the_place_the_user_s_words_and_the_why_never_a_secret() {
+    let user = User::with_fake_agent()
+        .with_judge(says("ask", "Let the user see it."))
+        .with_env("GH_TOKEN", TOKEN);
+    let (_, mcp, _) = session(&user, false);
+    let outside = user.path("elsewhere/config.txt");
+    let content = format!(
+        "password = {PASSWORD}\ntoken = {TOKEN}\n{}",
+        (3..=40).map(|n| format!("line {n}\n")).collect::<String>()
+    );
+
+    held(
+        &user,
+        mcp.call(
+            "fs_write",
+            json!({"path": outside, "content": content,
+                "why": format!("the deploy needs {PASSWORD}")}),
+        ),
+    );
+
+    let prompts = judge_prompts(&user);
+    assert_eq!(prompts.len(), 1);
+    let prompt = &prompts[0];
+    assert!(prompt.contains("Tool: fs_write"), "{prompt}");
+    assert!(prompt.contains("is outside this agent's place"), "{prompt}");
+    assert!(prompt.contains("workspace w of project app"), "{prompt}");
+    assert!(prompt.contains("add the login page, then stop"), "{prompt}");
+    assert!(prompt.contains("the deploy needs"), "{prompt}");
+    // A file's content is cut to its first lines.
+    assert!(prompt.contains("line 3"), "{prompt}");
+    assert!(!prompt.contains("line 40"), "{prompt}");
+    for secret in [PASSWORD, TOKEN] {
+        assert!(!prompt.contains(secret), "{secret} in {prompt}");
+    }
+    // Nor anywhere else the judge was sent.
+    let everything = user
+        .judge_received()
+        .iter()
+        .map(Value::to_string)
+        .collect::<String>();
+    for secret in [PASSWORD, TOKEN] {
+        assert!(!everything.contains(secret), "{secret} sent to the judge");
+    }
+}
+
+#[test]
+fn the_judge_runs_with_no_tool_and_no_mcp_server() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (_, mcp, _) = session(&user, false);
+
+    done(mcp.call("commands_run", json!({"line": "touch made.txt"})));
+
+    let opened: Vec<Value> = user
+        .judge_received()
+        .into_iter()
+        .filter(|e| e["received"]["method"] == "session/new")
+        .map(|e| e["received"]["params"].clone())
+        .collect();
+    assert_eq!(opened.len(), 1);
+    assert_eq!(opened[0]["mcpServers"], json!([]), "{}", opened[0]);
+    assert!(!opened[0].to_string().contains("mcp__"), "{}", opened[0]);
+    // OpenCode, its judge here, is told its tools in its configuration: every one denied.
+    let started = user
+        .judge_received()
+        .into_iter()
+        .find(|e| e["started"] == true)
+        .unwrap();
+    let config: Value =
+        serde_json::from_str(started["env"]["OPENCODE_CONFIG_CONTENT"].as_str().unwrap()).unwrap();
+    let permission = config["agent"]["flottille"]["permission"]
+        .as_object()
+        .unwrap()
+        .clone();
+    assert_eq!(permission["*"], "deny");
+    for (tool, said) in &permission {
+        assert!(said == "deny" || tool == "doom_loop", "{tool}: {said}");
+    }
+    assert!(
+        !config.to_string().contains("\"mcp\""),
+        "no MCP server: {config}"
+    );
+    // Every permission it would ask is refused.
+    assert!(
+        !user
+            .judge_received()
+            .iter()
+            .any(|e| e["permission"]["outcome"]["outcome"] == "selected"),
+    );
+}

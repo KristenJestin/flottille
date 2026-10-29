@@ -17,6 +17,7 @@ pub struct Card {
     body: Vec<AnyElement>,
     footer: Vec<AnyElement>,
     attention: bool,
+    alarm: bool,
 }
 
 impl Card {
@@ -52,6 +53,13 @@ impl Card {
         self.attention = true;
         self
     }
+
+    /// Red-bordered, on a red wash: a request that always comes back to the user, whatever the
+    /// mode, because it may lose work or reach what must stay private.
+    pub fn alarm(mut self) -> Self {
+        self.alarm = true;
+        self
+    }
 }
 
 impl RenderOnce for Card {
@@ -61,9 +69,13 @@ impl RenderOnce for Card {
         div()
             .flex()
             .flex_col()
-            .bg(p.card)
+            .bg(if self.alarm { p.fail_bg } else { p.card })
             .border_1()
-            .border_color(if self.attention { p.wait_line } else { p.line })
+            .border_color(match (self.alarm, self.attention) {
+                (true, _) => p.fail,
+                (false, true) => p.wait_line,
+                (false, false) => p.line,
+            })
             .rounded(radius::CARD)
             .text_color(p.text)
             .ui_text()

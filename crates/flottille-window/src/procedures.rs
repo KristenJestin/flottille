@@ -3,14 +3,12 @@
 //! shows the list the daemon gives next.
 //!
 //! * [`ProceduresSection`]: the "Procedures" section of the project page, with the modal that adds
-//!   one (from the list of templates, or blank) or edits one, each grant a sentence.
+//!   one (from the list of templates, or blank) or edits one.
 //! * [`RunProcedure`]: the modal that runs one, picked with `/` in a session's composer, in that
-//!   session's workspace. It shows the grants in words and starts nothing before Confirm.
-//! * [`run_block`]: the grants of the run a session belongs to, in its rail's WORKSPACE section.
+//!   session's workspace. It starts nothing before Confirm.
+//! * [`run_block`]: the run a session belongs to, in its rail's WORKSPACE section.
 
-use std::collections::BTreeMap;
-
-use flottille_core::procedure::{Grant, Mode, TEMPLATES};
+use flottille_core::procedure::TEMPLATES;
 use flottille_ui::{Button, Icon, ListRow, Modal, Type, icon, palette};
 use gpui_kit::base::input::{Input, InputEditorStyle, InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -19,54 +17,10 @@ use gpui_kit::{
     IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
     Subscription, TestSupportExt as _, WeakEntity, Window, div, px,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::actions::{Command, ProcedureWrite};
 use crate::shell::Shell;
-
-/// What a grant's mode means, in the words of the editor's choices: `allow` is done on its own,
-/// `ask` after asking the user, every time.
-pub fn mode_words(mode: &str) -> &'static str {
-    match mode {
-        "allow" => "on its own",
-        "ask" => "after asking me",
-        _ => "no",
-    }
-}
-
-/// What a grant lets a run do, as a sentence for the user; the grant's own word when it is not
-/// one Flottille knows.
-pub fn sentence(grant: &str) -> String {
-    let Some(grant) = Grant::of(grant) else {
-        return grant.to_owned();
-    };
-    match grant {
-        Grant::Commit => "Make commits",
-        Grant::Push => "Push the workspace's branch",
-        Grant::PushForceWithLease => "Force-push the branch, with a lease",
-        Grant::Rebase => "Rebase the branch on its base",
-        Grant::PrCreate => "Open the pull requests",
-        Grant::PrMergeSquash => "Merge the pull requests, by squash",
-        Grant::PipelineRerun => "Re-run the failed pipelines",
-        Grant::WorkspaceRemove => "Remove the workspace, once nothing would be lost",
-    }
-    .to_owned()
-}
-
-/// One grant of a procedure: the sentence the daemon gives for what it lets through.
-#[derive(Clone, Debug, PartialEq)]
-pub struct GrantLine {
-    pub grant: String,
-    pub mode: String,
-    pub says: String,
-}
-
-impl GrantLine {
-    /// `Push the workspace's branch · after asking me`
-    pub fn text(&self) -> String {
-        format!("{} · {}", sentence(&self.grant), mode_words(&self.mode))
-    }
-}
 
 /// A procedure as the daemon shows it (`docs/protocol.md`, "The procedure methods").
 #[derive(Clone, Debug, PartialEq)]
@@ -75,8 +29,6 @@ pub struct ProcedureInfo {
     pub description: String,
     /// Empty unless the daemon gave it whole (`procedure.show`).
     pub instructions: String,
-    pub grants: Vec<GrantLine>,
-    pub children: bool,
 }
 
 impl ProcedureInfo {
@@ -86,51 +38,7 @@ impl ProcedureInfo {
             name: text(&value["name"]),
             description: text(&value["description"]),
             instructions: text(&value["instructions"]),
-            grants: value["says"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|line| GrantLine {
-                    grant: text(&line["grant"]),
-                    mode: text(&line["mode"]),
-                    says: text(&line["says"]),
-                })
-                .collect(),
-            children: value["children"] == true,
         }
-    }
-
-    /// The grants as the daemon takes them back: grant to mode.
-    pub fn grants_json(&self) -> Value {
-        Value::Object(
-            self.grants
-                .iter()
-                .map(|line| (line.grant.clone(), json!(line.mode)))
-                .collect(),
-        )
-    }
-
-    /// The mode a grant has, if it is given.
-    pub fn mode_of(&self, grant: &str) -> Option<&str> {
-        self.grants
-            .iter()
-            .find(|line| line.grant == grant)
-            .map(|line| line.mode.as_str())
-    }
-
-    /// Each grant in words, then whether the children get them.
-    pub fn lines(&self) -> Vec<String> {
-        let mut lines: Vec<String> = self.grants.iter().map(GrantLine::text).collect();
-        lines.push(children_words(self.children, !self.grants.is_empty()).into());
-        lines
-    }
-}
-
-fn children_words(children: bool, grants: bool) -> &'static str {
-    match (grants, children) {
-        (false, _) => "It may do nothing beyond what agents may always do.",
-        (true, true) => "The agents the run starts may do the same.",
-        (true, false) => "The agents the run starts may do none of it.",
     }
 }
 
@@ -241,10 +149,6 @@ pub struct ProceduresSection {
     form: Form,
     /// Made when the modal first opens, which is when a window is at hand.
     fields: Option<Fields>,
-    grants: BTreeMap<Grant, Mode>,
-    /// Whether the run's children get the grants, as the file says: the form shows it and leaves
-    /// it as it is.
-    children: bool,
     saving: bool,
     form_error: Option<SharedString>,
     /// The procedure being read to be edited.
@@ -262,8 +166,6 @@ impl ProceduresSection {
             problem: None,
             form: Form::Closed,
             fields: None,
-            grants: BTreeMap::new(),
-            children: true,
             saving: false,
             form_error: None,
             reading: None,
@@ -299,11 +201,6 @@ impl ProceduresSection {
 
     pub fn instructions_field(&self) -> Option<&Entity<TextareaState>> {
         self.fields.as_ref().map(|f| &f.instructions)
-    }
-
-    /// The mode the form gives a grant now.
-    pub fn grant_in_form(&self, grant: Grant) -> Option<Mode> {
-        self.grants.get(&grant).copied()
     }
 
     /// Asks the daemon for the list.
@@ -385,15 +282,6 @@ impl ProceduresSection {
         instructions.update(cx, |f, cx| {
             f.set_value(text(|i| &i.instructions), window, cx);
         });
-        self.grants = info
-            .map(|info| {
-                info.grants
-                    .iter()
-                    .filter_map(|line| Some((Grant::of(&line.grant)?, Mode::of(&line.mode)?)))
-                    .collect()
-            })
-            .unwrap_or_default();
-        self.children = info.is_none_or(|info| info.children);
         self.form = Form::Editing(info.map(|info| info.name.clone()));
         self.form_error = None;
         self.saving = false;
@@ -472,12 +360,6 @@ impl ProceduresSection {
         let Some(fields) = &self.fields else {
             return;
         };
-        let grants: Value = Value::Object(
-            self.grants
-                .iter()
-                .map(|(grant, mode)| (grant.word().to_owned(), json!(mode.word())))
-                .collect(),
-        );
         let name = match &original {
             Some(name) => name.clone(),
             None => fields.name.read(cx).value().trim().to_owned(),
@@ -491,13 +373,11 @@ impl ProceduresSection {
                 name,
                 description,
                 instructions,
-                grants,
             },
             None => ProcedureWrite::Add {
                 name,
                 description,
                 instructions,
-                grants,
             },
         };
         self.write(write, cx);
@@ -534,33 +414,11 @@ impl ProceduresSection {
         cx.notify();
     }
 
-    fn set_grant(&mut self, grant: Grant, mode: Option<Mode>, cx: &mut Context<Self>) {
-        match mode {
-            Some(mode) => self.grants.insert(grant, mode),
-            None => self.grants.remove(&grant),
-        };
-        cx.notify();
-    }
-
     fn row(&self, info: &ProcedureInfo, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let name = info.name.clone();
         let id = |part: &str| ElementId::Name(format!("{part}-{}", info.name).into());
         let confirming = self.confirming.as_deref() == Some(&info.name);
-        let grants = if info.grants.is_empty() {
-            "no grants".to_owned()
-        } else {
-            info.grants
-                .iter()
-                .map(|line| format!("{} ({})", line.grant, line.mode))
-                .collect::<Vec<_>>()
-                .join(" · ")
-        };
-        let children = if info.children || info.grants.is_empty() {
-            ""
-        } else {
-            " · not the children"
-        };
         div()
             .id(id("procedure"))
             .px(px(14.))
@@ -593,17 +451,7 @@ impl ProceduresSection {
                             .aria_label(SharedString::from(info.description.clone()))
                             .child(SharedString::from(info.description.clone()))
                             .test_support(),
-                    )
-                    .child({
-                        let grants = SharedString::from(format!("{grants}{children}"));
-                        div()
-                            .id(id("procedure-grants"))
-                            .mono(11.)
-                            .text_color(p.faint)
-                            .aria_label(grants.clone())
-                            .child(grants)
-                            .test_support()
-                    }),
+                    ),
             )
             .child({
                 let edit = name.clone();
@@ -683,7 +531,7 @@ impl ProceduresSection {
                 });
                 let blank = ListRow::new("blank-procedure", "Blank procedure")
                     .leading(icon(Icon::Plus).size(px(14.)).text_color(p.faint))
-                    .line("Write your own: a name, what it does, and what a run may do")
+                    .line("Write your own: a name, what it does, and what the agent is told")
                     .on_click(cx.listener(|this, _, window, cx| this.blank(window, cx)));
                 modal
                     .child(
@@ -700,112 +548,42 @@ impl ProceduresSection {
             }
             Form::Editing(original) => {
                 let fields = self.fields.as_ref().expect("made when the form opens");
-                let grants = Grant::ALL.into_iter().map(|grant| {
-                    let word = grant.word();
-                    let mode = self.grants.get(&grant).copied();
-                    let choice =
-                        |label: &'static str, width: f32, this: Option<Mode>| {
-                            let button = ElementId::Name(
-                                format!("grant-{word}-{}", this.map_or("off", Mode::word)).into(),
-                            );
-                            let button = if mode == this {
-                                Button::secondary(button, label)
-                            } else {
-                                Button::quiet(button, label)
-                            };
-                            // One width each, so that the columns stay aligned whichever is chosen.
-                            div()
-                                .w(px(width))
-                                .flex()
-                                .justify_center()
-                                .child(button.on_click(cx.listener(move |this_, _, _, cx| {
-                                    this_.set_grant(grant, this, cx)
-                                })))
-                        };
-                    let said = sentence(word);
-                    div()
-                        .id(ElementId::Name(format!("grant-{word}").into()))
-                        .aria_label(SharedString::from(said.clone()))
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .py(px(2.))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .child(div().text_size(px(13.)).child(said))
-                                .child(div().mono(10.5).text_color(p.faint).child(word)),
-                        )
-                        .child(choice("No", 44., None))
-                        .child(choice("After asking me", 124., Some(Mode::Ask)))
-                        .child(choice("On its own", 92., Some(Mode::Allow)))
-                        .test_support()
-                });
-                let body =
-                    div()
-                        .id("procedure-form")
-                        .max_h(window.viewport_size().height - px(200.))
-                        .overflow_y_scroll()
-                        .flex()
-                        .flex_col()
-                        .gap(px(10.))
-                        .child(match &original {
-                            Some(name) => div()
-                                .mono(12.5)
-                                .semibold()
-                                .child(SharedString::from(name.clone()))
-                                .into_any_element(),
-                            None => boxed("procedure-name", Input::new(&fields.name), cx)
-                                .into_any_element(),
-                        })
-                        .child(boxed(
-                            "procedure-description-field",
-                            Input::new(&fields.description),
-                            cx,
-                        ))
-                        .child(
-                            div()
-                                .id("procedure-instructions")
-                                .px(px(10.))
-                                .py(px(8.))
-                                .rounded(px(8.))
-                                .bg(p.field)
-                                .border_1()
-                                .border_color(p.line2)
-                                .text_size(px(12.5))
-                                .child(fields.instructions.clone())
-                                .test_support(),
-                        )
-                        .child(
-                            div()
-                                .mt(px(4.))
-                                .text_size(px(12.))
-                                .semibold()
-                                .child("What a run may do"),
-                        )
-                        .child(
-                            div().text_size(px(11.5)).text_color(p.faint).child(
-                                "Each run shows you these, and starts only once you confirm.",
-                            ),
-                        )
-                        .children(grants)
-                        .child(
-                            div()
-                                .id("procedure-children-said")
-                                .text_size(px(11.5))
-                                .text_color(p.faint)
-                                .child(if self.children {
-                                    "The agents a run starts may do the same."
-                                } else {
-                                    "The agents a run starts may do none of it: the project's file \
-                                 says children = false."
-                                })
-                                .test_support(),
-                        )
-                        .test_support();
+                let body = div()
+                    .id("procedure-form")
+                    .max_h(window.viewport_size().height - px(200.))
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.))
+                    .child(match &original {
+                        Some(name) => div()
+                            .mono(12.5)
+                            .semibold()
+                            .child(SharedString::from(name.clone()))
+                            .into_any_element(),
+                        None => {
+                            boxed("procedure-name", Input::new(&fields.name), cx).into_any_element()
+                        }
+                    })
+                    .child(boxed(
+                        "procedure-description-field",
+                        Input::new(&fields.description),
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .id("procedure-instructions")
+                            .px(px(10.))
+                            .py(px(8.))
+                            .rounded(px(8.))
+                            .bg(p.field)
+                            .border_1()
+                            .border_color(p.line2)
+                            .text_size(px(12.5))
+                            .child(fields.instructions.clone())
+                            .test_support(),
+                    )
+                    .test_support();
                 modal.child(body).children(error).action(if self.saving {
                     div()
                         .mono(11.5)
@@ -879,18 +657,23 @@ impl Render for ProceduresSection {
     }
 }
 
+/// What the run modal says of what a run may do: nothing more than any agent.
+const RUN_SAYS: &str =
+    "It grants nothing: each call the run makes goes through the session's mode, like any other.";
+
 // ── The run modal ──────────────────────────────────────────────────────────────────────────────
 
 /// The modal that runs a procedure picked with `/` in the workspace of the session it was typed
-/// in: the procedure, the workspace, every grant in words, and Confirm. The daemon is asked what the run would grant (`procedure.run`), which
-/// starts nothing; `procedure.start` is asked only when the user confirms.
+/// in: the procedure, the workspace, and Confirm. The daemon is asked to show the procedure
+/// (`procedure.show`), which starts nothing; `procedure.start` is asked only when the user
+/// confirms.
 pub struct RunProcedure {
     shell: WeakEntity<Shell>,
     open: bool,
     project: String,
     workspace: String,
     chosen: Option<String>,
-    /// What running `chosen` would grant, as the daemon shows it.
+    /// The procedure `chosen`, as the daemon shows it.
     shown: Option<ProcedureInfo>,
     starting: bool,
     error: Option<SharedString>,
@@ -926,7 +709,7 @@ impl RunProcedure {
         self.chosen.as_deref()
     }
 
-    /// The procedure the daemon showed for the choice, with its grants.
+    /// The procedure the daemon showed for the choice.
     pub fn shown(&self) -> Option<&ProcedureInfo> {
         self.shown.as_ref()
     }
@@ -940,7 +723,7 @@ impl RunProcedure {
     }
 
     /// Opens the modal on a procedure to run in a workspace, nothing running: the daemon is asked
-    /// what a run of it would grant.
+    /// to show it.
     pub fn open(&mut self, project: &str, workspace: &str, name: &str, cx: &mut Context<Self>) {
         self.open = true;
         self.project = project.to_owned();
@@ -955,7 +738,7 @@ impl RunProcedure {
         cx.notify();
     }
 
-    /// Chooses a procedure: the daemon says what a run of it would grant. Nothing starts.
+    /// Chooses a procedure: the daemon shows it. Nothing starts.
     pub fn choose(&mut self, name: &str, cx: &mut Context<Self>) {
         if self.starting {
             return;
@@ -972,7 +755,7 @@ impl RunProcedure {
         cx.notify();
     }
 
-    /// What a run of the chosen procedure would grant.
+    /// The chosen procedure, as the daemon shows it.
     pub fn shown_by_daemon(
         &mut self,
         project: &str,
@@ -995,7 +778,7 @@ impl RunProcedure {
         cx.notify();
     }
 
-    /// Confirm: the run starts with the grants that were shown.
+    /// Confirm: the run of the procedure that was shown starts.
     pub fn confirm(&mut self, cx: &mut Context<Self>) {
         let (Some(shown), false) = (self.shown.clone(), self.starting) else {
             return;
@@ -1006,8 +789,6 @@ impl RunProcedure {
             project: self.project.clone(),
             name: shown.name.clone(),
             workspace: self.workspace.clone(),
-            grants: shown.grants_json(),
-            children: shown.children,
         };
         perform_later(&self.shell, command, cx);
         cx.notify();
@@ -1074,59 +855,11 @@ impl Render for RunProcedure {
                         )
                         .child(
                             div()
-                                .mt(px(4.))
-                                .text_size(px(12.))
-                                .semibold()
-                                .child("This run may"),
-                        )
-                        .child(
-                            div()
-                                .id("run-grants")
-                                .flex()
-                                .flex_col()
-                                .gap(px(6.))
-                                .children(shown.grants.iter().map(|line| {
-                                    div()
-                                        .id(ElementId::Name(
-                                            format!("run-grant-{}", line.grant).into(),
-                                        ))
-                                        .aria_label(SharedString::from(line.text()))
-                                        .flex()
-                                        .items_baseline()
-                                        .gap(px(8.))
-                                        .child(
-                                            div().text_size(px(12.5)).child(sentence(&line.grant)),
-                                        )
-                                        .child(
-                                            div()
-                                                .mono(10.5)
-                                                .text_color(p.faint)
-                                                .child(SharedString::from(line.grant.clone())),
-                                        )
-                                        .child(div().flex_1())
-                                        .child(
-                                            div()
-                                                .text_size(px(12.))
-                                                .text_color(if line.mode == "ask" {
-                                                    p.wait
-                                                } else {
-                                                    p.mute
-                                                })
-                                                .child(mode_words(&line.mode)),
-                                        )
-                                        .test_support()
-                                })),
-                        )
-                        .child(
-                            div()
-                                .id("run-children")
-                                .aria_label(children_words(
-                                    shown.children,
-                                    !shown.grants.is_empty(),
-                                ))
+                                .id("run-says")
+                                .aria_label(RUN_SAYS)
                                 .text_size(px(12.))
                                 .text_color(p.faint)
-                                .child(children_words(shown.children, !shown.grants.is_empty()))
+                                .child(RUN_SAYS)
                                 .test_support(),
                         )
                         .test_support(),
@@ -1175,8 +908,6 @@ impl Render for RunProcedure {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RunFacts {
     pub procedure: String,
-    pub grants: Vec<GrantLine>,
-    pub children: bool,
 }
 
 impl RunFacts {
@@ -1185,17 +916,13 @@ impl RunFacts {
         if run.is_null() || run["ended"] == true {
             return None;
         }
-        let info = ProcedureInfo::of(run);
         Some(Self {
             procedure: run["procedure"].as_str().unwrap_or_default().to_owned(),
-            grants: info.grants,
-            children: info.children,
         })
     }
 }
 
-/// The grants of the run, in the WORKSPACE section of the rail: the procedure, each grant in
-/// words, and whether the children get them.
+/// The run, in the WORKSPACE section of the rail: the procedure it runs.
 pub fn run_block(run: &RunFacts, cx: &App) -> impl IntoElement {
     let p = palette(cx);
     div()
@@ -1218,33 +945,6 @@ pub fn run_block(run: &RunFacts, cx: &App) -> impl IntoElement {
                         .mono(11.5)
                         .child(SharedString::from(run.procedure.clone())),
                 )
-                .test_support(),
-        )
-        .children(run.grants.iter().map(|line| {
-            div()
-                .id(ElementId::Name(
-                    format!("rail-run-grant-{}", line.grant).into(),
-                ))
-                .aria_label(SharedString::from(line.text()))
-                .flex()
-                .flex_wrap()
-                .gap_x(px(6.))
-                .text_size(px(11.5))
-                .text_color(p.mute)
-                .child(sentence(&line.grant))
-                .child(
-                    div()
-                        .text_color(if line.mode == "ask" { p.wait } else { p.faint })
-                        .child(mode_words(&line.mode)),
-                )
-                .test_support()
-        }))
-        .child(
-            div()
-                .id("rail-run-children")
-                .text_size(px(11.))
-                .text_color(p.faint)
-                .child(children_words(run.children, !run.grants.is_empty()))
                 .test_support(),
         )
         .test_support()
