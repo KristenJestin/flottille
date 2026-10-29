@@ -264,6 +264,55 @@ impl User {
         records(&self.path("gh/received.jsonl"))
     }
 
+    /// This user with a fake `sudo`, `sudoedit`, `doas`, `pkexec`, `run0` and `su` first in its
+    /// `PATH`: each writes a line in a marker file and exits 1. A test that sends one of them to
+    /// the gate checks `escalations` is empty afterwards: a gate that let the call run would
+    /// start a fake, never the program that asks the maintainer's machine for a password.
+    pub fn with_fake_escalation(self) -> User {
+        let bin = self.path("escalation-bin");
+        std::fs::create_dir(&bin).unwrap();
+        let marker = self.path("escalation-ran");
+        for name in ["sudo", "sudoedit", "doas", "pkexec", "run0", "su"] {
+            let program = bin.join(name);
+            std::fs::write(
+                &program,
+                format!(
+                    "#!/bin/sh\necho \"{name} $*\" >> '{}'\nexit 1\n",
+                    marker.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            self.env
+                .iter()
+                .rev()
+                .find(|(name, _)| name == "PATH")
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default())
+        );
+        // Looked up, never run: the real programs must be unreachable by name.
+        for name in ["sudo", "sudoedit", "doas", "pkexec", "run0", "su"] {
+            let found = path
+                .split(':')
+                .map(|folder| Path::new(folder).join(name))
+                .find(|candidate| candidate.is_file());
+            assert_eq!(found, Some(bin.join(name)), "{name} is not the fake one");
+        }
+        self.with_env("PATH", &path)
+    }
+
+    /// The calls the fake escalating programs received, the first first: what ran of `sudo`,
+    /// `doas`, `pkexec`, `run0` and `su`. Empty when the gate held every call.
+    pub fn escalations(&self) -> Vec<String> {
+        std::fs::read_to_string(self.path("escalation-ran"))
+            .map(|text| text.lines().map(str::to_owned).collect())
+            .unwrap_or_default()
+    }
+
     /// This user with the fake `bkt` (`crates/flottille-fake-bkt`) first in its `PATH`, its folder
     /// `bkt`: no test ever calls Bitbucket nor uses anyone's sign-in.
     pub fn with_fake_bkt(self) -> User {

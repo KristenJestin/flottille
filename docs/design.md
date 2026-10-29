@@ -174,8 +174,8 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
   `ticket_read`, the ticket a workspace is linked to, or another of the same tracker, read only
   (`tickets.md`);
 - the project (a root): `skills` and `commands` (list, show, add, edit, remove) and `project` (its
-  settings, its forges and tracker, its rules), what the window does, each change a call to judge
-  (`tools.md`, "The project", `projects.md`);
+  settings, its forges and tracker, its rules), what the window does, each change a call to judge,
+  a change of the tracker or of the rules base (`tools.md`, "The project", `projects.md`);
 
 Flottille's own tools:
 
@@ -335,19 +335,22 @@ says what kind of call it is, and the session's **mode** says who answers it.
 
 - **Harmless** calls pass, in every mode: reading in the project, writing in a workspace, the
   commands the rules know to only read, a task in a workspace. A known program is
-  the system's only: named bare and found through `PATH` outside the project, its workspaces and
-  the place; an option that runs a program or reads past ignored files toward a secret takes it
+  the system's only: named bare and found through the run's `PATH` outside the project, its
+  workspaces, the place and the user's `~/.local/bin` and `~/bin`; an option that runs a program or reads past ignored files toward a secret takes it
   out of this class.
 - **To judge** is everything else: writing in `main`, reading outside the project, a line the
   rules do not know or whose program is the agent's own file, an option of a reading program
   that runs one, a commit, a push, a forge write, a change of the project an agent asks for.
 - **Base** calls always come to the user, in every mode, with a strong warning: a push forced
   (with a lease or not), rewriting history that is on a remote, discarding work in `main` or
-  moving the branch it has checked out, `.git` folders, git settings that run programs or lead
-  pushes (`core`, `alias`, `remote`, `url`, `push`, `credential`, `include`), sensitive places
-  (`.env` files, credential folders, Flottille's own folders, another process's `/proc`),
-  publishing, a merge whose checks are waived, a change of the project's tracker, and the
-  project's `never` list. They are looked for in every line a wrapper or an option runs, and in
+  moving the branch it has checked out, removing git's reflog or unreachable objects, `.git`
+  folders, git settings that run programs or lead pushes (`core`, `alias`, `remote`, `url`,
+  `push`, `credential`, `include`, and every key whose value git runs, set by `-c` or `git
+  config`, or through the environment), a push naming the program that receives it, running as
+  another user (`sudo`, `doas`, `pkexec`), sensitive places (`.env` files, credential folders,
+  Flottille's own folders, another process's `/proc`), publishing, a merge whose checks are
+  waived, a change of the project's tracker or of its rules, and the project's `never` list.
+  They are looked for in every line a wrapper, an option or `git rebase --exec` runs, and in
   every end of a line whose program the gate does not know, so that no wrapper turns them into
   calls to judge.
 

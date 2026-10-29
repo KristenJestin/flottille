@@ -201,8 +201,9 @@ so a change reaches the agents created after it, and no agent created before. Th
 before the cache boundary, where every project shares them, so editing them changes the shared
 part once for everyone. A project's own rules would make that part differ from one project to
 the next, so they sit after the boundary. An agent reads the rules the agents created next will get with
-`project {action: "rules"}` and proposes a change with `set_rules {text}`, a call to judge like
-the project's other changes (`docs/tools.md`, "The project").
+`project {action: "rules"}` and proposes a change with `set_rules {text}`, a base call that only
+the user allows, since it rewrites the instructions of every agent created after it
+(`docs/tools.md`, "The project").
 
 ## Tasks
 

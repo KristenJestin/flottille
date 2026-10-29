@@ -406,9 +406,9 @@ const SERVED: [Definition; 24] = [
         description: "This project's settings. settings reads each repository's forge and the \
             tracker; set_settings declares them (null removes one; a tracker left out is kept). \
             rules reads how agents are told to work; set_rules replaces them, for the agents \
-            created after. A change is done once the session's judge or the user allows it, of \
-            the tracker only once the user does: you are answered at once, the result may come \
-            later. {\"action\": \"set_settings\", \"repositories\": [{\"path\": \
+            created after. A change is done once the judge or the user allows it, of the \
+            tracker or of the rules only once the user does: you are answered at once, the \
+            result may come later. {\"action\": \"set_settings\", \"repositories\": [{\"path\": \
             \"api\", \"forge\": {\"kind\": \"github\", \"repository\": \"acme/api\"}}]}.",
         read_only: false,
         idempotent: false,
@@ -1282,7 +1282,19 @@ pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gat
         paths_of.runtime.clone(),
     ];
     let pushed = rewrites(&words) && pushed(&grant.place, paths.first());
-    let search = runs::search_path(&grant.place, ".");
+    // The repository a run is in: the one whose folder it runs in.
+    let place = &grant.place;
+    let repository = paths
+        .first()
+        .filter(|_| tool == "commands_run")
+        .and_then(|folder| {
+            place
+                .repositories
+                .iter()
+                .find(|(_, base)| place.resolve(base, ".") == *folder)
+        })
+        .map_or(".", |(path, _)| path.as_str());
+    let search = runs::search_path(place, repository);
     let mut writable = vec![grant.place.root.clone()];
     if let Some(project) = &project {
         writable.extend([project.folder.clone(), project.workspaces_root.clone()]);
