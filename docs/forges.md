@@ -2,7 +2,7 @@
 
 What the forge of each repository of a workspace says of the workspace's branch: its pull request
 and the pull request's checks. The first step of the milestone "Forges and tickets"
-(`docs/design.md` §13). **Reading**, and the writes an agent in a workspace makes with `forge_write`, each a call to
+(`docs/design.md` §13). **Reading**, and the writes an agent makes with `forge`, each a call to
 judge at the gate ([`commands.md`](commands.md)).
 
 GitHub and Bitbucket (Cloud and Data Center) are the forges read. In the code a forge is one member
@@ -26,7 +26,7 @@ would send a read or a write to another host than the one the declaration was ch
   as every output is (`flottille_core::secrets`).
 - **Agents never get that environment.** An agent's process and its command runs have the forge
   tokens emptied and `GH_CONFIG_DIR` and `BKT_CONFIG_DIR` pointed at an empty folder
-  (`docs/tools.md`); an agent reads the forge only through `forge_read` below, never by running
+  (`docs/tools.md`); an agent reads the forge only through `forge` below, never by running
   `gh` itself, and **never by running `bkt`, reads included** (see "Bitbucket").
 
 ## The forge of a repository
@@ -83,7 +83,7 @@ forge from an alias: the user chooses it in the Settings, and saving it is check
 A name that could pass for a flag or a path (a leading `-`, anything but letters, digits, `.`, `_`,
 `~` and `-`) is no repository, and a host is a name alone (no scheme, port or path).
 
-**`forge_write` refuses a repository with no forge declared**, naming it (`docs/commands.md`).
+**`forge` refuses to write for a repository with no forge declared**, naming it (`docs/commands.md`).
 
 ## What is read
 
@@ -96,7 +96,7 @@ itself (`gh pr view <n> -R github.com/owner/name --json …`):
 - its checks, each with its name and its state: `passing`, `failing`, `pending` or `skipped`;
   and the checks as one mark: `failing` when one fails, else `pending` when one runs, else
   `passing`; none when there are no checks;
-- its comments (their number; `forge_read` gives their text, and the reviews').
+- its comments (their number; `forge` `show` gives their text, and the reviews').
 
 **`gh` missing or not signed in** is said once for the workspace, in `problem`, with what to do
 (install it, `gh auth login`), and in the daemon's log once when it starts being so. Nothing else
@@ -107,7 +107,7 @@ workspace with a GitHub repository and a Bitbucket one still shows the one that 
 ## When it is read
 
 - **On demand**: `workspace.forge` (and so `flottille workspace show`, the window's project page)
-  answers the last state read when it is less than a minute old, else reads it now; `forge_read`
+  answers the last state read when it is less than a minute old, else reads it now; `forge` `show`
   always reads now.
 - **While a client watches the workspace**: a session page of the window, or `flottille watch
   --forge <project> <workspace>`, asks `workspace.forge` with `watch: true`; from then on, for as
@@ -140,7 +140,7 @@ open.
 
 Read and written through the user's own `bkt`
 (<https://github.com/avivsinai/bitbucket-cli>, Go), the same way, and shown the same way (CLI,
-window, `forge_read`): a pull request has its number, title, state, base, link, review, checks and
+window, `forge`): a pull request has its number, title, state, base, link, review, checks and
 comments, as above, and, for Bitbucket, its reviewers (`reviewers`: each name with `approved`,
 `changes requested` or `pending`), which GitHub's reviews say otherwise.
 
@@ -201,21 +201,21 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
   are `failing`, anything else (`INPROGRESS`) is `pending`. Pipelines are on Cloud only
   (`pkg/cmd/pipeline/pipeline.go:20-27`).
 - **Draft is not modelled.** A pull request is `open`, `merged` (`MERGED`) or `closed`
-  (`DECLINED`, `SUPERSEDED`); `bkt` has no draft flag, so none is shown, and `forge_write` refuses
+  (`DECLINED`, `SUPERSEDED`); `bkt` has no draft flag, so none is shown, and `forge` `create` refuses
   `draft: true` for Bitbucket.
 
-### `forge_write` on Bitbucket
+### `forge`'s writes on Bitbucket
 
 The three actions of [`commands.md`](commands.md), under the same classes and the same checks
 (the remote leads where it led when the workspace was created; the repository is one of the
 workspace's; the pull request is the workspace's own branch's, from the repository itself, into
 the base the repository started from):
 
-- `pr-create`: `bkt pr create … --source <branch> --target <base>`, a `--reviewer` for each of
+- `create`: `bkt pr create … --source <branch> --target <base>`, a `--reviewer` for each of
   the project's reviewers; it prints no link, so the pull request is read back by its number for
   the answer. A reviewer is the name Bitbucket knows them by (Cloud: the username; Data Center: the
   user's slug).
-- `pr-merge-squash`: the open pull request of the branch, not from a fork (Cloud: source and
+- `merge`: the open pull request of the branch, not from a fork (Cloud: source and
   destination repositories are the same; Data Center: the same slug and project key), into the
   base: `bkt pr merge <id> --strategy squash --close-source=false`. `--close-source=false` because
   `bkt` closes the source branch by default (`pkg/cmd/pr/pr.go:1334`) and `gh pr merge --squash`
@@ -224,10 +224,16 @@ the base the repository started from):
   of the pull request (`bkt pr checks`) fails or runs, or while the review is `changes requested`
   (Data Center: a reviewer's `NEEDS_WORK` in the list; Cloud: a participant's `changes_requested`
   on the pull request's own page, read with `bkt api`), unless the user waives it.
-- `pipeline-rerun`: **Cloud only**; `bkt` has no re-run of one pipeline, only `pipeline run --ref
+- `checks`: **Cloud only**; `bkt` has no re-run of one pipeline, only `pipeline run --ref
   <branch>`, which runs the branch again. It is done when the newest pipeline of the branch (the
   highest `build_number` whose `target.ref.name` is the branch) ended `FAILED` or `ERROR`;
   otherwise it is refused. A Data Center repository is refused: it has no pipelines for `bkt`.
+- `comment` and `edit` of a pull request by its number: `bkt pr comment <id> --text <body>` and
+  `bkt pr edit <id> [--title T] [--description D]` (`pkg/cmd/pr/pr.go:1654-1669` and `:719-762`,
+  which print `✓ Commented on pull request #<id>` and `✓ Updated pull request #<id>`); `bkt pr
+  edit` refuses a call with neither, and Flottille refuses it before.
+- `list`: `bkt pr list --state OPEN | MERGED | DECLINED | all` (`closed` is `DECLINED`), the
+  newest 100, the branch picked from them; `show` with a number finds it among them.
 
 ### Agents never run `bkt`
 
@@ -241,32 +247,23 @@ names the host is all it takes to use the user's token, `bkt api` with any metho
 token. The tokens (`BKT_TOKEN`, `BITBUCKET_*`) and `BKT_CONFIG_DIR` are still emptied from an
 agent's environment (`docs/tools.md`), which keeps them out of anything it runs.
 
-## The agent's tool `forge_read`
+## The agent's tool `forge`
 
-`forge_read {repository?}` (`docs/tools.md`): the pull requests of the agent's own workspace's
-repositories, or of the one named, with their state, base, link, review, checks, comments and
-reviews. Read only, through the gate like every call (it allows it). It never reaches a repository
-outside the agent's workspace: one the workspace does not take is refused (`refused: X is not a
-repository of this agent's workspace: it has …`), and nothing is asked of the forge. Only an
-agent working in a workspace has the tool.
-
-## The agent's tool `forge_write`
-
-`forge_write {action, repository, …}` opens the pull request of the workspace's branch (with the
-project's reviewers), merges it by squash (never while its checks fail or run or a review asks for
-changes, unless the user waives it), or re-runs the failed pipelines of its last commit, with the
-same `gh` (or `bkt`, for a Bitbucket repository) and the same rules (spawned by the daemon, the
-repository named, its output masked, no token to the agent). It is listed to every agent of a
-project whose repository declares a forge, in `main` as in a workspace (in `main` it names the
-workspace), and each call is to judge (a merge that waives the checks is base): see
-[`commands.md`](commands.md).
+`forge {action, …}` (`docs/tools.md`, "The forge"): `list` the pull requests of the place's
+repositories by state and branch, `show` a workspace's branch's or one by its number with its
+checks, reviews and comments; `create`, `merge`, `checks`, `comment` and `edit`, each to judge (a
+merge that waives the checks base). The same `gh` (or `bkt`, for a Bitbucket repository) and the
+same rules: spawned by the daemon, the repository named, its output masked, no token to the agent.
+It never reaches a repository outside the agent's place, and is listed to every agent of a
+project whose repository declares a forge, in `main` as in a workspace. Until #141 it was
+`forge_read` and `forge_write`.
 
 ## Tickets
 
 The issues of GitHub and Jira, linked to a workspace and read the same way (the user's own command
 line, spawned without a shell, nothing written, everything masked), are in
 [`tickets.md`](tickets.md). Its `#123` reads through the `gh` described here, and the agent's
-`ticket_read` sits beside `forge_read`.
+`tickets` sits beside `forge`.
 
 ## Tests
 

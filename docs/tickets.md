@@ -2,8 +2,10 @@
 
 The ticket a workspace is about: its title, state, description and comments, read on the tracker
 and shown beside the workspace. The second step of the milestone "Forges and tickets"
-(`docs/design.md` §13), after [`forges.md`](forges.md). **Reading only**: nothing here writes to a
-tracker. An agent drafts a comment or a status change; the user posts it.
+(`docs/design.md` §13), after [`forges.md`](forges.md). What a workspace shows is read only. The
+agents' `tickets` (below) lists, searches and reads the tracker's tickets, and writes GitHub
+issues under the gate; **Jira is read only**, by the user's decision: an agent drafts a Jira
+comment or status change, and the user posts it.
 
 Two trackers are read: the issues of GitHub, through the user's own `gh`, and Jira (Cloud),
 through Atlassian's own command line, `acli`.
@@ -58,16 +60,19 @@ user's), so that the user's own sign-in works; a call is cut after 30 s.
   the exit code and the `Site:` line, nothing else (an e-mail there is never kept).
 - **What a tracker says is masked** before it is shown or stored (titles, descriptions, comments,
   errors), as every output is (`flottille_core::secrets`).
-- **Only reads are reachable.** The whole of what Flottille runs is `gh issue view <n> -R
-  github.com/owner/name --json number,title,state,body,comments,url`, `acli jira auth status` and `acli
-  jira workitem view <KEY> --json --fields summary,status,description,comment`. The key is
-  parsed first, so it is a number or `ABC-123`; no write command of either (`issue create`,
-  `workitem create`, `comment`, `transition`, …) appears anywhere in the code, and the tests
-  look at every call the fakes received.
+- **Jira's reads only are reachable.** Of `acli`, the whole of what Flottille runs is `acli jira
+  auth status`, `acli jira workitem view <KEY> --json --fields summary,status,description,comment`
+  and `acli jira workitem search --jql <JQL> --fields key,summary,status,assignee,labels --json
+  --limit 200`; no write command of it (`workitem create`, `comment`, `transition`, …) appears
+  anywhere in the code, and the tests look at every call the fake received. Of `gh`, the reads are
+  `gh issue view <n> -R github.com/owner/name --json number,title,state,body,comments,url` and
+  `gh issue list` (`docs/tools.md`, "The tickets"); its writes (`issue create`, `comment`,
+  `edit`, `close`, `reopen`) run only for a `tickets` call the gate let through. A key is parsed
+  first, so it is a number or `ABC-123`, and a JQL filter is quoted, never spliced.
 - **Agents never get that sign-in.** An agent's own command runs have the forge tokens emptied and
   `GH_CONFIG_DIR` pointed at an empty folder (`docs/tools.md`), so `gh` has no login there.
   `acli`'s sign-in lives in the user's home, which no variable of ours moves, so **the gate refuses
-  every `acli` line an agent runs, reads included**; an agent reads a ticket with `ticket_read`.
+  every `acli` line an agent runs, reads included**; an agent reads the tickets with `tickets`.
 
 ## The Jira site
 
@@ -142,7 +147,7 @@ JSON: the same, with the tracker's own first line, masked. The rest of Flottille
 
 **On demand only**: `workspace.ticket {project, name}` (and so `flottille workspace show` and the
 window's `WORKSPACE` section, when a page opens or the ticket is linked or unlinked) and
-`ticket_read` read it now, one call. Nothing is read in the background, nothing is kept in
+`tickets` `show` read it now, one call. Nothing is read in the background, nothing is kept in
 memory or in the store but the reference: a ticket is as fresh as the call.
 
 ## The protocol and the command line
@@ -171,18 +176,30 @@ and a button unlinks it. The form that makes a workspace has an optional ticket 
 typed**: once typing rests (300 ms) it asks `project.ticket` and shows the tracker and the title,
 or why the ticket is not taken, before anything is created.
 
-## The agent's tool `ticket_read`
+## The agent's tool `tickets`
 
-`ticket_read {ticket?}` (`docs/tools.md`): the workspace's ticket, or `ticket`, another ticket of
-the project's tracker by its key. A key the tracker does not take is refused, and nothing is asked
-of any tracker. Read only, through the gate like every call (it
-allows it). Only an agent working in a workspace has the tool, whether a ticket is linked or not
-(the tool list of a session is fixed when it starts).
+`tickets {action, …}` (`docs/tools.md`, "The tickets"): `list` every ticket of a state in one call
+(by label and assignee), `search` with words, `show` the workspace's ticket or another of the
+project's tracker by its key; on GitHub, `create`, `comment`, `edit`, `close` and `reopen`, each
+to judge. A key the tracker does not take is refused, and nothing is asked of any tracker; a write
+on Jira is refused before anything is asked. Every agent of a project that declares a tracker has
+the tool, in `main` as in a workspace, whether a ticket is linked or not (the tool list of a
+session is fixed when it starts). Until #141 `show` was `ticket_read`.
+
+### What `acli jira workitem search` prints is assumed too
+
+Its page (<https://developer.atlassian.com/cloud/acli/reference/commands/jira-workitem-search/>)
+gives its flags (`--jql`, `--fields`, `--json`, `--limit`, `--paginate`) and no output. The
+reading takes an array of work items in the shape `view` prints, or Jira's REST search object
+(`{"issues": [...]}`), and reads `key`, `self`, `fields.summary`, `fields.status.name`,
+`fields.assignee.displayName` and `fields.labels`. The maintainer checks it on their work machine
+(`tickets list` from an agent of a Jira project); a different shape shows as an empty list.
 
 ## Tests
 
 Tests never call GitHub or Jira nor use anyone's sign-in: a fake `gh` (`crates/flottille-fake-gh`,
-which answers `issue view` too) and a fake `acli` (`crates/flottille-fake-acli`), first on the
+which answers `issue view`, `issue list` and the issue writes too) and a fake `acli`
+(`crates/flottille-fake-acli`, `workitem view` and `workitem search`), first on the
 `PATH` of the test's daemon, answer from a script and record every call; the repositories are
 throwaway ones whose `origin` is set to a GitHub URL after their workspace is made, and whose
 forge and tracker are declared with `project.set_settings`

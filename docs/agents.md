@@ -220,11 +220,11 @@ bridge sets on `claude` ("The Claude bridge", below):
   and `report`; one that can have children (below the depth limit) also
   `agent_launch`, `agent_send`, `agent_status`, `agent_stop` and
   `approval_answer`; a root `ask_user`, a child `ask_parent`. Every agent has
-  `workspace_remove`; one of a project whose repositories declare a forge also has `forge_read`
-  and `forge_write`, and one of a project that declares a tracker `ticket_read`, in `main` as in
-  a workspace. A root of a project with neither gets, in this order, the first eight,
-  `skill_read`, `workspace_remove`, the four `agent_*`, `skills`, `commands`, `setup`, `project`,
-  `report`, `ask_user`, `approval_answer` (21). The list is
+  `workspace`; one of a project whose repositories declare a forge also has `forge`, and one of
+  a project that declares a tracker `tickets`, in `main` as in a workspace. A root of a project
+  with neither gets, in this order, the first eight, `skill_read`, `workspace`, the four
+  `agent_*`, `skills`, `commands`, `setup`, `project`, `report`, `ask_user`, `approval_answer`
+  (21). The list is
   frozen in the agent when it is created (the prompt cache depends on it).
 - `settingSources: []`: Claude Code's own default loads the user's settings, hooks, plugins,
   skills and instruction files; this overrides it.
