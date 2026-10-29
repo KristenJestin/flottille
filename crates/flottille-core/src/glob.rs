@@ -1,6 +1,6 @@
-//! The globs of the recipe's `copy` steps: `*` and `?` within one part of a path, and a hidden
+//! The globs of the setup's `copy` steps: `*` and `?` within one part of a path, and a hidden
 //! name matched only by a part that starts with a dot, as a shell does. `.git` is never matched:
-//! git's own folder is no file of the recipe's.
+//! git's own folder is no file of the setup's.
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};

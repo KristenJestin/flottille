@@ -1,724 +1,655 @@
-//! The commands the agents run, as the window shows them: the rail's Commands section (every
-//! command of the session's tree, running ones first, ended ones greyed until dismissed), the panel
-//! that follows one's output live, and the card a command's result is in the conversation.
-//!
-//! What a program wrote is drawn as the daemon gave it (masked): its colours (`ESC [ … m`) turned
-//! into the palette's, every other escape sequence dropped (`flottille_core::ansi`). The stored
-//! output is untouched.
+//! A project's commands in its Settings (`docs/commands.md`): named instructions that `/name`
+//! sends to the session's agent. The window writes nothing itself: every add, edit and removal is
+//! the daemon's (`command.*`), and the section shows the list the daemon gives next. The
+//! "Commands" section has the modal that adds one (from the list of templates, or blank) or edits
+//! one.
 
-use std::collections::HashMap;
-use std::time::Duration;
-
-use flottille_core::ansi;
-use flottille_ui::color::mix;
-use flottille_ui::{Button, Card, Icon, Modal, Palette, Type, icon, palette, section_label};
+use flottille_core::commands::TEMPLATES;
+use flottille_ui::{Button, Icon, ListRow, Modal, Type, icon, palette};
+use gpui_kit::base::input::{Input, InputEditorStyle, InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, ClickEvent, Context, ElementId, FocusHandle, Hsla, InteractiveElement,
-    IntoElement, ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement,
-    Styled, Task, TestSupportExt as _, WeakEntity, Window, div, px,
+    App, AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement,
+    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
+    Subscription, TestSupportExt as _, WeakEntity, Window, div, px,
 };
 use serde_json::Value;
 
-use crate::conversation::{CommandCard, Ending};
-use crate::session::{SessionPage, seconds};
-use crate::shell::now_ms;
+use crate::actions::{Command, CommandWrite};
+use crate::shell::Shell;
 
-/// The lines a card shows before it is unfolded.
-pub const FOLDED_LINES: usize = 5;
-
-/// A command of the session, as `command.list` gives it.
+/// A command as the daemon shows it (`docs/protocol.md`, "The command methods").
 #[derive(Clone, Debug, PartialEq)]
-pub struct CommandRow {
-    pub run: String,
-    /// The agent that started it.
-    pub agent: String,
-    /// The catalogue command it runs, none for a line of the agent's.
-    pub name: Option<String>,
-    pub line: String,
-    /// `running`, `exited`, `stopped` or `interrupted`.
-    pub state: String,
-    pub exit_code: Option<i32>,
-    pub signal: Option<i32>,
-    pub started_at: u64,
-    pub ended_at: Option<u64>,
-    /// The last line of its output with something on it, as the program wrote it.
-    pub last_line: String,
-    /// The last lines of its output, as the program wrote them: what the card of its result
-    /// shows, while it runs as once it ended.
-    pub tail: Vec<String>,
+pub struct CommandInfo {
+    pub name: String,
+    pub description: String,
+    /// Empty unless the daemon gave it whole (`command.show`).
+    pub instructions: String,
 }
 
-impl CommandRow {
-    pub fn of(value: &Value) -> CommandRow {
-        let text = |key: &str| value[key].as_str().unwrap_or_default().to_owned();
-        CommandRow {
-            run: text("run"),
-            agent: text("agent"),
-            name: value["name"].as_str().map(str::to_owned),
-            line: text("line"),
-            state: text("state"),
-            exit_code: value["exit_code"].as_i64().map(|code| code as i32),
-            signal: value["signal"].as_i64().map(|signal| signal as i32),
-            started_at: value["started_at"].as_u64().unwrap_or(0),
-            ended_at: value["ended_at"].as_u64(),
-            last_line: text("last_line"),
-            tail: value["tail"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|line| line.as_str().map(str::to_owned))
-                .collect(),
-        }
-    }
-
-    pub fn running(&self) -> bool {
-        self.state == "running"
-    }
-
-    pub fn ending(&self) -> Ending {
-        match (self.state.as_str(), self.exit_code, self.signal) {
-            ("running", ..) => Ending::Running,
-            ("exited", Some(code), _) => Ending::Exited(code),
-            ("exited", None, signal) => Ending::Killed(signal.unwrap_or_default()),
-            ("stopped", ..) => Ending::Stopped,
-            _ => Ending::Interrupted,
-        }
-    }
-
-    /// How long it has run, or ran.
-    pub fn elapsed_ms(&self, now: u64) -> u64 {
-        self.ended_at.unwrap_or(now).saturating_sub(self.started_at)
-    }
-}
-
-/// A command's output: the last lines the daemon gave, as the program wrote them.
-#[derive(Clone, Debug, PartialEq)]
-pub struct CommandOutput {
-    pub row: CommandRow,
-    pub lines: Vec<String>,
-    /// Lines before these were left out.
-    pub earlier: bool,
-}
-
-impl CommandOutput {
-    pub fn of(value: &Value) -> CommandOutput {
-        CommandOutput {
-            row: CommandRow::of(value),
-            lines: value["output"]
-                .as_str()
-                .unwrap_or_default()
-                .lines()
-                .map(str::to_owned)
-                .collect(),
-            earlier: value["earlier"] == true,
+impl CommandInfo {
+    pub fn of(value: &Value) -> Self {
+        let text = |value: &Value| value.as_str().unwrap_or_default().to_owned();
+        Self {
+            name: text(&value["name"]),
+            description: text(&value["description"]),
+            instructions: text(&value["instructions"]),
         }
     }
 }
 
-/// What a command's ending is drawn with: a glyph, its ink and its words. The shape says it as
-/// well as the colour.
-pub fn mark_of(ending: Ending, p: &Palette) -> (&'static str, Hsla, String) {
-    let (glyph, ink) = match ending {
-        Ending::Running => ("●", p.run),
-        Ending::Exited(0) => ("✓", p.ok),
-        Ending::Exited(_) | Ending::Killed(_) => ("✗", p.fail),
-        Ending::Stopped => ("■", p.faint),
-        Ending::Interrupted => ("–", p.faint),
-    };
-    (glyph, ink, ending.said())
+/// Asks the daemon through the shell, once the update running now is over: the shell hands its
+/// answers to these views while it is itself being updated, and a view cannot update it then.
+pub(crate) fn perform_later(shell: &WeakEntity<Shell>, command: Command, cx: &mut App) {
+    let shell = shell.clone();
+    cx.defer(move |cx| {
+        shell.update(cx, |shell, _| shell.perform(command)).ok();
+    });
 }
 
-/// A colour of a program's output, in the palette: the ink of the state it stands for.
-fn ink(color: ansi::Color, p: &Palette) -> Hsla {
-    match (color.index, color.bright) {
-        (0, _) => p.faint,
-        (1, _) => p.fail,
-        (2, _) => p.ok,
-        (3, _) => p.wait,
-        (4, _) => p.run,
-        (5, _) => mix(p.run, p.fail, 0.5),
-        (6, _) => mix(p.run, p.ok, 0.5),
-        (_, true) => p.text,
-        _ => p.mute,
+pub(crate) fn editor_style(cx: &App) -> InputEditorStyle {
+    let p = palette(cx);
+    InputEditorStyle {
+        foreground: p.text,
+        muted_foreground: p.faint,
+        selection: p.run.opacity(0.35),
+        caret: p.text,
+        ..Default::default()
     }
 }
 
-/// A line of output with its colours, on one line: the text is `base`, its colours the palette's.
-/// What it says without them is its label.
-pub fn coloured_line(id: ElementId, text: &str, base: Hsla, p: &Palette) -> impl IntoElement {
-    let spans = ansi::spans(text);
-    let plain: String = spans.iter().map(|span| span.text.as_str()).collect();
+/// A one-line field with the window's editor style.
+pub(crate) fn line_field(
+    placeholder: &'static str,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<InputState> {
+    cx.new(|cx| {
+        let mut field = InputState::new(window, cx).placeholder(placeholder);
+        field.set_editor_style(editor_style(cx));
+        field
+    })
+}
+
+/// A field in the modals: a box around an input.
+pub(crate) fn boxed(id: &'static str, field: impl IntoElement, cx: &App) -> impl IntoElement {
+    let p = palette(cx);
     div()
         .id(id)
+        .min_h(px(32.))
+        .px(px(10.))
+        .py(px(5.))
+        .rounded(px(8.))
+        .bg(p.field)
+        .border_1()
+        .border_color(p.line2)
         .flex()
-        .mono(11.5)
-        .text_color(base)
-        .whitespace_nowrap()
-        .overflow_hidden()
-        .aria_label(SharedString::from(plain))
-        .children(spans.into_iter().map(|span| {
-            div()
-                .flex_none()
-                .when_some(span.color, |d, color| d.text_color(ink(color, p)))
-                .when(span.bold, |d| d.semibold())
-                .child(SharedString::from(span.text))
-        }))
+        .items_center()
+        .mono(12.5)
+        .child(field)
         .test_support()
 }
 
-/// A command's result in the conversation: its line, its exit code in a colour, its duration, and
-/// its output folded to its last lines until `open`. `at` makes the ids; `toggle` unfolds it.
-pub fn card(
-    card: &CommandCard,
-    at: usize,
-    open: bool,
-    toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+/// The heading of a section of a project's pages.
+pub(crate) fn heading(
+    title: &'static str,
+    count: usize,
+    action: impl IntoElement,
     cx: &App,
-) -> AnyElement {
+) -> impl IntoElement {
     let p = palette(cx);
-    let (glyph, color, said) = mark_of(card.ending, &p);
-    let id = |part: &str| ElementId::Name(format!("command-{part}-{at}").into());
-    let hidden = if open {
-        0
-    } else {
-        card.lines.len().saturating_sub(FOLDED_LINES)
-    };
-    let shown = &card.lines[hidden..];
-    let title = div()
+    div()
         .flex()
-        .flex_1()
-        .min_w_0()
         .items_center()
         .gap(px(8.))
-        .child(icon(Icon::Terminal).size(px(13.)).text_color(p.faint))
+        .mt(px(34.))
+        .mb(px(12.))
+        .text_size(px(13.))
+        .semibold()
+        .child(title)
         .child(
             div()
-                .id(id("line"))
-                .flex_1()
-                .min_w_0()
-                .mono(12.5)
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .aria_label(SharedString::from(card.line.clone()))
-                .child(SharedString::from(card.line.clone()))
-                .test_support(),
+                .mono(11.)
+                .font_weight(gpui_kit::FontWeight::NORMAL)
+                .text_color(p.faint)
+                .child(count.to_string()),
         )
-        .child(
-            div()
-                .id(id("exit"))
-                .flex_none()
-                .mono(11.5)
-                .text_color(color)
-                .aria_label(SharedString::from(said.clone()))
-                .child(SharedString::from(format!("{glyph} {said}")))
-                .test_support(),
-        );
-    let body = div()
-        .id(id("output"))
-        .px(px(14.))
-        .py(px(8.))
-        .flex()
-        .flex_col()
-        .children(shown.iter().enumerate().map(|(i, line)| {
-            coloured_line(
-                ElementId::Name(format!("command-line-{at}-{}", hidden + i).into()),
-                line,
-                p.mute,
-                &p,
-            )
-        }))
-        .when(card.lines.is_empty(), |d| {
-            d.child(div().mono(11.5).text_color(p.faint).child("(no output)"))
-        })
-        .test_support();
-    let more = (card.lines.len() > FOLDED_LINES).then(|| {
-        let said = match open {
-            true => "Fold".to_owned(),
-            false => format!("Show {hidden} earlier lines"),
-        };
-        div()
-            .id(id("more"))
-            .px(px(14.))
-            .pb(px(8.))
-            .mono(11.)
-            .text_color(p.faint)
-            .cursor_pointer()
-            .hover(|s| s.text_color(p.text))
-            .on_click(toggle)
-            .child(SharedString::from(said))
-            .test_support()
-    });
-    let allowed = card.allowed_by.as_ref().map(|by| {
-        div()
-            .id(id("allowed"))
-            .px(px(14.))
-            .pb(px(10.))
-            .text_size(px(12.))
-            .text_color(p.faint)
-            .child(SharedString::from(format!("Allowed by {by}")))
-            .test_support()
-    });
-    div()
-        .id(id("card"))
-        .child(
-            Card::new()
-                .title(title)
-                .meta(seconds_text(card.seconds))
-                .child(body)
-                .children_of(more)
-                .children_of(allowed),
-        )
-        .test_support()
-        .into_any_element()
+        .child(div().flex_1())
+        .child(action)
 }
 
-fn seconds_text(seconds_taken: Option<f64>) -> String {
-    seconds_taken.map_or_else(String::new, |s| seconds((s * 1000.) as u64))
+// ── The section ────────────────────────────────────────────────────────────────────────────────
+
+/// What the modal is doing.
+#[derive(Clone, Debug, PartialEq)]
+enum Form {
+    Closed,
+    /// Which template, or a blank one.
+    Choosing,
+    /// A command written out: a new one, or the one named.
+    Editing(Option<String>),
 }
 
-/// The rail's Commands section: nothing while the session ran no command.
-pub struct CommandList {
-    page: WeakEntity<SessionPage>,
-    rows: Vec<CommandRow>,
-    /// How the tree names each agent.
-    names: HashMap<String, String>,
-    error: Option<SharedString>,
-    /// Draws the time again each second, while a command runs.
-    ticker: Option<Task<()>>,
-    renders: usize,
+struct Fields {
+    name: Entity<InputState>,
+    description: Entity<InputState>,
+    instructions: Entity<TextareaState>,
 }
 
-impl CommandList {
-    pub fn new(page: WeakEntity<SessionPage>) -> Self {
+pub struct CommandsSection {
+    shell: WeakEntity<Shell>,
+    project: String,
+    listed: Option<Vec<CommandInfo>>,
+    /// What the daemon said when the list could not be read, or a removal was refused.
+    problem: Option<SharedString>,
+    form: Form,
+    /// Made when the modal first opens, which is when a window is at hand.
+    fields: Option<Fields>,
+    saving: bool,
+    form_error: Option<SharedString>,
+    /// The command being read to be edited.
+    reading: Option<String>,
+    confirming: Option<String>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl CommandsSection {
+    pub fn new(shell: WeakEntity<Shell>, project: String) -> Self {
         Self {
-            page,
-            rows: Vec::new(),
-            names: HashMap::new(),
-            error: None,
-            ticker: None,
-            renders: 0,
+            shell,
+            project,
+            listed: None,
+            problem: None,
+            form: Form::Closed,
+            fields: None,
+            saving: false,
+            form_error: None,
+            reading: None,
+            confirming: None,
+            _subscriptions: Vec::new(),
         }
     }
 
-    pub fn rows(&self) -> &[CommandRow] {
-        &self.rows
+    /// The commands as last listed; `None` until the daemon has said.
+    pub fn commands(&self) -> Option<&[CommandInfo]> {
+        self.listed.as_deref()
     }
 
-    pub fn renders(&self) -> usize {
-        self.renders
+    pub fn is_open(&self) -> bool {
+        self.form != Form::Closed
     }
 
-    pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
+    pub fn form_error(&self) -> Option<&str> {
+        self.form_error.as_deref()
     }
 
-    /// What the daemon listed; nothing is drawn again when it is what was drawn.
-    pub fn set(&mut self, rows: Vec<CommandRow>, cx: &mut Context<Self>) {
-        if self.rows == rows {
+    pub fn problem(&self) -> Option<&str> {
+        self.problem.as_deref()
+    }
+
+    pub fn description_field(&self) -> Option<&Entity<InputState>> {
+        self.fields.as_ref().map(|f| &f.description)
+    }
+
+    pub fn name_field(&self) -> Option<&Entity<InputState>> {
+        self.fields.as_ref().map(|f| &f.name)
+    }
+
+    pub fn instructions_field(&self) -> Option<&Entity<TextareaState>> {
+        self.fields.as_ref().map(|f| &f.instructions)
+    }
+
+    /// Asks the daemon for the list.
+    pub fn read(&self, cx: &mut Context<Self>) {
+        let project = self.project.clone();
+        perform_later(&self.shell, Command::Commands { project }, cx);
+    }
+
+    /// The daemon's list.
+    pub fn listed(&mut self, listed: Result<Vec<CommandInfo>, String>, cx: &mut Context<Self>) {
+        match listed {
+            Ok(list) => {
+                self.problem = None;
+                if self.listed.as_ref() != Some(&list) {
+                    self.listed = Some(list);
+                }
+            }
+            Err(why) => self.problem = Some(why.into()),
+        }
+        cx.notify();
+    }
+
+    fn fields(&mut self, window: &mut Window, cx: &mut Context<Self>) -> &Fields {
+        if self.fields.is_none() {
+            let name = line_field("name, typed after / to send it: open-prs", window, cx);
+            let description = line_field("one line: what it does", window, cx);
+            let instructions = cx.new(|cx| {
+                let mut field = TextareaState::new(window, cx)
+                    .auto_grow(4, 10)
+                    .placeholder("what the agent is sent");
+                field.set_editor_style(editor_style(cx));
+                field
+            });
+            // Typing clears what a refusal said.
+            for input in [&name, &description] {
+                self._subscriptions
+                    .push(cx.subscribe(input, |this, _, event, cx| {
+                        if matches!(event, InputEvent::Change) && this.form_error.take().is_some() {
+                            cx.notify();
+                        }
+                    }));
+            }
+            self.fields = Some(Fields {
+                name,
+                description,
+                instructions,
+            });
+        }
+        self.fields.as_ref().expect("made above")
+    }
+
+    /// "New command": the list of the templates, and a blank one.
+    pub fn add(&mut self, cx: &mut Context<Self>) {
+        self.form = Form::Choosing;
+        self.form_error = None;
+        self.saving = false;
+        cx.notify();
+    }
+
+    fn blank(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.fill(None, window, cx);
+    }
+
+    /// Opens the form on `info`, or empty.
+    fn fill(&mut self, info: Option<&CommandInfo>, window: &mut Window, cx: &mut Context<Self>) {
+        let fields = self.fields(window, cx);
+        let (name, description, instructions) = (
+            fields.name.clone(),
+            fields.description.clone(),
+            fields.instructions.clone(),
+        );
+        let text = |f: fn(&CommandInfo) -> &str| info.map(f).unwrap_or_default().to_owned();
+        name.update(cx, |f, cx| {
+            f.set_value(text(|i| &i.name), window, cx);
+        });
+        description.update(cx, |f, cx| {
+            f.set_value(text(|i| &i.description), window, cx);
+        });
+        instructions.update(cx, |f, cx| {
+            f.set_value(text(|i| &i.instructions), window, cx);
+        });
+        self.form = Form::Editing(info.map(|info| info.name.clone()));
+        self.form_error = None;
+        self.saving = false;
+        let focus = if info.is_some() { description } else { name }
+            .read(cx)
+            .focus_handle(cx);
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    /// Reads the command whole, then opens it for editing.
+    pub fn edit(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.reading = Some(name.to_owned());
+        self.problem = None;
+        let command = Command::CommandRead {
+            project: self.project.clone(),
+            name: name.to_owned(),
+        };
+        perform_later(&self.shell, command, cx);
+        cx.notify();
+    }
+
+    /// The daemon's reading of the command to edit.
+    pub fn read_whole(
+        &mut self,
+        name: &str,
+        read: Result<CommandInfo, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.reading.as_deref() != Some(name) {
             return;
         }
-        let running = rows.iter().any(CommandRow::running);
-        self.rows = rows;
-        if running && self.ticker.is_none() {
-            self.ticker = Some(cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor().timer(Duration::from_secs(1)).await;
-                    if this.update(cx, |_, cx| cx.notify()).is_err() {
-                        break;
-                    }
-                }
-            }));
+        self.reading = None;
+        match read {
+            Ok(info) => self.fill(Some(&info), window, cx),
+            Err(why) => {
+                self.problem = Some(why.into());
+                cx.notify();
+            }
         }
-        if !running {
-            self.ticker = None;
-        }
-        cx.notify();
-    }
-
-    pub fn set_names(&mut self, names: HashMap<String, String>, cx: &mut Context<Self>) {
-        if self.names != names {
-            self.names = names;
-            cx.notify();
-        }
-    }
-
-    /// The daemon refused what was asked of a command, and why; none clears it.
-    pub fn failed(&mut self, why: Option<String>, cx: &mut Context<Self>) {
-        self.error = why.map(Into::into);
-        cx.notify();
-    }
-
-    /// Who started a command: the catalogue command, then the agent.
-    fn who(&self, row: &CommandRow) -> String {
-        let agent = self
-            .names
-            .get(&row.agent)
-            .cloned()
-            .unwrap_or_else(|| format!("agent {}", row.agent));
-        match &row.name {
-            Some(name) => format!("task {name} · {agent}"),
-            None => agent,
-        }
-    }
-}
-
-impl Render for CommandList {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.renders += 1;
-        if self.rows.is_empty() {
-            return div().id("rail-commands").into_any_element();
-        }
-        let p = palette(cx);
-        let now = now_ms();
-        let rows = self.rows.iter().map(|row| {
-            let ended = !row.running();
-            let (glyph, color, said) = mark_of(row.ending(), &p);
-            let run = row.run.clone();
-            let open = {
-                let page = self.page.clone();
-                let run = run.clone();
-                move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                    page.update(cx, |page, cx| page.open_command(&run, cx)).ok();
-                }
-            };
-            let button = if ended {
-                let page = self.page.clone();
-                let run = run.clone();
-                Button::quiet(
-                    ElementId::Name(format!("command-dismiss-{run}").into()),
-                    "Dismiss",
-                )
-                .on_click(move |_, _, cx| {
-                    // The row opens the output; its buttons do not.
-                    cx.stop_propagation();
-                    page.update(cx, |page, cx| page.dismiss_command(&run, cx))
-                        .ok();
-                })
-            } else {
-                let page = self.page.clone();
-                let run = run.clone();
-                Button::quiet(
-                    ElementId::Name(format!("command-stop-{run}").into()),
-                    "Stop",
-                )
-                .on_click(move |_, _, cx| {
-                    cx.stop_propagation();
-                    page.update(cx, |page, cx| page.stop_command(&run, cx)).ok();
-                })
-            };
-            let last = ansi::strip(&row.last_line);
-            div()
-                .id(ElementId::Name(format!("command-{}", row.run).into()))
-                .flex()
-                .flex_col()
-                .gap(px(2.))
-                .px(px(8.))
-                .py(px(6.))
-                .rounded(px(8.))
-                .cursor_pointer()
-                .hover(|s| s.bg(p.hover))
-                .when(ended, |d| d.opacity(0.6))
-                .on_click(open)
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(
-                            div()
-                                .id(ElementId::Name(format!("command-mark-{}", row.run).into()))
-                                .flex_none()
-                                .mono(12.)
-                                .text_color(color)
-                                .aria_label(SharedString::from(said.clone()))
-                                .child(glyph)
-                                .test_support(),
-                        )
-                        .child(
-                            div()
-                                .id(ElementId::Name(format!("command-line-{}", row.run).into()))
-                                .flex_1()
-                                .min_w_0()
-                                .mono(12.)
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .aria_label(SharedString::from(row.line.clone()))
-                                .child(SharedString::from(row.line.clone()))
-                                .test_support(),
-                        )
-                        .child(
-                            div()
-                                .id(ElementId::Name(format!("command-time-{}", row.run).into()))
-                                .flex_none()
-                                .mono(11.)
-                                .text_color(p.faint)
-                                .child(SharedString::from(seconds(row.elapsed_ms(now))))
-                                .test_support(),
-                        ),
-                )
-                .child(
-                    div()
-                        .id(ElementId::Name(format!("command-who-{}", row.run).into()))
-                        .pl(px(20.))
-                        .text_size(px(11.5))
-                        .text_color(p.faint)
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .aria_label(SharedString::from(self.who(row)))
-                        .child(SharedString::from(self.who(row)))
-                        .test_support(),
-                )
-                .child(
-                    div()
-                        .id(ElementId::Name(format!("command-last-{}", row.run).into()))
-                        .pl(px(20.))
-                        .mono(11.)
-                        .text_color(p.faint)
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .aria_label(SharedString::from(last.clone()))
-                        .child(SharedString::from(last))
-                        .test_support(),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .pl(px(20.))
-                        .when(ended, |d| {
-                            d.child(
-                                div()
-                                    .id(ElementId::Name(
-                                        format!("command-status-{}", row.run).into(),
-                                    ))
-                                    .mono(11.)
-                                    .text_color(color)
-                                    .aria_label(SharedString::from(said.clone()))
-                                    .child(SharedString::from(said.clone()))
-                                    .test_support(),
-                            )
-                        })
-                        .child(div().flex_1())
-                        .child(button),
-                )
-                .test_support()
-        });
-        div()
-            .id("rail-commands")
-            .flex()
-            .flex_col()
-            .child(div().h(px(1.)).bg(p.line).mx(px(6.)).my(px(16.)))
-            .child(section_label("Commands", cx))
-            .children(rows)
-            .children(self.error.clone().map(|error| {
-                div()
-                    .id("rail-commands-error")
-                    .px(px(8.))
-                    .py(px(4.))
-                    .text_size(px(11.5))
-                    .text_color(p.fail)
-                    .child(error)
-                    .test_support()
-            }))
-            .test_support()
-            .into_any_element()
-    }
-}
-
-/// The panel that follows one command's output while it is open.
-pub struct CommandPanel {
-    page: WeakEntity<SessionPage>,
-    /// The command whose output is open.
-    run: Option<String>,
-    shown: Option<CommandOutput>,
-    scroll: ScrollHandle,
-    /// Where the focus rests while the panel is open, so that Escape reaches the modal.
-    focus: Option<FocusHandle>,
-    focused: bool,
-    renders: usize,
-}
-
-impl CommandPanel {
-    pub fn new(page: WeakEntity<SessionPage>) -> Self {
-        Self {
-            page,
-            run: None,
-            shown: None,
-            scroll: ScrollHandle::new(),
-            focus: None,
-            focused: false,
-            renders: 0,
-        }
-    }
-
-    /// The command whose output is open.
-    pub fn run(&self) -> Option<&str> {
-        self.run.as_deref()
-    }
-
-    pub fn shown(&self) -> Option<&CommandOutput> {
-        self.shown.as_ref()
-    }
-
-    pub fn renders(&self) -> usize {
-        self.renders
-    }
-
-    pub fn open(&mut self, run: &str, cx: &mut Context<Self>) {
-        if self.run.as_deref() != Some(run) {
-            self.shown = None;
-        }
-        self.run = Some(run.to_owned());
-        self.focused = false;
-        cx.notify();
     }
 
     pub fn close(&mut self, cx: &mut Context<Self>) {
-        self.run = None;
-        self.focused = false;
-        self.shown = None;
+        self.form = Form::Closed;
+        self.form_error = None;
         cx.notify();
     }
 
-    /// What the daemon gave of the output; one of a command closed since is dropped.
-    pub fn set(&mut self, output: CommandOutput, cx: &mut Context<Self>) {
-        if self.run.as_deref() != Some(output.row.run.as_str())
-            || self.shown.as_ref() == Some(&output)
-        {
+    fn write(&mut self, write: CommandWrite, cx: &mut Context<Self>) {
+        self.saving = true;
+        self.form_error = None;
+        self.problem = None;
+        let command = Command::CommandWrite {
+            project: self.project.clone(),
+            write,
+        };
+        perform_later(&self.shell, command, cx);
+        cx.notify();
+    }
+
+    fn template(&mut self, template: &str, cx: &mut Context<Self>) {
+        self.write(
+            CommandWrite::Template {
+                template: template.to_owned(),
+            },
+            cx,
+        );
+    }
+
+    /// Saves the form: a new command, or the one being edited.
+    pub fn save(&mut self, cx: &mut Context<Self>) {
+        let Form::Editing(original) = self.form.clone() else {
+            return;
+        };
+        let Some(fields) = &self.fields else {
+            return;
+        };
+        let name = match &original {
+            Some(name) => name.clone(),
+            None => fields.name.read(cx).value().trim().to_owned(),
+        };
+        let (description, instructions) = (
+            fields.description.read(cx).value().trim().to_owned(),
+            fields.instructions.read(cx).value().trim().to_owned(),
+        );
+        let write = match original {
+            Some(_) => CommandWrite::Edit {
+                name,
+                description,
+                instructions,
+            },
+            None => CommandWrite::Add {
+                name,
+                description,
+                instructions,
+            },
+        };
+        self.write(write, cx);
+    }
+
+    /// Asks to remove; the second click confirms.
+    pub fn remove(&mut self, name: &str, cx: &mut Context<Self>) {
+        if self.confirming.as_deref() != Some(name) {
+            self.confirming = Some(name.to_owned());
+            cx.notify();
             return;
         }
-        self.shown = Some(output);
-        self.scroll.scroll_to_bottom();
+        self.confirming = None;
+        self.write(
+            CommandWrite::Remove {
+                name: name.to_owned(),
+            },
+            cx,
+        );
+    }
+
+    /// The daemon's answer to a write: done, and the list is read again; or refused, and why.
+    pub fn written(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
+        self.saving = false;
+        match refused {
+            None => {
+                self.form = Form::Closed;
+                self.form_error = None;
+                self.read(cx);
+            }
+            Some(why) if self.form == Form::Closed => self.problem = Some(why.into()),
+            Some(why) => self.form_error = Some(why.into()),
+        }
         cx.notify();
     }
-}
 
-impl Render for CommandPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.renders += 1;
+    fn row(&self, info: &CommandInfo, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let page = self.page.clone();
-        let focus = self.focus.get_or_insert_with(|| cx.focus_handle()).clone();
-        if self.run.is_some() && !self.focused {
-            self.focused = true;
-            window.focus(&focus, cx);
-        }
-        let mut body = div()
-            .id("command-panel-body")
+        let name = info.name.clone();
+        let id = |part: &str| ElementId::Name(format!("{part}-{}", info.name).into());
+        let confirming = self.confirming.as_deref() == Some(&info.name);
+        div()
+            .id(id("command"))
+            .px(px(14.))
+            .py(px(10.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(p.line)
+            .bg(p.card)
             .flex()
-            .flex_col()
-            .gap(px(14.))
-            .track_focus(&focus);
-        let mut modal = Modal::new("command-panel", "Output")
-            .width(px(720.))
-            .cancel_label("Close")
-            .open(self.run.is_some())
+            .items_start()
+            .gap(px(10.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .child(
+                        div()
+                            .mono(12.5)
+                            .semibold()
+                            .child(SharedString::from(name.clone())),
+                    )
+                    .child(
+                        div()
+                            .id(id("command-description"))
+                            .text_size(px(12.5))
+                            .text_color(p.mute)
+                            .aria_label(SharedString::from(info.description.clone()))
+                            .child(SharedString::from(info.description.clone()))
+                            .test_support(),
+                    ),
+            )
+            .child({
+                let edit = name.clone();
+                Button::quiet(id("edit-command"), "Edit")
+                    .disabled(self.reading.is_some())
+                    .on_click(cx.listener(move |this, _, _, cx| this.edit(&edit, cx)))
+            })
+            .child(if confirming {
+                let (cancel, remove) = (name.clone(), name.clone());
+                div()
+                    .flex()
+                    .gap(px(4.))
+                    .child(
+                        Button::quiet(id("cancel-remove-command"), "Cancel").on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                if this.confirming.as_deref() == Some(&cancel) {
+                                    this.confirming = None;
+                                    cx.notify();
+                                }
+                            },
+                        )),
+                    )
+                    .child(
+                        Button::secondary(id("confirm-remove-command"), format!("Remove {name}"))
+                            .on_click(cx.listener(move |this, _, _, cx| this.remove(&remove, cx))),
+                    )
+                    .into_any_element()
+            } else {
+                let remove = name.clone();
+                Button::quiet(id("remove-command"), "Remove")
+                    .on_click(cx.listener(move |this, _, _, cx| this.remove(&remove, cx)))
+                    .into_any_element()
+            })
+            .test_support()
+    }
+
+    fn modal(&mut self, window: &Window, cx: &mut Context<Self>) -> Modal {
+        let p = palette(cx);
+        let this = cx.entity().downgrade();
+        let open = self.form != Form::Closed;
+        let title = match &self.form {
+            Form::Editing(Some(_)) => "Edit command",
+            _ => "New command",
+        };
+        let modal = Modal::new("command-modal", title)
+            .width(px(600.))
+            .open(open)
             .on_close(move |_, cx| {
-                page.update(cx, |page, cx| page.close_command(cx)).ok();
+                this.update(cx, |this, cx| this.close(cx)).ok();
             });
-        if let Some(shown) = &self.shown {
-            let (glyph, color, said) = mark_of(shown.row.ending(), &p);
-            let run = shown.row.run.clone();
-            let page = self.page.clone();
-            if shown.row.running() {
-                modal = modal.action(Button::primary("command-panel-stop", "Stop").on_click(
-                    move |_, _, cx| {
-                        page.update(cx, |page, cx| page.stop_command(&run, cx)).ok();
-                    },
-                ));
+        let error = self.form_error.clone().map(|error| {
+            div()
+                .id("command-error")
+                .text_size(px(12.5))
+                .text_color(p.fail)
+                .child(error)
+                .test_support()
+        });
+        match self.form.clone() {
+            Form::Closed => modal,
+            Form::Choosing => {
+                let templates = TEMPLATES.into_iter().map(|template| {
+                    let description = flottille_core::commands::template(template)
+                        .map(|t| t.description)
+                        .unwrap_or_default();
+                    ListRow::new(
+                        ElementId::Name(format!("template-{template}").into()),
+                        template,
+                    )
+                    .leading(icon(Icon::Branch).size(px(14.)).text_color(p.faint))
+                    .line(description)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.saving {
+                            this.template(template, cx)
+                        }
+                    }))
+                });
+                let blank = ListRow::new("blank-command", "Blank command")
+                    .leading(icon(Icon::Plus).size(px(14.)).text_color(p.faint))
+                    .line("Write your own: a name, what it does, and what the agent is sent")
+                    .on_click(cx.listener(|this, _, window, cx| this.blank(window, cx)));
+                modal
+                    .child(
+                        div()
+                            .id("command-templates")
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .children(templates)
+                            .child(blank)
+                            .test_support(),
+                    )
+                    .children(error)
             }
-            body = body
-                .child(
+            Form::Editing(original) => {
+                let fields = self.fields.as_ref().expect("made when the form opens");
+                let body = div()
+                    .id("command-form")
+                    .max_h(window.viewport_size().height - px(200.))
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.))
+                    .child(match &original {
+                        Some(name) => div()
+                            .mono(12.5)
+                            .semibold()
+                            .child(SharedString::from(name.clone()))
+                            .into_any_element(),
+                        None => {
+                            boxed("command-name", Input::new(&fields.name), cx).into_any_element()
+                        }
+                    })
+                    .child(boxed(
+                        "command-description-field",
+                        Input::new(&fields.description),
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .id("command-instructions")
+                            .px(px(10.))
+                            .py(px(8.))
+                            .rounded(px(8.))
+                            .bg(p.field)
+                            .border_1()
+                            .border_color(p.line2)
+                            .text_size(px(12.5))
+                            .child(fields.instructions.clone())
+                            .test_support(),
+                    )
+                    .test_support();
+                modal.child(body).children(error).action(if self.saving {
                     div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(
-                            div()
-                                .id("command-panel-line")
-                                .flex_1()
-                                .min_w_0()
-                                .mono(12.5)
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .aria_label(SharedString::from(shown.row.line.clone()))
-                                .child(SharedString::from(shown.row.line.clone()))
-                                .test_support(),
-                        )
-                        .child(
-                            div()
-                                .id("command-panel-status")
-                                .flex_none()
-                                .mono(11.5)
-                                .text_color(color)
-                                .aria_label(SharedString::from(said.clone()))
-                                .child(SharedString::from(format!("{glyph} {said}")))
-                                .test_support(),
-                        ),
-                )
-                .child(
-                    div()
-                        .id("command-panel-output")
-                        .h(px(340.))
-                        .p(px(10.))
-                        .rounded(px(8.))
-                        .bg(p.field)
-                        .border_1()
-                        .border_color(p.line)
-                        .overflow_y_scroll()
-                        .track_scroll(&self.scroll)
-                        .flex()
-                        .flex_col()
-                        .when(shown.earlier, |d| {
-                            d.child(
-                                div()
-                                    .mono(11.)
-                                    .text_color(p.faint)
-                                    .child("(earlier lines are left out)"),
-                            )
-                        })
-                        .children(shown.lines.iter().enumerate().map(|(i, line)| {
-                            coloured_line(
-                                ElementId::Name(format!("command-panel-line-{i}").into()),
-                                line,
-                                p.text,
-                                &p,
-                            )
-                        }))
-                        .when(shown.lines.is_empty(), |d| {
-                            d.child(
-                                div()
-                                    .mono(11.5)
-                                    .text_color(p.faint)
-                                    .child("(no output yet)"),
-                            )
-                        })
-                        .test_support(),
-                );
-        } else if self.run.is_some() {
-            body = body.child(div().text_color(p.faint).child("Reading…"));
+                        .mono(11.5)
+                        .text_color(p.faint)
+                        .child("Saving…")
+                        .into_any_element()
+                } else {
+                    Button::primary("save-command", "Save")
+                        .on_click(cx.listener(|this, _, _, cx| this.save(cx)))
+                        .into_any_element()
+                })
+            }
         }
-        modal.child(body)
     }
 }
 
-/// `Card`'s optional child: nothing for none.
-trait ChildrenOf: Sized {
-    fn children_of(self, child: Option<impl IntoElement>) -> Self;
-}
-
-impl ChildrenOf for Card {
-    fn children_of(self, child: Option<impl IntoElement>) -> Self {
-        match child {
-            Some(child) => self.child(child),
-            None => self,
-        }
+impl Render for CommandsSection {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let rows: Vec<_> = self
+            .listed
+            .clone()
+            .unwrap_or_default()
+            .iter()
+            .map(|info| self.row(info, cx).into_any_element())
+            .collect();
+        let count = rows.len();
+        let empty = self.listed.as_ref().is_some_and(Vec::is_empty);
+        let modal = self.modal(window, cx);
+        div()
+            .id("commands")
+            .child(heading(
+                "Commands",
+                count,
+                Button::secondary("add-command", "New command")
+                    .leading(flottille_ui::Icon::Plus)
+                    .on_click(cx.listener(|this, _, _, cx| this.add(cx))),
+                cx,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .children(rows)
+                    .when(empty, |d| {
+                        d.child(
+                            div()
+                                .id("no-commands")
+                                .text_size(px(12.5))
+                                .text_color(p.faint)
+                                .child(
+                                    "No command yet: add one from a template to open the pull \
+                                     requests of a workspace, merge a stack or close it. /name \
+                                     in a session's composer sends it to the agent.",
+                                )
+                                .test_support(),
+                        )
+                    })
+                    .when_some(self.problem.clone(), |d, problem| {
+                        d.child(
+                            div()
+                                .id("commands-problem")
+                                .text_size(px(12.5))
+                                .text_color(p.fail)
+                                .child(problem)
+                                .test_support(),
+                        )
+                    }),
+            )
+            .child(modal)
     }
 }

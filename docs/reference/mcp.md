@@ -145,10 +145,10 @@ and the 2026 practice around it:
      the session's mode (`docs/tools.md`, "The gate"). In `main` they name the workspace they act
      on (`workspace`).
 
-   - only a root gets `procedure` and `project`, the project's procedures and settings
-     (`docs/tools.md`, "The project"): a child does its brief.
+   - only a root gets `skills`, `commands` and `project`, the project's skills, commands and
+     settings (`docs/tools.md`, "The project"): a child does its brief.
 
-   A root lead has 19 tools, a leaf worker 12; two more each when the project's repositories
+   A root lead has 20 tools, a leaf worker 12; two more each when the project's repositories
    declare a forge (`forge_read`, `forge_write`), one more when it declares a tracker
    (`ticket_read`).
 10. **The idempotency key** of a call is read from the call's `_meta` (`claudecode/toolUseId` for

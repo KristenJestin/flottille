@@ -42,7 +42,7 @@ fn session(user: &User) -> (String, Mcp, PathBuf) {
         .unwrap();
     let file = user.project_file("app");
     let mut text = std::fs::read_to_string(&file).unwrap();
-    text.push_str("\n[[recipe]]\ncopy = [\".env\"]\n");
+    text.push_str("\n[[setup]]\ncopy = [\".env\"]\n");
     std::fs::write(&file, text).unwrap();
     let workspace = user
         .call("workspace.create", json!({"project": "app", "name": "w"}))

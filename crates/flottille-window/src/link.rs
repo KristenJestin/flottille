@@ -285,7 +285,7 @@ fn read(conn: &mut Conn, briefs: &mut HashMap<String, String>, seen: &Seen) -> R
     let workspaces = conn.request("workspace.list", json!({}))?;
     let agents = conn.request("agent.list", json!({}))?;
     let approvals = conn.request("approval.list", json!({}))?;
-    let commands = conn.request("command.list", json!({}))?;
+    let commands = conn.request("run.list", json!({}))?;
     let needs_user = needing_the_user(conn)?;
     let roots: Vec<&str> = agents["agents"]
         .as_array()

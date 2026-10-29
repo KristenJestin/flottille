@@ -13,16 +13,16 @@ pub mod mode;
 pub mod model;
 pub mod open;
 pub mod page;
-pub mod procedures;
 pub mod project;
 pub mod project_settings;
 pub mod providers;
-pub mod references;
 pub mod rules;
+pub mod runs;
 pub mod session;
 pub mod session_link;
 pub mod settings;
 pub mod shell;
+pub mod skills;
 pub mod tree;
 
 use flottille_ui::Icons;

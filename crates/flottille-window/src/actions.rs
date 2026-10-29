@@ -15,11 +15,11 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc::UnboundedSender;
 use serde_json::{Value, json};
 
+use crate::commands::CommandInfo;
 use crate::link::{Conn, Connect, Update};
-use crate::procedures::ProcedureInfo;
-use crate::references::Reference;
 use crate::rules::Shown;
 use crate::session_link::{PullRequest, pull_requests};
+use crate::skills::SkillInfo;
 
 /// Where a session is started.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,30 +140,31 @@ pub enum Command {
         project: String,
         name: String,
     },
-    /// The project's procedures.
-    Procedures {
+    /// The project's commands.
+    Commands {
         project: String,
     },
-    /// One procedure whole, to edit it.
-    ProcedureRead {
+    /// One command whole, to edit it.
+    CommandRead {
         project: String,
         name: String,
     },
-    ProcedureWrite {
+    CommandWrite {
         project: String,
-        write: ProcedureWrite,
+        write: CommandWrite,
     },
-    /// The procedure to run in the workspace, as the daemon shows it: starts nothing.
-    ProcedureShow {
+    /// The project's skills.
+    Skills {
+        project: String,
+    },
+    /// One skill whole (a text skill's text), to edit it.
+    SkillRead {
         project: String,
         name: String,
-        workspace: String,
     },
-    /// The confirmed run.
-    ProcedureStart {
+    SkillWrite {
         project: String,
-        name: String,
-        workspace: String,
+        write: SkillWrite,
     },
     /// The rules agents are told to work by: the user's for every project, or a project's own.
     RulesRead {
@@ -173,19 +174,6 @@ pub enum Command {
     RulesWrite {
         project: Option<String>,
         text: Option<String>,
-    },
-    References {
-        project: String,
-    },
-    ReferenceAdd {
-        project: String,
-        name: String,
-        description: String,
-        path: String,
-    },
-    ReferenceRemove {
-        project: String,
-        name: String,
     },
     /// A message to a session's root agent: the only agent the window writes to.
     Reply {
@@ -231,20 +219,41 @@ pub enum Command {
     },
 }
 
-/// A change to a project's procedures, as the daemon takes it.
+/// A change to a project's skills, as the daemon takes it: a skill is a path or a text.
 #[derive(Clone, Debug, PartialEq)]
-pub enum ProcedureWrite {
+pub enum SkillWrite {
+    Add {
+        name: String,
+        description: String,
+        path: Option<String>,
+        text: Option<String>,
+    },
+    /// What is given replaces what the skill had.
+    Edit {
+        name: String,
+        description: String,
+        path: Option<String>,
+        text: Option<String>,
+    },
+    Remove {
+        name: String,
+    },
+}
+
+/// A change to a project's commands, as the daemon takes it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CommandWrite {
     /// One of Flottille's templates, as it is.
     Template {
         template: String,
     },
-    /// A new procedure.
+    /// A new command.
     Add {
         name: String,
         description: String,
         instructions: String,
     },
-    /// What is given replaces what the procedure had.
+    /// What is given replaces what the command had.
     Edit {
         name: String,
         description: String,
@@ -357,30 +366,28 @@ pub enum Outcome {
         name: String,
         refused: Option<String>,
     },
-    Procedures {
+    Commands {
         project: String,
-        listed: Result<Vec<ProcedureInfo>, String>,
+        listed: Result<Vec<CommandInfo>, String>,
     },
-    ProcedureRead {
+    CommandRead {
         project: String,
         name: String,
-        read: Result<ProcedureInfo, String>,
+        read: Result<CommandInfo, String>,
     },
-    /// A change to the procedures was made, or refused with why.
-    ProcedureWritten {
+    /// A change to the commands was made, or refused with why.
+    CommandWritten {
         project: String,
         refused: Option<String>,
     },
-    ProcedureShown {
+    Skills {
+        project: String,
+        listed: Result<Vec<SkillInfo>, String>,
+    },
+    SkillRead {
         project: String,
         name: String,
-        workspace: String,
-        shown: Result<ProcedureInfo, String>,
-    },
-    /// The run started, with its root agent; or the daemon refused, and why.
-    ProcedureStarted {
-        project: String,
-        started: Result<String, String>,
+        read: Result<SkillInfo, String>,
     },
     /// The rules as the daemon says them, after a read (`written` false) or a save or a reset.
     Rules {
@@ -388,11 +395,8 @@ pub enum Outcome {
         written: bool,
         shown: Result<Shown, String>,
     },
-    References {
-        project: String,
-        listed: Result<Vec<Reference>, String>,
-    },
-    ReferenceWritten {
+    /// A change to the skills was made, or refused with why.
+    SkillWritten {
         project: String,
         refused: Option<String>,
     },
@@ -745,87 +749,47 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             project,
             name,
         ),
-        Command::Procedures { project } => {
+        Command::Commands { project } => {
             let listed = ask_alone(
                 connect,
-                "procedure.list",
+                "command.list",
                 json!({"project": project}),
                 bounds.quick,
             );
-            Outcome::Procedures {
+            Outcome::Commands {
                 listed: listed.and_then(|listed| listed).map(|listed| {
-                    listed["procedures"]
+                    listed["commands"]
                         .as_array()
                         .into_iter()
                         .flatten()
-                        .map(ProcedureInfo::of)
+                        .map(CommandInfo::of)
                         .collect()
                 }),
                 project,
             }
         }
-        Command::ProcedureRead { project, name } => {
+        Command::CommandRead { project, name } => {
             let read = ask_alone(
                 connect,
-                "procedure.show",
+                "command.show",
                 json!({"project": project, "name": name}),
                 bounds.quick,
             );
-            Outcome::ProcedureRead {
+            Outcome::CommandRead {
                 read: read
                     .and_then(|read| read)
-                    .map(|read| ProcedureInfo::of(&read)),
+                    .map(|read| CommandInfo::of(&read)),
                 project,
                 name,
             }
         }
-        Command::ProcedureWrite { project, write } => {
-            let (method, params) = procedure_write(&project, write);
+        Command::CommandWrite { project, write } => {
+            let (method, params) = command_write(&project, write);
             let refused = match ask_alone(connect, method, params, bounds.quick) {
                 Ok(Ok(_)) => None,
                 Ok(Err(why)) | Err(why) => Some(why),
             };
-            Outcome::ProcedureWritten { project, refused }
-        }
-        Command::ProcedureShow {
-            project,
-            name,
-            workspace,
-        } => {
-            let shown = ask_alone(
-                connect,
-                "procedure.run",
-                json!({"project": project, "name": name, "workspace": workspace}),
-                bounds.quick,
-            );
-            Outcome::ProcedureShown {
-                shown: shown
-                    .and_then(|shown| shown)
-                    .map(|shown| ProcedureInfo::of(&shown)),
-                project,
-                name,
-                workspace,
-            }
-        }
-        Command::ProcedureStart {
-            project,
-            name,
-            workspace,
-        } => {
-            let started = ask_alone(
-                connect,
-                "procedure.start",
-                json!({"project": project, "name": name, "workspace": workspace}),
-                bounds.quick,
-            )
-            .and_then(|started| started)
-            .and_then(|started| {
-                started["agent"]["id"]
-                    .as_str()
-                    .map(str::to_owned)
-                    .ok_or_else(|| "the daemon did not say which agent it started".to_owned())
-            });
-            Outcome::ProcedureStarted { project, started }
+            Outcome::CommandWritten { project, refused }
         }
         Command::RulesRead { project } => {
             let shown = ask_alone(
@@ -861,54 +825,45 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 project,
             }
         }
-        Command::References { project } => {
+        Command::Skills { project } => {
             let listed = ask_alone(
                 connect,
-                "reference.list",
+                "skill.list",
                 json!({"project": project}),
                 bounds.quick,
             );
-            Outcome::References {
+            Outcome::Skills {
                 listed: listed.and_then(|listed| listed).map(|listed| {
-                    listed["references"]
+                    listed["skills"]
                         .as_array()
                         .into_iter()
                         .flatten()
-                        .map(Reference::of)
+                        .map(SkillInfo::of)
                         .collect()
                 }),
                 project,
             }
         }
-        Command::ReferenceAdd {
-            project,
-            name,
-            description,
-            path,
-        } => {
-            let refused = match ask_alone(
+        Command::SkillRead { project, name } => {
+            let read = ask_alone(
                 connect,
-                "reference.add",
-                json!({"project": project, "name": name, "description": description,
-                    "path": path}),
-                bounds.quick,
-            ) {
-                Ok(Ok(_)) => None,
-                Ok(Err(why)) | Err(why) => Some(why),
-            };
-            Outcome::ReferenceWritten { project, refused }
-        }
-        Command::ReferenceRemove { project, name } => {
-            let refused = match ask_alone(
-                connect,
-                "reference.remove",
+                "skill.show",
                 json!({"project": project, "name": name}),
                 bounds.quick,
-            ) {
+            );
+            Outcome::SkillRead {
+                read: read.and_then(|read| read).map(|read| SkillInfo::of(&read)),
+                project,
+                name,
+            }
+        }
+        Command::SkillWrite { project, write } => {
+            let (method, params) = skill_write(&project, write);
+            let refused = match ask_alone(connect, method, params, bounds.quick) {
                 Ok(Ok(_)) => None,
                 Ok(Err(why)) | Err(why) => Some(why),
             };
-            Outcome::ReferenceWritten { project, refused }
+            Outcome::SkillWritten { project, refused }
         }
         Command::Image { session, name } => {
             let image = match ask_alone(
@@ -999,11 +954,7 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             run,
             dismiss,
         } => {
-            let method = if dismiss {
-                "command.dismiss"
-            } else {
-                "command.stop"
-            };
+            let method = if dismiss { "run.dismiss" } else { "run.stop" };
             let refused = match ask_alone(connect, method, json!({"run": run}), bounds.quick) {
                 Ok(Ok(_)) => None,
                 Ok(Err(why)) | Err(why) => Some(why),
@@ -1047,34 +998,62 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
     }
 }
 
-fn procedure_write(project: &str, write: ProcedureWrite) -> (&'static str, Value) {
+fn command_write(project: &str, write: CommandWrite) -> (&'static str, Value) {
     match write {
-        ProcedureWrite::Template { template } => (
-            "procedure.add",
+        CommandWrite::Template { template } => (
+            "command.add",
             json!({"project": project, "template": template}),
         ),
-        ProcedureWrite::Add {
+        CommandWrite::Add {
             name,
             description,
             instructions,
         } => (
-            "procedure.add",
+            "command.add",
             json!({"project": project, "name": name, "description": description,
                 "instructions": instructions}),
         ),
-        ProcedureWrite::Edit {
+        CommandWrite::Edit {
             name,
             description,
             instructions,
         } => (
-            "procedure.edit",
+            "command.edit",
             json!({"project": project, "name": name, "description": description,
                 "instructions": instructions}),
         ),
-        ProcedureWrite::Remove { name } => (
-            "procedure.remove",
-            json!({"project": project, "name": name}),
-        ),
+        CommandWrite::Remove { name } => {
+            ("command.remove", json!({"project": project, "name": name}))
+        }
+    }
+}
+
+fn skill_write(project: &str, write: SkillWrite) -> (&'static str, Value) {
+    let written =
+        |name: String, description: String, path: Option<String>, text: Option<String>| {
+            let mut params = json!({"project": project, "name": name, "description": description});
+            if let Some(path) = path {
+                params["path"] = path.into();
+            }
+            if let Some(text) = text {
+                params["text"] = text.into();
+            }
+            params
+        };
+    match write {
+        SkillWrite::Add {
+            name,
+            description,
+            path,
+            text,
+        } => ("skill.add", written(name, description, path, text)),
+        SkillWrite::Edit {
+            name,
+            description,
+            path,
+            text,
+        } => ("skill.edit", written(name, description, path, text)),
+        SkillWrite::Remove { name } => ("skill.remove", json!({"project": project, "name": name})),
     }
 }
 

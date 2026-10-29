@@ -8,12 +8,8 @@ use std::sync::Arc;
 use flottille_core::declared::RepositoryForge;
 use flottille_core::detect;
 use flottille_core::paths::Paths;
-use flottille_core::project::{
-    OBSOLETE_FORGES, Project, Reference, check_reference, slug, valid_name,
-};
-use flottille_core::protocol::{
-    ProjectFolder, ProjectName, ProjectSettings, ReferenceAdd, ReferenceList, ReferenceRemove,
-};
+use flottille_core::project::{Project, slug, valid_name};
+use flottille_core::protocol::{ProjectFolder, ProjectName, ProjectSettings};
 use flottille_core::registry::Registry;
 use flottille_core::{Error, Result};
 use serde_json::{Value, json};
@@ -156,152 +152,11 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> std::result::Result
                 "missing": configured.iter().filter(|path| !detected.contains(path)).collect::<Vec<_>>(),
             }))
         }
-        "reference.list" => {
-            let ReferenceList { project } = serde_json::from_value(params)?;
-            let project = load(projects, &project)?;
-            Ok(
-                json!({"project": project.name, "references": project.references.iter()
-                .map(|(name, r)| json!({"name": name, "description": r.description, "path": r.path}))
-                .collect::<Vec<_>>()}),
-            )
-        }
-        "reference.add" => {
-            let asked: ReferenceAdd = serde_json::from_value(params)?;
-            let project = load(projects, &asked.project)?;
-            let path = match asked.path.trim_end_matches('/') {
-                "" => asked.path.as_str(),
-                trimmed => trimmed,
-            };
-            let reference = Reference {
-                description: asked.description.trim().to_owned(),
-                path: path.to_owned(),
-            };
-            check_reference(&asked.name, &reference)
-                .map_err(|error| Failure::refused(format!("references.{}{error}", asked.name)))?;
-            if project.references.contains_key(&asked.name) {
-                return Err(Failure::refused(format!(
-                    "project {} already has a reference named {}: remove it first",
-                    project.name, asked.name
-                )));
-            }
-            check_reachable(&project, &reference)?;
-            edit_references(daemon, projects, &project, |table| {
-                let mut entry = toml_edit::Table::new();
-                entry.insert(
-                    "description",
-                    toml_edit::value(reference.description.as_str()),
-                );
-                entry.insert("path", toml_edit::value(reference.path.as_str()));
-                table.insert(&asked.name, toml_edit::Item::Table(entry));
-            })?;
-            Ok(json!({"project": project.name, "name": asked.name,
-                "description": reference.description, "path": reference.path}))
-        }
-        "reference.remove" => {
-            let ReferenceRemove { project, name } = serde_json::from_value(params)?;
-            let project = load(projects, &project)?;
-            if !project.references.contains_key(&name) {
-                return Err(Failure::new(
-                    "not-found",
-                    format!("project {} has no reference named {name}", project.name),
-                ));
-            }
-            edit_references(daemon, projects, &project, |table| {
-                table.remove(&name);
-            })?;
-            Ok(json!({"project": project.name, "removed": name}))
-        }
         method => Err(Failure::new(
             "unknown-method",
             format!("unknown method `{method}`"),
         )),
     }
-}
-
-/// A reference is a file or a folder that is there now, and that stays in the project folder
-/// once the links are followed.
-fn check_reachable(project: &Project, reference: &Reference) -> std::result::Result<(), Failure> {
-    let inside = |error: std::io::Error| match error.kind() {
-        std::io::ErrorKind::NotFound => Failure::refused(format!(
-            "{} does not exist in the project folder",
-            reference.path
-        )),
-        _ => Failure::refused(format!("cannot read {}: {error}", reference.path)),
-    };
-    let folder = project.folder.canonicalize().map_err(|error| {
-        Failure::refused(format!(
-            "the folder {} of project {} cannot be read: {error}",
-            project.folder.display(),
-            project.name
-        ))
-    })?;
-    let real = project
-        .folder
-        .join(&reference.path)
-        .canonicalize()
-        .map_err(inside)?;
-    if !real.starts_with(&folder) {
-        return Err(Failure::refused(format!(
-            "{} leads outside the project folder: a reference stays inside it",
-            reference.path
-        )));
-    }
-    Ok(())
-}
-
-/// Changes the `references` table of the project's file and nothing else in it, comments
-/// included, then announces the change. The new text is read back as a project before it is
-/// written.
-fn edit_references(
-    daemon: &Daemon,
-    projects: &mut Projects,
-    project: &Project,
-    change: impl FnOnce(&mut toml_edit::Table),
-) -> std::result::Result<(), Failure> {
-    let file = projects.registry.file(&project.name);
-    let unavailable = |error: std::io::Error| {
-        Failure::new(
-            "unavailable",
-            format!("projects/{}.toml: {error}", project.name),
-        )
-    };
-    let text = std::fs::read_to_string(&file).map_err(unavailable)?;
-    let mut document: toml_edit::DocumentMut =
-        text.parse().map_err(|error: toml_edit::TomlError| {
-            Failure::new(
-                "invalid-config",
-                format!("projects/{}.toml: {}", project.name, error.message()),
-            )
-        })?;
-    let not_a_table = || {
-        Failure::new(
-            "invalid-config",
-            format!("projects/{}.toml: references: not a table", project.name),
-        )
-    };
-    if !document.contains_key("references") {
-        let mut table = toml_edit::Table::new();
-        // Only the entries show: `[references.name]`, never an empty `[references]`.
-        table.set_implicit(true);
-        document.insert("references", toml_edit::Item::Table(table));
-    }
-    let table = document["references"]
-        .as_table_mut()
-        .ok_or_else(not_a_table)?;
-    change(table);
-    if table.is_empty() {
-        document.remove("references");
-    }
-    let text = document.to_string();
-    let edited = Project::parse(&project.name, &text, &projects.data)
-        .map_err(|error| Failure::new("invalid-config", error.to_string()))?;
-    crate::providers::write_in_place(&file, &text).map_err(unavailable)?;
-    projects.known.insert(edited.name.clone(), edited.clone());
-    emit(
-        daemon,
-        "project.changed",
-        json!({"name": edited.name, "folder": edited.folder}),
-    )
 }
 
 /// `project.show`: the project, and the branch each repository's checkout in the project folder
@@ -553,56 +408,274 @@ pub fn rewrite(
     Ok(edited)
 }
 
-/// At start: the keys of the rights the gate no longer hands out leave every project's file
-/// (`docs/design.md` §7): `[agent_actions]`, a procedure's `grants` and `children`, a command's
-/// `added_by` (the line stays a plain catalogue line). The rest of each file is kept as it is.
+/// At start, every project's file is brought to the keys of this version (`former_keys_renamed`),
+/// where it stands: what the user wrote around them, comments included, stays as it is, and the
+/// file is replaced at once, never left half written. A file that the daemon could use is
+/// written only when it still can afterwards.
 pub fn migrate_files(daemon: &Daemon) {
-    let names: Vec<String> = daemon
-        .projects
-        .lock()
-        .unwrap()
-        .known
-        .keys()
-        .cloned()
-        .collect();
+    let names: Vec<String> = {
+        let projects = daemon.projects.lock().unwrap();
+        let Ok(loaded) = projects.registry.load_all() else {
+            return;
+        };
+        loaded
+            .projects
+            .iter()
+            .map(|project| project.name.clone())
+            .chain(loaded.invalid.iter().map(|error| error.name.clone()))
+            .collect()
+    };
     for name in names {
-        let Ok(project) = load_project(daemon, &name) else {
+        let mut projects = daemon.projects.lock().unwrap();
+        let file = projects.registry.file(&name);
+        let Ok(text) = std::fs::read_to_string(&file) else {
             continue;
         };
-        let stale = project.obsolete.iter().any(|o| o != OBSOLETE_FORGES)
-            || project.commands.values().any(|c| c.added_by.is_some());
-        if !stale {
-            continue;
-        }
-        let migrated = rewrite(daemon, &name, |_, document| {
-            document.remove("agent_actions");
-            for (table, keys) in [
-                ("commands", &["added_by"][..]),
-                ("procedures", &["grants", "children"][..]),
-            ] {
-                let Some(entries) = document
-                    .get_mut(table)
-                    .and_then(toml_edit::Item::as_table_like_mut)
-                else {
-                    continue;
-                };
-                for (_, entry) in entries.iter_mut() {
-                    if let Some(entry) = entry.as_table_like_mut() {
-                        for key in keys {
-                            entry.remove(key);
-                        }
-                    }
-                }
-            }
-            Ok(())
-        });
-        if let Err(failure) = migrated {
+        for task in tasks_twice(&text) {
             eprintln!(
-                "flottille daemon: projects/{name}.toml: its old rights cannot be removed: {}",
-                failure.message
+                "flottille daemon: projects/{name}.toml: commands.{task} and tasks.{task} are \
+                 both kept: remove the one you do not want"
             );
         }
+        let Some(migrated) = migrated(&text) else {
+            continue;
+        };
+        // The file is written only when it reads afterwards: one that worked still does, one that
+        // did not now does, or else it stays as the user left it.
+        let usable = |text: &str| Project::parse(&name, text, &projects.data).is_ok();
+        if !usable(&migrated) {
+            if usable(&text) {
+                eprintln!(
+                    "flottille daemon: projects/{name}.toml: its former keys are kept: the file \
+                     would not read the same with their new names"
+                );
+            }
+            continue;
+        }
+        if let Err(error) = crate::providers::write_in_place(&file, &migrated) {
+            eprintln!("flottille daemon: projects/{name}.toml: its former keys are kept: {error}");
+            continue;
+        }
+        let _ = announce_edits(daemon, &mut projects);
     }
+}
+
+/// The text of a project's file with its keys brought to this version, `None` when it holds
+/// none of the former ones (or is no TOML at all).
+pub fn migrated(text: &str) -> Option<String> {
+    let mut document: toml_edit::DocumentMut = text.parse().ok()?;
+    former_keys_renamed(&mut document).then(|| document.to_string())
+}
+
+/// The tasks a file holds twice, under their former key `[commands.<name>]` and under
+/// `[tasks.<name>]`: neither is moved, the user settles which one stays.
+pub fn tasks_twice(text: &str) -> Vec<String> {
+    let Ok(document) = text.parse::<toml_edit::DocumentMut>() else {
+        return Vec::new();
+    };
+    former_tasks(document.as_table())
+        .into_iter()
+        .filter(|name| {
+            document
+                .get("tasks")
+                .and_then(toml_edit::Item::as_table_like)
+                .is_some_and(|tasks| tasks.contains_key(name))
+        })
+        .collect()
+}
+
+/// The entries of `[commands]` that are tasks, by their `line`.
+fn former_tasks(root: &toml_edit::Table) -> Vec<String> {
+    root.get("commands")
+        .and_then(toml_edit::Item::as_table_like)
+        .map(|commands| {
+            commands
+                .iter()
+                .filter(|(_, entry)| {
+                    entry
+                        .as_table_like()
+                        .is_some_and(|e| e.contains_key("line"))
+                })
+                .map(|(name, _)| name.to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Renames the keys of earlier versions in the document, keeping everything else, the comments
+/// above and beside each entry included, and the order of the file:
+///
+/// - a task, `[commands.<name>]` with a `line`, goes under `[tasks.<name>]`, unless the file has
+///   that task there already (`tasks_twice`);
+/// - `[procedures.<name>]` becomes `[commands.<name>]`, once the tasks have left `commands`;
+/// - `[references.<name>]` becomes `[skills.<name>]`;
+/// - `[[recipe]]` becomes `[[setup]]`, and a step's `command` its `task`;
+/// - the rights the gate no longer hands out go (`docs/design.md` §7): `[agent_actions]`, a
+///   task's `added_by`, a command's `grants` and `children`.
+///
+/// Whether anything changed.
+pub fn former_keys_renamed(document: &mut toml_edit::DocumentMut) -> bool {
+    let mut changed = false;
+    let root = document.as_table_mut();
+    for name in former_tasks(root) {
+        let twice = root
+            .get("tasks")
+            .and_then(toml_edit::Item::as_table_like)
+            .is_some_and(|tasks| tasks.contains_key(&name));
+        if !twice {
+            changed |= moved(root, "commands", &name, "tasks");
+        }
+    }
+    changed |= merged(root, "procedures", "commands");
+    changed |= merged(root, "references", "skills");
+    if !root.contains_key("setup")
+        && let Some((key, recipe)) = root.remove_entry("recipe")
+    {
+        root.insert_formatted(&renamed(&key, "setup"), recipe);
+        changed = true;
+    }
+    if let Some(steps) = root
+        .get_mut("setup")
+        .and_then(toml_edit::Item::as_array_of_tables_mut)
+    {
+        for step in steps.iter_mut() {
+            changed |= key_renamed(step, "command", "task");
+        }
+    }
+    changed |= root.remove("agent_actions").is_some();
+    for (table, keys) in [
+        ("tasks", &["added_by"][..]),
+        ("commands", &["grants", "children"][..]),
+    ] {
+        let Some(entries) = root
+            .get_mut(table)
+            .and_then(toml_edit::Item::as_table_like_mut)
+        else {
+            continue;
+        };
+        for (_, entry) in entries.iter_mut() {
+            if let Some(entry) = entry.as_table_like_mut() {
+                for key in keys {
+                    changed |= entry.remove(key).is_some();
+                }
+            }
+        }
+    }
+    changed
+}
+
+/// The key, named `name`, with the comments and spaces around it kept.
+fn renamed(key: &toml_edit::Key, name: &str) -> toml_edit::Key {
+    toml_edit::Key::new(name)
+        .with_leaf_decor(key.leaf_decor().clone())
+        .with_dotted_decor(key.dotted_decor().clone())
+}
+
+/// Moves the entry `name` of the table `from` into the table `to`, made when it is missing; `from`
+/// goes once it is empty, unless its header holds a comment. Nothing moves when `to` is no table.
+fn moved(root: &mut toml_edit::Table, from: &str, name: &str, to: &str) -> bool {
+    if root
+        .get(to)
+        .is_some_and(|target| !target.is_table() && !target.is_inline_table())
+    {
+        return false;
+    }
+    let Some(table) = root
+        .get_mut(from)
+        .and_then(toml_edit::Item::as_table_like_mut)
+    else {
+        return false;
+    };
+    let Some(key) = table.key(name).cloned() else {
+        return false;
+    };
+    let Some(entry) = table.remove(name) else {
+        return false;
+    };
+    let commented = |decor: &toml_edit::Decor| {
+        [decor.prefix(), decor.suffix()]
+            .into_iter()
+            .flatten()
+            .any(|text| text.as_str().is_some_and(|text| text.contains('#')))
+    };
+    if root.get(from).is_some_and(|table| match table {
+        toml_edit::Item::Table(table) => table.is_empty() && !commented(table.decor()),
+        toml_edit::Item::Value(toml_edit::Value::InlineTable(table)) => {
+            table.is_empty() && !commented(table.decor())
+        }
+        _ => false,
+    }) {
+        root.remove(from);
+    }
+    let target = root.entry(to).or_insert_with(|| {
+        let mut table = toml_edit::Table::new();
+        // Only the entries show: `[tasks.name]`, never an empty `[tasks]`.
+        table.set_implicit(true);
+        toml_edit::Item::Table(table)
+    });
+    match target {
+        toml_edit::Item::Table(table) => {
+            table.insert_formatted(&key, entry);
+        }
+        toml_edit::Item::Value(toml_edit::Value::InlineTable(table)) => {
+            if let Ok(value) = entry.into_value() {
+                table.insert_formatted(&key, value);
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// The table `from` renamed `to`, or its entries moved into `to` when the file has both.
+fn merged(root: &mut toml_edit::Table, from: &str, to: &str) -> bool {
+    if !root.contains_key(to) {
+        let Some((key, table)) = root.remove_entry(from) else {
+            return false;
+        };
+        root.insert_formatted(&renamed(&key, to), table);
+        return true;
+    }
+    let names: Vec<String> = root
+        .get(from)
+        .and_then(toml_edit::Item::as_table_like)
+        .map(|table| table.iter().map(|(name, _)| name.to_owned()).collect())
+        .unwrap_or_default();
+    let mut changed = false;
+    for name in names {
+        // A name in both is the user's to settle: the file says so when it is read.
+        let twice = root
+            .get(to)
+            .and_then(toml_edit::Item::as_table_like)
+            .is_some_and(|table| table.contains_key(&name));
+        if !twice {
+            changed |= moved(root, from, &name, to);
+        }
+    }
+    changed
+}
+
+/// The key `from` of a table renamed `to`, in its place among the others.
+fn key_renamed(table: &mut toml_edit::Table, from: &str, to: &str) -> bool {
+    if !table.contains_key(from) || table.contains_key(to) {
+        return false;
+    }
+    let entries: Vec<(toml_edit::Key, toml_edit::Item)> = table
+        .iter()
+        .map(|(name, _)| name.to_owned())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .filter_map(|name| table.remove_entry(&name))
+        .collect();
+    for (key, item) in entries {
+        let key = if key.get() == from {
+            renamed(&key, to)
+        } else {
+            key
+        };
+        table.insert_formatted(&key, item);
+    }
+    true
 }
 
 /// The project as its file says now.
@@ -732,4 +805,121 @@ fn plan(projects: &Projects, asked: ProjectFolder) -> std::result::Result<Plan, 
         folder,
         repositories,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+
+    const FORMER: &str =
+        include_str!("../../flottille-core/tests/fixtures/multi-repo-case-former-keys.toml");
+    const CURRENT: &str = include_str!("../../flottille-core/tests/fixtures/multi-repo-case.toml");
+
+    fn parse(text: &str) -> Project {
+        Project::parse("app", text, Path::new("/data/flottille")).unwrap()
+    }
+
+    /// Each task's name and line.
+    fn lines(project: &Project) -> Vec<(&str, &str)> {
+        project
+            .tasks
+            .iter()
+            .map(|(name, task)| (name.as_str(), task.line.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn the_former_keys_of_a_file_get_their_new_names_and_its_comments_stay() {
+        let migrated = migrated(FORMER).expect("the file holds former keys");
+
+        for comment in FORMER.lines().filter(|line| line.starts_with('#')) {
+            assert!(migrated.contains(comment), "{comment}\n---\n{migrated}");
+        }
+        for former in [
+            "[commands.\"api:dev\"]",
+            "[procedures",
+            "[references",
+            "[[recipe]]",
+            "[agent_actions]",
+            "grants",
+            "added_by",
+            "command = ",
+        ] {
+            assert!(!migrated.contains(former), "{former}\n---\n{migrated}");
+        }
+        // Each entry stays where it was, its comment above it.
+        for kept in [
+            "# What we do before every review.\n[commands.open-prs]\n",
+            "[skills.style] # the team's own words\n",
+            "# The test data, once.\n[[setup]]\ntask = \"generate-data\"\n",
+            "PATH = \"{workspace.path}/.bin\"\n\n[tasks.\"api:dev\"]\n",
+        ] {
+            assert!(migrated.contains(kept), "{kept}\n---\n{migrated}");
+        }
+        let (before, after) = (parse(FORMER), parse(&migrated));
+        assert_eq!(lines(&after), lines(&before));
+        assert_eq!(format!("{:?}", after.setup), format!("{:?}", before.setup));
+        assert_eq!(after.commands.keys().collect::<Vec<_>>(), ["open-prs"]);
+        assert_eq!(after.skills.keys().collect::<Vec<_>>(), ["style"]);
+        assert_eq!(after.tasks.len(), 5);
+        assert_eq!(after.setup.len(), 4);
+    }
+
+    #[test]
+    fn a_task_under_both_its_former_and_its_new_key_stays_under_both() {
+        let text = "folder = \"/work/app\"\n\n\
+            # The build we had.\n[commands.build]\nline = \"make\"\n\n\
+            # The build we have.\n[tasks.build]\nline = \"make all\"\n\n\
+            [references.style]\npath = \"docs/style.md\"\n";
+
+        assert_eq!(tasks_twice(text), ["build"]);
+        let migrated = migrated(text).expect("the reference is renamed");
+        for kept in [
+            "# The build we had.\n[commands.build]\nline = \"make\"\n",
+            "# The build we have.\n[tasks.build]\nline = \"make all\"\n",
+            "[skills.style]",
+        ] {
+            assert!(migrated.contains(kept), "{kept}\n---\n{migrated}");
+        }
+    }
+
+    #[test]
+    fn a_tasks_that_is_not_a_table_loses_nothing() {
+        let text = "tasks = \"oops\"\n\n# Ours.\n[commands.build]\nline = \"make\"\n";
+
+        assert_eq!(migrated(text), None);
+        let mut document: toml_edit::DocumentMut = text.parse().unwrap();
+        assert!(!former_keys_renamed(&mut document));
+        assert_eq!(document.to_string(), text);
+    }
+
+    #[test]
+    fn the_comment_of_a_commands_header_stays_when_its_tasks_leave() {
+        let text = "# What we run.\n[commands]\n\n[commands.build]\nline = \"make\"\n";
+
+        let migrated = migrated(text).unwrap();
+        assert!(
+            migrated.contains("# What we run.\n[commands]\n"),
+            "{migrated}"
+        );
+        assert!(migrated.contains("[tasks.build]\n"), "{migrated}");
+        assert!(!migrated.contains("[commands.build]"), "{migrated}");
+    }
+
+    #[test]
+    fn a_file_with_the_new_keys_is_left_as_it_is() {
+        assert_eq!(migrated(CURRENT), None);
+        let once = migrated(FORMER).unwrap();
+        assert_eq!(migrated(&once), None, "a second start changes nothing");
+        assert_eq!(migrated("not = [toml"), None);
+    }
+
+    #[test]
+    fn the_new_fixture_reads_as_the_former_one_brought_to_the_new_keys() {
+        let (current, former) = (parse(CURRENT), parse(FORMER));
+        assert_eq!(lines(&current), lines(&former));
+        assert_eq!(current.setup.len() + 1, former.setup.len());
+    }
 }

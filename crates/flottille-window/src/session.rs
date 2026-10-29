@@ -39,13 +39,13 @@ use gpui_kit::{
 };
 
 use crate::actions::{Answer, Command, Picture};
-use crate::commands::{self, CommandList, CommandPanel};
+use crate::commands::CommandInfo;
 use crate::conversation::{Activity, Block, Call, CallState, Change, Conversation, DiffLine, USER};
 use crate::link::{Connect, Update};
 use crate::mode::ModeSwitch;
 use crate::model::Place;
 use crate::open::Opener;
-use crate::procedures::ProcedureInfo;
+use crate::runs::{self, CommandList, CommandPanel};
 use crate::session_link::{
     self, PlaceFacts, PullRequest, RepositoryFacts, Request, SessionLink, SessionUpdate, TreeAgent,
     Where,
@@ -793,7 +793,7 @@ impl SessionPage {
                 name,
             };
             // The shell is handing this page its updates: it asks once they are over.
-            crate::procedures::perform_later(&self.shell, command, cx);
+            crate::commands::perform_later(&self.shell, command, cx);
         }
     }
 
@@ -2421,7 +2421,7 @@ impl Render for Row {
                     this.open = !this.open;
                     cx.notify();
                 });
-                commands::card(result, self.at, self.open, toggle, cx)
+                runs::card(result, self.at, self.open, toggle, cx)
             }
         }
     }
@@ -3371,12 +3371,6 @@ impl Render for SessionRail {
                     .test_support()
             }))
             .children(ticket_row)
-            .children(
-                self.place
-                    .as_ref()
-                    .and_then(|p| p.run.as_ref())
-                    .map(|run| crate::procedures::run_block(run, cx)),
-            )
             .children(ticket_field.map(|field| {
                 div()
                     .id("rail-ticket-field")
@@ -3472,16 +3466,15 @@ fn elbow(color: gpui_kit::Hsla) -> gpui_kit::Canvas<()> {
 }
 
 /// The composer of a session: it writes to the root agent, and only to it. `/` at the start of a
-/// message lists the project's procedures, to run one in the session's workspace.
+/// message lists the project's commands: picking one puts `/name ` in the field, and the daemon
+/// sends the command's instructions with what follows it.
 pub struct Reply {
     shell: WeakEntity<Shell>,
     /// The root agent: fixed when the composer is made, the only agent it writes to.
     session: String,
     project: String,
-    /// The session's workspace; `None` in `main`, where no procedure runs.
-    workspace: Place,
-    /// The project's procedures, as the daemon listed them when `/` was last typed.
-    procedures: Option<Vec<ProcedureInfo>>,
+    /// The project's commands, as the daemon listed them when `/` was last typed.
+    commands: Option<Vec<CommandInfo>>,
     /// What follows the `/` while the message is that one word: the `/` list is open.
     slash: Option<String>,
     /// The entry of the `/` list the keyboard is on.
@@ -3519,7 +3512,6 @@ impl Reply {
         shell: WeakEntity<Shell>,
         session: String,
         project: String,
-        workspace: Place,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -3568,8 +3560,7 @@ impl Reply {
             shell,
             session,
             project,
-            workspace,
-            procedures: None,
+            commands: None,
             slash: None,
             highlighted: 0,
             dismissed: false,
@@ -3802,28 +3793,24 @@ impl Reply {
         self.renders
     }
 
-    /// The procedures the `/` list offers now, each with its description: those whose name holds
-    /// what follows the `/`. None in `main`, nor while the list is closed.
+    /// The commands the `/` list offers now, each with its description: those whose name holds
+    /// what follows the `/`. None while the list is closed.
     pub fn slash_entries(&self) -> Vec<(String, String)> {
-        let (Some(typed), Some(procedures), Some(_), false) = (
-            &self.slash,
-            &self.procedures,
-            &self.workspace,
-            self.dismissed,
-        ) else {
+        let (Some(typed), Some(commands), false) = (&self.slash, &self.commands, self.dismissed)
+        else {
             return Vec::new();
         };
         let typed = typed.to_lowercase();
-        procedures
+        commands
             .iter()
             .filter(|p| p.name.to_lowercase().contains(&typed))
             .map(|p| (p.name.clone(), p.description.clone()))
             .collect()
     }
 
-    /// The daemon has listed the project's procedures since the composer was made.
-    pub fn knows_procedures(&self) -> bool {
-        self.procedures.is_some()
+    /// The daemon has listed the project's commands since the composer was made.
+    pub fn knows_commands(&self) -> bool {
+        self.commands.is_some()
     }
 
     fn slash_open(&self) -> bool {
@@ -3831,7 +3818,7 @@ impl Reply {
     }
 
     /// The message changed: a `/` and one word open the list, asking the daemon for the
-    /// procedures again (the project's file is the user's to edit). The field says it when the
+    /// commands again (the project's file is the user's to edit). The field says it when the
     /// user types; a text set from code says it here.
     pub fn typed(&mut self, text: &str, cx: &mut Context<Self>) {
         let slash = text
@@ -3841,12 +3828,12 @@ impl Reply {
         if slash.is_none() {
             self.dismissed = false;
         }
-        if slash.is_some() && self.slash.is_none() && self.workspace.is_some() {
-            let command = Command::Procedures {
+        if slash.is_some() && self.slash.is_none() {
+            let command = Command::Commands {
                 project: self.project.clone(),
             };
             // Later: the shell may be the one setting the text, as it hands a reply its answer.
-            crate::procedures::perform_later(&self.shell, command, cx);
+            crate::commands::perform_later(&self.shell, command, cx);
         }
         if self.slash != slash {
             self.slash = slash;
@@ -3855,20 +3842,20 @@ impl Reply {
         }
     }
 
-    /// The project's procedures, as the daemon listed them.
-    pub fn procedures_listed(
+    /// The project's commands, as the daemon listed them.
+    pub fn commands_listed(
         &mut self,
         project: &str,
-        listed: &Result<Vec<ProcedureInfo>, String>,
+        listed: &Result<Vec<CommandInfo>, String>,
         cx: &mut Context<Self>,
     ) {
         if project != self.project {
             return;
         }
         if let Ok(list) = listed
-            && self.procedures.as_ref() != Some(list)
+            && self.commands.as_ref() != Some(list)
         {
-            self.procedures = Some(list.clone());
+            self.commands = Some(list.clone());
             self.highlighted = 0;
             cx.notify();
         }
@@ -3882,7 +3869,7 @@ impl Reply {
         }
     }
 
-    /// Enter: picks the procedure the `/` list is on; with none offered, the message is sent as
+    /// Enter: picks the command the `/` list is on; with none offered, the message is sent as
     /// text.
     fn enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let entries = self.slash_entries();
@@ -3895,26 +3882,18 @@ impl Reply {
         }
     }
 
-    /// Opens the confirmation of a run of `name` in the session's workspace; the `/` word leaves
-    /// the field. Nothing starts before Confirm.
+    /// Puts `/name ` in the field, for the user to add what the command is about before sending.
     pub fn pick(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(workspace) = self.workspace.clone() else {
-            return;
-        };
         self.slash = None;
-        self.has_text = false;
+        self.dismissed = true;
+        self.has_text = true;
+        let text = format!("/{name} ");
         self.field
-            .update(cx, |field, cx| field.set_value("", window, cx));
-        let (project, name) = (self.project.clone(), name.to_owned());
-        self.shell
-            .update(cx, |shell, cx| {
-                shell.run_procedure(&project, &workspace, &name, cx)
-            })
-            .ok();
+            .update(cx, |field, cx| field.set_value(text.as_str(), window, cx));
         cx.notify();
     }
 
-    /// The `/` list, over the composer: the procedures offered, or in `main` why there are none.
+    /// The `/` list, over the composer: the commands offered.
     fn render_slash(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.slash_open() {
             return None;
@@ -3932,26 +3911,21 @@ impl Reply {
                 .test_support()
                 .into_any_element()
         };
-        let body: Vec<AnyElement> = if self.workspace.is_none() {
-            vec![note(
-                "slash-in-main",
-                "Procedures run in a workspace: start a session in one to run them.",
-            )]
-        } else {
+        let body: Vec<AnyElement> = {
             let entries = self.slash_entries();
             if entries.is_empty() {
-                // A word that names no procedure is a message like any other: nothing to show.
-                if self.procedures.as_ref().is_none_or(|p| !p.is_empty())
+                // A word that names no command is a message like any other: nothing to show.
+                if self.commands.as_ref().is_none_or(|c| !c.is_empty())
                     || self.slash.as_deref() != Some("")
                 {
                     return None;
                 }
                 vec![note(
                     "slash-none",
-                    "This project has no procedure yet: add one on its page.",
+                    "This project has no command yet: add one in its settings.",
                 )]
             } else {
-                let mut rows = vec![section_label("Procedures", cx).into_any_element()];
+                let mut rows = vec![section_label("Commands", cx).into_any_element()];
                 for (at, (name, description)) in entries.into_iter().enumerate() {
                     let picked = name.clone();
                     rows.push(

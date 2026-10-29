@@ -16,7 +16,7 @@ use gpui_kit::{
 use serde_json::Value;
 
 use crate::actions::Command;
-use crate::procedures::{editor_style, perform_later};
+use crate::commands::{editor_style, perform_later};
 use crate::shell::Shell;
 
 /// What the editor says of when a change takes effect.

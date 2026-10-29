@@ -1,16 +1,17 @@
-//! Procedures (`docs/procedures.md`): named multi-step actions of a project, run by an agent in a
-//! workspace as plain instructions. A run grants nothing: its agent's calls go through the gate's
-//! classes like any other (`docs/design.md` §7).
+//! Commands (`docs/commands.md`): a project's named instructions, which `/name` in a session's
+//! composer, or an agent's message to its child, sends to the agent as a message. A command grants
+//! nothing: what its agent does goes through the gate's classes like any call (`docs/design.md`
+//! §7). Not to be mixed up with `crate::command`, which splits a command line.
 
 use serde::{Deserialize, Serialize};
 
-/// One procedure of a project, as its file holds it under `[procedures.<name>]`.
+/// One command of a project, as its file holds it under `[commands.<name>]`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Procedure {
+pub struct Command {
     /// One line: what it does.
     pub description: String,
-    /// What the agent of a run is given as its first message.
+    /// What the agent is sent.
     pub instructions: String,
     /// Obsolete since the gate's classes: read, said, never followed, and dropped from the file
     /// by the daemon's migration (`OBSOLETE_GRANTS`).
@@ -21,14 +22,24 @@ pub struct Procedure {
     pub children: Option<toml::Value>,
 }
 
-/// What is said of a procedure's `grants` or `children`.
-pub const OBSOLETE_GRANTS: &str = "no longer read: a procedure grants nothing; its agent's calls \
+/// What is said of a command's `grants` or `children`.
+pub const OBSOLETE_GRANTS: &str = "no longer read: a command grants nothing; its agent's calls \
      go through the gate's classes, and Ask or Auto decides what comes to you";
 
-impl Procedure {
+impl Command {
+    /// A command of these words.
+    pub fn new(description: impl Into<String>, instructions: impl Into<String>) -> Command {
+        Command {
+            description: description.into(),
+            instructions: instructions.into(),
+            grants: None,
+            children: None,
+        }
+    }
+
     /// The problem with it, as `<key>: <what is wrong>` under its own key.
     pub fn check(&self, name: &str) -> Result<(), String> {
-        let key = format!("procedures.{name}");
+        let key = format!("commands.{name}");
         if !crate::project::valid_name(name) {
             return Err(format!(
                 "{key}: the name must be 1 to 64 letters, digits, dots, dashes or underscores, \
@@ -38,6 +49,9 @@ impl Procedure {
         if self.description.trim().is_empty() {
             return Err(format!("{key}.description: must not be empty"));
         }
+        if self.description.trim().chars().any(char::is_control) {
+            return Err(format!("{key}.description: must be one line"));
+        }
         if self.instructions.trim().is_empty() {
             return Err(format!("{key}.instructions: must not be empty"));
         }
@@ -45,12 +59,32 @@ impl Procedure {
     }
 }
 
-/// The procedures Flottille ships, which a project adopts with `flottille procedure add
-/// --template <name>` and then edits as its own: the three of `docs/design.md` §13.
+/// The message `/name rest` stands for, when `text` starts with the name of one of `commands`:
+/// its instructions, then the rest of the text after a blank line. `None` for any other text,
+/// which is sent as it is.
+pub fn expanded<'a>(
+    text: &str,
+    commands: impl IntoIterator<Item = (&'a String, &'a Command)>,
+) -> Option<(String, String)> {
+    let rest = text.trim_start().strip_prefix('/')?;
+    let (name, after) = rest
+        .split_once(char::is_whitespace)
+        .map_or((rest, ""), |(name, after)| (name, after.trim()));
+    let (name, command) = commands.into_iter().find(|(known, _)| *known == name)?;
+    let mut message = command.instructions.trim().to_owned();
+    if !after.is_empty() {
+        message.push_str("\n\n");
+        message.push_str(after);
+    }
+    Some((name.clone(), message))
+}
+
+/// The commands Flottille ships, which a project adopts with `flottille command add --template
+/// <name>` and then edits as its own: the three of `docs/design.md` §13.
 pub const TEMPLATES: [&str; 3] = ["open-prs", "merge-stack", "close"];
 
 /// The template of that name, as it is written into a project's file.
-pub fn template(name: &str) -> Option<Procedure> {
+pub fn template(name: &str) -> Option<Command> {
     let (description, instructions) = match name {
         "open-prs" => (
             "Open the pull requests of the workspace, one per repository with commits",
@@ -66,12 +100,7 @@ pub fn template(name: &str) -> Option<Procedure> {
         ),
         _ => return None,
     };
-    Some(Procedure {
-        description: description.into(),
-        instructions: instructions.into(),
-        grants: None,
-        children: None,
-    })
+    Some(Command::new(description, instructions))
 }
 
 const OPEN_PRS: &str = "\
@@ -160,12 +189,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn each_template_is_a_valid_procedure_of_its_name_and_grants_nothing() {
+    fn each_template_is_a_valid_command_of_its_name_and_grants_nothing() {
         for name in TEMPLATES {
-            let procedure = template(name).unwrap();
-            procedure.check(name).unwrap();
-            assert_eq!(procedure.grants, None, "{name}");
+            let command = template(name).unwrap();
+            command.check(name).unwrap();
+            assert_eq!(command.grants, None, "{name}");
         }
         assert!(template("deploy").is_none());
+    }
+
+    #[test]
+    fn slash_name_sends_the_instructions_with_the_trailing_text() {
+        let commands = [(
+            "ship".to_owned(),
+            Command::new("Ship it", "Push, then open the PR.\n"),
+        )];
+        let each = || commands.iter().map(|(name, command)| (name, command));
+        assert_eq!(
+            expanded("/ship only the api, please", each()),
+            Some((
+                "ship".into(),
+                "Push, then open the PR.\n\nonly the api, please".into()
+            ))
+        );
+        assert_eq!(
+            expanded("  /ship", each()),
+            Some(("ship".into(), "Push, then open the PR.".into()))
+        );
+        assert_eq!(expanded("/shipping now", each()), None);
+        assert_eq!(expanded("ship it /ship", each()), None);
+        assert_eq!(expanded("/", each()), None);
     }
 }

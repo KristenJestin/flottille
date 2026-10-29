@@ -43,7 +43,7 @@ branch_prefix = "app"                 # default: a slug of the name
 workspaces_root = "/work/app-work"    # absolute; default: $XDG_DATA_HOME/flottille/workspaces/<name>
 default_repositories = "all"          # "all", or a list of the repositories a workspace takes
 max_children = 3                      # children running at once, 1 to 6
-run_time_limit = 1800                 # seconds a run step of the recipe may take; default 30 min
+run_time_limit = 1800                 # seconds a run step of the setup may take; default 30 min
 never = [["git", "push"], ["rm", "-rf"]]   # programs with their leading arguments, one word per element, for the gate to refuse
 provider = "claude"                   # the provider of its agents that name none; default: the first one enabled
 model = "sonnet"                      # the model of its agents on that provider that name none; default: the provider's
@@ -58,7 +58,7 @@ forge = { kind = "github", repository = "acme/app" }   # its forge (docs/forges.
 [variables]                           # name -> templated value, for every command run in a workspace
 STORE = "{workspace.path}/.store"
 
-[commands."api:dev"]                  # the catalogue: one command line, never run by a shell
+[tasks."api:dev"]                     # the tasks: one command line each, never run by a shell
 line = "npm run start:dev"
 repository = "app-api"                # where it runs; the workspace folder when left out
 serve = true                          # keeps running
@@ -66,14 +66,14 @@ check = false                         # tests, lint
 read_only = false                     # changes nothing
 ask_before_running = false            # held for approval each time an agent runs it
 
-[[recipe]]                            # the steps that prepare a new workspace, in order
+[[setup]]                             # the steps that prepare a new workspace, in order
 copy = [".env", ".env.*"]             # globs, copied from the main checkout, never over a file
 for_each_repository = true            # in each repository of the workspace, leaves first
 
-[[recipe]]
+[[setup]]
 root_entries = true                   # the project folder's other entries, linked
 
-[[recipe]]
+[[setup]]
 run = "npm install"                   # one line, its words templated, never run by a shell
 for_each_repository = true
 
@@ -82,19 +82,23 @@ kind = "jira"
 site = "acme.atlassian.net"
 projects = ["ABC", "OPS"]
 
-[procedures.open-prs]                 # a named action run by an agent in a workspace (docs/procedures.md)
+[skills.style]                        # a text its agents read when their task needs it (docs/skills.md)
+description = "The code style"
+path = "docs/STYLE.md"                # a path of the project folder; none: a text Flottille keeps
+
+[commands.open-prs]                   # instructions sent to a session as /open-prs (docs/commands.md)
 description = "Open the pull requests"
 instructions = "Push the branch, then open one pull request per repository."
 
-[pull_requests]                       # how its pull requests are opened (docs/procedures.md)
+[pull_requests]                       # how its pull requests are opened (docs/commands.md)
 title = "type(TICKET): subject"       # the title's format, told to the agent that writes it
 reviewers = ["alice", "bob"]          # asked to review each pull request Flottille opens
 ```
 
 The repositories are put in dependency order (a repository after those it depends on; among those
 that are ready, the first of the file first) by `Project::in_dependency_order()`, which preparing
-a workspace uses, and in dependency levels by `Project::dependency_levels()`, which a procedure's
-run is told for merging a level at a time.
+a workspace uses, and in dependency levels by `Project::dependency_levels()`, which a command
+sent in a workspace is told for merging a level at a time.
 
 `provider` must be one Flottille knows (`claude`, `opencode`, `codex`) and `model` must not be empty; which
 providers are enabled is the user's, in `$XDG_CONFIG_HOME/flottille/providers.toml`, beside the
@@ -132,20 +136,31 @@ a file that still has it is accepted, the table is ignored and said (`project sh
 "Not read", the window under the settings), and its repositories have no forge until one is set.
 Nothing is converted on its own.
 
-A procedure's keys and what a run of it does are in
-[`procedures.md`](procedures.md); `flottille procedure add`, `edit` and `remove` write them in the
-file where it stands, keeping what is around them.
+A command's keys and what sending it does are in [`commands.md`](commands.md), a skill's in
+[`skills.md`](skills.md); `flottille command` and `flottille skill` (`add`, `edit`, `remove`)
+write them in the file where it stands, keeping what is around them, and so do the project's
+Settings in the window, sections Skills and Commands.
+
+**Former keys.** Until #127 the tasks were `[commands.<name>]` (the catalogue), the commands
+`[procedures.<name>]`, the skills `[references.<name>]` and the setup `[[recipe]]`, a step naming a
+task with `command`. They are still read for one release, and the daemon renames them in the file
+at its start, in place: every comment and everything else the user wrote stays, the file is
+replaced at once, and it is written only when it can be used afterwards (a file that could not be
+used for another reason stays as it is). A name under both a former key and its new one is
+refused, with both keys named, and the migration moves neither: the daemon says so in its log,
+for the user to remove the one they do not want.
 
 ## What agents do on their own
 
-The agent the user talks to (a root) does what the window does, through the tools `procedure` and
-`project` (`docs/tools.md`, "The project"): it reads the project's procedures and settings at once,
+The agent the user talks to (a root) does what the window does, through the tools `skills`,
+`commands` and `project` (`docs/tools.md`, "The project"): it reads the project's skills, commands
+and settings at once,
 and every change it makes is a call to judge, said in words: a card for the user in Ask, the
 judge's in Auto (`docs/design.md` §7). A change of the tracker, which nothing checks against the
 project, is base: it always comes to the user. An agent never reaches another project's file.
 
 **Former keys.** `[agent_actions]`, which let a family of these changes run on its own, a
-procedure's `grants` and `children`, and a command's `added_by` (a line the user once allowed
+command's former `grants` and `children`, and a task's `added_by` (a line the user once allowed
 always) are no longer read: a file that still has them is accepted, `project show` lists the
 first three under "Not read", and the daemon removes them from the file at its start, keeping everything else
 the user wrote.
@@ -189,40 +204,23 @@ the next, so they sit after the boundary. An agent reads the rules the agents cr
 `project {action: "rules"}` and proposes a change with `set_rules {text}`, a call to judge like
 the project's other changes (`docs/tools.md`, "The project").
 
-## References
+## Tasks
 
-`[references.<name>]` lists documents an agent reads with a tool when its task needs them, in place
-of the knowledge skills (framework guides, a test library, a design system) that other tools load
-every time. Each holds:
+`[tasks.<name>]` lists the project's command lines its agents run by name with `commands_run`
+(tests, lint, servers). Each holds `line` (one line, never run by a shell) and, when they apply,
+`repository` (where it runs; the workspace folder when left out), `serve` (it keeps running),
+`check` (tests, lint), `read_only` (it changes nothing) and `ask_before_running` (held for
+approval each time an agent runs it). A setup step runs one with `task = "<name>"`.
 
-| Key | |
-|---|---|
-| `description` | One line, not empty: when the document is worth reading. |
-| `path` | A file or a folder of files, relative to the project folder (a file of a repository is `<repository>/<file>`). It must stay inside the project folder, once the links are followed, and not go through a `.git`. |
+## Skills
 
-```toml
-[references.react]
-description = "How we write React components"
-path = "docs/react"
+`[skills.<name>]` lists texts an agent reads with `skill_read` when its task needs them: a file or
+a folder of the project folder, or a text Flottille keeps in its data folder. What they hold and
+how they are read is in [`skills.md`](skills.md).
 
-[references.style]
-description = "The code style"
-path = "docs/STYLE.md"
-```
+## The setup
 
-An agent sees the names and descriptions in its instructions, after the cache boundary, never
-the content (`docs/design.md` §8); it reads one with `reference_read` (`docs/tools.md`). The list
-is frozen in an agent's instructions when the agent is created, so a reference added later is
-seen by the agents started after it; `reference_read` itself follows the file as it is now. A
-reference is read from the project folder, whatever the agent's place: it is the project's, not
-the branch's.
-
-`flottille reference list|add|remove` edits the file for you, the rest of it left as written,
-comments included (`docs/cli.md`).
-
-## The recipe
-
-`[[recipe]]` lists the steps that prepare a new workspace, done in the order of the file
+`[[setup]]` lists the steps that prepare a new workspace, done in the order of the file
 (`docs/workspaces.md` says how they run). Each step holds exactly one of:
 
 | Key | The step |
@@ -231,7 +229,7 @@ comments included (`docs/cli.md`).
 | `link = "<path>"` | Links one entry of the main checkout into the workspace, unless something is there already. |
 | `root_entries = true` | Links into the workspace folder every top-level entry of the project folder that is neither a repository (nor holds one), nor `.git`, nor `.gitignore`, nor already there. |
 | `run = "<line>"` | Runs one command line, without a shell (the same rules as the agents' commands: a line holding shell syntax is refused). Each word is a template. |
-| `command = "<name>"` | Runs a command of the catalogue. |
+| `task = "<name>"` | Runs one of the project's tasks. |
 
 And, for every kind but `root_entries`, where it is done:
 
@@ -239,21 +237,23 @@ And, for every kind but `root_entries`, where it is done:
 |---|---|
 | `repository = "<path>"` | In that repository; a step whose repository the workspace does not take is skipped. |
 | `for_each_repository = true` | Once in each repository of the workspace, in dependency order (leaves first), `{repository}` being its path. |
-| neither | In the workspace folder, `{repository}` being `.`; a `command` runs where the catalogue says. |
+| neither | In the workspace folder, `{repository}` being `.`; a `task` runs where the task says. |
 
-A `run` or a `command` step may also say `time_limit = <seconds>` (at least 1): it is stopped after
+A `run` or a `task` step may also say `time_limit = <seconds>` (at least 1): it is stopped after
 that long, in place of the project's `run_time_limit` (30 minutes unless the file says otherwise).
 
-Paths are relative to the repository (or to the folder) and stay inside it. The recipe is
+Paths are relative to the repository (or to the folder) and stay inside it. The setup is
 snapshotted when a workspace is created, with the variables: editing the file later never
 changes the steps nor the variables of a workspace that exists. This is deliberate: a workspace
-is prepared, resumed and used by the recipe and the variables it was made with, so a change to
+is prepared, resumed and used by the setup and the variables it was made with, so a change to
 the file cannot alter a preparation under way nor the environment of a piece of work already
 started. A workspace that should follow the new file is a new workspace.
 
 `crates/flottille-core/tests/fixtures/multi-repo-case.toml` describes the project of
 `docs/reference/multi-repo-case.md` (a folder that is a repository and holds six others, with
-dependencies, base rules, variables and commands) with this file alone.
+dependencies, base rules, variables and tasks) with this file alone;
+`multi-repo-case-former-keys.toml` is the same file under the former keys, which the migration
+is tested on.
 
 ## Changes
 

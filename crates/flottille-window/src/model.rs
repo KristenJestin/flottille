@@ -173,7 +173,7 @@ pub struct Answers<'a> {
     pub briefs: &'a HashMap<String, String>,
     /// The question each root asking the user asked last, by id: its text and when.
     pub questions: &'a HashMap<String, (String, u64)>,
-    /// `command.list`: the commands running.
+    /// `run.list`: the commands running.
     pub commands: &'a Value,
 }
 

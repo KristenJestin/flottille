@@ -208,7 +208,7 @@ forge of a repository"): `{"name", "folder", "repositories": [{"path", "remote",
 out, masked; `null` when it has none), `forge` the one declared (`null` when none), `proposal` what
 the address proposes (`null` when nothing), `disagrees` why the declared forge is not where the
 remote leads (`null` when it is). `obsolete` lists the keys of the file that are no longer read
-(the old `[forges]`, `[agent_actions]`, a procedure's `grants` and `children`), each with what
+(the old `[forges]`, `[agent_actions]`, a command's former `grants` and `children`), each with what
 replaces it. Nothing is asked of a forge.
 
 #### `project.set_settings`
@@ -246,30 +246,45 @@ own (the `rules` key of its file, where it stands, what is around it kept).
 A change to the user's rules emits `rules.changed {project: null}`; a project's emits
 `project.changed` like any edit of its file.
 
-### The reference methods
+### The skill methods
 
-A project's references (`docs/projects.md`, "References"). The daemon edits the project's file in
-place, the rest of it left as written, and announces `project.changed`. `not-found` for a project
-or a reference that does not exist, `refused` for a reference that cannot be used, with its key.
+A project's skills (`docs/skills.md`). The daemon edits the project's file in place, the rest of it
+left as written, and announces `project.changed`; a text skill's text is written to Flottille's
+data folder, the file replaced at once. `not-found` for a project or a skill that does not exist,
+`refused` for a skill that cannot be used, with its key. The `reference.*` methods of earlier
+versions are gone.
 
-#### `reference.list`
+A skill in a result is `{"name", "description", "kind", "path"}`: `kind` is `path` or `text`, and
+`path` is `null` for a text. `skill.show` adds `text` for a text skill.
 
-`{"project"}`. The result is `{"project", "references": [{"name", "description", "path"}]}`, by name.
+#### `skill.list`
 
-#### `reference.add`
+`{"project"}`. The result is `{"project", "skills": [...]}`, by name.
 
-`{"project", "name", "description", "path"}`. `path` is relative to the project folder; a trailing
-`/` is dropped. `refused` when the name is already used, when `path` does not exist, leaves the
-project folder (a link followed) or goes through a `.git`, or when the name or the description is
-not valid. The result is `{"project", "name", "description", "path"}`.
+#### `skill.show`
 
-#### `reference.remove`
+`{"project", "name"}`: the skill, with its text when Flottille keeps it.
 
-`{"project", "name"}`. The result is `{"project", "removed": "<name>"}`.
+#### `skill.add`
+
+`{"project", "name", "description"}` with one of `"path"` and `"text"`. `path` is relative to the
+project folder; a trailing `/` is dropped. `refused` when the name is already used, when both or
+neither of `path` and `text` are given, when `path` does not exist, leaves the project folder (a
+link followed) or goes through a `.git`, when `text` is empty, or when the name or the description
+is not valid. The result is the skill.
+
+#### `skill.edit`
+
+`{"project", "name", "description"?, "path"?, "text"?}`: what is given replaces what the skill had
+(at most one of `path` and `text`); a text skill made a path loses its text. Answers the skill.
+
+#### `skill.remove`
+
+`{"project", "name"}`: `{"project", "removed": "<name>"}`, its text removed with it.
 
 ### The workspace methods
 
-A workspace is one worktree per repository, on one branch, prepared by the project's recipe
+A workspace is one worktree per repository, on one branch, prepared by the project's setup
 (`docs/workspaces.md`). It is named by its project and its name. A workspace in a result:
 
 ```json
@@ -301,9 +316,9 @@ A workspace is one worktree per repository, on one branch, prepared by the proje
 creation, not yet filled. A base's `fetched_now` is false when the workspace was created offline;
 `fetched_at` (milliseconds since the Unix epoch) is when its tracking ref was last updated, `null`
 when unknown. Its `urls` are where its remote led at creation, fetch and push, credentials taken
-out (`docs/procedures.md`); absent for a workspace created before they were recorded. A step's `kind` is `worktree`, `copy` (`globs`), `link` (`path`), `root_entries`
+out (`docs/commands.md`); absent for a workspace created before they were recorded. A step's `kind` is `worktree`, `copy` (`globs`), `link` (`path`), `root_entries`
 (`except`: the top-level names of the project's repositories) or `run` (`line`, `time_limit` in
-seconds, and `command` when it is a command of the catalogue); its `state` is `pending`, `running`, `done`, `skipped` or
+seconds, and `task` when it is one of the project's tasks); its `state` is `pending`, `running`, `done`, `skipped` or
 `failed`, and `failure` is there only on a failed step. `repository` is `null` for a step done in
 the workspace folder.
 
@@ -315,7 +330,7 @@ cannot be used.
 
 `{"project", "name", "repositories"?, "branch"?, "offline"?, "ticket"?}`. Fetches the base of each
 repository, writes the workspace, makes the worktrees and answers the workspace; the rest of the
-recipe goes on in the background. `repositories` is the project's default set when left out,
+setup goes on in the background. `repositories` is the project's default set when left out,
 `branch` is `<branch prefix>/<name>`, `offline: true` fetches nothing, and `ticket` (`#123`, `123`
 or a Jira key) links the workspace to a ticket (`tickets.md`); the workspace's `ticket` says it, in
 every answer that shows a workspace, `null` when it has none.
@@ -431,56 +446,40 @@ folder and its record are gone. `refused`, with nothing touched, while it is bei
 when a worktree holds a changed or untracked file or a commit on no remote: the message names
 every one.
 
-### The procedure methods
+### The command methods
 
-A project's procedures and their runs (`docs/procedures.md`). A procedure in a result is `{"name",
-"description"}`; `procedure.show` and the edits add `instructions`. A procedure grants nothing:
-each call of its run goes through the gate's classes and the session's mode. `not-found` for a
-project or a procedure that does not exist, `refused` for an empty description or instructions,
-`invalid-config` when the project's file cannot be used.
+A project's commands (`docs/commands.md`). A command in a result is `{"name", "description"}`;
+`command.show` and the edits add `instructions`. A command grants nothing: it is a message, sent
+as `/name` with `agent.start`, `agent.run` or `agent.send`, and each call the session makes goes
+through the gate's classes and the session's mode. `not-found` for a project or a command that
+does not exist, `refused` for an empty description or instructions, `invalid-config` when the
+project's file cannot be used. The `procedure.*` methods of earlier versions, the runs with them,
+are gone.
 
-#### `procedure.list`
+#### `command.list`
 
-`{"project"}`: `{"project", "procedures": [...]}`, by name.
+`{"project"}`: `{"project", "commands": [...]}`, by name.
 
-#### `procedure.show`
+#### `command.show`
 
-`{"project", "name"}`: the procedure.
+`{"project", "name"}`: the command.
 
-#### `procedure.add`
+#### `command.add`
 
 `{"project", "name", "description", "instructions"}`, or `{"project", "template", "name"?}` for one
 of Flottille's templates as it is (`open-prs`, `merge-stack`, `close`; `name` the template's when
-left out, and nothing else given). Writes `[procedures.<name>]` in the project's file, what is
-around it kept, and answers the procedure. `refused` when the project has one of that name,
+left out, and nothing else given). Writes `[commands.<name>]` in the project's file, what is
+around it kept, and answers the command. `refused` when the project has one of that name,
 `not-found` for a template Flottille has not.
 
-#### `procedure.edit`
+#### `command.edit`
 
-`{"project", "name", "description"?, "instructions"?}`: what is given replaces what the procedure
-had. Answers the procedure.
+`{"project", "name", "description"?, "instructions"?}`: what is given replaces what the command
+had. Answers the command.
 
-#### `procedure.remove`
+#### `command.remove`
 
 `{"project", "name"}`: `{"project", "removed": "<name>"}`.
-
-#### `procedure.run`
-
-`{"project", "name", "workspace"}`: what a run would start, to show the user; it starts nothing.
-The procedure with `{"project", "workspace", "started": false}`. `not-found` when the workspace does
-not exist.
-
-#### `procedure.start`
-
-`{"project", "name", "workspace"}`. A root agent starts in the workspace, in Auto, with the
-procedure's first message, as `agent.start` starts one: `{"agent", "after", "procedure"}`, `agent`
-and `after` as `agent.start` answers them.
-
-#### `procedure.of`
-
-`{"agent"}`: the run whose root is that agent, for a client that shows it while it goes on:
-`{"agent", "run"}`, `run` null when the agent has none, else `{"procedure", "project", "workspace",
-"ended"}` (`ended` once the run is over).
 
 ### The agent methods
 
@@ -558,6 +557,8 @@ the effort is not among them (the sentence names those it offers). While they ar
 a model or an effort the agent does not offer is known only once its session is open: the agent
 then fails (`agent.failed`), saying what it offers.
 `agent.run` is the name this method had before the pilot door: it is still answered, the same.
+A message `/name rest`, where name is one of the project's commands, is sent as that command
+(`docs/commands.md`, "Sending one"), here and in `agent.send`.
 
 #### `agent.send`
 
@@ -607,7 +608,7 @@ names its root).
 (`agent.resumed`, `docs/events.md`). It keeps its id, its epoch, its conversation and its session;
 nothing is sent to it, and the next message (`agent.send`) starts its process, which resumes or
 loads the session as after an idle release (`docs/agents.md`, "How an agent runs"). Its children
-stay ended, and so does the procedure run it was the root of. Its next prompt starts with a
+stay ended. Its next prompt starts with a
 `resume` delivery saying the user stopped it and naming its requests cancelled then. `refused`
 for a child (the sentence names its root), an agent that has not ended, a failed one (its session
 went with it), one whose agent can neither resume nor load a session, that never opened one or
@@ -681,7 +682,7 @@ events, oldest first: at most 1000, the first ones (those numbered after `after`
 or with `before` the last ones numbered before it. `more` says whether events remain past the
 page: newer ones, or with `before` older ones.
 
-### The command methods
+### The run methods
 
 The commands the agents run with `commands_run` (`docs/tools.md`), as the user sees them. A
 command in a result:
@@ -712,7 +713,7 @@ last line of its output with something on it, masked of secrets and as the progr
 of its output (a list of texts, masked and as written, each cut at 300 characters), which a result
 card in the conversation shows folded, a running command's as well as one that ended.
 
-#### `command.list`
+#### `run.list`
 
 `{"project"?, "tree"?, "ended"?}`. `{"commands": [...]}`: the commands running, oldest first. With
 `project`, the project's; with `tree`, an agent's id, those of the agents of its root's tree; without
@@ -721,21 +722,21 @@ the last 30 to have ended at most, and none for a tree whose root ended or faile
 their session, and the daemon forgets them when the session is over for good (`docs/tools.md`)
 (`not-found` when `tree` names no agent).
 
-#### `command.output`
+#### `run.output`
 
 `{"run", "tail"?}`. The command without `root`, `project` and `workspace`, with `output`, the last
 `tail` lines (200 by default, 1 to 1000) of what it wrote, standard output and error together, masked
 and as the program wrote it, and `earlier`, whether lines before them were left out. Of a
 command running, what it wrote so far. `not-found` when there is no such run.
 
-#### `command.stop`
+#### `run.stop`
 
 `{"run"}`. `{"run": {...}}`: stops the command and everything in its process group (`SIGTERM`, then
 `SIGKILL` 5 s later, as `commands_status` with `action: stop` does) and answers once it ended. The
 agent that started it is told the user stopped it (`command-ended`, `docs/tools.md`). A command that
 already ended is answered as it is. `not-found` when there is no such run.
 
-#### `command.dismiss`
+#### `run.dismiss`
 
 `{"run"}`. `{"run"}`: a command that ended is no longer listed with `ended`, and `run.dismissed` is
 emitted. `refused` while it runs; `not-found` when there is no such run.
@@ -886,7 +887,7 @@ there is no such agent).
 `{"number"}`. Allows the request, once: nothing it answers allows a later call. Answered `{"request"}` once it
 is decided; the call is then checked again, performed in the background, and its answer stored for
 the agent (`approval.settled`). An `action` is done only while what it `says` still holds (a
-procedure edited meanwhile is not started). `not-found` when there is no such request; `refused` when it is held by an agent, or already
+command edited meanwhile is not written). `not-found` when there is no such request; `refused` when it is held by an agent, or already
 decided.
 
 #### `approval.deny`

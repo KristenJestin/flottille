@@ -1,54 +1,75 @@
-# Procedures
+# Commands
 
-A procedure is a named, multi-step action of a project, run by an agent in a workspace: what a
-slash command holds today (`docs/reference/multi-repo-case.md`, "Pull requests, merges…"). It
-carries the instructions given to the agent, and **grants nothing**: each call its agents make
-(a commit, a push, opening or merging a pull request) goes through the gate's classes and the
-session's mode like any other (`docs/design.md` §7, `docs/tools.md`, "The gate").
+A command is a project's named instructions, sent to a session as `/name`: what a slash command of
+an agent's own client holds (`docs/reference/multi-repo-case.md`, "Pull requests, merges…"). It
+holds a name, a one-line description and its instructions, nothing else: no run, no grant, no
+child. What the session it is sent to does then (a commit, a push, opening or merging a pull
+request) goes through the gate's classes and the session's mode like any other call
+(`docs/design.md` §7, `docs/tools.md`, "The gate").
 
-This document is the mechanism; the procedures themselves (open the pull requests of a workspace,
-merge a stack, close a workspace) are a project's own, which it can start from Flottille's
-templates (below).
+Commands are Flottille's data about a project, kept in the project's file in Flottille's
+configuration, never in the project's repositories. This document is the mechanism; the commands
+themselves (open the pull requests of a workspace, merge a stack, close a workspace) are a
+project's own, which it can start from Flottille's templates (below).
 
 ## The file
 
-A procedure lives in its project's file (`docs/projects.md`), beside the recipe and the commands:
+A command lives in its project's file (`docs/projects.md`), beside the tasks, the setup and the
+skills:
 
 ```toml
-[procedures.open-prs]
+[commands.open-prs]
 description = "Open the pull requests of the workspace"         # one line, not empty
 instructions = """
 Report each repository's state (uncommitted, unpushed, ahead of its base), then push the branch
-and open one pull request per repository with commits."""        # the agent's first message, not empty
+and open one pull request per repository with commits."""        # what the session is sent, not empty
 ```
 
 The name is a project name's kind of word (letters, digits, `.`, `-`, `_`). An unknown key is
 refused with its key, as every key of the file is.
 
-**Former grants.** A procedure used to carry `grants` and `children`. They are read as nothing,
-and said by `project.show` as obsolete; at its start the daemon removes them from the project's
-file, as it removes `[agent_actions]`, keeping everything else the user wrote.
+**Former names.** Until #127 a command was a *procedure*, under `[procedures.<name>]`, and
+`[commands.<name>]` held what are now the project's tasks (`docs/projects.md`, "Tasks"). The
+former keys are still read for one release; at its start the daemon renames them in the file
+(a `[commands.<name>]` with a `line` goes to `[tasks.<name>]`, then `[procedures.<name>]` becomes
+`[commands.<name>]`), keeping every comment and everything else the user wrote, and replaces the
+file at once. A name found under both a former key and its new one is refused, with both keys
+named, and left where they are. A procedure's former `grants` and `children` are read as nothing
+and removed at the same start, as `[agent_actions]` is. A procedure an agent asked to start that
+the user had not answered yet is refused at the daemon's first start of this version, and the agent
+told: "procedures were replaced by commands; start it again with /name".
 
-## A run
+## Sending one
 
-`flottille procedure run <project> <name> --workspace <workspace>` shows the procedure and asks
-for a yes on the standard input (`--yes` for scripts; no answer is a refusal): nothing starts
-before. Once confirmed, a root agent starts in the workspace, in Auto as every new session, its
-first message the procedure's: what it runs, the workspace's repositories by dependency level
-(each with its base and its remote, the levels read from the project's `depends_on`: a
-repository is one level after the deepest of those it depends on among the workspace's), what
-the project says of its pull requests (below), the workspace's ticket when it is linked to one,
-then its instructions. The run is a session like any other: it shows in the tree, the user writes
-to its root, its requests reach the user, and the user switches its mode as any session's.
+`/name` at the start of a message sends the command: the session's agent gets a short header,
+then the command's instructions, then what the message holds after the name:
 
-In the window, a procedure is run as a slash command was: `/` at the start of a message in a
-session's composer lists the project's procedures, filtered as the user types; picking one shows
-the same confirmation (what it runs, the session's workspace) and Confirm starts the run in that
-workspace. A session in `main` has no workspace to run one in, and a `/word` that names no
-procedure is sent to the agent as text.
+```
+The command open-prs of project shop: Open the pull requests of the workspace
+It runs in workspace login (branch shop/login), whose repositories are, by dependency level:
+- level 1: lib (base main, on origin)
+- level 2: api (base main, on origin), web (base main, on origin)
+A pull request's title follows the project's format: type(TICKET): subject
+---
 
-**The run ends** when its root reports (`report`) or ends (stopped, failed). A root the user
-resumes after it ended (`agent.resume`) does not start its run again: it is an ordinary session.
+Report each repository's state…
+
+and the docs too
+```
+
+The header says the workspace and its repositories by dependency level (each with its base and
+its remote, the levels read from the project's `depends_on`: a repository is one level after the
+deepest of those it depends on among the workspace's), what the project says of its pull requests
+(below) and the workspace's ticket when it is linked to one; a session in `main` gets the command's
+name and description only. A `/word` that names no command is sent as it is written.
+
+It works wherever a message is sent to an agent: the window's composer, `flottille agent send`,
+the message of `agent start` and `agent run`, and an agent's own `agent_send` to its child. Nothing
+starts that the user did not start: a command is a message, sent to a session that exists.
+
+In the window, `/` at the start of a message in a session's composer lists the project's commands,
+filtered as the user types; picking one puts `/name ` in the field, for the user to add what it is
+about, and Enter sends it. The commands are edited in the project's Settings, section Commands.
 
 **The environment.** An agent's runs get their environment without forge tokens: a push goes with
 the user's own git credentials (an SSH key, a credential helper that needs no forge command line).
@@ -109,7 +130,7 @@ are made when it is performed: after the judge or the user allowed it.
 
 ## The project's pull requests
 
-What a project's pull requests look like is said once, in its file, for every procedure that
+What a project's pull requests look like is said once, in its file, for every command that
 opens them:
 
 ```toml
@@ -118,16 +139,17 @@ title = "type(TICKET): subject"     # the title's format, in the project's words
 reviewers = ["alice", "bob"]        # the forge's names, asked to review each pull request opened
 ```
 
-The title's format is told to the run's agent, which writes the titles; the reviewers are added by
+The title's format is told to the agent a command is sent to, which writes the titles; the reviewers are added by
 Flottille to every `pr-create`, so that no agent forgets one. A reviewer is one name of the forge
 (no space, no comma, not starting with `-`). Both are read as the file is when they are used.
 
 ## Templates
 
-Flottille ships three procedures, written generically, which a project adopts with
-`flottille procedure add <project> --template <template> [<name>]`: written into its file as they
-are, under the template's name unless another is given, they are the project's own from then on,
-to edit like any other (its instructions are a multi-line string). They are what
+Flottille ships three commands, written generically, which a project adopts with
+`flottille command add <project> --template <template> [<name>]` or from its Settings in the
+window: written into its file as they are, under the template's name unless another is given,
+they are the project's own from then on, to edit like any other (its instructions are a
+multi-line string). They are what
 `docs/reference/multi-repo-case.md` runs by hand with slash commands. Their agents use Flottille's
 tools only (`forge_read`, `forge_write`, `workspace_remove`, git lines through `commands_run`),
 never a forge's command line, so they work on every forge Flottille writes to.
@@ -142,30 +164,28 @@ What each call of theirs needs is the session's mode: in Ask, each push and pull
 card; in Auto, the judge allows what the user asked for and asks the rest. A push with a lease
 (`merge-stack`) is base: it always comes to the user.
 
-A run never waits inside a tool call: when a template's agent must wait for something outside (a
-pipeline, a release), it tells the user with `ask_user` what it waits for and ends its turn, and
-goes on when it is written to.
+An agent never waits inside a tool call: when a template's agent must wait for something outside
+(a pipeline, a release), it tells the user with `ask_user` what it waits for and ends its turn,
+and goes on when it is written to.
 
 The order of the levels is the project's `depends_on`: a repository that must be merged after
 another (an end-to-end harness after the applications it observes) says so there.
 
-## The command line and the protocol
+## The command line, the protocol and the agents
 
 | Command | |
 |---|---|
-| `flottille procedure list <project>` | The procedures. |
-| `flottille procedure show <project> <name>` | One procedure: its description, its instructions. |
-| `flottille procedure add <project> <name> --description <d> (--instructions <t> \| --instructions-file <f>)` | Adds it to the project's file. |
-| `flottille procedure add <project> [<name>] --template <template>` | Adds one of Flottille's templates, as it is. |
-| `flottille procedure edit <project> <name> [--description] [--instructions \| --instructions-file]` | Changes what is given. |
-| `flottille procedure remove <project> <name>` | Removes it from the file. |
-| `flottille procedure run <project> <name> --workspace <w> [--yes]` | Shows it, asks, starts the run. |
+| `flottille command list <project>` | The commands. |
+| `flottille command show <project> <name>` | One command: its description, its instructions. |
+| `flottille command add <project> <name> --description <d> (--instructions <t> \| --instructions-file <f>)` | Adds it to the project's file. |
+| `flottille command add <project> [<name>] --template <template>` | Adds one of Flottille's templates, as it is. |
+| `flottille command edit <project> <name> [--description] [--instructions \| --instructions-file]` | Changes what is given. |
+| `flottille command remove <project> <name>` | Removes it from the file. |
 
-The daemon writes the project's file where it stands: what the user wrote around a procedure
-(comments, order) stays. The methods are `procedure.list`, `procedure.show`, `procedure.add`,
-`procedure.edit`, `procedure.remove`, then `procedure.run` (shows, starts nothing) and
-`procedure.start` (starts) (`docs/protocol.md`); a run emits
-`procedure.started` and `procedure.ended` (`docs/events.md`).
+The daemon writes the project's file where it stands: what the user wrote around a command
+(comments, order) stays. The methods are `command.list`, `command.show`, `command.add`,
+`command.edit` and `command.remove` (`docs/protocol.md`). A root agent does the same with its
+`commands` tool (`docs/tools.md`, "The project"): its reads run at once, its writes are to judge.
 
 ## Tests
 

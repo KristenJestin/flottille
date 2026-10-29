@@ -1,6 +1,6 @@
 //! Forges (`docs/forges.md`): what the forge of each repository of a workspace says of the
 //! workspace's branch, its pull request and their checks, and the writes of `forge_write` that a
-//! procedure grants (`docs/procedures.md`). Through the user's own command line (`gh` for
+//! what a session sends (`docs/commands.md`). Through the user's own command line (`gh` for
 //! GitHub, `bkt` for Bitbucket), spawned without a shell, with the user's own sign-in: Flottille
 //! never reads, keeps nor prints a token, and of `gh auth status` it reads the exit code alone.
 //!
@@ -228,12 +228,12 @@ pub async fn urls_of(folder: &Path, remote: &str) -> Vec<String> {
 pub(crate) use flottille_core::declared::without_credentials;
 
 /// Refuses unless the repository's remote leads where it led when the workspace was created: an
-/// agent never changes it, and a push or a forge write that a procedure grants goes nowhere else.
+/// agent never changes it, and a push or a forge write an agent makes goes nowhere else.
 pub async fn remote_kept(folder: &Path, base: &Base) -> Result<(), String> {
     if base.urls.is_empty() {
         return Err(format!(
             "refused: this workspace was created before Flottille recorded where its remote {} \
-             leads, and a procedure's push or forge write goes only where that is known: say \
+             leads, and an agent's push or forge write goes only where that is known: say \
              what should be done, and the user does it",
             base.remote
         ));
@@ -932,7 +932,7 @@ fn blocks(checks: &[(String, &'static str)], review: Option<&str>) -> Option<Str
     (!blocks.is_empty()).then(|| blocks.join(", "))
 }
 
-/// `forge_write`, once the gate let it through by a procedure's grant: one write to the forge of
+/// `forge_write`, once the gate let it through: one write to the forge of
 /// one repository of the agent's own workspace, for the workspace's branch only, through the
 /// user's own `gh`.
 pub async fn forge_write(daemon: &Daemon, place: &Place, args: Value) -> Outcome {

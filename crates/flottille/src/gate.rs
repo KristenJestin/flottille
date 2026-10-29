@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use flottille_core::approval::Kind;
-use flottille_core::project::CatalogueCommand;
+use flottille_core::project::Task;
 use serde_json::Value;
 
 use crate::mcp::Grant;
@@ -27,7 +27,7 @@ pub struct Call<'a> {
     /// call that names none, or names one that cannot be read (the tool refuses it).
     pub paths: &'a [Resolved],
     /// The catalogue command a run names, with its name.
-    pub command: Option<(&'a str, &'a CatalogueCommand)>,
+    pub command: Option<(&'a str, &'a Task)>,
     /// The project's never list; `None` when the project's configuration cannot be read.
     pub never: Option<&'a [Vec<String>]>,
     /// Flottille's own folders (its data, configuration, state): sensitive places.
@@ -2100,7 +2100,7 @@ mod tests {
         own: Vec<PathBuf>,
         grant: Grant,
         never: Vec<Vec<String>>,
-        commands: BTreeMap<String, CatalogueCommand>,
+        commands: BTreeMap<String, Task>,
         pushed: bool,
         /// Where the system's programs are: a folder beside the project, every known program in it.
         search: std::ffi::OsString,
@@ -2172,8 +2172,8 @@ mod tests {
             self
         }
 
-        fn command(mut self, name: &str, line: &str, set: impl Fn(&mut CatalogueCommand)) -> Self {
-            let mut command = CatalogueCommand {
+        fn command(mut self, name: &str, line: &str, set: impl Fn(&mut Task)) -> Self {
+            let mut command = Task {
                 line: line.into(),
                 repository: None,
                 serve: false,
@@ -2447,27 +2447,37 @@ mod tests {
     #[test]
     fn to_judge_the_window_actions_of_an_agent_are_judged_and_a_tracker_change_is_base() {
         let fixture = Fixture::main();
-        let verdict = fixture.judge(
-            "procedure",
-            json!({"action": "start", "name": "ship", "workspace": "w"}),
-            Some(&fixture.never),
-        );
-        assert!(to_judge(&verdict), "{verdict:?}");
-        assert!(matches!(verdict, Verdict::Ask(ask) if ask.kind == Kind::Action));
+        for (tool, write) in [
+            (
+                "skills",
+                json!({"action": "add", "name": "style", "description": "d", "text": "t"}),
+            ),
+            ("skills", json!({"action": "remove", "name": "style"})),
+            (
+                "commands",
+                json!({"action": "edit", "name": "ship", "instructions": "Push."}),
+            ),
+        ] {
+            let verdict = fixture.judge(tool, write, Some(&fixture.never));
+            assert!(to_judge(&verdict), "{tool}: {verdict:?}");
+            assert!(matches!(verdict, Verdict::Ask(ask) if ask.kind == Kind::Action));
+        }
         let tracker = fixture.judge(
             "project",
             json!({"action": "set_settings", "tracker": null}),
             Some(&fixture.never),
         );
         assert!(base_class(&tracker), "{tracker:?}");
-        for reading in [
-            json!({"action": "list"}),
-            json!({"action": "show", "name": "ship"}),
-        ] {
-            assert_eq!(
-                fixture.judge("procedure", reading, Some(&fixture.never)),
-                Verdict::Allow
-            );
+        for tool in ["skills", "commands"] {
+            for reading in [
+                json!({"action": "list"}),
+                json!({"action": "show", "name": "ship"}),
+            ] {
+                assert_eq!(
+                    fixture.judge(tool, reading, Some(&fixture.never)),
+                    Verdict::Allow
+                );
+            }
         }
     }
 

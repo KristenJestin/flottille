@@ -90,7 +90,7 @@ struct Going {
     /// Whether the call that started it still waits for its end, answered with it running, or
     /// is over: only a run that outlived its call wakes the agent when it ends.
     phase: Mutex<Phase>,
-    /// The user stopped it (`command.stop`), which the agent is told.
+    /// The user stopped it (`run.stop`), which the agent is told.
     stopped_by_user: AtomicBool,
 }
 
@@ -145,13 +145,13 @@ pub fn commands_list(daemon: &Daemon, place: &Place, args: Value) -> Outcome {
         Ok(project) => project,
         Err(failure) => return Outcome::Failed(failure.message),
     };
-    if project.commands.is_empty() {
+    if project.tasks.is_empty() {
         return Outcome::Done(
             "the project's catalogue is empty: run a line with commands_run {\"line\": …}".into(),
         );
     }
     let lines: Vec<String> = project
-        .commands
+        .tasks
         .iter()
         .map(|(name, command)| {
             let mut notes = Vec::new();
@@ -214,7 +214,7 @@ fn request(daemon: &Daemon, place: &Place, args: RunArguments) -> Result<Request
                 Ok(project) => project,
                 Err(failure) => return Err(Outcome::Failed(failure.message)),
             };
-            let Some(command) = project.commands.get(&name) else {
+            let Some(command) = project.tasks.get(&name) else {
                 return Err(Outcome::Refused(format!(
                     "refused: the catalogue has no command {name}: list them with commands_list"
                 )));

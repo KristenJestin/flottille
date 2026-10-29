@@ -20,8 +20,6 @@ use gpui_kit::{
 use crate::actions::{Changes, Command, Details};
 use crate::composer::{Choice, Composer, agents_label};
 use crate::model::{Place, Preparation, ago};
-use crate::procedures::ProceduresSection;
-use crate::references::ReferencesSection;
 use crate::session::pull_row;
 use crate::session_link::PullRequest;
 use crate::shell::{Selection, Shell, now_ms};
@@ -84,8 +82,6 @@ pub struct ProjectPage {
     places: Vec<Place>,
     composer: Entity<Composer>,
     new_workspace: Entity<NewWorkspace>,
-    procedures: Entity<ProceduresSection>,
-    references: Entity<ReferencesSection>,
     narrow: bool,
     /// Nothing but `main`, and no session in it: the page says what to start with, instead of a
     /// section of one bare card. Kept here for the same reason as `places`.
@@ -100,16 +96,8 @@ impl ProjectPage {
         name: String,
         composer: Entity<Composer>,
         new_workspace: Entity<NewWorkspace>,
-        cx: &mut Context<Self>,
+        _: &mut Context<Self>,
     ) -> Self {
-        let procedures = cx.new(|_| ProceduresSection::new(shell.clone(), name.clone()));
-        let references = cx.new(|_| ReferencesSection::new(shell.clone(), name.clone()));
-        // Asked once the shell, which is making this page, is no longer being updated.
-        let (listing, referencing) = (procedures.clone(), references.clone());
-        cx.defer(move |cx| {
-            listing.update(cx, |section, cx| section.read(cx));
-            referencing.update(cx, |section, cx| section.read(cx));
-        });
         Self {
             shell,
             name,
@@ -120,8 +108,6 @@ impl ProjectPage {
             places: Vec::new(),
             composer,
             new_workspace,
-            procedures,
-            references,
             narrow: false,
             empty: false,
             renders: 0,
@@ -131,14 +117,6 @@ impl ProjectPage {
     /// Whether the page shows its empty state in place of "Where the work happens".
     pub fn is_empty(&self) -> bool {
         self.empty
-    }
-
-    pub fn procedures(&self) -> &Entity<ProceduresSection> {
-        &self.procedures
-    }
-
-    pub fn references(&self) -> &Entity<ReferencesSection> {
-        &self.references
     }
 
     pub fn name(&self) -> &str {
@@ -178,15 +156,6 @@ impl ProjectPage {
             .collect()
     }
 
-    /// Whether the daemon has answered both lists the page asks for as it opens, with a list or
-    /// with a problem: an answer redraws the page, so the tests wait for it as they do for `chips`.
-    pub fn has_read(&self, cx: &gpui_kit::App) -> bool {
-        let procedures = self.procedures.read(cx);
-        let references = self.references.read(cx);
-        (procedures.procedures().is_some() || procedures.problem().is_some())
-            && (references.references().is_some() || references.problem().is_some())
-    }
-
     pub fn set_narrow(&mut self, narrow: bool, cx: &mut Context<Self>) {
         if self.narrow != narrow {
             self.narrow = narrow;
@@ -197,8 +166,6 @@ impl ProjectPage {
     /// Brings the page up to `data`; a card whose data did not change is not drawn again.
     pub fn set(&mut self, data: ProjectData, cx: &mut Context<Self>) {
         let mut changed = self.folder != data.folder || self.repositories != data.repositories;
-        self.references
-            .update(cx, |section, _| section.set_folder(&data.folder));
         self.folder = data.folder;
         self.repositories = data.repositories;
         let mut old = std::mem::take(&mut self.cards);
@@ -484,9 +451,7 @@ impl Render for ProjectPage {
                                 ),
                         ))
                         .child(grid)
-                    })
-                    .child(self.procedures.clone())
-                    .child(self.references.clone()),
+                    }),
             )
     }
 }

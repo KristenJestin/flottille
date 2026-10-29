@@ -321,9 +321,9 @@ fn show_text(project: &Value) -> String {
             ));
         }
     }
-    if let Some(commands) = project["commands"].as_object() {
-        shown.push_str("Commands:\n");
-        for (name, command) in commands {
+    if let Some(tasks) = project["tasks"].as_object() {
+        shown.push_str("Tasks:\n");
+        for (name, command) in tasks {
             let flags: Vec<String> = ["serve", "check", "read_only", "ask_before_running"]
                 .into_iter()
                 .filter(|flag| command[flag] == true)
