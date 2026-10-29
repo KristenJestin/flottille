@@ -300,7 +300,7 @@ fn the_daemon_s_start_removes_grants_families_and_always_from_the_project_s_file
     let user = User::with_fake_agent();
     project(&user);
     assert!(user.run(&["daemon", "stop"]).status.success());
-    // The file as the release before wrote it: `ship` a procedure, `ls` in the catalogue.
+    // The file as the release before wrote it: `ship` a procedure, `ls` a task.
     let old = file(&user).replace("[commands.ship]", "[procedures.ship]")
         + "\n[agent_actions]\nprocedures = \"allow\"\n\
            \n[procedures.ship.grants]\npush = \"allow\"\n\
@@ -418,9 +418,9 @@ fn in_main_a_known_read_runs_at_once_and_a_write_is_held_then_run_once() {
     let (_, mcp) = root(&user, None);
     let before = file(&user);
 
-    let read = done(mcp.call("commands_run", json!({"line": "cat README.md"})));
+    let read = done(mcp.call("run", json!({"line": "cat README.md"})));
     assert!(read.contains("exited with code 0"), "{read}");
-    let number = held(mcp.call("commands_run", json!({"line": "touch notes.txt"})));
+    let number = held(mcp.call("run", json!({"line": "touch notes.txt"})));
     let asked = request(&user, number);
     assert_eq!(asked["kind"], "call");
     assert_eq!(asked["class"], "judge");
@@ -433,7 +433,7 @@ fn in_main_a_known_read_runs_at_once_and_a_write_is_held_then_run_once() {
     assert!(folder.join("notes.txt").exists());
     assert_eq!(file(&user), before, "nothing is added to the tasks");
     // Once: the next run asks again.
-    held(mcp.call("commands_run", json!({"line": "touch notes.txt"})));
+    held(mcp.call("run", json!({"line": "touch notes.txt"})));
 }
 
 #[test]
@@ -450,7 +450,7 @@ fn in_main_shell_syntax_is_still_refused_and_a_never_command_is_base() {
     let (_, mcp) = root(&user, None);
 
     // Refused in the words a workspace's run is refused in.
-    let shell = mcp.call("commands_run", json!({"line": "cat README.md | wc -l"}));
+    let shell = mcp.call("run", json!({"line": "cat README.md | wc -l"}));
     assert!(shell.error, "{}", shell.text);
     assert!(shell.text.contains("is shell syntax"), "{}", shell.text);
     assert!(
@@ -459,9 +459,9 @@ fn in_main_shell_syntax_is_still_refused_and_a_never_command_is_base() {
             .unwrap()
             .is_empty()
     );
-    let never = held(mcp.call("commands_run", json!({"line": "deploy now"})));
+    let never = held(mcp.call("run", json!({"line": "deploy now"})));
     assert_eq!(request(&user, never)["class"], "base");
-    let push = held(mcp.call("commands_run", json!({"line": "git push origin main"})));
+    let push = held(mcp.call("run", json!({"line": "git push origin main"})));
     assert_eq!(request(&user, push)["class"], "judge");
 }
 
@@ -529,7 +529,7 @@ fn a_command_whose_instructions_changed_after_it_was_asked_is_not_written() {
 }
 
 #[test]
-fn a_line_equal_to_a_catalogue_command_is_that_command_and_is_judged_in_main() {
+fn a_line_equal_to_a_task_is_that_task_and_is_judged_in_main() {
     let user = User::with_fake_agent();
     project(&user);
     let path = user.project_file("app");
@@ -547,17 +547,17 @@ fn a_line_equal_to_a_catalogue_command_is_that_command_and_is_judged_in_main() {
     let before = file(&user);
 
     // In the project folder, the user's own checkout: judged, as that command.
-    let build = held(mcp.call("commands_run", json!({"line": "touch  built.txt"})));
+    let build = held(mcp.call("run", json!({"line": "touch  built.txt"})));
     let asked = request(&user, build);
     assert_eq!(asked["class"], "judge");
     assert!(
         asked["reasons"]
             .to_string()
-            .contains("the catalogue command build runs in the project folder"),
+            .contains("the task build runs in the project folder"),
         "{asked}"
     );
     // Marked to ask: held as that command.
-    let status = held(mcp.call("commands_run", json!({"line": "git  status"})));
+    let status = held(mcp.call("run", json!({"line": "git  status"})));
     assert!(
         request(&user, status)["reasons"]
             .to_string()
@@ -583,7 +583,7 @@ fn in_main_a_line_that_discards_the_user_s_work_is_base() {
         "git worktree remove ../w",
         "git branch -D old",
     ] {
-        let number = held(mcp.call("commands_run", json!({"line": line})));
+        let number = held(mcp.call("run", json!({"line": line})));
         let asked = request(&user, number);
         assert_eq!(asked["class"], "base", "{line}");
         assert!(
@@ -600,7 +600,7 @@ fn a_sensitive_line_is_base_and_allowed_only_once() {
     let user = User::with_fake_agent();
     project(&user);
     let (_, mcp) = root(&user, None);
-    let number = held(mcp.call("commands_run", json!({"line": "cat .env"})));
+    let number = held(mcp.call("run", json!({"line": "cat .env"})));
     assert_eq!(request(&user, number)["class"], "base");
 
     let error = cli(&user, &["approve", &number.to_string(), "--always"]).unwrap_err();
@@ -629,7 +629,7 @@ fn an_agent_can_never_change_its_mode_nor_choose_the_judge() {
     // Nor through a command line: the daemon's own command is refused, and Flottille's own
     // folder is base, which only the user allows.
     let said = refused(mcp.call(
-        "commands_run",
+        "run",
         json!({"line": format!("flottille agent mode {id} ask")}),
     ));
     assert!(said.contains("flottille drives the daemon"), "{said}");

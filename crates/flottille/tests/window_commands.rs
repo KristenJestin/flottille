@@ -45,14 +45,14 @@ fn user() -> User {
     let user = User::with_fake_agent();
     user.fake_script(json!({"turns": [
         {"when": "show colours", "do": [
-            {"mcp": {"tool": "commands_run", "arguments": {"command": "colours"}}}]},
+            {"mcp": {"tool": "run", "arguments": {"task": "colours"}}}]},
         {"when": "run fails", "do": [
-            {"mcp": {"tool": "commands_run", "arguments": {"command": "fails", "timeout": 1}}}]},
+            {"mcp": {"tool": "run", "arguments": {"task": "fails", "timeout": 1}}}]},
         {"when": "run slow", "do": [
-            {"mcp": {"tool": "commands_run", "arguments": {"command": "fails", "timeout": 1}}},
+            {"mcp": {"tool": "run", "arguments": {"task": "fails", "timeout": 1}}},
             {"say": "The slow check is running."}]},
         {"when": "run server", "do": [
-            {"mcp": {"tool": "commands_run", "arguments": {"command": "server"}}}]}
+            {"mcp": {"tool": "run", "arguments": {"task": "server"}}}]}
     ]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     user
@@ -128,9 +128,9 @@ fn ok(answer: Answer) -> String {
     answer.text
 }
 
-/// Starts a catalogue command and leaves the call after a second: its run's id.
+/// Starts a task and leaves the call after a second: its run's id.
 fn start(mcp: &Mcp, command: &str) -> String {
-    let text = ok(mcp.call("commands_run", json!({"command": command, "timeout": 1})));
+    let text = ok(mcp.call("run", json!({"task": command, "timeout": 1})));
     text.strip_prefix("run ")
         .and_then(|rest| rest.split(':').next())
         .unwrap_or_else(|| panic!("no run in {text}"))
@@ -260,7 +260,7 @@ fn the_rail_lists_a_running_command_with_its_line_who_started_it_and_its_last_li
     until(&shell, cx, "the last line moves on", |cx| {
         label(cx, &format!("command-last-{run}")).is_some_and(|line| line.starts_with("tick"))
     });
-    ok(mcp.call("commands_status", json!({"run": run, "action": "stop"})));
+    ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
 }
 
 #[gpui_kit::test]
@@ -347,7 +347,7 @@ fn the_tree_shows_an_icon_on_the_project_and_the_session_while_a_command_runs_an
         "A command is running"
     );
 
-    ok(mcp.call("commands_status", json!({"run": run, "action": "stop"})));
+    ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
     until(&shell, cx, "the icons go", |cx| {
         !has(cx, project_commands_id("app")) && !has(cx, session_commands_id(&lead))
     });
@@ -398,7 +398,7 @@ fn clicking_a_command_opens_its_output_and_follows_it_live(cx: &mut TestAppConte
     until(&shell, cx, "the panel closes", |cx| {
         panel.read_with(cx, |panel, _| panel.run().is_none())
     });
-    ok(mcp.call("commands_status", json!({"run": run, "action": "stop"})));
+    ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
 }
 
 fn card_of(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Option<(usize, Block)> {
@@ -472,10 +472,7 @@ fn a_command_that_came_back_through_an_approval_is_the_same_card_with_who_allowe
     std::fs::create_dir_all(script.parent().unwrap()).unwrap();
     std::fs::write(&script, SCRIPTS[2].1).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let held = mcp.call(
-        "commands_run",
-        json!({"line": script.display().to_string()}),
-    );
+    let held = mcp.call("run", json!({"line": script.display().to_string()}));
     let number: u64 = held
         .text
         .strip_prefix("Waiting for the user's approval, request #")
@@ -579,7 +576,7 @@ fn a_command_ended_delivery_is_never_shown_as_text_when_its_card_is_on_screen(
         blocks.iter().all(|block| !matches!(
             block,
             Block::Notice { kind, text }
-                if kind.contains("command") || text.contains("commands_status")
+                if kind.contains("command") || text.contains("run_status")
                     || text.contains("Your command")
         )),
         "no text, no line: the card says it. {blocks:?}"
@@ -622,7 +619,7 @@ fn a_command_ended_whose_card_is_not_on_screen_is_one_quiet_line(cx: &mut TestAp
     assert!(
         blocks_of(&page, cx).iter().all(|block| !matches!(
             block,
-            Block::Notice { text, .. } if text.contains("commands_status")
+            Block::Notice { text, .. } if text.contains("run_status")
         )),
         "not the delivery's own words"
     );
@@ -647,10 +644,7 @@ fn a_card_whose_command_the_agent_stopped_itself_shows_it_stopped(cx: &mut TestA
     };
 
     // No delivery tells the agent its own stop: the list of commands does.
-    ok(mcp.call(
-        "commands_status",
-        json!({"run": card.run, "action": "stop"}),
-    ));
+    ok(mcp.call("run_status", json!({"run": card.run, "action": "stop"})));
     until(&shell, cx, "the card shows the stop", |cx| {
         ending_of_card(&page, cx) == Some(Ending::Stopped)
     });
@@ -672,10 +666,7 @@ fn the_old_approval_line_is_dropped_when_the_card_follows(cx: &mut TestAppContex
     std::fs::create_dir_all(script.parent().unwrap()).unwrap();
     std::fs::write(&script, SCRIPTS[2].1).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let held = mcp.call(
-        "commands_run",
-        json!({"line": script.display().to_string()}),
-    );
+    let held = mcp.call("run", json!({"line": script.display().to_string()}));
     let number: u64 = held
         .text
         .strip_prefix("Waiting for the user's approval, request #")
@@ -778,8 +769,5 @@ fn a_running_card_ticks_and_shows_the_last_lines_of_its_output(cx: &mut TestAppC
         label(cx, &format!("command-line-{at}-{last}")).is_some_and(|l| l.starts_with("tick")),
         "the card draws the tail"
     );
-    ok(mcp.call(
-        "commands_status",
-        json!({"run": card.run, "action": "stop"}),
-    ));
+    ok(mcp.call("run_status", json!({"run": card.run, "action": "stop"})));
 }

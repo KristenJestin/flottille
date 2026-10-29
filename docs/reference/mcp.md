@@ -100,7 +100,7 @@ and the 2026 practice around it:
    for input mid-call; what needs the user is a delivery, later. **MCP tasks** (the
    `io.modelcontextprotocol/tasks` extension, which Claude Code is starting to support) are not
    used: a call that outlasts its wait answers with a run id and is read again, which is what
-   `commands_run` and `commands_status` do. **`anthropic/requiresUserInteraction` is never set**:
+   `run` and `run_status` do. **`anthropic/requiresUserInteraction` is never set**:
    in a non-interactive session with a permission prompt tool, which is how Flottille drives
    `claude`, it turns every call of the tool into a deny.
 4. **Every tool has `title`, a short description following §3, and annotations**:
@@ -145,10 +145,13 @@ and the 2026 practice around it:
      the session's mode (`docs/tools.md`, "The gate"). In `main` they name the workspace they act
      on (`workspace`).
 
-   - only a root gets `skills`, `commands` and `project`, the project's skills, commands and
-     settings (`docs/tools.md`, "The project"): a child does its brief.
+   - only a root gets `skills`, `commands`, `setup` and `project`, the project's skills, commands,
+     setup and settings, and writes its tasks (`docs/tools.md`, "The project"): a child does its
+     brief. Every agent gets `tasks`, `run` and `run_status`, the names `commands_list`,
+     `commands_run` and `commands_status` had until #131, which are still served under them for
+     one release.
 
-   A root lead has 20 tools, a leaf worker 12; two more each when the project's repositories
+   A root lead has 21 tools, a leaf worker 12; two more each when the project's repositories
    declare a forge (`forge_read`, `forge_write`), one more when it declares a tracker
    (`ticket_read`).
 10. **The idempotency key** of a call is read from the call's `_meta` (`claudecode/toolUseId` for

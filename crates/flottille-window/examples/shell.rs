@@ -3,7 +3,7 @@
 //! compositor.
 //!
 //! ```text
-//! cargo run -p flottille-window --example shell [--features frames] -- [--project <name>] [--add-project <folder>] [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace] [--add-command] [--edit-command <name>] [--add-skill] [--edit-skill <name>] [--slash <text>] [--attach <picture>] [--end] [--ended <project>] [--project-settings <project>] [--size <w>x<h>]
+//! cargo run -p flottille-window --example shell [--features frames] -- [--project <name>] [--add-project <folder>] [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace] [--add-command] [--edit-command <name>] [--add-skill] [--edit-skill <name>] [--edit-task <name>] [--edit-setup <number>] [--run-task <name>] [--slash <text>] [--attach <picture>] [--end] [--ended <project>] [--project-settings <project>] [--size <w>x<h>]
 //! ```
 //!
 //! `--project` opens a project's page, `--add-project` the "Add a project" modal with the
@@ -12,7 +12,8 @@
 //! three columns), `--settings` the settings page, `--menu` one of the project page composer's
 //! pickers, `--new-workspace` the project page's new-workspace modal, `--add-command`,
 //! `--edit-command`, `--add-skill` and `--edit-skill` the modals of the Commands and Skills
-//! sections, `--slash` types a text in the open session's composer (its `/` list), `--attach` attaches a picture file to it, `--end` opens the open
+//! sections, `--edit-task` and `--edit-setup` those of the Tasks and Setup sections, `--run-task`
+//! runs a task of the open project's page and opens its output, `--slash` types a text in the open session's composer (its `/` list), `--attach` attaches a picture file to it, `--end` opens the open
 //! session's "End the session?" confirmation, `--ended` unfolds a project's "Ended" group of the
 //! left tree, `--project-settings` a project's settings page, `--size` the window's size. The daemon is found on
 //! `$XDG_RUNTIME_DIR/flottille/daemon.sock`; it is not started.
@@ -37,6 +38,7 @@ fn main() {
     let (mut add_command, mut add_skill) = (false, false);
     let (mut edit_command, mut edit_skill, mut slash, mut attach) = (None, None, None, None);
     let (mut end, mut ended) = (false, None);
+    let (mut edit_task, mut edit_setup, mut run_task) = (None, None, None);
     let mut dimensions = (1280., 800.);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -54,6 +56,12 @@ fn main() {
             "--add-skill" => add_skill = true,
             "--edit-command" => edit_command = Some(args.next().expect("a command")),
             "--edit-skill" => edit_skill = Some(args.next().expect("a skill")),
+            "--edit-task" => edit_task = Some(args.next().expect("a task")),
+            "--edit-setup" => {
+                let number = args.next().expect("a step's number");
+                edit_setup = Some(number.parse::<usize>().expect("a number"));
+            }
+            "--run-task" => run_task = Some(args.next().expect("a task")),
             "--slash" => slash = Some(args.next().expect("what the reply's field holds")),
             "--attach" => attach = Some(args.next().expect("a picture file")),
             "--end" => end = true,
@@ -160,7 +168,13 @@ fn main() {
                 })
                 .ok();
             // A section of the project's settings, once the page is drawn and has read them.
-            if add_command || add_skill || edit_command.is_some() || edit_skill.is_some() {
+            if add_command
+                || add_skill
+                || edit_command.is_some()
+                || edit_skill.is_some()
+                || edit_task.is_some()
+                || edit_setup.is_some()
+            {
                 cx.background_executor()
                     .timer(Duration::from_millis(1000))
                     .await;
@@ -186,8 +200,47 @@ fn main() {
                         if let Some(name) = &edit_skill {
                             skills.update(cx, |s, cx| s.edit(name, cx));
                         }
+                        if let Some(name) = &edit_task {
+                            let tasks = page.read(cx).tasks().clone();
+                            let info = tasks.read(cx).tasks().and_then(|listed| {
+                                listed.iter().find(|t| &t.name == name).cloned()
+                            });
+                            tasks.update(cx, |s, cx| s.open(info.as_ref(), window, cx));
+                        }
+                        if let Some(number) = edit_setup {
+                            let setup = page.read(cx).setup().clone();
+                            setup.update(cx, |s, cx| s.open(Some(number), window, cx));
+                        }
                     })
                     .ok();
+            }
+            // A task run from the project's page, then its output opened once it is listed.
+            if let Some(name) = run_task {
+                cx.background_executor()
+                    .timer(Duration::from_millis(1000))
+                    .await;
+                let tasks = window
+                    .update(cx, |_, _, cx| {
+                        let page = shell.read(cx).main().read(cx).project_page().cloned()?;
+                        let tasks = page.read(cx).tasks().clone();
+                        tasks.update(cx, |t, cx| t.run(&name, cx));
+                        Some(tasks)
+                    })
+                    .ok()
+                    .flatten();
+                cx.background_executor()
+                    .timer(Duration::from_millis(1500))
+                    .await;
+                if let Some(tasks) = tasks {
+                    window
+                        .update(cx, |_, _, cx| {
+                            let run = tasks.read(cx).commands().read(cx).rows().first().cloned();
+                            if let Some(row) = run {
+                                tasks.update(cx, |t, cx| t.open_command(&row.run, cx));
+                            }
+                        })
+                        .ok();
+                }
             }
             // A sub-agent read, or the end asked, once the page knows its tree.
             if agent.is_some() || end || ended.is_some() {

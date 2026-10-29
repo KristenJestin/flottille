@@ -31,8 +31,10 @@ use crate::providers;
 use crate::rules;
 use crate::run_methods;
 use crate::runs;
+use crate::setup;
 use crate::skills;
 use crate::sweep;
+use crate::tasks;
 use crate::tickets;
 use crate::workspaces;
 
@@ -551,6 +553,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                 "project.settings",
                 "project.set_settings",
                 "project.ticket",
+                "task.run",
             ]
             .contains(&request.method.as_str())
         {
@@ -574,6 +577,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     projects::set_settings(daemon, request.params).await
                 } else if request.method == "project.ticket" {
                     tickets::preview(daemon, request.params).await
+                } else if request.method == "task.run" {
+                    tasks::run(&daemon, request.params)
                 } else {
                     workspaces::call(daemon, &request.method, request.params).await
                 };
@@ -670,6 +675,20 @@ fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) 
         ),
         method if method.starts_with("command.") => (
             match commands::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+            },
+            None,
+        ),
+        method if method.starts_with("task.") => (
+            match tasks::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+            },
+            None,
+        ),
+        method if method.starts_with("setup.") => (
+            match setup::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => Message::error(Some(id), failure.code, failure.message),
             },

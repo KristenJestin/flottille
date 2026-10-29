@@ -21,8 +21,10 @@ pub mod runs;
 pub mod session;
 pub mod session_link;
 pub mod settings;
+pub mod setup;
 pub mod shell;
 pub mod skills;
+pub mod tasks;
 pub mod tree;
 
 use flottille_ui::Icons;

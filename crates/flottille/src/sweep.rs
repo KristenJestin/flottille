@@ -102,7 +102,7 @@ fn stuck(daemon: &Arc<Daemon>, agent: &flottille_core::agent::Agent, now: u64) {
         .read(Store::running_runs)
         .unwrap_or_default()
         .iter()
-        .any(|run| run.agent == agent.id);
+        .any(|run| run.agent.as_deref() == Some(agent.id.as_str()));
     let ended = daemon
         .read(|store| store.last_run_end(&agent.id))
         .ok()

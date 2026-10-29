@@ -2221,7 +2221,7 @@ fn a_base_card_in_auto_is_distinct_and_says_why_it_always_comes_back(cx: &mut Te
     let user = team_user();
     let (_lead, mcp, shell, cx) = lead_in_main(&user, cx);
 
-    let number = held_number(mcp.call("commands_run", json!({"line": "cat .env"})));
+    let number = held_number(mcp.call("run", json!({"line": "cat .env"})));
     let card = card_for(&shell, number, cx);
 
     assert!(card.base);
@@ -7102,4 +7102,281 @@ fn the_rules_editor_says_when_rules_edited_by_hand_were_cut(cx: &mut TestAppCont
         std::fs::read_to_string(user.path("config/flottille/rules.md")).unwrap(),
         "x".repeat(8_000)
     );
+}
+
+// ── Tasks and setup in the project's settings, Run on its page (#131) ─────────────────────────
+
+fn tasks_section(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+) -> Entity<flottille_window::tasks::TasksSection> {
+    settings_of(shell, cx)
+        .expect("the project's settings")
+        .read_with(cx, |page, _| page.tasks().clone())
+}
+
+fn setup_section(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+) -> Entity<flottille_window::setup::SetupSection> {
+    settings_of(shell, cx)
+        .expect("the project's settings")
+        .read_with(cx, |page, _| page.setup().clone())
+}
+
+fn tasks_listed(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+) -> Vec<flottille_window::tasks::TaskInfo> {
+    tasks_section(shell, cx).read_with(cx, |s, _| s.tasks().unwrap_or_default().to_vec())
+}
+
+fn steps_listed(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+) -> Vec<flottille_core::project::SetupStep> {
+    setup_section(shell, cx).read_with(cx, |s, _| s.steps().unwrap_or_default().to_vec())
+}
+
+#[gpui_kit::test]
+fn the_project_s_settings_show_skills_commands_tasks_and_setup_above_the_rules(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", cx);
+    until(&shell, cx, "the sections are read", |cx| {
+        settings_of(&shell, cx).is_some_and(|page| page.read_with(cx, |p, cx| p.has_read(cx)))
+    });
+    settle(cx);
+    cx.update(|window, _| {
+        let y = |id: &str| window.find(id.to_owned()).bounds().origin.y;
+        let order = [
+            "add-skill",
+            "add-command",
+            "add-task",
+            "add-setup",
+            "rules-save-atlas",
+        ];
+        for pair in order.windows(2) {
+            assert!(
+                y(pair[0]) < y(pair[1]),
+                "{} comes before {}",
+                pair[0],
+                pair[1]
+            );
+        }
+        assert!(window.find("no-tasks").visible());
+        assert!(window.find("no-setup").visible());
+    });
+}
+
+#[gpui_kit::test]
+fn a_task_is_added_edited_and_removed_from_the_tasks_section(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", cx);
+    let section = tasks_section(&shell, cx);
+
+    cx.update(|window, cx| window.click("add-task", cx));
+    settle(cx);
+    let (name, line) = section.read_with(cx, |s, _| {
+        (
+            s.name_field().unwrap().clone(),
+            s.line_field().unwrap().clone(),
+        )
+    });
+    cx.update(|window, cx| {
+        name.update(cx, |f, cx| f.set_value("test", window, cx));
+        line.update(cx, |f, cx| f.set_value("cargo test | tee log", window, cx));
+    });
+    cx.update(|window, cx| window.click("task-flag-check", cx));
+    cx.update(|window, cx| window.click("save-task", cx));
+    // Shell syntax: the daemon refuses, the form says why and stays open.
+    until(&shell, cx, "the refusal is shown", |cx| {
+        section.read_with(cx, |s, _| s.form_error().is_some())
+    });
+    assert!(section.read_with(cx, |s, _| s.is_open()));
+    cx.update(|window, cx| line.update(cx, |f, cx| f.set_value("cargo test", window, cx)));
+    cx.update(|window, cx| window.click("save-task", cx));
+    until(&shell, cx, "the task is listed", |cx| {
+        !tasks_listed(&shell, cx).is_empty()
+    });
+    let listed = tasks_listed(&shell, cx);
+    assert_eq!(
+        (
+            listed[0].name.as_str(),
+            listed[0].line.as_str(),
+            listed[0].check
+        ),
+        ("test", "cargo test", true)
+    );
+    let file = || std::fs::read_to_string(user.project_file("atlas")).unwrap();
+    assert!(file().contains("[tasks.test]"), "{}", file());
+    settle(cx);
+
+    cx.update(|window, cx| window.click("edit-task-test", cx));
+    until(&shell, cx, "the form is open on it", |cx| {
+        section.read_with(cx, |s, _| s.is_open())
+    });
+    settle(cx);
+    cx.update(|window, cx| line.update(cx, |f, cx| f.set_value("cargo test --all", window, cx)));
+    cx.update(|window, cx| window.click("save-task", cx));
+    until(&shell, cx, "the file says so", |_| {
+        file().contains("line = \"cargo test --all\"")
+    });
+    until(&shell, cx, "the list follows", |cx| {
+        tasks_listed(&shell, cx)
+            .first()
+            .is_some_and(|t| t.line == "cargo test --all")
+    });
+    settle(cx);
+
+    cx.update(|window, cx| window.click("remove-task-test", cx));
+    settle(cx);
+    assert!(
+        file().contains("[tasks.test]"),
+        "a removal needs a second click"
+    );
+    cx.update(|window, cx| window.click("confirm-remove-task-test", cx));
+    until(&shell, cx, "the list is empty", |cx| {
+        tasks_listed(&shell, cx).is_empty()
+    });
+    assert!(!file().contains("tasks"), "{}", file());
+}
+
+#[gpui_kit::test]
+fn setup_steps_are_added_reordered_and_removed_in_the_setup_section(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", cx);
+    let section = setup_section(&shell, cx);
+
+    // A copy of the .env files, in each repository.
+    cx.update(|window, cx| window.click("add-setup", cx));
+    settle(cx);
+    let value = section.read_with(cx, |s, _| s.value_field().unwrap().clone());
+    cx.update(|window, cx| value.update(cx, |f, cx| f.set_value(".env .env.*", window, cx)));
+    cx.update(|window, cx| window.click("setup-where-each", cx));
+    cx.update(|window, cx| window.click("save-setup", cx));
+    until(&shell, cx, "the step is listed", |cx| {
+        steps_listed(&shell, cx).len() == 1
+    });
+    settle(cx);
+
+    // Then a run, with its time limit; a shell line is refused first.
+    cx.update(|window, cx| window.click("add-setup", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("setup-kind-run", cx));
+    settle(cx);
+    let limit = section.read_with(cx, |s, _| s.limit_field().unwrap().clone());
+    cx.update(|window, cx| {
+        value.update(cx, |f, cx| f.set_value("npm ci && npm test", window, cx));
+        limit.update(cx, |f, cx| f.set_value("120", window, cx));
+    });
+    cx.update(|window, cx| window.click("save-setup", cx));
+    until(&shell, cx, "the refusal is shown", |cx| {
+        section.read_with(cx, |s, _| s.form_error().is_some())
+    });
+    cx.update(|window, cx| value.update(cx, |f, cx| f.set_value("npm ci", window, cx)));
+    cx.update(|window, cx| window.click("save-setup", cx));
+    until(&shell, cx, "the second step is listed", |cx| {
+        steps_listed(&shell, cx).len() == 2
+    });
+    settle(cx);
+    let steps = steps_listed(&shell, cx);
+    assert_eq!(steps[0].copy, Some(vec![".env".into(), ".env.*".into()]));
+    assert!(steps[0].for_each_repository);
+    assert_eq!(
+        (steps[1].run.as_deref(), steps[1].time_limit),
+        (Some("npm ci"), Some(120))
+    );
+    assert_eq!(
+        text_of("setup-step-said-2", cx).as_deref(),
+        Some("Run npm ci · in the workspace folder · stopped after 120 s")
+    );
+
+    // Up moves the run first, in the file too.
+    cx.update(|window, cx| window.click("setup-up-2", cx));
+    until(&shell, cx, "the run is first", |cx| {
+        steps_listed(&shell, cx)
+            .first()
+            .is_some_and(|s| s.run.is_some())
+    });
+    let file = || std::fs::read_to_string(user.project_file("atlas")).unwrap();
+    assert!(
+        file().find("run = ").unwrap() < file().find("copy = ").unwrap(),
+        "{}",
+        file()
+    );
+    settle(cx);
+
+    cx.update(|window, cx| window.click("remove-setup-1", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("confirm-remove-setup-1", cx));
+    until(&shell, cx, "one step is left", |cx| {
+        steps_listed(&shell, cx).len() == 1
+    });
+    assert!(!file().contains("npm ci"), "{}", file());
+}
+
+#[gpui_kit::test]
+fn run_on_a_task_of_the_project_page_lists_its_run_and_opens_its_output(cx: &mut TestAppContext) {
+    let user = user().with_fake_escalation();
+    let folder = project(&user, "atlas");
+    let say = folder.join("say.sh");
+    std::fs::write(&say, "#!/bin/sh\necho first\necho second\n").unwrap();
+    std::fs::set_permissions(&say, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    user.call(
+        "task.add",
+        json!({"project": "atlas", "name": "say", "line": "./say.sh"}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    open_project(&shell, "atlas", cx);
+    let tasks = shell.read_with(cx, |s, cx| {
+        s.main()
+            .read(cx)
+            .project_page()
+            .unwrap()
+            .read(cx)
+            .tasks()
+            .clone()
+    });
+    until(&shell, cx, "the task is shown", |cx| {
+        tasks.read_with(cx, |t, _| t.tasks().is_some_and(|t| !t.is_empty()))
+    });
+    settle(cx);
+
+    cx.update(|window, cx| window.click("run-task-say", cx));
+    until(&shell, cx, "its run ended and is listed", |cx| {
+        tasks.read_with(cx, |t, cx| {
+            t.commands()
+                .read(cx)
+                .rows()
+                .iter()
+                .any(|row| row.name.as_deref() == Some("say") && !row.running())
+        })
+    });
+    let row = tasks.read_with(cx, |t, cx| t.commands().read(cx).rows()[0].clone());
+    assert_eq!(row.agent, "", "no agent ran it");
+    assert_eq!(row.last_line, "second");
+    settle(cx);
+    let who = format!("command-who-{}", row.run);
+    assert!(text_of(&who, cx).unwrap_or_default().contains("you"));
+
+    cx.update(|window, cx| window.click(format!("command-{}", row.run), cx));
+    until(&shell, cx, "its output is open", |cx| {
+        tasks.read_with(cx, |t, cx| {
+            t.panel()
+                .read(cx)
+                .shown()
+                .is_some_and(|o| o.lines == ["first", "second"])
+        })
+    });
+    assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
 }

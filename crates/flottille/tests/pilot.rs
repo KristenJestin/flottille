@@ -262,13 +262,7 @@ fn approving_is_not_possible_from_the_pilot_door() {
         ),
         "{names:?}"
     );
-    for tool in [
-        "approve",
-        "deny",
-        "approval_answer",
-        "fs_read",
-        "commands_run",
-    ] {
+    for tool in ["approve", "deny", "approval_answer", "fs_read", "run"] {
         let text = refused(pilot.call(tool, json!({"number": 1, "request_id": 1})));
         assert!(text.contains("agents_list"), "{tool}: {text}");
     }

@@ -216,15 +216,15 @@ bridge sets on `claude` ("The Claude bridge", below):
 - `allowedTools`: the exact names of the agent's Flottille tools (never a wildcard), so that
   Claude never asks for them, each prefixed `mcp__flottille__`. The list depends on what the agent
   can do (`docs/design.md` §4.3, `docs/reference/mcp.md` §4 rule 9). Every agent has `fs_read`,
-  `fs_list`, `search`, `fs_write`, `fs_edit`, `commands_list`, `commands_run`, `commands_status`
+  `fs_list`, `search`, `fs_write`, `fs_edit`, `tasks`, `run`, `run_status`
   and `report`; one that can have children (below the depth limit) also
   `agent_launch`, `agent_send`, `agent_status`, `agent_stop` and
   `approval_answer`; a root `ask_user`, a child `ask_parent`. Every agent has
   `workspace_remove`; one of a project whose repositories declare a forge also has `forge_read`
   and `forge_write`, and one of a project that declares a tracker `ticket_read`, in `main` as in
   a workspace. A root of a project with neither gets, in this order, the first eight,
-  `skill_read`, `workspace_remove`, the four `agent_*`, `skills`, `commands`, `project`,
-  `report`, `ask_user`, `approval_answer` (20). The list is
+  `skill_read`, `workspace_remove`, the four `agent_*`, `skills`, `commands`, `setup`, `project`,
+  `report`, `ask_user`, `approval_answer` (21). The list is
   frozen in the agent when it is created (the prompt cache depends on it).
 - `settingSources: []`: Claude Code's own default loads the user's settings, hooks, plugins,
   skills and instruction files; this overrides it.

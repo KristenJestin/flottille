@@ -146,7 +146,7 @@ fn plain_agent(user: &User) -> Mcp {
 }
 
 fn line(mcp: &Mcp, line: &str) -> Answer {
-    mcp.call("commands_run", json!({"line": line, "timeout": 30}))
+    mcp.call("run", json!({"line": line, "timeout": 30}))
 }
 
 /// The branches the bare remote holds.
@@ -640,10 +640,10 @@ fn pr_merge_squash_merges_only_the_workspace_s_own_pull_request_into_its_base() 
 }
 
 /// The gate refuses `flottille`, and the daemon the clients its agents start (#93): without
-/// them, an agent reaches the daemon's socket through `commands_run`. The agent names the socket's
+/// them, an agent reaches the daemon's socket through `run`. The agent names the socket's
 /// folder itself, which a run's environment no longer says.
 #[test]
-fn an_agent_s_commands_run_of_flottille_command_add_adds_nothing() {
+fn an_agent_s_run_of_flottille_command_add_adds_nothing() {
     let user = User::with_fake_agent();
     let (_, remote) = fixture(&user);
     command(&user, "plain");
@@ -739,7 +739,7 @@ fn committed(user: &User, worktree: &Path, file: &str) {
 /// A line run in one repository of the workspace.
 fn line_in(mcp: &Mcp, repository: &str, line: &str) -> Answer {
     mcp.call(
-        "commands_run",
+        "run",
         json!({"line": line, "repository": repository, "timeout": 30}),
     )
 }
@@ -1687,7 +1687,7 @@ fn plain_agent_with_id(user: &User) -> (String, Mcp) {
 fn sleeping(user: &User, mcp: &Mcp) -> String {
     let answer = allowed(
         user,
-        mcp.call("commands_run", json!({"line": "sleep 300", "timeout": 1})),
+        mcp.call("run", json!({"line": "sleep 300", "timeout": 1})),
     );
     assert!(!answer.error, "{}", answer.text);
     answer
@@ -1729,7 +1729,7 @@ fn workspace_remove_is_refused_while_an_agent_outside_the_tree_or_a_command_not_
     assert!(!answer.text.contains(&ours), "{}", answer.text);
     assert!(workspace.exists());
 
-    let stopped = outside.call("commands_status", json!({"run": theirs, "action": "stop"}));
+    let stopped = outside.call("run_status", json!({"run": theirs, "action": "stop"}));
     assert!(!stopped.error, "{}", stopped.text);
     let answer = remove(&user, &mcp, json!({}));
     assert!(answer.error, "{}", answer.text);
@@ -1740,7 +1740,7 @@ fn workspace_remove_is_refused_while_an_agent_outside_the_tree_or_a_command_not_
     let answer = remove(&user, &mcp, json!({}));
     assert!(!answer.error, "{}", answer.text);
     assert!(!workspace.exists());
-    let stopped = mcp.call("commands_status", json!({"run": ours, "action": "stop"}));
+    let stopped = mcp.call("run_status", json!({"run": ours, "action": "stop"}));
     assert!(!stopped.error, "{}", stopped.text);
 }
 

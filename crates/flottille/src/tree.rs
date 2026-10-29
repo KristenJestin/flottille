@@ -495,11 +495,10 @@ pub fn doing(daemon: &Daemon, agent: &Agent) -> String {
     {
         return format!("waiting for approval #{}", request.number);
     }
-    if let Some(run) = daemon
-        .read(Store::running_runs)
-        .ok()
-        .and_then(|runs| runs.into_iter().find(|run| run.agent == agent.id))
-    {
+    if let Some(run) = daemon.read(Store::running_runs).ok().and_then(|runs| {
+        runs.into_iter()
+            .find(|run| run.agent.as_deref() == Some(agent.id.as_str()))
+    }) {
         let line = secrets::mask(&run.line, &std::env::vars_os().collect());
         return format!(
             "running `{}` for {}",

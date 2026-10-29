@@ -23,6 +23,7 @@ use crate::model::{Place, Preparation, ago};
 use crate::session::pull_row;
 use crate::session_link::PullRequest;
 use crate::shell::{Selection, Shell, now_ms};
+use crate::tasks::ProjectTasks;
 use crate::tree::place_name;
 
 /// The element id of a place's card: `place-card-main` or `place-card-<workspace>`.
@@ -82,6 +83,8 @@ pub struct ProjectPage {
     places: Vec<Place>,
     composer: Entity<Composer>,
     new_workspace: Entity<NewWorkspace>,
+    /// Its tasks, each with a Run button, and what the user ran.
+    tasks: Entity<ProjectTasks>,
     narrow: bool,
     /// Nothing but `main`, and no session in it: the page says what to start with, instead of a
     /// section of one bare card. Kept here for the same reason as `places`.
@@ -96,8 +99,15 @@ impl ProjectPage {
         name: String,
         composer: Entity<Composer>,
         new_workspace: Entity<NewWorkspace>,
-        _: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Self {
+        let tasks = {
+            let (shell, project) = (shell.clone(), name.clone());
+            cx.new(|cx| ProjectTasks::new(shell, project, cx))
+        };
+        // Asked once the shell, which is making this page, is no longer being updated.
+        let reading = tasks.clone();
+        cx.defer(move |cx| reading.update(cx, |tasks, cx| tasks.read(cx)));
         Self {
             shell,
             name,
@@ -108,6 +118,7 @@ impl ProjectPage {
             places: Vec::new(),
             composer,
             new_workspace,
+            tasks,
             narrow: false,
             empty: false,
             renders: 0,
@@ -121,6 +132,10 @@ impl ProjectPage {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn tasks(&self) -> &Entity<ProjectTasks> {
+        &self.tasks
     }
 
     pub fn renders(&self) -> usize {
@@ -451,7 +466,8 @@ impl Render for ProjectPage {
                                 ),
                         ))
                         .child(grid)
-                    }),
+                    })
+                    .child(div().mt(px(34.)).child(self.tasks.clone())),
             )
     }
 }

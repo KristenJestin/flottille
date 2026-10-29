@@ -9,7 +9,7 @@
 //! and calls only the tools of that agent, in the order frozen in it. A call with a call key
 //! (`claudecode/toolUseId`) is played once: a retry waits for the first and gets its answer.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
 use std::io::Read;
 use std::sync::{Arc, Mutex};
@@ -40,6 +40,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::VERSION;
+use crate::actions::Sets;
 use crate::approvals;
 use crate::daemon::Daemon;
 use crate::deliveries;
@@ -93,7 +94,7 @@ const REPLACED: &str = "refused: this session has been replaced: a new session o
 
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
 /// the order frozen in the agent.
-const SERVED: [Definition; 24] = [
+const SERVED: [Definition; 25] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -195,31 +196,46 @@ const SERVED: [Definition; 24] = [
         },
     },
     Definition {
-        name: "commands_list",
-        title: "List the project's commands",
-        description: "Lists the commands of the project's catalogue (tests, lint, servers…), \
-            each with its line and where it runs. Run one with commands_run {command}; prefer \
-            them to a line of your own, they are what the project means.",
-        read_only: true,
-        idempotent: true,
-        destructive: false,
-        schema: || json!({"type": "object", "properties": {}, "additionalProperties": false}),
+        name: "tasks",
+        title: "The project's tasks",
+        description: "The project's tasks: named lines (tests, lint, servers…) that run runs by \
+            name; prefer them to a line of your own, they are what the project means. list and \
+            show read them; a root's add, edit and remove change them once the session's judge \
+            or the user allows it, judged as a run of the line (check and read_only are the \
+            user's word: setting them is held for the user): you are answered at once, the \
+            result may come later. {\"action\": \"add\", \"name\": \"test\", \"line\": \
+            \"cargo test\"}.",
+        read_only: false,
+        idempotent: false,
+        destructive: true,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["list", "show", "add", "edit", "remove"]},
+                "name": {"type": "string"},
+                "line": {"type": "string", "description": "add, edit: one command line, never run by a shell."},
+                "repository": {"type": ["string", "null"], "description": "add, edit: where it runs; the place's top when left out or null."},
+                "serve": {"type": "boolean", "description": "It keeps running."},
+                "check": {"type": "boolean", "description": "Tests, lint."},
+                "read_only": {"type": "boolean", "description": "It changes nothing."},
+                "ask_before_running": {"type": "boolean", "description": "Judged each time it runs."}
+            }, "required": ["action"], "additionalProperties": false})
+        },
     },
     Definition {
-        name: "commands_run",
-        title: "Run a command",
-        description: "Runs a catalogue command or one line, without a shell: a pipe, a \
+        name: "run",
+        title: "Run a task or a line",
+        description: "Runs one of the project's tasks or one line, without a shell: a pipe, a \
             redirection, a variable, a glob or && is refused, put them in a script of the \
             repository. Waits up to timeout seconds (30 by default, 600 at most) and answers \
-            with the end of the output; a longer run keeps going under its run id. Give command \
-            or line: {\"command\": \"test\"}, or {\"line\": \"cargo test -p core\", \
+            with the end of the output; a longer run keeps going under its run id. Give task or \
+            line: {\"task\": \"test\"}, or {\"line\": \"cargo test -p core\", \
             \"repository\": \"api\", \"timeout\": 120}.",
         read_only: false,
         idempotent: false,
         destructive: true,
         schema: || {
             json!({"type": "object", "properties": {
-                "command": {"type": "string", "description": "A command of commands_list."},
+                "task": {"type": "string", "description": "A task of the project (tasks lists them)."},
                 "line": {"type": "string", "description": "One command line, split on spaces, quotes kept whole."},
                 "repository": {"type": "string", "description": "Where it runs; the place's top by default."},
                 "timeout": {"type": "integer", "minimum": 1, "maximum": 600},
@@ -228,21 +244,21 @@ const SERVED: [Definition; 24] = [
         },
     },
     Definition {
-        name: "commands_status",
+        name: "run_status",
         title: "Follow or stop a run",
-        description: "A run this agent started, by the run id commands_run gave. action output \
-            (the default): its state and lines of its output, the last tail lines (40 by \
-            default, 1000 at most) or those from start; the answer says how to read the lines \
-            before or after; only the last 64 KiB of an output are kept. action stop: ends it \
-            with everything it started, asked to end, then killed 5 seconds later, and answers \
-            once it ended; a run that already ended is left as it is. {\"run\": \"a1b2c3\", \
+        description: "A run this agent started, by the run id run gave. action output (the \
+            default): its state and lines of its output, the last tail lines (40 by default, \
+            1000 at most) or those from start; the answer says how to read the lines before or \
+            after; only the last 64 KiB of an output are kept. action stop: ends it with \
+            everything it started, asked to end, then killed 5 seconds later, and answers once \
+            it ended; a run that already ended is left as it is. {\"run\": \"a1b2c3\", \
             \"action\": \"stop\"}",
         read_only: false,
         idempotent: true,
         destructive: true,
         schema: || {
             json!({"type": "object", "properties": {
-                "run": {"type": "string", "description": "The run id commands_run gave."},
+                "run": {"type": "string", "description": "The run id run gave."},
                 "action": {"type": "string", "enum": ["output", "stop"], "description": "output by default."},
                 "tail": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "output: the last lines."},
                 "start": {"type": "integer", "minimum": 1, "description": "output: the first line to show."}
@@ -397,6 +413,27 @@ const SERVED: [Definition; 24] = [
                 "description": {"type": "string", "description": "add, edit: one line."},
                 "instructions": {"type": "string", "description": "add, edit: what the agent is told."},
                 "template": {"type": "string", "enum": ["open-prs", "merge-stack", "close"], "description": "add: one of Flottille's, as it is."}
+            }, "required": ["action"], "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "setup",
+        title: "The project's setup",
+        description: "The steps that prepare each new workspace, in order, by number. list reads \
+            them; add (at a number, the last by default), edit, remove and move (to) change them, \
+            judged as for tasks, a run step as a run of its line. A step is one of copy (globs), \
+            link, root_entries, run (a line) and task, in a repository, for_each_repository or \
+            the workspace folder. {\"action\": \"add\", \"step\": {\"copy\": [\".env\"], \
+            \"for_each_repository\": true}}.",
+        read_only: false,
+        idempotent: false,
+        destructive: true,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["list", "add", "edit", "remove", "move"]},
+                "number": {"type": "integer", "minimum": 1, "description": "edit, remove, move: the step; add: its number once added."},
+                "to": {"type": "integer", "minimum": 1, "description": "move: its new number."},
+                "step": {"type": "object", "description": "add, edit: the step whole: one of copy, link, root_entries, run, task; repository or for_each_repository; time_limit (seconds) with run or task."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -901,25 +938,7 @@ pub fn grant_of(daemon: &Daemon, agent: &Agent) -> Result<Grant, String> {
                 home: std::env::var_os("HOME").map(Into::into),
             }
         }
-        None => Place {
-            project: project.name.clone(),
-            workspace: None,
-            root: agent.folder.clone(),
-            repositories: project
-                .repositories
-                .iter()
-                .map(|r| {
-                    let folder = match r.path.as_str() {
-                        "." => project.folder.clone(),
-                        path => project.folder.join(path),
-                    };
-                    (r.path.clone(), folder)
-                })
-                .collect(),
-            branch: String::new(),
-            variables: project.variables.clone(),
-            home: std::env::var_os("HOME").map(Into::into),
-        },
+        None => Place::main(&project, agent.folder.clone()),
     };
     Ok(Grant {
         agent: agent.id.clone(),
@@ -1100,6 +1119,25 @@ impl ServerHandler for Handler {
     }
 }
 
+/// The tool a call names and its arguments, under the names of this version: the command tools'
+/// names before tasks are still answered for one release (`docs/tools.md`, "Running").
+pub fn current(tool: &str, args: Value) -> (String, Value) {
+    match tool {
+        "commands_list" => ("tasks".into(), json!({"action": "list"})),
+        "commands_run" => {
+            let mut args = args;
+            if let Some(object) = args.as_object_mut()
+                && let Some(task) = object.remove("command")
+            {
+                object.insert("task".into(), task);
+            }
+            ("run".into(), args)
+        }
+        "commands_status" => ("run_status".into(), args),
+        tool => (tool.to_owned(), args),
+    }
+}
+
 /// A call, played once for its call key, recorded, its pinned notes appended: its text, and
 /// whether it is an error.
 async fn call(
@@ -1113,8 +1151,8 @@ async fn call(
     let tool = providers::PROVIDERS
         .iter()
         .find_map(|provider| provider.tool_of(name))
-        .unwrap_or(name)
-        .to_owned();
+        .unwrap_or(name);
+    let (tool, args) = current(tool, args);
     let Some(key) = key else {
         if daemon
             .mcp
@@ -1260,20 +1298,35 @@ async fn played(
 /// The gate's verdict on a call of one of the agent's tools.
 pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gate::Verdict {
     let project = projects::load_project(daemon, &grant.place.project).ok();
-    let (paths, words, command) = reached(daemon, &grant.place, tool, args);
-    // A line equal to a catalogue command's is that command, with its own flags.
-    let command = match command.as_deref() {
-        Some(name) => project
-            .as_ref()
-            .and_then(|project| project.tasks.get_key_value(name)),
-        None if !words.is_empty() => project.as_ref().and_then(|project| {
-            project.tasks.iter().find(|(_, command)| {
-                flottille_core::command::split_line(&command.line).is_ok_and(|line| line == words)
+    let no_tasks = BTreeMap::new();
+    let tasks = project.as_ref().map_or(&no_tasks, |project| &project.tasks);
+    // A write of a task or a setup step is judged as the run it leaves for later, resolved the
+    // way that run will be.
+    let sets =
+        crate::actions::family(tool, args).and_then(|_| crate::actions::sets(tasks, tool, args));
+    let (paths, words, command) = match &sets {
+        Some(sets) => (
+            crate::actions::folders(&grant.place, sets),
+            flottille_core::command::split_line(&sets.task.line).unwrap_or_default(),
+            sets.name.clone(),
+        ),
+        None => reached(daemon, &grant.place, tool, args),
+    };
+    // A line equal to a task's is that task, with its own flags; a write's task is as the write
+    // leaves it.
+    let command = match (&sets, command.as_deref()) {
+        (Some(Sets { task, .. }), Some(name)) => Some((name, task)),
+        (_, Some(name)) => tasks
+            .get_key_value(name)
+            .map(|(name, task)| (name.as_str(), task)),
+        (_, None) if !words.is_empty() => tasks
+            .iter()
+            .find(|(_, task)| {
+                flottille_core::command::split_line(&task.line).is_ok_and(|line| line == words)
             })
-        }),
-        None => None,
-    }
-    .map(|(name, command)| (name.as_str(), command));
+            .map(|(name, task)| (name.as_str(), task)),
+        (_, None) => None,
+    };
     let paths_of = &daemon.paths;
     let own = [
         paths_of.data.clone(),
@@ -1286,7 +1339,7 @@ pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gat
     let place = &grant.place;
     let repository = paths
         .first()
-        .filter(|_| tool == "commands_run")
+        .filter(|_| tool == "run" || sets.is_some())
         .and_then(|folder| {
             place
                 .repositories
@@ -1312,6 +1365,7 @@ pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gat
         words: &words,
         paths: &paths,
         command,
+        tasks,
         never: project.as_ref().map(|project| project.never.as_slice()),
         own: &own,
         pushed,
@@ -1433,7 +1487,7 @@ fn with_notes(text: String, notes: &[String]) -> String {
     format!("{text}\n\n{}", notes.join("\n\n"))
 }
 
-/// The paths a call reaches and, for a run, the words it would start and the catalogue command
+/// The paths a call reaches and, for a run, the words it would start and the task
 /// it names, read from its arguments the way its tool will; what does not fit is left to the
 /// tool, which refuses it with its own sentence.
 fn reached(
@@ -1461,9 +1515,8 @@ async fn perform(
     approved: bool,
 ) -> Outcome {
     match tool {
-        "commands_list" => runs::commands_list(daemon, &grant.place, args),
-        "commands_run" => {
-            runs::commands_run(
+        "run" => {
+            runs::run(
                 daemon,
                 &grant.agent,
                 &grant.place,
@@ -1473,7 +1526,7 @@ async fn perform(
             )
             .await
         }
-        "commands_status" => runs::commands_status(daemon, &grant.agent, args).await,
+        "run_status" => runs::run_status(daemon, &grant.agent, args).await,
         "forge_read" => crate::forge::forge_read(daemon, &grant.place, args).await,
         "ticket_read" => crate::tickets::ticket_read(daemon, &grant.place, args).await,
         "forge_write" => crate::forge::forge_write(daemon, &grant.place, args).await,
@@ -1635,7 +1688,7 @@ mod tests {
         // migration renamed their tools (`store.rs`): the names the daemon gives today.
         let worker = [
             "mcp__flottille__fs_read",
-            "mcp__flottille__commands_status",
+            "mcp__flottille__run_status",
             "mcp__flottille__report",
         ]
         .map(String::from);
@@ -1646,7 +1699,7 @@ mod tests {
             assert!(stored.iter().all(|tool| given.contains(tool)), "{stored:?}");
         }
         let served_worker = served(&claude::PROVIDER, &worker);
-        assert_eq!(served_worker, ["fs_read", "commands_status", "report"]);
+        assert_eq!(served_worker, ["fs_read", "run_status", "report"]);
         let served_lead = served(&claude::PROVIDER, &lead);
         assert_eq!(served_lead, ["agent_status", "report"]);
         let meta = claude::session_meta("text", &worker);
@@ -1654,7 +1707,31 @@ mod tests {
         let server = crate::codex::server("http://x", &json!({}), &worker);
         assert_eq!(
             server["flottille"]["enabled_tools"],
-            json!(["fs_read", "commands_status", "report"])
+            json!(["fs_read", "run_status", "report"])
+        );
+    }
+
+    #[test]
+    fn the_old_tool_names_still_work_under_their_new_ones() {
+        assert_eq!(
+            current("commands_run", json!({"command": "test", "timeout": 5})),
+            ("run".into(), json!({"task": "test", "timeout": 5}))
+        );
+        assert_eq!(
+            current("commands_run", json!({"line": "make"})),
+            ("run".into(), json!({"line": "make"}))
+        );
+        assert_eq!(
+            current("commands_status", json!({"run": "r1"})),
+            ("run_status".into(), json!({"run": "r1"}))
+        );
+        assert_eq!(
+            current("commands_list", json!({})),
+            ("tasks".into(), json!({"action": "list"}))
+        );
+        assert_eq!(
+            current("fs_read", json!({"path": "a"})),
+            ("fs_read".into(), json!({"path": "a"}))
         );
     }
 
@@ -1733,7 +1810,7 @@ mod tests {
             })
             .sum();
         // About 6k tokens since the project's settings came (#112), then its skills and commands
-        // (#127).
-        assert!(chars < 24_000, "{chars} characters of definitions");
+        // (#127), then its tasks and setup (#131).
+        assert!(chars < 27_000, "{chars} characters of definitions");
     }
 }

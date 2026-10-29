@@ -161,8 +161,8 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
 
 - files: `fs_read`, `fs_list`, `search`, `fs_write`, `fs_edit` (read-before-write fingerprints,
   temp file + rename, all-or-nothing edits);
-- commands: `commands_list`, `commands_run` (a task or one line, **never a shell**),
-  `commands_status` (a run's output, or its stop);
+- tasks and runs: `tasks` (the project's tasks, written by a root only), `run` (a task or one
+  line, **never a shell**), `run_status` (a run's output, or its stop);
 - forges (every agent of a project whose repositories declare a forge, in `main` as in a
   workspace): `forge_read`, the pull requests of a workspace's repositories and their checks, read
   only (`forges.md`), and `forge_write`, which opens or merges them or re-runs a failed pipeline,
@@ -173,9 +173,10 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
 - tickets (every agent of a project that declares a tracker, in `main` as in a workspace):
   `ticket_read`, the ticket a workspace is linked to, or another of the same tracker, read only
   (`tickets.md`);
-- the project (a root): `skills` and `commands` (list, show, add, edit, remove) and `project` (its
-  settings, its forges and tracker, its rules), what the window does, each change a call to judge,
-  a change of the tracker or of the rules base (`tools.md`, "The project", `projects.md`);
+- the project (a root): `skills` and `commands` (list, show, add, edit, remove), `setup` (its
+  steps, numbered) and `project` (its settings, its forges and tracker, its rules), and the writes
+  of `tasks`, what the window does, each change a call to judge, a change of the tracker or of the
+  rules base, a line it sets judged as a run of it (`tools.md`, "The project", `projects.md`);
 
 Flottille's own tools:
 
@@ -200,7 +201,7 @@ Flottille's own tools:
 
 The tool list of a session is fixed for its whole life (prompt cache, `reference/hemera.md` §7)
 and depends on what the agent can do, known when it starts: a root gets `ask_user`, `skills`,
-`commands` and `project`, a child `ask_parent`; an agent at the depth limit gets no `agent_*` tools
+`commands`, `setup` and `project`, a child `ask_parent`; an agent at the depth limit gets no `agent_*` tools
 and no `approval_answer`. A root lead has 20 tools, a leaf worker 12; two more each when the
 project's repositories declare a forge (`forge_read`, `forge_write`), one more when it declares a
 tracker (`ticket_read`), whatever the place (`reference/mcp.md` §4).
@@ -356,7 +357,7 @@ says what kind of call it is, and the session's **mode** says who answers it.
 
 Only a push the gate read and let through goes out: every run's environment rewrites push URLs
 to nowhere, but a run that is itself a `git push` the user or the judge allowed (`docs/tools.md`,
-"commands_run").
+"Tasks and runs").
 
 What stays **refused** is not a permission but a call that cannot be made as it is: shell syntax,
 a malformed call, a login printed, the daemon driven from a command.
@@ -458,12 +459,15 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   root needs the user; a folded level shows the strongest mark it holds; a click on a project's name
   opens its page and leaves its places as they were, only its chevron folds and unfolds them;
 - a project page: its repositories, its places with their sessions, creating and removing a
-  workspace (with the preparation's progress and failure output), and the composer that starts
-  a session (place, agent, model, first message); its Settings: each repository's forge, the
-  tracker, its Rules (a text editor, Reset to default, and a line saying a change reaches the
-  agents created from now on), its Skills (a path picked in the project folder, or a text; added,
-  edited, removed) and its Commands (added from a list of the templates and a blank one, edited,
-  removed);
+  workspace (with the preparation's progress and failure output), the composer that starts
+  a session (place, agent, model, first message), and its tasks, each with Run, which runs it in
+  the project folder, listed below with the rail's rows and output panel; its Settings: each
+  repository's forge, the tracker, its Skills (a path picked in the project folder, or a text;
+  added, edited, removed), its Commands (added from a list of the templates and a blank one,
+  edited, removed), its Tasks (a line, where it runs and its flags), its Setup (steps added,
+  edited, removed and reordered, each with its kind, where it is done and its time limit), then
+  its Rules (a text editor, Reset to default, and a line saying a change reaches the agents
+  created from now on);
 - Settings: the providers, the Auto judge, and the Rules for every project, edited the same way;
 - a session page: the root's conversation, live (messages, thoughts collapsed, tool calls with
   their result, the children launched, reports, diffs), the approvals that reach the user, inline,
@@ -492,7 +496,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   says `STOPPED` or `FAILED`, as its rail does, and its conversation says it ended, then resumed. Selecting a child shows its
   conversation read-only;
 - the commands the agents run (`docs/tools.md`): the rail lists those of the session's tree, running
-  first, each with its line, who started it (the agent, and the catalogue command when it is one),
+  first, each with its line, who started it (the agent, and the task when it is one),
   how long, its last output line and Stop; a click opens its output, live, in a panel. One that
   ended stays listed, greyed, with its exit code, until the user dismisses it or the session ends.
   A project, and a session, with a command running show a small icon in the left tree, so that no

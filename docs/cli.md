@@ -638,23 +638,25 @@ $ flottille inbox
 Answer a question with `flottille agent send <agent> <message>`; `flottille inbox --after <n>` lists what came since.
 ```
 
-### `flottille commands list [project]`
+### `flottille runs list [project]`
 
-The commands the agents run that are running now, of a project or of all of them: the run, the
-agent that started it, its place, its line and the last line of its output (without the colours the
+The commands running now, of a project or of all of them: the run, the agent that started it
+(`you` for a task you ran from the window), its place, its line and the last line of its output (without the colours the
 program wrote). `--json` prints `run.list` (`docs/protocol.md`, "The run methods").
 
 ```
-$ flottille commands list app
+$ flottille runs list app
 5d2c0f1a9b3e agent 3f9a1c0b7d2e (app/login): npm run dev
     listening on :3000
-Stop one with `flottille commands stop <run>`.
+Stop one with `flottille runs stop <run>`.
 ```
 
-### `flottille commands stop <run>`
+`flottille commands` is the name it had until #131, kept for one release as a hidden alias.
 
-Stops the command and everything it started, and tells the agent that started it that you did
-(`run.stop`).
+### `flottille runs stop <run>`
+
+Stops the command and everything it started, and tells the agent that started it, if one did,
+that you did (`run.stop`).
 
 ### `flottille approvals`
 
@@ -666,7 +668,7 @@ prints `approval.list`. Only you answer them; the pilot door cannot.
 $ flottille approvals
 #1 agent ce034b165403: fs_read {"path":".env"} [base: always asked]
     .env is a sensitive place (.env)
-#2 agent ce034b165403: commands_run {"line":"git push"}
+#2 agent ce034b165403: run {"line":"git push"}
     judge claude (ask): pushing publishes the branch, and the user did not ask for it
     git push changes the repository, its branches or a remote
 Answer with `flottille approve <n>` or `flottille deny <n>`.

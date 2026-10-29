@@ -139,9 +139,9 @@ Nothing is converted on its own.
 A command's keys and what sending it does are in [`commands.md`](commands.md), a skill's in
 [`skills.md`](skills.md); `flottille command` and `flottille skill` (`add`, `edit`, `remove`)
 write them in the file where it stands, keeping what is around them, and so do the project's
-Settings in the window, sections Skills and Commands.
+Settings in the window, sections Skills, Commands, Tasks and Setup.
 
-**Former keys.** Until #127 the tasks were `[commands.<name>]` (the catalogue), the commands
+**Former keys.** Until #127 the tasks were `[commands.<name>]`, the commands
 `[procedures.<name>]`, the skills `[references.<name>]` and the setup `[[recipe]]`, a step naming a
 task with `command`. They are still read for one release, and the daemon renames them in the file
 at its start, in place: every comment and everything else the user wrote stays, the file is
@@ -207,11 +207,14 @@ the user allows, since it rewrites the instructions of every agent created after
 
 ## Tasks
 
-`[tasks.<name>]` lists the project's command lines its agents run by name with `commands_run`
-(tests, lint, servers). Each holds `line` (one line, never run by a shell) and, when they apply,
+`[tasks.<name>]` lists the project's command lines its agents run by name with `run`
+(tests, lint, servers), and the user with the Run button of the project page. Each holds `line` (one line, never run by a shell) and, when they apply,
 `repository` (where it runs; the workspace folder when left out), `serve` (it keeps running),
 `check` (tests, lint), `read_only` (it changes nothing) and `ask_before_running` (held for
-approval each time an agent runs it). A setup step runs one with `task = "<name>"`.
+approval each time an agent runs it). A setup step runs one with `task = "<name>"`; a task a step
+runs cannot be removed. The Tasks section of the project's Settings adds, edits and removes them
+(`task.*`, `docs/protocol.md`), and so does a root agent with `tasks`, each write judged
+(`docs/tools.md`).
 
 ## Skills
 
@@ -249,6 +252,11 @@ changes the steps nor the variables of a workspace that exists. This is delibera
 is prepared, resumed and used by the setup and the variables it was made with, so a change to
 the file cannot alter a preparation under way nor the environment of a piece of work already
 started. A workspace that should follow the new file is a new workspace.
+
+The Setup section of the project's Settings adds, edits, removes and reorders the steps: each
+with its kind, where it is done and its time limit (`setup.*`, `docs/protocol.md`). A root agent
+does the same with `setup`, each write judged, a `run` step's line as a run of it
+(`docs/tools.md`).
 
 `crates/flottille-core/tests/fixtures/multi-repo-case.toml` describes the project of
 `docs/reference/multi-repo-case.md` (a folder that is a repository and holds six others, with

@@ -44,6 +44,30 @@ pub struct Resolved {
 }
 
 impl Place {
+    /// The project folder itself (`main`), whose folder is `root`: its repositories where they
+    /// are, the project's variables.
+    pub fn main(project: &flottille_core::project::Project, root: PathBuf) -> Place {
+        Place {
+            project: project.name.clone(),
+            workspace: None,
+            root,
+            repositories: project
+                .repositories
+                .iter()
+                .map(|r| {
+                    let folder = match r.path.as_str() {
+                        "." => project.folder.clone(),
+                        path => project.folder.join(path),
+                    };
+                    (r.path.clone(), folder)
+                })
+                .collect(),
+            branch: String::new(),
+            variables: project.variables.clone(),
+            home: std::env::var_os("HOME").map(Into::into),
+        }
+    }
+
     /// Where relative paths start: the repository's folder, or the place's.
     pub fn base(&self, repository: Option<&str>) -> Result<(&str, &Path), String> {
         let Some(asked) = repository else {

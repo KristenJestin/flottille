@@ -111,7 +111,7 @@ fn the_daemon_runs_a_codex_agent_through_the_bridge_with_its_bare_session() {
         .iter()
         .map(|t| t.as_str().unwrap())
         .collect();
-    for tool in ["fs_read", "commands_run", "report", "ask_user"] {
+    for tool in ["fs_read", "run", "report", "ask_user"] {
         assert!(tools.contains(&tool), "{tools:?}");
     }
     assert_eq!(thread["environments"], json!([]));

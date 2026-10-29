@@ -95,7 +95,7 @@ mod tests {
             "call": {"path": ".env"}, "reasons": [".env is a sensitive place (.env)"],
             "class": "base",
             "forwards": [{"by": "0a1b2c3d4e5f", "why": "it needs the key"}]},
-            {"number": 4, "agent": "3f9a1c0b7d2e", "tool": "commands_run",
+            {"number": 4, "agent": "3f9a1c0b7d2e", "tool": "run",
             "call": {"line": "git push"}, "reasons": ["git push sends commits to a remote"],
             "class": "judge", "judgement": {"by": "claude haiku", "verdict": "ask",
             "reason": "the user did not ask to push"}, "forwards": []}]});
@@ -103,7 +103,7 @@ mod tests {
             approvals_text(&listed),
             "#3 agent 3f9a1c0b7d2e: fs_read {\"path\":\".env\"} [base: always asked]\n    .env \
              is a sensitive place (.env)\n    forwarded by 0a1b2c3d4e5f: it needs the key\n#4 \
-             agent 3f9a1c0b7d2e: commands_run {\"line\":\"git push\"}\n    judge claude haiku \
+             agent 3f9a1c0b7d2e: run {\"line\":\"git push\"}\n    judge claude haiku \
              (ask): the user did not ask to push\n    git push sends commits to a remote\n\
              Answer with `flottille approve <n>` or `flottille deny <n>`.\n"
         );

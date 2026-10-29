@@ -1,4 +1,5 @@
-//! `flottille commands`: the commands the agents run, listed by project, and stopped (`docs/cli.md`).
+//! `flottille runs` (`flottille commands` before tasks): the commands the agents run and the tasks
+//! the user ran, listed by project, and stopped (`docs/cli.md`).
 
 use clap::Subcommand;
 use flottille_core::ansi;
@@ -10,7 +11,7 @@ use crate::client::Client;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Subcommand)]
-pub enum CommandsAction {
+pub enum RunsAction {
     /// The commands running now, of a project or of all of them
     List {
         project: Option<String>,
@@ -21,10 +22,10 @@ pub enum CommandsAction {
     Stop { run: String },
 }
 
-pub fn run(paths: &Paths, action: CommandsAction) -> Result<()> {
+pub fn run(paths: &Paths, action: RunsAction) -> Result<()> {
     let mut client = Client::connect_or_start(paths)?;
     match action {
-        CommandsAction::List { project, json } => {
+        RunsAction::List { project, json } => {
             let listed = client.request("run.list", json!({"project": project}))?;
             if json {
                 println!("{listed}");
@@ -32,10 +33,13 @@ pub fn run(paths: &Paths, action: CommandsAction) -> Result<()> {
                 print!("{}", commands_text(&listed));
             }
         }
-        CommandsAction::Stop { run } => {
+        RunsAction::Stop { run } => {
             let stopped = client.request("run.stop", json!({"run": run}))?;
             let state = stopped["run"]["state"].as_str().unwrap_or("?");
-            println!("Run {run} is {state}; its agent is told it was you.");
+            match stopped["run"]["agent"].as_str() {
+                Some(_) => println!("Run {run} is {state}; its agent is told it was you."),
+                None => println!("Run {run} is {state}."),
+            }
         }
     }
     Ok(())
@@ -53,10 +57,13 @@ fn commands_text(listed: &Value) -> String {
             (Some(project), None) => project.to_owned(),
             _ => "?".to_owned(),
         };
+        let who = match command["agent"].as_str() {
+            Some(agent) => format!("agent {agent}"),
+            None => "you".to_owned(),
+        };
         text.push_str(&format!(
-            "{} agent {} ({place}): {}\n",
+            "{} {who} ({place}): {}\n",
             command["run"].as_str().unwrap_or("?"),
-            command["agent"].as_str().unwrap_or("?"),
             command["line"].as_str().unwrap_or("?"),
         ));
         // The program's own colours are for the window: a terminal shows the words.
@@ -65,7 +72,7 @@ fn commands_text(listed: &Value) -> String {
             text.push_str(&format!("    {last}\n"));
         }
     }
-    text.push_str("Stop one with `flottille commands stop <run>`.\n");
+    text.push_str("Stop one with `flottille runs stop <run>`.\n");
     text
 }
 
@@ -74,15 +81,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_command_is_shown_with_its_agent_its_place_and_its_last_line_without_colours() {
+    fn a_run_is_shown_with_its_agent_or_you_its_place_and_its_last_line_without_colours() {
         let listed = json!({"commands": [
             {"run": "r1", "agent": "3f9a1c0b7d2e", "project": "app", "workspace": "login",
-                "line": "npm run dev", "last_line": "\u{1b}[32mready\u{1b}[0m on :3000"}]});
+                "line": "npm run dev", "last_line": "\u{1b}[32mready\u{1b}[0m on :3000"},
+            {"run": "r2", "agent": null, "project": "app", "workspace": null,
+                "line": "make test", "last_line": ""}]});
 
         assert_eq!(
             commands_text(&listed),
             "r1 agent 3f9a1c0b7d2e (app/login): npm run dev\n    ready on :3000\n\
-             Stop one with `flottille commands stop <run>`.\n"
+             r2 you (app): make test\n\
+             Stop one with `flottille runs stop <run>`.\n"
         );
         assert_eq!(
             commands_text(&json!({"commands": []})),

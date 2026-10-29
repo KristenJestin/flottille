@@ -12,7 +12,6 @@ mod codex;
 mod codex_bridge;
 mod command_command;
 mod commands;
-mod commands_command;
 mod daemon;
 mod deliveries;
 mod files;
@@ -35,9 +34,12 @@ mod roles;
 mod rules;
 mod run_methods;
 mod runs;
+mod runs_command;
+mod setup;
 mod skill_command;
 mod skills;
 mod sweep;
+mod tasks;
 mod tickets;
 mod tree;
 mod update;
@@ -55,8 +57,8 @@ use serde_json::Value;
 use crate::agent_command::AgentAction;
 use crate::client::Client;
 use crate::command_command::CommandAction;
-use crate::commands_command::CommandsAction;
 use crate::project_command::ProjectAction;
+use crate::runs_command::RunsAction;
 use crate::skill_command::SkillAction;
 use crate::workspace_command::WorkspaceAction;
 
@@ -113,10 +115,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// The commands your agents run: the ones running now, and stopping one
-    Commands {
+    /// The commands your agents run and the tasks you ran: the ones running now, and stopping one
+    #[command(alias = "commands")]
+    Runs {
         #[command(subcommand)]
-        action: CommandsAction,
+        action: RunsAction,
     },
     /// Allow a request: its call is checked again, performed, and its result handed to the agent
     Approve { number: u64 },
@@ -268,7 +271,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 );
             }
         }
-        Command::Commands { action } => commands_command::run(&paths, action)?,
+        Command::Runs { action } => runs_command::run(&paths, action)?,
         Command::Approvals { json } => approval_command::approvals(&paths, json)?,
         Command::Approve { number } => approval_command::approve(&paths, number)?,
         Command::Deny { number } => approval_command::deny(&paths, number)?,

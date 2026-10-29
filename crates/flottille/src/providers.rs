@@ -99,12 +99,12 @@ const FILE_AND_COMMAND_TOOLS: [&str; 8] = [
     "search",
     "fs_write",
     "fs_edit",
-    "commands_list",
-    "commands_run",
-    "commands_status",
+    "tasks",
+    "run",
+    "run_status",
 ];
 const AGENT_TOOLS: [&str; 4] = ["agent_launch", "agent_send", "agent_status", "agent_stop"];
-const ACTION_TOOLS: [&str; 3] = ["skills", "commands", "project"];
+const ACTION_TOOLS: [&str; 4] = ["skills", "commands", "setup", "project"];
 
 impl Provider {
     /// The exact tool names an agent gets, as the provider names them: what it can do decides
@@ -1095,9 +1095,9 @@ mod tests {
                 "search",
                 "fs_write",
                 "fs_edit",
-                "commands_list",
-                "commands_run",
-                "commands_status",
+                "tasks",
+                "run",
+                "run_status",
                 "skill_read",
                 "workspace_remove",
                 "agent_launch",
@@ -1106,6 +1106,7 @@ mod tests {
                 "agent_stop",
                 "skills",
                 "commands",
+                "setup",
                 "project",
                 "report",
                 "ask_user",
@@ -1129,9 +1130,11 @@ mod tests {
         assert!(lead_child.contains(&"ask_parent".to_owned()));
         assert!(lead_child.contains(&"approval_answer".to_owned()));
         assert!(!lead_child.contains(&"ask_user".to_owned()));
-        // A child does its brief: the project's skills, commands and settings are the root's.
+        // A child does its brief: the project's skills, commands, setup and settings are the
+        // root's. It reads the tasks it runs, and changes none of them.
         for child in [&leaf, &lead_child] {
-            for family in ["skills", "commands", "project"] {
+            assert!(child.contains(&"tasks".to_owned()));
+            for family in ["skills", "commands", "setup", "project"] {
                 assert!(!child.contains(&family.to_owned()), "{family}");
             }
         }
@@ -1151,7 +1154,7 @@ mod tests {
         assert_eq!(forge[10], "forge_write", "after skill_read");
         assert!(!forge.contains(&"ticket_read".to_owned()));
         let both = short(claude::PROVIDER.tools(true, false, true, true));
-        assert_eq!(both.len(), 23);
+        assert_eq!(both.len(), 24);
         assert_eq!(both[10], "ticket_read", "after skill_read");
         assert_eq!(both[11], "forge_write", "after ticket_read");
         assert_eq!(both[12], "workspace_remove", "after forge_write");

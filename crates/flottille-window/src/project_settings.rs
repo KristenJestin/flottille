@@ -1,6 +1,7 @@
 //! A project's settings page: the forge each repository is on and the tracker of its tickets
 //! (`docs/projects.md`, "Forges and tracker"), re-checking or removing the project, then its
-//! Skills and Commands (`docs/skills.md`, `docs/commands.md`), each section saved on its own. Flottille
+//! Skills, Commands, Tasks and Setup (`docs/skills.md`, `docs/commands.md`, `docs/projects.md`),
+//! each section saved on its own, then its rules. Flottille
 //! never guesses a forge: the form is pre-filled with what each repository's remote proposes, and
 //! nothing is read nor written on a forge until the user saves. The window never writes the
 //! project's file: Save asks the daemon (`project.set_settings`), which checks each forge against
@@ -21,8 +22,10 @@ use crate::actions::Command;
 use crate::commands::CommandsSection;
 use crate::project::repository_label;
 use crate::rules::RulesEditor;
+use crate::setup::SetupSection;
 use crate::shell::Shell;
 use crate::skills::SkillsSection;
+use crate::tasks::TasksSection;
 
 /// A text field in Flottille's colours.
 pub fn styled_input(
@@ -225,6 +228,8 @@ pub struct ProjectSettingsPage {
     rules: Entity<RulesEditor>,
     skills: Entity<SkillsSection>,
     commands: Entity<CommandsSection>,
+    tasks: Entity<TasksSection>,
+    setup: Entity<SetupSection>,
 }
 
 impl ProjectSettingsPage {
@@ -240,11 +245,20 @@ impl ProjectSettingsPage {
         };
         let skills = cx.new(|_| SkillsSection::new(shell.clone(), name.clone()));
         let commands = cx.new(|_| CommandsSection::new(shell.clone(), name.clone()));
+        let tasks = cx.new(|_| TasksSection::new(shell.clone(), name.clone()));
+        let setup = cx.new(|_| SetupSection::new(shell.clone(), name.clone()));
         // Asked once the shell, which is making this page, is no longer being updated.
-        let (listing, skilling) = (commands.clone(), skills.clone());
+        let (listing, skilling, tasking, setting) = (
+            commands.clone(),
+            skills.clone(),
+            tasks.clone(),
+            setup.clone(),
+        );
         cx.defer(move |cx| {
             listing.update(cx, |section, cx| section.read(cx));
             skilling.update(cx, |section, cx| section.read(cx));
+            tasking.update(cx, |section, cx| section.read(cx));
+            setting.update(cx, |section, cx| section.read(cx));
         });
         Self {
             shell,
@@ -270,6 +284,8 @@ impl ProjectSettingsPage {
             rules,
             skills,
             commands,
+            tasks,
+            setup,
         }
     }
 
@@ -285,13 +301,25 @@ impl ProjectSettingsPage {
         &self.commands
     }
 
+    pub fn tasks(&self) -> &Entity<TasksSection> {
+        &self.tasks
+    }
+
+    pub fn setup(&self) -> &Entity<SetupSection> {
+        &self.setup
+    }
+
     /// Whether the daemon has answered the lists the page asks for as it opens, with a list or
     /// with a problem: an answer redraws the page, so the tests wait for it.
     pub fn has_read(&self, cx: &App) -> bool {
         let commands = self.commands.read(cx);
         let skills = self.skills.read(cx);
+        let tasks = self.tasks.read(cx);
+        let setup = self.setup.read(cx);
         (commands.commands().is_some() || commands.problem().is_some())
             && (skills.skills().is_some() || skills.problem().is_some())
+            && (tasks.tasks().is_some() || tasks.problem().is_some())
+            && (setup.steps().is_some() || setup.problem().is_some())
     }
 
     pub fn name(&self) -> &str {
@@ -408,6 +436,9 @@ impl ProjectSettingsPage {
                 repository: repository_field,
             });
         }
+        let paths = rows.iter().map(|row| row.path.clone()).collect();
+        self.setup
+            .update(cx, |section, cx| section.set_repositories(paths, cx));
         self.repositories = rows;
         let tracker = serde_json::from_value::<ProjectTracker>(settings["tracker"].clone()).ok();
         let (site, keys) = match &tracker {
@@ -1004,13 +1035,15 @@ impl Render for ProjectSettingsPage {
                         d.child(said("project-settings-saved", &saved))
                     })
                     .child(footer)
+                    .child(self.skills.clone())
+                    .child(self.commands.clone())
+                    .child(self.tasks.clone())
+                    .child(self.setup.clone())
                     .child(enter(
                         key("rules"),
                         6 + count,
-                        div().mb(px(12.)).child(self.rules.clone()),
-                    ))
-                    .child(self.skills.clone())
-                    .child(self.commands.clone()),
+                        div().mt(px(24.)).mb(px(12.)).child(self.rules.clone()),
+                    )),
             )
     }
 }

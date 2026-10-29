@@ -836,7 +836,7 @@ fn an_agent_s_acli_always_asks_the_user_and_never_runs_before() {
         "acli jira workitem view ABC-1 --json",
         "acli jira workitem comment create --key ABC-1 --body hi",
     ] {
-        let answer = mcp.call("commands_run", json!({"line": line}));
+        let answer = mcp.call("run", json!({"line": line}));
         assert!(
             answer.text.starts_with("Waiting for the user's approval"),
             "{line}: {}",

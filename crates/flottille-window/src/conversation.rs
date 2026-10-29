@@ -579,7 +579,13 @@ impl Conversation {
         if let Some(diff) = edit {
             changes.extend(self.push(diff));
         }
-        if ended && matches!(call.name.as_str(), "commands_run" | "commands_status") {
+        if ended
+            && matches!(
+                call.name.as_str(),
+                // The names before tasks, in a conversation of then.
+                "run" | "run_status" | "commands_run" | "commands_status"
+            )
+        {
             let mut texts = Vec::new();
             strings(&data["raw_output"], &mut texts);
             if let Some(mut card) = texts.into_iter().find_map(command_card) {
@@ -1333,7 +1339,7 @@ mod tests {
     #[test]
     fn a_command_s_result_is_a_card_with_its_code_its_duration_and_its_lines() {
         let mut c = root();
-        for event in answered("a", "commands_run", RUN_ANSWER) {
+        for event in answered("a", "run", RUN_ANSWER) {
             c.apply(&event);
         }
 
@@ -1362,8 +1368,8 @@ mod tests {
     #[test]
     fn a_command_still_running_when_it_answered_is_a_running_card_without_the_advice() {
         let mut c = root();
-        let text = "run r1: server (`npm run dev`) is running after 1.0 s\nit keeps going: read it with commands_status {\"run\": \"r1\"}, stop it with commands_status {\"run\": \"r1\", \"action\": \"stop\"}\n(lines 1-1 of 1)\nlistening";
-        for event in answered("a", "commands_run", text) {
+        let text = "run r1: server (`npm run dev`) is running after 1.0 s\nit keeps going: read it with run_status {\"run\": \"r1\"}, stop it with run_status {\"run\": \"r1\", \"action\": \"stop\"}\n(lines 1-1 of 1)\nlistening";
+        for event in answered("a", "run", text) {
             c.apply(&event);
         }
 
@@ -1378,11 +1384,7 @@ mod tests {
     #[test]
     fn a_result_that_is_no_command_s_is_no_card() {
         let mut c = root();
-        for event in answered(
-            "a",
-            "commands_run",
-            "refused: the catalogue has no command x",
-        ) {
+        for event in answered("a", "run", "refused: project app has no task named x") {
             c.apply(&event);
         }
         for event in answered("b", "fs_read", RUN_ANSWER) {
@@ -1396,7 +1398,7 @@ mod tests {
     fn an_approved_command_is_the_same_card_and_says_who_allowed_it_never_the_raw_text() {
         let mut c = root();
         let body = format!(
-            "[flottille:approval]\nRequest #7 (commands_run) was approved by the user, and \
+            "[flottille:approval]\nRequest #7 (run) was approved by the user, and \
              Flottille has now done it. Its result:\n\n{RUN_ANSWER}"
         );
         c.apply(&event(1, "agent.prompted", json!({ "text": body })));
@@ -1417,10 +1419,10 @@ mod tests {
     fn the_other_answers_to_a_request_are_a_sentence_and_never_the_raw_text() {
         let mut c = root();
         for (n, body) in [
-            "Request #1 (commands_run) was refused by the user. Nothing was done.",
+            "Request #1 (run) was refused by the user. Nothing was done.",
             "Request #2 (fs_write) was not executed: the agent that asked has ended.",
             "Request #3 (fs_write) was approved by the user, and Flottille has now done it. Its result:\n\nwrote 3 bytes",
-            "Request #4 (commands_run) was approved by the user, but nothing was done: cannot run it",
+            "Request #4 (run) was approved by the user, but nothing was done: cannot run it",
         ]
         .into_iter()
         .enumerate()
@@ -1443,10 +1445,10 @@ mod tests {
         assert_eq!(
             said,
             [
-                "you refused commands_run (request #1)",
+                "you refused run (request #1)",
                 "fs_write (request #2) was not done: the agent that asked has ended.",
                 "you allowed fs_write (request #3)",
-                "you allowed commands_run (request #4) but nothing was done: cannot run it",
+                "you allowed run (request #4) but nothing was done: cannot run it",
             ]
         );
     }
@@ -1467,18 +1469,18 @@ mod tests {
         assert_eq!(calls[0].args.chars().count(), ARGS + 1);
         assert!(calls[0].args.ends_with('…'));
     }
-    const RUNNING: &str = "run r1: `./fails.sh` is running after 1.0 s\nit keeps going: read it with commands_status {\"run\": \"r1\"}\n(lines 1-1 of 1)\nstart";
+    const RUNNING: &str = "run r1: `./fails.sh` is running after 1.0 s\nit keeps going: read it with run_status {\"run\": \"r1\"}\n(lines 1-1 of 1)\nstart";
 
     fn ended_delivery(state: &str) -> String {
         format!(
             "[flottille:command-ended]\nYour command `./fails.sh` (run r1) {state} after 2.0 s.\n\
-             Its last lines (lines 1-2 of 2; read more with commands_status {{\"run\": \"r1\"}}):\n\
+             Its last lines (lines 1-2 of 2; read more with run_status {{\"run\": \"r1\"}}):\n\
              start\nboom"
         )
     }
 
     fn running_card(c: &mut Conversation) {
-        for event in answered("a", "commands_run", RUNNING) {
+        for event in answered("a", "run", RUNNING) {
             c.apply(&event);
         }
     }
@@ -1598,7 +1600,7 @@ mod tests {
         assert_eq!(lines.len(), 1, "{:?}", without.blocks());
     }
 
-    const APPROVED: &str = "[flottille:approval]\nRequest #7 (commands_run) was approved by the user, and Flottille has now done it. Its result:\n\nrun r2: `make` exited with code 0 after 1.0 s\n(lines 1-1 of 1)\nbuilt";
+    const APPROVED: &str = "[flottille:approval]\nRequest #7 (run) was approved by the user, and Flottille has now done it. Its result:\n\nrun r2: `make` exited with code 0 after 1.0 s\n(lines 1-1 of 1)\nbuilt";
 
     #[test]
     fn the_approval_line_is_dropped_when_the_card_of_its_result_follows() {
@@ -1636,7 +1638,7 @@ mod tests {
         c.apply(&event(
             1,
             "agent.prompted",
-            json!({"text": "[flottille:approval]\nRequest #7 (commands_run) was refused by the user. Nothing was done."}),
+            json!({"text": "[flottille:approval]\nRequest #7 (run) was refused by the user. Nothing was done."}),
         ));
 
         assert_eq!(c.blocks()[0], Block::Approval { number: 7 });
@@ -1646,7 +1648,7 @@ mod tests {
         event(
             seq,
             "agent.tool_served",
-            json!({"tool": "commands_run", "call_key": key, "gate": gate}),
+            json!({"tool": "run", "call_key": key, "gate": gate}),
         )
     }
 
@@ -1654,7 +1656,7 @@ mod tests {
     fn a_card_says_the_judge_allowed_the_call_it_let_through() {
         let mut c = root();
         for (seq, id, gate) in [(1, "a", "judged"), (4, "b", "allow")] {
-            let [call, done] = answered(id, "commands_run", RUN_ANSWER);
+            let [call, done] = answered(id, "run", RUN_ANSWER);
             // The server records the call before the agent sees it done.
             c.apply(&Event { seq, ..call });
             c.apply(&served(seq + 1, id, gate));

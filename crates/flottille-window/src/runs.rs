@@ -23,6 +23,65 @@ use serde_json::Value;
 use crate::conversation::{CommandCard, Ending};
 use crate::session::{SessionPage, seconds};
 use crate::shell::now_ms;
+use crate::tasks::ProjectTasks;
+
+/// Where a list of commands and its panel are: a session's rail, or a project page, which lists
+/// the tasks the user ran there.
+#[derive(Clone)]
+pub enum Owner {
+    Session(WeakEntity<SessionPage>),
+    Project(WeakEntity<ProjectTasks>),
+}
+
+impl From<WeakEntity<SessionPage>> for Owner {
+    fn from(page: WeakEntity<SessionPage>) -> Self {
+        Owner::Session(page)
+    }
+}
+
+impl From<WeakEntity<ProjectTasks>> for Owner {
+    fn from(tasks: WeakEntity<ProjectTasks>) -> Self {
+        Owner::Project(tasks)
+    }
+}
+
+impl Owner {
+    fn open(&self, run: &str, cx: &mut App) {
+        match self {
+            Owner::Session(page) => page.update(cx, |page, cx| page.open_command(run, cx)).ok(),
+            Owner::Project(tasks) => tasks
+                .update(cx, |tasks, cx| tasks.open_command(run, cx))
+                .ok(),
+        };
+    }
+
+    fn close(&self, cx: &mut App) {
+        match self {
+            Owner::Session(page) => page.update(cx, |page, cx| page.close_command(cx)).ok(),
+            Owner::Project(tasks) => tasks.update(cx, |tasks, cx| tasks.close_command(cx)).ok(),
+        };
+    }
+
+    fn stop(&self, run: &str, cx: &mut App) {
+        match self {
+            Owner::Session(page) => page.update(cx, |page, cx| page.stop_command(run, cx)).ok(),
+            Owner::Project(tasks) => tasks
+                .update(cx, |tasks, cx| tasks.stop_command(run, cx))
+                .ok(),
+        };
+    }
+
+    fn dismiss(&self, run: &str, cx: &mut App) {
+        match self {
+            Owner::Session(page) => page
+                .update(cx, |page, cx| page.dismiss_command(run, cx))
+                .ok(),
+            Owner::Project(tasks) => tasks
+                .update(cx, |tasks, cx| tasks.dismiss_command(run, cx))
+                .ok(),
+        };
+    }
+}
 
 /// The lines a card shows before it is unfolded.
 pub const FOLDED_LINES: usize = 5;
@@ -31,9 +90,9 @@ pub const FOLDED_LINES: usize = 5;
 #[derive(Clone, Debug, PartialEq)]
 pub struct CommandRow {
     pub run: String,
-    /// The agent that started it.
+    /// The agent that started it; empty for a task the user ran.
     pub agent: String,
-    /// The catalogue command it runs, none for a line of the agent's.
+    /// The task it runs, none for a line of the agent's.
     pub name: Option<String>,
     pub line: String,
     /// `running`, `exited`, `stopped` or `interrupted`.
@@ -280,7 +339,7 @@ fn seconds_text(seconds_taken: Option<f64>) -> String {
 
 /// The rail's Commands section: nothing while the session ran no command.
 pub struct CommandList {
-    page: WeakEntity<SessionPage>,
+    page: Owner,
     rows: Vec<CommandRow>,
     /// How the tree names each agent.
     names: HashMap<String, String>,
@@ -291,9 +350,9 @@ pub struct CommandList {
 }
 
 impl CommandList {
-    pub fn new(page: WeakEntity<SessionPage>) -> Self {
+    pub fn new(page: impl Into<Owner>) -> Self {
         Self {
-            page,
+            page: page.into(),
             rows: Vec::new(),
             names: HashMap::new(),
             error: None,
@@ -350,13 +409,16 @@ impl CommandList {
         cx.notify();
     }
 
-    /// Who started a command: the catalogue command, then the agent.
+    /// Who started a command: the task, then the agent, or the user.
     fn who(&self, row: &CommandRow) -> String {
-        let agent = self
-            .names
-            .get(&row.agent)
-            .cloned()
-            .unwrap_or_else(|| format!("agent {}", row.agent));
+        let agent = match row.agent.as_str() {
+            "" => "you".to_owned(),
+            agent => self
+                .names
+                .get(agent)
+                .cloned()
+                .unwrap_or_else(|| format!("agent {agent}")),
+        };
         match &row.name {
             Some(name) => format!("task {name} · {agent}"),
             None => agent,
@@ -379,9 +441,7 @@ impl Render for CommandList {
             let open = {
                 let page = self.page.clone();
                 let run = run.clone();
-                move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                    page.update(cx, |page, cx| page.open_command(&run, cx)).ok();
-                }
+                move |_: &ClickEvent, _: &mut Window, cx: &mut App| page.open(&run, cx)
             };
             let button = if ended {
                 let page = self.page.clone();
@@ -393,8 +453,7 @@ impl Render for CommandList {
                 .on_click(move |_, _, cx| {
                     // The row opens the output; its buttons do not.
                     cx.stop_propagation();
-                    page.update(cx, |page, cx| page.dismiss_command(&run, cx))
-                        .ok();
+                    page.dismiss(&run, cx);
                 })
             } else {
                 let page = self.page.clone();
@@ -405,7 +464,7 @@ impl Render for CommandList {
                 )
                 .on_click(move |_, _, cx| {
                     cx.stop_propagation();
-                    page.update(cx, |page, cx| page.stop_command(&run, cx)).ok();
+                    page.stop(&run, cx);
                 })
             };
             let last = ansi::strip(&row.last_line);
@@ -533,7 +592,7 @@ impl Render for CommandList {
 
 /// The panel that follows one command's output while it is open.
 pub struct CommandPanel {
-    page: WeakEntity<SessionPage>,
+    page: Owner,
     /// The command whose output is open.
     run: Option<String>,
     shown: Option<CommandOutput>,
@@ -545,9 +604,9 @@ pub struct CommandPanel {
 }
 
 impl CommandPanel {
-    pub fn new(page: WeakEntity<SessionPage>) -> Self {
+    pub fn new(page: impl Into<Owner>) -> Self {
         Self {
-            page,
+            page: page.into(),
             run: None,
             shown: None,
             scroll: ScrollHandle::new(),
@@ -619,19 +678,16 @@ impl Render for CommandPanel {
             .width(px(720.))
             .cancel_label("Close")
             .open(self.run.is_some())
-            .on_close(move |_, cx| {
-                page.update(cx, |page, cx| page.close_command(cx)).ok();
-            });
+            .on_close(move |_, cx| page.close(cx));
         if let Some(shown) = &self.shown {
             let (glyph, color, said) = mark_of(shown.row.ending(), &p);
             let run = shown.row.run.clone();
             let page = self.page.clone();
             if shown.row.running() {
-                modal = modal.action(Button::primary("command-panel-stop", "Stop").on_click(
-                    move |_, _, cx| {
-                        page.update(cx, |page, cx| page.stop_command(&run, cx)).ok();
-                    },
-                ));
+                modal = modal.action(
+                    Button::primary("command-panel-stop", "Stop")
+                        .on_click(move |_, _, cx| page.stop(&run, cx)),
+                );
             }
             body = body
                 .child(
