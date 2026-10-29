@@ -2042,6 +2042,34 @@ fn the_card_of_a_command_an_agent_adds_says_what_it_writes_and_is_confirmed_once
 }
 
 #[gpui_kit::test]
+fn a_workspace_an_agent_creates_shows_its_setup_on_the_card_then_appears_in_the_tree(
+    cx: &mut TestAppContext,
+) {
+    let user = team_user();
+    let (lead, mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+
+    let number = held_number(mcp.call("workspace", json!({"action": "create", "name": "login"})));
+    let card = card_for(&shell, number, cx);
+    assert_eq!(card.asked.as_deref(), Some("Create the workspace login"));
+    assert_eq!(
+        card.says[1..],
+        [
+            "Its setup then runs, without the gate:",
+            "1. copy .env in the workspace folder",
+        ]
+    );
+    // Copying a secret into every workspace is the user's choice: base.
+    assert!(card.base);
+    let login = place_id("app", &Some("login".into()));
+    cx.update(|window, _| assert!(window.try_find(login.clone()).is_none()));
+    cx.update(|window, cx| window.click(format!("allow-{number}"), cx));
+    until(&shell, cx, "the workspace is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(login.clone()).is_some())
+    });
+}
+
+#[gpui_kit::test]
 fn the_card_of_a_settings_change_or_a_skill_says_what_changes(cx: &mut TestAppContext) {
     let user = team_user();
     let (lead, mcp, _) = lead_in_w(&user);
