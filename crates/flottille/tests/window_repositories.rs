@@ -279,7 +279,7 @@ fn the_new_workspace_form_creates_a_workspace_with_two_of_three_repositories(
     let placeholder = form.read_with(cx, |f, _| f.base_said("api").map(str::to_owned));
     assert_eq!(
         placeholder.as_deref(),
-        Some("base: develop, else main, the project's"),
+        Some("base: develop, else main"),
         "the default is the project's rule"
     );
 

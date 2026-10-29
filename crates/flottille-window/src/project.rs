@@ -1200,14 +1200,11 @@ impl NewWorkspace {
     /// What a repository's base field says when it is empty: the project's rule.
     fn rule_said(&self, path: &str) -> String {
         match self.rules.get(path).map(Vec::as_slice) {
-            Some([only]) => format!("base: {only}, the project's"),
-            Some([first, rest @ ..]) if !rest.is_empty() => {
-                format!(
-                    "base: {first}, else {}, the project's",
-                    rest.join(", else ")
-                )
+            Some([first, rest @ ..]) => {
+                let rest: String = rest.iter().map(|b| format!(", else {b}")).collect();
+                format!("base: {first}{rest}")
             }
-            _ => "base: the project's".to_owned(),
+            _ => "base: the project's rule".to_owned(),
         }
     }
 
@@ -1558,7 +1555,7 @@ impl Render for NewWorkspace {
                         let chip = div()
                             .id(ElementId::Name(format!("new-workspace-take-{path}").into()))
                             .flex_none()
-                            .w(px(150.))
+                            .w(px(130.))
                             .h(px(28.))
                             .px(px(8.))
                             .rounded(px(6.))
