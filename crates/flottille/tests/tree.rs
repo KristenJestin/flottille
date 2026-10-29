@@ -49,7 +49,7 @@ fn user() -> User {
     user
 }
 
-/// A project `app` over a throwaway repository with a `.env` (a sensitive file the recipe copies
+/// A project `app` over a throwaway repository with a `.env` (a sensitive file the setup copies
 /// into workspaces), and its ready workspace `w`; the workspace's folder.
 fn project(user: &User) -> PathBuf {
     let folder = user.path("work/app");
@@ -73,7 +73,7 @@ fn project(user: &User) -> PathBuf {
         .unwrap();
     let file = user.project_file("app");
     let mut text = std::fs::read_to_string(&file).unwrap();
-    text.push_str("\n[[recipe]]\ncopy = [\".env\"]\n");
+    text.push_str("\n[[setup]]\ncopy = [\".env\"]\n");
     std::fs::write(&file, text).unwrap();
     let workspace = user
         .call("workspace.create", json!({"project": "app", "name": "w"}))
@@ -637,16 +637,21 @@ fn a_lead_lists_the_agent_tools_ask_user_and_approval_answer_and_a_worker_at_the
     assert!(!names.iter().any(|n| n == "ticket_read"));
     assert!(!names.iter().any(|n| n == "forge_write"));
     assert!(names.iter().any(|n| n == "workspace_remove"));
-    // A root also reads and asks for changes to its project's procedures and settings.
-    assert!(names.iter().any(|n| n == "procedure"));
-    assert!(names.iter().any(|n| n == "project"));
-    assert_eq!(names.len(), 19);
+    // A root also reads and asks for changes to its project's skills, commands and settings.
+    for family in ["skills", "commands", "project"] {
+        assert!(names.iter().any(|n| n == family), "{family}");
+    }
+    assert_eq!(names.len(), 20);
 
     let names = worker.names();
     assert!(names.iter().any(|n| n == "ask_parent"));
     assert!(names.iter().any(|n| n == "agent_launch"));
     assert!(!names.iter().any(|n| n == "ask_user"));
-    assert!(!names.iter().any(|n| n == "procedure" || n == "project"));
+    assert!(
+        !names
+            .iter()
+            .any(|n| ["skills", "commands", "project"].contains(&n.as_str()))
+    );
 
     let names = leaf.names();
     assert_eq!(names.len(), 12, "{names:?}");
@@ -684,6 +689,32 @@ fn a_worker_s_question_reaches_the_lead_as_child_question_and_the_lead_answers_w
         seen.contains("The base is main.")
     });
     assert!(seen.contains("[flottille:parent]"), "{seen}");
+}
+
+#[test]
+fn an_agent_sends_a_command_to_its_child_with_agent_send() {
+    let user = user();
+    let (_, lead) = lead(&user);
+    user.call(
+        "command.add",
+        json!({"project": "app", "name": "ship", "description": "Ship the workspace",
+            "instructions": "Push the branch."}),
+    )
+    .unwrap();
+    let id = launch(&lead, "busy", "HANG and work");
+    let worker = titled(&user, "busy");
+
+    ok(lead.call(
+        "agent_send",
+        json!({"agent_id": id, "message": "/ship the login fix"}),
+    ));
+    let mut seen = String::new();
+    eventually("the command", || {
+        seen = ok(worker.call("fs_list", json!({"path": "."})));
+        seen.contains("Push the branch.")
+    });
+    assert!(seen.contains("The command ship of project app"), "{seen}");
+    assert!(seen.contains("Push the branch.\n\nthe login fix"), "{seen}");
 }
 
 #[test]

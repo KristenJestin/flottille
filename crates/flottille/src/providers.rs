@@ -104,7 +104,7 @@ const FILE_AND_COMMAND_TOOLS: [&str; 8] = [
     "commands_status",
 ];
 const AGENT_TOOLS: [&str; 4] = ["agent_launch", "agent_send", "agent_status", "agent_stop"];
-const ACTION_TOOLS: [&str; 2] = ["procedure", "project"];
+const ACTION_TOOLS: [&str; 3] = ["skills", "commands", "project"];
 
 impl Provider {
     /// The exact tool names an agent gets, as the provider names them: what it can do decides
@@ -126,7 +126,7 @@ impl Provider {
         if forge {
             names.push("forge_read");
         }
-        names.push("reference_read");
+        names.push("skill_read");
         if tracker {
             names.push("ticket_read");
         }
@@ -983,6 +983,8 @@ pub fn write_in_place(file: &Path, text: &str) -> std::io::Result<()> {
         if let Some(mode) = mode {
             out.set_permissions(mode)?;
         }
+        // On the disk before it takes the file's name: a crash never leaves the file empty.
+        out.sync_all()?;
         drop(out);
         std::fs::rename(&writing, &real)
     })();
@@ -1096,13 +1098,14 @@ mod tests {
                 "commands_list",
                 "commands_run",
                 "commands_status",
-                "reference_read",
+                "skill_read",
                 "workspace_remove",
                 "agent_launch",
                 "agent_send",
                 "agent_status",
                 "agent_stop",
-                "procedure",
+                "skills",
+                "commands",
                 "project",
                 "report",
                 "ask_user",
@@ -1126,10 +1129,11 @@ mod tests {
         assert!(lead_child.contains(&"ask_parent".to_owned()));
         assert!(lead_child.contains(&"approval_answer".to_owned()));
         assert!(!lead_child.contains(&"ask_user".to_owned()));
-        // A child does its brief: the project's procedures and settings are the root's.
+        // A child does its brief: the project's skills, commands and settings are the root's.
         for child in [&leaf, &lead_child] {
-            assert!(!child.contains(&"procedure".to_owned()));
-            assert!(!child.contains(&"project".to_owned()));
+            for family in ["skills", "commands", "project"] {
+                assert!(!child.contains(&family.to_owned()), "{family}");
+            }
         }
     }
 
@@ -1143,12 +1147,12 @@ mod tests {
         }
         let forge = short(claude::PROVIDER.tools(true, false, true, false));
         assert_eq!(forge[8], "forge_read", "after the command tools");
-        assert_eq!(forge[9], "reference_read", "after forge_read");
-        assert_eq!(forge[10], "forge_write", "after reference_read");
+        assert_eq!(forge[9], "skill_read", "after forge_read");
+        assert_eq!(forge[10], "forge_write", "after skill_read");
         assert!(!forge.contains(&"ticket_read".to_owned()));
         let both = short(claude::PROVIDER.tools(true, false, true, true));
-        assert_eq!(both.len(), 22);
-        assert_eq!(both[10], "ticket_read", "after reference_read");
+        assert_eq!(both.len(), 23);
+        assert_eq!(both[10], "ticket_read", "after skill_read");
         assert_eq!(both[11], "forge_write", "after ticket_read");
         assert_eq!(both[12], "workspace_remove", "after forge_write");
         assert_eq!(
@@ -1161,7 +1165,7 @@ mod tests {
     fn ticket_read_is_listed_only_when_a_tracker_is_declared() {
         // Without a tracker it could only refuse (`docs/reference/mcp.md` §4 rule 9).
         let tracker = short(claude::PROVIDER.tools(true, false, false, true));
-        assert_eq!(tracker[9], "ticket_read", "after reference_read");
+        assert_eq!(tracker[9], "ticket_read", "after skill_read");
         assert!(!tracker.contains(&"forge_read".to_owned()));
         assert!(!tracker.contains(&"forge_write".to_owned()));
         let forge = short(claude::PROVIDER.tools(true, false, true, false));
@@ -1170,7 +1174,7 @@ mod tests {
 
     #[test]
     fn workspace_remove_is_listed_in_any_project() {
-        // It acts in `main` too, naming the workspace: a procedure closes one in any project.
+        // It acts in `main` too, naming the workspace: the close command closes one in any project.
         for (forge, tracker) in [(false, false), (true, false), (false, true), (true, true)] {
             let listed = short(claude::PROVIDER.tools(true, false, forge, tracker));
             assert!(listed.contains(&"workspace_remove".to_owned()));

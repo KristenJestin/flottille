@@ -1,7 +1,7 @@
 # Workspaces
 
 A workspace is the place one piece of work happens: one git worktree per repository it takes, all
-on one branch, in one folder, prepared in the background by the project's recipe
+on one branch, in one folder, prepared in the background by the project's setup
 (`docs/projects.md`) and removed only when nothing in it would be lost. It follows
 `docs/reference/hemera.md` §6, with the additions of `docs/design.md` §6.2 that the
 multi-repository case (`docs/reference/multi-repo-case.md`) needs.
@@ -10,7 +10,7 @@ multi-repository case (`docs/reference/multi-repo-case.md`) needs.
 
 | Command | |
 |---|---|
-| `flottille workspace create <project> <name> [--repositories a,b] [--branch <branch>] [--offline]` | Makes the worktrees and answers; the rest of the recipe goes on in the background. Fails when the preparation already failed. |
+| `flottille workspace create <project> <name> [--repositories a,b] [--branch <branch>] [--offline]` | Makes the worktrees and answers; the rest of the setup goes on in the background. Fails when the preparation already failed. |
 | `flottille workspace list [<project>]` | The workspaces with their state. |
 | `flottille workspace show <project> <name>` | Its repositories, their bases, and each step with its state; a failure with its last lines. |
 | `flottille workspace ticket <project> <name> <ticket>` | Links it to a ticket (`#123` or a Jira key), or to none with `--clear` (`docs/tickets.md`). `create` takes `--ticket` too. |
@@ -66,8 +66,8 @@ none).
 
 ## Preparation
 
-The steps are, in order: one `worktree` step per repository, then the recipe as it is at creation,
-a step `for_each_repository` expanded into one step per repository. The recipe and the project's
+The steps are, in order: one `worktree` step per repository, then the setup as it is at creation,
+a step `for_each_repository` expanded into one step per repository. The setup and the project's
 variables are **snapshotted** in the store: editing the project's file later never changes the
 steps of a workspace that exists.
 
@@ -89,7 +89,7 @@ URL; JWTs and the tokens of the usual forges, registries and providers). A works
 | `root_entries` | A link to each top-level entry of the project folder that is neither a repository nor holds one, nor `.git` nor `.gitignore` (linking those makes git see the workspace folder as the root repository's checkout with every file deleted), nor holds the workspace, nor is there already. |
 | `run` | One line, split without a shell, its words filled, spawned in its repository's worktree (or the workspace folder) with the workspace's environment, in a process group of its own. It ends when its process does: what it left in the background is killed with the group. Past its time limit (`time_limit`, or the project's `run_time_limit`, 30 min by default) the group is killed and the step fails with its last lines and `it was stopped after N s`. A non-zero exit fails the step with its output, or with `it ended with exit N` when it wrote nothing. |
 
-Copies and links are Flottille's own actions, done for the recipe the user wrote; they never go
+Copies and links are Flottille's own actions, done for the setup the user wrote; they never go
 through the agents' gate.
 
 ### Resuming
@@ -162,7 +162,7 @@ and that `git worktree list` no longer lists it, then forgets the workspace. Its
 An agent in a workspace removes its own workspace the same way, with the tool `workspace_remove`
 (a call to judge), and then deletes, in each repository, the workspace's branch when
 it holds no commit of its own (every commit of it is in its base's tracking ref): an empty branch.
-A branch with commits is kept (`docs/procedures.md`). It is refused, nothing touched, while the
+A branch with commits is kept (`docs/commands.md`). It is refused, nothing touched, while the
 workspace is in use outside the agent's tree (`docs/design.md` §5.1): an agent of another tree not
 ended that works in it, or a command run of another tree still running in it, each named; the
 tree's own agents and command runs are no obstacle. The user's `flottille workspace remove` does not check

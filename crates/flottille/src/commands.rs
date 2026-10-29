@@ -1,72 +1,151 @@
-//! The commands of the agents, as the user's clients read them (`docs/protocol.md`, "The command
-//! methods"): the runs of a session, a project or the whole daemon with the last line of their
-//! output, a run's output, and the user's two answers, stop and dismiss. What the agents do with
-//! the same runs is `runs.rs`.
+//! The `command.*` methods (`docs/commands.md`): a project's named instructions, kept in its file
+//! beside its tasks. `/name` at the start of a message to an agent (the user's to a root, a
+//! parent's to its child) sends the command's instructions in its place. A command grants
+//! nothing: what its agent does goes through the gate's classes like any call.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
-use flottille_core::agent::Agent;
-use flottille_core::run::{Run, RunState};
-use flottille_core::store::Store;
+use flottille_core::commands::{self, Command};
+use flottille_core::project::Project;
+use flottille_core::workspace::Workspace;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
-use crate::projects::Failure;
-use crate::{runs, tree};
+use crate::projects::{self, Failure};
 
 type Answer = Result<Value, Failure>;
 
-/// The ended runs of a list, the latest ones: a session that ran hundreds of commands lists the
-/// last few, not all.
-const ENDED_LISTED: usize = 30;
-/// A run's last line is cut to this many characters.
-const LAST_LINE_CHARS: usize = 300;
-/// What a list reads of an ended run's output: its last characters, which hold the lines below.
-const TAIL_CHARS: usize = 8 * 1024;
-/// The lines of an ended run's output a list gives, for the card of its result.
-const CARD_LINES: usize = 20;
-/// The lines of output `command.output` gives by default and at most.
-const TAIL_LINES: usize = 200;
-const TAIL_LINES_MAX: usize = 1000;
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct List {
-    project: Option<String>,
-    /// A root, or any agent of its tree.
-    tree: Option<String>,
-    /// Also the runs that ended and were not dismissed.
-    #[serde(default)]
-    ended: bool,
+struct OfProject {
+    project: String,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Output {
-    run: String,
-    tail: Option<usize>,
+struct Named {
+    project: String,
+    name: String,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Name {
-    run: String,
+struct Add {
+    project: String,
+    /// The template's name when it is left out.
+    name: Option<String>,
+    description: Option<String>,
+    instructions: Option<String>,
+    /// One of Flottille's commands, written as it is (`commands::TEMPLATES`).
+    template: Option<String>,
 }
 
-pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
-    let params = if params.is_null() { json!({}) } else { params };
-    match method {
-        "command.list" => list(&daemon, serde_json::from_value(params)?),
-        "command.output" => output(&daemon, serde_json::from_value(params)?),
-        "command.stop" => {
-            let Name { run } = serde_json::from_value(params)?;
-            stop(&daemon, &run).await
+impl Add {
+    /// The command it adds, with its name.
+    fn command(self) -> Result<(String, Command), Failure> {
+        let Some(template) = self.template else {
+            let (Some(name), Some(description), Some(instructions)) =
+                (self.name, self.description, self.instructions)
+            else {
+                return Err(Failure::refused(
+                    "a command is added with its name, its description and its instructions, or \
+                     from a template",
+                ));
+            };
+            return Ok((name, Command::new(description.trim(), instructions)));
+        };
+        if self.description.is_some() || self.instructions.is_some() {
+            return Err(Failure::refused(
+                "a template is added as it is: edit the command once it is in the project's file",
+            ));
         }
-        "command.dismiss" => {
-            let Name { run } = serde_json::from_value(params)?;
-            dismiss(&daemon, &run)
+        let command = commands::template(&template).ok_or_else(|| {
+            Failure::new(
+                "not-found",
+                format!(
+                    "there is no template {template}: the templates are {}",
+                    commands::TEMPLATES.join(", ")
+                ),
+            )
+        })?;
+        Ok((self.name.unwrap_or(template), command))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Edit {
+    project: String,
+    name: String,
+    description: Option<String>,
+    instructions: Option<String>,
+}
+
+/// Answers a `command.*` request.
+pub fn call(daemon: &Daemon, method: &str, params: Value) -> Answer {
+    match method {
+        "command.list" => {
+            let asked: OfProject = serde_json::from_value(params)?;
+            let project = projects::load_project(daemon, &asked.project)?;
+            Ok(
+                json!({"project": project.name, "commands": project.commands.iter()
+                .map(|(name, command)| to_json(name, command, false))
+                .collect::<Vec<_>>()}),
+            )
+        }
+        "command.show" => {
+            let asked: Named = serde_json::from_value(params)?;
+            let project = projects::load_project(daemon, &asked.project)?;
+            Ok(to_json(&asked.name, find(&project, &asked.name)?, true))
+        }
+        "command.add" => {
+            let asked: Add = serde_json::from_value(params)?;
+            let project_name = asked.project.clone();
+            let (name, command) = asked.command()?;
+            command.check(&name).map_err(Failure::refused)?;
+            let project = projects::rewrite(daemon, &project_name, |project, document| {
+                if project.commands.contains_key(&name) {
+                    return Err(Failure::refused(format!(
+                        "project {} already has a command named {name}: edit it, or remove it \
+                         first",
+                        project.name
+                    )));
+                }
+                write(document, &project.name, &name, &command)
+            })?;
+            Ok(to_json(&name, find(&project, &name)?, true))
+        }
+        "command.edit" => {
+            let asked: Edit = serde_json::from_value(params)?;
+            let name = asked.name.clone();
+            let project = projects::rewrite(daemon, &asked.project, |project, document| {
+                let mut command = find(project, &name)?.clone();
+                if let Some(description) = asked.description {
+                    command.description = description.trim().to_owned();
+                }
+                if let Some(instructions) = asked.instructions {
+                    command.instructions = instructions;
+                }
+                command.check(&name).map_err(Failure::refused)?;
+                write(document, &project.name, &name, &command)
+            })?;
+            Ok(to_json(&asked.name, find(&project, &asked.name)?, true))
+        }
+        "command.remove" => {
+            let asked: Named = serde_json::from_value(params)?;
+            let name = asked.name.clone();
+            projects::rewrite(daemon, &asked.project, |project, document| {
+                find(project, &name)?;
+                let commands = document
+                    .get_mut("commands")
+                    .and_then(toml_edit::Item::as_table_like_mut)
+                    .ok_or_else(|| not_a_table(&project.name))?;
+                commands.remove(&name);
+                if commands.is_empty() {
+                    document.remove("commands");
+                }
+                Ok(())
+            })?;
+            Ok(json!({"project": asked.project, "removed": asked.name}))
         }
         method => Err(Failure::new(
             "unknown-method",
@@ -75,196 +154,149 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
     }
 }
 
-fn list(daemon: &Daemon, asked: List) -> Answer {
-    let agents = daemon.read(Store::agents)?;
-    let by_id: HashMap<&str, &Agent> = agents.iter().map(|a| (a.id.as_str(), a)).collect();
-    let (ids, ended_listed) = match (&asked.tree, &asked.project) {
-        (Some(agent), _) => {
-            if !by_id.contains_key(agent.as_str()) {
-                return Err(Failure::new(
-                    "not-found",
-                    format!("there is no agent {agent}"),
-                ));
-            }
-            let root = tree::root_of(daemon, agent);
-            // The commands of a session that ended go with it.
-            let over = by_id.get(root.as_str()).is_some_and(|a| a.state.is_final());
-            (tree::ids(daemon, &root)?, asked.ended && !over)
-        }
-        (None, Some(project)) => (
-            agents
-                .iter()
-                .filter(|a| &a.project == project)
-                .map(|a| a.id.clone())
-                .collect(),
-            asked.ended,
-        ),
-        (None, None) => (agents.iter().map(|a| a.id.clone()).collect(), asked.ended),
-    };
-    let mut commands: Vec<Value> = Vec::new();
-    for stored in daemon.read(|store| store.running_runs_of(&ids))? {
-        if let Some(view) = runs::view(daemon, &stored.id) {
-            let last = last_line(&view.output);
-            // The card of its call follows it, as the rail does.
-            let tail = tail_lines(end_of(&view.output, TAIL_CHARS));
-            commands.push(listed(daemon, &by_id, &view.run, last, tail));
-        }
-    }
-    if ended_listed {
-        for stored in daemon.read(|store| store.ended_runs_of(&ids, ENDED_LISTED, TAIL_CHARS))? {
-            let last = last_line(&stored.output);
-            let tail = tail_lines(&stored.output);
-            commands.push(listed(daemon, &by_id, &stored, last, tail));
-        }
-    }
-    Ok(json!({"commands": commands}))
-}
-
-/// A run of a list: the run, where it is, its last line and the lines of its output a card shows.
-fn listed(
-    daemon: &Daemon,
-    agents: &HashMap<&str, &Agent>,
-    run: &Run,
-    last_line: String,
-    tail: Vec<String>,
-) -> Value {
-    let agent = agents.get(run.agent.as_str());
-    let mut shown = run_json(run);
-    shown["root"] = tree::root_of(daemon, &run.agent).into();
-    shown["project"] = agent.map(|a| a.project.clone()).into();
-    shown["workspace"] = agent.and_then(|a| a.workspace.clone()).into();
-    shown["last_line"] = last_line.into();
-    shown["tail"] = tail.into();
-    shown
-}
-
-fn output(daemon: &Daemon, asked: Output) -> Answer {
-    let tail = asked.tail.unwrap_or(TAIL_LINES);
-    if !(1..=TAIL_LINES_MAX).contains(&tail) {
-        return Err(Failure::refused(format!(
-            "tail must be 1 to {TAIL_LINES_MAX} lines"
-        )));
-    }
-    let view = runs::view(daemon, &asked.run).ok_or_else(|| not_found(&asked.run))?;
-    let lines: Vec<&str> = view.output.lines().collect();
-    let from = lines.len().saturating_sub(tail);
-    let mut shown = run_json(&view.run);
-    shown["output"] = lines[from..].join("\n").into();
-    shown["earlier"] = (from > 0 || view.cut).into();
-    Ok(shown)
-}
-
-/// Stops the run, all its process group, and answers once it ended. The agent that started it is
-/// told it was the user.
-async fn stop(daemon: &Arc<Daemon>, id: &str) -> Answer {
-    let view = runs::view(daemon, id).ok_or_else(|| not_found(id))?;
-    if view.run.state == RunState::Running {
-        runs::stop_by_user(daemon, id).await;
-    }
-    let view = runs::view(daemon, id).ok_or_else(|| not_found(id))?;
-    Ok(json!({"run": run_json(&view.run)}))
-}
-
-fn dismiss(daemon: &Daemon, id: &str) -> Answer {
-    let run = daemon
-        .read(|store| store.run(id))?
-        .ok_or_else(|| not_found(id))?;
-    if run.state == RunState::Running {
-        return Err(Failure::refused(format!(
-            "run {id} is still running: stop it first"
-        )));
-    }
-    daemon.write(|store| {
-        let event = store.dismiss_run(
-            id,
-            ("run.dismissed", json!({"agent": run.agent, "run": id})),
-        )?;
-        Ok(((), event))
-    })?;
-    Ok(json!({"run": id}))
-}
-
-fn not_found(id: &str) -> Failure {
-    Failure::new("not-found", format!("there is no run {id}"))
-}
-
-/// A run as the clients read it, without its output.
-fn run_json(run: &Run) -> Value {
-    json!({
-        "run": run.id,
-        "agent": run.agent,
-        "name": run.name,
-        "line": run.line,
-        "folder": run.folder,
-        "state": run.state.as_str(),
-        "exit_code": run.exit_code,
-        "signal": run.signal,
-        "started_at": run.started_at,
-        "ended_at": run.ended_at,
+fn find<'a>(project: &'a Project, name: &str) -> Result<&'a Command, Failure> {
+    project.commands.get(name).ok_or_else(|| {
+        Failure::new(
+            "not-found",
+            format!("project {} has no command named {name}", project.name),
+        )
     })
 }
 
-/// The last `chars` characters of an output, or all of it.
-fn end_of(output: &str, chars: usize) -> &str {
-    let count = output.chars().count();
-    match count.checked_sub(chars) {
-        Some(skip) if skip > 0 => {
-            let from = output.char_indices().nth(skip).map_or(0, |(at, _)| at);
-            &output[from..]
+fn not_a_table(project: &str) -> Failure {
+    Failure::new(
+        "invalid-config",
+        format!("projects/{project}.toml: commands: must be a table"),
+    )
+}
+
+/// Writes the command under `[commands.<name>]`, in place of what was there.
+fn write(
+    document: &mut toml_edit::DocumentMut,
+    project: &str,
+    name: &str,
+    command: &Command,
+) -> Result<(), Failure> {
+    let mut table = toml_edit::Table::new();
+    table.insert("description", toml_edit::value(&command.description));
+    table.insert("instructions", toml_edit::value(&command.instructions));
+    let commands = document.entry("commands").or_insert_with(|| {
+        let mut commands = toml_edit::Table::new();
+        // `[commands.<name>]` alone, without an empty `[commands]` above it.
+        commands.set_implicit(true);
+        toml_edit::Item::Table(commands)
+    });
+    let commands = commands
+        .as_table_like_mut()
+        .ok_or_else(|| not_a_table(project))?;
+    // An entry edited keeps the comments the user wrote above it, and its form, inline or not.
+    match commands
+        .get_mut(name)
+        .and_then(toml_edit::Item::as_table_like_mut)
+    {
+        Some(entry) => {
+            for (key, value) in table.iter() {
+                entry.insert(key, value.clone());
+            }
         }
-        _ => output,
+        None => {
+            commands.insert(name, toml_edit::Item::Table(table));
+        }
     }
+    Ok(())
 }
 
-/// The last lines of the end of an output, to the card's size. An output cut by the store's
-/// tail starts mid-line: that piece is left out.
-fn tail_lines(tail: &str) -> Vec<String> {
-    let mut lines: Vec<&str> = tail.trim_end().lines().collect();
-    if tail.chars().count() >= TAIL_CHARS && !lines.is_empty() {
-        lines.remove(0);
+/// A command as the protocol shows it; with its instructions when `whole`.
+fn to_json(name: &str, command: &Command, whole: bool) -> Value {
+    let mut shown = json!({
+        "name": name,
+        "description": command.description,
+    });
+    if whole {
+        shown["instructions"] = command.instructions.clone().into();
     }
-    let from = lines.len().saturating_sub(CARD_LINES);
-    lines[from..]
+    shown
+}
+
+/// The message `text` stands for when it is sent to an agent of `project` in `workspace`:
+/// `/name rest`, where name is one of the project's commands, is the command's instructions with
+/// the rest after them, preceded by what the command is and, in a workspace, by its repositories,
+/// the project's pull requests and the ticket, which the commands Flottille ships read. Any other
+/// text is sent as it is.
+pub fn message_for(daemon: &Daemon, project: &str, workspace: Option<&str>, text: &str) -> String {
+    let Ok(project) = projects::load_project(daemon, project) else {
+        return text.to_owned();
+    };
+    let Some((name, instructions)) = commands::expanded(text, &project.commands) else {
+        return text.to_owned();
+    };
+    let mut message = format!(
+        "The command {name} of project {}: {}\n",
+        project.name,
+        project.commands[&name].description.trim()
+    );
+    let workspace = workspace.and_then(|workspace| {
+        daemon
+            .read(|store| store.workspace(&project.name, workspace))
+            .ok()
+            .flatten()
+    });
+    if let Some(workspace) = &workspace {
+        message.push_str(&format!(
+            "\nIt runs in workspace {} (branch {}).\n",
+            workspace.name, workspace.branch
+        ));
+        message.push_str(&repositories_text(&project, workspace));
+        message.push_str(&pull_requests_text(&project));
+        if let Some(ticket) = &workspace.ticket {
+            message.push_str(&format!(
+                "\nThe workspace is linked to the ticket {ticket} (ticket_read).\n"
+            ));
+        }
+    }
+    message.push_str("\n---\n\n");
+    message.push_str(&instructions);
+    message
+}
+
+/// The workspace's repositories by dependency level, as the project declares them
+/// (`depends_on`), each with its base and its remote.
+fn repositories_text(project: &Project, workspace: &Workspace) -> String {
+    let paths: Vec<String> = workspace
+        .repositories
         .iter()
-        .map(|line| line.chars().take(LAST_LINE_CHARS).collect())
-        .collect()
+        .map(|r| r.path.clone())
+        .collect();
+    let mut text = String::from(
+        "\nIts repositories, by dependency level (a level is built on the levels before it):\n",
+    );
+    for (at, level) in project.dependency_levels(&paths).iter().enumerate() {
+        let each: Vec<String> = level
+            .iter()
+            .filter_map(|path| workspace.repositories.iter().find(|r| r.path == *path))
+            .map(|r| format!("{} (base {}, on {})", r.path, r.base.branch, r.base.remote))
+            .collect();
+        text.push_str(&format!("- level {}: {}\n", at + 1, each.join(", ")));
+    }
+    text
 }
 
-/// The last line of the output with something on it, as the program wrote it.
-fn last_line(output: &str) -> String {
-    // A line redrawn in place ends with its last state: the window keeps what follows `\r`.
-    let line = output
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or_default()
-        .trim_end();
-    line.chars().take(LAST_LINE_CHARS).collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_tail_is_the_last_lines_without_the_piece_the_cut_left_at_its_start() {
-        assert_eq!(tail_lines("one\ntwo\n"), ["one", "two"]);
-        assert!(tail_lines("").is_empty());
-        let cut = format!("rest of a line\nwhole\n{}", "x".repeat(TAIL_CHARS));
-        let lines = tail_lines(&cut);
-        assert_eq!(lines[0], "whole", "{lines:?}");
-        let many: String = (0..30).map(|n| format!("l{n}\n")).collect();
-        let lines = tail_lines(&many);
-        assert_eq!((lines.len(), lines[0].as_str()), (CARD_LINES, "l10"));
+/// What the project's file says of its pull requests (`[pull_requests]`).
+fn pull_requests_text(project: &Project) -> String {
+    let settings = &project.pull_requests;
+    let mut text = String::new();
+    if let Some(title) = &settings.title {
+        text.push_str(&format!(
+            "\nA pull request's title follows the project's format: {}\n",
+            title.trim()
+        ));
     }
-
-    #[test]
-    fn the_last_line_is_the_last_with_something_on_it_cut_to_a_length() {
-        assert_eq!(last_line("one\ntwo \n\n  \n"), "two");
-        assert_eq!(last_line(""), "");
-        assert_eq!(
-            last_line(&"x".repeat(LAST_LINE_CHARS + 50)).chars().count(),
-            LAST_LINE_CHARS
-        );
+    if !settings.reviewers.is_empty() {
+        text.push_str(&format!(
+            "{}Flottille asks {} to review each pull request it opens.\n",
+            if settings.title.is_some() { "" } else { "\n" },
+            settings.reviewers.join(", ")
+        ));
     }
+    text
 }

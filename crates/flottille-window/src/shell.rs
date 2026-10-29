@@ -28,7 +28,6 @@ use crate::link::{self, Connect, Seen, Update};
 use crate::model::{BellItem, Place, Preparation, Snapshot};
 use crate::open::Opener;
 use crate::page::{MainArea, Page};
-use crate::procedures::RunProcedure;
 use crate::project::{NewWorkspace, PlaceData, ProjectData, SessionLine, repository_label};
 use crate::project_settings::ProjectSettingsPage;
 use crate::providers::Providers;
@@ -125,9 +124,6 @@ pub struct Shell {
     settings: Entity<SettingsPage>,
     /// The editor of the user's rules, on the settings page.
     rules: Entity<RulesEditor>,
-    /// The modal that runs a procedure in a workspace, one for the window: the `/` of every session
-    /// opens it.
-    run: Entity<RunProcedure>,
     /// The open project's settings page; made again for another project.
     project_settings: Option<Entity<ProjectSettingsPage>>,
     /// The form that adds a project, one for the window's life.
@@ -191,7 +187,6 @@ impl Shell {
         let sidebar = cx.new(|_| Sidebar::new(this.clone()));
         let rules = cx.new(|_| RulesEditor::new(this.clone(), None));
         let settings = cx.new(|_| SettingsPage::new(this.clone(), rules.clone()));
-        let run = cx.new(|_| RunProcedure::new(this.clone()));
         let main = {
             let (this, settings) = (this.clone(), settings.clone());
             cx.new(|cx| MainArea::new(this, settings, cx))
@@ -242,7 +237,6 @@ impl Shell {
             last_pick: None,
             settings,
             rules,
-            run,
             project_settings: None,
             add_project,
             updates: Some(updates),
@@ -408,8 +402,8 @@ impl Shell {
             .entry(id.clone())
             .or_insert_with(|| {
                 let (this, id) = (this.clone(), id.clone());
-                let (project, place) = (opened.project.clone(), opened.place.clone());
-                cx.new(|cx| Reply::new(this, id, project, place, window, cx))
+                let project = opened.project.clone();
+                cx.new(|cx| Reply::new(this, id, project, window, cx))
             })
             .clone();
         if self.providers.known {
@@ -443,23 +437,6 @@ impl Shell {
         if let Some(composer) = self.composer_of(project).cloned() {
             composer.update(cx, |composer, cx| composer.choose(choice, window, cx));
         }
-    }
-
-    /// A procedure picked with `/` in a session of the workspace: the modal shows what it grants.
-    /// Nothing starts before Confirm.
-    pub fn run_procedure(
-        &mut self,
-        project: &str,
-        workspace: &str,
-        name: &str,
-        cx: &mut Context<Self>,
-    ) {
-        self.run
-            .update(cx, |run, cx| run.open(project, workspace, name, cx));
-    }
-
-    pub fn procedure_run(&self) -> &Entity<RunProcedure> {
-        &self.run
     }
 
     /// What the window shows now, as the daemon last gave it.
@@ -720,54 +697,32 @@ impl Shell {
                     });
                 }
             }
-            Outcome::Procedures { project, listed } => {
+            Outcome::Commands { project, listed } => {
                 // The `/` lists of the project's sessions.
                 for reply in self.replies.values() {
-                    reply.update(cx, |reply, cx| {
-                        reply.procedures_listed(&project, &listed, cx)
-                    });
+                    reply.update(cx, |reply, cx| reply.commands_listed(&project, &listed, cx));
                 }
-                if let Some(page) = self.page_of_project(&project, cx) {
-                    let section = page.read(cx).procedures().clone();
+                if let Some(page) = self.settings_of_project(&project, cx) {
+                    let section = page.read(cx).commands().clone();
                     section.update(cx, |section, cx| section.listed(listed, cx));
                 }
             }
-            Outcome::ProcedureRead {
+            Outcome::CommandRead {
                 project,
                 name,
                 read,
             } => {
-                if let Some(page) = self.page_of_project(&project, cx) {
-                    let section = page.read(cx).procedures().clone();
+                if let Some(page) = self.settings_of_project(&project, cx) {
+                    let section = page.read(cx).commands().clone();
                     section.update(cx, |section, cx| {
                         section.read_whole(&name, read, window, cx)
                     });
                 }
             }
-            Outcome::ProcedureWritten { project, refused } => {
-                if let Some(page) = self.page_of_project(&project, cx) {
-                    let section = page.read(cx).procedures().clone();
+            Outcome::CommandWritten { project, refused } => {
+                if let Some(page) = self.settings_of_project(&project, cx) {
+                    let section = page.read(cx).commands().clone();
                     section.update(cx, |section, cx| section.written(refused, cx));
-                }
-            }
-            Outcome::ProcedureShown {
-                project,
-                name,
-                workspace,
-                shown,
-            } => self.run.update(cx, |run, cx| {
-                run.shown_by_daemon(&project, &name, &workspace, shown, cx)
-            }),
-            // The run opens as a session, wherever the user is.
-            Outcome::ProcedureStarted { project, started } => {
-                let (agent, refused) = match started {
-                    Ok(agent) => (Some(agent), None),
-                    Err(why) => (None, Some(why)),
-                };
-                self.run
-                    .update(cx, |run, cx| run.started(&project, refused, cx));
-                if let Some(agent) = agent {
-                    self.open(Selection::Session(agent), window, cx);
                 }
             }
             Outcome::Rules {
@@ -787,15 +742,27 @@ impl Shell {
                     editor.update(cx, |editor, cx| editor.answered(shown, written, window, cx));
                 }
             }
-            Outcome::References { project, listed } => {
-                if let Some(page) = self.page_of_project(&project, cx) {
-                    let section = page.read(cx).references().clone();
+            Outcome::Skills { project, listed } => {
+                if let Some(page) = self.settings_of_project(&project, cx) {
+                    let section = page.read(cx).skills().clone();
                     section.update(cx, |section, cx| section.listed(listed, cx));
                 }
             }
-            Outcome::ReferenceWritten { project, refused } => {
-                if let Some(page) = self.page_of_project(&project, cx) {
-                    let section = page.read(cx).references().clone();
+            Outcome::SkillRead {
+                project,
+                name,
+                read,
+            } => {
+                if let Some(page) = self.settings_of_project(&project, cx) {
+                    let section = page.read(cx).skills().clone();
+                    section.update(cx, |section, cx| {
+                        section.read_whole(&name, read, window, cx)
+                    });
+                }
+            }
+            Outcome::SkillWritten { project, refused } => {
+                if let Some(page) = self.settings_of_project(&project, cx) {
+                    let section = page.read(cx).skills().clone();
                     section.update(cx, |section, cx| section.written(refused, cx));
                 }
             }
@@ -808,17 +775,11 @@ impl Shell {
         }
     }
 
-    /// The open page, when it is `project`'s.
-    fn page_of_project(
-        &self,
-        project: &str,
-        cx: &App,
-    ) -> Option<Entity<crate::project::ProjectPage>> {
-        self.main
-            .read(cx)
-            .project_page()
+    /// The open settings page, when it is `project`'s.
+    fn settings_of_project(&self, project: &str, cx: &App) -> Option<Entity<ProjectSettingsPage>> {
+        self.project_settings
+            .clone()
             .filter(|page| page.read(cx).name() == project)
-            .cloned()
     }
 
     fn workspace_answered(
@@ -1177,12 +1138,14 @@ impl Shell {
         }
         if let Some(page) = self.main.read(cx).project_page().cloned() {
             crate::project::ProjectPage::tick(&page, now, cx);
+        }
+        if let Some(page) = self.project_settings.clone() {
             // The project's file is the user's to edit by hand too.
             let project = page.read(cx).name().to_owned();
-            self.actions.send(Command::Procedures {
+            self.actions.send(Command::Commands {
                 project: project.clone(),
             });
-            self.actions.send(Command::References { project });
+            self.actions.send(Command::Skills { project });
         }
     }
 
@@ -1433,7 +1396,6 @@ impl Render for Shell {
             }))
             .child(self.top.clone())
             .child(body)
-            .child(self.run.clone())
             .child(self.add_project.clone())
             .when(self.bell_open, |d| {
                 let scrim = div()

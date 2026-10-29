@@ -2,7 +2,7 @@
 //!
 //! A project's variables are templates (`STORE = "{workspace.path}/.store"`), filled for the
 //! workspace a command runs in, then laid over the daemon's own environment. They replace the
-//! shell hooks (`.envrc`) a project would otherwise need. The recipe's `run` steps use this, and so
+//! shell hooks (`.envrc`) a project would otherwise need. The setup's `run` steps use this, and so
 //! will every command run in a workspace later.
 
 use std::collections::BTreeMap;

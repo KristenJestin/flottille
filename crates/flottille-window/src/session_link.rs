@@ -21,9 +21,9 @@ use futures::channel::mpsc::UnboundedSender;
 use serde_json::{Value, json};
 
 use crate::actions::Changes;
-use crate::commands::{CommandOutput, CommandRow};
 use crate::conversation::one_line;
 use crate::link::{Conn, Connect, Update, quiet_wait};
+use crate::runs::{CommandOutput, CommandRow};
 
 /// One agent of the session's tree, as `agent.tree` gives it.
 #[derive(Clone, Debug, PartialEq)]
@@ -157,13 +157,18 @@ impl Request {
             },
             ("fs_read" | "fs_list" | "search", _, Some(path)) => format!("Read {path}"),
             ("fs_write" | "fs_edit", _, Some(path)) => format!("Write {path}"),
-            ("procedure" | "project", _, _) => {
+            ("skills" | "commands" | "project", _, _) => {
                 let name = field("name").unwrap_or_default();
+                let what = if self.tool == "skills" {
+                    "skill"
+                } else {
+                    "command"
+                };
                 match field("action").as_deref() {
-                    Some("start") => format!("Start the procedure {name}"),
                     Some("set_settings") => "Change the project's settings".into(),
-                    Some("add_reference") => format!("Add the reference {name}"),
-                    Some("remove_reference") => format!("Remove the reference {name}"),
+                    Some("add") => format!("Add the {what} {name}"),
+                    Some("edit") => format!("Edit the {what} {name}"),
+                    Some("remove") => format!("Remove the {what} {name}"),
                     _ => format!("{} {}", self.tool, one_line(&self.call)),
                 }
             }
@@ -284,8 +289,6 @@ pub struct PlaceFacts {
     pub forge_problem: Option<String>,
     /// The ticket it is linked to (a workspace).
     pub ticket: Option<TicketFacts>,
-    /// The procedure run the session is the root of, while it goes on.
-    pub run: Option<crate::procedures::RunFacts>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -593,7 +596,7 @@ impl Link {
             stale.mark(
                 TREE_EVENTS.contains(&name) || approval,
                 approval,
-                name == "agent.turn_ended" || name.starts_with("procedure."),
+                name == "agent.turn_ended",
                 name.starts_with("run."),
             );
             let decided = match name {
@@ -667,7 +670,7 @@ impl Link {
 
     /// The commands of the session's tree, sent; whether one runs.
     fn read_commands(&self, conn: &mut Conn) -> Result<bool, String> {
-        let answer = conn.request("command.list", json!({"tree": self.root, "ended": true}))?;
+        let answer = conn.request("run.list", json!({"tree": self.root, "ended": true}))?;
         let rows: Vec<CommandRow> = answer["commands"]
             .as_array()
             .into_iter()
@@ -682,7 +685,7 @@ impl Link {
     /// The output of the command watched, sent. A command the daemon no longer knows is not an
     /// error of the connection.
     fn read_output(&self, conn: &mut Conn, run: &str) -> Result<(), String> {
-        if let Ok(output) = conn.ask("command.output", json!({"run": run}))? {
+        if let Ok(output) = conn.ask("run.output", json!({"run": run}))? {
             self.send(SessionUpdate::CommandOutput(Box::new(CommandOutput::of(
                 &output,
             ))));
@@ -762,14 +765,8 @@ impl Link {
                     };
                 }
                 let forges = forge.as_ref().map_or(Vec::new(), forge_lines);
-                // A daemon without the method, or a session with no run: no grants to show.
-                let run = conn
-                    .ask("procedure.of", json!({"agent": self.root}))?
-                    .ok()
-                    .and_then(|held| crate::procedures::RunFacts::of(&held["run"]));
                 PlaceFacts {
                     forges,
-                    run,
                     ticket: ticket.as_ref().map(|(facts, _)| facts.clone()),
                     repositories,
                     branch: shown["branch"].as_str().map(str::to_owned),

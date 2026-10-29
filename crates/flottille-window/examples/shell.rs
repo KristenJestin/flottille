@@ -3,15 +3,15 @@
 //! compositor.
 //!
 //! ```text
-//! cargo run -p flottille-window --example shell [--features frames] -- [--project <name>] [--add-project <folder>] [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace] [--add-procedure] [--edit-procedure <name>] [--run <workspace>/<procedure>] [--slash <text>] [--attach <picture>] [--end] [--ended <project>] [--add-reference] [--project-settings <project>] [--size <w>x<h>]
+//! cargo run -p flottille-window --example shell [--features frames] -- [--project <name>] [--add-project <folder>] [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace] [--add-command] [--edit-command <name>] [--add-skill] [--edit-skill <name>] [--slash <text>] [--attach <picture>] [--end] [--ended <project>] [--project-settings <project>] [--size <w>x<h>]
 //! ```
 //!
 //! `--project` opens a project's page, `--add-project` the "Add a project" modal with the
 //! repositories detected in a folder, `--session` opens a session's page (`--agent` then reads one of its sub-agents), `--tree` the
 //! left drawer (in a narrow window), `--rail` the session page's drawer (in a window narrower than
 //! three columns), `--settings` the settings page, `--menu` one of the project page composer's
-//! pickers, `--new-workspace` the project page's new-workspace modal, `--add-procedure`,
-//! `--edit-procedure`, `--run` and `--add-reference` the modals of the procedures and references
+//! pickers, `--new-workspace` the project page's new-workspace modal, `--add-command`,
+//! `--edit-command`, `--add-skill` and `--edit-skill` the modals of the Commands and Skills
 //! sections, `--slash` types a text in the open session's composer (its `/` list), `--attach` attaches a picture file to it, `--end` opens the open
 //! session's "End the session?" confirmation, `--ended` unfolds a project's "Ended" group of the
 //! left tree, `--project-settings` a project's settings page, `--size` the window's size. The daemon is found on
@@ -34,8 +34,8 @@ fn main() {
     let (mut tree, mut rail, mut new_workspace, mut settings) = (false, false, false, false);
     let (mut menu, mut project_settings) = (None, None);
     let (mut project, mut add_project) = (None, None);
-    let (mut add_procedure, mut add_reference) = (false, false);
-    let (mut edit_procedure, mut run, mut slash, mut attach) = (None, None, None, None);
+    let (mut add_command, mut add_skill) = (false, false);
+    let (mut edit_command, mut edit_skill, mut slash, mut attach) = (None, None, None, None);
     let (mut end, mut ended) = (false, None);
     let mut dimensions = (1280., 800.);
     let mut args = std::env::args().skip(1);
@@ -50,10 +50,10 @@ fn main() {
             "--new-workspace" => new_workspace = true,
             "--settings" => settings = true,
             "--project-settings" => project_settings = Some(args.next().expect("a project")),
-            "--add-procedure" => add_procedure = true,
-            "--add-reference" => add_reference = true,
-            "--edit-procedure" => edit_procedure = Some(args.next().expect("a procedure")),
-            "--run" => run = Some(args.next().expect("a workspace/procedure")),
+            "--add-command" => add_command = true,
+            "--add-skill" => add_skill = true,
+            "--edit-command" => edit_command = Some(args.next().expect("a command")),
+            "--edit-skill" => edit_skill = Some(args.next().expect("a skill")),
             "--slash" => slash = Some(args.next().expect("what the reply's field holds")),
             "--attach" => attach = Some(args.next().expect("a picture file")),
             "--end" => end = true,
@@ -137,26 +137,6 @@ fn main() {
                                 }
                             }
                         }
-                        if let Some(page) = shell.main().read(cx).project_page().cloned() {
-                            let name = page.read(cx).name().to_owned();
-                            if add_procedure {
-                                let section = page.read(cx).procedures().clone();
-                                section.update(cx, |s, cx| s.add(cx));
-                            }
-                            if let Some(procedure) = &edit_procedure {
-                                let section = page.read(cx).procedures().clone();
-                                section.update(cx, |s, cx| s.edit(procedure, cx));
-                            }
-                            if add_reference {
-                                let section = page.read(cx).references().clone();
-                                section.update(cx, |s, cx| s.add(window, cx));
-                            }
-                            if let Some((workspace, procedure)) =
-                                run.as_deref().and_then(|run| run.split_once('/'))
-                            {
-                                shell.run_procedure(&name, workspace, procedure, cx);
-                            }
-                        }
                         let page = shell.main().read(cx).session_page().cloned();
                         if let (Some(text), Some(page)) = (&slash, &page)
                             && let Some(reply) = page.read(cx).reply().cloned()
@@ -179,6 +159,36 @@ fn main() {
                     })
                 })
                 .ok();
+            // A section of the project's settings, once the page is drawn and has read them.
+            if add_command || add_skill || edit_command.is_some() || edit_skill.is_some() {
+                cx.background_executor()
+                    .timer(Duration::from_millis(1000))
+                    .await;
+                window
+                    .update(cx, |_, window, cx| {
+                        let main = shell.read(cx).main().clone();
+                        let Some(page) = main.read(cx).project_settings_page().cloned() else {
+                            return;
+                        };
+                        let (commands, skills) = {
+                            let page = page.read(cx);
+                            (page.commands().clone(), page.skills().clone())
+                        };
+                        if add_command {
+                            commands.update(cx, |s, cx| s.add(cx));
+                        }
+                        if let Some(name) = &edit_command {
+                            commands.update(cx, |s, cx| s.edit(name, cx));
+                        }
+                        if add_skill {
+                            skills.update(cx, |s, cx| s.add(window, cx));
+                        }
+                        if let Some(name) = &edit_skill {
+                            skills.update(cx, |s, cx| s.edit(name, cx));
+                        }
+                    })
+                    .ok();
+            }
             // A sub-agent read, or the end asked, once the page knows its tree.
             if agent.is_some() || end || ended.is_some() {
                 cx.background_executor()

@@ -41,43 +41,43 @@ E2E_WEB_DIR = "{workspace.path}/app-web"
 E2E_API_DIR = "{workspace.path}/app-api"
 PATH = "{workspace.path}/.bin"
 
-[commands."api:dev"]
+[tasks."api:dev"]
 line = "npm run start:dev"
 repository = "app-api"
 serve = true
 
-[commands."front:dev"]
+[tasks."front:dev"]
 line = "npm run start"
 repository = "app-web"
 serve = true
 
-[commands.test]
+[tasks.test]
 line = "npm test"
 repository = "app-api"
 check = true
 read_only = true
 
-[commands.lint]
+[tasks.lint]
 line = "npm run lint"
 repository = "app-web"
 check = true
 read_only = true
 
-[commands.generate-data]
+[tasks.generate-data]
 line = "npm run generate-data"
 repository = "app-api"
 ask_before_running = true
 
 # Ignored files of each repository, from the main checkout, never over a file already there.
-[[recipe]]
+[[setup]]
 copy = [".env", ".env.*"]
 for_each_repository = true
 
 # The shared instructions and agent settings of the root folder, never `.git` nor `.gitignore`.
-[[recipe]]
+[[setup]]
 root_entries = true
 
 # Libraries before their consumers.
-[[recipe]]
+[[setup]]
 run = "npm install"
 for_each_repository = true

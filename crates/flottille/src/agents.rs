@@ -109,12 +109,19 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             }
             let images = keep_images(daemon, &agent, &asked.images)?;
             let after = daemon.read(Store::last_seq)?;
+            // `/name` sends the project's command of that name.
+            let message = crate::commands::message_for(
+                daemon,
+                &agent.project,
+                agent.workspace.as_deref(),
+                &asked.message,
+            );
             let delivery = deliveries::deliver_with_images(
                 daemon,
                 &agent.id,
                 "user",
                 None,
-                &asked.message,
+                &message,
                 approval::BETWEEN_TURNS,
                 images.clone(),
             )
@@ -433,6 +440,13 @@ fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
         ))
     })?;
     let after = daemon.read(Store::last_seq)?;
+    // `/name` starts the session with the project's command of that name.
+    let message = crate::commands::message_for(
+        daemon,
+        &project.name,
+        asked.workspace.as_deref(),
+        &asked.message,
+    );
     let agent = create(
         daemon,
         &project,
@@ -442,7 +456,7 @@ fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
             role,
             parent: None,
             title: None,
-            brief: asked.message.clone(),
+            brief: message.clone(),
             provider: asked.provider,
             model: asked.model,
             effort: asked.effort,
@@ -456,7 +470,7 @@ fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
         &agent.id,
         "user",
         Some(format!("brief-{}-0", agent.id)),
-        &asked.message,
+        &message,
         approval::BETWEEN_TURNS,
     );
     Ok(json!({"agent": agent.to_json(), "after": after}))
@@ -551,10 +565,10 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         project.tracker.is_some(),
     );
     let files = roles::project_files(&project.folder, &repositories);
-    let references: Vec<(String, String)> = project
-        .references
+    let skills: Vec<(String, String)> = project
+        .skills
         .iter()
-        .map(|(name, reference)| (name.clone(), reference.description.clone()))
+        .map(|(name, skill)| (name.clone(), skill.description.clone()))
         .collect();
     let rules = crate::rules::effective(&daemon.paths, project);
     let instructions = roles::instructions(
@@ -565,7 +579,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
             folder: &folder,
             title: new.title.as_deref(),
             at_depth_limit,
-            references: &references,
+            skills: &skills,
             rules: &rules,
         },
         &files,

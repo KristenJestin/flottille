@@ -8,13 +8,13 @@ use std::path::{Path, PathBuf};
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize, Serializer};
 
+use crate::commands::{Command, OBSOLETE_GRANTS};
 use crate::declared::{ProjectTracker, RepositoryForge};
-use crate::procedure::{OBSOLETE_GRANTS, Procedure};
 
 /// Children running at once per project: the bounds of `max_children`.
 pub const CHILDREN_CAP: std::ops::RangeInclusive<u8> = 1..=6;
 const DEFAULT_CHILDREN_CAP: u8 = 3;
-/// Seconds a run step of the recipe may take unless the project or the step says otherwise.
+/// Seconds a run step of the setup may take unless the project or the step says otherwise.
 const DEFAULT_RUN_TIME_LIMIT: u64 = 30 * 60;
 
 /// A configuration that cannot be used, said with its file and, when there is one, its key.
@@ -68,18 +68,28 @@ fn default_base() -> Vec<String> {
     vec!["main".into()]
 }
 
-/// A document an agent reads with a tool when it is relevant, in place of instructions loaded
-/// every time (`docs/projects.md`, "References").
+/// A text an agent reads with a tool when it is relevant, in place of instructions loaded every
+/// time (`docs/skills.md`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Reference {
+pub struct Skill {
     /// One line: what the agent is told of it, never the content.
     pub description: String,
-    /// A file or a folder of files, relative to the project folder.
-    pub path: String,
+    /// A file or a folder of files, relative to the project folder; none for a skill whose text
+    /// Flottille keeps in its data folder (`Skill::text_file`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
-/// How the project's pull requests are opened (`docs/procedures.md`, "The project's pull
+impl Skill {
+    /// Where the text of a skill without a path is kept: a Markdown file of Flottille's data
+    /// folder, so that writing it never writes in the project.
+    pub fn text_file(data: &Path, project: &str, name: &str) -> PathBuf {
+        data.join("skills").join(project).join(format!("{name}.md"))
+    }
+}
+
+/// How the project's pull requests are opened (`docs/commands.md`, "The project's pull
 /// requests"): the title's format, told to the agent that opens them, and the reviewers Flottille
 /// asks for each one it opens.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -99,10 +109,10 @@ impl PullRequests {
     }
 }
 
-/// A named command of the project, for the user and for agents.
+/// A task of the project: a named, ready command line, for the user and for agents.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CatalogueCommand {
+pub struct Task {
     /// One command line, run without a shell.
     pub line: String,
     /// Where it runs: the path of one of the repositories; the workspace folder when left out.
@@ -121,17 +131,17 @@ pub struct CatalogueCommand {
     #[serde(default)]
     pub ask_before_running: bool,
     /// Obsolete: who added it (a line the user allowed always). Read and not followed: the line
-    /// is a plain catalogue line, and the daemon's migration drops the key.
+    /// is a plain task, and the daemon's migration drops the key.
     #[serde(default, skip_serializing)]
     pub added_by: Option<toml::Value>,
 }
 
-/// One step of the recipe that prepares a new workspace, as written: exactly one of `copy`,
-/// `link`, `root_entries`, `run` and `command`, done in one repository, in each, or in the
+/// One step of the setup that prepares a new workspace, as written: exactly one of `copy`,
+/// `link`, `root_entries`, `run` and `task`, done in one repository, in each, or in the
 /// workspace folder (`docs/projects.md`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RecipeStep {
+pub struct SetupStep {
     /// Globs of files to copy from the main checkout, never over a file already there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copy: Option<Vec<String>>,
@@ -145,38 +155,38 @@ pub struct RecipeStep {
     /// One command line, its words templated, run without a shell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
-    /// A command of the catalogue.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-    /// Where the step is done; the workspace folder when left out (or, for a command, where the
-    /// catalogue says).
+    /// A task of the project. `command`, its name before tasks, is still read.
+    #[serde(default, alias = "command", skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    /// Where the step is done; the workspace folder when left out (or, for a task, where the
+    /// task says).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
     /// Done once in each repository of the workspace, in dependency order, leaves first.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub for_each_repository: bool,
-    /// Seconds a `run` or a `command` may take, in place of the project's `run_time_limit`.
+    /// Seconds a `run` or a `task` may take, in place of the project's `run_time_limit`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_limit: Option<u64>,
 }
 
-/// What a recipe step does.
+/// What a setup step does.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum StepKind<'a> {
     Copy(&'a [String]),
     Link(&'a str),
     RootEntries,
     Run(&'a str),
-    Command(&'a str),
+    Task(&'a str),
 }
 
-impl RecipeStep {
+impl SetupStep {
     /// What the step does. A step of a checked project holds exactly one kind.
     pub fn kind(&self) -> StepKind<'_> {
         self.kinds()
             .into_iter()
             .next()
-            .expect("a checked recipe step holds one kind")
+            .expect("a checked setup step holds one kind")
     }
 
     fn kinds(&self) -> Vec<StepKind<'_>> {
@@ -193,8 +203,8 @@ impl RecipeStep {
         if let Some(line) = &self.run {
             kinds.push(StepKind::Run(line));
         }
-        if let Some(name) = &self.command {
-            kinds.push(StepKind::Command(name));
+        if let Some(name) = &self.task {
+            kinds.push(StepKind::Task(name));
         }
         kinds
     }
@@ -258,7 +268,7 @@ pub struct Project {
     pub default_repositories: RepositorySet,
     /// Children running at once, within `CHILDREN_CAP`.
     pub max_children: u8,
-    /// Seconds a run step of the recipe may take before it is stopped, unless the step says.
+    /// Seconds a run step of the setup may take before it is stopped, unless the step says.
     pub run_time_limit: u64,
     /// The provider of the agents started without one; the first enabled one when unset.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -275,17 +285,18 @@ pub struct Project {
     /// Name to templated value, handed to every command run in a workspace.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub variables: BTreeMap<String, String>,
+    /// Named, ready command lines, for the user and for agents.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub commands: BTreeMap<String, CatalogueCommand>,
+    pub tasks: BTreeMap<String, Task>,
     /// The steps that prepare a new workspace, in order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub recipe: Vec<RecipeStep>,
-    /// Documents an agent reads with `reference_read`, by name.
+    pub setup: Vec<SetupStep>,
+    /// Texts an agent reads with `skill_read`, by name.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub references: BTreeMap<String, Reference>,
-    /// Named actions run by an agent in a workspace, as plain instructions (`docs/procedures.md`).
+    pub skills: BTreeMap<String, Skill>,
+    /// Named instructions sent to an agent as a message (`docs/commands.md`).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub procedures: BTreeMap<String, Procedure>,
+    pub commands: BTreeMap<String, Command>,
     #[serde(skip_serializing_if = "PullRequests::is_empty")]
     pub pull_requests: PullRequests,
     /// The tracker of its tickets, as the user declared it; none is read without one.
@@ -333,14 +344,23 @@ struct File {
     repositories: Vec<Repository>,
     #[serde(default)]
     variables: BTreeMap<String, String>,
+    /// The commands, and, in a file of an earlier version, the tasks: an entry with a `line` is
+    /// a task (`Former`).
     #[serde(default)]
-    commands: BTreeMap<String, CatalogueCommand>,
+    commands: BTreeMap<String, toml::Value>,
     #[serde(default)]
-    recipe: Vec<RecipeStep>,
+    tasks: BTreeMap<String, Task>,
     #[serde(default)]
-    references: BTreeMap<String, Reference>,
+    setup: Vec<SetupStep>,
     #[serde(default)]
-    procedures: BTreeMap<String, Procedure>,
+    skills: BTreeMap<String, Skill>,
+    /// Former names, read for one release (`Former`): the setup, the skills, the commands.
+    #[serde(default)]
+    recipe: Vec<SetupStep>,
+    #[serde(default)]
+    references: BTreeMap<String, Skill>,
+    #[serde(default)]
+    procedures: BTreeMap<String, toml::Value>,
     #[serde(default)]
     pull_requests: PullRequests,
     tracker: Option<ProjectTracker>,
@@ -390,10 +410,10 @@ impl Project {
                 })
                 .collect(),
             variables: BTreeMap::new(),
+            tasks: BTreeMap::new(),
+            setup: Vec::new(),
+            skills: BTreeMap::new(),
             commands: BTreeMap::new(),
-            recipe: Vec::new(),
-            references: BTreeMap::new(),
-            procedures: BTreeMap::new(),
             pull_requests: PullRequests::default(),
             tracker: None,
             rules: None,
@@ -484,7 +504,13 @@ impl Project {
 }
 
 /// The checks and defaults of a project; the error is `<key>: <what is wrong>`.
-fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
+fn check(name: &str, mut file: File, data: &Path) -> Result<Project, String> {
+    let Current {
+        tasks,
+        setup,
+        skills,
+        commands,
+    } = current(&mut file)?;
     if let Some(inside) = &file.name
         && inside != name
     {
@@ -598,25 +624,15 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
         }
         crate::variables::check(value).map_err(|error| format!("variables.{variable}: {error}"))?;
     }
-    for (command, entry) in &file.commands {
-        if command.is_empty() || command.contains(char::is_whitespace) {
-            return Err(format!("commands.{command}: the name must not hold spaces"));
-        }
-        if entry.line.trim().is_empty() {
-            return Err(format!("commands.{command}.line: must not be empty"));
-        }
-        if let Some(path) = &entry.repository
-            && !known(path)
-        {
-            return Err(unknown(format!("commands.{command}.repository"), path));
-        }
+    for (task, entry) in &tasks {
+        check_task(task, entry, &known).map_err(|error| format!("tasks.{task}{error}"))?;
     }
 
-    for (index, step) in file.recipe.iter().enumerate() {
-        check_step(&format!("recipe[{index}]"), step, &known, &file.commands)?;
+    for (index, step) in setup.iter().enumerate() {
+        check_step(&format!("setup[{index}]"), step, &known, &tasks)?;
     }
-    for (name, procedure) in &file.procedures {
-        procedure.check(name)?;
+    for (name, command) in &commands {
+        command.check(name)?;
     }
     if file
         .pull_requests
@@ -639,9 +655,8 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
         }
     }
 
-    for (reference, entry) in &file.references {
-        check_reference(reference, entry)
-            .map_err(|error| format!("references.{reference}{error}"))?;
+    for (skill, entry) in &skills {
+        check_skill(skill, entry).map_err(|error| format!("skills.{skill}{error}"))?;
     }
 
     let mut repositories = file.repositories;
@@ -675,10 +690,10 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
     if file.agent_actions.is_some() {
         obsolete.push(OBSOLETE_AGENT_ACTIONS.to_owned());
     }
-    for (name, procedure) in &file.procedures {
-        if procedure.grants.is_some() || procedure.children.is_some() {
+    for (name, command) in &commands {
+        if command.grants.is_some() || command.children.is_some() {
             obsolete.push(format!(
-                "procedures.{name}.grants, children: {OBSOLETE_GRANTS}"
+                "commands.{name}.grants, children: {OBSOLETE_GRANTS}"
             ));
         }
     }
@@ -696,10 +711,10 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
         never: file.never,
         repositories,
         variables: file.variables,
-        commands: file.commands,
-        recipe: file.recipe,
-        references: file.references,
-        procedures: file.procedures,
+        tasks,
+        setup,
+        skills,
+        commands,
         pull_requests: file.pull_requests,
         tracker,
         rules: file.rules,
@@ -707,8 +722,93 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
     })
 }
 
-/// What is wrong with a reference, as `<.key>: <what>` to follow `references.<name>`.
-pub fn check_reference(name: &str, reference: &Reference) -> Result<(), String> {
+/// The tasks, the setup, the skills and the commands of a file, those it holds under their former
+/// names included: `[commands.<name>]` with a `line` (a task, before tasks had their name),
+/// `[[recipe]]`, `[references.<name>]` and `[procedures.<name>]`. They are read for one release,
+/// and the daemon renames them in the file at its start.
+struct Current {
+    tasks: BTreeMap<String, Task>,
+    setup: Vec<SetupStep>,
+    skills: BTreeMap<String, Skill>,
+    commands: BTreeMap<String, Command>,
+}
+
+fn current(file: &mut File) -> Result<Current, String> {
+    fn read<T: serde::de::DeserializeOwned>(key: &str, value: toml::Value) -> Result<T, String> {
+        serde_path_to_error::deserialize(value).map_err(|error| {
+            match error.path().to_string().as_str() {
+                "." => format!("{key}: {}", error.inner().message()),
+                path => format!("{key}.{path}: {}", error.inner().message()),
+            }
+        })
+    }
+    let twice = |key: String, other: &str| {
+        format!("{key}: the file holds it under {other} too: keep one of them")
+    };
+    let mut tasks = std::mem::take(&mut file.tasks);
+    let mut commands = BTreeMap::new();
+    for (name, value) in std::mem::take(&mut file.commands) {
+        let key = format!("commands.{name}");
+        if value.get("line").is_some() {
+            if tasks.contains_key(&name) {
+                return Err(twice(key, &format!("tasks.{name}")));
+            }
+            tasks.insert(name, read(&key, value)?);
+        } else {
+            commands.insert(name, read::<Command>(&key, value)?);
+        }
+    }
+    for (name, value) in std::mem::take(&mut file.procedures) {
+        let key = format!("procedures.{name}");
+        if commands.contains_key(&name) {
+            return Err(twice(key, &format!("commands.{name}")));
+        }
+        commands.insert(name, read(&key, value)?);
+    }
+    let mut skills = std::mem::take(&mut file.skills);
+    for (name, skill) in std::mem::take(&mut file.references) {
+        if skills.contains_key(&name) {
+            return Err(twice(
+                format!("references.{name}"),
+                &format!("skills.{name}"),
+            ));
+        }
+        skills.insert(name, skill);
+    }
+    let setup = match (
+        std::mem::take(&mut file.setup),
+        std::mem::take(&mut file.recipe),
+    ) {
+        (setup, recipe) if recipe.is_empty() => setup,
+        (setup, _) if !setup.is_empty() => return Err(twice("recipe".into(), "setup")),
+        (_, recipe) => recipe,
+    };
+    Ok(Current {
+        tasks,
+        setup,
+        skills,
+        commands,
+    })
+}
+
+/// What is wrong with a task, as `<.key>: <what>` to follow `tasks.<name>`.
+pub fn check_task(name: &str, task: &Task, known: &dyn Fn(&str) -> bool) -> Result<(), String> {
+    if name.is_empty() || name.contains(char::is_whitespace) {
+        return Err(": the name must not be empty nor hold spaces".into());
+    }
+    if task.line.trim().is_empty() {
+        return Err(".line: must not be empty".into());
+    }
+    if let Some(path) = &task.repository
+        && !known(path)
+    {
+        return Err(format!(".repository: unknown repository \"{path}\""));
+    }
+    Ok(())
+}
+
+/// What is wrong with a skill, as `<.key>: <what>` to follow `skills.<name>`.
+pub fn check_skill(name: &str, skill: &Skill) -> Result<(), String> {
     if !valid_name(name) {
         return Err(
             ": the name must be 1 to 64 letters, digits, dots, dashes or underscores, starting \
@@ -716,14 +816,16 @@ pub fn check_reference(name: &str, reference: &Reference) -> Result<(), String> 
                 .into(),
         );
     }
-    let description = reference.description.trim();
+    let description = skill.description.trim();
     if description.is_empty() {
         return Err(".description: must not be empty".into());
     }
     if description.chars().any(char::is_control) {
         return Err(".description: must be one line".into());
     }
-    let path = &reference.path;
+    let Some(path) = &skill.path else {
+        return Ok(());
+    };
     if !valid_repository_path(path) {
         return Err(format!(
             ".path: must be a path inside the project folder like \"docs/react\", not \"{path}\""
@@ -735,17 +837,17 @@ pub fn check_reference(name: &str, reference: &Reference) -> Result<(), String> 
     Ok(())
 }
 
-/// One step of the recipe, `key` being `recipe[i]`.
-fn check_step(
+/// One step of the setup, `key` being `setup[i]`.
+pub fn check_step(
     key: &str,
-    step: &RecipeStep,
+    step: &SetupStep,
     known: &dyn Fn(&str) -> bool,
-    commands: &BTreeMap<String, CatalogueCommand>,
+    tasks: &BTreeMap<String, Task>,
 ) -> Result<(), String> {
     let kinds = step.kinds();
     if kinds.len() != 1 {
         return Err(format!(
-            "{key}: must hold exactly one of copy, link, root_entries, run, command"
+            "{key}: must hold exactly one of copy, link, root_entries, run, task"
         ));
     }
     if let Some(path) = &step.repository {
@@ -759,8 +861,8 @@ fn check_step(
         }
     }
     match step.time_limit {
-        Some(_) if !matches!(kinds[0], StepKind::Run(_) | StepKind::Command(_)) => {
-            return Err(format!("{key}.time_limit: goes only with run or command"));
+        Some(_) if !matches!(kinds[0], StepKind::Run(_) | StepKind::Task(_)) => {
+            return Err(format!("{key}.time_limit: goes only with run or task"));
         }
         Some(0) => return Err(format!("{key}.time_limit: must be at least 1 second")),
         _ => {}
@@ -807,11 +909,9 @@ fn check_step(
                 crate::variables::check(&word).map_err(refuse)?;
             }
         }
-        StepKind::Command(name) => {
-            if !commands.contains_key(name) {
-                return Err(format!(
-                    "{key}.command: no command \"{name}\" in the catalogue"
-                ));
+        StepKind::Task(name) => {
+            if !tasks.contains_key(name) {
+                return Err(format!("{key}.task: the project has no task \"{name}\""));
             }
         }
     }
@@ -1006,11 +1106,11 @@ mod tests {
             project.obsolete,
             [
                 OBSOLETE_AGENT_ACTIONS.to_owned(),
-                format!("procedures.p.grants, children: {OBSOLETE_GRANTS}")
+                format!("commands.p.grants, children: {OBSOLETE_GRANTS}")
             ]
         );
-        // A line the user once allowed always stays a plain catalogue line.
-        assert_eq!(project.commands["ls"].line, "ls");
+        // A line the user once allowed always stays a plain task.
+        assert_eq!(project.tasks["ls"].line, "ls");
         let written = project.to_toml().unwrap();
         assert!(
             !written.contains("added_by")
@@ -1049,11 +1149,11 @@ mod tests {
         assert_eq!(project.repositories[1].base, ["develop", "main"]);
         assert_eq!(project.repositories[1].depends_on, ["lib-app", "lib-core"]);
         assert_eq!(project.variables["COMPOSE_PROJECT_NAME"], "app-{workspace}");
-        assert!(project.commands["api:dev"].serve);
-        assert!(project.commands["test"].check && project.commands["test"].read_only);
-        assert!(project.commands["generate-data"].ask_before_running);
+        assert!(project.tasks["api:dev"].serve);
+        assert!(project.tasks["test"].check && project.tasks["test"].read_only);
+        assert!(project.tasks["generate-data"].ask_before_running);
         assert_eq!(project.never[0], ["git", "push"]);
-        let kinds: Vec<_> = project.recipe.iter().map(RecipeStep::kind).collect();
+        let kinds: Vec<_> = project.setup.iter().map(SetupStep::kind).collect();
         assert_eq!(
             kinds,
             [
@@ -1062,7 +1162,7 @@ mod tests {
                 StepKind::Run("npm install"),
             ]
         );
-        assert!(project.recipe[2].for_each_repository);
+        assert!(project.setup[2].for_each_repository);
     }
 
     #[test]
@@ -1379,19 +1479,18 @@ mod tests {
 
     #[test]
     fn a_command_names_its_repository_and_has_a_line() {
-        let unknown =
-            format!("{MINIMAL}\n[commands.build]\nline = \"make\"\nrepository = \"nope\"\n");
+        let unknown = format!("{MINIMAL}\n[tasks.build]\nline = \"make\"\nrepository = \"nope\"\n");
         assert_eq!(
             refusal(&unknown),
-            r#"projects/app.toml: commands.build.repository: unknown repository "nope""#
+            r#"projects/app.toml: tasks.build.repository: unknown repository "nope""#
         );
-        let blank = format!("{MINIMAL}\n[commands.build]\nline = \"  \"\n");
+        let blank = format!("{MINIMAL}\n[tasks.build]\nline = \"  \"\n");
         assert_eq!(
             refusal(&blank),
-            "projects/app.toml: commands.build.line: must not be empty"
+            "projects/app.toml: tasks.build.line: must not be empty"
         );
-        let spaced = format!("{MINIMAL}\n[commands.\"a b\"]\nline = \"make\"\n");
-        assert!(refusal(&spaced).contains("commands.a b"));
+        let spaced = format!("{MINIMAL}\n[tasks.\"a b\"]\nline = \"make\"\n");
+        assert!(refusal(&spaced).contains("tasks.a b"));
     }
 
     #[test]
@@ -1406,33 +1505,33 @@ mod tests {
         path = "."
         [[repositories]]
         path = "api"
-        [commands.install]
+        [tasks.install]
         line = "npm install"
         repository = "api"
     "#;
 
     #[test]
-    fn a_recipe_is_read_in_order_with_each_kind_of_step() {
+    fn a_setup_is_read_in_order_with_each_kind_of_step() {
         let text = format!(
             r#"{TWO}
-            [[recipe]]
+            [[setup]]
             copy = [".env", ".env.*"]
             for_each_repository = true
-            [[recipe]]
+            [[setup]]
             link = "notes"
-            [[recipe]]
+            [[setup]]
             root_entries = true
-            [[recipe]]
+            [[setup]]
             run = "npm run build --prefix {{workspace.path}}/{{repository}}"
             for_each_repository = true
-            [[recipe]]
-            command = "install"
+            [[setup]]
+            task = "install"
             "#
         );
 
         let project = parse(&text).unwrap();
 
-        let kinds: Vec<_> = project.recipe.iter().map(RecipeStep::kind).collect();
+        let kinds: Vec<_> = project.setup.iter().map(SetupStep::kind).collect();
         assert_eq!(
             kinds,
             [
@@ -1440,50 +1539,50 @@ mod tests {
                 StepKind::Link("notes"),
                 StepKind::RootEntries,
                 StepKind::Run("npm run build --prefix {workspace.path}/{repository}"),
-                StepKind::Command("install"),
+                StepKind::Task("install"),
             ]
         );
-        assert!(project.recipe[0].for_each_repository);
+        assert!(project.setup[0].for_each_repository);
         assert_eq!(parse(&project.to_toml().unwrap()).unwrap(), project);
     }
 
     #[test]
-    fn a_recipe_step_holds_exactly_one_kind() {
-        let none = format!("{TWO}\n[[recipe]]\nrepository = \"api\"\n");
-        let two = format!("{TWO}\n[[recipe]]\nrun = \"make\"\nlink = \"x\"\n");
+    fn a_setup_step_holds_exactly_one_kind() {
+        let none = format!("{TWO}\n[[setup]]\nrepository = \"api\"\n");
+        let two = format!("{TWO}\n[[setup]]\nrun = \"make\"\nlink = \"x\"\n");
         for text in [none, two] {
             assert_eq!(
                 refusal(&text),
-                "projects/app.toml: recipe[0]: must hold exactly one of copy, link, \
-                 root_entries, run, command"
+                "projects/app.toml: setup[0]: must hold exactly one of copy, link, \
+                 root_entries, run, task"
             );
         }
     }
 
     #[test]
-    fn a_recipe_step_names_a_repository_of_the_project_or_each_of_them() {
-        let unknown = format!("{TWO}\n[[recipe]]\nrun = \"make\"\nrepository = \"web\"\n");
+    fn a_setup_step_names_a_repository_of_the_project_or_each_of_them() {
+        let unknown = format!("{TWO}\n[[setup]]\nrun = \"make\"\nrepository = \"web\"\n");
         assert_eq!(
             refusal(&unknown),
-            r#"projects/app.toml: recipe[0].repository: unknown repository "web""#
+            r#"projects/app.toml: setup[0].repository: unknown repository "web""#
         );
         let both = format!(
-            "{TWO}\n[[recipe]]\nrun = \"make\"\nrepository = \"api\"\nfor_each_repository = true\n"
+            "{TWO}\n[[setup]]\nrun = \"make\"\nrepository = \"api\"\nfor_each_repository = true\n"
         );
         assert_eq!(
             refusal(&both),
-            "projects/app.toml: recipe[0].for_each_repository: cannot go with repository"
+            "projects/app.toml: setup[0].for_each_repository: cannot go with repository"
         );
-        let root = format!("{TWO}\n[[recipe]]\nroot_entries = true\nrepository = \"api\"\n");
+        let root = format!("{TWO}\n[[setup]]\nroot_entries = true\nrepository = \"api\"\n");
         assert_eq!(
             refusal(&root),
-            "projects/app.toml: recipe[0].root_entries: links the project folder's entries, \
+            "projects/app.toml: setup[0].root_entries: links the project folder's entries, \
              takes no repository"
         );
-        let off = format!("{TWO}\n[[recipe]]\nroot_entries = false\n");
+        let off = format!("{TWO}\n[[setup]]\nroot_entries = false\n");
         assert_eq!(
             refusal(&off),
-            "projects/app.toml: recipe[0].root_entries: must be true, or left out"
+            "projects/app.toml: setup[0].root_entries: must be true, or left out"
         );
     }
 
@@ -1491,10 +1590,10 @@ mod tests {
     fn run_steps_are_stopped_after_30_minutes_unless_the_file_says_otherwise() {
         assert_eq!(parse(MINIMAL).unwrap().run_time_limit, 1800);
         let text =
-            format!("run_time_limit = 600\n{TWO}\n[[recipe]]\nrun = \"make\"\ntime_limit = 7200\n");
+            format!("run_time_limit = 600\n{TWO}\n[[setup]]\nrun = \"make\"\ntime_limit = 7200\n");
         let project = parse(&text).unwrap();
         assert_eq!(project.run_time_limit, 600);
-        assert_eq!(project.recipe[0].time_limit, Some(7200));
+        assert_eq!(project.setup[0].time_limit, Some(7200));
         assert_eq!(parse(&project.to_toml().unwrap()).unwrap(), project);
     }
 
@@ -1504,25 +1603,25 @@ mod tests {
             refusal(&format!("run_time_limit = 0\n{TWO}")),
             "projects/app.toml: run_time_limit: must be at least 1 second"
         );
-        let zero = format!("{TWO}\n[[recipe]]\nrun = \"make\"\ntime_limit = 0\n");
+        let zero = format!("{TWO}\n[[setup]]\nrun = \"make\"\ntime_limit = 0\n");
         assert_eq!(
             refusal(&zero),
-            "projects/app.toml: recipe[0].time_limit: must be at least 1 second"
+            "projects/app.toml: setup[0].time_limit: must be at least 1 second"
         );
-        let copy = format!("{TWO}\n[[recipe]]\ncopy = [\".env\"]\ntime_limit = 60\n");
+        let copy = format!("{TWO}\n[[setup]]\ncopy = [\".env\"]\ntime_limit = 60\n");
         assert_eq!(
             refusal(&copy),
-            "projects/app.toml: recipe[0].time_limit: goes only with run or command"
+            "projects/app.toml: setup[0].time_limit: goes only with run or task"
         );
     }
 
     #[test]
     fn a_run_step_with_shell_syntax_is_refused_with_its_key() {
-        let text = format!("{TWO}\n[[recipe]]\nrun = \"npm install && npm run build\"\n");
+        let text = format!("{TWO}\n[[setup]]\nrun = \"npm install && npm run build\"\n");
         assert_eq!(
             refusal(&text),
             format!(
-                "projects/app.toml: recipe[0].run: {}",
+                "projects/app.toml: setup[0].run: {}",
                 crate::command::refusal("&&")
             )
         );
@@ -1530,10 +1629,10 @@ mod tests {
 
     #[test]
     fn a_template_name_flottille_does_not_fill_is_refused_with_its_key() {
-        let run = format!("{TWO}\n[[recipe]]\nrun = \"make {{home}}\"\n");
+        let run = format!("{TWO}\n[[setup]]\nrun = \"make {{home}}\"\n");
         assert!(
             refusal(&run).starts_with(
-                "projects/app.toml: recipe[0].run: “{home}” is not a name Flottille fills"
+                "projects/app.toml: setup[0].run: “{home}” is not a name Flottille fills"
             ),
             "{}",
             refusal(&run)
@@ -1551,12 +1650,12 @@ mod tests {
     #[test]
     fn a_copy_or_a_link_stays_inside_its_repository() {
         for (step, key) in [
-            ("copy = [\"../secret\"]", "recipe[0].copy[0]"),
-            ("copy = [\".env\", \"/etc/passwd\"]", "recipe[0].copy[1]"),
-            ("copy = []", "recipe[0].copy"),
-            ("link = \".\"", "recipe[0].link"),
+            ("copy = [\"../secret\"]", "setup[0].copy[0]"),
+            ("copy = [\".env\", \"/etc/passwd\"]", "setup[0].copy[1]"),
+            ("copy = []", "setup[0].copy"),
+            ("link = \".\"", "setup[0].link"),
         ] {
-            let text = format!("{TWO}\n[[recipe]]\n{step}\n");
+            let text = format!("{TWO}\n[[setup]]\n{step}\n");
             assert!(
                 refusal(&text).starts_with(&format!("projects/app.toml: {key}: ")),
                 "{step}: {}",
@@ -1568,25 +1667,25 @@ mod tests {
     #[test]
     fn a_copy_glob_that_can_only_match_git_is_refused() {
         for glob in [".git", ".git/config", "sub/.git/*"] {
-            let text = format!("{TWO}\n[[recipe]]\ncopy = [\"{glob}\"]\n");
+            let text = format!("{TWO}\n[[setup]]\ncopy = [\"{glob}\"]\n");
             assert_eq!(
                 refusal(&text),
                 format!(
-                    "projects/app.toml: recipe[0].copy[0]: \"{glob}\" can only match in .git, \
+                    "projects/app.toml: setup[0].copy[0]: \"{glob}\" can only match in .git, \
                      which a copy never touches"
                 )
             );
         }
-        let text = format!("{TWO}\n[[recipe]]\ncopy = [\".gi*\"]\n");
+        let text = format!("{TWO}\n[[setup]]\ncopy = [\".gi*\"]\n");
         assert!(parse(&text).is_ok());
     }
 
     #[test]
-    fn a_command_step_names_a_command_of_the_catalogue() {
-        let text = format!("{TWO}\n[[recipe]]\ncommand = \"deploy\"\n");
+    fn a_task_step_names_a_task_of_the_project() {
+        let text = format!("{TWO}\n[[setup]]\ntask = \"deploy\"\n");
         assert_eq!(
             refusal(&text),
-            r#"projects/app.toml: recipe[0].command: no command "deploy" in the catalogue"#
+            r#"projects/app.toml: setup[0].task: the project has no task "deploy""#
         );
     }
 
@@ -1762,63 +1861,67 @@ mod tests {
     }
 
     #[test]
-    fn references_are_read_with_their_description_and_path() {
+    fn skills_are_read_with_their_description_and_path_or_their_text() {
         let project = parse(&format!(
-            "{MINIMAL}\n[references.react]\ndescription = \"The framework guide\"\npath = \"docs/react\"\n\
-             [references.\"test.lib\"]\ndescription = \"Testing\"\npath = \"web/TESTING.md\"\n"
+            "{MINIMAL}\n[skills.react]\ndescription = \"The framework guide\"\npath = \"docs/react\"\n\
+             [skills.\"test.lib\"]\ndescription = \"Testing\"\npath = \"web/TESTING.md\"\n\
+             [skills.style]\ndescription = \"The code style\"\n"
         ))
         .unwrap();
 
-        let names: Vec<_> = project.references.keys().map(String::as_str).collect();
-        assert_eq!(names, ["react", "test.lib"]);
+        let names: Vec<_> = project.skills.keys().map(String::as_str).collect();
+        assert_eq!(names, ["react", "style", "test.lib"]);
+        // A skill without a path is a text Flottille keeps in its data folder.
+        assert_eq!(project.skills["style"].path, None);
         assert_eq!(
-            project.references["react"].description,
-            "The framework guide"
+            Skill::text_file(Path::new(DATA), "app", "style"),
+            Path::new("/data/flottille/skills/app/style.md")
         );
-        assert_eq!(project.references["react"].path, "docs/react");
+        assert_eq!(project.skills["react"].description, "The framework guide");
+        assert_eq!(project.skills["react"].path.as_deref(), Some("docs/react"));
         assert_eq!(parse(&project.to_toml().unwrap()).unwrap(), project);
-        assert!(parse(MINIMAL).unwrap().references.is_empty());
+        assert!(parse(MINIMAL).unwrap().skills.is_empty());
     }
 
     #[test]
-    fn a_reference_that_cannot_be_used_is_refused_with_its_key() {
+    fn a_skill_that_cannot_be_used_is_refused_with_its_key() {
         let with = |reference: &str| refusal(&format!("{MINIMAL}\n{reference}"));
         let cases = [
             (
-                "[references.\"a b\"]\ndescription = \"d\"\npath = \"x\"",
-                "references.a b: the name",
+                "[skills.\"a b\"]\ndescription = \"d\"\npath = \"x\"",
+                "skills.a b: the name",
             ),
             (
-                "[references.x]\ndescription = \"\"\npath = \"x\"",
-                "references.x.description: must not be empty",
+                "[skills.x]\ndescription = \"\"\npath = \"x\"",
+                "skills.x.description: must not be empty",
             ),
             (
-                "[references.x]\ndescription = \"two\\nlines\"\npath = \"x\"",
-                "references.x.description: must be one line",
+                "[skills.x]\ndescription = \"two\\nlines\"\npath = \"x\"",
+                "skills.x.description: must be one line",
             ),
             (
-                "[references.x]\ndescription = \"d\"\npath = \"/etc\"",
-                "references.x.path: must be a path inside the project folder",
+                "[skills.x]\ndescription = \"d\"\npath = \"/etc\"",
+                "skills.x.path: must be a path inside the project folder",
             ),
             (
-                "[references.x]\ndescription = \"d\"\npath = \"../x\"",
-                "references.x.path: must be a path inside the project folder",
+                "[skills.x]\ndescription = \"d\"\npath = \"../x\"",
+                "skills.x.path: must be a path inside the project folder",
             ),
             (
-                "[references.x]\ndescription = \"d\"\npath = \"a/../../x\"",
-                "references.x.path: must be a path inside the project folder",
+                "[skills.x]\ndescription = \"d\"\npath = \"a/../../x\"",
+                "skills.x.path: must be a path inside the project folder",
             ),
             (
-                "[references.x]\ndescription = \"d\"\npath = \"\"",
-                "references.x.path: must be a path inside the project folder",
+                "[skills.x]\ndescription = \"d\"\npath = \"\"",
+                "skills.x.path: must be a path inside the project folder",
             ),
             (
-                "[references.x]\ndescription = \"d\"\npath = \"web/.git/config\"",
-                "references.x.path: must not go through a .git",
+                "[skills.x]\ndescription = \"d\"\npath = \"web/.git/config\"",
+                "skills.x.path: must not go through a .git",
             ),
             (
-                "[references.x]\ndescription = \"d\"\npath = \"x\"\nextra = 1",
-                "references.x.extra",
+                "[skills.x]\ndescription = \"d\"\npath = \"x\"\nextra = 1",
+                "skills.x.extra",
             ),
         ];
         for (reference, expected) in cases {
@@ -1838,33 +1941,93 @@ mod tests {
         assert_eq!(slug("..."), "");
     }
     #[test]
-    fn a_procedure_is_read_with_its_instructions() {
+    fn a_command_is_read_with_its_instructions() {
         let project = parse(&format!(
-            "{MINIMAL}\n[procedures.open-prs]\ndescription = \"Open the pull requests\"\n\
+            "{MINIMAL}\n[commands.open-prs]\ndescription = \"Open the pull requests\"\n\
              instructions = \"Push, then open one per repository.\"\n"
         ))
         .unwrap();
 
-        let procedure = &project.procedures["open-prs"];
-        assert_eq!(procedure.description, "Open the pull requests");
+        let command = &project.commands["open-prs"];
+        assert_eq!(command.description, "Open the pull requests");
         assert_eq!(
-            parse(&project.to_toml().unwrap()).unwrap().procedures,
-            project.procedures
+            parse(&project.to_toml().unwrap()).unwrap().commands,
+            project.commands
         );
     }
 
     #[test]
-    fn an_empty_procedure_is_refused() {
-        let with = |body: &str| format!("{MINIMAL}\n[procedures.p]\n{body}");
+    fn an_empty_command_is_refused() {
+        let with = |body: &str| format!("{MINIMAL}\n[commands.p]\n{body}");
         assert_eq!(
             refusal(&with("description = \"d\"\ninstructions = \" \"\n")),
-            "projects/app.toml: procedures.p.instructions: must not be empty"
+            "projects/app.toml: commands.p.instructions: must not be empty"
         );
         assert!(
             refusal(&with(
                 "description = \"d\"\ninstructions = \"i\"\nwhat = 1\n"
             ))
-            .contains("procedures.p"),
+            .contains("commands.p"),
         );
+    }
+
+    #[test]
+    fn the_former_keys_are_read_under_their_new_names() {
+        let old = parse(&format!(
+            "{MINIMAL}\n[commands.test]\nline = \"cargo test\"\ncheck = true\n\
+             [procedures.ship]\ndescription = \"Ship\"\ninstructions = \"Push.\"\n\
+             [references.style]\ndescription = \"The style\"\npath = \"docs/STYLE.md\"\n\
+             [[recipe]]\ncommand = \"test\"\n"
+        ))
+        .unwrap();
+        let new = parse(&format!(
+            "{MINIMAL}\n[tasks.test]\nline = \"cargo test\"\ncheck = true\n\
+             [commands.ship]\ndescription = \"Ship\"\ninstructions = \"Push.\"\n\
+             [skills.style]\ndescription = \"The style\"\npath = \"docs/STYLE.md\"\n\
+             [[setup]]\ntask = \"test\"\n"
+        ))
+        .unwrap();
+        assert_eq!(old, new);
+        assert!(new.tasks["test"].check);
+        assert_eq!(new.commands["ship"].instructions, "Push.");
+        assert_eq!(new.setup[0].kind(), StepKind::Task("test"));
+        // Written again, a project holds the new names only.
+        let written = old.to_toml().unwrap();
+        assert!(
+            written.contains("[tasks.test]")
+                && written.contains("[commands.ship]")
+                && written.contains("[skills.style]")
+                && written.contains("[[setup]]")
+                && !written.contains("recipe")
+                && !written.contains("references")
+                && !written.contains("procedures"),
+            "{written}"
+        );
+    }
+
+    #[test]
+    fn a_name_under_a_former_key_and_its_new_one_is_refused() {
+        for (twice, key) in [
+            (
+                "[tasks.test]\nline = \"a\"\n[commands.test]\nline = \"b\"\n",
+                "commands.test: the file holds it under tasks.test too",
+            ),
+            (
+                "[commands.p]\ndescription = \"d\"\ninstructions = \"i\"\n\
+                 [procedures.p]\ndescription = \"d\"\ninstructions = \"i\"\n",
+                "procedures.p: the file holds it under commands.p too",
+            ),
+            (
+                "[skills.s]\ndescription = \"d\"\n[references.s]\ndescription = \"d\"\npath = \"x\"\n",
+                "references.s: the file holds it under skills.s too",
+            ),
+            (
+                "[[setup]]\nrun = \"make\"\n[[recipe]]\nrun = \"make\"\n",
+                "recipe: the file holds it under setup too",
+            ),
+        ] {
+            let message = refusal(&format!("{MINIMAL}\n{twice}"));
+            assert!(message.contains(key), "{message}");
+        }
     }
 }

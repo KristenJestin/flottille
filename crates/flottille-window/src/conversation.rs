@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use flottille_core::protocol::Event;
 use serde_json::Value;
 
-use crate::commands::CommandRow;
+use crate::runs::CommandRow;
 
 /// Who sent the user's messages: a role, never drawn (the bubble says it).
 pub const USER: &str = "you";

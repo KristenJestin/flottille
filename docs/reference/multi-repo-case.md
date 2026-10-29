@@ -70,7 +70,7 @@ base branch rule `[develop, main]` per repository and a fetch that fails loudly;
 variables (store folder, compose project name, harness paths, `PATH` prefix) injected into every
 command; copy steps with globs; a root-entries link step that excludes `.git` and `.gitignore`;
 repository dependencies (declared, or read by a project command) and run steps "for each
-repository in dependency order"; the command catalogue; agents started in the workspace. No
+repository in dependency order"; the project's tasks; agents started in the workspace. No
 script, no environment file, no metadata file.
 
 ## Pull requests, merges, deployment, closing (today: slash commands)
@@ -97,28 +97,28 @@ script, no environment file, no metadata file.
   commands, remove the worktrees, delete the local branches, refresh the main folder, remove the
   group's folder last.
 
-**What Flottille provides later** (milestone "Forges and tickets"): these as **procedures** of the project, with the
-authorization each run grants written in the procedure and shown before it runs, on top of
-forge and tracker support (Bitbucket and GitHub, Jira read-only).
+**What Flottille provides** (milestone "Forges and tickets"): these as **commands** of the project
+(`docs/commands.md`), which grant nothing (each call goes through the gate), on top of forge and
+tracker support (Bitbucket and GitHub, Jira read-only).
 
 ## Rules the project's instructions set for agents
 
 - Push and pull request creation only after the user's explicit confirmation of exactly what was
   shown; one confirmation covers one operation.
 - Never rewrite published history or merge on their own; never `reset --hard` nor `stash`, even
-  inside a procedure.
-- Commits off by default; a procedure that says so authorizes them.
+  inside a command.
+- Commits off by default; a command that says so asks for them.
 - Never write to the tracker or wiki through the shared service account: draft, the user posts.
 - Secrets come from a vault reachable only through the company VPN: on a 403 or an unreachable
   vault, stop and tell the user, never work around it.
 
-**In Flottille** these are gate rules (never, ask) and procedure authorizations, not prose an
+**In Flottille** these are gate rules (never, ask) and the session's mode, not prose an
 agent may or may not follow.
 
 ## Skills of that project
 
 - Knowledge skills (framework guides, test library, design system, accessibility): become project
-  **references**, read by the agent with a tool when relevant.
+  **skills**, read by the agent with a tool when relevant (`docs/skills.md`).
 - Process skills and slash commands (feature group, drive the app in a browser, open pull
-  requests, merge, deploy, close): become Flottille features (workspaces, recipes) and
-  **procedures**.
+  requests, merge, deploy, close): become Flottille features (workspaces, their setup) and
+  **commands**.

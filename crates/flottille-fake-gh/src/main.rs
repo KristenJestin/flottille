@@ -1,5 +1,5 @@
 //! A scripted `gh` for the tests of Flottille's forge reads and writes (`docs/forges.md`,
-//! `docs/procedures.md`), so that no test
+//! `docs/commands.md`), so that no test
 //! ever calls GitHub nor uses anyone's sign-in. It answers the few commands Flottille runs, from a
 //! script, and records every call.
 //!

@@ -270,7 +270,7 @@ impl ListRow {
         self
     }
 
-    /// A sentence under the title: what a procedure or a template does. It is the element
+    /// A sentence under the title: what a command or a template does. It is the element
     /// `<id>-line`.
     pub fn line(mut self, text: impl Into<SharedString>) -> Self {
         self.line = Some(text.into());

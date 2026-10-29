@@ -77,7 +77,7 @@ pub struct Step {
     pub failure: Option<Failure>,
 }
 
-/// What a step does, snapshotted from the recipe when the workspace was created.
+/// What a step does, snapshotted from the setup when the workspace was created.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Action {
@@ -93,12 +93,12 @@ pub enum Action {
     RootEntries {
         except: Vec<String>,
     },
-    /// A line, or the line of a command of the catalogue, which is then named; stopped after
+    /// A line, or the line of a task of the project, which is then named; stopped after
     /// `time_limit` seconds.
     Run {
         line: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        command: Option<String>,
+        task: Option<String>,
         time_limit: u64,
     },
 }

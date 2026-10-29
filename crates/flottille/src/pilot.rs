@@ -109,7 +109,7 @@ const TOOLS: [Definition; 11] = [
         name: "workspace_create",
         title: "Make a workspace",
         description: "Makes a workspace for a piece of work: fetches the base of each \
-            repository and makes a worktree on a new branch; the project's recipe then goes on \
+            repository and makes a worktree on a new branch; the project's setup then goes on \
             in the background (workspaces_list says when it is ready). Refused when the name \
             or the branch is taken, or a fetch fails: nothing is made then.",
         read_only: false,

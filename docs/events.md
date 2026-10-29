@@ -162,28 +162,6 @@ The workspace's worktrees, folder and record are gone. Its branches are kept.
 |---|---|
 | `project`, `workspace` | |
 
-### `procedure.started`
-
-A procedure's run started (`procedure.start`, `docs/procedures.md`). It grants nothing: its calls
-go through the gate's classes and the session's mode.
-
-| Field | |
-|---|---|
-| `agent` | The run's root agent. |
-| `project` | Its project. |
-| `workspace` | The workspace it runs in. |
-| `procedure` | The procedure's name. |
-
-### `procedure.ended`
-
-A procedure's run ended: its root reported, or ended (stopped or failed). A root resumed after it
-does not start its run again.
-
-| Field | |
-|---|---|
-| `agent` | The run's root agent. |
-| `reason` | `reported`, `ended` or `failed`. |
-
 ### The events of an agent
 
 Every event of an agent has `agent`, its id (`docs/agents.md`), and is part of its conversation
@@ -511,7 +489,7 @@ the agent that started it, and `run`, its id.
 | Field | |
 |---|---|
 | `agent`, `run` | |
-| `name` | The catalogue command, `null` for a line of the agent's. |
+| `name` | The task, `null` for a line of the agent's. |
 | `line` | The line run, masked of secrets like a call's arguments. |
 | `folder` | Where it runs. |
 
@@ -520,13 +498,13 @@ the agent that started it, and `run`, its id.
 | Field | |
 |---|---|
 | `agent`, `run` | |
-| `state` | `exited` (by itself), `stopped` (`commands_status` with `action: stop`, `command.stop`, or the call that started it stopped), `interrupted` (the daemon stopped, or the one that ran it is gone). |
+| `state` | `exited` (by itself), `stopped` (`commands_status` with `action: stop`, `run.stop`, or the call that started it stopped), `interrupted` (the daemon stopped, or the one that ran it is gone). |
 | `exit_code` | Its exit code, `null` when it did not exit by itself or a signal ended it. |
 | `signal` | The signal that ended it, `null` otherwise. |
 
 #### `run.dismissed`
 
-The user dismissed a command that ended (`command.dismiss`): it is no longer listed.
+The user dismissed a command that ended (`run.dismiss`): it is no longer listed.
 
 | Field | |
 |---|---|

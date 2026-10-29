@@ -298,6 +298,45 @@ const MIGRATIONS: &[&str] = &[
     -- agent.
     CREATE INDEX runs_by_agent ON runs (agent);
 ",
+    "
+    -- Skills and Commands (`docs/skills.md`, `docs/commands.md`): references are skills and
+    -- procedures are commands, sent to an agent as a message, so the runs of procedures go. An
+    -- agent made before keeps its tools under their new names, in their order; a request keeps
+    -- its tool's new name; a workspace's step names the task it runs. A procedure the user had
+    -- not answered is refused, and its agent told what to do instead, as a refusal is.
+    DROP TABLE procedure_runs;
+    INSERT OR IGNORE INTO deliveries (id, agent, kind, body, urgency, state, created_at)
+        SELECT 'approval-' || number, agent, 'approval',
+            'Request #' || number || ' (procedure) was refused: procedures were replaced by '
+                || 'commands; start it again with /'
+                || coalesce(json_extract(arguments, '$.name'), '<name>') || '.',
+            'urgent', 'queued', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
+        FROM approval_requests WHERE tool = 'procedure' AND state = 'pending';
+    UPDATE approval_requests
+        SET state = 'denied', decision = 'deny',
+            decided_at = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
+        WHERE tool = 'procedure' AND state = 'pending';
+    UPDATE agents SET tools = (
+        SELECT json_group_array(name) FROM (
+            SELECT CASE value
+                WHEN 'mcp__flottille__reference_read' THEN 'mcp__flottille__skill_read'
+                WHEN 'mcp__flottille__procedure' THEN 'mcp__flottille__commands'
+                WHEN 'flottille_reference_read' THEN 'flottille_skill_read'
+                WHEN 'flottille_procedure' THEN 'flottille_commands'
+                ELSE value
+            END AS name FROM json_each(agents.tools) ORDER BY key
+        )
+    );
+    UPDATE approval_requests SET tool = CASE tool
+        WHEN 'reference_read' THEN 'skill_read'
+        WHEN 'procedure' THEN 'commands'
+        ELSE tool
+    END;
+    UPDATE workspace_steps
+        SET action = json_set(json_remove(action, '$.command'), '$.task',
+            json_extract(action, '$.command'))
+        WHERE json_type(action, '$.command') IS NOT NULL;
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -330,18 +369,6 @@ pub struct AgentChange {
     pub reported_at: Option<Option<u64>>,
     pub quiet_turns: Option<u32>,
     pub waiting_on_answer: Option<bool>,
-}
-
-/// A run of a procedure, held for its root agent (`docs/procedures.md`).
-#[derive(Clone, Debug, PartialEq)]
-pub struct ProcedureRun {
-    /// The run's root agent.
-    pub agent: String,
-    pub project: String,
-    pub workspace: String,
-    pub procedure: String,
-    pub started_at: u64,
-    pub ended_at: Option<u64>,
 }
 
 pub struct Store {
@@ -1596,72 +1623,6 @@ impl Store {
         Ok(())
     }
 
-    /// Records a run for its root agent, with its `procedure.started` event.
-    pub fn start_procedure_run(&mut self, run: &ProcedureRun) -> Result<Event> {
-        let transaction = self.connection.transaction()?;
-        transaction.execute(
-            "INSERT INTO procedure_runs (agent, project, workspace, procedure, started_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                run.agent,
-                run.project,
-                run.workspace,
-                run.procedure,
-                run.started_at
-            ],
-        )?;
-        let event = append_event(
-            &transaction,
-            "procedure.started",
-            json!({"agent": run.agent, "project": run.project, "workspace": run.workspace,
-                "procedure": run.procedure}),
-        )?;
-        transaction.commit()?;
-        Ok(event)
-    }
-
-    /// The run whose root is that agent, ended or not.
-    pub fn procedure_run(&self, agent: &str) -> Result<Option<ProcedureRun>> {
-        Ok(self
-            .connection
-            .query_row(
-                "SELECT agent, project, workspace, procedure, started_at, ended_at \
-                 FROM procedure_runs WHERE agent = ?1",
-                params![agent],
-                |row| {
-                    Ok(ProcedureRun {
-                        agent: row.get(0)?,
-                        project: row.get(1)?,
-                        workspace: row.get(2)?,
-                        procedure: row.get(3)?,
-                        started_at: row.get(4)?,
-                        ended_at: row.get(5)?,
-                    })
-                },
-            )
-            .optional()?)
-    }
-
-    /// Ends the run of that root agent, with its `procedure.ended` event. `None` when it has no
-    /// run, or its run ended already.
-    pub fn end_procedure_run(&mut self, agent: &str, reason: &str) -> Result<Option<Event>> {
-        let transaction = self.connection.transaction()?;
-        let changed = transaction.execute(
-            "UPDATE procedure_runs SET ended_at = ?2 WHERE agent = ?1 AND ended_at IS NULL",
-            params![agent, now_ms()],
-        )?;
-        if changed == 0 {
-            return Ok(None);
-        }
-        let event = append_event(
-            &transaction,
-            "procedure.ended",
-            json!({"agent": agent, "reason": reason}),
-        )?;
-        transaction.commit()?;
-        Ok(Some(event))
-    }
-
     pub fn replacements_since(&self, agent: &str, since: u64) -> Result<usize> {
         let count: u64 = self.connection.query_row(
             "SELECT count(*) FROM agent_replacements WHERE agent = ?1 AND at >= ?2 AND counted",
@@ -2117,7 +2078,7 @@ mod tests {
                     repository: None,
                     action: Action::Run {
                         line: "make".into(),
-                        command: None,
+                        task: None,
                         time_limit: 1800,
                     },
                     state: StepState::Pending,
@@ -2326,20 +2287,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(tables, 0);
-        let columns: u64 = store
-            .connection
-            .query_row(
-                "SELECT count(*) FROM pragma_table_info('procedure_runs') \
-                 WHERE name IN ('grants', 'children')",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(columns, 0);
-        assert_eq!(
-            store.procedure_run(&agent.id).unwrap().unwrap().procedure,
-            "ship"
-        );
         assert_eq!(
             store.agent(&agent.id).unwrap().unwrap().gate_mode,
             crate::agent::GateMode::Auto
@@ -2735,45 +2682,131 @@ mod tests {
     }
 
     #[test]
-    fn a_procedure_run_is_recorded_until_it_ends_once() {
-        let mut store = Store::open_in_memory().unwrap();
+    fn the_migration_of_skills_and_commands_renames_the_tools_requests_and_steps() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let old = Connection::open(&path).unwrap();
+        let previous = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("DROP TABLE procedure_runs"))
+            .unwrap();
+        for migration in &MIGRATIONS[..previous] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.pragma_update(None, "user_version", previous).unwrap();
         let agent = an_agent();
-        store
-            .create_agent(&agent, ("agent.created", json!({})))
-            .unwrap();
-        let run = ProcedureRun {
-            agent: agent.id.clone(),
-            project: "app".into(),
-            workspace: "login".into(),
-            procedure: "open-prs".into(),
-            started_at: 5,
-            ended_at: None,
-        };
+        old.execute_batch(&format!(
+            "INSERT INTO agents (id, provider, role, project, folder, state, created_at, \
+             updated_at, instructions, tools) VALUES ('{}', 'claude', 'lead', 'app', '/w', \
+             'idle', 1, 1, 'i', '[\"mcp__flottille__fs_read\",\"mcp__flottille__reference_read\",\
+             \"mcp__flottille__procedure\",\"mcp__flottille__project\"]'); \
+             INSERT INTO approval_requests (number, agent, tool, arguments, shown, reasons, \
+             sensitive, identity, held_by, forwards, state, created_at, kind) VALUES \
+             (1, '{0}', 'procedure', '{{\"action\":\"start\"}}', '{{}}', '[]', 0, 'x', 'user', \
+             '[]', 'pending', 1, 'action'); \
+             INSERT INTO workspaces (id, project, name, branch, folder, project_folder, \
+             created_at, variables, repositories) VALUES (1, 'app', 'login', 'app/login', '/w', \
+             '/p', 1, '{{}}', '[]'); \
+             INSERT INTO workspace_steps (workspace, position, repository, action, state) VALUES \
+             (1, 0, NULL, '{{\"kind\":\"run\",\"line\":\"make\",\"command\":\"build\",\
+             \"time_limit\":60}}', 'done');",
+            agent.id
+        ))
+        .unwrap();
+        drop(old);
 
-        let started = store.start_procedure_run(&run).unwrap();
+        let store = Store::open(&path).unwrap();
 
-        assert_eq!(started.name, "procedure.started");
-        assert!(started.data.get("grants").is_none());
-        assert_eq!(store.procedure_run(&agent.id).unwrap(), Some(run));
-        assert_eq!(store.procedure_run("another").unwrap(), None);
-        let ended = store
-            .end_procedure_run(&agent.id, "reported")
-            .unwrap()
-            .unwrap();
-        assert_eq!(ended.name, "procedure.ended");
-        assert!(
-            store
-                .procedure_run(&agent.id)
-                .unwrap()
-                .unwrap()
-                .ended_at
-                .is_some()
+        assert_eq!(
+            store.agent(&agent.id).unwrap().unwrap().tools,
+            [
+                "mcp__flottille__fs_read",
+                "mcp__flottille__skill_read",
+                "mcp__flottille__commands",
+                "mcp__flottille__project"
+            ]
         );
-        assert!(
+        assert_eq!(store.request(1).unwrap().unwrap().tool, "commands");
+        let steps = store.workspace("app", "login").unwrap().unwrap().steps;
+        assert_eq!(
+            steps[0].action,
+            Action::Run {
+                line: "make".into(),
+                task: Some("build".into()),
+                time_limit: 60
+            }
+        );
+        let tables: u64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'procedure_runs'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 0);
+    }
+
+    #[test]
+    fn a_pending_procedure_request_is_refused_by_the_migration_and_its_agent_told() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let old = Connection::open(&path).unwrap();
+        let previous = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("DROP TABLE procedure_runs"))
+            .unwrap();
+        for migration in &MIGRATIONS[..previous] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.pragma_update(None, "user_version", previous).unwrap();
+        let agent = an_agent();
+        old.execute_batch(&format!(
+            "INSERT INTO agents (id, provider, role, project, folder, state, created_at, \
+             updated_at, instructions, tools) VALUES ('{}', 'claude', 'lead', 'app', '/w', \
+             'idle', 1, 1, 'i', '[]'); \
+             INSERT INTO approval_requests (number, agent, tool, arguments, shown, reasons, \
+             sensitive, identity, held_by, forwards, state, created_at, kind) VALUES \
+             (1, '{0}', 'procedure', '{{\"action\":\"start\",\"name\":\"ship\"}}', '{{}}', \
+             '[]', 0, 'x', 'user', '[]', 'pending', 1, 'action'), \
+             (2, '{0}', 'procedure', '{{\"action\":\"start\",\"name\":\"old\"}}', '{{}}', \
+             '[]', 0, 'y', 'user', '[]', 'denied', 1, 'action'), \
+             (3, '{0}', 'fs_write', '{{}}', '{{}}', '[]', 0, 'z', 'user', '[]', 'pending', 1, \
+             'action');",
+            agent.id
+        ))
+        .unwrap();
+        drop(old);
+
+        let store = Store::open(&path).unwrap();
+
+        let refused = store.request(1).unwrap().unwrap();
+        assert_eq!(refused.state, RequestState::Denied);
+        assert_eq!(
+            store.request(2).unwrap().unwrap().state,
+            RequestState::Denied
+        );
+        assert_eq!(
+            store.request(3).unwrap().unwrap().state,
+            RequestState::Pending
+        );
+        assert_eq!(
             store
-                .end_procedure_run(&agent.id, "reported")
+                .pending_requests(approval::USER)
                 .unwrap()
-                .is_none()
+                .iter()
+                .map(|request| request.number)
+                .collect::<Vec<_>>(),
+            [3]
+        );
+        let told = store.deliveries(&agent.id, "queued").unwrap();
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0].id, "approval-1");
+        assert_eq!(told[0].kind, "approval");
+        assert_eq!(
+            told[0].body,
+            "Request #1 (procedure) was refused: procedures were replaced by commands; start it \
+             again with /ship."
         );
     }
 

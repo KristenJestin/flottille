@@ -25,7 +25,7 @@ pub fn run(paths: &Paths, action: CommandsAction) -> Result<()> {
     let mut client = Client::connect_or_start(paths)?;
     match action {
         CommandsAction::List { project, json } => {
-            let listed = client.request("command.list", json!({"project": project}))?;
+            let listed = client.request("run.list", json!({"project": project}))?;
             if json {
                 println!("{listed}");
             } else {
@@ -33,7 +33,7 @@ pub fn run(paths: &Paths, action: CommandsAction) -> Result<()> {
             }
         }
         CommandsAction::Stop { run } => {
-            let stopped = client.request("command.stop", json!({"run": run}))?;
+            let stopped = client.request("run.stop", json!({"run": run}))?;
             let state = stopped["run"]["state"].as_str().unwrap_or("?");
             println!("Run {run} is {state}; its agent is told it was you.");
         }
