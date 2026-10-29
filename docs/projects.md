@@ -145,8 +145,10 @@ Settings in the window, sections Skills and Commands.
 `[procedures.<name>]`, the skills `[references.<name>]` and the setup `[[recipe]]`, a step naming a
 task with `command`. They are still read for one release, and the daemon renames them in the file
 at its start, in place: every comment and everything else the user wrote stays, the file is
-replaced at once, and a file the daemon could use is written only when it still can afterwards. A
-name under both a former key and its new one is refused, with both keys named.
+replaced at once, and it is written only when it can be used afterwards (a file that could not be
+used for another reason stays as it is). A name under both a former key and its new one is
+refused, with both keys named, and the migration moves neither: the daemon says so in its log,
+for the user to remove the one they do not want.
 
 ## What agents do on their own
 

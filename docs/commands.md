@@ -34,8 +34,10 @@ former keys are still read for one release; at its start the daemon renames them
 (a `[commands.<name>]` with a `line` goes to `[tasks.<name>]`, then `[procedures.<name>]` becomes
 `[commands.<name>]`), keeping every comment and everything else the user wrote, and replaces the
 file at once. A name found under both a former key and its new one is refused, with both keys
-named. A procedure's former `grants` and `children` are read as nothing and removed at the same
-start, as `[agent_actions]` is.
+named, and left where they are. A procedure's former `grants` and `children` are read as nothing
+and removed at the same start, as `[agent_actions]` is. A procedure an agent asked to start that
+the user had not answered yet is refused at the daemon's first start of this version, and the agent
+told: "procedures were replaced by commands; start it again with /name".
 
 ## Sending one
 
