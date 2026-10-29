@@ -516,7 +516,31 @@ fn the_enforced_text_matches_the_gate_s_rules() {
             mcp.call("project", json!({"action": "set_rules", "text": "Push."})),
         );
         assert_eq!(rules["class"], "base", "{rules}");
+        for (tool, args) in [
+            (
+                "tasks",
+                json!({"action": "add", "name": "up", "line": "sudo make install"}),
+            ),
+            (
+                "setup",
+                json!({"action": "add", "step": {"link": "node_modules"}}),
+            ),
+            (
+                "setup",
+                json!({"action": "add", "step": {"copy": [".env"]}}),
+            ),
+            (
+                "tasks",
+                json!({"action": "add", "name": "ro", "line": "make", "read_only": true}),
+            ),
+        ] {
+            let base = request(&user, mcp.call(tool, args));
+            assert_eq!(base["class"], "base", "{tool}: {base}");
+        }
     }
+    claim("a task or setup step whose later run would be base");
+    claim("a setup step that links the user's checkout into workspaces or copies a secret");
+    claim("a task's asking turned off or its check and read-only flags set");
     claim("a forced push");
     claim("removing git's reflog or unreachable objects");
     claim("git settings that run programs");
