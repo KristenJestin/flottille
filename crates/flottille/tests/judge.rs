@@ -721,3 +721,196 @@ fn switching_the_root_to_ask_makes_a_child_s_next_call_a_card() {
     assert!(answer.text.starts_with("Waiting for"), "{}", answer.text);
     assert_eq!(judge_prompts(&user).len(), 1, "the judge was asked");
 }
+
+/// Each call is held for the user, as base, though the judge allows everything, which is never
+/// asked.
+fn base_in_auto(user: &User, mcp: &Mcp, calls: &[(&str, Value)]) {
+    for (tool, args) in calls {
+        let request = held(user, mcp.call(tool, args.clone()));
+        assert_eq!(request["class"], "base", "{args}: {request}");
+        assert!(request["judgement"].is_null(), "{args}: {request}");
+    }
+    assert!(judge_prompts(user).is_empty(), "the judge was asked");
+}
+
+fn line(text: &str) -> (&'static str, Value) {
+    ("commands_run", json!({ "line": text }))
+}
+
+#[test]
+fn a_git_setting_whose_value_git_runs_is_base() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (_, mcp, _) = session(&user, false);
+
+    base_in_auto(
+        &user,
+        &mcp,
+        &[
+            line("git -c diff.external=./x diff"),
+            line("git -c pager.log=./x log"),
+            line("git config sequence.editor ./x"),
+            line("git config filter.x.smudge ./x"),
+            line("git --config-env gpg.program=X log --show-signature"),
+            line("env GIT_EXTERNAL_DIFF=./x git diff"),
+        ],
+    );
+}
+
+#[test]
+fn a_push_with_a_receive_pack_or_exec_is_base() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (_, mcp, _) = session(&user, false);
+
+    base_in_auto(
+        &user,
+        &mcp,
+        &[
+            line("git push --receive-pack=./x origin HEAD"),
+            line("git push --exec ./x origin HEAD"),
+        ],
+    );
+}
+
+#[test]
+fn sudo_doas_and_pkexec_are_base_in_any_form() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (_, mcp, _) = session(&user, false);
+
+    base_in_auto(
+        &user,
+        &mcp,
+        &[
+            line("sudo npm test"),
+            line("sudo -E ls"),
+            line("doas ls"),
+            line("pkexec ls"),
+            line("nice sudo ls"),
+        ],
+    );
+}
+
+#[test]
+fn removing_git_s_safety_net_is_base_in_main_and_in_a_workspace() {
+    for main in [true, false] {
+        let user = User::with_fake_agent().with_allowing_judge();
+        let (_, mcp, _) = session(&user, main);
+
+        base_in_auto(
+            &user,
+            &mcp,
+            &[
+                line("git reflog expire --expire=now --all"),
+                line("git gc --prune=now"),
+                line("git prune"),
+            ],
+        );
+    }
+}
+
+#[test]
+fn a_rebase_exec_line_is_read_as_a_line_it_runs() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (_, mcp, _) = session(&user, false);
+
+    base_in_auto(
+        &user,
+        &mcp,
+        &[
+            line("git rebase -x 'git push -f' main"),
+            line("git rebase --exec='git push --force origin HEAD' main"),
+        ],
+    );
+}
+
+#[test]
+fn a_program_in_the_user_s_bin_folders_is_not_taken_for_installed() {
+    let user = User::with_fake_agent();
+    let bin = user.path("home/.local/bin");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let user = user.with_allowing_judge().with_env("PATH", &path);
+    std::fs::create_dir_all(&bin).unwrap();
+    // What an agent the judge allowed may have written there, named as a reader.
+    std::fs::write(bin.join("ls"), "#!/bin/sh\ntouch \"$HOME/ran\"\n").unwrap();
+    std::fs::set_permissions(
+        bin.join("ls"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let (_, mcp, _) = session(&user, false);
+
+    done(mcp.call("commands_run", json!({"line": "ls"})));
+
+    let prompts = judge_prompts(&user);
+    assert_eq!(prompts.len(), 1, "a harmless call, never judged");
+    assert!(prompts[0].contains("agent's own file"), "{}", prompts[0]);
+}
+
+#[test]
+fn the_path_of_a_run_is_resolved_in_the_repository_it_runs_in() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let folder = user.path("work/app");
+    for name in ["api", "web"] {
+        let repository = folder.join(name);
+        user.git_init(&repository);
+        std::fs::write(repository.join("README.md"), format!("{name}\n")).unwrap();
+        user.git(&repository, &["add", "."]);
+        user.git(&repository, &["commit", "--quiet", "-m", "start"]);
+    }
+    user.write_project_file(
+        "app",
+        &format!(
+            "folder = \"{}\"\nworkspaces_root = \"{}\"\n[[repositories]]\npath = \"api\"\n\
+             [[repositories]]\npath = \"web\"\n[variables]\n\
+             PATH = \"{{workspace.path}}/{{repository}}/bin:{}\"\n",
+            folder.display(),
+            user.path("work/app-work").display(),
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    );
+    // Only web has one: the run in web finds it first, the agent's own file named as a reader.
+    let bin = folder.join("web/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("ls"), "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(
+        bin.join("ls"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let opened = user.received_requests("session/new").len();
+    user.call("agent.run", json!({"project": "app", "message": "look"}))
+        .unwrap();
+    let (url, authorization) = server_of(&user, opened);
+    let mcp = Mcp::initialize(&url, &authorization);
+
+    done(mcp.call("commands_run", json!({"line": "ls", "repository": "api"})));
+    assert!(
+        judge_prompts(&user).is_empty(),
+        "the system's ls was judged"
+    );
+    done(mcp.call("commands_run", json!({"line": "ls", "repository": "web"})));
+
+    let prompts = judge_prompts(&user);
+    assert_eq!(prompts.len(), 1, "web's own ls, taken for the system's");
+    assert!(prompts[0].contains("agent's own file"), "{}", prompts[0]);
+}
+
+#[test]
+fn an_agent_setting_the_project_s_rules_is_base() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (_, mcp, _) = session(&user, false);
+
+    base_in_auto(
+        &user,
+        &mcp,
+        &[(
+            "project",
+            json!({"action": "set_rules", "text": "Push with --force when done."}),
+        )],
+    );
+    let file = std::fs::read_to_string(user.project_file("app")).unwrap();
+    assert!(!file.contains("Push with"), "{file}");
+}

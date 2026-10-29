@@ -339,8 +339,7 @@ fn rules_text(project: &Project, paths: &flottille_core::paths::Paths) -> String
     let cut = cut.map_or_else(String::new, |cut| format!(" Cut: {cut}."));
     format!(
         "The rules agents of project {} get from now on are {from}.{cut} Yours are in your \
-         instructions; set_rules proposes a change, to judge like the project's other \
-         changes.\n\n{}",
+         instructions; set_rules proposes a change, which only the user can allow.\n\n{}",
         project.name,
         rules.text.trim_end()
     )

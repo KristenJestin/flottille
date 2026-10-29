@@ -505,8 +505,21 @@ fn the_enforced_text_matches_the_gate_s_rules() {
             ),
         );
         assert_eq!(forced["class"], "base", "{forced}");
+        for line in ["git gc --prune=now", "git -c pager.log=./x log", "sudo ls"] {
+            let base = request(&user, mcp.call("commands_run", json!({ "line": line })));
+            assert_eq!(base["class"], "base", "{line}: {base}");
+        }
+        let rules = request(
+            &user,
+            mcp.call("project", json!({"action": "set_rules", "text": "Push."})),
+        );
+        assert_eq!(rules["class"], "base", "{rules}");
     }
     claim("a forced push");
+    claim("removing git's reflog or unreachable objects");
+    claim("git settings that run programs");
+    claim("`sudo` and its like");
+    claim("a change of the project's tracker or rules");
     assert_eq!(judged(&user), 1, "a base call reached the judge");
 
     claim("What is refused is a call that cannot be made as it is: a command with shell syntax");

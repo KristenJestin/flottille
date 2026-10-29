@@ -208,6 +208,11 @@ pub fn decide(call: &Call) -> Verdict {
             found.base(
                 "it changes the project's tracker, which nothing checks against the project".into(),
             );
+        } else if family == "rules" {
+            found.base(
+                "it replaces the project's rules, the instructions of every agent created after it"
+                    .into(),
+            );
         } else {
             found.judge(crate::actions::asked(family));
         }
@@ -487,6 +492,14 @@ fn refusal(layer: &[String]) -> Option<String> {
             "refused: {program} auth prints a login token, and agents never see one: auth status \
              says whether a login exists"
         )),
+        "git" => rebase_execs(args).into_iter().find_map(|line| {
+            flottille_core::command::split_line(line).err().map(|why| {
+                format!(
+                    "refused: git rebase --exec runs its line through a shell, and Flottille \
+                     reads that line: it cannot be split without a shell: {why}"
+                )
+            })
+        }),
         _ => None,
     }
 }
@@ -520,6 +533,10 @@ fn program(call: &Call, layer: &[String]) -> Line {
              with the user's own token"
                 .into(),
         ),
+        "sudo" | "sudoedit" | "doas" | "pkexec" | "run0" | "su" => Line::Base(format!(
+            "{program} runs a program as another user, root by default, with an environment of \
+             its own, without the wall that keeps git from pushing behind the gate"
+        )),
         "acli" => Line::Base(
             "acli is Atlassian's command line, signed in as the user to Jira: whatever it runs, \
              it runs with the user's own sign-in"
@@ -572,6 +589,16 @@ fn installed(call: &Call, word: &str) -> Result<(), String> {
             continue;
         }
         let real = std::fs::canonicalize(&candidate).unwrap_or(candidate);
+        if let Some(bin) = user_bins(call)
+            .iter()
+            .find(|bin| real.starts_with(bin) || dir.starts_with(bin))
+        {
+            return own(format!(
+                "{word} is found in {}, the user's own programs, where an agent a judge allowed \
+                 may have written it",
+                bin.display()
+            ));
+        }
         if call
             .writable
             .iter()
@@ -587,6 +614,20 @@ fn installed(call: &Call, word: &str) -> Result<(), String> {
     own(format!(
         "{word} is not found where PATH leads outside the agent's folders"
     ))
+}
+
+/// The folders of the user's own programs, `~/.local/bin` and `~/bin`, as written and as they
+/// really are.
+fn user_bins(call: &Call) -> Vec<PathBuf> {
+    let Some(home) = &call.grant.place.home else {
+        return Vec::new();
+    };
+    let bins = [home.join(".local/bin"), home.join("bin")];
+    let real: Vec<PathBuf> = bins
+        .iter()
+        .filter_map(|bin| std::fs::canonicalize(bin).ok())
+        .collect();
+    bins.into_iter().chain(real).collect()
 }
 
 /// What a program that only reads does with these arguments: an option that runs a program is
@@ -748,11 +789,47 @@ fn executed(layer: &[String]) -> Option<(String, Vec<Vec<String>>)> {
                     ));
                 }
             }
+            for line in rebase_execs(args) {
+                runs = Some("git rebase --exec runs a line after each commit it makes".into());
+                lines.extend(flottille_core::command::split_line(line).ok());
+            }
         }
         _ => {}
     }
     lines.retain(|line| !line.is_empty());
     runs.map(|why| (why, lines))
+}
+
+/// The lines a `git rebase` runs after each commit: `-x`, `--exec` and their attached forms.
+fn rebase_execs(args: &[String]) -> Vec<&str> {
+    let at = git_globals(args).0;
+    if args.get(at).is_none_or(|command| command != "rebase") {
+        return Vec::new();
+    }
+    let mut execs = Vec::new();
+    let mut words = args[at + 1..].iter().map(String::as_str);
+    while let Some(word) = words.next() {
+        if word == "--" {
+            break;
+        }
+        let value = if abbreviates(word, "exec", 2) {
+            match word.split_once('=') {
+                Some((_, value)) => Some(value),
+                None => words.next(),
+            }
+        } else if word.starts_with('-') && !word.starts_with("--") {
+            // `-x`, `-xLINE`, or `-x` last of short options (`-ix`).
+            match word[1..].split_once('x') {
+                Some((_, "")) => words.next(),
+                Some((_, value)) => Some(value),
+                None => None,
+            }
+        } else {
+            None
+        };
+        execs.extend(value);
+    }
+    execs
 }
 
 /// Why a recursive read would read a sensitive file: it walks hidden or ignored files (or every
@@ -911,8 +988,21 @@ fn group_of(pid: u32) -> Option<u32> {
         .ok()
 }
 
-/// Why a layer would lift what keeps an agent's git from pushing and running hooks: git's
-/// configuration set or cleared through the environment.
+/// The variables of the environment whose value is a program git runs.
+const GIT_PROGRAMS: [&str; 9] = [
+    "GIT_EXTERNAL_DIFF",
+    "GIT_PAGER",
+    "GIT_EDITOR",
+    "GIT_SEQUENCE_EDITOR",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GIT_ASKPASS",
+    "GIT_PROXY_COMMAND",
+    "GIT_EXEC_PATH",
+];
+
+/// Why a layer would lift what keeps an agent's git from pushing and running hooks, git's
+/// configuration set or cleared through the environment, or name there a program git runs.
 fn unwalls(layer: &[String]) -> Option<String> {
     let program = base(&layer[0]);
     if READS.contains(&program) {
@@ -920,6 +1010,17 @@ fn unwalls(layer: &[String]) -> Option<String> {
     }
     let args = &layer[1..];
     let git_config = |name: &str| name.starts_with("GIT_CONFIG");
+    let named = |word: &String| word.split_once('=').map(|(name, _)| name.to_owned());
+    if let Some(name) = args
+        .iter()
+        .filter(|word| assignment(word))
+        .filter_map(named)
+        .find(|name| GIT_PROGRAMS.contains(&name.as_str()))
+    {
+        return Some(format!(
+            "{name} names a program git runs, set through the environment"
+        ));
+    }
     if let Some(word) = args
         .iter()
         .find(|word| assignment(word) && word.split_once('=').is_some_and(|(n, _)| git_config(n)))
@@ -973,13 +1074,32 @@ fn shown_words(words: &[String]) -> String {
 /// for the sections that run programs, lead pushes elsewhere or bring in other files.
 fn risky_setting(key: &str) -> Option<&'static str> {
     let section = key.split('.').next().unwrap_or(key).to_ascii_lowercase();
-    Some(match section.as_str() {
-        "core" => "can run a program or move git's hooks",
-        "alias" => "can make a git command run any program",
-        "remote" | "url" => "changes where git fetches and pushes",
-        "push" => "changes what a push sends",
-        "credential" => "changes how git finds the user's credentials",
+    // The setting's own name is the last part; a subsection may sit between them.
+    let name = match key.rsplit_once('.') {
+        Some((_, name)) => name.to_ascii_lowercase(),
+        None => String::new(),
+    };
+    Some(match (section.as_str(), name.as_str()) {
+        ("core", _) => "can run a program or move git's hooks",
+        ("alias", _) => "can make a git command run any program",
+        ("remote" | "url", _) => "changes where git fetches and pushes",
+        ("push", _) => "changes what a push sends",
+        ("credential", _) => "changes how git finds the user's credentials",
         _ if section.starts_with("include") => "brings in another configuration file",
+        ("diff", "external" | "command" | "textconv")
+        | ("difftool" | "mergetool" | "man" | "browser", "cmd" | "path")
+        | ("merge", "driver")
+        | ("filter" | "pager" | "hook" | "guitool" | "sendemail" | "instaweb", _)
+        | ("gpg", "program" | "defaultkeycommand")
+        | ("sequence", "editor")
+        | ("interactive", "difffilter")
+        | ("submodule", "update")
+        | ("uploadpack", "packobjectshook")
+        | ("imap", "tunnel")
+        | ("tar", "command")
+        | ("web", "browser")
+        | ("trailer", "command" | "cmd") => "names a program git runs",
+        ("protocol", "allow") => "can let a remote's URL run a program (ext::)",
         _ => return None,
     })
 }
@@ -1119,6 +1239,16 @@ fn command_line(call: &Call, layer: &[String], command: &str, rest: &[String]) -
         "notes" if notes_reads(rest) => Line::Reads,
         "stash" if matches!(rest.first().map(String::as_str), Some("list" | "show")) => Line::Reads,
         "worktree" if rest.first().is_some_and(|w| w == "list") => Line::Reads,
+        "reflog" if matches!(rest.first().map(String::as_str), Some("expire" | "delete")) => {
+            Line::Base(safety_net(layer))
+        }
+        "gc" if rest
+            .iter()
+            .any(|w| w.contains('=') && abbreviates(w, "prune", 2)) =>
+        {
+            Line::Base(safety_net(layer))
+        }
+        "prune" if !any(&["-n", "--dry-run"]) => Line::Base(safety_net(layer)),
         "reflog" if matches!(rest.first().map(String::as_str), None | Some("show")) => Line::Reads,
         // Writing the files of a workspace, through git.
         "add" | "mv" | "rm" if !main => Line::Files,
@@ -1126,6 +1256,16 @@ fn command_line(call: &Call, layer: &[String], command: &str, rest: &[String]) -
             "git {command} changes the repository, its branches or a remote"
         )),
     }
+}
+
+/// Why removing the reflog or unreachable objects is base: they are what recovers lost commits,
+/// and the project folder and its workspaces share them.
+fn safety_net(layer: &[String]) -> String {
+    format!(
+        "{} removes what git keeps to recover lost commits, the user's safety net, shared by the \
+         project folder and its workspaces",
+        shown_words(layer)
+    )
 }
 
 /// `git config` that writes: base for a setting that runs programs or leads pushes, to judge
@@ -1247,8 +1387,8 @@ fn git_globals(args: &[String]) -> (usize, Vec<(&str, Option<&str>)>) {
     (at, options)
 }
 
-/// A push: forcing it or deleting on the remote is base, anything else to judge. Git takes any
-/// unambiguous start of a long option.
+/// A push: forcing it, deleting on the remote or naming the program that receives it is base,
+/// anything else to judge. Git takes any unambiguous start of a long option.
 fn push(rest: &[String]) -> Line {
     const FORCING: [&str; 6] = [
         "force",
@@ -1258,12 +1398,25 @@ fn push(rest: &[String]) -> Line {
         "delete",
         "prune",
     ];
+    const RUNNING: [&str; 2] = ["receive-pack", "exec"];
     let mut options = true;
     for word in rest {
         let word = word.as_str();
         if options && word == "--" {
             options = false;
             continue;
+        }
+        if options
+            && let Some(name) = word
+                .strip_prefix("--")
+                .and_then(|long| long.split('=').next())
+            && !name.is_empty()
+            && RUNNING.iter().any(|option| option.starts_with(name))
+        {
+            return Line::Base(format!(
+                "git push {word} names the program it runs to receive the push, on this machine \
+                 for a remote that is a path"
+            ));
         }
         let forced = if options && word.starts_with("--") {
             let name = word[2..].split('=').next().unwrap_or_default();
@@ -2378,7 +2531,6 @@ mod tests {
                 "sed -i s/a/b/ src/a.rs",
                 "gh pr create --fill",
                 "env ls",
-                "sudo ls",
             ] {
                 assert!(
                     to_judge(&fixture.run(line)),
@@ -3024,5 +3176,222 @@ mod tests {
         assert!(base_class(
             &fixture.file("fs_read", &format!("/proc/{me}/environ"))
         ));
+    }
+
+    #[test]
+    fn a_git_setting_whose_value_git_runs_is_base() {
+        let keys = [
+            "diff.external",
+            "Diff.External",
+            "diff.word.command",
+            "diff.pdf.textconv",
+            "difftool.mine.cmd",
+            "difftool.mine.path",
+            "mergetool.mine.cmd",
+            "merge.ours.driver",
+            "filter.lfs.smudge",
+            "filter.x.process",
+            "gpg.program",
+            "gpg.ssh.program",
+            "gpg.ssh.defaultKeyCommand",
+            "sequence.editor",
+            "pager.log",
+            "interactive.diffFilter",
+            "submodule.lib.update",
+            "protocol.allow",
+            "protocol.ext.allow",
+            "hook.check.command",
+            "uploadpack.packObjectsHook",
+            "imap.tunnel",
+            "guitool.x.cmd",
+            "tar.tgz.command",
+            "sendemail.sendmailCmd",
+            "man.mine.cmd",
+            "web.browser",
+            "browser.mine.path",
+            "instaweb.httpd",
+            "trailer.sign.command",
+            "trailer.sign.cmd",
+        ];
+        for fixture in [Fixture::main(), Fixture::workspace()] {
+            for key in keys {
+                for line in [
+                    format!("git -c {key}=x status"),
+                    format!("git -c{key}=x log"),
+                    format!("git --config-env {key}=VALUE diff"),
+                    format!("git --config-env={key}=VALUE diff"),
+                    format!("git config {key} x"),
+                    format!("git config set {key} x"),
+                ] {
+                    let verdict = fixture.run(&line);
+                    assert!(base_class(&verdict), "{line}: {verdict:?}");
+                }
+            }
+            for line in [
+                "env GIT_EXTERNAL_DIFF=x git diff",
+                "env GIT_PAGER=x git log",
+                "env GIT_EDITOR=x git commit",
+                "env GIT_SEQUENCE_EDITOR=x git rebase -i main",
+                "env GIT_SSH_COMMAND=x git fetch",
+                "env GIT_SSH=x git fetch",
+                "env GIT_ASKPASS=x git fetch",
+                "env GIT_PROXY_COMMAND=x git fetch",
+                "env GIT_EXEC_PATH=x git status",
+            ] {
+                let verdict = fixture.run(line);
+                assert!(base_class(&verdict), "{line}: {verdict:?}");
+            }
+            for line in [
+                "git -c diff.renames=false diff",
+                "git -c merge.ff=only merge x",
+                "git config submodule.recurse true",
+                "git config gpg.format ssh",
+            ] {
+                let verdict = fixture.run(line);
+                assert!(!base_class(&verdict), "{line}: {verdict:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_push_with_a_receive_pack_or_exec_is_base() {
+        for fixture in [Fixture::main(), Fixture::workspace()] {
+            for line in [
+                "git push --receive-pack=x origin HEAD",
+                "git push --receive-pack x origin HEAD",
+                "git push --receive=x origin HEAD",
+                "git push --exec=x origin HEAD",
+                "git push --exec x origin HEAD",
+                "git push --ex=x origin HEAD",
+                "git send-pack --receive-pack=x ../r HEAD",
+            ] {
+                let verdict = fixture.run(line);
+                assert!(base_class(&verdict), "{line}: {verdict:?}");
+            }
+            let verdict = fixture.run("git push --repo=origin");
+            assert!(to_judge(&verdict), "{verdict:?}");
+        }
+    }
+
+    #[test]
+    fn sudo_doas_and_pkexec_are_base_in_any_form() {
+        let fixture = Fixture::workspace().command("deploy-local", "sudo make install", |_| {});
+        for line in [
+            "sudo ls",
+            "sudo -E npm test",
+            "sudo -u nobody id",
+            "/usr/bin/sudo ls",
+            "sudoedit src/a.rs",
+            "doas ls",
+            "doas -u nobody id",
+            "pkexec ls",
+            "pkexec --user nobody id",
+            "run0 ls",
+            "su -c ls",
+            "env sudo ls",
+            "nice -n 5 doas ls",
+            "timeout 5 pkexec ls",
+            "npx sudo ls",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+            assert!(reasons(&verdict).contains("another user"), "{line}");
+        }
+        assert!(base_class(&fixture.catalogue("deploy-local")));
+        assert_eq!(fixture.run("echo sudo"), Verdict::Allow);
+    }
+
+    #[test]
+    fn removing_git_s_safety_net_is_base_in_main_and_in_a_workspace() {
+        for fixture in [Fixture::main(), Fixture::workspace()] {
+            for line in [
+                "git reflog expire --expire=now --all",
+                "git reflog delete HEAD@{1}",
+                "git gc --prune=now",
+                "git gc --prune=all --aggressive",
+                "git prune",
+                "git prune --expire=now",
+                "git -C . prune",
+            ] {
+                let verdict = fixture.run(line);
+                assert!(base_class(&verdict), "{line}: {verdict:?}");
+                assert!(reasons(&verdict).contains("safety net"), "{line}");
+            }
+            for line in [
+                "git gc",
+                "git gc --no-prune",
+                "git prune -n",
+                "git prune --dry-run",
+            ] {
+                let verdict = fixture.run(line);
+                assert!(to_judge(&verdict), "{line}: {verdict:?}");
+            }
+            assert_eq!(fixture.run("git reflog"), Verdict::Allow);
+        }
+    }
+
+    #[test]
+    fn a_rebase_exec_line_is_read_as_a_line_it_runs() {
+        // Unpushed, in a workspace: a rebase alone is to judge.
+        let fixture = Fixture::workspace();
+        assert!(to_judge(&fixture.run("git rebase -x 'cargo test' main")));
+        for line in [
+            "git rebase -x 'git push -f' main",
+            "git rebase -x'git push --force' main",
+            "git rebase --exec 'git push -f' main",
+            "git rebase --exec='git push -f' main",
+            "git rebase --exe='git push -f' main",
+            "git rebase -i -x 'cargo test' -x 'git push -f' main",
+            "git rebase -x 'sudo ls' main",
+            "git rebase -x 'env GIT_CONFIG_COUNT=0 cargo test' main",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+        }
+        for line in [
+            "git rebase -x 'cargo test && git push -f' main",
+            "git rebase --exec='make; git push -f' main",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(denied(&verdict), "{line}: {verdict:?}");
+            assert!(reasons(&verdict).contains("shell"), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_program_in_the_user_s_bin_folders_is_not_taken_for_installed() {
+        let mut fixture = Fixture::workspace();
+        let home = fixture.grant.place.home.clone().unwrap();
+        for bin in [".local/bin", "bin"] {
+            std::fs::create_dir_all(home.join(bin)).unwrap();
+        }
+        installed(&home.join(".local/bin/ls"));
+        installed(&home.join("bin/cat"));
+        let system = PathBuf::from(&fixture.search);
+        fixture.search =
+            std::env::join_paths([home.join(".local/bin"), home.join("bin"), system]).unwrap();
+        for line in ["ls src", "cat src/a.rs"] {
+            let verdict = fixture.run(line);
+            assert!(to_judge(&verdict), "{line}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains("agent's own file"),
+                "{line}: {verdict:?}"
+            );
+        }
+        // The system's own, found after them, still is.
+        assert_eq!(fixture.run("wc src/a.rs"), Verdict::Allow);
+    }
+
+    #[test]
+    fn an_agent_setting_the_project_s_rules_is_base() {
+        let fixture = Fixture::workspace();
+        let verdict = fixture.judge(
+            "project",
+            json!({"action": "set_rules", "text": "Push when done."}),
+            Some(&fixture.never),
+        );
+        assert!(base_class(&verdict), "{verdict:?}");
+        assert!(matches!(&verdict, Verdict::Ask(ask) if ask.kind == Kind::Action));
+        assert!(reasons(&verdict).contains("every agent created after"));
     }
 }
