@@ -65,7 +65,6 @@ serve = true                          # keeps running
 check = false                         # tests, lint
 read_only = false                     # changes nothing
 ask_before_running = false            # held for approval each time an agent runs it
-# added_by = "approval"               # written by Always (docs/tools.md, "The gate"): runs in the project folder, unchecked
 
 [[recipe]]                            # the steps that prepare a new workspace, in order
 copy = [".env", ".env.*"]             # globs, copied from the main checkout, never over a file
@@ -86,19 +85,10 @@ projects = ["ABC", "OPS"]
 [procedures.open-prs]                 # a named action run by an agent in a workspace (docs/procedures.md)
 description = "Open the pull requests"
 instructions = "Push the branch, then open one pull request per repository."
-children = false                      # the run's children get none of its grants; default true
-[procedures.open-prs.grants]          # from a fixed vocabulary, each "allow" or "ask"
-push = "allow"
-pr-create = "ask"
 
 [pull_requests]                       # how its pull requests are opened (docs/procedures.md)
 title = "type(TICKET): subject"       # the title's format, told to the agent that writes it
 reviewers = ["alice", "bob"]          # asked to review each pull request Flottille opens
-
-[agent_actions]                       # what its agents do without asking first; each "ask" (default) or "allow"
-procedures = "allow"                  # start a procedure
-settings = "ask"                      # change the forges and the tracker
-references = "ask"                    # add or remove a reference
 ```
 
 The repositories are put in dependency order (a repository after those it depends on; among those
@@ -142,7 +132,7 @@ a file that still has it is accepted, the table is ignored and said (`project sh
 "Not read", the window under the settings), and its repositories have no forge until one is set.
 Nothing is converted on its own.
 
-A procedure's keys, its grants' vocabulary and what a run of it may do are in
+A procedure's keys and what a run of it does are in
 [`procedures.md`](procedures.md); `flottille procedure add`, `edit` and `remove` write them in the
 file where it stands, keeping what is around them.
 
@@ -150,20 +140,15 @@ file where it stands, keeping what is around them.
 
 The agent the user talks to (a root) does what the window does, through the tools `procedure` and
 `project` (`docs/tools.md`, "The project"): it reads the project's procedures and settings at once,
-and every change it makes is held for the user first, who sees what it changes in words and
-confirms it. `[agent_actions]` lets a family of these changes run on its own:
+and every change it makes is a call to judge, said in words: a card for the user in Ask, the
+judge's in Auto (`docs/design.md` §7). A change of the tracker, which nothing checks against the
+project, is base: it always comes to the user. An agent never reaches another project's file.
 
-| Key | The change |
-|---|---|
-| `procedures` | Starting one of the project's procedures in a workspace. An agent may then start any procedure in any of the project's workspaces without asking; its grants are still the procedure's, as the file says them, and the agent gives none. |
-| `settings` | Declaring or removing a repository's forge, or the tracker. A forge is still checked against its repository's remote; a change of the tracker, which nothing checks, always asks. |
-| `references` | Adding or removing a reference. A reference still stays inside the project folder, and an agent's is never the folder itself nor a repository's root. |
-
-Each is `ask` (the default: held for the user each time) or `allow` (done at once). Only the user
-sets them, in the file or with the switches of the project's Settings in the window, which take
-effect at once (`project.set_agent_actions`, `docs/protocol.md`): no tool of an agent writes
-`[agent_actions]`, and an agent never reaches another project's file. A line run in the project
-folder that is not in the catalogue is held too, whatever this says (`docs/tools.md`, "The gate").
+**Former keys.** `[agent_actions]`, which let a family of these changes run on its own, a
+procedure's `grants` and `children`, and a command's `added_by` (a line the user once allowed
+always) are no longer read: a file that still has them is accepted, `project show` lists the
+first three under "Not read", and the daemon removes them from the file at its start, keeping everything else
+the user wrote.
 
 ## Rules
 

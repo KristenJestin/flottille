@@ -1,7 +1,8 @@
-//! The scenarios of procedures (`docs/procedures.md`): named actions of a project with the grants
-//! each run gives, shown before it runs and applied by the gate to the agents of that run only.
-//! The agents are the fake agent's sessions, driven through their MCP server as their client
-//! would; the forge is the fake `gh`; the remotes are throwaway bare repositories.
+//! The scenarios of procedures (`docs/procedures.md`): named actions of a project, run by an agent
+//! in a workspace. A run grants nothing: what its agents write goes through the gate's classes,
+//! held here for the user, who allows it. The agents are the fake agent's sessions, driven through
+//! their MCP server as their client would; the forge is the fake `gh`; the remotes are throwaway
+//! bare repositories.
 
 mod common;
 
@@ -10,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use common::User;
 use common::mcp::{Answer, Mcp, server_of};
+use flottille_core::store::Store;
 use serde_json::{Value, json};
 
 /// A project `app` that is one repository, pushed to a bare remote `origin`, with its ready
@@ -74,32 +76,66 @@ fn bare(user: &User, name: &str) -> PathBuf {
     remote
 }
 
-/// Adds the procedure `ship` with these grants.
-fn procedure(user: &User, name: &str, grants: Value, children: bool) {
+/// Adds the procedure `name`.
+fn procedure(user: &User, name: &str) {
     user.call(
         "procedure.add",
         json!({"project": "app", "name": name, "description": "Ship the workspace",
-            "instructions": "Push the branch, then open its pull request.",
-            "grants": grants, "children": children}),
+            "instructions": "Push the branch, then open its pull request."}),
     )
     .unwrap();
+}
+
+/// A call the gate holds, allowed by the user: the answer the agent is handed for it, an error
+/// when it was not done.
+fn allowed(user: &User, answer: Answer) -> Answer {
+    assert!(!answer.error, "{}", answer.text);
+    let number: u64 = answer
+        .text
+        .strip_prefix("Waiting for the user's approval, request #")
+        .and_then(|rest| rest.split_once('.'))
+        .map(|(number, _)| number.parse().unwrap())
+        .unwrap_or_else(|| panic!("not held: {}", answer.text));
+    user.call("approval.approve", json!({"number": number}))
+        .unwrap();
+    let store = || Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let id = format!("approval-{number}");
+    eventually("the answer", || store().delivery(&id).unwrap().is_some());
+    let text = store().delivery(&id).unwrap().unwrap().body;
+    Answer {
+        error: !text.contains("and Flottille has now done it"),
+        text,
+    }
+}
+
+/// `forge_write`, allowed by the user.
+fn write(user: &User, mcp: &Mcp, args: Value) -> Answer {
+    allowed(user, mcp.call("forge_write", args))
+}
+
+/// `workspace_remove`, allowed by the user.
+fn remove(user: &User, mcp: &Mcp, args: Value) -> Answer {
+    allowed(user, mcp.call("workspace_remove", args))
+}
+
+/// A line, allowed by the user.
+fn allowed_line(user: &User, mcp: &Mcp, text: &str) -> Answer {
+    allowed(user, line(mcp, text))
 }
 
 /// Runs the procedure in `login` as the CLI does once confirmed: its root agent's id and MCP
 /// session.
 fn run(user: &User, name: &str) -> (String, Mcp) {
-    let shown = user
-        .call(
-            "procedure.run",
-            json!({"project": "app", "name": name, "workspace": "login"}),
-        )
-        .unwrap();
+    user.call(
+        "procedure.run",
+        json!({"project": "app", "name": name, "workspace": "login"}),
+    )
+    .unwrap();
     let opened = user.received_requests("session/new").len();
     let started = user
         .call(
             "procedure.start",
-            json!({"project": "app", "name": name, "workspace": "login",
-                "grants": shown["grants"], "children": shown["children"]}),
+            json!({"project": "app", "name": name, "workspace": "login"}),
         )
         .unwrap();
     let (url, authorization) = server_of(user, opened);
@@ -164,10 +200,6 @@ fn a_procedure_is_added_listed_shown_edited_and_removed() {
         "Open the pull requests",
         "--instructions",
         "Push, then open one pull request per repository.",
-        "--grant",
-        "push=allow",
-        "--grant",
-        "pr-create=ask",
     ]);
     assert!(added.status.success(), "{}", stderr(&added));
 
@@ -176,13 +208,9 @@ fn a_procedure_is_added_listed_shown_edited_and_removed() {
         listed.contains("open-prs  Open the pull requests"),
         "{listed}"
     );
-    assert!(listed.contains("push (allow), pr-create (ask)"), "{listed}");
     let shown = user.run(&["procedure", "show", "app", "open-prs", "--json"]);
     let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
-    assert_eq!(
-        shown["grants"],
-        json!({"push": "allow", "pr-create": "ask"})
-    );
+    assert!(shown.get("grants").is_none(), "{shown}");
     assert_eq!(
         shown["instructions"],
         "Push, then open one pull request per repository."
@@ -191,30 +219,23 @@ fn a_procedure_is_added_listed_shown_edited_and_removed() {
     assert!(text.starts_with("# kept by hand\n"), "{text}");
     assert!(text.contains("[procedures.open-prs]"), "{text}");
 
-    // A grant outside the vocabulary is refused, and nothing changes.
+    // A grant is no option any more.
     let refused = user.run(&[
         "procedure",
         "edit",
         "app",
         "open-prs",
         "--grant",
-        "shell=allow",
+        "push=allow",
     ]);
     assert!(!refused.status.success());
-    assert!(
-        stderr(&refused).contains("there is no grant shell"),
-        "{}",
-        stderr(&refused)
-    );
     let edited = user.run(&[
         "procedure",
         "edit",
         "app",
         "open-prs",
-        "--grant",
-        "push=ask",
-        "--children",
-        "true",
+        "--description",
+        "Open them all",
     ]);
     assert!(edited.status.success(), "{}", stderr(&edited));
     let shown = user
@@ -223,8 +244,7 @@ fn a_procedure_is_added_listed_shown_edited_and_removed() {
             json!({"project": "app", "name": "open-prs"}),
         )
         .unwrap();
-    assert_eq!(shown["grants"], json!({"push": "ask"}));
-    assert_eq!(shown["children"], true);
+    assert_eq!(shown["description"], "Open them all");
     assert_eq!(
         user.call(
             "procedure.add",
@@ -247,15 +267,10 @@ fn a_procedure_is_added_listed_shown_edited_and_removed() {
 }
 
 #[test]
-fn running_one_shows_its_grants_and_starts_nothing_until_confirmed() {
+fn running_one_shows_it_and_starts_nothing_until_confirmed() {
     let user = User::with_fake_agent();
     fixture(&user);
-    procedure(
-        &user,
-        "ship",
-        json!({"push": "allow", "commit": "ask"}),
-        false,
-    );
+    procedure(&user, "ship");
 
     // Refused, or no answer at all: nothing starts.
     for input in ["n\n", ""] {
@@ -265,17 +280,15 @@ fn running_one_shows_its_grants_and_starts_nothing_until_confirmed() {
         );
         assert!(!output.status.success());
         let shown = stderr(&output);
-        assert!(shown.contains("It grants, for this run only:"), "{shown}");
         assert!(
-            shown.contains("  push (allow): push the workspace's branch"),
+            shown.contains("Procedure ship of project app, in workspace login"),
             "{shown}"
         );
-        assert!(shown.contains("  commit (ask): make commits"));
-        assert!(shown.contains("Its children get none of them."), "{shown}");
+        assert!(shown.contains("It grants nothing"), "{shown}");
         assert!(shown.contains("not started"), "{shown}");
     }
     assert_eq!(agents(&user), 0);
-    // The protocol's first request shows them and starts nothing either.
+    // The protocol's first request shows it and starts nothing either.
     let shown = user
         .call(
             "procedure.run",
@@ -283,21 +296,7 @@ fn running_one_shows_its_grants_and_starts_nothing_until_confirmed() {
         )
         .unwrap();
     assert_eq!(shown["started"], false);
-    assert_eq!(shown["grants"], json!({"push": "allow", "commit": "ask"}));
-    assert_eq!(agents(&user), 0);
-    // Grants that are no longer the procedure's are refused: what is shown is what is granted.
-    let (code, message) = user
-        .call(
-            "procedure.start",
-            json!({"project": "app", "name": "ship", "workspace": "login",
-                "grants": {"push": "allow"}, "children": false}),
-        )
-        .unwrap_err();
-    assert_eq!(code, "refused");
-    assert!(
-        message.contains("changed since they were shown"),
-        "{message}"
-    );
+    assert!(shown.get("grants").is_none(), "{shown}");
     assert_eq!(agents(&user), 0);
 
     let output = user.run_with_input(
@@ -311,10 +310,11 @@ fn running_one_shows_its_grants_and_starts_nothing_until_confirmed() {
         stdout(&output)
     );
     assert_eq!(agents(&user), 1);
-    // A session like any other, in the tree, its instructions as its first message.
+    // A session like any other, in the tree, in Auto, its instructions as its first message.
     let listed = user.call("agent.list", json!({})).unwrap();
     let agent = &listed["agents"][0];
     assert_eq!(agent["workspace"], "login");
+    assert_eq!(agent["gate_mode"], "auto");
     let id = agent["id"].as_str().unwrap();
     let tree = user.call("agent.tree", json!({"agent": id})).unwrap();
     assert_eq!(tree["agents"].as_array().unwrap().len(), 1);
@@ -340,64 +340,29 @@ fn running_one_shows_its_grants_and_starts_nothing_until_confirmed() {
 }
 
 #[test]
-fn inside_a_run_a_granted_push_of_the_workspace_s_branch_goes_through_an_ask_one_is_held_an_ungranted_one_is_refused_and_outside_the_run_it_is_refused_as_today()
- {
+fn a_push_is_to_judge_for_any_agent_and_goes_through_once_the_user_allows_it() {
     let user = User::with_fake_agent();
     let (_, remote) = fixture(&user);
-    procedure(&user, "ship", json!({"push": "allow"}), false);
-    procedure(&user, "careful", json!({"push": "ask"}), false);
-    procedure(&user, "commits", json!({"commit": "allow"}), false);
+    procedure(&user, "ship");
 
-    // Outside a run: refused, as today, and nothing reaches the remote.
-    let outside = plain_agent(&user);
-    let answer = line(&outside, "git push origin app/login");
-    assert!(answer.error, "{}", answer.text);
-    assert!(
-        answer.text.contains("git push is refused for agents"),
-        "{}",
-        answer.text
-    );
-    assert!(!remote_branches(&user, &remote).contains("app/login"));
-
-    // Inside a run that does not grant it: refused.
-    let (_, commits) = run(&user, "commits");
-    let answer = line(&commits, "git push origin app/login");
-    assert!(answer.error, "{}", answer.text);
-    assert!(!remote_branches(&user, &remote).contains("app/login"));
-
-    // Held when the run grants it with ask: nothing is pushed until the user allows it.
-    let (_, careful) = run(&user, "careful");
-    let answer = line(&careful, "git push origin app/login");
-    assert!(!answer.error, "{}", answer.text);
-    assert!(
-        answer.text.contains("Waiting for the user's approval"),
-        "{}",
-        answer.text
-    );
-    let requests = user.call("approval.list", json!({})).unwrap()["requests"].clone();
-    let request = &requests[0];
-    assert_eq!(request["sensitive"], true, "never allowed for the tree");
-    assert!(!remote_branches(&user, &remote).contains("app/login"));
-    let number = request["number"].as_u64().unwrap();
-    assert_eq!(
+    for mcp in [plain_agent(&user), run(&user, "ship").1] {
+        let answer = line(&mcp, "git push origin app/login");
+        assert!(
+            answer.text.contains("Waiting for the user's approval"),
+            "{}",
+            answer.text
+        );
+        let requests = waiting(&user);
+        assert_eq!(requests.last().unwrap()["class"], "judge");
+        assert!(!remote_branches(&user, &remote).contains("app/login"));
         user.call(
-            "approval.approve",
-            json!({"number": number, "for_tree": true})
+            "approval.deny",
+            json!({"number": requests.last().unwrap()["number"]}),
         )
-        .unwrap_err()
-        .0,
-        "refused"
-    );
-    user.call("approval.approve", json!({"number": number}))
         .unwrap();
-    eventually("the allowed push", || {
-        remote_branches(&user, &remote).contains("app/login")
-    });
-    user.git(&remote, &["branch", "-D", "app/login"]);
+    }
 
-    // Allowed at once when the run grants it.
-    let (_, ship) = run(&user, "ship");
-    let answer = line(&ship, "git push origin app/login");
+    let answer = allowed_line(&user, &plain_agent(&user), "git push origin app/login");
     assert!(!answer.error, "{}", answer.text);
     assert!(
         answer.text.contains("exited with code 0"),
@@ -405,90 +370,35 @@ fn inside_a_run_a_granted_push_of_the_workspace_s_branch_goes_through_an_ask_one
         answer.text
     );
     assert!(remote_branches(&user, &remote).contains("app/login"));
-
-    // The same push by the agent outside the run is still refused.
-    let answer = line(&outside, "git push origin app/login");
-    assert!(answer.error, "{}", answer.text);
 }
 
 #[test]
-fn a_procedure_that_writes_to_the_forge_refuses_to_start_on_a_repository_with_none() {
-    let user = User::with_fake_agent().with_fake_gh();
-    fixture(&user);
-    procedure(&user, "open", json!({"pr-create": "ask"}), false);
-    procedure(&user, "push", json!({"push": "ask"}), false);
-
-    let shown = user
-        .call(
-            "procedure.run",
-            json!({"project": "app", "name": "open", "workspace": "login"}),
-        )
-        .unwrap_err();
-    let started = user
-        .call(
-            "procedure.start",
-            json!({"project": "app", "name": "open", "workspace": "login",
-                "grants": {"pr-create": "ask"}, "children": false}),
-        )
-        .unwrap_err();
-
-    for (code, message) in [shown, started] {
-        assert_eq!(code, "refused");
-        assert!(
-            message.starts_with(
-                "procedure open writes to the forge (pr-create), and no forge is set for . of \
-                 workspace login"
-            ),
-            "{message}"
-        );
-    }
-    assert_eq!(agents(&user), 0);
-    assert!(user.gh_received().is_empty());
-    // A procedure that writes nothing to the forge needs none.
-    user.call(
-        "procedure.run",
-        json!({"project": "app", "name": "push", "workspace": "login"}),
-    )
-    .unwrap();
-}
-
-#[test]
-fn reset_hard_stash_and_a_force_push_without_lease_are_refused_even_with_every_grant() {
+fn a_force_push_or_a_deletion_on_the_remote_is_base_and_a_plain_push_is_to_judge() {
     let user = User::with_fake_agent();
     let (_, remote) = fixture(&user);
-    procedure(
-        &user,
-        "all",
-        // Every grant of git lines: those of the forge need a declared forge, and run no line.
-        json!({"commit": "allow", "push": "allow", "push-force-with-lease": "allow",
-            "rebase": "allow"}),
-        false,
-    );
-    let (_, mcp) = run(&user, "all");
+    let mcp = plain_agent(&user);
 
-    for refused in [
-        "git reset --hard HEAD",
-        "git stash",
+    for base in [
         "git push --force origin app/login",
         "git push -f origin app/login",
         "git push origin +app/login",
-        "git push origin main",
         "git push --delete origin main",
+        "git push --force-with-lease origin app/login",
     ] {
-        let answer = line(&mcp, refused);
-        assert!(answer.error, "{refused}: {}", answer.text);
+        let answer = line(&mcp, base);
         assert!(
-            answer.text.starts_with("refused: "),
-            "{refused}: {}",
+            answer.text.contains("Waiting for the user's approval"),
+            "{base}: {}",
             answer.text
         );
+        assert_eq!(waiting(&user).last().unwrap()["class"], "base", "{base}");
+    }
+    for judged in ["git reset --hard HEAD", "git stash", "git push origin main"] {
+        line(&mcp, judged);
+        assert_eq!(waiting(&user).last().unwrap()["class"], "judge", "{judged}");
     }
     assert!(!remote_branches(&user, &remote).contains("app/login"));
     assert!(remote_branches(&user, &remote).contains("main"));
-    // With a lease, it goes through.
-    let answer = line(&mcp, "git push --force-with-lease origin app/login");
-    assert!(!answer.error, "{}", answer.text);
-    assert!(remote_branches(&user, &remote).contains("app/login"));
 }
 
 /// The fixture's workspace, its remote GitHub's `acme/app` (created offline: nothing is fetched
@@ -531,40 +441,25 @@ fn creates(user: &User) -> usize {
 }
 
 #[test]
-fn forge_write_creates_a_pull_request_with_the_fake_gh_only_when_granted() {
+fn forge_write_creates_a_pull_request_with_the_fake_gh_once_allowed() {
     let user = User::with_fake_agent().with_fake_gh();
     on_github(&user);
     user.gh_script(json!({"created": 12}));
-    procedure(&user, "open", json!({"pr-create": "allow"}), false);
-    procedure(&user, "merge", json!({"pr-merge-squash": "allow"}), false);
     let create = json!({"action": "pr-create", "repository": ".", "title": "Add the login page",
         "body": "What it does"});
 
-    // The tool is listed to everyone: outside a run the gate refuses the call, and in a run that
-    // grants another action it refuses this one: never asked of the forge.
-    let outside = plain_agent(&user);
-    assert!(outside.names().contains(&"forge_write".to_owned()));
-    let answer = outside.call("forge_write", create.clone());
-    assert!(answer.error, "{}", answer.text);
+    // Listed to an agent of a workspace, held: never asked of the forge before the user allows it.
+    let mcp = plain_agent(&user);
+    assert!(mcp.names().contains(&"forge_write".to_owned()));
+    let answer = mcp.call("forge_write", create.clone());
     assert!(
-        answer
-            .text
-            .contains("only inside a procedure that grants it"),
-        "{}",
-        answer.text
-    );
-    let (_, merge) = run(&user, "merge");
-    let answer = merge.call("forge_write", create.clone());
-    assert!(answer.error, "{}", answer.text);
-    assert!(
-        answer.text.contains("does not grant pr-create"),
+        answer.text.contains("Waiting for the user's approval"),
         "{}",
         answer.text
     );
     assert_eq!(creates(&user), 0);
 
-    let (_, open) = run(&user, "open");
-    let answer = open.call("forge_write", create);
+    let answer = write(&user, &mcp, create);
     assert!(!answer.error, "{}", answer.text);
     assert!(
         answer.text.contains("https://github.com/acme/app/pull/12"),
@@ -584,127 +479,18 @@ fn forge_write_creates_a_pull_request_with_the_fake_gh_only_when_granted() {
 }
 
 #[test]
-fn a_child_of_the_run_has_no_grant_unless_the_procedure_gives_it() {
-    let user = User::with_fake_agent();
-    let (_, remote) = fixture(&user);
-    procedure(&user, "alone", json!({"push": "allow"}), false);
-    procedure(&user, "together", json!({"push": "allow"}), true);
-
-    for (name, inherits) in [("alone", false), ("together", true)] {
-        let (_, root) = run(&user, name);
-        let opened = user.received_requests("session/new").len();
-        let launched = root.call(
-            "agent_launch",
-            json!({"title": "push", "brief": "Push the branch."}),
-        );
-        assert!(!launched.error, "{}", launched.text);
-        let (url, authorization) = server_of(&user, opened);
-        let child = Mcp::initialize(&url, &authorization);
-
-        let answer = line(&child, "git push origin app/login");
-
-        assert_eq!(!answer.error, inherits, "{name}: {}", answer.text);
-        assert_eq!(
-            remote_branches(&user, &remote).contains("app/login"),
-            inherits,
-            "{name}"
-        );
-    }
-}
-
-#[test]
-fn a_run_s_children_get_its_grants_when_the_file_says_nothing_and_none_when_it_says_children_false()
-{
-    let user = User::with_fake_agent();
-    let (_, remote) = fixture(&user);
-    // Written by hand: one says nothing of its children, the other keeps its grants from them.
-    let file = user.project_file("app");
-    let text = std::fs::read_to_string(&file).unwrap();
-    let procedure = |name: &str, more: &str| {
-        format!(
-            "\n[procedures.{name}]\ndescription = \"Ship the workspace\"\n\
-             instructions = \"Push the branch.\"\n{more}[procedures.{name}.grants]\n\
-             push = \"allow\"\n"
-        )
-    };
-    std::fs::write(
-        &file,
-        format!(
-            "{text}{}{}",
-            procedure("silent", ""),
-            procedure("alone", "children = false\n")
-        ),
-    )
-    .unwrap();
-
-    for (name, inherits) in [("alone", false), ("silent", true)] {
-        let (_, root) = run(&user, name);
-        let opened = user.received_requests("session/new").len();
-        let launched = root.call(
-            "agent_launch",
-            json!({"title": "push", "brief": "Push the branch."}),
-        );
-        assert!(!launched.error, "{}", launched.text);
-        let (url, authorization) = server_of(&user, opened);
-        let child = Mcp::initialize(&url, &authorization);
-
-        let answer = line(&child, "git push origin app/login");
-
-        assert_eq!(!answer.error, inherits, "{name}: {}", answer.text);
-        assert_eq!(
-            remote_branches(&user, &remote).contains("app/login"),
-            inherits,
-            "{name}"
-        );
-    }
-    // Editing the one that said `children = false` keeps it.
-    user.call(
-        "procedure.edit",
-        json!({"project": "app", "name": "alone", "description": "Ship it"}),
-    )
-    .unwrap();
-    let text = std::fs::read_to_string(&file).unwrap();
-    assert!(text.contains("children = false"), "{text}");
-}
-
-#[test]
-fn the_grants_end_with_the_run() {
-    let user = User::with_fake_agent();
-    let (_, remote) = fixture(&user);
-    procedure(&user, "ship", json!({"push": "allow"}), false);
-    let (_, root) = run(&user, "ship");
-
-    let reported = root.call("report", json!({"text": "Done."}));
-    assert!(!reported.error, "{}", reported.text);
-    let answer = line(&root, "git push origin app/login");
-
-    assert!(answer.error, "{}", answer.text);
-    assert!(!remote_branches(&user, &remote).contains("app/login"));
-}
-
-#[test]
-fn a_run_s_grants_are_read_from_its_agent_while_it_goes_on_and_none_for_another() {
+fn a_run_is_read_from_its_agent_while_it_goes_on_and_none_for_another() {
     let user = User::with_fake_agent();
     fixture(&user);
-    procedure(
-        &user,
-        "ship",
-        json!({"push": "allow", "commit": "ask"}),
-        true,
-    );
+    procedure(&user, "ship");
     let (agent, root) = run(&user, "ship");
 
     let held = user.call("procedure.of", json!({"agent": agent})).unwrap();
 
     assert_eq!(held["run"]["procedure"], "ship");
     assert_eq!(held["run"]["workspace"], "login");
-    assert_eq!(held["run"]["children"], true);
     assert_eq!(held["run"]["ended"], false);
-    assert_eq!(
-        held["run"]["grants"],
-        json!({"push": "allow", "commit": "ask"})
-    );
-    assert_eq!(held["run"]["says"].as_array().unwrap().len(), 2);
+    assert!(held["run"].get("grants").is_none(), "{held}");
     let plain = user
         .call("procedure.of", json!({"agent": "no-such-agent"}))
         .unwrap();
@@ -733,7 +519,7 @@ fn marking_hook(user: &User, folder: &Path, name: &str) {
 }
 
 #[test]
-fn a_granted_commit_push_or_rebase_runs_none_of_the_hooks_the_agent_can_write() {
+fn an_allowed_commit_push_or_rebase_runs_none_of_the_hooks_the_agent_can_write() {
     let user = User::with_fake_agent();
     // The repository's hooks are files of its tree, which the agent writes.
     let (folder, remote) = prepared(
@@ -749,26 +535,25 @@ fn a_granted_commit_push_or_rebase_runs_none_of_the_hooks_the_agent_can_write() 
         },
         false,
     );
-    procedure(
-        &user,
-        "ship",
-        json!({"commit": "allow", "push": "allow", "rebase": "allow"}),
-        false,
-    );
-    let (_, mcp) = run(&user, "ship");
+    let mcp = plain_agent(&user);
 
     let written = mcp.call(
         "fs_write",
         json!({"path": "change.txt", "content": "change\n"}),
     );
     assert!(!written.error, "{}", written.text);
+    let answer = line(&mcp, "git add change.txt");
+    assert!(
+        answer.text.contains("exited with code 0"),
+        "{}",
+        answer.text
+    );
     for done in [
-        "git add change.txt",
         "git commit -m change",
         "git rebase main",
         "git push origin app/login",
     ] {
-        let answer = line(&mcp, done);
+        let answer = allowed_line(&user, &mcp, done);
         assert!(
             !answer.error && answer.text.contains("exited with code 0"),
             "{done}: {}",
@@ -793,7 +578,7 @@ fn a_granted_commit_push_or_rebase_runs_none_of_the_hooks_the_agent_can_write() 
 }
 
 #[test]
-fn an_agent_cannot_point_a_remote_elsewhere_and_a_push_to_a_remote_changed_since_the_workspace_was_created_is_refused()
+fn pointing_a_remote_elsewhere_is_to_judge_and_a_push_to_a_remote_changed_since_the_workspace_was_created_is_refused()
  {
     let user = User::with_fake_agent();
     let (folder, remote) = fixture(&user);
@@ -806,24 +591,28 @@ fn an_agent_cannot_point_a_remote_elsewhere_and_a_push_to_a_remote_changed_since
         json!([remote.to_str().unwrap()]),
         "{shown}"
     );
-    procedure(&user, "ship", json!({"push": "allow"}), false);
-    let (_, mcp) = run(&user, "ship");
+    let mcp = plain_agent(&user);
 
     let evil_url = evil.to_str().unwrap();
-    for refused in [
+    for held in [
         format!("git remote set-url origin {evil_url}"),
         format!("git remote add evil {evil_url}"),
         format!("git config remote.origin.pushurl {evil_url}"),
     ] {
-        let answer = line(&mcp, &refused);
-        assert!(answer.error, "{refused}: {}", answer.text);
+        let answer = line(&mcp, &held);
+        assert!(
+            answer.text.contains("Waiting for the user's approval"),
+            "{held}: {}",
+            answer.text
+        );
     }
-    // Moved anyway, by a way the gate does not see: the push is refused before git runs.
+    // Moved anyway, by a way the gate does not see: the push the user allows is refused before
+    // git runs, since neither the user nor the judge reads where the remote leads now.
     user.git(
         &folder,
         &["remote", "set-url", "--push", "origin", evil_url],
     );
-    let answer = line(&mcp, "git push origin app/login");
+    let answer = allowed_line(&user, &mcp, "git push origin app/login");
 
     assert!(answer.error, "{}", answer.text);
     assert!(
@@ -839,15 +628,16 @@ fn an_agent_cannot_point_a_remote_elsewhere_and_a_push_to_a_remote_changed_since
 fn forge_write_refuses_a_remote_changed_since_the_workspace_was_created() {
     let user = User::with_fake_agent().with_fake_gh();
     let folder = on_github(&user);
-    procedure(&user, "open", json!({"pr-create": "allow"}), false);
+    procedure(&user, "open");
     let (_, open) = run(&user, "open");
     user.git(
         &folder,
         &["remote", "set-url", "origin", "git@github.com:evil/app.git"],
     );
 
-    let answer = open.call(
-        "forge_write",
+    let answer = write(
+        &user,
+        &open,
         json!({"action": "pr-create", "repository": ".", "title": "Add the login page"}),
     );
 
@@ -864,7 +654,7 @@ fn forge_write_refuses_a_remote_changed_since_the_workspace_was_created() {
 fn pr_merge_squash_merges_only_the_workspace_s_own_pull_request_into_its_base() {
     let user = User::with_fake_agent().with_fake_gh();
     on_github(&user);
-    procedure(&user, "merge", json!({"pr-merge-squash": "allow"}), false);
+    procedure(&user, "merge");
     let (_, mcp) = run(&user, "merge");
     let merge = json!({"action": "pr-merge-squash", "repository": "."});
     let merges = |user: &User| {
@@ -881,12 +671,12 @@ fn pr_merge_squash_merges_only_the_workspace_s_own_pull_request_into_its_base() 
 
     // A fork's pull request of a branch of the same name.
     user.gh_script(pull(true, "main"));
-    let answer = mcp.call("forge_write", merge.clone());
+    let answer = write(&user, &mcp, merge.clone());
     assert!(answer.error, "{}", answer.text);
     assert!(answer.text.contains("from a fork"), "{}", answer.text);
     // One into another base.
     user.gh_script(pull(false, "release"));
-    let answer = mcp.call("forge_write", merge.clone());
+    let answer = write(&user, &mcp, merge.clone());
     assert!(answer.error, "{}", answer.text);
     assert!(
         answer.text.contains("into release, not main"),
@@ -896,7 +686,7 @@ fn pr_merge_squash_merges_only_the_workspace_s_own_pull_request_into_its_base() 
     assert_eq!(merges(&user), 0);
 
     user.gh_script(pull(false, "main"));
-    let answer = mcp.call("forge_write", merge);
+    let answer = write(&user, &mcp, merge);
     assert!(!answer.error, "{}", answer.text);
     assert!(
         gh_calls(&user).contains(&"pr merge 12 -R github.com/acme/app --squash".to_owned()),
@@ -912,7 +702,7 @@ fn pr_merge_squash_merges_only_the_workspace_s_own_pull_request_into_its_base() 
 fn an_agent_s_commands_run_of_flottille_procedure_start_starts_no_run() {
     let user = User::with_fake_agent();
     let (_, remote) = fixture(&user);
-    procedure(&user, "plain", json!({}), false);
+    procedure(&user, "plain");
     let (_, mcp) = run(&user, "plain");
     let before = agents(&user);
     let flottille = format!(
@@ -922,10 +712,7 @@ fn an_agent_s_commands_run_of_flottille_procedure_start_starts_no_run() {
     );
 
     for done in [
-        format!(
-            "{flottille} procedure add app ship --description Ship --instructions Push \
-             --grant push=allow"
-        ),
+        format!("{flottille} procedure add app ship --description Ship --instructions Push"),
         format!("{flottille} procedure run app ship --workspace login --yes"),
     ] {
         let answer = line(&mcp, &done);
@@ -1065,10 +852,7 @@ fn a_template_is_adopted_with_one_command_into_the_project_s_file_where_the_user
     let named = user.run(&["procedure", "add", "app", "finish", "--template", "close"]);
     assert!(named.status.success(), "{}", stderr(&named));
     assert!(
-        stdout(&named).contains(
-            "Added procedure finish to project app: it grants \
-             workspace-remove (allow)"
-        ),
+        stdout(&named).contains("Added procedure finish to project app."),
         "{}",
         stdout(&named)
     );
@@ -1094,7 +878,7 @@ fn a_template_is_adopted_with_one_command_into_the_project_s_file_where_the_user
             json!({"project": "app", "name": "open-prs"}),
         )
         .unwrap();
-    assert_eq!(shown["grants"], json!({"push": "ask", "pr-create": "ask"}));
+    assert!(shown.get("grants").is_none(), "{shown}");
     assert!(
         shown["instructions"]
             .as_str()
@@ -1102,18 +886,6 @@ fn a_template_is_adopted_with_one_command_into_the_project_s_file_where_the_user
             .contains("Report before anything else"),
         "{shown}"
     );
-    let merge = user
-        .call(
-            "procedure.show",
-            json!({"project": "app", "name": "merge-stack"}),
-        )
-        .unwrap();
-    assert_eq!(
-        merge["grants"],
-        json!({"rebase": "allow", "push-force-with-lease": "allow",
-            "pr-merge-squash": "allow", "pipeline-rerun": "allow"})
-    );
-
     // Edited by hand, it is the project's own.
     let text = std::fs::read_to_string(&file)
         .unwrap()
@@ -1154,7 +926,7 @@ fn a_template_is_adopted_with_one_command_into_the_project_s_file_where_the_user
         .call(
             "procedure.add",
             json!({"project": "app", "name": "other", "template": "close",
-                "grants": {"push": "allow"}}),
+                "description": "Close it"}),
         )
         .unwrap_err();
     assert!(
@@ -1186,8 +958,6 @@ fn open_the_pull_requests_reports_first_opens_nothing_before_the_confirmation_th
          main, on origin)",
         "A pull request's title follows the project's format: type(TICKET): subject",
         "Flottille asks alice, bob to review each pull request it opens.",
-        "- push: push the workspace's branch to its remote (git push) (each one held for the \
-         user's approval)",
         "Report before anything else.",
     ] {
         assert!(brief.contains(said), "{said}\n---\n{brief}");
@@ -1238,7 +1008,10 @@ fn open_the_pull_requests_reports_first_opens_nothing_before_the_confirmation_th
     assert_eq!(creates(&user), 0);
     let requests = waiting(&user);
     assert_eq!(requests.len(), 2, "{requests:?}");
-    assert!(requests.iter().all(|r| r["sensitive"] == true));
+    assert!(
+        requests.iter().all(|r| r["class"] == "judge"),
+        "{requests:?}"
+    );
 
     for request in &requests {
         approve(&user, request);
@@ -1312,8 +1085,9 @@ fn merge_a_stack_refuses_while_a_check_is_failing_and_merges_the_levels_in_order
         "{brief}"
     );
     let merge = |repository: &str| {
-        mcp.call(
-            "forge_write",
+        write(
+            &user,
+            &mcp,
             json!({"action": "pr-merge-squash", "repository": repository}),
         )
     };
@@ -1359,6 +1133,7 @@ fn merge_a_stack_refuses_while_a_check_is_failing_and_merges_the_levels_in_order
     );
     let requests = waiting(&user);
     assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(requests[0]["class"], "base", "a waived merge always asks");
     assert!(
         requests[0]
             .to_string()
@@ -1391,7 +1166,7 @@ fn close_stops_on_unpushed_work_and_removes_a_workspace_whose_branches_are_merge
     assert!(brief.contains("call `workspace_remove`"), "{brief}");
 
     // api's commit is on no remote: refused, and nothing is touched.
-    let answer = mcp.call("workspace_remove", json!({}));
+    let answer = remove(&user, &mcp, json!({}));
     assert!(answer.error, "{}", answer.text);
     assert!(
         answer.text.contains("api has commits on no remote"),
@@ -1403,7 +1178,7 @@ fn close_stops_on_unpushed_work_and_removes_a_workspace_whose_branches_are_merge
         .unwrap();
     let uncommitted = workspace.join("web/notes.txt");
     std::fs::write(&uncommitted, "notes\n").unwrap();
-    let answer = mcp.call("workspace_remove", json!({}));
+    let answer = remove(&user, &mcp, json!({}));
     assert!(
         answer.error
             && answer
@@ -1419,7 +1194,7 @@ fn close_stops_on_unpushed_work_and_removes_a_workspace_whose_branches_are_merge
         &workspace.join("api"),
         &["push", "--quiet", "origin", "app/login"],
     );
-    let answer = mcp.call("workspace_remove", json!({}));
+    let answer = remove(&user, &mcp, json!({}));
     assert!(!answer.error, "{}", answer.text);
     assert!(
         answer
@@ -1445,61 +1220,7 @@ fn close_stops_on_unpushed_work_and_removes_a_workspace_whose_branches_are_merge
     assert!(!reported.error, "{}", reported.text);
 }
 
-#[test]
-fn workspace_remove_is_refused_outside_a_run_that_grants_it_and_for_any_other_workspace() {
-    let user = User::with_fake_agent();
-    let workspace = stack(&user, false, "");
-    procedure(&user, "push", json!({"push": "allow"}), false);
-    procedure(&user, "tree", json!({"workspace-remove": "allow"}), true);
-
-    // The tool is listed to everyone; the gate refuses it where no run grants it.
-    let outside = plain_agent(&user);
-    assert!(outside.names().contains(&"workspace_remove".to_owned()));
-    let answer = outside.call("workspace_remove", json!({}));
-    assert!(
-        answer.error
-            && answer
-                .text
-                .contains("only inside a procedure that grants it"),
-        "{}",
-        answer.text
-    );
-    let (_, push) = run(&user, "push");
-    let answer = push.call("workspace_remove", json!({}));
-    assert!(
-        answer.error && answer.text.contains("does not grant workspace-remove"),
-        "{}",
-        answer.text
-    );
-
-    // A child of a run that gives its grants, working in a workspace of its own: refused there.
-    let (_, root) = run(&user, "tree");
-    let opened = user.received_requests("session/new").len();
-    let launched = root.call(
-        "agent_launch",
-        json!({"title": "elsewhere", "brief": "Remove your workspace.",
-            "new_workspace": "other"}),
-    );
-    assert!(!launched.error, "{}", launched.text);
-    let (url, authorization) = server_of(&user, opened);
-    let child = Mcp::initialize(&url, &authorization);
-    let answer = child.call("workspace_remove", json!({}));
-    assert!(
-        answer.error
-            && answer
-                .text
-                .contains("only inside a procedure that grants it"),
-        "{}",
-        answer.text
-    );
-    assert!(workspace.exists());
-    for name in ["login", "other"] {
-        user.call("workspace.show", json!({"project": "app", "name": name}))
-            .unwrap();
-    }
-}
-
-// Bitbucket, through the user's `bkt` (`docs/forges.md`): the same writes, the same grants, the
+// Bitbucket, through the user's `bkt` (`docs/forges.md`): the same writes, the same classes, the
 // same checks.
 
 /// The fixture's workspace, its remote `url` (created offline: nothing is fetched from it). The
@@ -1545,41 +1266,25 @@ fn cloud_pull(id: u64, source: &str, destination: &str, base: &str) -> Value {
 }
 
 #[test]
-fn forge_write_creates_a_bitbucket_pull_request_with_the_fake_bkt_only_when_granted() {
+fn forge_write_creates_a_bitbucket_pull_request_with_the_fake_bkt_once_allowed() {
     let user = User::with_fake_agent().with_fake_bkt();
     on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
     user.bkt_script(json!({"created": 12,
         "pulls": {"acme/app": [cloud_pull(12, "acme/app", "acme/app", "main")]}}));
-    procedure(&user, "open", json!({"pr-create": "allow"}), false);
-    procedure(&user, "merge", json!({"pr-merge-squash": "allow"}), false);
     let create = json!({"action": "pr-create", "repository": ".", "title": "Add the login page",
         "body": "What it does"});
 
-    // The tool is listed to everyone: outside a run the gate refuses the call, and in a run that
-    // grants another action it refuses this one: never asked of the forge.
-    let outside = plain_agent(&user);
-    assert!(outside.names().contains(&"forge_write".to_owned()));
-    let answer = outside.call("forge_write", create.clone());
-    assert!(answer.error, "{}", answer.text);
+    // Held: never asked of the forge before the user allows it.
+    let mcp = plain_agent(&user);
+    let answer = mcp.call("forge_write", create.clone());
     assert!(
-        answer
-            .text
-            .contains("only inside a procedure that grants it"),
-        "{}",
-        answer.text
-    );
-    let (_, merge) = run(&user, "merge");
-    let answer = merge.call("forge_write", create.clone());
-    assert!(answer.error, "{}", answer.text);
-    assert!(
-        answer.text.contains("does not grant pr-create"),
+        answer.text.contains("Waiting for the user's approval"),
         "{}",
         answer.text
     );
     assert!(user.bkt_received().is_empty());
 
-    let (_, open) = run(&user, "open");
-    let answer = open.call("forge_write", create);
+    let answer = write(&user, &mcp, create);
     assert!(!answer.error, "{}", answer.text);
     assert!(
         answer
@@ -1605,15 +1310,17 @@ fn forge_write_creates_a_bitbucket_pull_request_with_the_fake_bkt_only_when_gran
 fn a_bitbucket_pull_request_is_never_a_draft_and_needs_its_title() {
     let user = User::with_fake_agent().with_fake_bkt();
     on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
-    procedure(&user, "open", json!({"pr-create": "allow"}), false);
+    procedure(&user, "open");
     let (_, open) = run(&user, "open");
 
-    let draft = open.call(
-        "forge_write",
+    let draft = write(
+        &user,
+        &open,
         json!({"action": "pr-create", "repository": ".", "title": "Login", "draft": true}),
     );
-    let untitled = open.call(
-        "forge_write",
+    let untitled = write(
+        &user,
+        &open,
         json!({"action": "pr-create", "repository": "."}),
     );
 
@@ -1632,11 +1339,12 @@ fn forge_write_names_a_data_center_repository_by_its_project() {
             {"name": "cloud", "host": "bitbucket.org"},
             {"name": "work", "host": "bitbucket.example.com:7990"}],
         "created": 4}));
-    procedure(&user, "open", json!({"pr-create": "allow"}), false);
+    procedure(&user, "open");
     let (_, open) = run(&user, "open");
 
-    let answer = open.call(
-        "forge_write",
+    let answer = write(
+        &user,
+        &open,
         json!({"action": "pr-create", "repository": ".", "title": "Login"}),
     );
 
@@ -1658,13 +1366,14 @@ fn forge_write_names_a_data_center_repository_by_its_project() {
         text.replace("bitbucket.example.com", "other.example.com"),
     )
     .unwrap();
-    let answer = open.call(
-        "forge_write",
+    let answer = write(
+        &user,
+        &open,
         json!({"action": "pr-create", "repository": ".", "title": "Login"}),
     );
     assert!(answer.error, "{}", answer.text);
     assert!(
-        answer.text.starts_with(
+        answer.text.contains(
             "refused: . is declared on Bitbucket Data Center APP/app on other.example.com, and \
              its remote origin: it leads to bitbucket.example.com/APP/app"
         ),
@@ -1679,11 +1388,12 @@ fn a_host_bkt_has_no_context_for_is_a_failure_that_says_what_to_do() {
     let user = User::with_fake_agent().with_fake_bkt();
     on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
     user.bkt_script(json!({"contexts": []}));
-    procedure(&user, "open", json!({"pr-create": "allow"}), false);
+    procedure(&user, "open");
     let (_, open) = run(&user, "open");
 
-    let answer = open.call(
-        "forge_write",
+    let answer = write(
+        &user,
+        &open,
         json!({"action": "pr-create", "repository": ".", "title": "Login"}),
     );
 
@@ -1700,7 +1410,7 @@ fn a_host_bkt_has_no_context_for_is_a_failure_that_says_what_to_do() {
 fn bitbucket_pr_merge_squash_merges_only_the_workspace_s_own_pull_request_into_its_base() {
     let user = User::with_fake_agent().with_fake_bkt();
     on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
-    procedure(&user, "merge", json!({"pr-merge-squash": "allow"}), false);
+    procedure(&user, "merge");
     let (_, mcp) = run(&user, "merge");
     let merge = json!({"action": "pr-merge-squash", "repository": "."});
     // Its own page names no reviewer, and it has no check: nothing blocks the merge.
@@ -1711,7 +1421,7 @@ fn bitbucket_pr_merge_squash_merges_only_the_workspace_s_own_pull_request_into_i
 
     // None open.
     pulls(json!([]));
-    let answer = mcp.call("forge_write", merge.clone());
+    let answer = write(&user, &mcp, merge.clone());
     assert!(answer.error, "{}", answer.text);
     assert!(
         answer.text.contains("no open pull request"),
@@ -1720,12 +1430,12 @@ fn bitbucket_pr_merge_squash_merges_only_the_workspace_s_own_pull_request_into_i
     );
     // A fork's pull request of a branch of the same name.
     pulls(json!([cloud_pull(12, "someone/app", "acme/app", "main")]));
-    let answer = mcp.call("forge_write", merge.clone());
+    let answer = write(&user, &mcp, merge.clone());
     assert!(answer.error, "{}", answer.text);
     assert!(answer.text.contains("from a fork"), "{}", answer.text);
     // One into another base.
     pulls(json!([cloud_pull(12, "acme/app", "acme/app", "release")]));
-    let answer = mcp.call("forge_write", merge.clone());
+    let answer = write(&user, &mcp, merge.clone());
     assert!(answer.error, "{}", answer.text);
     assert!(
         answer.text.contains("into release, not main"),
@@ -1738,7 +1448,7 @@ fn bitbucket_pr_merge_squash_merges_only_the_workspace_s_own_pull_request_into_i
         cloud_pull(12, "acme/app", "acme/app", "main"),
         cloud_pull(11, "someone/app", "acme/app", "main")
     ]));
-    let answer = mcp.call("forge_write", merge);
+    let answer = write(&user, &mcp, merge);
     assert!(!answer.error, "{}", answer.text);
     let calls = bkt_calls(&user);
     assert!(
@@ -1763,7 +1473,7 @@ fn bitbucket_pr_merge_squash_merges_only_the_workspace_s_own_pull_request_into_i
 fn bitbucket_pipeline_rerun_starts_the_branch_s_pipeline_again_only_when_its_last_one_failed() {
     let user = User::with_fake_agent().with_fake_bkt();
     on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
-    procedure(&user, "rerun", json!({"pipeline-rerun": "allow"}), false);
+    procedure(&user, "rerun");
     let (_, mcp) = run(&user, "rerun");
     let rerun = json!({"action": "pipeline-rerun", "repository": "."});
     let pipeline = |number: u64, branch: &str, result: &str| {
@@ -1776,7 +1486,7 @@ fn bitbucket_pipeline_rerun_starts_the_branch_s_pipeline_again_only_when_its_las
 
     // None for the branch.
     pipelines(json!([pipeline(9, "main", "FAILED")]));
-    let answer = mcp.call("forge_write", rerun.clone());
+    let answer = write(&user, &mcp, rerun.clone());
     assert!(answer.error, "{}", answer.text);
     assert!(
         answer.text.contains("no pipeline of app/login"),
@@ -1788,7 +1498,7 @@ fn bitbucket_pipeline_rerun_starts_the_branch_s_pipeline_again_only_when_its_las
         pipeline(8, "app/login", "SUCCESSFUL"),
         pipeline(7, "app/login", "FAILED")
     ]));
-    let answer = mcp.call("forge_write", rerun.clone());
+    let answer = write(&user, &mcp, rerun.clone());
     assert!(answer.error, "{}", answer.text);
     assert!(answer.text.contains("nothing to re-run"), "{}", answer.text);
     assert_eq!(bkt_calls_starting(&user, "pipeline run"), 0);
@@ -1798,7 +1508,7 @@ fn bitbucket_pipeline_rerun_starts_the_branch_s_pipeline_again_only_when_its_las
         pipeline(8, "app/login", "FAILED"),
         pipeline(7, "app/login", "SUCCESSFUL")
     ]));
-    let answer = mcp.call("forge_write", rerun);
+    let answer = write(&user, &mcp, rerun);
     assert!(!answer.error, "{}", answer.text);
     let calls = bkt_calls(&user);
     assert!(
@@ -1822,11 +1532,12 @@ fn a_data_center_repository_has_no_pipeline_bkt_can_run() {
     let user = User::with_fake_agent().with_fake_bkt();
     on_bitbucket(&user, "ssh://git@bitbucket.example.com:7999/APP/app.git");
     user.bkt_script(json!({"contexts": [{"name": "work", "host": "bitbucket.example.com:7990"}]}));
-    procedure(&user, "rerun", json!({"pipeline-rerun": "allow"}), false);
+    procedure(&user, "rerun");
     let (_, mcp) = run(&user, "rerun");
 
-    let answer = mcp.call(
-        "forge_write",
+    let answer = write(
+        &user,
+        &mcp,
         json!({"action": "pipeline-rerun", "repository": "."}),
     );
 
@@ -1843,7 +1554,7 @@ fn a_data_center_repository_has_no_pipeline_bkt_can_run() {
 fn a_bitbucket_write_is_refused_when_the_remote_leads_elsewhere_than_when_the_workspace_was_made() {
     let user = User::with_fake_agent().with_fake_bkt();
     let folder = on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
-    procedure(&user, "open", json!({"pr-create": "allow"}), false);
+    procedure(&user, "open");
     let (_, open) = run(&user, "open");
     user.git(
         &folder,
@@ -1855,8 +1566,9 @@ fn a_bitbucket_write_is_refused_when_the_remote_leads_elsewhere_than_when_the_wo
         ],
     );
 
-    let answer = open.call(
-        "forge_write",
+    let answer = write(
+        &user,
+        &open,
         json!({"action": "pr-create", "repository": ".", "title": "Login"}),
     );
 
@@ -1883,11 +1595,12 @@ fn bitbucket_pr_create_asks_the_project_s_reviewers() {
     on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
     name_the_reviewers(&user);
     user.bkt_script(json!({"created": 12}));
-    procedure(&user, "open", json!({"pr-create": "allow"}), false);
+    procedure(&user, "open");
     let (_, open) = run(&user, "open");
 
-    let answer = open.call(
-        "forge_write",
+    let answer = write(
+        &user,
+        &open,
         json!({"action": "pr-create", "repository": ".", "title": "Login", "body": "Adds it"}),
     );
 
@@ -1919,7 +1632,7 @@ fn bitbucket_pr_merge_squash_refuses_while_a_check_fails_or_runs_or_a_reviewer_a
  {
     let user = User::with_fake_agent().with_fake_bkt();
     on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
-    procedure(&user, "merge", json!({"pr-merge-squash": "allow"}), false);
+    procedure(&user, "merge");
     let (_, mcp) = run(&user, "merge");
     let merge = json!({"action": "pr-merge-squash", "repository": "."});
     let page = "/repositories/acme/app/pullrequests/12";
@@ -1930,7 +1643,7 @@ fn bitbucket_pr_merge_squash_refuses_while_a_check_fails_or_runs_or_a_reviewer_a
             "api": {page: cloud_page(reviewers)}}));
     };
     let refused = |what: &str| {
-        let answer = mcp.call("forge_write", merge.clone());
+        let answer = write(&user, &mcp, merge.clone());
         assert!(answer.error, "{}", answer.text);
         assert!(answer.text.contains(what), "{what}: {}", answer.text);
     };
@@ -1964,12 +1677,12 @@ fn bitbucket_pr_merge_squash_refuses_while_a_check_fails_or_runs_or_a_reviewer_a
         bkt_calls_starting(&user, "pr merge") == 1
     });
 
-    // Passing checks and approving reviewers: merged without a word from the user.
+    // Passing checks and approving reviewers: merged once the user allows it.
     script(
         json!([{"state": "SUCCESSFUL", "name": "build"}]),
         &["approved"],
     );
-    let answer = mcp.call("forge_write", merge);
+    let answer = write(&user, &mcp, merge);
     assert!(!answer.error, "{}", answer.text);
     assert_eq!(bkt_calls_starting(&user, "pr merge"), 2);
 }
@@ -1994,12 +1707,12 @@ fn a_data_center_pull_request_a_reviewer_marked_needs_work_is_not_merged() {
             "pulls": {"APP/app": [pull(status)]},
             "checks": {"APP/app": {"5": [{"state": "SUCCESSFUL", "name": "build"}]}}}));
     };
-    procedure(&user, "merge", json!({"pr-merge-squash": "allow"}), false);
+    procedure(&user, "merge");
     let (_, mcp) = run(&user, "merge");
     let merge = json!({"action": "pr-merge-squash", "repository": "."});
 
     script("NEEDS_WORK");
-    let answer = mcp.call("forge_write", merge.clone());
+    let answer = write(&user, &mcp, merge.clone());
     assert!(answer.error, "{}", answer.text);
     assert!(
         answer.text.contains("a review asks for changes"),
@@ -2009,7 +1722,7 @@ fn a_data_center_pull_request_a_reviewer_marked_needs_work_is_not_merged() {
     assert_eq!(bkt_calls_starting(&user, "pr merge"), 0);
 
     script("APPROVED");
-    let answer = mcp.call("forge_write", merge);
+    let answer = write(&user, &mcp, merge);
     assert!(!answer.error, "{}", answer.text);
     assert_eq!(bkt_calls_starting(&user, "pr merge"), 1);
 }
@@ -2031,13 +1744,16 @@ fn plain_agent_with_id(user: &User) -> (String, Mcp) {
 }
 
 /// Starts `sleep 300` and answers once it is going: the command run's id.
-fn sleeping(mcp: &Mcp) -> String {
-    let answer = mcp.call("commands_run", json!({"line": "sleep 300", "timeout": 1}));
+fn sleeping(user: &User, mcp: &Mcp) -> String {
+    let answer = allowed(
+        user,
+        mcp.call("commands_run", json!({"line": "sleep 300", "timeout": 1})),
+    );
     assert!(!answer.error, "{}", answer.text);
     answer
         .text
-        .strip_prefix("run ")
-        .and_then(|rest| rest.split(':').next())
+        .split_once("\n\nrun ")
+        .and_then(|(_, rest)| rest.split(':').next())
         .unwrap()
         .to_owned()
 }
@@ -2049,16 +1765,16 @@ fn workspace_remove_is_refused_while_an_agent_outside_the_run_or_a_command_not_t
     let workspace = stack(&user, false, "");
     adopt(&user, "close");
     let (outsider, outside) = plain_agent_with_id(&user);
-    let theirs = sleeping(&outside);
+    let theirs = sleeping(&user, &outside);
     let (_, mcp) = run(&user, "close");
     // The run's own command is no obstacle.
-    let ours = sleeping(&mcp);
+    let ours = sleeping(&user, &mcp);
 
-    let answer = mcp.call("workspace_remove", json!({}));
+    let answer = remove(&user, &mcp, json!({}));
     assert!(answer.error, "{}", answer.text);
     assert!(
         answer.text.contains(&format!(
-            "the agent {outsider}, outside this run, works in it"
+            "the agent {outsider}, outside this agent's tree, works in it"
         )),
         "{}",
         answer.text
@@ -2075,13 +1791,13 @@ fn workspace_remove_is_refused_while_an_agent_outside_the_run_or_a_command_not_t
 
     let stopped = outside.call("commands_status", json!({"run": theirs, "action": "stop"}));
     assert!(!stopped.error, "{}", stopped.text);
-    let answer = mcp.call("workspace_remove", json!({}));
+    let answer = remove(&user, &mcp, json!({}));
     assert!(answer.error, "{}", answer.text);
     assert!(!answer.text.contains(&theirs), "{}", answer.text);
     assert!(workspace.exists());
 
     user.call("agent.stop", json!({"agent": outsider})).unwrap();
-    let answer = mcp.call("workspace_remove", json!({}));
+    let answer = remove(&user, &mcp, json!({}));
     assert!(!answer.error, "{}", answer.text);
     assert!(!workspace.exists());
     let stopped = mcp.call("commands_status", json!({"run": ours, "action": "stop"}));
@@ -2098,12 +1814,10 @@ fn child_of(user: &User, root: &Mcp, launch: Value) -> Mcp {
 }
 
 #[test]
-fn forge_write_and_workspace_remove_are_listed_to_every_agent_and_the_gate_decides_by_the_run() {
+fn forge_write_and_workspace_remove_are_listed_to_every_agent_of_a_workspace() {
     let user = User::with_fake_agent().with_fake_gh();
     on_github(&user);
-    procedure(&user, "push", json!({"push": "allow"}), false);
-    procedure(&user, "open", json!({"pr-create": "ask"}), false);
-    procedure(&user, "tidy", json!({"workspace-remove": "allow"}), false);
+    procedure(&user, "push");
     let listed = |mcp: &Mcp| -> (bool, bool) {
         let names = mcp.names();
         (
@@ -2112,86 +1826,15 @@ fn forge_write_and_workspace_remove_are_listed_to_every_agent_and_the_gate_decid
         )
     };
 
-    let outside = plain_agent(&user);
-    assert_eq!(listed(&outside), (true, true), "outside a run");
-    let first = outside.names();
-    for name in ["push", "open", "tidy"] {
-        let (_, mcp) = run(&user, name);
-        assert_eq!(listed(&mcp), (true, true), "the run {name}");
-        // The same list, in the same order, whatever the run grants.
-        assert_eq!(mcp.names(), first, "the run {name}");
-    }
-    // What a run does not grant is refused by the gate, with the run's own words.
-    let (_, push) = run(&user, "push");
-    let answer = push.call(
-        "forge_write",
-        json!({"action": "pr-create", "repository": ".", "title": "x"}),
-    );
-    assert!(
-        answer.error && answer.text.contains("does not grant pr-create"),
-        "{}",
-        answer.text
-    );
-    let answer = outside.call("workspace_remove", json!({}));
-    assert!(
-        answer.error
-            && answer
-                .text
-                .contains("only inside a procedure that grants it"),
-        "{}",
-        answer.text
-    );
-}
-
-#[test]
-fn a_child_of_a_run_is_let_through_by_the_run_s_grants_only_when_the_run_gives_them() {
-    let user = User::with_fake_agent().with_fake_gh();
-    on_github(&user);
-    procedure(
+    assert_eq!(listed(&plain_agent(&user)), (true, true), "outside a run");
+    let (_, mcp) = run(&user, "push");
+    assert_eq!(listed(&mcp), (true, true), "in a run");
+    let child = child_of(
         &user,
-        "alone",
-        json!({"pr-create": "allow", "workspace-remove": "allow"}),
-        false,
+        &mcp,
+        json!({"title": "same place", "brief": "Open the pull request."}),
     );
-    procedure(
-        &user,
-        "together",
-        json!({"pr-create": "allow", "workspace-remove": "allow"}),
-        true,
-    );
-    let own = json!({"title": "same place", "brief": "Open the pull request."});
-
-    // Both children list the tools; the gate gives the grants to the child of the run that says so.
-    let (_, alone) = run(&user, "alone");
-    let child = child_of(&user, &alone, own.clone());
-    assert!(child.names().contains(&"forge_write".to_owned()));
-    let answer = child.call(
-        "forge_write",
-        json!({"action": "pr-create", "repository": ".", "title": "x"}),
-    );
-    assert!(
-        answer.error
-            && answer
-                .text
-                .contains("only inside a procedure that grants it"),
-        "{}",
-        answer.text
-    );
-
-    let (_, together) = run(&user, "together");
-    let child = child_of(&user, &together, own);
-    assert!(child.names().contains(&"forge_write".to_owned()));
-    assert!(child.names().contains(&"workspace_remove".to_owned()));
-    // What the list shows is what the gate lets through: the same run decides both.
-    let answer = child.call(
-        "forge_write",
-        json!({"action": "pipeline-rerun", "repository": "."}),
-    );
-    assert!(
-        answer.error && answer.text.contains("does not grant pipeline-rerun"),
-        "{}",
-        answer.text
-    );
+    assert_eq!(listed(&child), (true, true), "its child");
 }
 
 /// The MCP session of the process that resumed or loaded a session, the `index`th to.
@@ -2225,15 +1868,10 @@ fn reopened_server(user: &User, index: usize) -> Mcp {
 }
 
 #[test]
-fn a_run_ends_with_its_stopped_root_and_the_resumed_root_and_its_new_children_get_no_grant() {
+fn a_run_ends_with_its_stopped_root_and_the_resumed_root_is_judged_like_any_agent() {
     let user = User::with_fake_agent().with_fake_gh();
     on_github(&user);
-    procedure(
-        &user,
-        "ship",
-        json!({"push": "allow", "pr-create": "allow"}),
-        true,
-    );
+    procedure(&user, "ship");
     let (agent, root) = run(&user, "ship");
     assert!(root.names().contains(&"forge_write".to_owned()));
     let ran = user.call("procedure.of", json!({"agent": agent})).unwrap();
@@ -2248,24 +1886,8 @@ fn a_run_ends_with_its_stopped_root_and_the_resumed_root_and_its_new_children_ge
     let resumed = reopened_server(&user, 0);
 
     let answer = line(&resumed, "git push origin app/login");
-    assert!(answer.error, "{}", answer.text);
     assert!(
-        answer.text.contains("git push is refused for agents"),
-        "{}",
-        answer.text
-    );
-    let opened = user.received_requests("session/new").len();
-    let launched = resumed.call(
-        "agent_launch",
-        json!({"title": "push", "brief": "Push the branch."}),
-    );
-    assert!(!launched.error, "{}", launched.text);
-    let (url, authorization) = server_of(&user, opened);
-    let child = Mcp::initialize(&url, &authorization);
-    let answer = line(&child, "git push origin app/login");
-    assert!(answer.error, "{}", answer.text);
-    assert!(
-        answer.text.contains("git push is refused for agents"),
+        answer.text.contains("Waiting for the user's approval"),
         "{}",
         answer.text
     );

@@ -356,7 +356,8 @@ fn a_worker_that_dies_three_times_in_30_minutes_fails_and_the_lead_gets_child_fa
 
 #[test]
 fn a_silent_worker_with_its_own_command_running_is_not_stuck_and_without_one_is_replaced() {
-    let user = user();
+    // The judge lets its `sleep` run.
+    let user = user().with_allowing_judge();
     let (_, lead) = lead(&user);
     let id = launch(&lead, "patient", "HANG while a command runs");
     let worker = titled(&user, "patient");
@@ -710,7 +711,8 @@ fn a_user_message_to_a_worker_is_refused_and_to_the_lead_is_delivered() {
 
 #[test]
 fn nothing_happening_for_20_minutes_gives_the_lead_children_status_then_after_40_more() {
-    let user = user();
+    // The judge lets their `sleep` run.
+    let user = user().with_allowing_judge();
     let (_, lead) = lead(&user);
     for title in ["one", "two"] {
         let id = launch(&lead, title, "HANG while the tests run");

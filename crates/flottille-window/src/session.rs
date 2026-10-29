@@ -26,7 +26,7 @@ use flottille_ui::{
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{
-    Escape, Input, InputEditorStyle, InputEvent, InputState, MoveDown, MoveUp, TextareaState,
+    Escape, Input, InputEditorStyle, InputEvent, InputState, MoveDown, MoveUp, Paste, TextareaState,
 };
 use gpui_kit::base::text::{TextView, TextViewState, TextViewStyle};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -34,13 +34,14 @@ use gpui_kit::{
     AnyElement, App, AppContext as _, Bounds, Context, Div, ElementId, Entity, EventEmitter,
     Focusable as _, FollowMode, ImageCacheError, ImageSource, InteractiveElement, IntoElement,
     ListAlignment, ListState, ParentElement, PathBuilder, Pixels, Render, SharedString, SharedUri,
-    Stateful, StatefulInteractiveElement, Styled, Subscription, Task, TestSupportExt as _,
-    Transformation, WeakEntity, Window, canvas, div, list, point, px, radians,
+    Stateful, StatefulInteractiveElement, Styled, StyledImage as _, Subscription, Task,
+    TestSupportExt as _, Transformation, WeakEntity, Window, canvas, div, list, point, px, radians,
 };
 
-use crate::actions::{Answer, Command};
-use crate::conversation::{Block, Call, CallState, Change, Conversation, DiffLine, USER};
+use crate::actions::{Answer, Command, Picture};
+use crate::conversation::{Activity, Block, Call, CallState, Change, Conversation, DiffLine, USER};
 use crate::link::{Connect, Update};
+use crate::mode::ModeSwitch;
 use crate::model::Place;
 use crate::open::Opener;
 use crate::procedures::ProcedureInfo;
@@ -62,6 +63,15 @@ pub const REPLY_PLACEHOLDER: &str = "Reply…";
 pub const SEND: &str = "Send";
 /// The composer's button that interrupts the turn that runs.
 pub const STOP: &str = "Stop the turn";
+/// The reply field is one line high when empty, and grows with its lines up to this many.
+const REPLY_MAX_ROWS: usize = 10;
+/// What the composer says of a picture it does not attach.
+pub const NO_IMAGES: &str = "This agent takes no images, so the picture was not attached.";
+const IMAGE_KINDS: &str = "Flottille takes png, jpeg, gif and webp images.";
+const TOO_MANY_IMAGES: &str = "A message carries 4 images at most.";
+const IMAGE_TOO_BIG: &str = "An image can be 5 MiB at most.";
+const MAX_IMAGES: usize = 4;
+const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
 /// The state an agent of the tree is drawn with, from what the daemon says of it: only a root can
 /// need the user; a child waiting on its parent is waiting, in grey.
@@ -150,6 +160,10 @@ pub struct SessionPage {
     read: bool,
     /// How many times a conversation was read and its rows made again.
     histories: usize,
+    /// The pictures sent to the shown agent, read back from the daemon by name, and the names
+    /// asked for.
+    pictures: HashMap<String, Arc<gpui_kit::Image>>,
+    asked_pictures: HashSet<String>,
     needs_you: bool,
     /// The confirmation of ending the session is open.
     ending: bool,
@@ -181,7 +195,7 @@ impl SessionPage {
         let page = cx.entity().downgrade();
         let rail = cx.new(|cx| SessionRail::new(page.clone(), opened.id.clone(), &opened, cx));
         let drawer = cx.new(|_| Drawer::new("rail-drawer", Side::Right, px(RAIL), rail.clone()));
-        let pill = cx.new(|cx| Pill::new(status.clone(), cx));
+        let pill = cx.new(|cx| Pill::new(status.clone(), cx).quiet_running());
         let shown = opened.id.clone();
         let conversation =
             cx.new(|_| ConversationView::new(page, &shown, THE_CONVERSATION.into(), None));
@@ -214,6 +228,8 @@ impl SessionPage {
             pages: 1,
             read: false,
             histories: 0,
+            pictures: HashMap::new(),
+            asked_pictures: HashSet::new(),
             needs_you,
             ending: false,
             end_error: None,
@@ -593,6 +609,8 @@ impl SessionPage {
                     view.rebuild(read, this, cx)
                 });
                 self.refresh_conversation(cx);
+                self.note_activity(cx);
+                self.fetch_pictures(cx);
             }
             // One row added or drawn again: nothing else is looked at.
             SessionUpdate::Live(event) => {
@@ -603,6 +621,10 @@ impl SessionPage {
                     let changes = view.model.apply(&event);
                     view.changed(&changes, this, cx);
                 });
+                self.note_activity(cx);
+                if event.name == "agent.prompted" {
+                    self.fetch_pictures(cx);
+                }
             }
             SessionUpdate::Requests(requests) => {
                 self.requests = requests.into_iter().map(|r| (r.number, r)).collect();
@@ -657,6 +679,67 @@ impl SessionPage {
             .any(|a| a.parent.as_deref() == Some(&self.shown))
     }
 
+    /// What the root does, for the line above the composer: read from its conversation, which is
+    /// the shown one only while the root is shown.
+    fn note_activity(&self, cx: &mut Context<Self>) {
+        if self.shown != self.opened.id {
+            return;
+        }
+        let activity = self.conversation.read(cx).model.activity();
+        self.reply
+            .update(cx, |reply, cx| reply.set_activity(Some(activity), cx));
+    }
+
+    /// Asks the daemon for the pictures the shown conversation names and has not read yet.
+    fn fetch_pictures(&mut self, cx: &mut Context<Self>) {
+        let wanted: Vec<String> = self
+            .conversation
+            .read(cx)
+            .blocks()
+            .iter()
+            .filter_map(|block| match block {
+                Block::Images { names } => Some(names.clone()),
+                _ => None,
+            })
+            .flatten()
+            .filter(|name| !self.asked_pictures.contains(name))
+            .collect();
+        for name in wanted {
+            self.asked_pictures.insert(name.clone());
+            let command = Command::Image {
+                session: self.shown.clone(),
+                name,
+            };
+            // The shell is handing this page its updates: it asks once they are over.
+            crate::procedures::perform_later(&self.shell, command, cx);
+        }
+    }
+
+    /// A picture read back from the daemon: the rows that show it draw it.
+    pub fn picture_read(&mut self, name: String, image: Option<Picture>, cx: &mut Context<Self>) {
+        let Some(image) = image else {
+            return;
+        };
+        let Some(format) = gpui_kit::ImageFormat::from_mime_type(&image.mime) else {
+            return;
+        };
+        self.pictures.insert(
+            name.clone(),
+            Arc::new(gpui_kit::Image::from_bytes(format, image.bytes)),
+        );
+        let rows = self.conversation.read(cx).rows.clone();
+        for row in rows {
+            if matches!(&*row.read(cx).block, Block::Images { names } if names.contains(&name)) {
+                row.update(cx, |_, cx| cx.notify());
+            }
+        }
+    }
+
+    /// How many pictures of the shown conversation are read.
+    pub fn pictures_read(&self) -> usize {
+        self.pictures.len()
+    }
+
     fn note_usage(&self, event: &flottille_core::protocol::Event, cx: &mut Context<Self>) {
         if event.name != "agent.usage" || self.shown != self.opened.id {
             return;
@@ -688,9 +771,15 @@ impl SessionPage {
             let runs_on = (root.provider.clone(), root.model.clone());
             let facts = self.reply.read(cx).facts.clone();
             facts.update(cx, |facts, cx| facts.set_model(runs_on, cx));
+            let mode = self.reply.read(cx).mode.clone();
+            let gate_mode = root.gate_mode.clone();
+            mode.update(cx, |mode, cx| mode.set_mode(gate_mode, cx));
             let running = root.state == "working";
-            self.reply
-                .update(cx, |reply, cx| reply.set_running(running, cx));
+            let images = root.images;
+            self.reply.update(cx, |reply, cx| {
+                reply.set_images(images);
+                reply.set_running(running, cx)
+            });
         }
         let names: HashMap<String, String> =
             tree.iter().map(|a| (a.id.clone(), name_of(a))).collect();
@@ -738,7 +827,7 @@ impl SessionPage {
             }
             .unwrap_or_else(|| self.status.clone());
             self.pill_status = status.clone();
-            self.pill = cx.new(|cx| Pill::new(status, cx));
+            self.pill = cx.new(|cx| Pill::new(status, cx).quiet_running());
             cx.notify();
         }
         if std::mem::take(&mut self.unchecked) && !self.tree.iter().any(|a| a.id == self.shown) {
@@ -833,7 +922,13 @@ impl SessionPage {
         }
         Some(ApprovalCard {
             number,
-            sensitive: request.is_some_and(|r| r.sensitive),
+            base: request.is_some_and(|r| r.base),
+            judgement: request
+                .and_then(|r| r.judgement.as_ref())
+                .map(|(by, verdict, reason)| match verdict.as_str() {
+                    "failed" => format!("The judge ({by}) could not decide: {reason}"),
+                    _ => format!("The judge ({by}) asks you: {reason}"),
+                }),
             kind: request.map_or_else(|| "call".to_owned(), |r| r.kind.clone()),
             says: request.map(|r| r.says.clone()).unwrap_or_default(),
             asked: request.map(Request::asked),
@@ -1394,9 +1489,11 @@ pub struct SubAgent {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ApprovalCard {
     pub number: u64,
-    /// It reaches a sensitive place: it is never allowed for the tree.
-    pub sensitive: bool,
-    /// `call`, `catalogue` or `action`: what the user may answer.
+    /// In the base: it always comes back to the user, whatever the mode.
+    pub base: bool,
+    /// What the Auto judge said, in one line, when it was judged.
+    pub judgement: Option<String>,
+    /// `call`, or `action` (a change of the project the agent asks for).
     pub kind: String,
     /// What it changes, in words, one line each.
     pub says: Vec<String>,
@@ -1404,7 +1501,7 @@ pub struct ApprovalCard {
     pub why: Option<String>,
     pub source: Option<String>,
     pub asker: Option<String>,
-    /// `deny`, `once`, `tree`, `always` or `cancelled`, once decided.
+    /// `deny`, `once` or `cancelled`, once decided.
     pub decision: Option<String>,
 }
 
@@ -1413,9 +1510,7 @@ impl ApprovalCard {
     pub fn record(&self) -> Option<String> {
         let said = match self.decision.as_deref()? {
             "deny" => "Denied",
-            "once" => "Allowed once",
-            "tree" => "Allowed for this tree",
-            "always" => "Allowed always, added to the catalogue",
+            "once" => "Allowed",
             "cancelled" => "Cancelled",
             other => other,
         };
@@ -1830,6 +1925,39 @@ impl Render for Row {
                 )
                 .test_support()
                 .into_any_element(),
+            Block::Images { names } => {
+                let page = self.page.upgrade();
+                let pictures: Vec<Option<Arc<gpui_kit::Image>>> = names
+                    .iter()
+                    .map(|name| page.as_ref()?.read(cx).pictures.get(name).cloned())
+                    .collect();
+                div()
+                    .id(id("images"))
+                    .flex()
+                    .flex_wrap()
+                    .justify_end()
+                    .gap(px(8.))
+                    .children(pictures.into_iter().enumerate().map(|(n, picture)| {
+                        let thumb = div()
+                            .id(id(&format!("image-{n}")))
+                            .flex_none()
+                            .size(px(96.))
+                            .rounded(px(10.))
+                            .bg(p.card2)
+                            .overflow_hidden();
+                        match picture {
+                            Some(picture) => thumb.child(
+                                gpui_kit::img(picture)
+                                    .size_full()
+                                    .object_fit(gpui_kit::ObjectFit::Cover),
+                            ),
+                            None => thumb,
+                        }
+                        .test_support()
+                    }))
+                    .test_support()
+                    .into_any_element()
+            }
             Block::Thought { text, .. } => {
                 let (label, timer) = self.thinking.clone().expect("a thought has its timer");
                 // A thought the provider sent no text of says how long it took, and opens on
@@ -1953,15 +2081,6 @@ impl Render for Row {
                                                 .gap(px(8.))
                                                 .mono(12.5)
                                                 .child(SharedString::from(call.name.clone()))
-                                                .when(call.state == CallState::Running, |d| {
-                                                    d.child(
-                                                        div()
-                                                            .mono(10.)
-                                                            .medium()
-                                                            .text_color(p.run)
-                                                            .child("RUNNING"),
-                                                    )
-                                                })
                                                 .when(call.state == CallState::Interrupted, |d| {
                                                     d.child(
                                                         div()
@@ -2025,11 +2144,6 @@ impl Render for Row {
                                 .child(chevron(1.))
                                 .aria_label(line.clone())
                                 .child(line)
-                                .when(running > 0, |d| {
-                                    d.child(
-                                        div().mono(10.).medium().text_color(p.run).child("RUNNING"),
-                                    )
-                                })
                                 .on_click(toggle)
                                 .test_support(),
                         )
@@ -2064,7 +2178,7 @@ impl Render for Row {
                     if !self.icons.contains_key(&agent.id) {
                         let status = agent.status.clone();
                         let icon = cx.new(|cx| StateIcon::new(status.clone(), cx));
-                        let pill = cx.new(|cx| Pill::new(status, cx));
+                        let pill = cx.new(|cx| Pill::new(status, cx).quiet_running());
                         self.icons.insert(agent.id.clone(), icon);
                         self.pills.insert(agent.id.clone(), pill);
                     }
@@ -2234,6 +2348,7 @@ impl Row {
             .child(
                 Card::new()
                     .attention()
+                    .when(card.base, Card::alarm)
                     .child(
                         div()
                             .px(px(16.))
@@ -2261,6 +2376,45 @@ impl Row {
                                     .child(SharedString::from(said.clone()))
                                     .test_support()
                             }))
+                            .child({
+                                let class = match card.base {
+                                    true => "Base",
+                                    false => "To judge",
+                                };
+                                div()
+                                    .id(ElementId::Name(format!("approval-class-{number}").into()))
+                                    .aria_label(class)
+                                    .mono(11.)
+                                    .text_color(if card.base { p.fail } else { p.wait })
+                                    .child(class)
+                                    .test_support()
+                            })
+                            .when(card.base, |d| {
+                                d.child(
+                                    div()
+                                        .id(ElementId::Name(
+                                            format!("approval-base-{number}").into(),
+                                        ))
+                                        .aria_label(BASE_SAYS)
+                                        .text_size(px(13.))
+                                        .semibold()
+                                        .text_color(p.fail)
+                                        .child(BASE_SAYS)
+                                        .test_support(),
+                                )
+                            })
+                            .when_some(card.judgement.clone(), |d, judgement| {
+                                d.child(
+                                    div()
+                                        .id(ElementId::Name(
+                                            format!("approval-judge-{number}").into(),
+                                        ))
+                                        .aria_label(SharedString::from(judgement.clone()))
+                                        .text_size(px(13.))
+                                        .child(SharedString::from(judgement))
+                                        .test_support(),
+                                )
+                            })
                             .when_some(card.why.clone(), |d, why| {
                                 d.child(
                                     div()
@@ -2291,31 +2445,16 @@ impl Row {
                             }),
                     )
                     .action(button("deny", "Deny", Answer::Deny, false))
-                    // The daemon never allows a sensitive place, nor a change the agent asks
-                    // for, for the tree: not offered. A line outside the catalogue is allowed
-                    // once or always.
-                    .when(card.kind == "call" && !card.sensitive, |c| {
-                        c.action(button(
-                            "allow-tree",
-                            "Allow for this tree",
-                            Answer::Tree,
-                            false,
-                        ))
-                    })
-                    // A sensitive line asks each time: the daemon never allows it always.
-                    .when(card.kind == "catalogue" && !card.sensitive, |c| {
-                        c.action(button("allow-always", "Always", Answer::Always, false))
-                    })
-                    .action(match card.kind.as_str() {
-                        "catalogue" => button("allow-once", "Once", Answer::Once, true),
-                        "action" => button("allow-once", "Confirm", Answer::Once, true),
-                        _ => button("allow-once", "Allow once", Answer::Once, true),
-                    }),
+                    .action(button("allow", "Allow", Answer::Once, true)),
             )
             .test_support()
             .into_any_element()
     }
 }
+
+/// Why a base card comes back whatever the mode, said on it.
+pub const BASE_SAYS: &str = "Flottille always asks you for this, in Ask and in Auto: it may lose \
+                             work or reach what must stay private, so no judge decides it.";
 
 /// The time a thought took, or has taken so far: it ticks only while the thought runs.
 pub struct ThinkingTimer {
@@ -2643,7 +2782,7 @@ impl SessionRail {
                 let status = agent.status.clone();
                 (
                     cx.new(|cx| StateIcon::new(status.clone(), cx)),
-                    cx.new(|cx| Pill::new(status, cx)),
+                    cx.new(|cx| Pill::new(status, cx).quiet_running()),
                 )
             });
         }
@@ -3231,6 +3370,7 @@ pub struct Reply {
     dismissed: bool,
     field: Entity<TextareaState>,
     facts: Entity<ReplyFacts>,
+    pub mode: Entity<ModeSwitch>,
     has_text: bool,
     focused: bool,
     sending: bool,
@@ -3240,6 +3380,15 @@ pub struct Reply {
     interrupting: bool,
     /// The field's text as it was sent, while it is: what is typed after it is kept.
     sent: Option<String>,
+    /// What the root does while its turn runs, for the line above the field.
+    activity: Option<Activity>,
+    /// Pictures pasted or dropped, sent with the next message.
+    attachments: Vec<Arc<gpui_kit::Image>>,
+    /// The ones the message being sent holds: they leave when it is taken, whatever was removed
+    /// or added meanwhile.
+    sent_images: Vec<Arc<gpui_kit::Image>>,
+    /// Whether the root's agent takes images; `None` until it first started.
+    images: Option<bool>,
     error: Option<SharedString>,
     renders: usize,
     _subscriptions: Vec<Subscription>,
@@ -3256,6 +3405,7 @@ impl Reply {
     ) -> Self {
         let field = cx.new(|cx| {
             let mut field = TextareaState::new(window, cx)
+                .auto_grow(1, REPLY_MAX_ROWS)
                 .submit_on_enter(true)
                 .placeholder(REPLY_PLACEHOLDER);
             let p = palette(cx);
@@ -3293,6 +3443,7 @@ impl Reply {
                 _ => {}
             },
         )];
+        let mode = cx.new(|_| ModeSwitch::new(shell.clone(), session.clone()));
         Self {
             shell,
             session,
@@ -3308,12 +3459,17 @@ impl Reply {
                 model: None,
                 context: None,
             }),
+            mode,
             has_text: false,
             focused: false,
             sending: false,
             running: false,
             interrupting: false,
             sent: None,
+            activity: None,
+            attachments: Vec::new(),
+            sent_images: Vec::new(),
+            images: None,
             error: None,
             renders: 0,
             _subscriptions: subscriptions,
@@ -3335,6 +3491,145 @@ impl Reply {
 
     pub fn is_sending(&self) -> bool {
         self.sending
+    }
+
+    /// The pictures that go with the next message.
+    pub fn attachments(&self) -> &[Arc<gpui_kit::Image>] {
+        &self.attachments
+    }
+
+    /// The line above the field while a turn runs: what the root does.
+    pub fn status(&self) -> Option<String> {
+        self.activity
+            .as_ref()
+            .filter(|_| self.running)
+            .map(Activity::line)
+    }
+
+    fn set_activity(&mut self, activity: Option<Activity>, cx: &mut Context<Self>) {
+        if self.activity != activity {
+            self.activity = activity;
+            cx.notify();
+        }
+    }
+
+    fn set_images(&mut self, images: Option<bool>) {
+        self.images = images;
+    }
+
+    /// Attaches a picture, or says in one sentence why not; the text in the field stays.
+    pub fn attach(&mut self, image: gpui_kit::Image, cx: &mut Context<Self>) {
+        use gpui_kit::ImageFormat::{Gif, Jpeg, Png, Webp};
+        let refused = if self.images == Some(false) {
+            Some(NO_IMAGES)
+        } else if !matches!(image.format, Png | Jpeg | Gif | Webp) {
+            Some(IMAGE_KINDS)
+        } else if image.bytes.len() > MAX_IMAGE_BYTES {
+            Some(IMAGE_TOO_BIG)
+        } else if self.attachments.len() >= MAX_IMAGES {
+            Some(TOO_MANY_IMAGES)
+        } else {
+            None
+        };
+        match refused {
+            Some(why) => self.error = Some(why.into()),
+            None => {
+                self.error = None;
+                self.attachments.push(Arc::new(image));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Attaches the picture a file holds (a file dropped on the composer, or picked).
+    pub fn attach_file(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        use gpui_kit::ImageFormat::{Gif, Jpeg, Png, Webp};
+        let format = match path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("png") => Png,
+            Some("jpg" | "jpeg") => Jpeg,
+            Some("gif") => Gif,
+            Some("webp") => Webp,
+            _ => {
+                self.error = Some(IMAGE_KINDS.into());
+                cx.notify();
+                return;
+            }
+        };
+        let big = std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_IMAGE_BYTES as u64);
+        match std::fs::read(path) {
+            Ok(_) if big => self.error = Some(IMAGE_TOO_BIG.into()),
+            Ok(bytes) => return self.attach(gpui_kit::Image::from_bytes(format, bytes), cx),
+            Err(_) => self.error = Some("That file could not be read.".into()),
+        }
+        cx.notify();
+    }
+
+    pub fn detach(&mut self, at: usize, cx: &mut Context<Self>) {
+        if at < self.attachments.len() {
+            self.attachments.remove(at);
+            self.error = None;
+            cx.notify();
+        }
+    }
+
+    /// Paste: a clipboard that holds a picture attaches it, whatever text comes with it (a copy in
+    /// a browser gives the picture's address or its HTML as well); else the field takes it.
+    fn pasted(&mut self, cx: &mut Context<Self>) -> bool {
+        use gpui_kit::ClipboardEntry;
+        let Some(clipboard) = cx.read_from_clipboard() else {
+            return false;
+        };
+        let has_image = clipboard
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry, ClipboardEntry::Image(_)));
+        if clipboard.text().is_some() && !has_image {
+            return false;
+        }
+        let mut taken = false;
+        for entry in clipboard.into_entries() {
+            match entry {
+                ClipboardEntry::Image(image) => {
+                    self.attach(image, cx);
+                    taken = true;
+                }
+                ClipboardEntry::ExternalPaths(paths) => {
+                    for path in paths.paths() {
+                        self.attach_file(path, cx);
+                        taken = true;
+                    }
+                }
+                ClipboardEntry::String(_) => {}
+            }
+        }
+        taken
+    }
+
+    /// The Attach button: pictures picked in the system's file chooser.
+    fn pick_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Attach".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                for path in &paths {
+                    this.attach_file(path, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub fn error(&self) -> Option<&str> {
@@ -3586,15 +3881,25 @@ impl Reply {
     pub fn send(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         let typed = self.field.read(cx).value().to_string();
         let message = typed.trim().to_owned();
-        if self.sending || message.is_empty() {
+        if self.sending || (message.is_empty() && self.attachments.is_empty()) {
             return;
         }
         self.sending = true;
         self.sent = Some(typed);
+        self.sent_images = self.attachments.clone();
         self.error = None;
+        let images = self
+            .attachments
+            .iter()
+            .map(|image| Picture {
+                mime: image.format.mime_type().to_owned(),
+                bytes: image.bytes.clone(),
+            })
+            .collect();
         let command = Command::Reply {
             session: self.session.clone(),
             message,
+            images,
         };
         self.shell
             .update(cx, |shell, _| shell.perform(command))
@@ -3615,6 +3920,9 @@ impl Reply {
         match refused {
             None => {
                 self.error = None;
+                let sent_images = std::mem::take(&mut self.sent_images);
+                self.attachments
+                    .retain(|image| !sent_images.iter().any(|sent| Arc::ptr_eq(sent, image)));
                 let now = self.field.read(cx).value().to_string();
                 // A sent text changed meanwhile is left as it is: nothing typed is lost.
                 if let Some(rest) = sent.as_deref().and_then(|sent| now.strip_prefix(sent)) {
@@ -3635,7 +3943,50 @@ impl Render for Reply {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
         let p = palette(cx);
-        let can_send = self.has_text && !self.sending;
+        let can_send = (self.has_text || !self.attachments.is_empty()) && !self.sending;
+        let status = self.status();
+        let thumbs: Vec<AnyElement> = self
+            .attachments
+            .iter()
+            .enumerate()
+            .map(|(at, image)| {
+                div()
+                    .id(ElementId::Name(format!("attachment-{at}").into()))
+                    .relative()
+                    .flex_none()
+                    .size(px(56.))
+                    .child(
+                        gpui_kit::img(image.clone())
+                            .size_full()
+                            .rounded(px(8.))
+                            .object_fit(gpui_kit::ObjectFit::Cover),
+                    )
+                    .child(
+                        div()
+                            .id(ElementId::Name(format!("attachment-remove-{at}").into()))
+                            .absolute()
+                            .top(px(-5.))
+                            .right(px(-5.))
+                            .size(px(18.))
+                            .rounded_full()
+                            .bg(p.card2)
+                            .border_1()
+                            .border_color(p.line2)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(12.))
+                            .text_color(p.mute)
+                            .cursor_pointer()
+                            .aria_label("Remove the picture")
+                            .child("×")
+                            .on_click(cx.listener(move |this, _, _, cx| this.detach(at, cx)))
+                            .test_support(),
+                    )
+                    .test_support()
+                    .into_any_element()
+            })
+            .collect();
         let slash = self.render_slash(cx);
         div()
             .id("reply")
@@ -3663,6 +4014,17 @@ impl Render for Reply {
                 }
             }))
             .children(slash.map(|slash| gpui_kit::deferred(slash).priority(1)))
+            // A picture on the clipboard is an attachment; text is left to the field.
+            .capture_action(cx.listener(|this, _: &Paste, _, cx| {
+                if this.pasted(cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .on_drop(cx.listener(|this, paths: &gpui_kit::ExternalPaths, _, cx| {
+                for path in paths.paths() {
+                    this.attach_file(path, cx);
+                }
+            }))
             // Escape interrupts the turn that runs; with none running it is left to others.
             .on_key_down(cx.listener(|this, event: &gpui_kit::KeyDownEvent, _, cx| {
                 if this.running && event.keystroke.key == "escape" {
@@ -3678,6 +4040,33 @@ impl Render for Reply {
             .shadow_lg()
             .ui_text()
             .text_color(p.text)
+            .when_some(status, |d, line| {
+                d.child(
+                    div()
+                        .id("reply-status")
+                        .aria_label(SharedString::from(line.clone()))
+                        .px(px(10.))
+                        .pb(px(6.))
+                        .pt(px(2.))
+                        .text_size(px(12.5))
+                        .text_color(p.faint)
+                        .child(SharedString::from(line))
+                        .test_support(),
+                )
+            })
+            .when(!thumbs.is_empty(), |d| {
+                d.child(
+                    div()
+                        .id("reply-attachments")
+                        .flex()
+                        .gap(px(10.))
+                        .px(px(6.))
+                        .pt(px(6.))
+                        .pb(px(10.))
+                        .children(thumbs)
+                        .test_support(),
+                )
+            })
             .child(
                 div()
                     .id("reply-field")
@@ -3710,10 +4099,13 @@ impl Render for Reply {
                     .pt(px(6.))
                     .px(px(2.))
                     .child(self.facts.clone())
+                    .child(self.mode.clone())
                     .child(
                         Button::quiet("attach", "Attach")
-                            .disabled(true)
-                            .tooltip("The daemon takes no attachments yet"),
+                            .tooltip("Attach pictures")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.pick_files(window, cx)),
+                            ),
                     )
                     .child(div().flex_1())
                     .when(self.running, |d| {
@@ -3733,6 +4125,7 @@ impl Render for Reply {
                 d.child(
                     div()
                         .id("reply-error")
+                        .aria_label(error.clone())
                         .px(px(10.))
                         .pt(px(6.))
                         .text_size(px(12.5))
@@ -3871,6 +4264,8 @@ mod tests {
             needs_user: false,
             resumable: false,
             stopping: false,
+            images: None,
+            gate_mode: Some("auto".into()),
         }
     }
 
@@ -3984,19 +4379,17 @@ mod tests {
     fn a_decided_card_folds_into_one_line() {
         let card = ApprovalCard {
             number: 4,
-            sensitive: false,
+            base: false,
+            judgement: None,
             kind: "call".into(),
             says: Vec::new(),
             asked: Some("Read .env".into()),
             why: None,
             source: None,
             asker: Some("lead".into()),
-            decision: Some("tree".into()),
+            decision: Some("once".into()),
         };
-        assert_eq!(
-            card.record().as_deref(),
-            Some("Allowed for this tree · Read .env · lead")
-        );
+        assert_eq!(card.record().as_deref(), Some("Allowed · Read .env · lead"));
         let pending = ApprovalCard {
             decision: None,
             ..card

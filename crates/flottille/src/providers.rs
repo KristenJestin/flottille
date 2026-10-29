@@ -17,7 +17,7 @@ use std::time::{Duration, Instant, SystemTime};
 use flottille_core::agent::{Agent, Choices};
 use flottille_core::paths::Paths;
 use flottille_core::project::Project;
-use flottille_core::provider::{self, Settings};
+use flottille_core::provider::{self, Judge, Settings};
 use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
@@ -110,18 +110,22 @@ impl Provider {
     /// The exact tool names an agent gets, as the provider names them: what it can do decides
     /// (`docs/design.md` §4.3, `docs/reference/mcp.md` §4 rule 9). A root asks the user, a child
     /// its parent; an agent at the depth limit cannot have children, so it has no `agent_*` tool
-    /// and nobody's request to answer. `integrated`: the project declares a forge or a tracker,
-    /// and then every agent has the same three tools for them, in `main` as in a workspace;
-    /// `workspace_remove` needs neither, since a procedure closes a workspace in any project.
-    /// What each may do is the gate's business, not the list's.
-    pub fn tools(&self, root: bool, at_depth_limit: bool, integrated: bool) -> Vec<String> {
+    /// and nobody's request to answer. The same tools in `main` as in a workspace: `main` names
+    /// the workspace they act on. A tool that can only refuse is not listed (`docs/reference/mcp.md`
+    /// §4 rule 9): `forge_read` and `forge_write` need a repository with a declared forge,
+    /// `ticket_read` a declared tracker; `workspace_remove` acts in any project. What each may do
+    /// is the gate's business, not the list's.
+    pub fn tools(&self, root: bool, at_depth_limit: bool, forge: bool, tracker: bool) -> Vec<String> {
         let mut names: Vec<&str> = FILE_AND_COMMAND_TOOLS.to_vec();
-        if integrated {
+        if forge {
             names.push("forge_read");
         }
         names.push("reference_read");
-        if integrated {
-            names.extend(["ticket_read", "forge_write"]);
+        if tracker {
+            names.push("ticket_read");
+        }
+        if forge {
+            names.push("forge_write");
         }
         names.push("workspace_remove");
         if !at_depth_limit {
@@ -812,6 +816,41 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
             };
             Ok(switched(provider.name, enabled, announced))
         }
+        "provider.set_judge" => {
+            // The user's choice only: no tool of an agent reaches this method.
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Chosen {
+                provider: Option<String>,
+                #[serde(default)]
+                model: Option<String>,
+            }
+            let Chosen { provider, model } = serde_json::from_value(params)?;
+            let judge = match provider {
+                None => None,
+                Some(name) => {
+                    let provider = get(&name).ok_or_else(|| {
+                        Failure::new(
+                            "not-found",
+                            format!(
+                                "there is no provider {name}: the providers are {}",
+                                provider::NAMES.join(", ")
+                            ),
+                        )
+                    })?;
+                    Some(Judge {
+                        provider: provider.name.to_owned(),
+                        model: model.filter(|m| !m.trim().is_empty()),
+                    })
+                }
+            };
+            if set_judge(&daemon.paths, judge.as_ref())? {
+                daemon
+                    .emit("provider.judge_changed", json!({"judge": judge}))
+                    .map_err(|error| Failure::new("unavailable", error.to_string()))?;
+            }
+            Ok(json!({"judge": judge}))
+        }
         method => Err(Failure::new(
             "unknown-method",
             format!("unknown method `{method}`"),
@@ -868,6 +907,45 @@ fn set_enabled(paths: &Paths, name: &str, enabled: bool) -> Result<bool, Failure
         None => {
             table.insert("enabled", toml_edit::value(enabled));
         }
+    }
+    let text = document.to_string();
+    Settings::parse(&text).map_err(|error| Failure::new("invalid-config", error))?;
+    std::fs::create_dir_all(&paths.config).map_err(unavailable)?;
+    write_in_place(&file, &text).map_err(unavailable)?;
+    Ok(true)
+}
+
+/// Sets `[judge]` in `providers.toml`, or removes it when `judge` is none, the rest of the file
+/// kept as the user wrote it. Whether it changed.
+fn set_judge(paths: &Paths, judge: Option<&Judge>) -> Result<bool, Failure> {
+    let _writing = WRITING.lock().unwrap();
+    let file = provider::file(paths);
+    let unavailable =
+        |error: std::io::Error| Failure::new("unavailable", format!("providers.toml: {error}"));
+    let text = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(unavailable(error)),
+    };
+    let before = Settings::parse(&text).map_err(|error| Failure::new("invalid-config", error))?;
+    if before.judge.as_ref() == judge {
+        return Ok(false);
+    }
+    let mut document: toml_edit::DocumentMut =
+        text.parse().map_err(|error: toml_edit::TomlError| {
+            Failure::new(
+                "invalid-config",
+                format!("providers.toml: {}", error.message()),
+            )
+        })?;
+    document.remove("judge");
+    if let Some(judge) = judge {
+        let mut table = toml_edit::Table::new();
+        table.insert("provider", toml_edit::value(judge.provider.as_str()));
+        if let Some(model) = &judge.model {
+            table.insert("model", toml_edit::value(model.as_str()));
+        }
+        document.insert("judge", toml_edit::Item::Table(table));
     }
     let text = document.to_string();
     Settings::parse(&text).map_err(|error| Failure::new("invalid-config", error))?;
@@ -969,7 +1047,7 @@ fn list(daemon: &Daemon, project: Option<&Project>) -> Result<Value, Failure> {
             entry
         })
         .collect();
-    let mut answer = json!({"providers": providers});
+    let mut answer = json!({"providers": providers, "judge": settings.judge});
     if let Some(project) = project {
         let provider = project_provider(project, &settings);
         answer["project"] = json!({
@@ -984,6 +1062,7 @@ fn list(daemon: &Daemon, project: Option<&Project>) -> Result<Value, Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     fn short(tools: Vec<String>) -> Vec<String> {
         tools
             .into_iter()
@@ -999,7 +1078,7 @@ mod tests {
 
     #[test]
     fn a_root_agent_gets_ask_user_the_agent_tools_and_approval_answer() {
-        let tools = short(claude::PROVIDER.tools(true, false, false));
+        let tools = short(claude::PROVIDER.tools(true, false, false, false));
         assert_eq!(
             tools,
             [
@@ -1028,7 +1107,7 @@ mod tests {
 
     #[test]
     fn the_tools_follow_what_the_agent_can_do() {
-        let leaf = short(claude::PROVIDER.tools(false, true, false));
+        let leaf = short(claude::PROVIDER.tools(false, true, false, false));
         assert_eq!(leaf.len(), 12);
         assert!(leaf.contains(&"ask_parent".to_owned()));
         assert!(
@@ -1037,7 +1116,7 @@ mod tests {
                 .any(|t| t.starts_with("agent_") || t == "ask_user")
         );
         assert!(!leaf.contains(&"approval_answer".to_owned()));
-        let lead_child = short(claude::PROVIDER.tools(false, false, false));
+        let lead_child = short(claude::PROVIDER.tools(false, false, false, false));
         assert!(lead_child.contains(&"ask_parent".to_owned()));
         assert!(lead_child.contains(&"approval_answer".to_owned()));
         assert!(!lead_child.contains(&"ask_user".to_owned()));
@@ -1052,32 +1131,51 @@ mod tests {
     fn a_root_agent_in_main_with_a_forge_lists_the_forge_tools() {
         // The same tools in `main` and in a workspace: the place does not decide, the project's
         // declarations do, and what is allowed stays the gate's business.
-        let bare = short(claude::PROVIDER.tools(true, false, false));
+        let bare = short(claude::PROVIDER.tools(true, false, false, false));
         for tool in ["forge_read", "ticket_read", "forge_write"] {
             assert!(!bare.contains(&tool.to_owned()), "{tool}");
         }
-        // Removing a workspace needs no forge: a procedure closes one in any project.
-        assert!(bare.contains(&"workspace_remove".to_owned()));
-        let integrated = short(claude::PROVIDER.tools(true, false, true));
-        assert_eq!(integrated.len(), 22);
-        assert_eq!(integrated[8], "forge_read", "after the command tools");
-        assert_eq!(integrated[9], "reference_read", "after forge_read");
-        assert_eq!(integrated[10], "ticket_read", "after reference_read");
-        assert_eq!(integrated[11], "forge_write", "after ticket_read");
-        assert_eq!(integrated[12], "workspace_remove", "after forge_write");
-        let leaf = short(claude::PROVIDER.tools(false, true, true));
-        assert_eq!(leaf.len(), 15);
-        assert_eq!(short(claude::PROVIDER.tools(false, true, false)).len(), 12);
+        let forge = short(claude::PROVIDER.tools(true, false, true, false));
+        assert_eq!(forge[8], "forge_read", "after the command tools");
+        assert_eq!(forge[9], "reference_read", "after forge_read");
+        assert_eq!(forge[10], "forge_write", "after reference_read");
+        assert!(!forge.contains(&"ticket_read".to_owned()));
+        let both = short(claude::PROVIDER.tools(true, false, true, true));
+        assert_eq!(both.len(), 22);
+        assert_eq!(both[10], "ticket_read", "after reference_read");
+        assert_eq!(both[11], "forge_write", "after ticket_read");
+        assert_eq!(both[12], "workspace_remove", "after forge_write");
+        assert_eq!(short(claude::PROVIDER.tools(false, true, true, true)).len(), 15);
+    }
+
+    #[test]
+    fn ticket_read_is_listed_only_when_a_tracker_is_declared() {
+        // Without a tracker it could only refuse (`docs/reference/mcp.md` §4 rule 9).
+        let tracker = short(claude::PROVIDER.tools(true, false, false, true));
+        assert_eq!(tracker[9], "ticket_read", "after reference_read");
+        assert!(!tracker.contains(&"forge_read".to_owned()));
+        assert!(!tracker.contains(&"forge_write".to_owned()));
+        let forge = short(claude::PROVIDER.tools(true, false, true, false));
+        assert!(!forge.contains(&"ticket_read".to_owned()));
+    }
+
+    #[test]
+    fn workspace_remove_is_listed_in_any_project() {
+        // It acts in `main` too, naming the workspace: a procedure closes one in any project.
+        for (forge, tracker) in [(false, false), (true, false), (false, true), (true, true)] {
+            let listed = short(claude::PROVIDER.tools(true, false, forge, tracker));
+            assert!(listed.contains(&"workspace_remove".to_owned()));
+        }
     }
 
     #[test]
     fn each_provider_names_flottille_s_tools_its_own_way() {
         assert_eq!(
-            claude::PROVIDER.tools(true, false, false)[0],
+            claude::PROVIDER.tools(true, false, false, false)[0],
             "mcp__flottille__fs_read"
         );
         assert_eq!(
-            opencode::PROVIDER.tools(true, false, false)[0],
+            opencode::PROVIDER.tools(true, false, false, false)[0],
             "flottille_fs_read"
         );
         assert_eq!(

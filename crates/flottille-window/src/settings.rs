@@ -1,14 +1,15 @@
 //! The settings page: every provider Flottille knows, enabled or not with a switch, how it signs
 //! in, and whether its agents can run here, as the daemon says it (`provider.list`). The window
 //! never writes `providers.toml` itself: a switch asks the daemon (`provider.enable`,
-//! `provider.disable`), and the page follows what the daemon lists next.
+//! `provider.disable`), and the page follows what the daemon lists next. The Auto judge is
+//! chosen here too (`provider.set_judge`).
 
 use std::collections::HashMap;
 
-use flottille_ui::{Card, Switch, Type, enter, palette};
+use flottille_ui::{Align, Card, Dropdown, MenuItem, Switch, Type, enter, palette};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, Render,
+    App, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, Render,
     SharedString, StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, Window, div,
     px,
 };
@@ -28,7 +29,26 @@ pub struct SettingsPage {
     narrow: bool,
     /// The user's rules for every project, edited on this page.
     rules: Entity<RulesEditor>,
+    /// The judge's picker whose list is open.
+    judge_menu: Option<JudgeMenu>,
+    /// A judge chosen, until the daemon lists it.
+    judge_pending: bool,
+    /// The daemon's refusal of the last judge chosen.
+    judge_refused: Option<String>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JudgeMenu {
+    Provider,
+    Model,
+}
+
+/// A judge as the daemon lists it: its provider and its model, the provider's default when none.
+pub type Judge = (String, Option<String>);
+
+/// What the page says of the judge's cost, beside its pickers.
+pub const JUDGE_QUOTA: &str =
+    "Each judgement is a turn of the judge's model: it uses your quota on that provider.";
 
 impl SettingsPage {
     pub fn new(shell: WeakEntity<Shell>, rules: Entity<RulesEditor>) -> Self {
@@ -39,6 +59,9 @@ impl SettingsPage {
             pending: HashMap::new(),
             refused: HashMap::new(),
             narrow: false,
+            judge_menu: None,
+            judge_pending: false,
+            judge_refused: None,
         }
     }
 
@@ -129,6 +152,196 @@ impl SettingsPage {
             .update(cx, |shell, _| shell.perform(command))
             .ok();
         cx.notify();
+    }
+
+    /// The judge as the page shows it: `None`, or a provider's title and the model.
+    pub fn judge_shown(&self) -> (String, Option<String>) {
+        match &self.providers.judge {
+            None => ("None".into(), None),
+            Some((name, model)) => {
+                let title = self
+                    .providers
+                    .get(name)
+                    .map_or_else(|| name.clone(), |p| p.title.clone());
+                (
+                    title,
+                    Some(model.clone().unwrap_or_else(|| "default model".into())),
+                )
+            }
+        }
+    }
+
+    /// What the judge's picker offers: `(id, label, chosen, the judge it chooses)`.
+    pub fn judge_entries(&self, menu: JudgeMenu) -> Vec<(String, String, bool, Option<Judge>)> {
+        let judge = self.providers.judge.as_ref();
+        match menu {
+            JudgeMenu::Provider => {
+                let mut entries = vec![(
+                    "judge-choice-none".to_owned(),
+                    "None".to_owned(),
+                    judge.is_none(),
+                    None,
+                )];
+                for provider in self.providers.offered() {
+                    entries.push((
+                        format!("judge-choice-{}", provider.name),
+                        provider.title.clone(),
+                        judge.is_some_and(|(name, _)| name == &provider.name),
+                        Some((provider.name.clone(), None)),
+                    ));
+                }
+                entries
+            }
+            JudgeMenu::Model => {
+                let Some((name, model)) = judge else {
+                    return Vec::new();
+                };
+                let models = self
+                    .providers
+                    .get(name)
+                    .and_then(|p| p.models.clone())
+                    .unwrap_or_default();
+                let mut entries = vec![(
+                    "judge-model-default".to_owned(),
+                    "default model".to_owned(),
+                    model.is_none(),
+                    Some((name.clone(), None)),
+                )];
+                for listed in models
+                    .into_iter()
+                    .filter(|m| m.id != crate::composer::DEFAULT)
+                {
+                    entries.push((
+                        format!("judge-model-{}", listed.id),
+                        listed.id.clone(),
+                        model.as_deref() == Some(listed.id.as_str()),
+                        Some((name.clone(), Some(listed.id))),
+                    ));
+                }
+                entries
+            }
+        }
+    }
+
+    /// The judge's picker whose list is open.
+    pub fn judge_menu(&self) -> Option<JudgeMenu> {
+        self.judge_menu
+    }
+
+    pub fn toggle_judge_menu(&mut self, menu: JudgeMenu, cx: &mut Context<Self>) {
+        self.judge_menu = if self.judge_menu == Some(menu) {
+            None
+        } else {
+            Some(menu)
+        };
+        cx.notify();
+    }
+
+    /// Asks the daemon for this judge, or for none.
+    pub fn choose_judge(&mut self, judge: Option<Judge>, cx: &mut Context<Self>) {
+        self.judge_menu = None;
+        if self.judge_pending || judge == self.providers.judge {
+            cx.notify();
+            return;
+        }
+        self.judge_pending = true;
+        self.judge_refused = None;
+        let (provider, model) = match judge {
+            Some((provider, model)) => (Some(provider), model),
+            None => (None, None),
+        };
+        self.shell
+            .update(cx, |shell, _| {
+                shell.perform(Command::SetJudge { provider, model })
+            })
+            .ok();
+        cx.notify();
+    }
+
+    /// The daemon's answer to a judge chosen: its refusal shows under the pickers.
+    pub fn judge_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
+        self.judge_pending = false;
+        self.judge_refused = refused;
+        cx.notify();
+    }
+
+    fn judge_handler(
+        cx: &Context<Self>,
+        f: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> impl Fn(&mut Window, &mut App) + 'static {
+        let this = cx.entity().downgrade();
+        move |_, cx| {
+            this.update(cx, |this, cx| f(this, cx)).ok();
+        }
+    }
+
+    fn judge_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let (provider, model) = self.judge_shown();
+        let mut pickers = div().flex().items_center().gap(px(4.));
+        let menus = [
+            Some((JudgeMenu::Provider, "judge-provider", provider)),
+            model.map(|m| (JudgeMenu::Model, "judge-model", m)),
+        ];
+        for (menu, id, label) in menus.into_iter().flatten() {
+            let items: Vec<MenuItem> = self
+                .judge_entries(menu)
+                .into_iter()
+                .map(|(id, label, chosen, judge)| {
+                    MenuItem::new(SharedString::from(id), label)
+                        .selected(chosen)
+                        .on_click(Self::judge_handler(cx, move |this, cx| {
+                            this.choose_judge(judge.clone(), cx)
+                        }))
+                })
+                .collect();
+            let picker = Dropdown::new(id, label)
+                .align(Align::Start)
+                .width(px(260.))
+                .open(self.judge_menu == Some(menu))
+                .on_toggle(Self::judge_handler(cx, move |this, cx| {
+                    this.toggle_judge_menu(menu, cx)
+                }))
+                .items(items);
+            pickers = pickers.child(match menu {
+                JudgeMenu::Provider => picker.strong(),
+                JudgeMenu::Model => picker.mono(),
+            });
+        }
+        let line =
+            |text: &'static str, color| div().text_size(px(12.5)).text_color(color).child(text);
+        let mut body = div()
+            .id("judge")
+            .px(px(14.))
+            .py(px(12.))
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(pickers)
+            .child(line(
+                "In Auto, it decides the calls that are neither harmless nor base, and asks you \
+                 when it is not sure. Without a judge, Auto asks you like Ask.",
+                p.mute,
+            ))
+            .child(
+                div()
+                    .id("judge-quota")
+                    .aria_label(JUDGE_QUOTA)
+                    .text_size(px(12.5))
+                    .text_color(p.faint)
+                    .child(JUDGE_QUOTA)
+                    .test_support(),
+            )
+            .test_support();
+        if let Some(why) = &self.judge_refused {
+            body = body.child(
+                div()
+                    .text_size(px(12.5))
+                    .text_color(p.fail)
+                    .child(SharedString::from(why.clone())),
+            );
+        }
+        Card::new().title(div().child("Auto judge")).child(body)
     }
 
     fn card(&self, provider: &Provider, cx: &mut Context<Self>) -> impl IntoElement {
@@ -275,6 +488,11 @@ impl Render for SettingsPage {
                  their next start, saying why. Flottille never shows a key: it says whether one \
                  is set.",
             );
+        let judge = enter(
+            key("judge"),
+            3,
+            div().mb(px(24.)).child(self.judge_card(cx)),
+        );
         let cards: Vec<_> = self
             .providers
             .list
@@ -284,7 +502,7 @@ impl Render for SettingsPage {
             .map(|(i, provider)| {
                 enter(
                     key(&provider.name),
-                    3 + i,
+                    4 + i,
                     div().mb(px(12.)).child(self.card(provider, cx)),
                 )
             })
@@ -305,6 +523,7 @@ impl Render for SettingsPage {
                     .flex()
                     .flex_col()
                     .child(enter(key("header"), 0, header))
+                    .when(self.providers.known, |d| d.child(judge))
                     .child(enter(key("label"), 1, label))
                     .child(enter(key("note"), 2, note))
                     .when_some(self.providers.error.clone(), |d, error| {

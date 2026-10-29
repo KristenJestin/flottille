@@ -7,9 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 
-use crate::agent::{Agent, AgentState, Choices};
-use crate::approval::{Decision, Delivery, Forward, Kind, Request, RequestState};
-use crate::procedure::Grants;
+use crate::agent::{Agent, AgentState, Choices, GateMode};
+use crate::approval::{Decision, Delivery, Forward, Judgement, Kind, Request, RequestState};
 use crate::protocol::Event;
 use crate::run::{Run, RunState};
 use crate::workspace::{Action, Failure, Step, StepState, Workspace};
@@ -274,10 +273,28 @@ const MIGRATIONS: &[&str] = &[
     -- one: an ended root whose agent can is resumed on its own session (`agent.resume`).
     ALTER TABLE agents ADD COLUMN reopens INTEGER NOT NULL DEFAULT 0;
 ",
+    "
+    -- Whether an agent's agent takes images in a prompt, as it said when it last started (`NULL`
+    -- before it did), and the images a delivery carries: the names of files in the agent's folder
+    -- of the data folder.
+    ALTER TABLE agents ADD COLUMN images INTEGER;
+    ALTER TABLE deliveries ADD COLUMN images TEXT NOT NULL DEFAULT '[]';
+",
+    "
+    -- Ask and Auto (`docs/design.md` §7): the gate classes each call instead of handing out
+    -- rights. Each session has its mode, Auto unless the user chose Ask; a request keeps the
+    -- judge's verdict; its `sensitive` is now whether its class is base. The grants go: those the
+    -- user gave a tree, and those of procedure runs, which now run as plain instructions.
+    ALTER TABLE agents ADD COLUMN gate_mode TEXT NOT NULL DEFAULT 'auto';
+    ALTER TABLE approval_requests ADD COLUMN judgement TEXT;
+    DROP TABLE approval_grants;
+    ALTER TABLE procedure_runs DROP COLUMN grants;
+    ALTER TABLE procedure_runs DROP COLUMN children;
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
-    identity, held_by, forwards, state, decision, created_at, decided_at, kind, says";
+    identity, held_by, forwards, state, decision, created_at, decided_at, kind, says, judgement";
 
 const RUN_COLUMNS: &str =
     "id, agent, name, line, folder, state, exit_code, signal, started_at, ended_at, output";
@@ -285,9 +302,9 @@ const RUN_COLUMNS: &str =
 const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, state, state_reason, \
     created_at, updated_at, active_at, ended_at, chosen_model, chosen_effort, chosen_mode, \
     taken_model, taken_effort, taken_mode, native_id, agent_version, instructions, tools, parent, \
-    depth, epoch, title, brief, reported_at, quiet_turns, waiting_on_answer, reopens";
+    depth, epoch, title, brief, reported_at, quiet_turns, waiting_on_answer, reopens, images, gate_mode";
 
-const DELIVERY_COLUMNS: &str = "id, agent, kind, body, urgency, state, created_at, sent_at";
+const DELIVERY_COLUMNS: &str = "id, agent, kind, body, urgency, state, created_at, sent_at, images";
 
 /// What changes on an agent; what is left `None` stays as it is.
 #[derive(Clone, Debug, Default)]
@@ -298,6 +315,9 @@ pub struct AgentChange {
     pub native_id: Option<String>,
     pub agent_version: Option<String>,
     pub reopens: Option<bool>,
+    pub images: Option<bool>,
+    /// Only the user changes it (`agent.mode`).
+    pub gate_mode: Option<GateMode>,
     pub taken: Option<Choices>,
     /// `Some(None)` forgets it.
     pub reported_at: Option<Option<u64>>,
@@ -313,10 +333,6 @@ pub struct ProcedureRun {
     pub project: String,
     pub workspace: String,
     pub procedure: String,
-    /// As the user confirmed them: editing the procedure later changes no run.
-    pub grants: Grants,
-    /// Whether the root's children get the grants too.
-    pub children: bool,
     pub started_at: u64,
     pub ended_at: Option<u64>,
 }
@@ -608,7 +624,7 @@ impl Store {
             &format!(
                 "INSERT INTO agents ({AGENT_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, \
                  ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, \
-                 ?25, ?26, ?27, ?28, ?29, ?30, ?31)"
+                 ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33)"
             ),
             params![
                 agent.id,
@@ -642,6 +658,8 @@ impl Store {
                 agent.quiet_turns,
                 agent.waiting_on_answer,
                 agent.reopens,
+                agent.images,
+                agent.gate_mode.as_str(),
             ],
         )?;
         let event = append_agent_event(&transaction, &agent.id, event.0, event.1)?;
@@ -709,6 +727,18 @@ impl Store {
             transaction.execute(
                 "UPDATE agents SET reopens = ?2 WHERE id = ?1",
                 params![id, reopens],
+            )?;
+        }
+        if let Some(images) = change.images {
+            transaction.execute(
+                "UPDATE agents SET images = ?2 WHERE id = ?1",
+                params![id, images],
+            )?;
+        }
+        if let Some(mode) = change.gate_mode {
+            transaction.execute(
+                "UPDATE agents SET gate_mode = ?2 WHERE id = ?1",
+                params![id, mode.as_str()],
             )?;
         }
         if let Some(reported_at) = change.reported_at {
@@ -983,8 +1013,8 @@ impl Store {
         let created_at = now_ms();
         let number: u64 = transaction.query_row(
             "INSERT INTO approval_requests (agent, call_key, tool, arguments, shown, reasons, \
-             sensitive, identity, held_by, forwards, state, created_at, kind, says) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending', ?11, ?12, ?13) \
+             sensitive, identity, held_by, forwards, state, created_at, kind, says, judgement) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', ?8, ?9, 'pending', ?10, ?11, ?12, ?13) \
              RETURNING number",
             params![
                 asked.agent,
@@ -993,13 +1023,17 @@ impl Store {
                 serde_json::to_string(&asked.arguments)?,
                 serde_json::to_string(&asked.shown)?,
                 serde_json::to_string(&asked.reasons)?,
-                asked.sensitive,
-                asked.identity,
+                asked.base,
                 asked.held_by,
                 serde_json::to_string(&asked.forwards)?,
                 created_at,
                 asked.kind.as_str(),
                 serde_json::to_string(&asked.says)?,
+                asked
+                    .judgement
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
             ],
             |row| row.get(0),
         )?;
@@ -1126,20 +1160,19 @@ impl Store {
     }
 
     /// The decision on a pending request `by` holds (`approval::USER`, or an agent, which only
-    /// denies), with its `approval.decided` event and, for `Decision::Tree`, the grant of its
-    /// identity to `tree`; `None` when the request is not pending or not held by `by`.
+    /// denies), with its `approval.decided` event; `None` when the request is not pending or not
+    /// held by `by`.
     pub fn decide(
         &mut self,
         number: u64,
         decision: Decision,
-        tree: &str,
         by: &str,
     ) -> Result<Option<(Request, Event)>> {
         let transaction = self.connection.transaction()?;
         let now = now_ms();
         let state = match decision {
             Decision::Deny => RequestState::Denied,
-            Decision::Once | Decision::Tree | Decision::Always => RequestState::Allowed,
+            Decision::Once => RequestState::Allowed,
         };
         let changed = transaction.execute(
             "UPDATE approval_requests SET state = ?2, decision = ?3, decided_at = ?4 \
@@ -1149,18 +1182,11 @@ impl Store {
         if changed == 0 {
             return Ok(None);
         }
-        let (agent, identity): (String, String) = transaction.query_row(
-            "SELECT agent, identity FROM approval_requests WHERE number = ?1",
+        let agent: String = transaction.query_row(
+            "SELECT agent FROM approval_requests WHERE number = ?1",
             params![number],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| row.get(0),
         )?;
-        if decision == Decision::Tree {
-            transaction.execute(
-                "INSERT OR REPLACE INTO approval_grants (tree, identity, request, created_at) \
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![tree, identity, number, now],
-            )?;
-        }
         let event = append_agent_event(
             &transaction,
             &agent,
@@ -1202,15 +1228,6 @@ impl Store {
         transaction.commit()?;
         events.sort_by_key(|e| e.data["number"].as_u64());
         Ok(events)
-    }
-
-    /// Whether the user allowed this exact call for the tree.
-    pub fn tree_granted(&self, tree: &str, identity: &str) -> Result<bool> {
-        let mut statement = self.connection.prepare_cached(
-            "SELECT count(*) FROM approval_grants WHERE tree = ?1 AND identity = ?2",
-        )?;
-        let count: u64 = statement.query_row(params![tree, identity], |row| row.get(0))?;
-        Ok(count > 0)
     }
 
     /// Stores the answer of a decided request as the `approval` delivery of the agent that asked,
@@ -1266,8 +1283,8 @@ impl Store {
     pub fn deliver(&mut self, delivery: &Delivery) -> Result<Option<Event>> {
         let transaction = self.connection.transaction()?;
         let stored = transaction.execute(
-            "INSERT OR IGNORE INTO deliveries (id, agent, kind, body, urgency, state, created_at) \
-             SELECT ?1, ?2, ?3, ?4, ?5, 'queued', ?6 WHERE EXISTS (SELECT 1 FROM agents \
+            "INSERT OR IGNORE INTO deliveries (id, agent, kind, body, urgency, state, created_at, \
+             images) SELECT ?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7 WHERE EXISTS (SELECT 1 FROM agents \
              WHERE id = ?2 AND state NOT IN ('ended', 'failed'))",
             params![
                 delivery.id,
@@ -1275,7 +1292,8 @@ impl Store {
                 delivery.kind,
                 delivery.body,
                 delivery.urgency,
-                now_ms()
+                now_ms(),
+                serde_json::to_string(&delivery.images)?
             ],
         )?;
         if stored == 0 {
@@ -1495,19 +1513,17 @@ impl Store {
         Ok(())
     }
 
-    /// Starts holding a run's grants for its root agent, with its `procedure.started` event.
+    /// Records a run for its root agent, with its `procedure.started` event.
     pub fn start_procedure_run(&mut self, run: &ProcedureRun) -> Result<Event> {
         let transaction = self.connection.transaction()?;
         transaction.execute(
-            "INSERT INTO procedure_runs (agent, project, workspace, procedure, grants, children, \
-             started_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO procedure_runs (agent, project, workspace, procedure, started_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 run.agent,
                 run.project,
                 run.workspace,
                 run.procedure,
-                serde_json::to_string(&run.grants)?,
-                run.children,
                 run.started_at
             ],
         )?;
@@ -1515,7 +1531,7 @@ impl Store {
             &transaction,
             "procedure.started",
             json!({"agent": run.agent, "project": run.project, "workspace": run.workspace,
-                "procedure": run.procedure, "grants": run.grants, "children": run.children}),
+                "procedure": run.procedure}),
         )?;
         transaction.commit()?;
         Ok(event)
@@ -1523,38 +1539,28 @@ impl Store {
 
     /// The run whose root is that agent, ended or not.
     pub fn procedure_run(&self, agent: &str) -> Result<Option<ProcedureRun>> {
-        let row: Option<(ProcedureRun, String)> = self
+        Ok(self
             .connection
             .query_row(
-                "SELECT agent, project, workspace, procedure, grants, children, started_at, \
-                 ended_at FROM procedure_runs WHERE agent = ?1",
+                "SELECT agent, project, workspace, procedure, started_at, ended_at \
+                 FROM procedure_runs WHERE agent = ?1",
                 params![agent],
                 |row| {
-                    Ok((
-                        ProcedureRun {
-                            agent: row.get(0)?,
-                            project: row.get(1)?,
-                            workspace: row.get(2)?,
-                            procedure: row.get(3)?,
-                            grants: Grants::new(),
-                            children: row.get(5)?,
-                            started_at: row.get(6)?,
-                            ended_at: row.get(7)?,
-                        },
-                        row.get(4)?,
-                    ))
+                    Ok(ProcedureRun {
+                        agent: row.get(0)?,
+                        project: row.get(1)?,
+                        workspace: row.get(2)?,
+                        procedure: row.get(3)?,
+                        started_at: row.get(4)?,
+                        ended_at: row.get(5)?,
+                    })
                 },
             )
-            .optional()?;
-        row.map(|(mut run, grants)| {
-            run.grants = serde_json::from_str(&grants)?;
-            Ok(run)
-        })
-        .transpose()
+            .optional()?)
     }
 
-    /// Ends the run of that root agent, with its `procedure.ended` event: its grants are no
-    /// longer given. `None` when it has no run, or its run ended already.
+    /// Ends the run of that root agent, with its `procedure.ended` event. `None` when it has no
+    /// run, or its run ended already.
     pub fn end_procedure_run(&mut self, agent: &str, reason: &str) -> Result<Option<Event>> {
         let transaction = self.connection.transaction()?;
         let changed = transaction.execute(
@@ -1751,7 +1757,14 @@ fn run_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Run>> {
 }
 
 /// A stored request's JSON columns: arguments, shown, reasons, forwards and says.
-type RequestParts = (Value, Value, Vec<String>, Vec<Forward>, Vec<String>);
+type RequestParts = (
+    Value,
+    Value,
+    Vec<String>,
+    Vec<Forward>,
+    Vec<String>,
+    Option<Judgement>,
+);
 
 fn request_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Request>> {
     let json = |i| -> rusqlite::Result<Result<Value>> {
@@ -1776,6 +1789,7 @@ fn request_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Request>> {
             "the store holds a request of an unknown kind {kind}"
         ))));
     };
+    let judgement: Option<String> = row.get(17)?;
     let parsed = (|| -> Result<RequestParts> {
         Ok((
             json(4)??,
@@ -1783,9 +1797,10 @@ fn request_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Request>> {
             serde_json::from_value(json(6)??)?,
             serde_json::from_value(json(10)??)?,
             serde_json::from_value(json(16)??)?,
+            judgement.as_deref().map(serde_json::from_str).transpose()?,
         ))
     })();
-    let (arguments, shown, reasons, forwards, says) = match parsed {
+    let (arguments, shown, reasons, forwards, says, judgement) = match parsed {
         Ok(parsed) => parsed,
         Err(error) => return Ok(Err(error)),
     };
@@ -1797,10 +1812,10 @@ fn request_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Request>> {
         arguments,
         shown,
         reasons,
-        sensitive: row.get(7)?,
+        base: row.get(7)?,
         kind,
         says,
-        identity: row.get(8)?,
+        judgement,
         held_by: row.get(9)?,
         forwards,
         state,
@@ -1820,6 +1835,7 @@ fn delivery_row(row: &rusqlite::Row) -> rusqlite::Result<Delivery> {
         state: row.get(5)?,
         created_at: row.get(6)?,
         sent_at: row.get(7)?,
+        images: serde_json::from_str(&row.get::<_, String>(8)?).unwrap_or_default(),
     })
 }
 
@@ -1873,6 +1889,9 @@ fn agent_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Agent>> {
         quiet_turns: row.get(28)?,
         waiting_on_answer: row.get(29)?,
         reopens: row.get(30)?,
+        images: row.get(31)?,
+        // A mode the store does not know is the safer one.
+        gate_mode: GateMode::parse(&row.get::<_, String>(32)?).unwrap_or(GateMode::Ask),
     }))
 }
 
@@ -2178,6 +2197,77 @@ mod tests {
     }
 
     #[test]
+    fn the_migration_removes_grants_and_families_and_starts_every_session_in_auto() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let old = Connection::open(&path).unwrap();
+        let previous = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("ADD COLUMN gate_mode"))
+            .unwrap();
+        for migration in &MIGRATIONS[..previous] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.pragma_update(None, "user_version", previous).unwrap();
+        drop(old);
+        let agent = an_agent();
+        // The old schema, with an agent, a grant for its tree and a run with grants.
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch(&format!(
+            "INSERT INTO agents (id, provider, role, project, folder, state, created_at, \
+             updated_at, instructions, tools) VALUES ('{}', 'claude', 'lead', 'app', '/w', \
+             'idle', 1, 1, 'i', '[]'); \
+             INSERT INTO approval_requests (number, agent, tool, arguments, shown, reasons, \
+             sensitive, identity, held_by, forwards, state, created_at, decision, kind) VALUES \
+             (1, '{0}', 'commands_run', '{{}}', '{{}}', '[]', 0, 'x', 'user', '[]', 'allowed', 1, \
+             'tree', 'catalogue'); \
+             INSERT INTO approval_grants (tree, identity, request, created_at) VALUES \
+             ('{0}', 'x', 1, 1); \
+             INSERT INTO procedure_runs (agent, project, workspace, procedure, grants, children, \
+             started_at) VALUES ('{0}', 'app', 'login', 'ship', '{{\"push\":\"allow\"}}', 1, 1);",
+            agent.id
+        ))
+        .unwrap();
+        drop(old);
+
+        let store = Store::open(&path).unwrap();
+
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len());
+        let tables: u64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'approval_grants'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 0);
+        let columns: u64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('procedure_runs') \
+                 WHERE name IN ('grants', 'children')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(columns, 0);
+        assert_eq!(
+            store.procedure_run(&agent.id).unwrap().unwrap().procedure,
+            "ship"
+        );
+        assert_eq!(
+            store.agent(&agent.id).unwrap().unwrap().gate_mode,
+            crate::agent::GateMode::Auto
+        );
+        let request = store.request(1).unwrap().unwrap();
+        assert_eq!(
+            (request.kind, request.decision),
+            (approval::Kind::Call, Some(Decision::Once))
+        );
+    }
+
+    #[test]
     fn a_store_before_the_tickets_keeps_its_workspaces_with_no_ticket() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("flottille.db");
@@ -2382,6 +2472,8 @@ mod tests {
             quiet_turns: 0,
             waiting_on_answer: false,
             reopens: false,
+            images: None,
+            gate_mode: GateMode::Auto,
         }
     }
 
@@ -2559,8 +2651,7 @@ mod tests {
     }
 
     #[test]
-    fn a_procedure_run_holds_its_grants_until_it_ends_once() {
-        use crate::procedure::{Grant, Mode};
+    fn a_procedure_run_is_recorded_until_it_ends_once() {
         let mut store = Store::open_in_memory().unwrap();
         let agent = an_agent();
         store
@@ -2571,8 +2662,6 @@ mod tests {
             project: "app".into(),
             workspace: "login".into(),
             procedure: "open-prs".into(),
-            grants: Grants::from([(Grant::Push, Mode::Allow), (Grant::PrCreate, Mode::Ask)]),
-            children: false,
             started_at: 5,
             ended_at: None,
         };
@@ -2580,10 +2669,7 @@ mod tests {
         let started = store.start_procedure_run(&run).unwrap();
 
         assert_eq!(started.name, "procedure.started");
-        assert_eq!(
-            started.data["grants"],
-            json!({"push": "allow", "pr-create": "ask"})
-        );
+        assert!(started.data.get("grants").is_none());
         assert_eq!(store.procedure_run(&agent.id).unwrap(), Some(run));
         assert_eq!(store.procedure_run("another").unwrap(), None);
         let ended = store
@@ -2715,6 +2801,7 @@ mod tests {
             state: "queued".into(),
             created_at: 0,
             sent_at: None,
+            images: Vec::new(),
         }
     }
 
@@ -2888,10 +2975,10 @@ mod tests {
             arguments: json!({"path": ".env"}),
             shown: json!({"path": ".env"}),
             reasons: vec![".env is a sensitive place (.env)".into()],
-            sensitive: true,
+            base: true,
             kind: approval::Kind::Call,
             says: Vec::new(),
-            identity: "fs_read .env".into(),
+            judgement: None,
             held_by: approval::USER.into(),
             forwards: Vec::new(),
             state: RequestState::Denied,
@@ -2930,37 +3017,38 @@ mod tests {
     }
 
     #[test]
-    fn a_request_keeps_its_kind_and_what_it_says_and_always_grants_no_tree() {
+    fn a_request_keeps_its_kind_what_it_says_its_class_and_the_judge_s_verdict() {
         let mut store = Store::open_in_memory().unwrap();
         let agent = an_agent();
         store
             .create_agent(&agent, ("agent.created", json!({})))
             .unwrap();
+        let judgement = Judgement {
+            by: "claude haiku".into(),
+            verdict: "ask".into(),
+            reason: "it pushes to a remote the user did not mention".into(),
+        };
         let (made, event) = store
             .ask(&Request {
-                kind: approval::Kind::Catalogue,
-                says: vec!["Run cargo test in the project folder".into()],
-                sensitive: false,
+                kind: approval::Kind::Action,
+                says: vec!["Start the procedure ship in workspace login".into()],
+                base: false,
+                judgement: Some(judgement.clone()),
                 ..a_request(None)
             })
             .unwrap();
-        assert_eq!(made.kind, approval::Kind::Catalogue);
+        assert_eq!(made.kind, approval::Kind::Action);
+        let event = event.unwrap();
         assert_eq!(
-            event.unwrap().data["says"][0],
-            "Run cargo test in the project folder"
+            event.data["says"][0],
+            "Start the procedure ship in workspace login"
         );
+        assert_eq!(event.data["class"], "judge");
+        assert_eq!(event.data["judgement"]["verdict"], "ask");
         let read = store.request(made.number).unwrap().unwrap();
-        assert_eq!(read.kind, approval::Kind::Catalogue);
         assert_eq!(read.says, made.says);
-
-        let (decided, event) = store
-            .decide(made.number, Decision::Always, &agent.id, approval::USER)
-            .unwrap()
-            .unwrap();
-        assert_eq!(decided.state, RequestState::Allowed);
-        assert_eq!(decided.decision, Some(Decision::Always));
-        assert_eq!(event.data["decision"], "always");
-        assert!(!store.tree_granted(&agent.id, &made.identity).unwrap());
+        assert!(!read.base);
+        assert_eq!(read.judgement, Some(judgement));
     }
 
     #[test]
@@ -2977,7 +3065,7 @@ mod tests {
         assert!(store.pending_requests(approval::USER).unwrap().is_empty());
         assert!(
             store
-                .decide(request.number, Decision::Once, &agent.id, approval::USER)
+                .decide(request.number, Decision::Once, approval::USER)
                 .unwrap()
                 .is_none()
         );
@@ -3012,25 +3100,24 @@ mod tests {
         assert_eq!(store.pending_requests(approval::USER).unwrap().len(), 1);
         assert!(
             store
-                .decide(request.number, Decision::Once, &agent.id, approval::USER)
+                .decide(request.number, Decision::Once, approval::USER)
                 .unwrap()
                 .is_some()
         );
     }
 
     #[test]
-    fn a_decision_is_taken_once_and_a_grant_for_the_tree_is_written() {
+    fn a_decision_is_taken_once() {
         let mut store = Store::open_in_memory().unwrap();
         let agent = an_agent();
         store
             .create_agent(&agent, ("agent.created", json!({})))
             .unwrap();
         let (once, _) = store.ask(&a_request(None)).unwrap();
-        let (tree, _) = store.ask(&a_request(None)).unwrap();
         let (denied, _) = store.ask(&a_request(None)).unwrap();
 
         let (decided, event) = store
-            .decide(once.number, Decision::Once, &agent.id, approval::USER)
+            .decide(once.number, Decision::Once, approval::USER)
             .unwrap()
             .unwrap();
         assert_eq!(decided.state, RequestState::Allowed);
@@ -3038,24 +3125,16 @@ mod tests {
         assert!(decided.decided_at.is_some());
         assert_eq!(event.name, "approval.decided");
         assert_eq!(event.data["decision"], "once");
-        assert!(!store.tree_granted(&agent.id, "fs_read .env").unwrap());
         // Decided once: a second decision changes nothing.
         assert!(
             store
-                .decide(once.number, Decision::Deny, &agent.id, approval::USER)
+                .decide(once.number, Decision::Deny, approval::USER)
                 .unwrap()
                 .is_none()
         );
 
-        store
-            .decide(tree.number, Decision::Tree, &agent.id, approval::USER)
-            .unwrap()
-            .unwrap();
-        assert!(store.tree_granted(&agent.id, "fs_read .env").unwrap());
-        assert!(!store.tree_granted("another0000", "fs_read .env").unwrap());
-
         let (denied, _) = store
-            .decide(denied.number, Decision::Deny, &agent.id, approval::USER)
+            .decide(denied.number, Decision::Deny, approval::USER)
             .unwrap()
             .unwrap();
         assert_eq!(denied.state, RequestState::Denied);
@@ -3078,7 +3157,7 @@ mod tests {
             .unwrap();
         let (decided, _) = store.ask(&a_request(Some("toolu_03"))).unwrap();
         store
-            .decide(decided.number, Decision::Deny, &agent.id, approval::USER)
+            .decide(decided.number, Decision::Deny, approval::USER)
             .unwrap();
 
         let events = store.cancel_requests(&agent.id, "its agent ended").unwrap();
@@ -3109,7 +3188,7 @@ mod tests {
             .unwrap();
         let (request, _) = store.ask(&a_request(None)).unwrap();
         let (request, _) = store
-            .decide(request.number, Decision::Once, &agent.id, approval::USER)
+            .decide(request.number, Decision::Once, approval::USER)
             .unwrap()
             .unwrap();
         assert_eq!(

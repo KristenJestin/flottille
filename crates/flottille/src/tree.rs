@@ -221,6 +221,8 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             provider,
             model: asked.model,
             effort: asked.effort,
+            // Not read: a tree runs in its root's mode (`judge::mode`).
+            gate_mode: Some(caller.gate_mode),
         },
     )
     .map_err(|f| refused(format!("refused: {}", f.message)))?;
@@ -940,7 +942,7 @@ enum Choice {
 fn answer(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     let asked: Answer = arguments("approval_answer", args)?;
     let number = asked.request_id;
-    let request = daemon
+    daemon
         .read(|store| store.request(number))
         .map_err(failed)?
         .filter(|r| r.held_by == caller.id && r.state == approval::RequestState::Pending)
@@ -958,15 +960,12 @@ fn answer(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     }
     let why = secrets::mask(why, &std::env::vars_os().collect());
     if asked.decision == Choice::Deny {
-        let tree = root_of(daemon, &request.agent);
         let decided = daemon
             .write(|store| {
-                Ok(
-                    match store.decide(number, Decision::Deny, &tree, &caller.id)? {
-                        Some((request, event)) => (Some(request), Some(event)),
-                        None => (None, None),
-                    },
-                )
+                Ok(match store.decide(number, Decision::Deny, &caller.id)? {
+                    Some((request, event)) => (Some(request), Some(event)),
+                    None => (None, None),
+                })
             })
             .map_err(failed)?
             .ok_or_else(|| refused(format!("refused: request #{number} was answered meanwhile")))?;
@@ -1360,8 +1359,10 @@ pub fn summary(daemon: &Daemon, agent: &Agent) -> Value {
         "active_at": agent.active_at,
         "ended_at": agent.ended_at,
         "waiting_on_answer": agent.waiting_on_answer,
+        "gate_mode": crate::judge::mode(daemon, &agent.id),
         "resumable": agent.state == AgentState::Ended && resume_refusal(daemon, agent).is_none(),
         "stopping": agent.state.is_final() && agents::stopping(daemon, &agent.id),
+        "images": agent.images,
     })
 }
 

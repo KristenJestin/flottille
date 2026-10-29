@@ -731,7 +731,11 @@ pub async fn state(daemon: &Daemon, workspace: &Workspace) -> Value {
 /// Reads the workspace's forges now and keeps what was read; an event says when it changed.
 async fn refresh(daemon: &Daemon, workspace: &Workspace) -> Value {
     let project = projects::load_project(daemon, &workspace.project).ok();
-    let obsolete = project.as_ref().is_some_and(|p| !p.obsolete.is_empty());
+    let obsolete = project.as_ref().is_some_and(|p| {
+        p.obsolete
+            .iter()
+            .any(|o| o == flottille_core::project::OBSOLETE_FORGES)
+    });
     let repositories = repositories_of(workspace, project.as_ref());
     let read = read(&repositories, &workspace.branch, obsolete).await;
     let state = state_of(workspace, &read);
@@ -863,7 +867,11 @@ pub async fn forge_read(daemon: &Daemon, place: &Place, args: Value) -> Outcome 
         Err(error) => return Outcome::Failed(error.to_string()),
     };
     let project = projects::load_project(daemon, &place.project).ok();
-    let obsolete = project.as_ref().is_some_and(|p| !p.obsolete.is_empty());
+    let obsolete = project.as_ref().is_some_and(|p| {
+        p.obsolete
+            .iter()
+            .any(|o| o == flottille_core::project::OBSOLETE_FORGES)
+    });
     let mut repositories = repositories_of(&workspace, project.as_ref());
     if let Some(asked) = &asked.repository {
         if !repositories.iter().any(|r| &r.path == asked) {

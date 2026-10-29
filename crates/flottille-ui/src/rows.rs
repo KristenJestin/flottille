@@ -41,6 +41,12 @@ pub struct TreeRow {
     selected: bool,
     trailing: Option<AnyElement>,
     on_click: Option<OnClick>,
+    on_toggle: Option<OnClick>,
+}
+
+/// The element id of a project row's chevron, which folds and unfolds the level below.
+pub fn toggle_id(row: impl Into<ElementId>) -> ElementId {
+    ElementId::NamedChild(std::sync::Arc::new(row.into()), "toggle".into())
 }
 
 impl TreeRow {
@@ -53,6 +59,7 @@ impl TreeRow {
             selected: false,
             trailing: None,
             on_click: None,
+            on_toggle: None,
         }
     }
 
@@ -76,6 +83,12 @@ impl TreeRow {
 
     pub fn on_click(mut self, f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
         self.on_click = Some(Box::new(f));
+        self
+    }
+
+    /// A click on the chevron alone, which then does not reach the row's own click.
+    pub fn on_toggle(mut self, f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.on_toggle = Some(Box::new(f));
         self
     }
 }
@@ -133,12 +146,27 @@ impl RenderOnce for TreeRow {
                 d.aria_expanded(self.expanded == Some(true))
             });
         if let Some(turn) = chevron_turn.filter(|_| project) {
-            row = row.child(
-                icon(Icon::Chevron)
-                    .size(px(12.))
-                    .text_color(p.faint)
-                    .with_transformation(Transformation::rotate(radians(-FRAC_PI_2 * turn))),
-            );
+            let chevron = icon(Icon::Chevron)
+                .size(px(12.))
+                .text_color(p.faint)
+                .with_transformation(Transformation::rotate(radians(-FRAC_PI_2 * turn)));
+            row = row.child(match self.on_toggle {
+                Some(on_toggle) => div()
+                    .id(toggle_id(self.id.clone()))
+                    .flex_none()
+                    .p(px(4.))
+                    .m(px(-4.))
+                    .cursor_pointer()
+                    // The row's own click is the page; this one only folds.
+                    .on_click(move |event, window, cx| {
+                        cx.stop_propagation();
+                        on_toggle(event, window, cx);
+                    })
+                    .child(chevron)
+                    .test_support()
+                    .into_any_element(),
+                None => chevron.into_any_element(),
+            });
         }
         match self.level {
             TreeLevel::Main => row = row.child(icon(Icon::Folder).text_color(p.faint)),

@@ -73,6 +73,15 @@ pub enum AgentAction {
         #[arg(long)]
         json: bool,
     },
+    /// Set a session's mode: in ask, every call to judge comes to you; in auto, the judge you
+    /// chose in Settings decides it (`docs/design.md` §7)
+    Mode {
+        agent: String,
+        /// ask or auto
+        mode: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// The agents, of every project or of one
     List {
         #[arg(long)]
@@ -167,6 +176,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                 serde_json::to_value(AgentSend {
                     agent: agent.clone(),
                     message,
+                    images: Vec::new(),
                 })?,
             )?;
             let mut code = ExitCode::SUCCESS;
@@ -238,6 +248,22 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                     "Resumed agent {} on its own session; it is {} now. Its next message starts it.",
                     text(&resumed["agent"], "id"),
                     text(&resumed["agent"], "state")
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        AgentAction::Mode { agent, mode, json } => {
+            let set = Client::connect_or_start(paths)?.request(
+                "agent.mode",
+                serde_json::json!({"agent": agent, "mode": mode}),
+            )?;
+            if json {
+                println!("{set}");
+            } else {
+                println!(
+                    "Agent {} is in {} mode now.",
+                    text(&set["agent"], "id"),
+                    text(&set["agent"], "gate_mode")
                 );
             }
             Ok(ExitCode::SUCCESS)

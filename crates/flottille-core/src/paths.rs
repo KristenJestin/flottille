@@ -82,6 +82,11 @@ impl Paths {
         self.config.join("rules.md")
     }
 
+    /// The images the user sent to an agent, one folder per agent: never the project's.
+    pub fn images(&self, agent: &str) -> PathBuf {
+        self.data.join("images").join(agent)
+    }
+
     /// One TOML file per project.
     pub fn projects(&self) -> PathBuf {
         self.config.join("projects")

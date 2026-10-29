@@ -1,19 +1,13 @@
 //! What an agent does of what the window does (`docs/tools.md`, "The project"): the project's
 //! procedures (`procedure`), its settings and references (`project`), always its own project.
-//! Reads run at once; every write is a family (`AgentActions`) the gate holds for the user unless
-//! the project's file lets it run on its own, and the request says what it changes in words. No
-//! argument names another project, gives a grant or sets what runs on its own: only the user
+//! Reads run at once; every write is a call to judge (a tracker's change is base, `gate.rs`), and
+//! its request says what it changes in words. No argument names another project: only the user
 //! does that.
-//!
-//! And the catalogue a line run in the project folder is added to when the user answers its
-//! request Always (`docs/tools.md`, "The gate").
 
 use std::sync::Arc;
 
-use flottille_core::command::split_line;
 use flottille_core::declared::{ProjectTracker, RepositoryForge};
-use flottille_core::procedure::Mode;
-use flottille_core::project::{AgentActions, Project, Reference, check_reference, slug};
+use flottille_core::project::{Project, Reference, check_reference};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
@@ -64,8 +58,7 @@ fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
 }
 
 /// The family of writes a call is, `None` for a read or a call that does not fit (the tool
-/// refuses it). For the gate, which holds a write unless the project lets its family run on its
-/// own.
+/// refuses it). For the gate, which judges every write.
 pub fn family(tool: &str, args: &Value) -> Option<&'static str> {
     match (tool, args["action"].as_str()?) {
         ("procedure", "start") => Some("procedures"),
@@ -76,20 +69,15 @@ pub fn family(tool: &str, args: &Value) -> Option<&'static str> {
     }
 }
 
-/// Why the gate holds a write of a family.
+/// Why the gate holds a write of a family: what it does, as the window would.
 pub fn asked(family: &str) -> String {
-    let what = match family {
-        "procedures" => "start a procedure",
-        "settings" => "change the project's settings",
-        "rules" => "change how the project's agents are told to work",
-        _ => "add or remove a reference",
-    };
-    format!("the project's agents {what} only once you allow it")
-}
-
-/// Whether the project lets a family run on its own.
-pub fn on_its_own(actions: &AgentActions, family: &str) -> bool {
-    actions.mode(family) == Some(Mode::Allow)
+    match family {
+        "procedures" => "it starts a procedure, a new session of its own",
+        "settings" => "it changes the project's settings",
+        "rules" => "it changes how the project's agents are told to work",
+        _ => "it adds or removes a reference of the project",
+    }
+    .into()
 }
 
 /// A call checked before the gate is asked: what a write changes, in words (nothing for a read),
@@ -231,18 +219,15 @@ async fn performed(
             "start" => {
                 let wanted = named(&call.name, "start")?;
                 let workspace = workspace_of(grant, &call.workspace)?;
-                // The grants are the procedure's own, as the file says now: those the request
-                // showed the user, since it is done only while its words still hold.
-                let procedure = project.procedures.get(wanted).ok_or_else(|| {
-                    Outcome::Refused(format!(
+                if !project.procedures.contains_key(wanted) {
+                    return Err(Outcome::Refused(format!(
                         "refused: project {name} has no procedure named {wanted}"
-                    ))
-                })?;
+                    )));
+                }
                 let started = procedures::call(
                     daemon.clone(),
                     "procedure.start",
-                    json!({"project": name, "name": wanted, "workspace": workspace,
-                        "grants": procedure.grants, "children": procedure.children}),
+                    json!({"project": name, "name": wanted, "workspace": workspace}),
                 )
                 .await
                 .map_err(refusal)?;
@@ -427,25 +412,6 @@ fn start_says(name: &str, workspace: &str, instructions: &str, shown: &Value) ->
     )];
     // What its agent is told is part of what the user confirms: edited meanwhile, nothing starts.
     says.push(format!("Its agent is told: {}", instructions.trim()));
-    let grants = shown["says"].as_array().map_or(&[][..], Vec::as_slice);
-    for grant in grants {
-        let how = match grant["mode"].as_str() {
-            Some("allow") => "on their own",
-            _ => "after asking you, each time",
-        };
-        says.push(format!(
-            "Its agents may {}, {how}",
-            grant["says"].as_str().unwrap_or_default()
-        ));
-    }
-    says.push(
-        match (grants.is_empty(), shown["children"] == true) {
-            (true, _) => "It grants nothing beyond what agents may always do",
-            (false, true) => "The agents the run starts may do the same",
-            (false, false) => "The agents the run starts may do none of it",
-        }
-        .into(),
-    );
     says
 }
 
@@ -509,11 +475,7 @@ fn procedures_text(project: &Project) -> String {
         project.name
     );
     for (name, procedure) in &project.procedures {
-        text.push_str(&format!(
-            "- {name}: {} Grants: {}.\n",
-            procedure.description,
-            flottille_core::procedure::shown(&procedure.grants)
-        ));
+        text.push_str(&format!("- {name}: {}\n", procedure.description));
     }
     text
 }
@@ -521,22 +483,6 @@ fn procedures_text(project: &Project) -> String {
 fn procedure_text(procedure: &Value) -> String {
     let text = |key: &str| procedure[key].as_str().unwrap_or_default().to_owned();
     let mut shown = format!("Procedure {}: {}\n", text("name"), text("description"));
-    let grants = procedure["says"].as_array().map_or(&[][..], Vec::as_slice);
-    if grants.is_empty() {
-        shown.push_str("It grants nothing.\n");
-    }
-    for grant in grants {
-        shown.push_str(&format!(
-            "- {} ({}): {}\n",
-            grant["grant"].as_str().unwrap_or_default(),
-            grant["mode"].as_str().unwrap_or_default(),
-            grant["says"].as_str().unwrap_or_default()
-        ));
-    }
-    shown.push_str(match procedure["children"] == true {
-        true => "Its run's children get its grants.\n",
-        false => "Its run's children get none of its grants.\n",
-    });
     shown.push_str(&format!("Instructions:\n{}\n", text("instructions")));
     shown
 }
@@ -584,129 +530,7 @@ fn settings_text(project: &Project, settings: &Value) -> String {
             reference.path, reference.description
         ));
     }
-    let modes: Vec<String> = AgentActions::FAMILIES
-        .iter()
-        .map(|family| {
-            let mode = project.agent_actions.mode(family).unwrap_or(Mode::Ask);
-            format!("{family} {}", mode.word())
-        })
-        .collect();
-    text.push_str(&format!(
-        "What agents do on their own: {} (ask: each write waits for the user; only the user \
-         changes this).\n",
-        modes.join(", ")
-    ));
     text
-}
-
-/// The name a line takes in the catalogue: its words as a slug, made unique.
-pub fn catalogue_name(project: &Project, words: &[String]) -> String {
-    let program = |word: &String| word.rsplit('/').next().unwrap_or(word).to_owned();
-    let mut base = slug(
-        &words
-            .iter()
-            .enumerate()
-            .map(|(i, word)| if i == 0 { program(word) } else { word.clone() })
-            .collect::<Vec<_>>()
-            .join(" "),
-    );
-    if base.len() > 48 {
-        base.truncate(48);
-        base = base.trim_end_matches('-').to_owned();
-    }
-    if base.is_empty() {
-        base = "command".into();
-    }
-    let mut name = base.clone();
-    let mut n = 2;
-    while project.commands.contains_key(&name) {
-        name = format!("{base}-{n}");
-        n += 1;
-    }
-    name
-}
-
-/// What a line outside the catalogue, run in the project folder, does, and what Always adds.
-pub fn catalogue_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Vec<String> {
-    let Some(line) = args["line"].as_str() else {
-        return Vec::new();
-    };
-    let repository = args["repository"].as_str().unwrap_or(".");
-    let mut says = vec![match repository {
-        "." => format!("Run {line} in the project folder"),
-        repository => format!("Run {line} in {repository}, in the project folder"),
-    }];
-    if let (Ok(project), Ok(words)) = (own(daemon, grant), split_line(line)) {
-        says.push(format!(
-            "Always adds it to the project's catalogue as {}. Flottille does not check that it \
-             only reads. It will run in your project folder without asking, for every agent of \
-             this project.",
-            catalogue_name(&project, &words)
-        ));
-    }
-    says
-}
-
-/// The catalogue command a line run in the project folder is: the one whose line it is, where
-/// it runs, whatever its flags.
-pub fn catalogued(project: &Project, args: &Value, words: &[String]) -> Option<String> {
-    let asked = args["repository"].as_str().unwrap_or(".");
-    project
-        .commands
-        .iter()
-        .find(|(_, command)| {
-            command.repository.as_deref().unwrap_or(".") == asked
-                && split_line(&command.line).ok().as_deref() == Some(words)
-        })
-        .map(|(name, _)| name.clone())
-}
-
-/// Adds the line of a `commands_run` call to the project's catalogue as allowed always by the
-/// user (`added_by = "approval"`), so that it runs in the project folder without asking from now
-/// on, where it was asked for: its name. A line the catalogue already holds there is that
-/// command, never added again.
-pub fn add_to_catalogue(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<String, String> {
-    let line = args["line"]
-        .as_str()
-        .ok_or("the request runs no line")?
-        .to_owned();
-    let words = split_line(&line)?;
-    let repository = args["repository"]
-        .as_str()
-        .filter(|path| *path != ".")
-        .map(str::to_owned);
-    let mut added = String::new();
-    projects::rewrite(daemon, &grant.place.project, |project, document| {
-        if let Some(name) = catalogued(project, args, &words) {
-            added = name;
-            return Ok(());
-        }
-        added = catalogue_name(project, &words);
-        let mut entry = toml_edit::Table::new();
-        entry.insert("line", toml_edit::value(line.as_str()));
-        if let Some(repository) = &repository {
-            entry.insert("repository", toml_edit::value(repository.as_str()));
-        }
-        entry.insert("added_by", toml_edit::value("approval"));
-        let commands = document.entry("commands").or_insert_with(|| {
-            let mut commands = toml_edit::Table::new();
-            // `[commands.<name>]` alone, without an empty `[commands]` above it.
-            commands.set_implicit(true);
-            toml_edit::Item::Table(commands)
-        });
-        commands
-            .as_table_mut()
-            .ok_or_else(|| {
-                Failure::new(
-                    "invalid-config",
-                    format!("projects/{}.toml: commands: must be a table", project.name),
-                )
-            })?
-            .insert(&added, toml_edit::Item::Table(entry));
-        Ok(())
-    })
-    .map_err(|failure| failure.message)?;
-    Ok(added)
 }
 
 #[cfg(test)]
@@ -728,24 +552,5 @@ mod tests {
             assert_eq!(call(tool, action), None, "{tool} {action}");
         }
         assert_eq!(family("procedure", &json!({})), None);
-    }
-
-    #[test]
-    fn a_line_takes_the_slug_of_its_words_as_its_name_once() {
-        let mut project = Project::new(
-            "app",
-            "/work/app".into(),
-            vec![".".into()],
-            std::path::Path::new("/data"),
-        );
-        let words: Vec<String> = ["/usr/bin/cargo", "test", "-p", "core"]
-            .map(String::from)
-            .to_vec();
-        assert_eq!(catalogue_name(&project, &words), "cargo-test-p-core");
-        project.commands.insert(
-            "cargo-test-p-core".into(),
-            serde_json::from_value(json!({"line": "x"})).unwrap(),
-        );
-        assert_eq!(catalogue_name(&project, &words), "cargo-test-p-core-2");
     }
 }

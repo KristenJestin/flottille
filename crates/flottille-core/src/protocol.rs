@@ -92,15 +92,6 @@ pub struct ProjectSettings {
     pub tracker: Option<crate::declared::ProjectTracker>,
 }
 
-/// `project.set_agent_actions`: what the project's agents do without asking. The user's door
-/// alone sets it: no tool of an agent does.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProjectAgentActions {
-    pub name: String,
-    pub agent_actions: crate::project::AgentActions,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepositorySetting {
@@ -225,6 +216,25 @@ pub struct AgentRun {
 pub struct AgentSend {
     pub agent: String,
     pub message: String,
+    /// Pasted or dropped images, sent with the message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageUpload>,
+}
+
+/// An image sent with a message: its MIME type and its bytes in base64.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageUpload {
+    pub mime: String,
+    pub data: String,
+}
+
+/// The parameters of `agent.image`: an image of the agent's folder, by the name an event gave.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentImage {
+    pub agent: String,
+    pub name: String,
 }
 
 /// The parameters of `agent.trees`: a page of root agents with their trees, newest first.

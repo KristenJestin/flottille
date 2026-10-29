@@ -713,7 +713,7 @@ fn a_search_with_thousands_of_matches_stays_under_the_limit_and_says_how_to_read
 
 #[test]
 fn a_command_printing_megabytes_stays_under_the_limit_and_says_how_to_read_on() {
-    let user = User::with_fake_agent();
+    let user = User::with_fake_agent().with_allowing_judge();
     let (mcp, _) = session(&user);
 
     for line in ["seq 1 500000", "seq -s , 1 400000"] {
@@ -778,7 +778,7 @@ fn shell_syntax_is_refused_with_the_sentence() {
 
 #[test]
 fn a_long_command_answers_after_its_timeout_with_it_keeps_going_and_stop_ends_its_tree() {
-    let user = User::with_fake_agent();
+    let user = User::with_fake_agent().with_allowing_judge();
     let (mcp, folder) = session(&user);
 
     let started = Instant::now();
@@ -832,7 +832,7 @@ fn stubborn(folder: &Path, seconds: u32) -> Value {
 
 #[test]
 fn stopping_a_run_kills_after_the_grace_one_that_ignores_sigterm() {
-    let user = User::with_fake_agent();
+    let user = User::with_fake_agent().with_allowing_judge();
     let (mcp, folder) = session(&user);
     let run = run_id(&ok(mcp.call("commands_run", stubborn(&folder, 300))));
     eventually("the shell's pid", || folder.join("pid-300").exists());
@@ -863,7 +863,7 @@ fn stopping_a_run_kills_after_the_grace_one_that_ignores_sigterm() {
 
 #[test]
 fn a_daemon_that_stops_stops_its_runs_together_not_one_after_another() {
-    let user = User::with_fake_agent();
+    let user = User::with_fake_agent().with_allowing_judge();
     let (mcp, folder) = session(&user);
     let watch = user.watch(&["--after", "0"]);
     let runs: Vec<String> = [301, 302, 303]
@@ -902,7 +902,7 @@ fn a_daemon_that_stops_stops_its_runs_together_not_one_after_another() {
 
 #[test]
 fn a_retry_with_the_same_call_key_does_not_run_twice() {
-    let user = User::with_fake_agent();
+    let user = User::with_fake_agent().with_allowing_judge();
     let (mcp, folder) = session(&user);
     std::fs::write(
         folder.join("count.sh"),
@@ -926,54 +926,9 @@ fn a_retry_with_the_same_call_key_does_not_run_twice() {
 }
 
 #[test]
-fn git_push_is_refused_by_the_gate_and_fails_from_a_script_too() {
-    let user = User::with_fake_agent();
-    let (mcp, folder) = session(&user);
-    std::fs::write(folder.join("more.txt"), "more\n").unwrap();
-    user.git(&folder, &["add", "."]);
-    user.git(&folder, &["commit", "--quiet", "-m", "more"]);
-    let remote = user.path("remotes/app.git");
-    let before = user.git_output(&remote, &["rev-parse", "main"]);
-
-    let text = refused(mcp.call("commands_run", json!({"line": "git push origin HEAD:main"})));
-    assert!(text.contains("git push is refused for agents"), "{text}");
-
-    // The gate does not read a script: the run's environment still sends the push nowhere.
-    std::fs::write(folder.join("push.sh"), "git push origin HEAD:main\n").unwrap();
-    let answer = ok(mcp.call("commands_run", json!({"line": "sh push.sh"})));
-    assert!(!answer.contains("exited with code 0"), "{answer}");
-    assert!(answer.contains("exited with code"), "{answer}");
-    assert_eq!(user.git_output(&remote, &["rev-parse", "main"]), before);
-}
-
-#[test]
-fn a_repository_with_a_push_url_still_refuses_git_push_and_runs_the_rest_of_git() {
-    let user = User::with_fake_agent();
-    let (mcp, folder) = session(&user);
-    let remote = user.path("remotes/app.git");
-    let before = user.git_output(&remote, &["rev-parse", "main"]);
-    // git skips `pushInsteadOf` for a remote that has a push URL of its own: the gate's refusal
-    // is what stops it.
-    user.git(
-        &folder,
-        &["config", "remote.origin.pushurl", remote.to_str().unwrap()],
-    );
-
-    for line in [
-        "git push origin HEAD:main",
-        "git -c url.x.pushInsteadOf=y push origin HEAD:main",
-        "env -u GIT_CONFIG_COUNT git push origin HEAD:main",
-    ] {
-        refused(mcp.call("commands_run", json!({"line": line})));
-    }
-    assert_eq!(user.git_output(&remote, &["rev-parse", "main"]), before);
-    let answer = ok(mcp.call("commands_run", json!({"line": "git status"})));
-    assert!(answer.contains("exited with code 0"), "{answer}");
-}
-
-#[test]
 fn gh_token_is_empty_in_a_run() {
     let user = User::with_fake_agent()
+        .with_allowing_judge()
         .with_env("GH_TOKEN", "ghp_fakefakefakefakefakefakefake0001")
         .with_env("GITLAB_TOKEN", "glpat-fakefakefakefakefake");
     let (mcp, _) = session(&user);
@@ -996,11 +951,22 @@ fn gh_token_is_empty_in_a_run() {
     assert!(Path::new(&config).is_dir());
     assert_eq!(std::fs::read_dir(&config).unwrap().count(), 0);
     assert_eq!(value("GLAB_CONFIG_DIR").as_deref(), Some(config.as_str()));
-    assert_eq!(value("GIT_CONFIG_COUNT").as_deref(), Some("1"));
-    assert!(
-        value("GIT_CONFIG_KEY_0")
-            .unwrap()
-            .ends_with(".pushInsteadOf"),
+    assert_eq!(value("GIT_CONFIG_COUNT").as_deref(), Some("2"));
+    // No hook of the repository, which the agent writes, runs; and a push from a line that is
+    // not itself a push the gate let through goes nowhere.
+    assert_eq!(
+        value("GIT_CONFIG_KEY_0").as_deref(),
+        Some("core.hooksPath"),
+        "{output}"
+    );
+    assert_eq!(
+        value("GIT_CONFIG_VALUE_0").as_deref(),
+        Some("/dev/null"),
+        "{output}"
+    );
+    assert_eq!(
+        value("GIT_CONFIG_KEY_1").as_deref(),
+        Some("url./dev/null/flottille-refused-push/.pushInsteadOf"),
         "{output}"
     );
 }
@@ -1123,7 +1089,7 @@ fn a_run_s_line_is_masked_in_its_record_its_event_and_its_answers() {
 
 #[test]
 fn every_call_goes_through_the_gate_stopping_a_run_and_reading_its_output_included() {
-    let user = User::with_fake_agent();
+    let user = User::with_fake_agent().with_allowing_judge();
     project(&user);
     workspace(&user);
     let (id, url, authorization) = agent(&user, json!({"workspace": "w"}));
@@ -1133,8 +1099,8 @@ fn every_call_goes_through_the_gate_stopping_a_run_and_reading_its_output_includ
     ok(mcp.call("commands_status", json!({"run": run})));
     ok(mcp.call("commands_status", json!({"run": run, "action": "stop"})));
     ok(mcp.call("commands_list", json!({})));
-    held(mcp.call("fs_read", json!({"path": "/etc/hostname"})));
-    refused(mcp.call("commands_run", json!({"line": "git push"})));
+    held(mcp.call("fs_read", json!({"path": ".env"})));
+    refused(mcp.call("commands_run", json!({"line": "ls | wc"})));
 
     let events = user.call("agent.show", json!({"agent": id})).unwrap()["events"]
         .as_array()
@@ -1155,7 +1121,7 @@ fn every_call_goes_through_the_gate_stopping_a_run_and_reading_its_output_includ
     assert_eq!(
         verdicts,
         [
-            row("commands_run", "allow", "ok"),
+            row("commands_run", "judged", "ok"),
             row("commands_status", "allow", "ok"),
             row("commands_status", "allow", "ok"),
             row("commands_list", "allow", "ok"),
@@ -1248,7 +1214,7 @@ fn zombies_of(daemon: u64) -> Vec<u64> {
 
 #[test]
 fn a_client_started_through_commands_run_is_refused_and_nothing_it_sent_is_done() {
-    let user = User::with_fake_agent();
+    let user = User::with_fake_agent().with_allowing_judge();
     let (mcp, folder) = session(&user);
     let pid = user.status()["pid"].as_u64().unwrap();
     std::fs::write(folder.join("client.sh"), stop_script(&user, "client.out")).unwrap();
@@ -1271,7 +1237,7 @@ fn a_client_started_through_commands_run_is_refused_and_nothing_it_sent_is_done(
 
 #[test]
 fn a_client_that_outlives_its_command_and_its_parent_is_still_refused() {
-    let user = User::with_fake_agent();
+    let user = User::with_fake_agent().with_allowing_judge();
     let (mcp, folder) = session(&user);
     let pid = user.status()["pid"].as_u64().unwrap();
     // A double fork out of the run's session: `setsid -f` starts `late.sh` in a session of its
@@ -1336,7 +1302,7 @@ fn commands_run_flottille_project_list_is_refused_by_the_gate() {
 
 #[test]
 fn a_run_s_environment_does_not_say_where_the_daemon_is() {
-    let user = User::with_fake_agent();
+    let user = User::with_fake_agent().with_allowing_judge();
     let (mcp, _) = session(&user);
 
     let answer = ok(mcp.call("commands_run", json!({"line": "env"})));
@@ -1359,7 +1325,7 @@ fn a_client_started_outside_the_agents_works_as_before() {
 
 #[test]
 fn commands_status_reads_by_default_stops_on_request_and_refuses_what_does_not_fit() {
-    let user = User::with_fake_agent();
+    let user = User::with_fake_agent().with_allowing_judge();
     let (mcp, _) = session(&user);
     let answer = ok(mcp.call("commands_run", json!({"line": "sleep 300", "timeout": 1})));
     let run = run_id(&answer);

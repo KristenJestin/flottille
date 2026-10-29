@@ -2,8 +2,8 @@
 
 What the forge of each repository of a workspace says of the workspace's branch: its pull request
 and the pull request's checks. The first step of the milestone "Forges and tickets"
-(`docs/design.md` §13). **Reading**, and the writes an agent makes with `forge_write` only inside a
-procedure that grants them, through the gate ([`procedures.md`](procedures.md)).
+(`docs/design.md` §13). **Reading**, and the writes an agent in a workspace makes with `forge_write`, each a call to
+judge at the gate ([`procedures.md`](procedures.md)).
 
 GitHub and Bitbucket (Cloud and Data Center) are the forges read. In the code a forge is one member
 of `forge::Forge`, read through its own command line (`gh`, `bkt`); others will sit beside them.
@@ -208,7 +208,7 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
 
 ### `forge_write` on Bitbucket
 
-The three actions of [`procedures.md`](procedures.md), under the same grants and the same checks
+The three actions of [`procedures.md`](procedures.md), under the same classes and the same checks
 (the remote leads where it led when the workspace was created; the repository is one of the
 workspace's; the pull request is the workspace's own branch's, from the repository itself, into
 the base the repository started from):
@@ -258,8 +258,10 @@ agent working in a workspace has the tool.
 project's reviewers), merges it by squash (never while its checks fail or run or a review asks for
 changes, unless the user waives it), or re-runs the failed pipelines of its last commit, with the
 same `gh` (or `bkt`, for a Bitbucket repository) and the same rules (spawned by the daemon, the
-repository named, its output masked, no token to the agent). It is refused unless the agent works
-in a procedure's run that grants the action; the tool is listed to every agent of a project that declares a forge or a tracker, and the gate decides: see [`procedures.md`](procedures.md).
+repository named, its output masked, no token to the agent). It is listed to every agent of a
+project whose repository declares a forge, in `main` as in a workspace (in `main` it names the
+workspace), and each call is to judge (a merge that waives the checks is base): see
+[`procedures.md`](procedures.md).
 
 ## Tickets
 

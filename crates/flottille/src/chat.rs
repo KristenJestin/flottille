@@ -88,6 +88,7 @@ fn send_and_follow(
         serde_json::to_value(AgentSend {
             agent: agent.to_owned(),
             message,
+            images: Vec::new(),
         })?,
     )?;
     follow(
@@ -129,6 +130,7 @@ fn refuse(client: &mut Client, agent: &str) -> Result<()> {
         serde_json::to_value(AgentSend {
             agent: agent.to_owned(),
             message: String::new(),
+            images: Vec::new(),
         })?,
     ) {
         Err(error) => Err(error),

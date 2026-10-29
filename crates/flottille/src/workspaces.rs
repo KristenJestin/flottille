@@ -1200,7 +1200,7 @@ fn in_use(daemon: &Daemon, workspace: &Workspace, ours: &str) -> Result<Vec<Stri
             && theirs(&agent.id)
         {
             used.push(format!(
-                "the agent {}, outside this run, works in it",
+                "the agent {}, outside this agent's tree, works in it",
                 agent.id
             ));
         }
@@ -1375,7 +1375,7 @@ struct WorkspaceRemove {
     workspace: Option<String>,
 }
 
-/// `workspace_remove`, once the gate let it through by a procedure's grant: the agent's own
+/// `workspace_remove`, once the gate let it through: the agent's own
 /// workspace removed as `workspace.remove` removes it, then the branches of it that hold no commit
 /// of their own deleted from their repositories (`docs/procedures.md`).
 pub async fn workspace_remove(

@@ -39,6 +39,31 @@ pub struct Pick {
     pub effort: Option<String>,
 }
 
+/// An image and its MIME type, as the daemon takes and gives them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Picture {
+    pub mime: String,
+    pub bytes: Vec<u8>,
+}
+
+impl Picture {
+    fn to_json(&self) -> Value {
+        use base64::Engine as _;
+        json!({"mime": self.mime,
+            "data": base64::engine::general_purpose::STANDARD.encode(&self.bytes)})
+    }
+
+    fn of(found: &Value) -> Option<Picture> {
+        use base64::Engine as _;
+        Some(Picture {
+            mime: found["mime"].as_str()?.to_owned(),
+            bytes: base64::engine::general_purpose::STANDARD
+                .decode(found["data"].as_str()?)
+                .ok()?,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     /// What the project page shows beyond the shell's read: branches and lines changed.
@@ -53,6 +78,11 @@ pub enum Command {
     SetProvider {
         name: String,
         enabled: bool,
+    },
+    /// Chooses the Auto judge in `providers.toml`, or none.
+    SetJudge {
+        provider: Option<String>,
+        model: Option<String>,
     },
     /// Reads the providers again: `providers.toml` is the user's to edit by hand too.
     ReadProviders,
@@ -75,11 +105,6 @@ pub enum Command {
     SaveProjectSettings {
         project: String,
         settings: Value,
-    },
-    /// Sets what the project's agents do without asking (`project.set_agent_actions`).
-    SetAgentActions {
-        project: String,
-        actions: Value,
     },
     /// Detects the project's repositories again, against its file.
     CheckProject(String),
@@ -128,19 +153,17 @@ pub enum Command {
         project: String,
         write: ProcedureWrite,
     },
-    /// What a run of the procedure in the workspace would grant: starts nothing.
+    /// The procedure to run in the workspace, as the daemon shows it: starts nothing.
     ProcedureShow {
         project: String,
         name: String,
         workspace: String,
     },
-    /// The confirmed run, with the grants that were shown.
+    /// The confirmed run.
     ProcedureStart {
         project: String,
         name: String,
         workspace: String,
-        grants: Value,
-        children: bool,
     },
     /// The rules agents are told to work by: the user's for every project, or a project's own.
     RulesRead {
@@ -168,6 +191,13 @@ pub enum Command {
     Reply {
         session: String,
         message: String,
+        /// Pasted or dropped pictures that go with it, as the clipboard gave them.
+        images: Vec<Picture>,
+    },
+    /// Reads back an image the session's agent was sent, by the name its event gave.
+    Image {
+        session: String,
+        name: String,
     },
     /// Ends a session: its root agent and its tree stop.
     Stop {
@@ -180,6 +210,11 @@ pub enum Command {
     /// Interrupts the turn the session's root agent runs; the agent stays.
     Interrupt {
         session: String,
+    },
+    /// Puts the session in Ask or Auto (`ask`, `auto`): the user's alone to change.
+    SetMode {
+        session: String,
+        mode: String,
     },
     /// The user's answer to a request they hold, given on the page of the session of `session`
     /// (its root agent).
@@ -197,20 +232,17 @@ pub enum ProcedureWrite {
     Template {
         template: String,
     },
-    /// A new procedure: its children get its grants, the default.
+    /// A new procedure.
     Add {
         name: String,
         description: String,
         instructions: String,
-        grants: Value,
     },
-    /// What is given replaces what the procedure had, `grants` whole; whether its children get them
-    /// stays as the file says.
+    /// What is given replaces what the procedure had.
     Edit {
         name: String,
         description: String,
         instructions: String,
-        grants: Value,
     },
     Remove {
         name: String,
@@ -221,10 +253,6 @@ pub enum ProcedureWrite {
 pub enum Answer {
     Deny,
     Once,
-    /// Allowed for the root's tree.
-    Tree,
-    /// Allowed, and the line added to the project's catalogue.
-    Always,
 }
 
 /// What one project page shows beyond the shell's read.
@@ -279,11 +307,6 @@ pub enum Outcome {
         read: Result<Value, String>,
         saved: bool,
     },
-    /// What the project's agents do without asking, as saved, or why it was not.
-    AgentActions {
-        project: String,
-        read: Result<Value, String>,
-    },
     /// The project's repositories detected again (`project.check`), or why not.
     ProjectChecked {
         project: String,
@@ -320,6 +343,10 @@ pub enum Outcome {
     /// the daemon could not be asked.
     Providers(u64, Option<crate::providers::Providers>),
     /// A provider was enabled or disabled as asked, or the daemon refused it with why.
+    /// The Auto judge was chosen, or the daemon refused with why.
+    JudgeSet {
+        refused: Option<String>,
+    },
     ProviderSet {
         name: String,
         refused: Option<String>,
@@ -363,6 +390,12 @@ pub enum Outcome {
         project: String,
         refused: Option<String>,
     },
+    /// An image read back from the daemon, `None` when it could not be.
+    ImageRead {
+        session: String,
+        name: String,
+        image: Option<Picture>,
+    },
     /// A message to the session's root was taken, or refused with why.
     Replied {
         session: String,
@@ -380,6 +413,11 @@ pub enum Outcome {
     },
     /// The session's turn was interrupted (or none ran), or the daemon refused with why.
     Interrupted {
+        session: String,
+        refused: Option<String>,
+    },
+    /// The session's mode was changed, or the daemon refused with why.
+    ModeSet {
         session: String,
         refused: Option<String>,
     },
@@ -560,6 +598,18 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             };
             Outcome::ProviderSet { name, refused }
         }
+        Command::SetJudge { provider, model } => {
+            let refused = match ask_alone(
+                connect,
+                "provider.set_judge",
+                json!({"provider": provider, "model": model}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::JudgeSet { refused }
+        }
         Command::ReadProviders => {
             let read = crate::providers::next_read();
             Outcome::Providers(read, read_providers(connect, bounds.quick))
@@ -601,15 +651,6 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             )),
             project,
             saved: true,
-        },
-        Command::SetAgentActions { project, actions } => Outcome::AgentActions {
-            read: answer(ask_alone(
-                connect,
-                "project.set_agent_actions",
-                json!({"name": project, "agent_actions": actions}),
-                bounds.quick,
-            )),
-            project,
         },
         Command::CheckProject(project) => Outcome::ProjectChecked {
             read: answer(ask_alone(
@@ -759,14 +800,11 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             project,
             name,
             workspace,
-            grants,
-            children,
         } => {
             let started = ask_alone(
                 connect,
                 "procedure.start",
-                json!({"project": project, "name": name, "workspace": workspace,
-                    "grants": grants, "children": children}),
+                json!({"project": project, "name": name, "workspace": workspace}),
                 bounds.quick,
             )
             .and_then(|started| started)
@@ -861,10 +899,31 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             };
             Outcome::ReferenceWritten { project, refused }
         }
-        Command::Reply { session, message } => match ask_alone(
+        Command::Image { session, name } => {
+            let image = match ask_alone(
+                connect,
+                "agent.image",
+                json!({"agent": session, "name": name}),
+                bounds.quick,
+            ) {
+                Ok(Ok(found)) => Picture::of(&found),
+                Ok(Err(_)) | Err(_) => None,
+            };
+            Outcome::ImageRead {
+                session,
+                name,
+                image,
+            }
+        }
+        Command::Reply {
+            session,
+            message,
+            images,
+        } => match ask_alone(
             connect,
             "agent.send",
-            json!({"agent": session, "message": message}),
+            json!({"agent": session, "message": message,
+                "images": images.iter().map(Picture::to_json).collect::<Vec<_>>()}),
             bounds.quick,
         ) {
             Ok(Ok(_)) => Outcome::Replied {
@@ -900,6 +959,18 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             };
             Outcome::Resumed { session, refused }
         }
+        Command::SetMode { session, mode } => {
+            let refused = match ask_alone(
+                connect,
+                "agent.mode",
+                json!({"agent": session, "mode": mode}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::ModeSet { session, refused }
+        }
         Command::Interrupt { session } => {
             let refused = match ask_alone(
                 connect,
@@ -920,14 +991,6 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             let (method, params) = match answer {
                 Answer::Deny => ("approval.deny", json!({"number": number})),
                 Answer::Once => ("approval.approve", json!({"number": number})),
-                Answer::Tree => (
-                    "approval.approve",
-                    json!({"number": number, "for_tree": true}),
-                ),
-                Answer::Always => (
-                    "approval.approve",
-                    json!({"number": number, "always": true}),
-                ),
             };
             match ask_alone(connect, method, params, bounds.quick) {
                 Ok(Ok(answered)) => Outcome::Answered {
@@ -967,21 +1030,19 @@ fn procedure_write(project: &str, write: ProcedureWrite) -> (&'static str, Value
             name,
             description,
             instructions,
-            grants,
         } => (
             "procedure.add",
             json!({"project": project, "name": name, "description": description,
-                "instructions": instructions, "grants": grants}),
+                "instructions": instructions}),
         ),
         ProcedureWrite::Edit {
             name,
             description,
             instructions,
-            grants,
         } => (
             "procedure.edit",
             json!({"project": project, "name": name, "description": description,
-                "instructions": instructions, "grants": grants}),
+                "instructions": instructions}),
         ),
         ProcedureWrite::Remove { name } => (
             "procedure.remove",

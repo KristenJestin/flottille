@@ -138,7 +138,7 @@ fn a_held_call_answers_at_once_with_the_waiting_text() {
     assert_eq!(listed[0]["agent"], id.as_str());
     assert_eq!(listed[0]["tool"], "fs_read");
     assert_eq!(listed[0]["call"], json!({"path": ".env"}));
-    assert_eq!(listed[0]["sensitive"], true);
+    assert_eq!(listed[0]["class"], "base");
     assert_eq!(listed[0]["held_by"], "user");
     assert_eq!(
         listed[0]["reasons"],
@@ -232,45 +232,29 @@ fn the_same_call_key_asked_twice_gives_the_same_request() {
 }
 
 #[test]
-fn a_grant_for_the_tree_lets_the_same_call_through_without_asking() {
+fn an_approval_allows_that_call_once_and_the_same_call_asks_again() {
     let user = User::with_fake_agent();
     let (_, mcp, _) = session(&user);
     std::fs::write(user.path("shared.txt"), "shared\n").unwrap();
     let line = format!("cat {}", user.path("shared.txt").display());
     let number = held(mcp.call("commands_run", json!({"line": line})));
 
-    let said = cli(&user, &["approve", &number.to_string(), "--for-tree"]).unwrap();
-    assert!(said.contains("tree"), "{said}");
+    let said = cli(&user, &["approve", &number.to_string()]).unwrap();
+    assert!(said.contains("is allowed"), "{said}");
     assert!(
         settled(&user, number)
             .body
             .contains("and Flottille has now done it"),
     );
 
-    let answer = mcp.call("commands_run", json!({"line": line}));
-    assert!(!answer.error, "{}", answer.text);
-    assert!(answer.text.starts_with("run "), "{}", answer.text);
-    assert!(answer.text.contains("shared"), "{}", answer.text);
-    assert!(approvals(&user).is_empty());
-    // Only that call: another one asks.
-    held(mcp.call("commands_run", json!({"line": format!("{line} README.md")})));
-}
-
-#[test]
-fn a_grant_for_the_tree_never_lifts_a_sensitive_place() {
-    let user = User::with_fake_agent();
-    let (_, mcp, _) = session(&user);
-    let number = held(mcp.call("fs_read", json!({"path": ".env"})));
-
-    let error = cli(&user, &["approve", &number.to_string(), "--for-tree"]).unwrap_err();
-
-    assert!(error.contains("sensitive"), "{error}");
-    assert_eq!(approvals(&user).len(), 1, "nothing was decided");
-    cli(&user, &["approve", &number.to_string()]).unwrap();
-    settled(&user, number);
-    // Allowed once: the next read asks again.
-    let next = held(mcp.call("fs_read", json!({"path": ".env"})));
+    // Nothing is remembered: the same call asks again.
+    let next = held(mcp.call("commands_run", json!({"line": line})));
     assert_ne!(next, number);
+    let error = cli(&user, &["approve", &next.to_string(), "--for-tree"]).unwrap_err();
+    assert!(
+        error.contains("--for-tree"),
+        "no answer for the tree: {error}"
+    );
 }
 
 #[test]
@@ -295,8 +279,8 @@ fn an_allowed_request_is_checked_again_before_it_is_performed() {
     let body = settled(&user, number).body;
     assert!(
         body.starts_with(&format!(
-            "Request #{number} (commands_run) was not executed: refused: the project never \
-             allows cat"
+            "Request #{number} (commands_run) was not executed: the situation changed since you \
+             allowed it: the project's never list holds cat"
         )),
         "{body}"
     );
@@ -317,10 +301,10 @@ fn a_request_held_by_an_agent_is_not_the_user_s_until_it_is_forwarded_to_them() 
             arguments: json!({"path": "/tmp/flottille-never-written", "content": "x"}),
             shown: json!({"path": "/tmp/flottille-never-written", "content": "x"}),
             reasons: vec!["/tmp/flottille-never-written is outside this agent's place".into()],
-            sensitive: false,
+            base: false,
+            judgement: None,
             kind: flottille_core::approval::Kind::Call,
             says: Vec::new(),
-            identity: "a child's write".into(),
             held_by: "parent0000ab".into(),
             forwards: Vec::new(),
             state: RequestState::Pending,
@@ -334,7 +318,6 @@ fn a_request_held_by_an_agent_is_not_the_user_s_until_it_is_forwarded_to_them() 
     assert!(approvals(&user).is_empty());
     for args in [
         vec!["approve", number.as_str()],
-        vec!["approve", number.as_str(), "--for-tree"],
         vec!["deny", number.as_str()],
     ] {
         let error = cli(&user, &args).unwrap_err();

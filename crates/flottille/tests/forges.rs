@@ -646,15 +646,12 @@ fn a_root_agent_in_main_with_a_forge_lists_the_forge_tools() {
     let (_, main) = agent_in(&user, None);
     let (_, workspace) = agent_in(&user, Some("login"));
 
-    // The same tools wherever it works: the place does not decide.
-    for tool in [
-        "forge_read",
-        "ticket_read",
-        "forge_write",
-        "workspace_remove",
-    ] {
+    // The same tools wherever it works: the place does not decide, the project's declarations
+    // do. The fixture declares a forge and no tracker, so `ticket_read` could only refuse.
+    for tool in ["forge_read", "forge_write", "workspace_remove"] {
         assert!(main.names().contains(&tool.to_owned()), "{tool}");
     }
+    assert!(!main.names().contains(&"ticket_read".to_owned()));
     assert_eq!(main.names(), workspace.names());
 }
 

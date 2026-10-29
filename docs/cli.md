@@ -337,15 +337,14 @@ Removed workspace login of shop: its worktrees and its folder. Its branches are 
 
 ## Procedures
 
-A procedure is a named action of a project, run by an agent in a workspace with the grants it
-gives (`docs/procedures.md`).
+A procedure is a named action of a project, run by an agent in a workspace (`docs/procedures.md`).
+It grants nothing: the run's calls go through the gate like any other (`docs/design.md` §7).
 
 ### `flottille procedure list <project>`
 
 ```
 $ flottille procedure list shop
 open-prs  Open the pull requests of the workspace
-    grants: push (allow), pr-create (ask)
 ```
 
 `--json` prints `procedure.list`.
@@ -355,26 +354,19 @@ open-prs  Open the pull requests of the workspace
 ```
 $ flottille procedure show shop open-prs
 Procedure open-prs of project shop: Open the pull requests of the workspace
-It grants, for each run:
-  push (allow): push the workspace's branch to its remote (git push)
-  pr-create (ask): open the workspace's pull requests (forge_write pr-create)
-Its children get none of them.
 Instructions:
   Push the branch, then open one pull request per repository with commits.
 ```
 
 ### `flottille procedure add <project> <name>`
 
-`--description <line>`, the instructions with `--instructions <text>` or `--instructions-file
-<file>`, a `--grant <grant>=<mode>` per grant (`push=allow`, `pr-create=ask`; the grants are
-`commit`, `push`, `push-force-with-lease`, `rebase`, `pr-create`, `pr-merge-squash`,
-`pipeline-rerun`, `workspace-remove`) and `--children false` to keep the grants from the run's
-children, who get them otherwise. Written in the project's file, what is around it kept.
+`--description <line>` and the instructions with `--instructions <text>` or `--instructions-file
+<file>`. Written in the project's file, what is around it kept.
 
 ```
 $ flottille procedure add shop open-prs --description "Open the pull requests of the workspace" \
-    --instructions-file open-prs.md --grant push=allow --grant pr-create=ask
-Added procedure open-prs to project shop: it grants push (allow), pr-create (ask). Edit it in the project's file, or with `flottille procedure edit`.
+    --instructions-file open-prs.md
+Added procedure open-prs to project shop. Edit it in the project's file, or with `flottille procedure edit`.
 ```
 
 `--template <template> [<name>]` writes one of Flottille's procedures instead, as it is, under its
@@ -384,13 +376,12 @@ edited in the file or with `procedure edit`.
 
 ```
 $ flottille procedure add shop --template close
-Added procedure close to project shop: it grants workspace-remove (allow). Edit it in the project's file, or with `flottille procedure edit`.
+Added procedure close to project shop. Edit it in the project's file, or with `flottille procedure edit`.
 ```
 
 ### `flottille procedure edit <project> <name>`
 
-Changes what is given (`--description`, `--instructions`, `--instructions-file`, `--children
-true|false`); `--grant` given once or more replaces all the grants, `--no-grants` removes them.
+Changes what is given (`--description`, `--instructions`, `--instructions-file`).
 
 ### `flottille procedure remove <project> <name>`
 
@@ -401,18 +392,13 @@ Removed procedure open-prs from project shop.
 
 ### `flottille procedure run <project> <name> --workspace <workspace>`
 
-Shows the grants, asks for a yes (`--yes` starts without asking; no answer is a refusal), then
-starts the run's root agent in the workspace. Nothing starts before the yes, and the daemon refuses
-when the grants changed since they were shown.
+Shows the procedure, asks for a yes (`--yes` starts without asking; no answer is a refusal), then
+starts the run's root agent in the workspace, in Auto. Nothing starts before the yes.
 
 ```
 $ flottille procedure run shop open-prs --workspace login
 Procedure open-prs of project shop, in workspace login: Open the pull requests of the workspace
-It grants, for this run only:
-  push (allow): push the workspace's branch to its remote (git push)
-  pr-create (ask): open the workspace's pull requests (forge_write pr-create)
-Its children get none of them.
-Everything else is decided as for any agent.
+It grants nothing: its session starts in Auto, and each call it makes goes through the gate like any other.
 Run it? [y/N] y
 Started agent 3f9a1c0b7d2e for procedure open-prs in workspace login: follow it with `flottille agent read 3f9a1c0b7d2e`.
 ```
@@ -584,6 +570,20 @@ $ flottille agent resume bd7ed8152969
 Resumed agent bd7ed8152969 on its own session; it is idle now. Its next message starts it.
 ```
 
+### `flottille agent mode <agent> ask|auto`
+
+Sets the mode of a session (`docs/design.md` §7): in `ask`, every call to judge comes to you as a
+request; in `auto`, the judge chosen in the window's Settings decides it, and what it does not
+allow comes to you. Base calls come to you in both. A tree has one mode, its root's: naming a
+child switches its root, and every agent of the tree follows at once. A new session starts in
+`auto`; the mode is kept when the session is resumed. Only you set it: no tool of an agent does.
+`--json` prints `{"agent": {...}}`, the root.
+
+```
+$ flottille agent mode bd7ed8152969 ask
+Agent bd7ed8152969 is in ask mode now.
+```
+
 ### `flottille agent list`
 
 The agents, in short, of every project or of `--project <name>`: id, role, place, provider and
@@ -641,29 +641,28 @@ Answer a question with `flottille agent send <agent> <message>`; `flottille inbo
 
 ### `flottille approvals`
 
-The requests of your agents that wait for your answer: the call, why the gate held it, and who
-forwarded it up the tree. `--json` prints `approval.list`. Only you answer them; the pilot door
-cannot.
+The requests of your agents that wait for your answer: the call, its class, why the gate held it,
+what the Auto judge said of it when it judged it, and who forwarded it up the tree. `--json`
+prints `approval.list`. Only you answer them; the pilot door cannot.
 
 ```
 $ flottille approvals
-#1 agent ce034b165403: fs_read {"path":".env"}
+#1 agent ce034b165403: fs_read {"path":".env"} [base: always asked]
     .env is a sensitive place (.env)
-Answer with `flottille approve <n>` (`--for-tree` for the same call from now on) or `flottille deny <n>`.
+#2 agent ce034b165403: commands_run {"line":"git push"}
+    judge claude (ask): pushing publishes the branch, and the user did not ask for it
+    git push changes the repository, its branches or a remote
+Answer with `flottille approve <n>` or `flottille deny <n>`.
 ```
 
 ### `flottille approve <number>`
 
-Allows the request: its call is checked again, performed, and its result handed to the agent.
-`--for-tree` allows the same call, exactly, for the whole tree of the agent's root from now on;
-never for a sensitive place, nor for a change of the project an agent asked for. `--always` answers
-a line run outside the catalogue in the project folder: it is added to the project's catalogue as
-allowed always (`added_by = "approval"`), so that it runs there without asking from now on, then
-run; never for a line that reaches a sensitive place. Flottille does not check that it only reads.
+Allows the request: its call is checked again, performed, and its result handed to the agent. It
+allows that call once; nothing is remembered for the next one.
 
 ```
 $ flottille approve 1
-Request #1 is allowed once; Flottille performs it and hands the result to agent ce034b165403.
+Request #1 is allowed; Flottille performs it and hands the result to agent ce034b165403.
 ```
 
 ### `flottille deny <number>`

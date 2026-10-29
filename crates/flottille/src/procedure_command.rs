@@ -1,5 +1,5 @@
-//! `flottille procedure`: the procedures of a project, and running one in a workspace once its
-//! grants were shown and confirmed (`docs/procedures.md`, `docs/cli.md`).
+//! `flottille procedure`: the procedures of a project, and running one in a workspace once it was
+//! shown and confirmed (`docs/procedures.md`, `docs/cli.md`). A run grants nothing.
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -7,7 +7,6 @@ use std::process::ExitCode;
 
 use clap::Subcommand;
 use flottille_core::paths::Paths;
-use flottille_core::procedure::{Grant, Grants, Mode};
 use serde_json::{Value, json};
 
 use crate::client::Client;
@@ -23,7 +22,7 @@ pub enum ProcedureAction {
         #[arg(long)]
         json: bool,
     },
-    /// One procedure: its grants and its instructions
+    /// One procedure: its description and its instructions
     Show {
         project: String,
         name: String,
@@ -37,7 +36,7 @@ pub enum ProcedureAction {
         #[arg(required_unless_present = "template")]
         name: Option<String>,
         /// Write one of Flottille's procedures: open-prs, merge-stack or close
-        #[arg(long, conflicts_with_all = ["description", "instructions", "instructions_file", "grants", "children"])]
+        #[arg(long, conflicts_with_all = ["description", "instructions", "instructions_file"])]
         template: Option<String>,
         /// One line: what it does
         #[arg(long, required_unless_present = "template")]
@@ -52,12 +51,6 @@ pub enum ProcedureAction {
         /// The instructions, read from this file
         #[arg(long, value_name = "FILE")]
         instructions_file: Option<PathBuf>,
-        /// A grant and its mode, `push=allow` or `pr-create=ask`; once per grant
-        #[arg(long = "grant", value_name = "GRANT=MODE")]
-        grants: Vec<String>,
-        /// Whether the run's children get its grants; they do unless it is false
-        #[arg(long, value_name = "true|false")]
-        children: Option<bool>,
         #[arg(long)]
         json: bool,
     },
@@ -71,19 +64,6 @@ pub enum ProcedureAction {
         instructions: Option<String>,
         #[arg(long, value_name = "FILE")]
         instructions_file: Option<PathBuf>,
-        /// Its grants become these, `push=allow`; once per grant
-        #[arg(
-            long = "grant",
-            value_name = "GRANT=MODE",
-            conflicts_with = "no_grants"
-        )]
-        grants: Vec<String>,
-        /// It grants nothing any more
-        #[arg(long)]
-        no_grants: bool,
-        /// Whether the run's children get its grants
-        #[arg(long, value_name = "true|false")]
-        children: Option<bool>,
         #[arg(long)]
         json: bool,
     },
@@ -94,7 +74,7 @@ pub enum ProcedureAction {
         #[arg(long)]
         json: bool,
     },
-    /// Show a procedure's grants, ask, then start its agent in a workspace
+    /// Show a procedure, ask, then start its agent in a workspace
     Run {
         project: String,
         name: String,
@@ -144,8 +124,6 @@ pub fn run(paths: &Paths, action: ProcedureAction) -> Result<ExitCode> {
             description,
             instructions,
             instructions_file,
-            grants,
-            children,
             json,
         } => {
             let mut params = json!({"project": project, "name": name});
@@ -156,20 +134,15 @@ pub fn run(paths: &Paths, action: ProcedureAction) -> Result<ExitCode> {
                     .ok_or("give the instructions, with --instructions or --instructions-file")?;
                 params["description"] = description.into();
                 params["instructions"] = instructions.into();
-                params["grants"] = serde_json::to_value(grants_of(&grants)?)?;
-                if let Some(children) = children {
-                    params["children"] = children.into();
-                }
             }
             let added = ask("procedure.add", params)?;
             if json {
                 println!("{added}");
             } else {
                 println!(
-                    "Added procedure {} to project {project}: it grants {}. Edit it in the \
-                     project's file, or with `flottille procedure edit`.",
-                    text(&added["name"]),
-                    grants_line(&added)
+                    "Added procedure {} to project {project}. Edit it in the project's file, or \
+                     with `flottille procedure edit`.",
+                    text(&added["name"])
                 );
             }
         }
@@ -179,9 +152,6 @@ pub fn run(paths: &Paths, action: ProcedureAction) -> Result<ExitCode> {
             description,
             instructions,
             instructions_file,
-            grants,
-            no_grants,
-            children,
             json,
         } => {
             let mut params = json!({"project": project, "name": name});
@@ -190,12 +160,6 @@ pub fn run(paths: &Paths, action: ProcedureAction) -> Result<ExitCode> {
             }
             if let Some(instructions) = instructions_of(instructions, instructions_file)? {
                 params["instructions"] = instructions.into();
-            }
-            if no_grants || !grants.is_empty() {
-                params["grants"] = serde_json::to_value(grants_of(&grants)?)?;
-            }
-            if let Some(children) = children {
-                params["children"] = children.into();
             }
             let edited = ask("procedure.edit", params)?;
             if json {
@@ -234,11 +198,9 @@ pub fn run(paths: &Paths, action: ProcedureAction) -> Result<ExitCode> {
             if !yes {
                 confirm()?;
             }
-            // What was shown is what is granted: the daemon refuses if the grants changed meanwhile.
             let started = ask(
                 "procedure.start",
-                json!({"project": project, "name": name, "workspace": workspace,
-                    "grants": shown["grants"], "children": shown["children"]}),
+                json!({"project": project, "name": name, "workspace": workspace}),
             )?;
             if json {
                 println!("{started}");
@@ -266,35 +228,6 @@ fn instructions_of(text: Option<String>, file: Option<PathBuf>) -> Result<Option
     })
 }
 
-/// `push=allow` and the like, each grant once, from the fixed vocabulary.
-fn grants_of(words: &[String]) -> Result<Grants> {
-    let vocabulary = || {
-        Grant::ALL
-            .iter()
-            .map(|grant| grant.word())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let mut grants = Grants::new();
-    for word in words {
-        let (grant, mode) = word
-            .split_once('=')
-            .ok_or_else(|| format!("--grant {word}: give it as GRANT=MODE, like push=allow"))?;
-        let grant = Grant::of(grant).ok_or_else(|| {
-            format!(
-                "--grant {word}: there is no grant {grant}: the grants are {}",
-                vocabulary()
-            )
-        })?;
-        let mode = Mode::of(mode)
-            .ok_or_else(|| format!("--grant {word}: the mode is allow or ask, not {mode}"))?;
-        if grants.insert(grant, mode).is_some() {
-            return Err(format!("--grant {grant} is given twice").into());
-        }
-    }
-    Ok(grants)
-}
-
 /// Asks on the standard input; anything but a yes, or no answer at all, refuses.
 fn confirm() -> Result<()> {
     eprint!("Run it? [y/N] ");
@@ -317,47 +250,6 @@ fn text(value: &Value) -> &str {
     value.as_str().unwrap_or_default()
 }
 
-/// The grants, one line each: `  push (allow): push the workspace's branch…`.
-fn grants_text(procedure: &Value) -> String {
-    let says = procedure["says"].as_array().map_or(&[][..], Vec::as_slice);
-    if says.is_empty() {
-        return "  none\n".into();
-    }
-    says.iter()
-        .map(|each| {
-            format!(
-                "  {} ({}): {}\n",
-                text(&each["grant"]),
-                text(&each["mode"]),
-                text(&each["says"])
-            )
-        })
-        .collect()
-}
-
-fn children_text(procedure: &Value) -> &'static str {
-    if procedure["children"] == true {
-        "Its children get these grants too.\n"
-    } else {
-        "Its children get none of them.\n"
-    }
-}
-
-/// The grants in one line: `push (allow), pr-create (ask)`, or `none`.
-fn grants_line(procedure: &Value) -> String {
-    let grants: Vec<String> = procedure["says"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|each| format!("{} ({})", text(&each["grant"]), text(&each["mode"])))
-        .collect();
-    if grants.is_empty() {
-        "none".to_owned()
-    } else {
-        grants.join(", ")
-    }
-}
-
 fn list_text(list: &Value) -> String {
     let procedures = list["procedures"].as_array().map_or(&[][..], Vec::as_slice);
     if procedures.is_empty() {
@@ -370,10 +262,9 @@ fn list_text(list: &Value) -> String {
         .iter()
         .map(|procedure| {
             format!(
-                "{}  {}\n    grants: {}\n",
+                "{}  {}\n",
                 text(&procedure["name"]),
-                text(&procedure["description"]),
-                grants_line(procedure)
+                text(&procedure["description"])
             )
         })
         .collect()
@@ -385,49 +276,19 @@ fn show_text(project: &str, procedure: &Value) -> String {
         .map(|line| format!("  {line}\n"))
         .collect();
     format!(
-        "Procedure {} of project {project}: {}\nIt grants, for each run:\n{}{}Instructions:\n{instructions}",
+        "Procedure {} of project {project}: {}\nInstructions:\n{instructions}",
         text(&procedure["name"]),
         text(&procedure["description"]),
-        grants_text(procedure),
-        children_text(procedure),
     )
 }
 
 fn run_text(shown: &Value) -> String {
     format!(
-        "Procedure {} of project {}, in workspace {}: {}\nIt grants, for this run only:\n{}{}\
-         Everything else is decided as for any agent.\n",
+        "Procedure {} of project {}, in workspace {}: {}\nIt grants nothing: its session starts \
+         in Auto, and each call it makes goes through the gate like any other.\n",
         text(&shown["name"]),
         text(&shown["project"]),
         text(&shown["workspace"]),
         text(&shown["description"]),
-        grants_text(shown),
-        children_text(shown),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_grant_is_given_as_grant_equals_mode_from_the_vocabulary() {
-        let grants = grants_of(&["push=allow".into(), "pr-create=ask".into()]).unwrap();
-        assert_eq!(
-            grants,
-            Grants::from([(Grant::Push, Mode::Allow), (Grant::PrCreate, Mode::Ask)])
-        );
-        for (word, said) in [
-            ("push", "GRANT=MODE"),
-            (
-                "shell=allow",
-                "there is no grant shell: the grants are commit, push",
-            ),
-            ("push=always", "the mode is allow or ask"),
-        ] {
-            let error = grants_of(&[word.into()]).unwrap_err().to_string();
-            assert!(error.contains(said), "{word}: {error}");
-        }
-        assert!(grants_of(&["push=allow".into(), "push=ask".into()]).is_err());
-    }
 }

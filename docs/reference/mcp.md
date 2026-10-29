@@ -137,17 +137,20 @@ and the 2026 practice around it:
    - only an agent that can have children gets `approval_answer`;
    - a root gets `ask_user`, a child gets `ask_parent`.
 
-   - `forge_read`, `ticket_read` and `forge_write` are listed to every agent whose project declares
-     a forge or a tracker, in `main` as in a workspace, and `workspace_remove` to every agent: the
-     same tools wherever it works, so that the list never depends on the place nor on a run's
-     grants. Listing grants nothing, the gate still decides each call. In `main` they name the
-     workspace they act on (`workspace`).
+   - `forge_read` and `forge_write` are listed to every agent whose project's repositories
+     declare a forge, `ticket_read` to every agent whose project declares a tracker, in `main` as
+     in a workspace, and `workspace_remove` to every agent: the same tools wherever it works. A
+     tool that could only refuse is not listed: without a forge or a tracker there is nothing for
+     them to read or write. Listing grants nothing: each call goes through the gate's classes and
+     the session's mode (`docs/tools.md`, "The gate"). In `main` they name the workspace they act
+     on (`workspace`).
 
    - only a root gets `procedure` and `project`, the project's procedures and settings
      (`docs/tools.md`, "The project"): a child does its brief.
 
-   A root lead has 19 tools, a leaf worker 12, and three more each when the project declares a forge
-   or a tracker (`forge_read`, `ticket_read`, `forge_write`).
+   A root lead has 19 tools, a leaf worker 12; two more each when the project's repositories
+   declare a forge (`forge_read`, `forge_write`), one more when it declares a tracker
+   (`ticket_read`).
 10. **The idempotency key** of a call is read from the call's `_meta` (`claudecode/toolUseId` for
     Claude). `claude` calls Flottille's server itself and sends it with every call; the bridge
     never sees MCP calls. Check that the `claude` version Flottille pins still sends it, and fall

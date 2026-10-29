@@ -79,6 +79,15 @@ An edit of `providers.toml` by hand is not announced: it is read again at the ne
 | `name` | The provider's name. |
 | `enabled` | Whether it is enabled now. |
 
+### `provider.judge_changed`
+
+The user chose the Auto judge, or none, through the daemon (`provider.set_judge`). An edit of
+`providers.toml` by hand is not announced.
+
+| Field | |
+|---|---|
+| `judge` | `{"provider", "model"}`, `model` `null` for the provider's default; `null` when none is chosen. |
+
 ### `workspace.created`
 
 A workspace was written, before anything is made on disk (`docs/workspaces.md`). Every event of a
@@ -155,8 +164,8 @@ The workspace's worktrees, folder and record are gone. Its branches are kept.
 
 ### `procedure.started`
 
-A procedure's run started (`procedure.start`, `docs/procedures.md`): its root agent holds the grants
-from now on.
+A procedure's run started (`procedure.start`, `docs/procedures.md`). It grants nothing: its calls
+go through the gate's classes and the session's mode.
 
 | Field | |
 |---|---|
@@ -164,13 +173,11 @@ from now on.
 | `project` | Its project. |
 | `workspace` | The workspace it runs in. |
 | `procedure` | The procedure's name. |
-| `grants` | The grants, frozen: grant to `allow` or `ask`. |
-| `children` | Whether the root's children get them too. |
 
 ### `procedure.ended`
 
-A procedure's run ended: its root reported, or ended (stopped or failed). Its grants are given no
-more, even when the root is resumed.
+A procedure's run ended: its root reported, or ended (stopped or failed). A root resumed after it
+does not start its run again.
 
 | Field | |
 |---|---|
@@ -221,6 +228,7 @@ A turn starts with this message.
 |---|---|
 | `agent` | |
 | `text` | The message. |
+| `images` | The names of the images that went with it, when some did (`agent.image` gives each back). An image that did not go is said in `text` instead. |
 
 #### `agent.user_message`, `agent.message`, `agent.thought`
 
@@ -286,7 +294,8 @@ activity.
 | `tool` | The tool's name, without the `mcp__flottille__` prefix. |
 | `call_key` | The call's key (`claudecode/toolUseId`), `null` when the call had none. |
 | `arguments` | The arguments, every text cut at 500 characters and masked. |
-| `gate` | The gate's verdict on the call (`allow`, `deny` or `ask`), `null` for a call refused before it, because the agent has no such tool. |
+| `gate` | The gate's verdict on the call: `allow` (harmless, or allowed by the user), `judged` (to judge, allowed by the judge in Auto), `deny` or `ask`; `null` for a call refused before it, because the agent has no such tool. |
+| `judgement` | The judge's verdict when one was asked, `{"by", "verdict", "reason"}` (`docs/protocol.md`, `approval.list`); else `null`. |
 | `outcome` | `ok`, `refused`, `failed`, or `held` for a call the gate held (`docs/tools.md`, "The gate"). |
 | `duration_ms` | How long it took. |
 | `request` | For a call the user allowed, performed once they did: the request's number; else `null`. |
@@ -303,9 +312,10 @@ The gate held one of the agent's calls: a request was written (`docs/tools.md`, 
 | `tool` | |
 | `call` | The arguments, every text cut at 500 characters and masked. |
 | `reasons` | Why it was held, one sentence each, masked. |
-| `sensitive` | Whether it is never allowed for the tree: it reaches a sensitive place, or a procedure's `ask` grant holds it each time (`docs/procedures.md`). |
-| `kind` | `call`, `catalogue` (a line outside the catalogue in the project folder: once or always) or `action` (a change of the project an agent asked for: once) (`docs/protocol.md`). |
+| `class` | `judge` or `base` (`docs/tools.md`, "The gate"). |
+| `kind` | `call`, or `action` (a change of the project an agent asked for) (`docs/protocol.md`). |
 | `says` | What it does, in words, one sentence each; empty for a `call`. |
+| `judgement` | The judge's verdict when one was asked in Auto (it asked, or failed); else `null`. |
 | `held_by` | `user`, or the id of the agent that holds it. |
 | `forwards`, `state`, `decision`, `created_at`, `decided_at` | As in `approval.list` (`docs/protocol.md`). |
 
@@ -341,7 +351,7 @@ The user answered the request, or the agent that held it denied it.
 |---|---|
 | `number` | |
 | `agent` | The agent that asked. |
-| `decision` | `deny`, `once`, `tree` (allowed for the root's tree), or `always` (a line added to the catalogue). |
+| `decision` | `deny` or `once`. |
 | `by` | `user`, or the id of the agent that denied it (`approval_answer`). |
 
 #### `approval.settled`
@@ -406,6 +416,15 @@ reported. Its process and its runs are stopped; what was queued for it is supers
 |---|---|
 | `agent` | |
 | `reason` | A sentence. |
+
+#### `agent.gate_mode_changed`
+
+The user put the agent's session in Ask or Auto (`agent.mode`, `docs/protocol.md`).
+
+| Field | |
+|---|---|
+| `agent` | |
+| `mode` | `ask` or `auto`. |
 
 #### `agent.resumed`
 
