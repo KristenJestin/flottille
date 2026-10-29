@@ -266,10 +266,17 @@ pub fn decide(call: &Call) -> Verdict {
         return found.verdict(Kind::Action);
     }
     match call.tool {
-        "forge_write" => forge_write(call),
-        "workspace_remove" => {
+        "forge" => forge(call),
+        "tickets" => tickets(call),
+        // A session for the user acts with a root's tools, outside the caller's tree.
+        "agent_launch" if call.args["root"] == true => Found {
+            base: Vec::new(),
+            judge: vec![ROOT_LAUNCH.into()],
+        }
+        .verdict(Kind::Action),
+        "workspace" if call.args["action"] == "remove" => {
             // In `main` it names the workspace; elsewhere it is the agent's own.
-            let named = call.args["workspace"].as_str();
+            let named = call.args["name"].as_str();
             let which = match named.or(call.grant.place.workspace.as_deref()) {
                 Some(name) => format!("the workspace {name}"),
                 None => "a workspace".to_owned(),
@@ -318,27 +325,34 @@ fn files(call: &Call) -> Verdict {
     found.verdict(Kind::Call)
 }
 
-/// `forge_write`: a malformed call is refused; merging what the checks or a review block is
-/// base, since it is the user's own decision; the rest is to judge.
-fn forge_write(call: &Call) -> Verdict {
+/// Why the gate holds `agent_launch` with `root`.
+pub const ROOT_LAUNCH: &str = "it starts a new session for the user, a root agent with the \
+    project's tools, outside this agent's tree";
+
+/// `forge`: its reads are harmless; a malformed call is refused; merging what the checks or a
+/// review block is base, since it is the user's own decision; the other writes are to judge.
+fn forge(call: &Call) -> Verdict {
     let action = call.args["action"].as_str().unwrap_or_default();
-    if !["pr-create", "pr-merge-squash", "pipeline-rerun"].contains(&action) {
-        return Verdict::Deny(format!(
-            "refused: forge_write has no action {action:?}: its actions are pr-create, \
-             pr-merge-squash and pipeline-rerun"
-        ));
-    }
+    let said = match action {
+        "list" | "show" => return Verdict::Allow,
+        "create" => "it opens a pull request on the forge",
+        "comment" => "it comments on a pull request on the forge",
+        "edit" => "it changes the title or the description of a pull request on the forge",
+        "merge" => "it merges a pull request on the forge, by squash",
+        "checks" => "it re-runs the failed jobs of a pipeline on the forge",
+        _ => {
+            return Verdict::Deny(format!(
+                "refused: forge has no action {action:?}: its actions are {FORGE_ACTIONS}"
+            ));
+        }
+    };
     let mut found = Found::default();
-    found.judge(match action {
-        "pr-create" => "it opens a pull request on the forge".into(),
-        "pr-merge-squash" => "it merges a pull request on the forge, by squash".into(),
-        _ => "it re-runs the failed jobs of a pipeline on the forge".into(),
-    });
+    found.judge(said.into());
     if let Some(waived) = call.args.get("waive").filter(|w| !w.is_null()) {
-        if action != "pr-merge-squash" {
+        if action != "merge" {
             return Verdict::Deny(
-                "refused: waive is for pr-merge-squash only: it merges a pull request whose \
-                 checks or review block it, once the user allows it"
+                "refused: waive is for merge only: it merges a pull request whose checks or \
+                 review block it, once the user allows it"
                     .into(),
             );
         }
@@ -354,6 +368,34 @@ fn forge_write(call: &Call) -> Verdict {
         ));
     }
     found.verdict(Kind::Call)
+}
+
+/// The actions of `forge`, as a refusal names them.
+pub const FORGE_ACTIONS: &str = "list, show, create, comment, edit, merge and checks";
+/// The actions of `tickets`, as a refusal names them.
+pub const TICKET_ACTIONS: &str = "list, search, show, create, comment, edit, close and reopen";
+
+/// `tickets`: its reads are harmless, its writes to the tracker to judge.
+fn tickets(call: &Call) -> Verdict {
+    let action = call.args["action"].as_str().unwrap_or_default();
+    let said = match action {
+        "list" | "search" | "show" => return Verdict::Allow,
+        "create" => "it opens a ticket on the tracker",
+        "comment" => "it comments on a ticket on the tracker",
+        "edit" => "it changes the title or the description of a ticket on the tracker",
+        "close" => "it closes a ticket on the tracker",
+        "reopen" => "it reopens a ticket on the tracker",
+        _ => {
+            return Verdict::Deny(format!(
+                "refused: tickets has no action {action:?}: its actions are {TICKET_ACTIONS}"
+            ));
+        }
+    };
+    Found {
+        base: Vec::new(),
+        judge: vec![said.into()],
+    }
+    .verdict(Kind::Call)
 }
 
 /// The tasks whose line is `words`.
@@ -2168,7 +2210,7 @@ fn symbolic_ref_writes(rest: &[String]) -> bool {
 }
 
 /// Whether `git remote` with these words only reads: it lists, shows or gives a URL. Anything else
-/// is taken for a write: a push and `forge_write` trust where the remote leads.
+/// is taken for a write: a push and `forge`'s writes trust where the remote leads.
 fn remote_reads(rest: &[String]) -> bool {
     match rest
         .iter()
@@ -2600,10 +2642,24 @@ mod tests {
             for tool in ["fs_read", "fs_list", "search"] {
                 assert_eq!(fixture.file(tool, "src/a.rs"), Verdict::Allow, "{tool}");
             }
-            for tool in ["run_status", "forge_read", "agent_status"] {
+            for tool in ["run_status", "agent_status"] {
                 assert_eq!(
                     fixture.judge(tool, json!({}), Some(&fixture.never)),
                     Verdict::Allow
+                );
+            }
+            for (tool, action) in [
+                ("forge", "list"),
+                ("forge", "show"),
+                ("tickets", "list"),
+                ("tickets", "search"),
+                ("tickets", "show"),
+                ("workspace", "list"),
+            ] {
+                assert_eq!(
+                    fixture.judge(tool, json!({"action": action}), Some(&fixture.never)),
+                    Verdict::Allow,
+                    "{tool} {action}"
                 );
             }
         }
@@ -2732,27 +2788,68 @@ mod tests {
     #[test]
     fn to_judge_forge_writes_and_workspace_removal_are_judged() {
         let fixture = Fixture::workspace();
-        for action in ["pr-create", "pr-merge-squash", "pipeline-rerun"] {
+        for action in ["create", "comment", "edit", "merge", "checks"] {
             let verdict = fixture.judge(
-                "forge_write",
-                json!({"action": action, "repository": "."}),
+                "forge",
+                json!({"action": action, "repository": ".", "number": 1}),
                 Some(&fixture.never),
             );
             assert!(to_judge(&verdict), "{action}");
         }
         assert!(to_judge(&fixture.judge(
-            "workspace_remove",
-            json!({}),
+            "workspace",
+            json!({"action": "remove"}),
             Some(&fixture.never)
         )));
+    }
+
+    #[test]
+    fn to_judge_ticket_writes_are_judged_and_an_unknown_action_refused() {
+        let fixture = Fixture::main();
+        for action in ["create", "comment", "edit", "close", "reopen"] {
+            let verdict = fixture.judge(
+                "tickets",
+                json!({"action": action, "ticket": "#1"}),
+                Some(&fixture.never),
+            );
+            assert!(to_judge(&verdict), "{action}");
+        }
+        assert!(denied(&fixture.judge(
+            "tickets",
+            json!({"action": "delete"}),
+            Some(&fixture.never)
+        )));
+    }
+
+    #[test]
+    fn to_judge_a_session_started_for_the_user_is_judged_as_an_action() {
+        let fixture = Fixture::main();
+        let verdict = fixture.judge(
+            "agent_launch",
+            json!({"title": "t", "brief": "b", "root": true}),
+            Some(&fixture.never),
+        );
+        assert!(to_judge(&verdict), "{verdict:?}");
+        let Verdict::Ask(ask) = verdict else {
+            unreachable!()
+        };
+        assert_eq!(ask.kind, Kind::Action);
+        assert_eq!(ask.reasons, [ROOT_LAUNCH]);
+        // A child launched is the caller's own work, as before.
+        let child = fixture.judge(
+            "agent_launch",
+            json!({"title": "t", "brief": "b"}),
+            Some(&fixture.never),
+        );
+        assert_eq!(child, Verdict::Allow);
     }
 
     #[test]
     fn workspace_remove_in_main_is_judged_and_names_the_workspace_it_removes() {
         let fixture = Fixture::main();
         let verdict = fixture.judge(
-            "workspace_remove",
-            json!({"workspace": "login"}),
+            "workspace",
+            json!({"action": "remove", "name": "login"}),
             Some(&fixture.never),
         );
         assert!(to_judge(&verdict), "{verdict:?}");
@@ -2977,8 +3074,8 @@ mod tests {
             fixture.run("bkt pr list"),
             fixture.run("acli jira workitem view ABC-1"),
             fixture.judge(
-                "forge_write",
-                json!({"action": "pr-merge-squash", "repository": ".", "waive": "ship it"}),
+                "forge",
+                json!({"action": "merge", "repository": ".", "waive": "ship it"}),
                 Some(&fixture.never),
             ),
         ] {
@@ -3015,13 +3112,13 @@ mod tests {
             fixture.run("gh auth status --show-token"),
             fixture.run("flottille agent list"),
             fixture.judge(
-                "forge_write",
+                "forge",
                 json!({"action": "pr-delete", "repository": "."}),
                 Some(&fixture.never),
             ),
             fixture.judge(
-                "forge_write",
-                json!({"action": "pr-create", "repository": ".", "waive": "x"}),
+                "forge",
+                json!({"action": "create", "repository": ".", "waive": "x"}),
                 Some(&fixture.never),
             ),
         ] {

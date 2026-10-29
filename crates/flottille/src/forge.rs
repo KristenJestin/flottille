@@ -1,10 +1,10 @@
 //! Forges (`docs/forges.md`): what the forge of each repository of a workspace says of the
-//! workspace's branch, its pull request and their checks, and the writes of `forge_write` that a
-//! what a session sends (`docs/commands.md`). Through the user's own command line (`gh` for
+//! workspace's branch, its pull request and their checks, the pull requests of a repository, and
+//! the writes of `forge` that a session sends (`docs/commands.md`). Through the user's own command line (`gh` for
 //! GitHub, `bkt` for Bitbucket), spawned without a shell, with the user's own sign-in: Flottille
 //! never reads, keeps nor prints a token, and of `gh auth status` it reads the exit code alone.
 //!
-//! A workspace is read on demand (`workspace.forge`, the agents' `forge_read`), and again about
+//! A workspace is read on demand (`workspace.forge`, the agents' `forge show`), and again about
 //! once a minute while a client watches it, less often while `gh` or `bkt` fails. Nothing is read
 //! while nobody looks. Every text kept from them is masked before it is shown or stored.
 
@@ -40,7 +40,7 @@ const LONGEST_MS: u64 = 16 * 60_000;
 const GH_TIME: Duration = Duration::from_secs(30);
 /// A call of `ssh -G` is cut after this.
 const SSH_TIME: Duration = Duration::from_secs(5);
-/// What `forge_read` shows of one comment at most.
+/// What `forge show` shows of one comment at most.
 const COMMENT_CHARS: usize = 2000;
 /// What `gh pr view` is asked for.
 const FIELDS: &str = "number,title,state,isDraft,baseRefName,url,reviewDecision,\
@@ -203,7 +203,7 @@ async fn ssh_host(host: &str) -> Result<String, String> {
     }
 }
 
-/// Where a repository's remote leads, as a workspace records it and a push and `forge_write`
+/// Where a repository's remote leads, as a workspace records it and a push and `forge`'s writes
 /// check it: its fetch and push URLs as git uses them (`insteadOf` applied), credentials taken
 /// out, sorted; empty when git names none.
 pub async fn urls_of(folder: &Path, remote: &str) -> Vec<String> {
@@ -838,26 +838,335 @@ pub fn poll(daemon: &Arc<Daemon>) {
     }
 }
 
+/// A call of `forge`: its action and what the action takes.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ForgeRead {
+pub(crate) struct ForgeCall {
+    action: String,
     workspace: Option<String>,
     repository: Option<String>,
+    number: Option<u64>,
+    state: Option<String>,
+    branch: Option<String>,
     detail: Option<String>,
+    title: Option<String>,
+    body: Option<String>,
+    #[serde(default)]
+    draft: bool,
+    /// merge: why the user lets a pull request whose checks or review block it be merged; the
+    /// gate held the call for them.
+    waive: Option<String>,
 }
 
-/// `forge_read`: the pull requests of the agent's own workspace's repositories, their checks and
-/// their review comments. Never another repository.
-pub async fn forge_read(daemon: &Daemon, place: &Place, args: Value) -> Outcome {
-    let asked: ForgeRead = match arguments("forge_read", args) {
+/// `forge`, once the gate let it through: the pull requests of the project's repositories, read
+/// and written through the user's own `gh` or `bkt`. Never a repository outside the agent's
+/// place.
+pub async fn forge(daemon: &Daemon, place: &Place, args: Value) -> Outcome {
+    let asked: ForgeCall = match arguments("forge", args) {
         Ok(asked) => asked,
         Err(refusal) => return refusal,
     };
-    let full = match full_detail("forge_read", asked.detail.as_deref()) {
+    match (asked.action.as_str(), asked.number) {
+        ("list", _) => forge_list(daemon, place, asked).await,
+        ("show", None) => forge_read(daemon, place, asked).await,
+        ("show", Some(number)) => forge_show(daemon, place, asked, number).await,
+        ("create" | "merge" | "checks", _) => forge_write(daemon, place, asked).await,
+        ("comment" | "edit", _) => forge_note(daemon, place, asked).await,
+        (action, _) => Outcome::Refused(format!(
+            "refused: forge has no action {action:?}: its actions are {}",
+            crate::gate::FORGE_ACTIONS
+        )),
+    }
+}
+
+/// The repositories of the agent's place as a forge is read for them: its workspace's, or the
+/// project's in `main`, each with its declared forge.
+fn place_checkouts(daemon: &Daemon, place: &Place) -> Result<Vec<Checkout>, Outcome> {
+    let project = projects::load_project(daemon, &place.project)
+        .map_err(|failure| Outcome::Failed(failure.message))?;
+    let Some(name) = &place.workspace else {
+        return Ok(project
+            .repositories
+            .iter()
+            .map(|r| Checkout {
+                path: r.path.clone(),
+                folder: match r.path.as_str() {
+                    "." => project.folder.clone(),
+                    path => project.folder.join(path),
+                },
+                remote: r.remote.clone(),
+                declared: r.forge.clone(),
+            })
+            .collect());
+    };
+    match daemon.read(|store| store.workspace(&place.project, name)) {
+        Ok(Some(workspace)) => Ok(repositories_of(&workspace, Some(&project))),
+        Ok(None) => Err(Outcome::Failed(format!("the workspace {name} is gone"))),
+        Err(error) => Err(Outcome::Failed(error.to_string())),
+    }
+}
+
+/// The repositories a call acts on: the one it names, or every one when it names none and `one`
+/// is not needed.
+fn chosen(
+    checkouts: Vec<Checkout>,
+    asked: Option<&str>,
+    action: &str,
+    one: bool,
+) -> Result<Vec<Checkout>, Outcome> {
+    let names = || {
+        let names: Vec<&str> = checkouts.iter().map(|r| r.path.as_str()).collect();
+        names.join(", ")
+    };
+    match asked {
+        Some(asked) if checkouts.iter().any(|r| r.path == asked) => {
+            Ok(checkouts.into_iter().filter(|r| r.path == asked).collect())
+        }
+        Some(asked) => Err(Outcome::Refused(format!(
+            "refused: {asked} is not a repository of this agent's place: it has {}; forge acts \
+             only on those",
+            names()
+        ))),
+        None if one && checkouts.len() != 1 => Err(Outcome::Refused(format!(
+            "refused: forge {action} needs repository, one of {}",
+            names()
+        ))),
+        None => Ok(checkouts),
+    }
+}
+
+/// A pull request of a list: enough to name it and pick it.
+pub(crate) struct Listed {
+    pub number: u64,
+    pub title: String,
+    pub state: &'static str,
+    pub branch: String,
+    pub base: String,
+    pub url: String,
+}
+
+/// `forge list`: the pull requests of the place's repositories, by state and source branch.
+async fn forge_list(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
+    let state = asked.state.as_deref().unwrap_or("open");
+    if !["open", "closed", "merged", "all"].contains(&state) {
+        return Outcome::Refused(format!(
+            "refused: forge list has no state {state:?}: its states are open (the default), \
+             closed, merged and all"
+        ));
+    }
+    let checkouts = match place_checkouts(daemon, place)
+        .and_then(|all| chosen(all, asked.repository.as_deref(), "list", false))
+    {
+        Ok(checkouts) => checkouts,
+        Err(refusal) => return refusal,
+    };
+    let branch = asked.branch.as_deref();
+    let mut text = match branch {
+        Some(branch) => format!("The {state} pull requests of {branch}:\n"),
+        None => format!("The {state} pull requests:\n"),
+    };
+    let mut contexts = bitbucket::Contexts::default();
+    for checkout in &checkouts {
+        let listed = match declared_forge(checkout).await {
+            Err(None) => Err(NO_FORGE.to_owned()),
+            Err(Some(why)) => Err(why),
+            Ok(forge @ Forge::GitHub { .. }) => match signed_in().await {
+                Err(problem) => Err(problem),
+                Ok(()) => gh_list(&forge, state, branch).await,
+            },
+            Ok(forge @ Forge::Bitbucket { .. }) => match contexts.of(&forge).await {
+                Err(problem) => Err(problem),
+                Ok(context) => bitbucket::pulls_in(&forge, &context, state, branch).await,
+            },
+        };
+        match listed {
+            Err(why) => text.push_str(&format!("\n{}: {why}.\n", checkout.path)),
+            Ok(pulls) if pulls.is_empty() => {
+                text.push_str(&format!("\n{}: none.\n", checkout.path))
+            }
+            Ok(pulls) => {
+                text.push_str(&format!("\n{} ({}):\n", checkout.path, pulls.len()));
+                for pull in pulls {
+                    text.push_str(&format!(
+                        "- #{} {}, {} into {}: {}  {}\n",
+                        pull.number, pull.state, pull.branch, pull.base, pull.title, pull.url
+                    ));
+                }
+            }
+        }
+    }
+    text.push_str("\nforge {\"action\": \"show\", \"repository\": …, \"number\": …} reads one.");
+    Outcome::Done(text)
+}
+
+/// How many pull requests one list asks `gh` for.
+const LISTED: &str = "100";
+
+/// `gh pr list` of the repository, in `state`, of `branch` when given.
+async fn gh_list(forge: &Forge, state: &str, branch: Option<&str>) -> Result<Vec<Listed>, String> {
+    let repo = forge.gh_repository();
+    let mut args = vec![
+        "pr", "list", "-R", &repo, "--state", state, "--limit", LISTED,
+    ];
+    if let Some(branch) = branch {
+        args.extend(["--head", branch]);
+    }
+    args.extend([
+        "--json",
+        "number,title,state,isDraft,headRefName,baseRefName,url",
+    ]);
+    let listed = gh_json(&args).await?;
+    Ok(listed
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|pull| {
+            let text = |key: &str| masked(pull[key].as_str().unwrap_or_default());
+            Some(Listed {
+                number: pull["number"].as_u64()?,
+                title: text("title"),
+                state: Pull::of(pull)?.state,
+                branch: text("headRefName"),
+                base: text("baseRefName"),
+                url: text("url"),
+            })
+        })
+        .collect())
+}
+
+/// `forge show` with a number: that pull request of one repository of the place, its checks,
+/// review and comments.
+async fn forge_show(daemon: &Daemon, place: &Place, asked: ForgeCall, number: u64) -> Outcome {
+    let full = match full_detail("forge", asked.detail.as_deref()) {
         Ok(full) => full,
         Err(refusal) => return refusal,
     };
-    let name = match workspace_named(daemon, place, asked.workspace.as_deref(), "forge_read") {
+    let checkout = match place_checkouts(daemon, place)
+        .and_then(|all| chosen(all, asked.repository.as_deref(), "show", true))
+    {
+        Ok(mut checkouts) => checkouts.remove(0),
+        Err(refusal) => return refusal,
+    };
+    let forge = match declared_forge(&checkout).await {
+        Ok(forge) => forge,
+        Err(None) => return Outcome::Refused(format!("refused: {}: {NO_FORGE}", checkout.path)),
+        Err(Some(why)) => return Outcome::Refused(why),
+    };
+    let pull = match &forge {
+        Forge::GitHub { .. } => match signed_in().await {
+            Err(problem) => Err(problem),
+            Ok(()) => {
+                let repo = forge.gh_repository();
+                let number = number.to_string();
+                gh_json(&["pr", "view", &number, "-R", &repo, "--json", FIELDS])
+                    .await
+                    .map(|viewed| Pull::of(&viewed))
+            }
+        },
+        Forge::Bitbucket { .. } => match bitbucket::Contexts::default().of(&forge).await {
+            Err(problem) => Err(problem),
+            Ok(context) => bitbucket::pull_numbered(&forge, &context, number).await,
+        },
+    };
+    match pull {
+        Err(why) => Outcome::Failed(why),
+        Ok(None) => Outcome::Refused(format!(
+            "refused: {} has no pull request #{number}",
+            forge.slug()
+        )),
+        Ok(Some(pull)) => {
+            let again = format!(
+                "{{\"action\": \"show\", \"repository\": {}, \"number\": {number}, \
+                 \"detail\": \"full\"}}",
+                Value::from(checkout.path.as_str())
+            );
+            let mut text = String::new();
+            pull_text(
+                &mut text,
+                &format!("{} ({})", checkout.path, forge.slug()),
+                &pull,
+                full,
+                &again,
+            );
+            Outcome::Done(text.trim_start().to_owned())
+        }
+    }
+}
+
+/// `forge comment` and `forge edit`: a comment on a pull request of one repository of the place,
+/// or a new title or description of it.
+async fn forge_note(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
+    let action = asked.action.as_str();
+    let Some(number) = asked.number else {
+        return Outcome::Refused(format!(
+            "refused: forge {action} needs number, the pull request's: forge list lists them"
+        ));
+    };
+    let body = asked.body.as_deref().filter(|b| !b.trim().is_empty());
+    let title = asked.title.as_deref().filter(|t| !t.trim().is_empty());
+    match (action, body, title) {
+        ("comment", None, _) => {
+            return Outcome::Refused("refused: forge comment needs body, the comment".into());
+        }
+        ("edit", None, None) => {
+            return Outcome::Refused(
+                "refused: forge edit needs title, body or both: what changes".into(),
+            );
+        }
+        _ => {}
+    }
+    let checkout = match place_checkouts(daemon, place)
+        .and_then(|all| chosen(all, asked.repository.as_deref(), action, true))
+    {
+        Ok(mut checkouts) => checkouts.remove(0),
+        Err(refusal) => return refusal,
+    };
+    let forge = match declared_forge(&checkout).await {
+        Ok(forge) => forge,
+        Err(None) => {
+            return Outcome::Refused(format!(
+                "refused: {}: {NO_FORGE}; nothing was written: ask the user to set it",
+                checkout.path
+            ));
+        }
+        Err(Some(why)) => return Outcome::Refused(why),
+    };
+    let slug = forge.slug();
+    let number = number.to_string();
+    let done = match &forge {
+        Forge::Bitbucket { .. } => bitbucket::note(&forge, action, &number, title, body).await,
+        Forge::GitHub { .. } => {
+            if let Err(problem) = signed_in().await {
+                return Outcome::Failed(problem);
+            }
+            let repo = forge.gh_repository();
+            let mut args = vec!["pr", action, &number, "-R", &repo];
+            if let Some(title) = title {
+                args.extend(["--title", title]);
+            }
+            if let Some(body) = body {
+                args.extend(["--body", body]);
+            }
+            gh_text(&args).await.map(|_| ())
+        }
+    };
+    match (done, action) {
+        (Err(why), _) => Outcome::Failed(why),
+        (Ok(()), "comment") => Outcome::Done(format!(
+            "The comment was posted on pull request #{number} of {slug}."
+        )),
+        (Ok(()), _) => Outcome::Done(format!("Pull request #{number} of {slug} was changed.")),
+    }
+}
+
+/// `forge show` without a number: the pull requests of a workspace's branch, their checks and
+/// their review comments. Never another repository.
+async fn forge_read(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
+    let full = match full_detail("forge", asked.detail.as_deref()) {
+        Ok(full) => full,
+        Err(refusal) => return refusal,
+    };
+    let name = match workspace_named(daemon, place, asked.workspace.as_deref(), "forge") {
         Ok(name) => name,
         Err(refusal) => return refusal,
     };
@@ -878,7 +1187,7 @@ pub async fn forge_read(daemon: &Daemon, place: &Place, args: Value) -> Outcome 
             let names: Vec<&str> = repositories.iter().map(|r| r.path.as_str()).collect();
             return Outcome::Refused(format!(
                 "refused: {asked} is not a repository of this agent's workspace: it has {}; \
-                 forge_read reads only those",
+                 forge reads only those",
                 names.join(", ")
             ));
         }
@@ -891,21 +1200,6 @@ pub async fn forge_read(daemon: &Daemon, place: &Place, args: Value) -> Outcome 
         full,
         asked.repository.as_deref(),
     ))
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ForgeWrite {
-    workspace: Option<String>,
-    action: String,
-    repository: String,
-    title: Option<String>,
-    body: Option<String>,
-    #[serde(default)]
-    draft: bool,
-    /// pr-merge-squash: why the user lets a pull request whose checks or review block it be
-    /// merged; the gate held the call for them.
-    waive: Option<String>,
 }
 
 /// What blocks the merge of a pull request with these checks and this review; none when nothing
@@ -932,15 +1226,16 @@ fn blocks(checks: &[(String, &'static str)], review: Option<&str>) -> Option<Str
     (!blocks.is_empty()).then(|| blocks.join(", "))
 }
 
-/// `forge_write`, once the gate let it through: one write to the forge of
-/// one repository of the agent's own workspace, for the workspace's branch only, through the
-/// user's own `gh`.
-pub async fn forge_write(daemon: &Daemon, place: &Place, args: Value) -> Outcome {
-    let asked: ForgeWrite = match arguments("forge_write", args) {
-        Ok(asked) => asked,
-        Err(refusal) => return refusal,
+/// `forge` `create`, `merge` and `checks`: one write to the forge of one repository of a
+/// workspace, for the workspace's branch only, through the user's own `gh` or `bkt`.
+async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
+    let Some(asked_repository) = asked.repository.clone() else {
+        return Outcome::Refused(format!(
+            "refused: forge {} needs repository, one of the workspace's",
+            asked.action
+        ));
     };
-    let name = match workspace_named(daemon, place, asked.workspace.as_deref(), "forge_write") {
+    let name = match workspace_named(daemon, place, asked.workspace.as_deref(), "forge") {
         Ok(name) => name,
         Err(refusal) => return refusal,
     };
@@ -958,13 +1253,12 @@ pub async fn forge_write(daemon: &Daemon, place: &Place, args: Value) -> Outcome
     let found = repositories
         .iter()
         .zip(&workspace.repositories)
-        .find(|(checkout, _)| checkout.path == asked.repository);
+        .find(|(checkout, _)| checkout.path == asked_repository);
     let Some((checkout, repository)) = found else {
         let names: Vec<&str> = repositories.iter().map(|r| r.path.as_str()).collect();
         return Outcome::Refused(format!(
-            "refused: {} is not a repository of this agent's workspace: it has {}; forge_write \
-             writes only for those",
-            asked.repository,
+            "refused: {asked_repository} is not a repository of the workspace {name}: it has \
+             {}; forge writes only for those",
             names.join(", ")
         ));
     };
@@ -975,8 +1269,8 @@ pub async fn forge_write(daemon: &Daemon, place: &Place, args: Value) -> Outcome
         Ok(forge) => forge,
         Err(None) => {
             return Outcome::Refused(format!(
-                "refused: {}: {NO_FORGE}; nothing was written: ask the user to set it",
-                asked.repository
+                "refused: {asked_repository}: {NO_FORGE}; nothing was written: ask the user to \
+                 set it"
             ));
         }
         Err(Some(why)) => return Outcome::Refused(why),
@@ -993,10 +1287,10 @@ pub async fn forge_write(daemon: &Daemon, place: &Place, args: Value) -> Outcome
     let slug = forge.slug();
     let repo = forge.gh_repository();
     match asked.action.as_str() {
-        "pr-create" => {
+        "create" => {
             let Some(title) = asked.title.filter(|t| !t.trim().is_empty()) else {
                 return Outcome::Refused(
-                    "refused: pr-create needs a title: say what the pull request does".into(),
+                    "refused: create needs a title: say what the pull request does".into(),
                 );
             };
             let base = &repository.base.branch;
@@ -1019,7 +1313,7 @@ pub async fn forge_write(daemon: &Daemon, place: &Place, args: Value) -> Outcome
                 Err(why) => Outcome::Failed(why),
             }
         }
-        "pr-merge-squash" => {
+        "merge" => {
             let base = &repository.base.branch;
             let listed = match gh_json(&[
                 "pr",
@@ -1085,7 +1379,7 @@ pub async fn forge_write(daemon: &Daemon, place: &Place, args: Value) -> Outcome
                 Err(why) => Outcome::Failed(why),
             }
         }
-        "pipeline-rerun" => {
+        "checks" => {
             let runs = match gh_json(&[
                 "run",
                 "list",
@@ -1132,15 +1426,12 @@ pub async fn forge_write(daemon: &Daemon, place: &Place, args: Value) -> Outcome
                 done.join(", ")
             ))
         }
-        action => Outcome::Refused(format!(
-            "refused: forge_write has no action {action:?}: its actions are pr-create, \
-             pr-merge-squash and pipeline-rerun"
-        )),
+        action => Outcome::Refused(format!("refused: forge {action} writes nothing here")),
     }
 }
 
 /// `gh <args>`'s output, masked, or a sentence saying why it failed.
-async fn gh_text(args: &[&str]) -> Result<String, String> {
+pub(crate) async fn gh_text(args: &[&str]) -> Result<String, String> {
     let shown = args[..2].join(" ");
     match gh(args).await {
         Ok((true, stdout, _)) => Ok(masked(&stdout)),
@@ -1156,15 +1447,20 @@ async fn gh_text(args: &[&str]) -> Result<String, String> {
     }
 }
 
-/// What `forge_read` answers: the texts of the comments and reviews only when `full`, otherwise
+/// What `forge show` answers for a workspace: the texts of the comments and reviews only when `full`, otherwise
 /// their number and the way to get them, for the `repository` that was asked when one was.
 fn read_text(workspace: &Workspace, read: &Read, full: bool, asked: Option<&str>) -> String {
     let again = match asked {
         Some(repository) => format!(
-            "{{\"repository\": {}, \"detail\": \"full\"}}",
+            "{{\"action\": \"show\", \"workspace\": {}, \"repository\": {}, \"detail\": \
+             \"full\"}}",
+            Value::from(workspace.name.as_str()),
             Value::from(repository)
         ),
-        None => "{\"detail\": \"full\"}".to_owned(),
+        None => format!(
+            "{{\"action\": \"show\", \"workspace\": {}, \"detail\": \"full\"}}",
+            Value::from(workspace.name.as_str())
+        ),
     };
     let mut text = format!(
         "The pull requests of workspace {}, branch {}:\n",
@@ -1198,60 +1494,66 @@ fn read_text(workspace: &Workspace, read: &Read, full: bool, asked: Option<&str>
             ));
             continue;
         };
-        text.push_str(&format!(
-            "\n{named}: pull request #{}, {}, into {}: {}\n  {}\n",
-            pull.number, pull.state, pull.base, pull.title, pull.url
-        ));
-        if let Some(review) = pull.review {
-            text.push_str(&format!("  review: {review}\n"));
-        }
-        if !pull.reviewers.is_empty() {
+        pull_text(&mut text, &named, pull, full, &again);
+    }
+    text
+}
+
+/// A pull request, as `forge show` says it: the texts of its comments and reviews only when
+/// `full`, otherwise their number and `again`, the call that gives them.
+fn pull_text(text: &mut String, named: &str, pull: &Pull, full: bool, again: &str) {
+    text.push_str(&format!(
+        "\n{named}: pull request #{}, {}, into {}: {}\n  {}\n",
+        pull.number, pull.state, pull.base, pull.title, pull.url
+    ));
+    if let Some(review) = pull.review {
+        text.push_str(&format!("  review: {review}\n"));
+    }
+    if !pull.reviewers.is_empty() {
+        let each: Vec<String> = pull
+            .reviewers
+            .iter()
+            .map(|(name, state)| format!("{name} {state}"))
+            .collect();
+        text.push_str(&format!("  reviewers: {}\n", each.join(", ")));
+    }
+    match pull.mark() {
+        None => text.push_str("  checks: none\n"),
+        Some(mark) => {
             let each: Vec<String> = pull
-                .reviewers
+                .checks
                 .iter()
                 .map(|(name, state)| format!("{name} {state}"))
                 .collect();
-            text.push_str(&format!("  reviewers: {}\n", each.join(", ")));
-        }
-        match pull.mark() {
-            None => text.push_str("  checks: none\n"),
-            Some(mark) => {
-                let each: Vec<String> = pull
-                    .checks
-                    .iter()
-                    .map(|(name, state)| format!("{name} {state}"))
-                    .collect();
-                text.push_str(&format!("  checks: {mark} ({})\n", each.join(", ")));
-            }
-        }
-        for (title, comments) in [("comments", &pull.comments), ("reviews", &pull.reviews)] {
-            let said: Vec<&Comment> = comments.iter().filter(|c| !c.body.is_empty()).collect();
-            if said.is_empty() {
-                continue;
-            }
-            if !full {
-                text.push_str(&format!(
-                    "  {title}: {}, read them with forge_read {again}\n",
-                    said.len()
-                ));
-                continue;
-            }
-            text.push_str(&format!("  {title} ({}):\n", said.len()));
-            for comment in said {
-                let state = comment
-                    .state
-                    .as_deref()
-                    .map_or(String::new(), |s| format!(", {s}"));
-                let body: String = comment.body.chars().take(COMMENT_CHARS).collect();
-                text.push_str(&format!(
-                    "  - {}{state}: {}\n",
-                    comment.author,
-                    body.replace('\n', "\n    ")
-                ));
-            }
+            text.push_str(&format!("  checks: {mark} ({})\n", each.join(", ")));
         }
     }
-    text
+    for (title, comments) in [("comments", &pull.comments), ("reviews", &pull.reviews)] {
+        let said: Vec<&Comment> = comments.iter().filter(|c| !c.body.is_empty()).collect();
+        if said.is_empty() {
+            continue;
+        }
+        if !full {
+            text.push_str(&format!(
+                "  {title}: {}, read them with forge {again}\n",
+                said.len()
+            ));
+            continue;
+        }
+        text.push_str(&format!("  {title} ({}):\n", said.len()));
+        for comment in said {
+            let state = comment
+                .state
+                .as_deref()
+                .map_or(String::new(), |s| format!(", {s}"));
+            let body: String = comment.body.chars().take(COMMENT_CHARS).collect();
+            text.push_str(&format!(
+                "  - {}{state}: {}\n",
+                comment.author,
+                body.replace('\n', "\n    ")
+            ));
+        }
+    }
 }
 
 #[cfg(test)]

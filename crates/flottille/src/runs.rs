@@ -457,7 +457,7 @@ pub fn groups_of(daemon: &Daemon, agent: &str) -> Vec<u32> {
         .collect()
 }
 
-/// No forge token, the forge command lines' configuration in `empty` (`forge_write` is the way to
+/// No forge token, the forge command lines' configuration in `empty` (`forge` is the way to
 /// the forge), and no hook: the hooks are files the agent writes, and a commit or a push the gate
 /// let through would run them where it does not look. Every push URL is rewritten to a path that
 /// is no remote (`url.<nowhere>.pushInsteadOf` of every URL), unless `lift`: the run is itself a

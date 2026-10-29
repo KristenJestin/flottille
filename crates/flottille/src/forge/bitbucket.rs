@@ -9,7 +9,7 @@
 
 use serde_json::Value;
 
-use super::{Comment, Forge, ForgeWrite, Gh, Pull, blocks, masked, run};
+use super::{Comment, Forge, ForgeCall, Gh, Pull, blocks, masked, run};
 use crate::mcp::Outcome;
 
 /// How many pull requests one list asks for: the newest ones.
@@ -272,6 +272,36 @@ async fn pulls(forge: &Forge, context: &str, state: &str) -> Result<Vec<Listed>,
         .collect())
 }
 
+/// `forge list` of a Bitbucket repository: its newest pull requests in `state`, of `branch` when
+/// given. `bkt` filters by state and not by branch, so the branch is picked from them; it has no
+/// draft and no state for `closed` and `merged` together.
+pub(super) async fn pulls_in(
+    forge: &Forge,
+    context: &str,
+    state: &str,
+    branch: Option<&str>,
+) -> Result<Vec<super::Listed>, String> {
+    let asked = match state {
+        "open" => "OPEN",
+        "merged" => "MERGED",
+        "closed" => "DECLINED",
+        _ => "all",
+    };
+    Ok(pulls(forge, context, asked)
+        .await?
+        .into_iter()
+        .filter(|pull| branch.is_none_or(|branch| pull.branch == branch))
+        .map(|pull| super::Listed {
+            number: pull.id,
+            title: pull.title,
+            state: pull.state,
+            branch: pull.branch,
+            base: pull.base,
+            url: pull.url,
+        })
+        .collect())
+}
+
 /// The pull request of `branch`, the newest when there are several; none when there is none.
 /// `bkt` filters by state and not by branch, so the newest are listed and the branch is picked
 /// from them.
@@ -280,14 +310,35 @@ pub(super) async fn pull_of(
     context: &str,
     branch: &str,
 ) -> Result<Option<Pull>, String> {
-    let Some(found) = pulls(forge, context, "all")
+    let found = pulls(forge, context, "all")
         .await?
         .into_iter()
         .filter(|pull| pull.branch == branch)
-        .max_by_key(|pull| pull.id)
-    else {
-        return Ok(None);
-    };
+        .max_by_key(|pull| pull.id);
+    match found {
+        Some(found) => detailed(forge, context, found).await.map(Some),
+        None => Ok(None),
+    }
+}
+
+/// The pull request numbered `number`, among the newest; none when they do not hold it.
+pub(super) async fn pull_numbered(
+    forge: &Forge,
+    context: &str,
+    number: u64,
+) -> Result<Option<Pull>, String> {
+    let found = pulls(forge, context, "all")
+        .await?
+        .into_iter()
+        .find(|pull| pull.id == number);
+    match found {
+        Some(found) => detailed(forge, context, found).await.map(Some),
+        None => Ok(None),
+    }
+}
+
+/// A listed pull request with its checks, reviewers and comments.
+async fn detailed(forge: &Forge, context: &str, found: Listed) -> Result<Pull, String> {
     let id = found.id.to_string();
     let checks = checks_of(forge, context, &id).await?;
     let (reviewers, comments) = if cloud(forge) {
@@ -318,7 +369,7 @@ pub(super) async fn pull_of(
         .await?;
         (found.reviewers, dc_comments(&activities))
     };
-    Ok(Some(Pull {
+    Ok(Pull {
         number: found.id,
         title: found.title,
         state: found.state,
@@ -329,7 +380,7 @@ pub(super) async fn pull_of(
         comments,
         reviews: Vec::new(),
         reviewers,
-    }))
+    })
 }
 
 /// The checks of the pull request `id`: the commit statuses of its source commit.
@@ -445,15 +496,42 @@ fn dc_comments(page: &Value) -> Vec<Comment> {
     comments
 }
 
-/// `forge_write` for a Bitbucket repository, once the gate let it through
-/// and the remote was found where the workspace was created: the same actions and the same
-/// checks as for GitHub, through `bkt`.
+/// `forge comment` and `forge edit` of a Bitbucket pull request: `bkt pr comment <id> --text` and
+/// `bkt pr edit <id> --title --description` (`pkg/cmd/pr/pr.go:1654-1669`, `:719-762`).
+pub(super) async fn note(
+    forge: &Forge,
+    action: &str,
+    number: &str,
+    title: Option<&str>,
+    body: Option<&str>,
+) -> Result<(), String> {
+    let context = Contexts::default().of(forge).await?;
+    let mut flags = Vec::new();
+    match action {
+        "comment" => flags.extend(["--text", body.unwrap_or_default()]),
+        _ => {
+            if let Some(title) = title {
+                flags.extend(["--title", title]);
+            }
+            if let Some(body) = body {
+                flags.extend(["--description", body]);
+            }
+        }
+    }
+    text(&command(forge, &context, &["pr", action, number], &flags))
+        .await
+        .map(|_| ())
+}
+
+/// `forge` `create`, `merge` and `checks` for a Bitbucket repository, once the gate let it
+/// through and the remote was found where the workspace was created: the same actions and the
+/// same checks as for GitHub, through `bkt`.
 pub(super) async fn write(
     forge: &Forge,
     branch: &str,
     base: &str,
     reviewers: &[String],
-    asked: ForgeWrite,
+    asked: ForgeCall,
 ) -> Outcome {
     let slug = forge.slug();
     let context = match Contexts::default().of(forge).await {
@@ -462,10 +540,10 @@ pub(super) async fn write(
     };
     let context = context.as_str();
     match asked.action.as_str() {
-        "pr-create" => {
+        "create" => {
             let Some(title) = asked.title.filter(|t| !t.trim().is_empty()) else {
                 return Outcome::Refused(
-                    "refused: pr-create needs a title: say what the pull request does".into(),
+                    "refused: create needs a title: say what the pull request does".into(),
                 );
             };
             if asked.draft {
@@ -516,7 +594,7 @@ pub(super) async fn write(
                 url.unwrap_or_else(|| said.trim().to_owned())
             ))
         }
-        "pr-merge-squash" => {
+        "merge" => {
             let open = match pulls(forge, context, "OPEN").await {
                 Ok(open) => open,
                 Err(why) => return Outcome::Failed(why),
@@ -582,7 +660,7 @@ pub(super) async fn write(
                 Err(why) => Outcome::Failed(why),
             }
         }
-        "pipeline-rerun" => {
+        "checks" => {
             if !cloud(forge) {
                 return Outcome::Refused(format!(
                     "refused: Bitbucket Data Center has no pipelines bkt can run, and {slug} is \
@@ -637,9 +715,6 @@ pub(super) async fn write(
                 Err(why) => Outcome::Failed(why),
             }
         }
-        action => Outcome::Refused(format!(
-            "refused: forge_write has no action {action:?}: its actions are pr-create, \
-             pr-merge-squash and pipeline-rerun"
-        )),
+        action => Outcome::Refused(format!("refused: forge {action} writes nothing here")),
     }
 }

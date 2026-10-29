@@ -395,10 +395,7 @@ fn shell_syntax_and_a_malformed_call_stay_refused_in_both_modes() {
         set_mode(&user, &id, mode);
         let shell = mcp.call("run", json!({"line": "ls | wc -l"}));
         assert!(shell.error, "{mode}: {}", shell.text);
-        let malformed = mcp.call(
-            "forge_write",
-            json!({"action": "pr-delete", "repository": "."}),
-        );
+        let malformed = mcp.call("forge", json!({"action": "pr-delete", "repository": "."}));
         assert!(malformed.error, "{mode}: {}", malformed.text);
     }
     assert!(judge_prompts(&user).is_empty());

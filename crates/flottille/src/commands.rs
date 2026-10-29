@@ -250,7 +250,7 @@ pub fn message_for(daemon: &Daemon, project: &str, workspace: Option<&str>, text
         message.push_str(&pull_requests_text(&project));
         if let Some(ticket) = &workspace.ticket {
             message.push_str(&format!(
-                "\nThe workspace is linked to the ticket {ticket} (ticket_read).\n"
+                "\nThe workspace is linked to the ticket {ticket} (tickets show).\n"
             ));
         }
     }

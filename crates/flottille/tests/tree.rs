@@ -633,16 +633,15 @@ fn a_lead_lists_the_agent_tools_ask_user_and_approval_answer_and_a_worker_at_the
     assert!(!names.iter().any(|n| n == "ask_parent"));
     // The project declares no forge nor tracker, so none of their tools is listed, in a workspace
     // as anywhere; removing a workspace needs neither, and the gate decides who may.
-    assert!(!names.iter().any(|n| n == "forge_read"));
-    assert!(!names.iter().any(|n| n == "ticket_read"));
-    assert!(!names.iter().any(|n| n == "forge_write"));
-    assert!(names.iter().any(|n| n == "workspace_remove"));
+    assert!(!names.iter().any(|n| n == "forge"));
+    assert!(!names.iter().any(|n| n == "tickets"));
+    assert!(names.iter().any(|n| n == "workspace"));
     // A root also reads and asks for changes to its project's skills, commands, setup,
     // settings and workspaces.
     for family in ["skills", "commands", "setup", "project", "workspace"] {
         assert!(names.iter().any(|n| n == family), "{family}");
     }
-    assert_eq!(names.len(), 22);
+    assert_eq!(names.len(), 21);
 
     let names = worker.names();
     assert!(names.iter().any(|n| n == "ask_parent"));

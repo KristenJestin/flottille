@@ -97,7 +97,9 @@ struct WorkspaceCall {
     /// The workspace; for all but create, the agent's own when left out.
     name: Option<String>,
     repositories: Option<Vec<String>>,
-    ticket: Option<String>,
+    /// link_ticket: `null` unlinks.
+    #[serde(default, deserialize_with = "present")]
+    ticket: Option<Option<String>>,
 }
 
 #[derive(Clone, Deserialize, serde::Serialize)]
@@ -255,6 +257,13 @@ pub async fn prepared(
     if tool == "agent_launch" {
         return launch_says(daemon, grant, args);
     }
+    if tool == "tickets" {
+        let project = own(daemon, grant)?;
+        return match crate::tickets::unwritable(&project, args) {
+            Some(why) => Err(Outcome::Refused(why)),
+            None => Ok(Vec::new()),
+        };
+    }
     if !TOOLS.contains(&tool) {
         return Ok(Vec::new());
     }
@@ -275,7 +284,8 @@ pub async fn prepared(
         "skills" => skills_says(daemon, &project, &arguments(tool, args.clone())?),
         "commands" => commands_says(&project, &arguments(tool, args.clone())?),
         "workspace" => {
-            if !is_root(daemon, grant) {
+            let mine = matches!(args["action"].as_str(), Some("list" | "show" | "remove"));
+            if !mine && !is_root(daemon, grant) {
                 return Err(Outcome::Refused(CHILD_WORKSPACES.into()));
             }
             workspace_says(daemon, grant, &project, &arguments(tool, args.clone())?)
@@ -1036,7 +1046,7 @@ async fn performed(
                     let created = answer(
                         "workspace.create",
                         json!({"project": name, "name": call.name,
-                            "repositories": call.repositories, "ticket": call.ticket}),
+                            "repositories": call.repositories, "ticket": call.ticket.flatten()}),
                     )
                     .await?;
                     let made = created["name"].as_str().unwrap_or_default();
@@ -1068,11 +1078,27 @@ async fn performed(
                         json!({"project": name, "name": workspace.name, "ticket": call.ticket}),
                     )
                     .await?;
-                    Ok(format!(
-                        "Workspace {} is linked to the ticket {}: ticket_read reads it.",
-                        workspace.name,
-                        call.ticket.unwrap_or_default()
-                    ))
+                    Ok(match call.ticket.flatten() {
+                        Some(ticket) => format!(
+                            "Workspace {} is linked to the ticket {ticket}: tickets {{\"action\": \
+                             \"show\"}} reads it.",
+                            workspace.name
+                        ),
+                        None => format!("Workspace {} is linked to no ticket.", workspace.name),
+                    })
+                }
+                "remove" => {
+                    let removed = crate::workspaces::workspace_remove(
+                        daemon,
+                        &grant.agent,
+                        &grant.place,
+                        call.name.as_deref(),
+                    )
+                    .await;
+                    match removed {
+                        Outcome::Done(text) => Ok(text),
+                        other => Err(other),
+                    }
                 }
                 other => Err(unknown("workspace", other, WORKSPACE_ACTIONS)),
             }
@@ -1121,11 +1147,13 @@ async fn performed(
 
 // The workspaces.
 
-const WORKSPACE_ACTIONS: &str = "list, show, create, prepare and link_ticket";
+const WORKSPACE_ACTIONS: &str = "list, show, create, prepare, link_ticket and remove";
 
-/// What a child is told of the `workspace` family, which it does not hold.
+/// What a child is told of the writes of the `workspace` family but `remove`, which are not its
+/// own.
 pub const CHILD_WORKSPACES: &str = "refused: the agent the user talks to manages the project's \
-    workspaces; you work in the place you were given: ask your parent (ask_parent)";
+    workspaces; you work in the place you were given, and may only remove it once done: ask your \
+    parent (ask_parent)";
 
 /// The setup steps a call plays without the gate, as the gate judges them: creating a workspace
 /// (`workspace create`, `agent_launch` with `new_workspace`) plays the project's setup, resuming
@@ -1244,7 +1272,7 @@ fn workspace_says(
     call: &WorkspaceCall,
 ) -> Result<Vec<String>, Outcome> {
     let action = call.action.as_str();
-    if !["list", "show", "create", "prepare", "link_ticket"].contains(&action) {
+    if !["list", "show", "create", "prepare", "link_ticket", "remove"].contains(&action) {
         return Err(unknown("workspace", action, WORKSPACE_ACTIONS));
     }
     match action {
@@ -1252,7 +1280,7 @@ fn workspace_says(
         "create" => {
             let name = named(&call.name, "workspace", action, "login")?;
             let mut says = create_says(daemon, project, name, &call.repositories)?;
-            if let Some(ticket) = &call.ticket {
+            if let Some(Some(ticket)) = &call.ticket {
                 let key = crate::tickets::accepted(project, ticket)
                     .map_err(|why| Outcome::Refused(format!("refused: {why}")))?;
                 says[0].push_str(&format!(", linked to the ticket {}", key.text()));
@@ -1290,14 +1318,37 @@ fn workspace_says(
                     }
                     Ok(says)
                 }
+                // Judged as before #141, as a call: what it removes is said by the gate.
+                // An agent in a workspace removes only its own.
+                "remove" => crate::mcp::workspace_named(
+                    daemon,
+                    &grant.place,
+                    call.name.as_deref(),
+                    "workspace remove",
+                )
+                .map(|_| Vec::new()),
                 _ => {
-                    let ticket = call.ticket.as_deref().ok_or_else(|| {
-                        Outcome::Refused(
-                            "refused: link_ticket needs ticket: {\"action\": \"link_ticket\", \
-                             \"name\": \"login\", \"ticket\": \"#123\"}"
-                                .into(),
-                        )
-                    })?;
+                    let ticket = match &call.ticket {
+                        Some(Some(ticket)) => ticket,
+                        Some(None) => {
+                            let Some(was) = &workspace.ticket else {
+                                return Err(Outcome::Refused(format!(
+                                    "refused: workspace {name} is linked to no ticket"
+                                )));
+                            };
+                            return Ok(vec![format!(
+                                "Unlink the workspace {name} from the ticket {was}"
+                            )]);
+                        }
+                        None => {
+                            return Err(Outcome::Refused(
+                                "refused: link_ticket needs ticket (null unlinks): \
+                                 {\"action\": \"link_ticket\", \"name\": \"login\", \
+                                 \"ticket\": \"#123\"}"
+                                    .into(),
+                            ));
+                        }
+                    };
                     let key = crate::tickets::accepted(project, ticket)
                         .map_err(|why| Outcome::Refused(format!("refused: {why}")))?;
                     let was = workspace
@@ -1360,18 +1411,54 @@ fn create_says(
     Ok(says)
 }
 
-/// What `agent_launch` with `new_workspace` does, in words, as `workspace create` says it: it
-/// creates the workspace the same way. Nothing for any other launch.
+/// What a child is told of `agent_launch` with `root`.
+pub const CHILD_ROOTS: &str = "refused: only the agent the user talks to starts a session for \
+    the user; a child's work stays in its tree, under its parent: ask your parent (ask_parent)";
+
+/// What `agent_launch` does, in words, when it is judged: with `new_workspace`, as `workspace
+/// create` says it, since it creates the workspace the same way; with `root`, the session it
+/// starts for the user and its first message whole. Nothing for any other launch. Only a root
+/// starts a root: a child doing so would leave its tree, its parent and its parent's sight.
 fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<String>, Outcome> {
-    let (Some(name), true) = (args["new_workspace"].as_str(), args["workspace"].is_null()) else {
-        return Ok(Vec::new());
-    };
-    let project = own(daemon, grant)?;
-    let repositories: Option<Vec<String>> =
-        serde_json::from_value(args["repositories"].clone()).unwrap_or_default();
-    let mut says = create_says(daemon, &project, name, &repositories)?;
+    let root = args["root"] == true;
+    if root && !is_root(daemon, grant) {
+        return Err(Outcome::Refused(CHILD_ROOTS.into()));
+    }
     let title = args["title"].as_str().unwrap_or_default();
-    says[0].push_str(&format!(", for a child: \"{title}\""));
+    let mut says = match (args["new_workspace"].as_str(), args["workspace"].is_null()) {
+        (Some(name), true) => {
+            let project = own(daemon, grant)?;
+            let repositories: Option<Vec<String>> =
+                serde_json::from_value(args["repositories"].clone()).unwrap_or_default();
+            let mut says = create_says(daemon, &project, name, &repositories)?;
+            let whose = match root {
+                true => "a session of the user's",
+                false => "a child",
+            };
+            says[0].push_str(&format!(", for {whose}: \"{title}\""));
+            says
+        }
+        _ if root => {
+            let place = match args["workspace"]
+                .as_str()
+                .or(grant.place.workspace.as_deref())
+            {
+                Some(name) => format!("the workspace {name}"),
+                None => "main, the project folder".to_owned(),
+            };
+            vec![format!(
+                "Start a session for the user in {place}: \"{title}\", theirs, not a child of \
+                 this agent"
+            )]
+        }
+        _ => return Ok(Vec::new()),
+    };
+    if root {
+        says.push(format!(
+            "Its first message: {}",
+            args["brief"].as_str().unwrap_or_default()
+        ));
+    }
     Ok(says)
 }
 

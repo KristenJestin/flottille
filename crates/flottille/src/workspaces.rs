@@ -29,7 +29,7 @@ use tokio::sync::oneshot;
 use crate::daemon::Daemon;
 use crate::forge;
 use crate::git::{self, Class};
-use crate::mcp::{Outcome, arguments, workspace_named};
+use crate::mcp::{Outcome, workspace_named};
 use crate::place::Place;
 use crate::projects::{self, Failure};
 use crate::tree;
@@ -1369,31 +1369,16 @@ async fn remove_held(daemon: &Daemon, workspace: &Workspace) -> Answer {
     Ok(json!({"removed": workspace.name, "project": workspace.project}))
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WorkspaceRemove {
-    workspace: Option<String>,
-}
-
-/// `workspace_remove`, once the gate let it through: the agent's own
-/// workspace removed as `workspace.remove` removes it, then the branches of it that hold no commit
-/// of their own deleted from their repositories (`docs/commands.md`).
+/// `workspace` `remove`, once the gate let it through: the agent's own workspace (or, in
+/// `main`, the one named) removed as `workspace.remove` removes it, then the branches of it that
+/// hold no commit of their own deleted from their repositories (`docs/commands.md`).
 pub async fn workspace_remove(
     daemon: &Arc<Daemon>,
     agent: &str,
     place: &Place,
-    args: Value,
+    named: Option<&str>,
 ) -> Outcome {
-    let asked: WorkspaceRemove = match arguments("workspace_remove", args) {
-        Ok(asked) => asked,
-        Err(refusal) => return refusal,
-    };
-    let name = match workspace_named(
-        daemon,
-        place,
-        asked.workspace.as_deref(),
-        "workspace_remove",
-    ) {
+    let name = match workspace_named(daemon, place, named, "workspace remove") {
         Ok(name) => name,
         Err(refusal) => return refusal,
     };

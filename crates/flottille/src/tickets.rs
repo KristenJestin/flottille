@@ -1,9 +1,10 @@
 //! Tickets (`docs/tickets.md`): what the tracker says of the ticket a workspace is linked to, its
-//! title, state, description and comments. Reading only, through the user's own command lines,
-//! spawned without a shell: `gh` for the issues of GitHub, `acli` (Atlassian's) for Jira. Flottille
-//! never reads, keeps nor prints a token, and of each one's sign-in status it reads the exit code
-//! alone. No write command of either is reachable from here: the only calls are `gh issue view`,
-//! `acli jira auth status` and `acli jira workitem view`.
+//! title, state, description and comments, and the agents' `tickets`, which list, search and read
+//! the tracker's tickets and write GitHub issues. Through the user's own command lines, spawned
+//! without a shell: `gh` for the issues of GitHub, `acli` (Atlassian's) for Jira. Flottille never
+//! reads, keeps nor prints a token, and of each one's sign-in status it reads the exit code alone.
+//! Jira is read only: the only `acli` calls are `jira auth status`, `jira workitem view` and
+//! `jira workitem search`. A write to GitHub is a `tickets` call the gate let through.
 //!
 //! A ticket is read on demand, never in the background, and kept nowhere. Every text kept from a
 //! tracker is masked before it is shown or stored.
@@ -81,15 +82,15 @@ impl Ticket {
         })
     }
 
-    /// What `ticket_read` answers: the comments themselves only when `full`, otherwise their
+    /// What `tickets show` answers: the comments themselves only when `full`, otherwise their
     /// number and the way to get them, for the ticket that was named when one was.
     fn text(&self, full: bool, named: Option<&str>) -> String {
         let again = match named {
             Some(ticket) => format!(
-                "{{\"ticket\": {}, \"detail\": \"full\"}}",
+                "{{\"action\": \"show\", \"ticket\": {}, \"detail\": \"full\"}}",
                 Value::from(ticket)
             ),
-            None => "{\"detail\": \"full\"}".to_owned(),
+            None => "{\"action\": \"show\", \"detail\": \"full\"}".to_owned(),
         };
         let place = match (&self.repository, self.tracker) {
             (Some(repository), _) => format!(" of {repository} (GitHub)"),
@@ -110,7 +111,7 @@ impl Ticket {
         if !self.comments.is_empty() && !full {
             let older = self.older;
             text.push_str(&format!(
-                "\nComments: {}{}, read them with ticket_read {again}\n",
+                "\nComments: {}{}, read them with tickets {again}\n",
                 self.comments.len() + older,
                 self.comments.last().map_or(String::new(), |last| format!(
                     ", the newest by {}{}",
@@ -264,7 +265,9 @@ fn signed_in_site(status: &str) -> Option<String> {
     })
 }
 
-async fn read_work_item(key: &str, site: &str) -> Result<Ticket, String> {
+/// That `acli` is there, signed in, and to the tracker's site: nothing is asked of Jira
+/// otherwise.
+async fn jira_site(site: &str) -> Result<(), String> {
     let status = match acli(&["jira", "auth", "status"]).await {
         Err(Gh::Missing) => {
             return Err(
@@ -301,6 +304,11 @@ async fn read_work_item(key: &str, site: &str) -> Result<Ticket, String> {
             ));
         }
     }
+    Ok(())
+}
+
+async fn read_work_item(key: &str, site: &str) -> Result<Ticket, String> {
+    jira_site(site).await?;
     let (ok, stdout, stderr) = match acli(&[
         "jira",
         "workitem",
@@ -594,66 +602,464 @@ pub async fn preview(daemon: Arc<Daemon>, params: Value) -> Result<Value, Failur
     Ok(state)
 }
 
+/// A call of `tickets`: its action and what the action takes.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct TicketRead {
-    workspace: Option<String>,
+struct TicketsCall {
+    action: String,
     ticket: Option<String>,
+    workspace: Option<String>,
+    query: Option<String>,
+    state: Option<String>,
+    label: Option<String>,
+    assignee: Option<String>,
     detail: Option<String>,
+    title: Option<String>,
+    body: Option<String>,
+    labels: Option<Vec<String>>,
 }
 
-/// `ticket_read`: the ticket of the agent's own workspace, or another ticket of the same tracker.
-/// Read only, and never another tracker's.
-pub async fn ticket_read(daemon: &Daemon, place: &Place, args: Value) -> Outcome {
-    let asked: TicketRead = match arguments("ticket_read", args) {
+/// The writes of `tickets`.
+const WRITES: [&str; 5] = ["create", "comment", "edit", "close", "reopen"];
+
+/// Why a write of `tickets` cannot be done on the project's tracker, before anyone is asked:
+/// Flottille reads Jira and writes nothing to it.
+pub fn unwritable(project: &Project, args: &Value) -> Option<String> {
+    let action = args["action"].as_str()?;
+    match project.tracker.as_ref()? {
+        ProjectTracker::Jira { .. } if WRITES.contains(&action) => Some(format!(
+            "refused: tickets {action} is not supported on Jira: Flottille reads Jira tickets and \
+             writes nothing to Jira; write the text for the user, who posts it"
+        )),
+        _ => None,
+    }
+}
+
+/// `tickets`, once the gate let it through: the tickets of the project's tracker, listed,
+/// searched and read through the user's own `gh` or `acli`, and GitHub issues written through
+/// `gh`. Never another tracker's.
+pub async fn tickets(daemon: &Daemon, place: &Place, args: Value) -> Outcome {
+    let asked: TicketsCall = match arguments("tickets", args) {
         Ok(asked) => asked,
         Err(refusal) => return refusal,
-    };
-    let full = match full_detail("ticket_read", asked.detail.as_deref()) {
-        Ok(full) => full,
-        Err(refusal) => return refusal,
-    };
-    // A ticket named needs no workspace; without one, the workspace's own ticket is read.
-    let by_name = asked.ticket.is_some() && place.workspace.is_none() && asked.workspace.is_none();
-    let linked = if by_name {
-        None
-    } else {
-        let name = match workspace_named(daemon, place, asked.workspace.as_deref(), "ticket_read") {
-            Ok(name) => name,
-            Err(refusal) => return refusal,
-        };
-        match daemon.read(|store| store.workspace(&place.project, &name)) {
-            Ok(Some(workspace)) => Some(workspace),
-            Ok(None) => return Outcome::Failed(format!("the workspace {name} is gone")),
-            Err(error) => return Outcome::Failed(error.to_string()),
-        }
     };
     let project = match projects::load_project(daemon, &place.project) {
         Ok(project) => project,
         Err(failure) => return Outcome::Failed(failure.message),
     };
-    let key = match (
+    if let Some(refusal) = unwritable(&project, &json!({"action": asked.action})) {
+        return Outcome::Refused(refusal);
+    }
+    match asked.action.as_str() {
+        "list" | "search" => listed(&project, &asked).await,
+        "show" => show(daemon, place, &project, &asked).await,
+        "create" => create(&project, &asked).await,
+        "comment" | "edit" | "close" | "reopen" => {
+            let key = match key_of(daemon, place, &project, &asked) {
+                Ok(key) => key,
+                Err(refusal) => return refusal,
+            };
+            write(&project, &asked, &key).await
+        }
+        action => Outcome::Refused(format!(
+            "refused: tickets has no action {action:?}: its actions are {}",
+            crate::gate::TICKET_ACTIONS
+        )),
+    }
+}
+
+/// How many tickets one list asks for: more than a project keeps open, said when reached.
+const LISTED: usize = 200;
+
+/// A ticket of a list.
+struct Listed {
+    reference: String,
+    state: String,
+    title: String,
+    labels: Vec<String>,
+    assignees: Vec<String>,
+    url: Option<String>,
+}
+
+/// `tickets list` and `tickets search`: every ticket of a state, by label, assignee and, for a
+/// search, words, in one call.
+async fn listed(project: &Project, asked: &TicketsCall) -> Outcome {
+    let state = asked.state.as_deref().unwrap_or("open");
+    if !["open", "closed", "all"].contains(&state) {
+        return Outcome::Refused(format!(
+            "refused: tickets has no state {state:?}: its states are open (the default), closed \
+             and all"
+        ));
+    }
+    let query = match (asked.action.as_str(), asked.query.as_deref()) {
+        ("search", Some(query)) if !query.trim().is_empty() => Some(query.trim()),
+        ("search", _) => {
+            return Outcome::Refused(
+                "refused: tickets search needs query, the words to find; list takes none".into(),
+            );
+        }
+        _ => None,
+    };
+    let Some(tracker) = &project.tracker else {
+        return Outcome::Refused(format!("refused: {NO_TRACKER}"));
+    };
+    let filters = Filters {
+        state,
+        label: asked.label.as_deref(),
+        assignee: asked.assignee.as_deref(),
+        query,
+    };
+    let found = match tracker {
+        ProjectTracker::Github { repository } => match github_of(project, repository).await {
+            Ok(forge) => list_issues(&forge, &filters).await,
+            Err(why) => Err(why),
+        },
+        ProjectTracker::Jira { site, projects } => list_work_items(site, projects, &filters).await,
+    };
+    let (tickets, left_out) = match found {
+        Ok(found) => found,
+        Err(why) => return Outcome::Failed(format!("the tickets could not be listed: {why}")),
+    };
+    let mut text = format!(
+        "The {state} tickets of {}{}: {}\n",
+        tracker.said(),
+        query.map_or(String::new(), |q| format!(" matching {q:?}")),
+        tickets.len()
+    );
+    for ticket in &tickets {
+        let mut line = format!("- {} {}: {}", ticket.reference, ticket.state, ticket.title);
+        if !ticket.labels.is_empty() {
+            line.push_str(&format!(" [{}]", ticket.labels.join(", ")));
+        }
+        if !ticket.assignees.is_empty() {
+            line.push_str(&format!(" ({})", ticket.assignees.join(", ")));
+        }
+        if let Some(url) = &ticket.url {
+            line.push_str(&format!("  {url}"));
+        }
+        text.push_str(&line);
+        text.push('\n');
+    }
+    if tickets.len() >= LISTED {
+        text.push_str(&format!(
+            "(the newest {LISTED}: narrow with label, assignee or a search)\n"
+        ));
+    }
+    if left_out > 0 {
+        text.push_str(&format!(
+            "({left_out} answered from another site than the tracker's are left out)\n"
+        ));
+    }
+    text.push_str("tickets {\"action\": \"show\", \"ticket\": …} reads one.");
+    Outcome::Done(text)
+}
+
+/// What a list keeps.
+struct Filters<'a> {
+    state: &'a str,
+    label: Option<&'a str>,
+    assignee: Option<&'a str>,
+    query: Option<&'a str>,
+}
+
+/// `gh issue list` of the tracker's repository.
+async fn list_issues(forge: &Forge, filters: &Filters<'_>) -> Result<(Vec<Listed>, usize), String> {
+    forge::signed_in().await?;
+    let repo = forge.gh_repository();
+    let limit = LISTED.to_string();
+    let mut args = vec![
+        "issue",
+        "list",
+        "-R",
+        &repo,
+        "--state",
+        filters.state,
+        "--limit",
+        &limit,
+    ];
+    for (flag, value) in [
+        ("--label", filters.label),
+        ("--assignee", filters.assignee),
+        ("--search", filters.query),
+    ] {
+        if let Some(value) = value {
+            args.extend([flag, value]);
+        }
+    }
+    args.extend(["--json", "number,title,state,labels,assignees,url"]);
+    let issues = forge::gh_json(&args).await?;
+    let names = |list: &Value, key: &str| -> Vec<String> {
+        list.as_array()
+            .into_iter()
+            .flatten()
+            .map(|item| said(&item[key]))
+            .filter(|name| !name.is_empty())
+            .collect()
+    };
+    let tickets = issues
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|issue| {
+            Some(Listed {
+                reference: format!("#{}", issue["number"].as_u64()?),
+                state: said(&issue["state"]).to_lowercase(),
+                title: said(&issue["title"]),
+                labels: names(&issue["labels"], "name"),
+                assignees: names(&issue["assignees"], "login"),
+                url: issue["url"].as_str().map(masked),
+            })
+        })
+        .collect();
+    Ok((tickets, 0))
+}
+
+/// A text as JQL quotes it.
+fn jql_quoted(text: &str) -> String {
+    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// The JQL of a list: the tracker's projects, the state as Jira's status category, and the
+/// filters, each quoted.
+fn jql(projects: &[String], filters: &Filters<'_>) -> String {
+    let projects: Vec<String> = projects.iter().map(|p| jql_quoted(p)).collect();
+    let mut clauses = vec![format!("project in ({})", projects.join(", "))];
+    match filters.state {
+        "open" => clauses.push("statusCategory != Done".into()),
+        "closed" => clauses.push("statusCategory = Done".into()),
+        _ => {}
+    }
+    if let Some(label) = filters.label {
+        clauses.push(format!("labels = {}", jql_quoted(label)));
+    }
+    if let Some(assignee) = filters.assignee {
+        clauses.push(format!("assignee = {}", jql_quoted(assignee)));
+    }
+    if let Some(query) = filters.query {
+        clauses.push(format!("text ~ {}", jql_quoted(query)));
+    }
+    format!("{} ORDER BY created DESC", clauses.join(" AND "))
+}
+
+/// `acli jira workitem search` on the tracker's projects, once `acli` is checked to be signed in
+/// to the tracker's site. An item that says another site is left out, and counted.
+async fn list_work_items(
+    site: &str,
+    projects: &[String],
+    filters: &Filters<'_>,
+) -> Result<(Vec<Listed>, usize), String> {
+    jira_site(site).await?;
+    let query = jql(projects, filters);
+    let limit = LISTED.to_string();
+    let (ok, stdout, stderr) = match acli(&[
+        "jira",
+        "workitem",
+        "search",
+        "--jql",
+        &query,
+        "--fields",
+        "key,summary,status,assignee,labels",
+        "--json",
+        "--limit",
+        &limit,
+    ])
+    .await
+    {
+        Ok(output) => output,
+        Err(Gh::Missing) => return Err("acli is not on the daemon's PATH".into()),
+        Err(Gh::Failed(why)) => return Err(format!("acli jira workitem search: {why}")),
+    };
+    if !ok {
+        let said = stderr.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+        return Err(format!(
+            "acli jira workitem search failed: {}",
+            masked(&said.chars().take(300).collect::<String>())
+        ));
+    }
+    let found: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("acli jira workitem search answered what is not JSON: {error}"))?;
+    // Assumed: the items as an array, or under `issues` as Jira's REST search gives them.
+    let items = found
+        .as_array()
+        .or(found["issues"].as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut left_out = 0;
+    let mut tickets = Vec::new();
+    for item in &items {
+        if site_of(item).as_deref() != Some(site) {
+            left_out += 1;
+            continue;
+        }
+        let fields = &item["fields"];
+        let Some(key) = item["key"].as_str() else {
+            continue;
+        };
+        tickets.push(Listed {
+            reference: masked(key),
+            state: said(&fields["status"]["name"]),
+            title: said(&fields["summary"]),
+            labels: fields["labels"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(said)
+                .collect(),
+            assignees: Some(said(&fields["assignee"]["displayName"]))
+                .filter(|name| !name.is_empty())
+                .into_iter()
+                .collect(),
+            url: Some(format!("https://{site}/browse/{}", masked(key))),
+        });
+    }
+    Ok((tickets, left_out))
+}
+
+/// The ticket a call names, or the one its workspace (the agent's own, or the one named) is
+/// linked to; a key of another tracker is refused.
+fn key_of(
+    daemon: &Daemon,
+    place: &Place,
+    project: &Project,
+    asked: &TicketsCall,
+) -> Result<Key, Outcome> {
+    // A ticket named needs no workspace; without one, the workspace's own ticket is meant.
+    let by_name = asked.ticket.is_some() && place.workspace.is_none() && asked.workspace.is_none();
+    let linked = if by_name {
+        None
+    } else {
+        let tool = format!("tickets {}", asked.action);
+        let name = workspace_named(daemon, place, asked.workspace.as_deref(), &tool)?;
+        match daemon.read(|store| store.workspace(&place.project, &name)) {
+            Ok(Some(workspace)) => Some(workspace),
+            Ok(None) => return Err(Outcome::Failed(format!("the workspace {name} is gone"))),
+            Err(error) => return Err(Outcome::Failed(error.to_string())),
+        }
+    };
+    match (
         &asked.ticket,
         linked.as_ref().and_then(|w| w.ticket.as_ref()),
     ) {
-        (Some(text), _) | (None, Some(text)) => match accepted(&project, text) {
-            Ok(key) => key,
-            Err(why) => return Outcome::Refused(format!("refused: {why}")),
-        },
-        (None, None) => {
-            return Outcome::Refused(format!(
-                "refused: workspace {} is linked to no ticket: name one of the project's tracker, \
-                 or ask the user to link it",
-                linked.map_or_else(String::new, |w| w.name)
-            ));
+        (Some(text), _) | (None, Some(text)) => {
+            accepted(project, text).map_err(|why| Outcome::Refused(format!("refused: {why}")))
         }
+        (None, None) => Err(Outcome::Refused(format!(
+            "refused: workspace {} is linked to no ticket: name one of the project's tracker, \
+             or ask the user to link it",
+            linked.map_or_else(String::new, |w| w.name)
+        ))),
+    }
+}
+
+/// `tickets show`: the ticket of the agent's own workspace, or another ticket of the same
+/// tracker.
+async fn show(daemon: &Daemon, place: &Place, project: &Project, asked: &TicketsCall) -> Outcome {
+    let full = match full_detail("tickets", asked.detail.as_deref()) {
+        Ok(full) => full,
+        Err(refusal) => return refusal,
     };
-    match read(&project, &key).await {
+    let key = match key_of(daemon, place, project, asked) {
+        Ok(key) => key,
+        Err(refusal) => return refusal,
+    };
+    match read(project, &key).await {
         Ok(ticket) => Outcome::Done(ticket.text(full, asked.ticket.as_deref())),
         Err(problem) => Outcome::Failed(format!(
             "the ticket {} could not be read: {problem}",
             key.text()
         )),
+    }
+}
+
+/// The GitHub repository of the project's tracker, for a write: Jira was refused before.
+async fn issues_of(project: &Project) -> Result<Forge, Outcome> {
+    match &project.tracker {
+        Some(ProjectTracker::Github { repository }) => github_of(project, repository)
+            .await
+            .map_err(|why| Outcome::Refused(format!("refused: {why}; nothing was written"))),
+        Some(ProjectTracker::Jira { .. }) => Err(Outcome::Refused(
+            "refused: Flottille writes nothing to Jira".into(),
+        )),
+        None => Err(Outcome::Refused(format!("refused: {NO_TRACKER}"))),
+    }
+}
+
+/// `tickets create`: a new issue of the tracker's repository.
+async fn create(project: &Project, asked: &TicketsCall) -> Outcome {
+    let Some(title) = asked.title.as_deref().filter(|t| !t.trim().is_empty()) else {
+        return Outcome::Refused("refused: tickets create needs title".into());
+    };
+    let forge = match issues_of(project).await {
+        Ok(forge) => forge,
+        Err(refusal) => return refusal,
+    };
+    if let Err(problem) = forge::signed_in().await {
+        return Outcome::Failed(problem);
+    }
+    let repo = forge.gh_repository();
+    let body = asked.body.as_deref().unwrap_or_default();
+    let mut args = vec![
+        "issue", "create", "-R", &repo, "--title", title, "--body", body,
+    ];
+    for label in asked.labels.iter().flatten() {
+        args.extend(["--label", label.as_str()]);
+    }
+    match forge::gh_text(&args).await {
+        Ok(said) => Outcome::Done(format!(
+            "The ticket was opened in {}: {}",
+            forge.slug(),
+            said.trim()
+        )),
+        Err(why) => Outcome::Failed(why),
+    }
+}
+
+/// `tickets comment`, `edit`, `close` and `reopen` of an issue.
+async fn write(project: &Project, asked: &TicketsCall, key: &Key) -> Outcome {
+    let action = asked.action.as_str();
+    let body = asked.body.as_deref().filter(|b| !b.trim().is_empty());
+    let title = asked.title.as_deref().filter(|t| !t.trim().is_empty());
+    match (action, body, title) {
+        ("comment", None, _) => {
+            return Outcome::Refused("refused: tickets comment needs body, the comment".into());
+        }
+        ("edit", None, None) => {
+            return Outcome::Refused(
+                "refused: tickets edit needs title, body or both: what changes".into(),
+            );
+        }
+        _ => {}
+    }
+    let Key::Issue(number) = key else {
+        return Outcome::Refused("refused: Flottille writes nothing to Jira".into());
+    };
+    let forge = match issues_of(project).await {
+        Ok(forge) => forge,
+        Err(refusal) => return refusal,
+    };
+    if let Err(problem) = forge::signed_in().await {
+        return Outcome::Failed(problem);
+    }
+    let repo = forge.gh_repository();
+    let number = number.to_string();
+    let mut args = vec!["issue", action, &number, "-R", &repo];
+    if action != "close" && action != "reopen" {
+        if let Some(title) = title {
+            args.extend(["--title", title]);
+        }
+        if let Some(body) = body {
+            args.extend(["--body", body]);
+        }
+    }
+    let slug = forge.slug();
+    match forge::gh_text(&args).await {
+        Ok(_) => Outcome::Done(match action {
+            "comment" => format!("The comment was posted on #{number} of {slug}."),
+            "edit" => format!("#{number} of {slug} was changed."),
+            "close" => format!("#{number} of {slug} was closed."),
+            _ => format!("#{number} of {slug} was reopened."),
+        }),
+        Err(why) => Outcome::Failed(why),
     }
 }
 

@@ -115,6 +115,9 @@ struct Launch {
     workspace: Option<String>,
     new_workspace: Option<String>,
     repositories: Option<Vec<String>>,
+    /// A session for the user rather than a child (`docs/tools.md`, "The tree's tools").
+    #[serde(default)]
+    root: bool,
 }
 
 /// Where a child works: an existing workspace, a new one, or its parent's place. The workspace
@@ -157,7 +160,11 @@ impl Launch {
 async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     let asked: Launch = arguments("agent_launch", args)?;
     let choice = asked.workspace_choice()?;
-    if caller.depth + 1 > DEPTH_LIMIT {
+    // Checked again here, as the request was: only a root starts a root.
+    if asked.root && caller.parent.is_some() {
+        return Err(refused(crate::actions::CHILD_ROOTS));
+    }
+    if !asked.root && caller.depth + 1 > DEPTH_LIMIT {
         return Err(refused(format!(
             "refused: this agent is at the depth limit ({DEPTH_LIMIT}): it cannot launch \
              children; do the work yourself"
@@ -168,7 +175,12 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             "refused: a child needs a title and a brief: the brief is all it will know",
         ));
     }
-    let role = roles::role(asked.role.as_deref().unwrap_or(roles::WORKER)).ok_or_else(|| {
+    // A session for the user is made as the window makes one: a lead by default.
+    let role = match asked.root {
+        true => roles::LEAD,
+        false => roles::WORKER,
+    };
+    let role = roles::role(asked.role.as_deref().unwrap_or(role)).ok_or_else(|| {
         refused(format!(
             "refused: there is no role {}: the roles are lead and worker",
             asked.role.as_deref().unwrap_or_default()
@@ -184,8 +196,12 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     };
     providers::choose(daemon, &project, asked_provider)
         .map_err(|f| refused(format!("refused: {}", f.message)))?;
-    // The slot is taken before anything is made: a launch refused leaves nothing behind.
-    let _slot = Slot::take(daemon, &project.name, project.max_children)?;
+    // The slot is taken before anything is made: a launch refused leaves nothing behind. A
+    // session for the user is no child, and counts in no cap of children.
+    let _slot = match asked.root {
+        true => None,
+        false => Some(Slot::take(daemon, &project.name, project.max_children)?),
+    };
     let (workspace, preparing) = match choice {
         WorkspaceChoice::Own => (caller.workspace.clone(), false),
         WorkspaceChoice::Existing(name) => (Some(name), false),
@@ -214,14 +230,15 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             workspace: workspace.clone(),
             preparing,
             role,
-            parent: Some((caller.id.clone(), caller.depth)),
+            parent: (!asked.root).then(|| (caller.id.clone(), caller.depth)),
             title: Some(asked.title.trim().to_owned()),
             brief: asked.brief.clone(),
             provider,
             model: asked.model,
             effort: asked.effort,
-            // Not read: a tree runs in its root's mode (`judge::mode`).
-            gate_mode: Some(caller.gate_mode),
+            // A child's is not read: a tree runs in its root's mode (`judge::mode`). A new root
+            // takes the mode of the tree that started it, never a looser one of its own.
+            gate_mode: Some(crate::judge::mode(daemon, &caller.id)),
         },
     )
     .map_err(|f| refused(format!("refused: {}", f.message)))?;
@@ -231,6 +248,14 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
         brief(daemon, &child);
     }
     let place = workspace.map_or("your own place".to_owned(), |w| format!("workspace {w}"));
+    if asked.root {
+        return Ok(Outcome::Done(format!(
+            "Started a session for the user, {}, in {place}. It is the user's, not your child: \
+             the user follows it in the window, the agent_* tools do not reach it, and you are \
+             told nothing of it.",
+            named(&child)
+        )));
+    }
     Ok(Outcome::Done(format!(
         "Launched {} in {place}. It works on its own: you are told when it reports, asks, \
          fails, is stuck or goes idle, so do not poll it. Go on with your own work, or end your \
@@ -280,11 +305,17 @@ impl Drop for Slot<'_> {
     }
 }
 
+/// The first message of an agent a launch made: a child's brief, or the first message of a session
+/// for the user, which is the user's as one started from the window is.
 fn brief(daemon: &Arc<Daemon>, child: &Agent) {
+    let kind = match child.parent {
+        Some(_) => "brief",
+        None => "user",
+    };
     deliveries::deliver(
         daemon,
         &child.id,
-        "brief",
+        kind,
         Some(format!("brief-{}-0", child.id)),
         child.brief.as_deref().unwrap_or_default(),
         approval::BETWEEN_TURNS,

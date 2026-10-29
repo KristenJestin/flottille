@@ -94,7 +94,7 @@ const REPLACED: &str = "refused: this session has been replaced: a new session o
 
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
 /// the order frozen in the agent.
-const SERVED: [Definition; 26] = [
+const SERVED: [Definition; 24] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -266,27 +266,6 @@ const SERVED: [Definition; 26] = [
         },
     },
     Definition {
-        name: "forge_read",
-        title: "Read the workspace's pull requests",
-        description: "Reads, on the forge, the pull request of this workspace's branch in each of \
-            its repositories (or the one named): its number, state, base and link, its review, \
-            its checks and their states, and how many comments and reviews it has: detail full \
-            gives their texts. Read only; it reaches no repository outside the workspace. In a \
-            workspace it is yours; in main, workspace names the one to read. A repository on a \
-            host Flottille cannot read yet says so. Use it rather than a forge's command line, \
-            which has no sign-in here.",
-        read_only: true,
-        idempotent: true,
-        destructive: false,
-        schema: || {
-            json!({"type": "object", "properties": {
-                "workspace": {"type": "string", "description": "A workspace of the project, by its name. Yours when left out; in main, name it."},
-                "repository": {"type": "string", "description": "One of the workspace's repositories, by its path; all of them when left out."},
-                "detail": {"type": "string", "enum": ["short", "full"], "description": "short by default; full adds the texts of the comments and reviews."}
-            }, "additionalProperties": false})
-        },
-    },
-    Definition {
         name: "skill_read",
         title: "Read a skill",
         description: "Reads one of the project's skills, the texts listed in your instructions \
@@ -310,69 +289,63 @@ const SERVED: [Definition; 26] = [
         },
     },
     Definition {
-        name: "ticket_read",
-        title: "Read the workspace's ticket",
-        description: "Reads, on its tracker, the ticket this workspace is linked to (a GitHub \
-            issue, #123, or a Jira key, ABC-123): its title, state and description, and how many \
-            comments it has: detail full gives their texts. Another ticket of the same tracker \
-            when `ticket` names it. In main, name a ticket or a workspace. Read only: it writes nothing to the tracker, and drafts of \
-            comments go to the user, who posts them. Use it rather than a tracker's command \
-            line, which has no sign-in here.",
-        read_only: true,
-        idempotent: true,
-        destructive: false,
-        schema: || {
-            json!({"type": "object", "properties": {
-                "workspace": {"type": "string", "description": "A workspace of the project, by its name. Yours when left out; in main, name it."},
-                "ticket": {"type": "string", "description": "A ticket of the same tracker as the workspace's, by its key (#123 or ABC-123); the workspace's own ticket when left out."},
-                "detail": {"type": "string", "enum": ["short", "full"], "description": "short by default; full adds the texts of the comments."}
-            }, "additionalProperties": false})
-        },
-    },
-    Definition {
-        name: "forge_write",
-        title: "Write to the workspace's forge",
-        description: "Opens the pull request of this workspace's branch (yours; in main, \
-            workspace names it) in one of its repositories (pr-create, with a title and a body, \
-            into the repository's base), merges it by squash (pr-merge-squash), or re-runs the \
-            failed jobs of its branch's last pipelines (pipeline-rerun). Run by Flottille with the \
-            user's own forge sign-in, once the session's judge or the user allows it: you are \
-            answered at once, the result may come later. A merge is refused while the checks fail \
-            or run, or a review asks for changes, unless the user waives it, and a waived merge \
-            always asks the user. \
-            {\"action\": \"pr-create\", \"repository\": \"api\", \"title\": \"fix(api): ...\", \
-            \"body\": \"...\"}; {\"action\": \"pr-merge-squash\", \"repository\": \"api\"}.",
+        name: "forge",
+        title: "Pull requests",
+        description: "The pull requests of the project's repositories on their forge, through \
+            the user's own gh or bkt (no forge sign-in here: never run them). list: by state \
+            (open by default) and branch. show: a workspace's branch's (yours; in main, name \
+            workspace), or number's, with checks, review and comment counts; detail full adds \
+            texts. Writes, judged, answered at once, the result maybe later: create, merge \
+            (squash; refused while checks fail or a review asks for changes unless waive gives \
+            the user's words) and checks (re-run failed) act on a workspace's branch; comment \
+            and edit on number. {\"action\": \"create\", \"repository\": \"api\", \"title\": \
+            \"fix: ...\", \"body\": \"...\"}",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "workspace": {"type": "string", "description": "A workspace of the project, by its name. Yours when left out; in main, name it."},
-                "action": {"type": "string", "enum": ["pr-create", "pr-merge-squash", "pipeline-rerun"]},
-                "repository": {"type": "string", "description": "One of the workspace's repositories, by its path."},
-                "title": {"type": "string", "description": "pr-create: the pull request's title."},
-                "body": {"type": "string", "description": "pr-create: its description."},
-                "draft": {"type": "boolean", "description": "pr-create: opened as a draft."},
-                "waive": {"type": "string", "description": "pr-merge-squash: the user's words letting a pull request whose checks fail or run, or whose review asks for changes, be merged as it is; the merge is then held for their approval."}
-            }, "required": ["action", "repository"], "additionalProperties": false})
+                "action": {"type": "string", "enum": ["list", "show", "create", "comment", "edit", "merge", "checks"]},
+                "workspace": {"type": "string", "description": "Yours when left out; in main, name it."},
+                "repository": {"type": "string", "description": "By path; all of the place's when left out (list, show)."},
+                "number": {"type": "integer", "minimum": 1, "description": "show, comment, edit: a pull request."},
+                "state": {"type": "string", "enum": ["open", "closed", "merged", "all"]},
+                "branch": {"type": "string", "description": "list: its source branch."},
+                "detail": {"type": "string", "enum": ["short", "full"]},
+                "title": {"type": "string"},
+                "body": {"type": "string", "description": "create, edit: description; comment: the comment."},
+                "draft": {"type": "boolean"},
+                "waive": {"type": "string", "description": "merge: the user's words letting a blocked pull request be merged; held for them."}
+            }, "required": ["action"], "additionalProperties": false})
         },
     },
     Definition {
-        name: "workspace_remove",
-        title: "Remove the workspace",
-        description: "Removes a workspace: this agent's own, or, in main, the one workspace \
-            names, once the session's judge or the user allows it. It refuses, touching \
-            nothing, while a repository holds uncommitted work or commits on no remote, and \
-            names them; otherwise it removes every worktree and the folder, and deletes the \
-            branches that hold no commit of their own. From inside the workspace, nothing is left to work in \
-            afterwards: report next.",
+        name: "tickets",
+        title: "Tickets",
+        description: "The tickets of the project's tracker (GitHub issues #123, Jira ABC-123), \
+            through the user's own gh or acli (no sign-in here: never run them). list: every \
+            ticket of a state (open by default), by label and assignee, in one call; search: \
+            the same, with words; show: a workspace's linked ticket (yours; in main, name \
+            workspace) or ticket, detail full adds the comments. Writes, GitHub only (Jira is \
+            read only), judged, answered at once, the result maybe later: create, comment, edit, \
+            close, reopen. {\"action\": \"comment\", \"ticket\": \"#12\", \"body\": \"...\"}",
         read_only: false,
         idempotent: false,
-        destructive: true,
+        destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "workspace": {"type": "string", "description": "A workspace of the project, by its name. Yours when left out; in main, name it."}
-            }, "additionalProperties": false})
+                "action": {"type": "string", "enum": ["list", "search", "show", "create", "comment", "edit", "close", "reopen"]},
+                "ticket": {"type": "string", "description": "#123 or ABC-123; the workspace's when left out."},
+                "workspace": {"type": "string"},
+                "query": {"type": "string", "description": "search: words."},
+                "state": {"type": "string", "enum": ["open", "closed", "all"]},
+                "label": {"type": "string"},
+                "assignee": {"type": "string"},
+                "detail": {"type": "string", "enum": ["short", "full"]},
+                "title": {"type": "string"},
+                "body": {"type": "string", "description": "create, edit: description; comment: the comment."},
+                "labels": {"type": "array", "items": {"type": "string"}, "description": "create: labels."}
+            }, "required": ["action"], "additionalProperties": false})
         },
     },
     Definition {
@@ -464,19 +437,21 @@ const SERVED: [Definition; 26] = [
     Definition {
         name: "workspace",
         title: "The project's workspaces",
-        description: "The project's workspaces. list and show read them. create makes one, \
-            its worktrees then its setup; prepare resumes a failed setup; link_ticket links a ticket: judged as for tasks, create and prepare as \
-            a run of each setup step. name: yours when left out, but for create. \
-            {\"action\": \"create\", \"name\": \"login\"}.",
+        description: "The project's workspaces. list and show read them. A root's writes, \
+            judged: create makes one (worktrees, then setup, judged as a run of each step), \
+            prepare resumes a failed setup, link_ticket links a ticket (null unlinks). remove, \
+            judged, for any agent of its own workspace: refused while work is uncommitted or \
+            unpushed. name: yours when left out, but for create. {\"action\": \"create\", \
+            \"name\": \"login\"}",
         read_only: false,
         idempotent: false,
-        destructive: false,
+        destructive: true,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "show", "create", "prepare", "link_ticket"]},
+                "action": {"type": "string", "enum": ["list", "show", "create", "prepare", "link_ticket", "remove"]},
                 "name": {"type": "string"},
                 "repositories": {"type": "array", "items": {"type": "string"}, "description": "create: by path."},
-                "ticket": {"type": "string", "description": "#123 or ABC-123."}
+                "ticket": {"type": ["string", "null"], "description": "#123 or ABC-123."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -485,14 +460,14 @@ const SERVED: [Definition; 26] = [
         title: "Launch a child agent",
         description: "Starts a child agent on one precise task and answers at once with its \
             agent_id. It works on its own: you are told when it reports, asks, fails, is stuck or \
-            idles, so never poll. The brief is all it knows: the task and only it, what to read, \
-            the checks, the deliverable. Where it works: workspace names an existing workspace, \
-            new_workspace makes one (repositories picks its repositories), neither is your own \
-            place. provider: yours when left out; a refusal names the ready ones and their \
-            models. Refused above the project's children cap or the depth limit. \
-            {\"title\": \"Fix login\", \"brief\": \"...\", \"workspace\": \"login\"}; \
-            {\"title\": \"Add API\", \"brief\": \"...\", \"new_workspace\": \"api\", \
-            \"repositories\": [\"api\"]}.",
+            idles, so never poll. The brief is all it knows: the task, what to read, the checks, \
+            the deliverable. workspace names an existing workspace, new_workspace makes one \
+            (repositories picks them); neither: your own place. provider: yours when left out; a \
+            refusal names the ready ones. Refused above the children cap or the depth limit. \
+            root (a root only, judged): a new session for the user instead, theirs, not your \
+            child, the brief its first message. {\"title\": \"Fix login\", \"brief\": \"...\", \
+            \"workspace\": \"login\"}; {\"title\": \"Add API\", \"brief\": \"...\", \
+            \"new_workspace\": \"api\", \"repositories\": [\"api\"]}",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -506,7 +481,8 @@ const SERVED: [Definition; 26] = [
                 "role": {"type": "string", "enum": ["worker", "lead"], "description": "worker by default."},
                 "workspace": {"type": "string", "description": "An existing workspace of the project, to work in."},
                 "new_workspace": {"type": "string", "description": "The name of a new workspace to make for it. Not with workspace."},
-                "repositories": {"type": "array", "items": {"type": "string"}, "description": "With new_workspace: its repositories, by path; the project's when left out."}
+                "repositories": {"type": "array", "items": {"type": "string"}, "description": "With new_workspace: its repositories, by path; the project's when left out."},
+                "root": {"type": "boolean", "description": "A session for the user, not a child."}
             }, "required": ["title", "brief"], "additionalProperties": false})
         },
     },
@@ -1152,8 +1128,41 @@ pub fn current(tool: &str, args: Value) -> (String, Value) {
             ("run".into(), args)
         }
         "commands_status" => ("run_status".into(), args),
+        // Until #141: the forge, ticket and workspace removal tools, now actions of families.
+        "forge_read" => ("forge".into(), with_action(args, "show")),
+        "ticket_read" => ("tickets".into(), with_action(args, "show")),
+        "forge_write" => {
+            let mut args = args;
+            let action = match args["action"].as_str() {
+                Some("pr-create") => "create",
+                Some("pr-merge-squash") => "merge",
+                Some("pipeline-rerun") => "checks",
+                _ => return ("forge".into(), args),
+            };
+            args["action"] = action.into();
+            ("forge".into(), args)
+        }
+        "workspace_remove" => {
+            let mut args = with_action(args, "remove");
+            if let Some(object) = args.as_object_mut()
+                && let Some(name) = object.remove("workspace")
+            {
+                object.insert("name".into(), name);
+            }
+            ("workspace".into(), args)
+        }
         tool => (tool.to_owned(), args),
     }
+}
+
+/// The arguments with `action` set, an object even when none were given.
+fn with_action(args: Value, action: &str) -> Value {
+    let mut args = match args {
+        Value::Object(object) => object,
+        _ => Map::new(),
+    };
+    args.insert("action".into(), action.into());
+    Value::Object(args)
 }
 
 /// A call, played once for its call key, recorded, its pinned notes appended: its text, and
@@ -1361,6 +1370,9 @@ pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gat
                 }
             }
         }
+    }
+    if tool == "agent_launch" && args["root"] == true {
+        judge.push(gate::ROOT_LAUNCH.into());
     }
     let class = match base.is_empty() {
         true => gate::Class::Judge,
@@ -1606,12 +1618,8 @@ async fn perform(
             .await
         }
         "run_status" => runs::run_status(daemon, &grant.agent, args).await,
-        "forge_read" => crate::forge::forge_read(daemon, &grant.place, args).await,
-        "ticket_read" => crate::tickets::ticket_read(daemon, &grant.place, args).await,
-        "forge_write" => crate::forge::forge_write(daemon, &grant.place, args).await,
-        "workspace_remove" => {
-            crate::workspaces::workspace_remove(daemon, &grant.agent, &grant.place, args).await
-        }
+        "forge" => crate::forge::forge(daemon, &grant.place, args).await,
+        "tickets" => crate::tickets::tickets(daemon, &grant.place, args).await,
         tool if tree::TOOLS.contains(&tool) => tree::call(daemon, grant, tool, args).await,
         tool if crate::actions::TOOLS.contains(&tool) => {
             crate::actions::perform(daemon, grant, tool, args).await
@@ -1750,7 +1758,7 @@ mod tests {
     #[test]
     fn a_grant_holds_the_agent_s_served_tools_in_its_own_order() {
         let mut leaf = claude::PROVIDER.tools(false, true, true, true);
-        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 15);
+        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 14);
         leaf.reverse();
         leaf.retain(|tool| !tool.ends_with("__search"));
         leaf.push("fs_read".into());
@@ -1758,7 +1766,7 @@ mod tests {
         assert_eq!(served.first(), Some(&"ask_parent"));
         assert_eq!(served.last(), Some(&"fs_read"));
         assert!(!served.contains(&"search"));
-        assert_eq!(served.len(), 14);
+        assert_eq!(served.len(), 13);
     }
 
     #[test]
@@ -1811,6 +1819,32 @@ mod tests {
         assert_eq!(
             current("fs_read", json!({"path": "a"})),
             ("fs_read".into(), json!({"path": "a"}))
+        );
+        // Until #141.
+        assert_eq!(
+            current("forge_read", Value::Null),
+            ("forge".into(), json!({"action": "show"}))
+        );
+        assert_eq!(
+            current("ticket_read", json!({"ticket": "#1"})),
+            ("tickets".into(), json!({"action": "show", "ticket": "#1"}))
+        );
+        for (old, new) in [
+            ("pr-create", "create"),
+            ("pr-merge-squash", "merge"),
+            ("pipeline-rerun", "checks"),
+        ] {
+            assert_eq!(
+                current("forge_write", json!({"action": old, "repository": "."})),
+                ("forge".into(), json!({"action": new, "repository": "."}))
+            );
+        }
+        assert_eq!(
+            current("workspace_remove", json!({"workspace": "login"})),
+            (
+                "workspace".into(),
+                json!({"action": "remove", "name": "login"})
+            )
         );
     }
 
@@ -1878,8 +1912,10 @@ mod tests {
 
     #[test]
     fn the_biggest_list_stays_far_under_the_threshold_of_tool_search() {
-        // About 4 characters a token: Anthropic suggests tool search past 10k tokens of
-        // definitions (`docs/reference/mcp.md` §3), 40,000 characters.
+        // Anthropic suggests tool search past 10 tools or 10k tokens of definitions
+        // (`docs/reference/mcp.md` §3); every tool loads upfront here, so the list stays under
+        // the tokens. JSON schemas tokenize densely, about 3 characters a token at worst: 28,000
+        // characters is under 9,400 tokens then, and about 7,000 at the usual 4.
         let biggest = claude::PROVIDER.tools(true, false, true, true);
         let chars: usize = served(&claude::PROVIDER, &biggest)
             .into_iter()
@@ -1888,9 +1924,9 @@ mod tests {
                 tool.unwrap().len()
             })
             .sum();
-        // About 6k tokens since the project's settings came (#112), then its skills and commands
-        // (#127), then its tasks and setup (#131), then its workspaces (#118): 26,889 characters,
-        // under the limit by shorter descriptions.
-        assert!(chars < 27_000, "{chars} characters of definitions");
+        // 26,889 characters in 25 tools before the families were completed (#141); 25,236 in
+        // 23 after, the forge, ticket and removal tools merged into families and the
+        // descriptions shortened.
+        assert!(chars < 28_000, "{chars} characters of definitions");
     }
 }
