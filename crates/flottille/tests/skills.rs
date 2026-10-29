@@ -572,3 +572,33 @@ fn an_inline_skill_stays_inline_when_it_is_edited() {
     );
     assert!(!edited.contains("[skills.style]"), "{edited}");
 }
+
+#[test]
+fn a_text_skill_whose_file_is_a_link_is_read_where_it_leads() {
+    let user = User::with_fake_agent();
+    project(&user);
+    stdout(
+        &user,
+        &[
+            "skill",
+            "add",
+            "app",
+            "review",
+            "--text",
+            "Read the diff twice.\n",
+            "--description",
+            "How we review",
+        ],
+    );
+    // The user keeps the text elsewhere and links it.
+    let kept = user.path("data/flottille/skills/app/review.md");
+    let elsewhere = user.path("notes/review.md");
+    std::fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
+    std::fs::write(&elsewhere, "Read it where it is kept.\n").unwrap();
+    std::fs::remove_file(&kept).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &kept).unwrap();
+
+    let (mcp, _) = session(&user);
+    let read = ok(mcp.call("skill_read", json!({"name": "review"})));
+    assert!(read.contains("Read it where it is kept."), "{read}");
+}

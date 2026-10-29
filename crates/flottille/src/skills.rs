@@ -74,8 +74,10 @@ fn read(
                 "refused: the skill {name} is a text: it takes no path, read it with just its name"
             )));
         }
-        let file =
-            Resolved::real_inside(name.to_owned(), Skill::text_file(data, &project.name, name));
+        // The user's own file, which may be a link: read where it leads, which the file tools
+        // open without following a link.
+        let file = Skill::text_file(data, &project.name, name);
+        let file = Resolved::real_inside(name.to_owned(), file.canonicalize().unwrap_or(file));
         return files::read_page(None, &file, offset, length).or_else(|error| {
             Ok(match error.kind() {
                 std::io::ErrorKind::NotFound => Outcome::Refused(format!(
