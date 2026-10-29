@@ -6,7 +6,7 @@
 //! checks the step as the file is checked, and the section shows the list the daemon gives next.
 
 use flottille_core::project::SetupStep;
-use flottille_ui::{Button, Item, Listing, Modal, Type, enter, palette, presence};
+use flottille_ui::{Button, Icon, Item, Listing, Modal, Type, enter, palette, presence};
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
     Context, ElementId, Entity, Focusable as _, InteractiveElement, IntoElement, ParentElement,
@@ -473,14 +473,14 @@ impl SetupSection {
                     .test_support(),
             )
             .child(
-                Button::quiet(id("setup-up"), "Up")
+                Button::icon(id("setup-up"), Icon::ChevronUp, "Move up")
                     .disabled(number == 1 || self.saving)
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.move_step(number, number - 1, cx)),
                     ),
             )
             .child(
-                Button::quiet(id("setup-down"), "Down")
+                Button::icon(id("setup-down"), Icon::Chevron, "Move down")
                     .disabled(number == count || self.saving)
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.move_step(number, number + 1, cx)),
@@ -673,7 +673,7 @@ impl Render for SetupSection {
                 "Setup",
                 count,
                 Button::secondary("add-setup", "New step")
-                    .leading(flottille_ui::Icon::Plus)
+                    .leading(Icon::Plus)
                     .on_click(cx.listener(|this, _, window, cx| this.open(None, window, cx))),
                 cx,
             ))

@@ -26,6 +26,7 @@ pub mod shell;
 pub mod skills;
 pub mod tasks;
 pub mod tree;
+pub mod waiting;
 
 use flottille_ui::Icons;
 use gpui_kit::{AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
