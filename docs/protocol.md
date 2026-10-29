@@ -511,6 +511,7 @@ there. An agent in a result:
   "native_id": "0f6c…",
   "agent_version": "flottille-claude-bridge 0.1.0",
   "reopens": true,
+  "images": true,
   "instructions": "…\n\n__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__\n\n…",
   "tools": ["mcp__flottille__fs_read", "…"]
 }
@@ -523,7 +524,8 @@ is never left, but for an ended root the user resumes (`agent.resume`).
 `provider` is the provider it runs on, for life (`docs/agents.md`, "Providers"). `chosen` is what
 was asked, or the project's default model, `null` for the agent's default; `taken` what the agent reported
 at the last start of its process; `reopens` whether its agent offered to resume or load a session
-when it last opened one, `false` once Flottille forgot an ended root's session. `active_at` is its last sign of activity, `null` before the
+when it last opened one, `false` once Flottille forgot an ended root's session; `images` whether
+it took images in a prompt when it last started, `null` before it did. `active_at` is its last sign of activity, `null` before the
 first. `instructions` and `tools` are frozen when the agent is created. `parent` is the agent that
 launched it (`null` for a root), `depth` its depth in the tree, `epoch` the number of its session
 (each replacement adds one), `title` and `brief` a child's task, `reported_at` when it reported,
@@ -552,7 +554,7 @@ then fails (`agent.failed`), saying what it offers.
 
 #### `agent.send`
 
-`{"agent", "message"}`. Gives the agent a message (a `user` delivery), played after the turn that
+`{"agent", "message", "images"?}`. Gives the agent a message (a `user` delivery), played after the turn that
 runs if one does, starting its process again when it was released: `{"agent", "after",
 "delivery"}`. `delivery` is the id of the delivery stored for the message: its `delivery.queued`
 event (numbered after `after`), then `delivery.sent` when a prompt takes it (`docs/events.md`), name
@@ -560,6 +562,20 @@ it, so that a client follows the turn of its own message even when another clien
 agent at the same time.
 `refused` when the agent is in a final state, the message is empty, or the agent is a child: only
 its parent writes to it, and the sentence names its root.
+
+`images` is a list of `{"mime", "data"}`, `data` the image's bytes in base64: a pasted or dropped
+picture, sent as ACP image blocks after the message's text. With images, the message may be
+empty. `mime` is `image/png`, `image/jpeg`, `image/gif` or `image/webp`; a message carries 4
+images at most, 5 MiB each. The daemon writes them in `$XDG_DATA_HOME/flottille/images/<agent>/`
+(never the project's), and the `agent.prompted` event of the turn that sends them names them.
+`refused` for an image of another type, bad base64, an empty or too big image, too many, and
+when the agent's agent said, when it last started, that it takes no images (`images` of the
+agent, below); before it started once, `images` is `null` and the daemon sends them.
+
+#### `agent.image`
+
+`{"agent", "name"}`. An image of the agent's, by a name `agent.prompted` gave: `{"mime", "data"}`.
+`not-found` when there is none.
 
 #### `agent.cancel`
 
@@ -595,7 +611,8 @@ whose session was forgotten (7 days after it ended), one whose workspace or proj
 `state_reason`, `created_at`, `active_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
 took at the last start of its process, else the one asked, `null` for the agent's default before it
 started; `resumable`: whether `agent.resume` takes it once its last process is gone; `stopping`:
-whether the process of an agent that ended is still stopping); `doing` a sentence of what it does
+whether the process of an agent that ended is still stopping; `images`: as in the agent's full
+form); `doing` a sentence of what it does
 (`working`, `idle`, `running \`cargo test\` for 12 min`, `waiting for approval #3`, `failed: …`);
 `waiting_on` `parent` for a child whose request or question waits for its parent, `user` for a
 root whose own does, else `null`; `needs_user`, for the root, whether a request of its tree or its

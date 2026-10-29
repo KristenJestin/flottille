@@ -57,6 +57,8 @@ pub struct Agent {
     /// Its agent offered to resume or load a session when it last opened one: its session can be
     /// opened again once it ended (`agent.resume`). False once Flottille forgot it.
     pub reopens: bool,
+    /// Its agent takes images in a prompt, as it said when it last started; `None` before it did.
+    pub images: Option<bool>,
     /// The system prompt, frozen at creation, with its cache boundary.
     pub instructions: String,
     /// The exact names of its tools, frozen at creation (the prompt cache depends on it).

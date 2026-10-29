@@ -221,6 +221,7 @@ A turn starts with this message.
 |---|---|
 | `agent` | |
 | `text` | The message. |
+| `images` | The names of the images that went with it, when there are some (`agent.image` gives each back). |
 
 #### `agent.user_message`, `agent.message`, `agent.thought`
 

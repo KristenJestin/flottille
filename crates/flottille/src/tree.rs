@@ -1367,6 +1367,7 @@ pub fn summary(daemon: &Daemon, agent: &Agent) -> Value {
         "waiting_on_answer": agent.waiting_on_answer,
         "resumable": agent.state == AgentState::Ended && resume_refusal(daemon, agent).is_none(),
         "stopping": agent.state.is_final() && agents::stopping(daemon, &agent.id),
+        "images": agent.images,
     })
 }
 

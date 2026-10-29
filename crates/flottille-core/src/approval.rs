@@ -196,6 +196,9 @@ pub struct Delivery {
     pub state: String,
     pub created_at: u64,
     pub sent_at: Option<u64>,
+    /// The images it carries: names of files in the agent's folder of the data folder.
+    #[serde(default)]
+    pub images: Vec<String>,
 }
 
 pub const BETWEEN_TURNS: &str = "between-turns";

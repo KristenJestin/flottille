@@ -274,6 +274,13 @@ const MIGRATIONS: &[&str] = &[
     -- one: an ended root whose agent can is resumed on its own session (`agent.resume`).
     ALTER TABLE agents ADD COLUMN reopens INTEGER NOT NULL DEFAULT 0;
 ",
+    "
+    -- Whether an agent's agent takes images in a prompt, as it said when it last started (`NULL`
+    -- before it did), and the images a delivery carries: the names of files in the agent's folder
+    -- of the data folder.
+    ALTER TABLE agents ADD COLUMN images INTEGER;
+    ALTER TABLE deliveries ADD COLUMN images TEXT NOT NULL DEFAULT '[]';
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -285,9 +292,9 @@ const RUN_COLUMNS: &str =
 const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, state, state_reason, \
     created_at, updated_at, active_at, ended_at, chosen_model, chosen_effort, chosen_mode, \
     taken_model, taken_effort, taken_mode, native_id, agent_version, instructions, tools, parent, \
-    depth, epoch, title, brief, reported_at, quiet_turns, waiting_on_answer, reopens";
+    depth, epoch, title, brief, reported_at, quiet_turns, waiting_on_answer, reopens, images";
 
-const DELIVERY_COLUMNS: &str = "id, agent, kind, body, urgency, state, created_at, sent_at";
+const DELIVERY_COLUMNS: &str = "id, agent, kind, body, urgency, state, created_at, sent_at, images";
 
 /// What changes on an agent; what is left `None` stays as it is.
 #[derive(Clone, Debug, Default)]
@@ -298,6 +305,7 @@ pub struct AgentChange {
     pub native_id: Option<String>,
     pub agent_version: Option<String>,
     pub reopens: Option<bool>,
+    pub images: Option<bool>,
     pub taken: Option<Choices>,
     /// `Some(None)` forgets it.
     pub reported_at: Option<Option<u64>>,
@@ -608,7 +616,7 @@ impl Store {
             &format!(
                 "INSERT INTO agents ({AGENT_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, \
                  ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, \
-                 ?25, ?26, ?27, ?28, ?29, ?30, ?31)"
+                 ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32)"
             ),
             params![
                 agent.id,
@@ -642,6 +650,7 @@ impl Store {
                 agent.quiet_turns,
                 agent.waiting_on_answer,
                 agent.reopens,
+                agent.images,
             ],
         )?;
         let event = append_agent_event(&transaction, &agent.id, event.0, event.1)?;
@@ -709,6 +718,12 @@ impl Store {
             transaction.execute(
                 "UPDATE agents SET reopens = ?2 WHERE id = ?1",
                 params![id, reopens],
+            )?;
+        }
+        if let Some(images) = change.images {
+            transaction.execute(
+                "UPDATE agents SET images = ?2 WHERE id = ?1",
+                params![id, images],
             )?;
         }
         if let Some(reported_at) = change.reported_at {
@@ -1266,8 +1281,8 @@ impl Store {
     pub fn deliver(&mut self, delivery: &Delivery) -> Result<Option<Event>> {
         let transaction = self.connection.transaction()?;
         let stored = transaction.execute(
-            "INSERT OR IGNORE INTO deliveries (id, agent, kind, body, urgency, state, created_at) \
-             SELECT ?1, ?2, ?3, ?4, ?5, 'queued', ?6 WHERE EXISTS (SELECT 1 FROM agents \
+            "INSERT OR IGNORE INTO deliveries (id, agent, kind, body, urgency, state, created_at, \
+             images) SELECT ?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7 WHERE EXISTS (SELECT 1 FROM agents \
              WHERE id = ?2 AND state NOT IN ('ended', 'failed'))",
             params![
                 delivery.id,
@@ -1275,7 +1290,8 @@ impl Store {
                 delivery.kind,
                 delivery.body,
                 delivery.urgency,
-                now_ms()
+                now_ms(),
+                serde_json::to_string(&delivery.images)?
             ],
         )?;
         if stored == 0 {
@@ -1820,6 +1836,7 @@ fn delivery_row(row: &rusqlite::Row) -> rusqlite::Result<Delivery> {
         state: row.get(5)?,
         created_at: row.get(6)?,
         sent_at: row.get(7)?,
+        images: serde_json::from_str(&row.get::<_, String>(8)?).unwrap_or_default(),
     })
 }
 
@@ -1873,6 +1890,7 @@ fn agent_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Agent>> {
         quiet_turns: row.get(28)?,
         waiting_on_answer: row.get(29)?,
         reopens: row.get(30)?,
+        images: row.get(31)?,
     }))
 }
 
@@ -2382,6 +2400,7 @@ mod tests {
             quiet_turns: 0,
             waiting_on_answer: false,
             reopens: false,
+            images: None,
         }
     }
 
@@ -2715,6 +2734,7 @@ mod tests {
             state: "queued".into(),
             created_at: 0,
             sent_at: None,
+            images: Vec::new(),
         }
     }
 

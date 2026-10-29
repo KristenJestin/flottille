@@ -1936,6 +1936,7 @@ name = "flottille"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
+ "base64 0.22.1",
  "bytes",
  "clap",
  "flottille-core",
@@ -2034,6 +2035,7 @@ dependencies = [
 name = "flottille-window"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "flottille-core",
  "flottille-ui",
  "futures",

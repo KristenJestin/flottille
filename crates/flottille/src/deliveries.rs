@@ -193,7 +193,20 @@ pub fn deliver(
     body: &str,
     urgency: &str,
 ) -> Option<String> {
-    let id = store(daemon, agent, kind, id, body, urgency)?;
+    deliver_with_images(daemon, agent, kind, id, body, urgency, Vec::new())
+}
+
+/// `deliver`, with the images of the message: names of files of the agent's folder of images.
+pub fn deliver_with_images(
+    daemon: &Arc<Daemon>,
+    agent: &str,
+    kind: &str,
+    id: Option<String>,
+    body: &str,
+    urgency: &str,
+    images: Vec<String>,
+) -> Option<String> {
+    let id = store(daemon, agent, kind, id, body, urgency, images)?;
     ring(daemon, agent);
     Some(id)
 }
@@ -206,7 +219,15 @@ pub fn queue(
     id: Option<String>,
     body: &str,
 ) -> Option<String> {
-    store(daemon, agent, kind, id, body, approval::BETWEEN_TURNS)
+    store(
+        daemon,
+        agent,
+        kind,
+        id,
+        body,
+        approval::BETWEEN_TURNS,
+        Vec::new(),
+    )
 }
 
 fn store(
@@ -216,6 +237,7 @@ fn store(
     id: Option<String>,
     body: &str,
     urgency: &str,
+    images: Vec<String>,
 ) -> Option<String> {
     let id = id.unwrap_or_else(|| format!("{kind}-{}", new_id().unwrap_or_default()));
     let delivery = Delivery {
@@ -227,6 +249,7 @@ fn store(
         state: "queued".into(),
         created_at: 0,
         sent_at: None,
+        images,
     };
     if let Err(error) = daemon.write(|store| Ok(((), store.deliver(&delivery)?))) {
         eprintln!("flottille daemon: agent {agent}: a delivery cannot be stored: {error}");
@@ -259,9 +282,16 @@ pub fn ring(daemon: &Arc<Daemon>, agent: &str) {
     agents::order(daemon, agent, Order::Ring);
 }
 
+/// A prompt as it is sent: the text of the deliveries taken, and the images they carry.
+pub struct Prompt {
+    pub text: String,
+    /// Names of files of the agent's folder of images.
+    pub images: Vec<String>,
+}
+
 /// The agent's queued deliveries as one prompt, taken: those that start a session first, then the
 /// others in their order. `None` when there is none, or the agent has ended.
-pub fn pump(daemon: &Daemon, agent: &str) -> Option<String> {
+pub fn pump(daemon: &Daemon, agent: &str) -> Option<Prompt> {
     let found = daemon.read(|store| store.agent(agent)).ok()??;
     if found.state.is_final() {
         return None;
@@ -290,13 +320,38 @@ pub fn pump(daemon: &Daemon, agent: &str) -> Option<String> {
     }
     let kinds: Vec<String> = taken.iter().map(|d| d.kind.clone()).collect();
     took(daemon, agent, &kinds);
-    Some(
-        taken
+    Some(Prompt {
+        images: taken.iter().flat_map(|d| d.images.clone()).collect(),
+        text: taken
             .into_iter()
             .map(render)
             .collect::<Vec<_>>()
             .join("\n\n"),
-    )
+    })
+}
+
+/// The kinds of image a prompt takes, by the extension of the file that holds it.
+pub const IMAGE_TYPES: [(&str, &str); 4] = [
+    ("image/png", "png"),
+    ("image/jpeg", "jpg"),
+    ("image/gif", "gif"),
+    ("image/webp", "webp"),
+];
+
+/// An image of the agent's folder, as its MIME type and its bytes in base64; `None` when the name
+/// is not one Flottille made or the file is gone.
+pub fn read_image(daemon: &Daemon, agent: &str, name: &str) -> Option<(&'static str, String)> {
+    use base64::Engine as _;
+    let (_, extension) = name.rsplit_once('.')?;
+    let (mime, _) = IMAGE_TYPES.iter().find(|(_, e)| *e == extension)?;
+    if name.contains('/') || name.starts_with('.') {
+        return None;
+    }
+    let bytes = std::fs::read(daemon.paths.images(agent).join(name)).ok()?;
+    Some((
+        mime,
+        base64::engine::general_purpose::STANDARD.encode(bytes),
+    ))
 }
 
 /// The agents whose notes were not taken in time: their notes are unpinned and their turn
@@ -340,6 +395,7 @@ mod tests {
             state: "queued".into(),
             created_at: 0,
             sent_at: None,
+            images: Vec::new(),
         }
     }
 

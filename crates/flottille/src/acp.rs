@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ClientCapabilities, ContentBlock, HttpHeader, Implementation,
+    CancelNotification, ClientCapabilities, ContentBlock, HttpHeader, ImageContent, Implementation,
     InitializeRequest, LoadSessionRequest, McpServer, McpServerHttp, NewSessionRequest,
     PermissionOptionKind, PromptRequest, PromptResponse, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
@@ -32,7 +32,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::VERSION;
 use crate::agents::{Order, Turns};
-use crate::deliveries;
+use crate::deliveries::{self, Prompt};
 use crate::providers::{self, MCP_SERVER, Provider};
 
 /// A prompt as it may be sent: only one that starts with a delivery's marker. An agent may read a
@@ -80,10 +80,13 @@ pub trait Events: Send + Sync + 'static {
         agent_version: &str,
         taken: Choices,
         reopens: bool,
+        images: bool,
     );
     /// The next prompt, taken from what was delivered, when there is one.
-    fn pump(&self) -> Option<String>;
-    fn turn_started(&self, text: &str);
+    fn pump(&self) -> Option<Prompt>;
+    /// An image a prompt carries, as its MIME type and its bytes in base64.
+    fn image(&self, name: &str) -> Option<(&'static str, String)>;
+    fn turn_started(&self, text: &str, images: &[String]);
     fn turn_ended(&self, stop_reason: &str, usage: Value);
 }
 
@@ -206,6 +209,7 @@ async fn drive(
     let initialized = serde_json::to_value(&initialized).unwrap_or_default();
     let loads = initialized["agentCapabilities"]["loadSession"] == true;
     let resumes = !initialized["agentCapabilities"]["sessionCapabilities"]["resume"].is_null();
+    let images = initialized["agentCapabilities"]["promptCapabilities"]["image"] == true;
     let agent_version = format!(
         "{} {}",
         initialized["agentInfo"]["name"].as_str().unwrap_or("agent"),
@@ -328,26 +332,32 @@ async fn drive(
             mode: current("mode"),
         },
         loads || resumes,
+        images,
     );
 
     let mut turn: Option<Turn> = None;
     loop {
         if turn.is_none()
             && turns.queued.is_empty()
-            && let Some(text) = events.pump()
+            && let Some(prompt) = events.pump()
         {
-            turns.queued.push_back(text);
+            turns.queued.push_back(prompt);
         }
         if turn.is_none()
-            && let Some(text) = turns.queued.pop_front()
+            && let Some(prompt) = turns.queued.pop_front()
         {
-            let text = prompt_text(text)?;
-            events.turn_started(&text);
+            let text = prompt_text(prompt.text)?;
+            events.turn_started(&text, &prompt.images);
             turns.running = true;
-            let request = PromptRequest::new(
-                native_id.clone(),
-                vec![ContentBlock::Text(TextContent::new(text))],
+            let mut blocks = vec![ContentBlock::Text(TextContent::new(text))];
+            blocks.extend(
+                prompt
+                    .images
+                    .iter()
+                    .filter_map(|name| events.image(name))
+                    .map(|(mime, data)| ContentBlock::Image(ImageContent::new(data, mime))),
             );
+            let request = PromptRequest::new(native_id.clone(), blocks);
             turn = Some(Box::pin(cx.send_request(request).block_task()));
         }
         tokio::select! {

@@ -167,6 +167,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                 serde_json::to_value(AgentSend {
                     agent: agent.clone(),
                     message,
+                    images: Vec::new(),
                 })?,
             )?;
             let mut code = ExitCode::SUCCESS;

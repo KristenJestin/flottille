@@ -578,6 +578,7 @@ fn agent_send(paths: &Paths, args: Value) -> Done {
         AgentSend {
             agent: asked.agent_id.clone(),
             message: asked.message,
+            images: Vec::new(),
         },
     )
     .map_err(|outcome| unknown_agent(outcome, &asked.agent_id))?;

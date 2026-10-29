@@ -37,6 +37,7 @@
 //!
 //! - `load`, `resume`: whether `initialize` offers `session/load` and `session/resume` (both by
 //!   default). A loaded session replays its history first; a resumed one does not.
+//! - `images`: whether `initialize` says the agent takes images in a prompt (false by default).
 //! - `linger`: keep running once standard input closes, as an orphan would (false by default).
 //! - `child`: start a `sleep` in the process group at startup, recording its pid (`{"child": <pid>}`).
 //! - `stall`: never answer `session/new`, `session/load` or `session/resume`: an agent stuck while
@@ -227,7 +228,7 @@ impl Agent {
             "initialize" => {
                 let mut capabilities = json!({
                     "loadSession": self.script["load"] != false,
-                    "promptCapabilities": {"image": false, "embeddedContext": true},
+                    "promptCapabilities": {"image": self.script["images"] == true, "embeddedContext": true},
                     "mcpCapabilities": {"http": true},
                     "sessionCapabilities": {},
                 });

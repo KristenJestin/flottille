@@ -15,6 +15,7 @@ fast = ["flottille-ui/fast"]
 frames = ["gpui-kit/profiler"]
 
 [dependencies]
+base64 = "0.22.1"
 flottille-core = { version = "0.1.0", path = "../flottille-core" }
 flottille-ui = { version = "0.1.0", path = "../flottille-ui", default-features = false }
 futures = { version = "0.3.32", default-features = false, features = ["std"] }
