@@ -44,6 +44,9 @@ pub struct CommandRow {
     pub ended_at: Option<u64>,
     /// The last line of its output with something on it, as the program wrote it.
     pub last_line: String,
+    /// The last lines of its output once it ended, as the program wrote them: what the card of
+    /// its result shows. None while it runs.
+    pub tail: Vec<String>,
 }
 
 impl CommandRow {
@@ -60,6 +63,12 @@ impl CommandRow {
             started_at: value["started_at"].as_u64().unwrap_or(0),
             ended_at: value["ended_at"].as_u64(),
             last_line: text("last_line"),
+            tail: value["tail"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|line| line.as_str().map(str::to_owned))
+                .collect(),
         }
     }
 
@@ -110,14 +119,14 @@ impl CommandOutput {
 /// What a command's ending is drawn with: a glyph, its ink and its words. The shape says it as
 /// well as the colour.
 pub fn mark_of(ending: Ending, p: &Palette) -> (&'static str, Hsla, String) {
-    match ending {
-        Ending::Running => ("●", p.run, "running".into()),
-        Ending::Exited(0) => ("✓", p.ok, "exit 0".into()),
-        Ending::Exited(code) => ("✗", p.fail, format!("exit {code}")),
-        Ending::Killed(signal) => ("✗", p.fail, format!("signal {signal}")),
-        Ending::Stopped => ("■", p.faint, "stopped".into()),
-        Ending::Interrupted => ("–", p.faint, "interrupted".into()),
-    }
+    let (glyph, ink) = match ending {
+        Ending::Running => ("●", p.run),
+        Ending::Exited(0) => ("✓", p.ok),
+        Ending::Exited(_) | Ending::Killed(_) => ("✗", p.fail),
+        Ending::Stopped => ("■", p.faint),
+        Ending::Interrupted => ("–", p.faint),
+    };
+    (glyph, ink, ending.said())
 }
 
 /// A colour of a program's output, in the palette: the ink of the state it stands for.

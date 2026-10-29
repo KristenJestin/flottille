@@ -8,8 +8,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use flottille_core::protocol::Event;
 use serde_json::Value;
 
+use crate::commands::CommandRow;
+
 /// Who sent the user's messages: a role, never drawn (the bubble says it).
 pub const USER: &str = "you";
+/// Who allowed a call the Auto judge let through, as a card says it.
+pub const JUDGE: &str = "the judge";
 
 /// What one row of the conversation shows.
 #[derive(Clone, Debug, PartialEq)]
@@ -60,6 +64,11 @@ pub enum Block {
     },
     /// A command's result.
     Command(CommandCard),
+    /// A request whose answer came as a card below: the line that told it was asked and decided
+    /// has nothing left to say, and shows nothing.
+    Answered {
+        number: u64,
+    },
 }
 
 /// How a command ended, as its result says it.
@@ -72,6 +81,19 @@ pub enum Ending {
     Interrupted,
 }
 
+impl Ending {
+    /// What it is called: `exit 3`, `signal 9`, `stopped`.
+    pub fn said(self) -> String {
+        match self {
+            Ending::Running => "running".into(),
+            Ending::Exited(code) => format!("exit {code}"),
+            Ending::Killed(signal) => format!("signal {signal}"),
+            Ending::Stopped => "stopped".into(),
+            Ending::Interrupted => "interrupted".into(),
+        }
+    }
+}
+
 /// A command's result as a card: what the daemon answered the call with, read back.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CommandCard {
@@ -82,7 +104,7 @@ pub struct CommandCard {
     /// The lines of its output the answer held, as the program wrote them (masked): colours
     /// included, for the card to draw or strip.
     pub lines: Vec<String>,
-    /// Who allowed the call when it came back through an approval.
+    /// Who allowed the call: the user when it came back through an approval, or the Auto judge.
     pub allowed_by: Option<String>,
 }
 
@@ -182,6 +204,11 @@ pub struct Conversation {
     /// Requests asked by another agent, each with when it was asked, the soonest first: each
     /// gets its row before the first event that came after it.
     pending_approvals: VecDeque<(u64, u64)>,
+    /// The calls the Auto judge let through, by their id.
+    judged: HashSet<String>,
+    /// The commands whose end was told by a line, for a delivery pinned and then sent to say it
+    /// once.
+    ended_lines: HashSet<String>,
 }
 
 impl Conversation {
@@ -199,6 +226,8 @@ impl Conversation {
             running: HashSet::new(),
             approvals: HashSet::new(),
             pending_approvals: VecDeque::new(),
+            judged: HashSet::new(),
+            ended_lines: HashSet::new(),
         }
     }
 
@@ -403,13 +432,20 @@ impl Conversation {
                     if body.trim().is_empty() && !names.is_empty() {
                         continue;
                     }
-                    let block = self.delivered(&kind, body);
-                    changes.extend(self.push(block));
+                    changes.extend(self.deliver(&kind, body));
                 }
                 if !names.is_empty() {
                     changes.extend(self.push(Block::Images { names }));
                 }
                 changes
+            }
+            "agent.tool_served" => {
+                if data["gate"] == "judged"
+                    && let Some(key) = data["call_key"].as_str()
+                {
+                    self.judged.insert(key.to_owned());
+                }
+                Vec::new()
             }
             "agent.reported" => {
                 let mut changes = self.close(Some(event.at));
@@ -536,25 +572,111 @@ impl Conversation {
         if ended && matches!(call.name.as_str(), "commands_run" | "commands_status") {
             let mut texts = Vec::new();
             strings(&data["raw_output"], &mut texts);
-            if let Some(card) = texts.into_iter().find_map(command_card) {
+            if let Some(mut card) = texts.into_iter().find_map(command_card) {
+                if self.judged.contains(&call.id) {
+                    card.allowed_by = Some(JUDGE.into());
+                }
                 changes.extend(self.push(Block::Command(card)));
             }
         }
-        // A report delivered as a note on the result.
+        // A report, or the end of a command, delivered as a note on the result.
         for (kind, body) in notes(&data["raw_output"]) {
-            if kind == "child-report" {
-                let block = self.delivered(&kind, body);
-                changes.extend(self.push(block));
+            if matches!(kind.as_str(), "child-report" | "command-ended") {
+                changes.extend(self.deliver(&kind, body));
             }
+        }
+        changes
+    }
+
+    /// One delivery the agent was sent, as the rows it changes: a block of its own, except for
+    /// the end of a command and the answer to a request, which are a card's business.
+    fn deliver(&mut self, kind: &str, body: String) -> Vec<Change> {
+        match kind {
+            "command-ended" => {
+                if let Some(ended) = command_ended(&body) {
+                    return self.command_ended(ended);
+                }
+            }
+            "approval" => {
+                let (block, answered) = approved(&body);
+                let mut changes = Vec::new();
+                if let Some(number) = answered {
+                    // The card says who allowed the call: the line above it, that the request
+                    // was asked and decided, has nothing to add.
+                    self.approvals.insert(number);
+                    let line = Block::Approval { number };
+                    if let Some(at) = self.blocks.iter().position(|b| *b == line) {
+                        self.blocks[at] = Block::Answered { number };
+                        changes.push(Change::Changed(at));
+                    }
+                }
+                changes.extend(self.push(block));
+                return changes;
+            }
+            _ => {}
+        }
+        let block = self.delivered(kind, body);
+        self.push(block)
+    }
+
+    /// A command that outlived its call ended: its card shows how, and nothing is added. Only a
+    /// command with no card on screen (its call is in an earlier page) is told by a quiet line.
+    fn command_ended(&mut self, ended: Ended) -> Vec<Change> {
+        let mut changes = Vec::new();
+        let mut shown = false;
+        for (at, block) in self.blocks.iter_mut().enumerate() {
+            let Block::Command(card) = block else {
+                continue;
+            };
+            if card.run != ended.run {
+                continue;
+            }
+            shown = true;
+            if card.ending == Ending::Running {
+                card.ending = ended.ending;
+                card.seconds = ended.seconds;
+                card.lines = ended.lines.clone();
+                changes.push(Change::Changed(at));
+            }
+        }
+        if !shown && self.ended_lines.insert(ended.run.clone()) {
+            let mut parts = vec![format!("`{}` ended", ended.line), ended.ending.said()];
+            parts.extend(ended.seconds.map(|s| format!("{s:.1}s")));
+            changes.extend(self.push(Block::Notice {
+                kind: "command".into(),
+                text: parts.join(" \u{b7} "),
+            }));
+        }
+        changes
+    }
+
+    /// The daemon's list of the session's commands: a card still running whose run ended takes its
+    /// end from it (a stop by the agent, a daemon that stopped, a run read again after a restart),
+    /// with the end of its output when the list gives it.
+    pub fn update_commands(&mut self, rows: &[CommandRow]) -> Vec<Change> {
+        let mut changes = Vec::new();
+        for (at, block) in self.blocks.iter_mut().enumerate() {
+            let Block::Command(card) = block else {
+                continue;
+            };
+            if card.ending != Ending::Running {
+                continue;
+            }
+            let Some(row) = rows.iter().find(|r| r.run == card.run && !r.running()) else {
+                continue;
+            };
+            card.ending = row.ending();
+            card.seconds = Some(row.elapsed_ms(0) as f64 / 1000.0);
+            if !row.tail.is_empty() {
+                card.lines = row.tail.clone();
+            }
+            changes.push(Change::Changed(at));
         }
         changes
     }
 
     /// The block of one delivery the agent was sent.
     fn delivered(&self, kind: &str, body: String) -> Block {
-        if kind == "approval" {
-            return approved(&body);
-        }
         match (kind, &self.parent) {
             ("" | "user" | "brief", None) => Block::Message {
                 from: USER.into(),
@@ -604,19 +726,7 @@ pub fn command_card(text: &str) -> Option<CommandCard> {
         ),
         None => (after, None),
     };
-    let ending = match how {
-        "is running" => Ending::Running,
-        "was stopped" => Ending::Stopped,
-        how if how.starts_with("was interrupted") => Ending::Interrupted,
-        how => match (
-            how.strip_prefix("exited with code "),
-            how.strip_prefix("was killed by signal "),
-        ) {
-            (Some(code), _) => Ending::Exited(code.parse().ok()?),
-            (_, Some(signal)) => Ending::Killed(signal.parse().ok()?),
-            _ => return None,
-        },
-    };
+    let ending = ending_of(how)?;
     let mut lines = body.lines().peekable();
     if lines
         .peek()
@@ -640,13 +750,72 @@ pub fn command_card(text: &str) -> Option<CommandCard> {
     })
 }
 
+/// How a command is, as the daemon says it (`runs.rs`, `state_text`).
+fn ending_of(how: &str) -> Option<Ending> {
+    Some(match how {
+        "is running" => Ending::Running,
+        "was stopped" | "was stopped by the user" => Ending::Stopped,
+        how if how.starts_with("was interrupted") => Ending::Interrupted,
+        how => match (
+            how.strip_prefix("exited with code "),
+            how.strip_prefix("was killed by signal "),
+        ) {
+            (Some(code), _) => Ending::Exited(code.parse().ok()?),
+            (_, Some(signal)) => Ending::Killed(signal.parse().ok()?),
+            _ => return None,
+        },
+    })
+}
+
+/// A `command-ended` delivery, read back.
+struct Ended {
+    run: String,
+    line: String,
+    ending: Ending,
+    seconds: Option<f64>,
+    lines: Vec<String>,
+}
+
+/// The end of a command as its agent is told (`runs.rs`, `ended_text`): `Your command `<line>`
+/// (run <id>) <how> after <s> s.`, then its last lines or `It wrote nothing.`; `None` for any
+/// other text.
+fn command_ended(body: &str) -> Option<Ended> {
+    let rest = body.strip_prefix("Your command `")?;
+    let (line, rest) = rest.split_once("` (run ")?;
+    let (run, rest) = rest.split_once(") ")?;
+    let (header, tail) = rest.split_once('\n').unwrap_or((rest, ""));
+    let header = header.trim_end().trim_end_matches('.');
+    let (how, seconds) = match header.rsplit_once(" after ") {
+        Some((how, time)) => (
+            how,
+            time.strip_suffix(" s").and_then(|t| t.parse::<f64>().ok()),
+        ),
+        None => (header, None),
+    };
+    let mut lines = tail.lines();
+    // The line that says where the lines come from, or that there are none.
+    lines.next();
+    Some(Ended {
+        run: run.to_owned(),
+        line: line.to_owned(),
+        ending: ending_of(how)?,
+        seconds,
+        lines: lines.map(str::to_owned).collect(),
+    })
+}
+
 /// What the daemon stored for an agent when the user answered a request (`approvals.rs`), as the
 /// conversation says it: a command's result is its card with who allowed it, any other answer a
 /// sentence. The daemon's own words are the agent's, never shown.
-fn approved(body: &str) -> Block {
-    let notice = |text: String| Block::Notice {
-        kind: "approval".into(),
-        text,
+fn approved(body: &str) -> (Block, Option<u64>) {
+    let notice = |text: String| {
+        (
+            Block::Notice {
+                kind: "approval".into(),
+                text,
+            },
+            None,
+        )
     };
     let parsed = body
         .strip_prefix("Request #")
@@ -660,10 +829,13 @@ fn approved(body: &str) -> Block {
     };
     if let Some((_, result)) = said.split_once("has now done it. Its result:\n\n") {
         return match command_card(result) {
-            Some(card) => Block::Command(CommandCard {
-                allowed_by: Some(USER.into()),
-                ..card
-            }),
+            Some(card) => (
+                Block::Command(CommandCard {
+                    allowed_by: Some(USER.into()),
+                    ..card
+                }),
+                number.parse().ok(),
+            ),
             None => notice(format!("you allowed {tool} (request #{number})")),
         };
     }
@@ -1281,5 +1453,261 @@ mod tests {
         };
         assert_eq!(calls[0].args.chars().count(), ARGS + 1);
         assert!(calls[0].args.ends_with('…'));
+    }
+    const RUNNING: &str = "run r1: `./fails.sh` is running after 1.0 s\nit keeps going: read it with commands_status {\"run\": \"r1\"}\n(lines 1-1 of 1)\nstart";
+
+    fn ended_delivery(state: &str) -> String {
+        format!(
+            "[flottille:command-ended]\nYour command `./fails.sh` (run r1) {state} after 2.0 s.\n\
+             Its last lines (lines 1-2 of 2; read more with commands_status {{\"run\": \"r1\"}}):\n\
+             start\nboom"
+        )
+    }
+
+    fn running_card(c: &mut Conversation) {
+        for event in answered("a", "commands_run", RUNNING) {
+            c.apply(&event);
+        }
+    }
+
+    fn cards(c: &Conversation) -> Vec<&CommandCard> {
+        c.blocks()
+            .iter()
+            .filter_map(|b| match b {
+                Block::Command(card) => Some(card),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_command_ended_delivery_ends_its_card_and_is_never_shown_as_text() {
+        let mut c = root();
+        running_card(&mut c);
+
+        let changes = c.apply(&event(
+            20,
+            "agent.prompted",
+            json!({"text": ended_delivery("exited with code 3")}),
+        ));
+
+        assert_eq!(changes, [Change::Changed(1)], "the card, and nothing added");
+        let card = cards(&c)[0];
+        assert_eq!(card.ending, Ending::Exited(3));
+        assert_eq!(card.seconds, Some(2.0));
+        assert_eq!(card.lines, ["start", "boom"], "the final tail");
+        assert!(c.blocks().iter().all(|b| !matches!(
+            b,
+            Block::Notice { text, .. } if text.contains("Your command")
+        )));
+        assert_eq!(c.blocks().len(), 2);
+    }
+
+    #[test]
+    fn a_command_ended_delivery_of_a_user_stop_ends_its_card_as_stopped() {
+        let mut c = root();
+        running_card(&mut c);
+
+        c.apply(&event(
+            20,
+            "agent.prompted",
+            json!({"text": ended_delivery("was stopped by the user")}),
+        ));
+
+        assert_eq!(cards(&c)[0].ending, Ending::Stopped);
+    }
+
+    #[test]
+    fn a_command_ended_delivery_without_its_card_is_one_quiet_line_once() {
+        let mut c = root();
+        let delivery = json!({"text": ended_delivery("exited with code 3")});
+
+        let changes = c.apply(&event(1, "agent.prompted", delivery.clone()));
+        c.apply(&event(2, "agent.prompted", delivery));
+
+        assert_eq!(changes, [Change::Added]);
+        assert_eq!(
+            c.blocks(),
+            [Block::Notice {
+                kind: "command".into(),
+                text: "`./fails.sh` ended \u{b7} exit 3 \u{b7} 2.0s".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_command_ended_delivery_pinned_on_a_result_is_handled_the_same_way() {
+        let note = |delivery: String| {
+            format!("file\n\n<flottille-note id=\"d\">\n{delivery}\n</flottille-note>")
+        };
+        let read = |c: &mut Conversation, at: u64, id: &str, text: String| {
+            c.apply(&event(
+                at,
+                "agent.tool_call",
+                json!({"id": id, "title": "fs_read", "status": "in_progress"}),
+            ));
+            c.apply(&event(
+                at + 1,
+                "agent.tool_call",
+                json!({"id": id, "update": true, "status": "completed", "raw_output":
+                    {"result": {"content": [{"type": "text", "text": text}]}}}),
+            ));
+        };
+
+        let mut with_card = root();
+        running_card(&mut with_card);
+        read(
+            &mut with_card,
+            30,
+            "x",
+            note(ended_delivery("exited with code 3")),
+        );
+        assert_eq!(cards(&with_card)[0].ending, Ending::Exited(3));
+        assert!(
+            with_card
+                .blocks()
+                .iter()
+                .all(|b| !matches!(b, Block::Notice { .. }))
+        );
+
+        let mut without = root();
+        read(
+            &mut without,
+            1,
+            "x",
+            note(ended_delivery("exited with code 3")),
+        );
+        let lines: Vec<&Block> = without
+            .blocks()
+            .iter()
+            .filter(|b| matches!(b, Block::Notice { .. }))
+            .collect();
+        assert_eq!(lines.len(), 1, "{:?}", without.blocks());
+    }
+
+    const APPROVED: &str = "[flottille:approval]\nRequest #7 (commands_run) was approved by the user, and Flottille has now done it. Its result:\n\nrun r2: `make` exited with code 0 after 1.0 s\n(lines 1-1 of 1)\nbuilt";
+
+    #[test]
+    fn the_approval_line_is_dropped_when_the_card_of_its_result_follows() {
+        let mut c = root();
+        c.add_approval(7);
+
+        let changes = c.apply(&event(1, "agent.prompted", json!({"text": APPROVED})));
+
+        assert_eq!(changes, [Change::Changed(0), Change::Added]);
+        assert_eq!(c.blocks()[0], Block::Answered { number: 7 });
+        assert!(
+            matches!(&c.blocks()[1], Block::Command(card) if card.allowed_by.as_deref() == Some("you"))
+        );
+        assert!(
+            c.add_approval(7).is_empty(),
+            "the page's refresh does not bring the line back"
+        );
+    }
+
+    #[test]
+    fn an_approval_whose_card_came_first_is_not_added_again() {
+        let mut c = root();
+
+        c.apply(&event(1, "agent.prompted", json!({"text": APPROVED})));
+
+        assert!(c.add_approval(7).is_empty());
+        assert_eq!(c.blocks().len(), 1);
+    }
+
+    #[test]
+    fn a_refused_request_keeps_its_line() {
+        let mut c = root();
+        c.add_approval(7);
+
+        c.apply(&event(
+            1,
+            "agent.prompted",
+            json!({"text": "[flottille:approval]\nRequest #7 (commands_run) was refused by the user. Nothing was done."}),
+        ));
+
+        assert_eq!(c.blocks()[0], Block::Approval { number: 7 });
+    }
+
+    fn served(seq: u64, key: &str, gate: &str) -> Event {
+        event(
+            seq,
+            "agent.tool_served",
+            json!({"tool": "commands_run", "call_key": key, "gate": gate}),
+        )
+    }
+
+    #[test]
+    fn a_card_says_the_judge_allowed_the_call_it_let_through() {
+        let mut c = root();
+        for (seq, id, gate) in [(1, "a", "judged"), (4, "b", "allow")] {
+            let [call, done] = answered(id, "commands_run", RUN_ANSWER);
+            // The server records the call before the agent sees it done.
+            c.apply(&Event { seq, ..call });
+            c.apply(&served(seq + 1, id, gate));
+            c.apply(&Event {
+                seq: seq + 2,
+                ..done
+            });
+        }
+
+        let allowed: Vec<Option<&str>> = cards(&c)
+            .iter()
+            .map(|card| card.allowed_by.as_deref())
+            .collect();
+        assert_eq!(allowed, [Some("the judge"), None]);
+    }
+
+    fn row(state: &str, exit_code: Option<i32>, tail: &[&str]) -> CommandRow {
+        CommandRow {
+            run: "r1".into(),
+            agent: "a".into(),
+            name: None,
+            line: "./fails.sh".into(),
+            state: state.into(),
+            exit_code,
+            signal: None,
+            started_at: 1_000,
+            ended_at: (state != "running").then_some(4_500),
+            last_line: tail.last().copied().unwrap_or_default().into(),
+            tail: tail.iter().map(|l| (*l).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_running_card_takes_its_end_from_the_live_row_of_its_run() {
+        let mut c = root();
+        running_card(&mut c);
+
+        assert!(c.update_commands(&[row("running", None, &[])]).is_empty());
+        let changes = c.update_commands(&[
+            row("exited", Some(3), &["start", "boom"]),
+            CommandRow {
+                run: "other".into(),
+                ..row("exited", Some(1), &[])
+            },
+        ]);
+
+        assert_eq!(changes, [Change::Changed(1)]);
+        let card = cards(&c)[0];
+        assert_eq!(card.ending, Ending::Exited(3));
+        assert_eq!(card.seconds, Some(3.5));
+        assert_eq!(card.lines, ["start", "boom"]);
+        assert!(
+            c.update_commands(&[row("exited", Some(3), &["start", "boom"])])
+                .is_empty(),
+            "an ended card is not drawn again"
+        );
+    }
+
+    #[test]
+    fn a_running_card_of_a_run_the_daemon_interrupted_shows_it() {
+        let mut c = root();
+        running_card(&mut c);
+
+        c.update_commands(&[row("interrupted", None, &[])]);
+
+        assert_eq!(cards(&c)[0].ending, Ending::Interrupted);
+        assert_eq!(cards(&c)[0].lines, ["start"], "no tail: what it had stays");
     }
 }

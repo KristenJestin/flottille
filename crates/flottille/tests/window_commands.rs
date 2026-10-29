@@ -45,7 +45,11 @@ fn user() -> User {
     let user = User::with_fake_agent();
     user.fake_script(json!({"turns": [
         {"when": "show colours", "do": [
-            {"mcp": {"tool": "commands_run", "arguments": {"command": "colours"}}}]}
+            {"mcp": {"tool": "commands_run", "arguments": {"command": "colours"}}}]},
+        {"when": "run fails", "do": [
+            {"mcp": {"tool": "commands_run", "arguments": {"command": "fails", "timeout": 1}}}]},
+        {"when": "run server", "do": [
+            {"mcp": {"tool": "commands_run", "arguments": {"command": "server"}}}]}
     ]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     user
@@ -504,5 +508,200 @@ fn a_command_that_came_back_through_an_approval_is_the_same_card_with_who_allowe
             Block::Notice { text, .. } if text.contains("Request #") || text.contains("Its result")
         )),
         "{blocks:?}"
+    );
+}
+
+fn blocks_of(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Vec<Block> {
+    page.read_with(cx, |page, cx| {
+        page.conversation().read(cx).blocks().to_vec()
+    })
+}
+
+fn ending_of_card(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Option<Ending> {
+    match card_of(page, cx) {
+        Some((_, Block::Command(card))) => Some(card.ending),
+        _ => None,
+    }
+}
+
+#[gpui_kit::test]
+fn a_running_card_shows_its_end(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, _mcp, _) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, cx);
+    let page = session_page(&shell, cx);
+
+    user.call("agent.send", json!({"agent": lead, "message": "run fails"}))
+        .unwrap();
+    until(&shell, cx, "the card says the command runs", |cx| {
+        ending_of_card(&page, cx) == Some(Ending::Running)
+    });
+    settle(cx);
+    let (at, _) = card_of(&page, cx).unwrap();
+    assert_eq!(label(cx, &format!("command-exit-{at}")).unwrap(), "running");
+
+    // The command ends by itself, two seconds in, after its call answered.
+    until(&shell, cx, "the card shows how it ended", |cx| {
+        ending_of_card(&page, cx) == Some(Ending::Exited(3))
+    });
+    settle(cx);
+
+    let Some((at, Block::Command(card))) = card_of(&page, cx) else {
+        unreachable!()
+    };
+    assert_eq!(label(cx, &format!("command-exit-{at}")).unwrap(), "exit 3");
+    assert!(card.seconds.is_some_and(|s| s >= 1.5), "{:?}", card.seconds);
+    assert_eq!(card.lines, ["one"], "the final tail of its output");
+    assert_eq!(label(cx, &format!("command-line-{at}-0")).unwrap(), "one");
+}
+
+#[gpui_kit::test]
+fn a_command_ended_delivery_is_never_shown_as_text_when_its_card_is_on_screen(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let (lead, _mcp, _) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, cx);
+    let page = session_page(&shell, cx);
+
+    user.call("agent.send", json!({"agent": lead, "message": "run fails"}))
+        .unwrap();
+    until(&shell, cx, "the card shows how it ended", |cx| {
+        ending_of_card(&page, cx) == Some(Ending::Exited(3))
+    });
+    settle(cx);
+
+    let blocks = blocks_of(&page, cx);
+    assert!(
+        blocks.iter().all(|block| !matches!(
+            block,
+            Block::Notice { kind, text }
+                if kind.contains("command") || text.contains("commands_status")
+                    || text.contains("Your command")
+        )),
+        "no text, no line: the card says it. {blocks:?}"
+    );
+    assert!(
+        cx.update(|window, _| window.try_find("notice".to_owned()).is_none()),
+        "nothing drawn as a notice"
+    );
+}
+
+#[gpui_kit::test]
+fn a_command_ended_whose_card_is_not_on_screen_is_one_quiet_line(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp, _) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, cx);
+    let page = session_page(&shell, cx);
+
+    // Started by a call the conversation shows no card for.
+    let _run = start(&mcp, "fails");
+    until(&shell, cx, "the line is in the conversation", |cx| {
+        blocks_of(&page, cx)
+            .iter()
+            .any(|block| matches!(block, Block::Notice { kind, .. } if kind == "command"))
+    });
+    settle(cx);
+
+    let lines: Vec<String> = blocks_of(&page, cx)
+        .iter()
+        .filter_map(|block| match block {
+            Block::Notice { kind, text } if kind == "command" => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].starts_with("`./fails.sh` ended \u{b7} exit 3 \u{b7} 2."),
+        "{}",
+        lines[0]
+    );
+    assert!(
+        blocks_of(&page, cx).iter().all(|block| !matches!(
+            block,
+            Block::Notice { text, .. } if text.contains("commands_status")
+        )),
+        "not the delivery's own words"
+    );
+}
+
+#[gpui_kit::test]
+fn a_card_whose_command_the_agent_stopped_itself_shows_it_stopped(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp, _) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, cx);
+    let page = session_page(&shell, cx);
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": "run server"}),
+    )
+    .unwrap();
+    until(&shell, cx, "the card says the server runs", |cx| {
+        ending_of_card(&page, cx) == Some(Ending::Running)
+    });
+    let Some((_, Block::Command(card))) = card_of(&page, cx) else {
+        unreachable!()
+    };
+
+    // No delivery tells the agent its own stop: the list of commands does.
+    ok(mcp.call(
+        "commands_status",
+        json!({"run": card.run, "action": "stop"}),
+    ));
+    until(&shell, cx, "the card shows the stop", |cx| {
+        ending_of_card(&page, cx) == Some(Ending::Stopped)
+    });
+    settle(cx);
+
+    let (at, _) = card_of(&page, cx).unwrap();
+    assert_eq!(label(cx, &format!("command-exit-{at}")).unwrap(), "stopped");
+}
+
+#[gpui_kit::test]
+fn the_old_approval_line_is_dropped_when_the_card_follows(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp, _) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, cx);
+    let page = session_page(&shell, cx);
+
+    // The call is held: the request has its row, until its result comes as a card.
+    let script = user.path("shared/colours.sh");
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(&script, SCRIPTS[2].1).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let held = mcp.call(
+        "commands_run",
+        json!({"line": script.display().to_string()}),
+    );
+    let number: u64 = held
+        .text
+        .strip_prefix("Waiting for the user's approval, request #")
+        .and_then(|rest| rest.split_once('.'))
+        .map(|(number, _)| number.parse().unwrap())
+        .unwrap_or_else(|| panic!("not held: {}", held.text));
+    until(&shell, cx, "the request has its row", |cx| {
+        blocks_of(&page, cx).contains(&Block::Approval { number })
+    });
+
+    user.call("approval.approve", json!({"number": number}))
+        .unwrap();
+    until(&shell, cx, "the card is in the conversation", |cx| {
+        card_of(&page, cx).is_some()
+    });
+    settle(cx);
+
+    let blocks = blocks_of(&page, cx);
+    assert!(blocks.contains(&Block::Answered { number }), "{blocks:?}");
+    assert!(!blocks.contains(&Block::Approval { number }), "{blocks:?}");
+    assert!(
+        cx.update(|window, _| window
+            .try_find(format!("approval-record-{number}"))
+            .is_none()),
+        "no line 'Allowed' above the card"
+    );
+    let (at, _) = card_of(&page, cx).unwrap();
+    assert!(
+        cx.update(|window, _| window.try_find(format!("command-allowed-{at}")).is_some()),
+        "the card says who allowed it"
     );
 }

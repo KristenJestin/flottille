@@ -678,6 +678,7 @@ impl SessionPage {
                     view.rebuild(read, this, cx)
                 });
                 self.refresh_conversation(cx);
+                self.sync_command_cards(cx);
                 self.note_activity(cx);
                 self.fetch_pictures(cx);
             }
@@ -690,6 +691,9 @@ impl SessionPage {
                     let changes = view.model.apply(&event);
                     view.changed(&changes, this, cx);
                 });
+                if event.name == "agent.tool_call" {
+                    self.sync_command_cards(cx);
+                }
                 self.note_activity(cx);
                 if event.name == "agent.prompted" {
                     self.fetch_pictures(cx);
@@ -712,6 +716,7 @@ impl SessionPage {
             SessionUpdate::Commands(rows) => {
                 let list = self.commands(cx);
                 list.update(cx, |list, cx| list.set(rows, cx));
+                self.sync_command_cards(cx);
             }
             SessionUpdate::CommandOutput(output) => {
                 self.command_panel
@@ -918,6 +923,17 @@ impl SessionPage {
             conversation.update(cx, |view, _| view.model.set_names(names));
             self.refresh_conversation(cx);
         }
+    }
+
+    /// Brings the cards of running commands up to the rail's list: a command that ended meanwhile
+    /// shows its end, and the end of its output when the list has it.
+    fn sync_command_cards(&self, cx: &mut Context<Self>) {
+        let rows = self.commands(cx).read(cx).rows().to_vec();
+        let conversation = self.conversation.clone();
+        conversation.update(cx, |view, cx| {
+            let changes = view.model.update_commands(&rows);
+            view.changed(&changes, self, cx);
+        });
     }
 
     /// Brings the rows that show the tree or the requests up to what the page knows: the
@@ -1444,6 +1460,10 @@ impl ConversationView {
                 }
                 Change::Changed(at) => {
                     let block = self.model.blocks()[*at].clone();
+                    if !matches!(block, Block::SubAgents | Block::Approval { .. }) {
+                        // A request answered by a card has no card of its own to bring up to date.
+                        self.specials.retain(|special| special != at);
+                    }
                     if let Some(row) = self.rows.get(*at).cloned() {
                         self.touched += 1;
                         row.update(cx, |row, cx| row.set_block(block, cx));
@@ -1505,6 +1525,10 @@ impl ConversationView {
         let Some(row) = self.rows.get(at) else {
             return div().into_any_element();
         };
+        // A request answered by a card below it: no row, not even the gap between two.
+        if matches!(row.read(cx).block(), Block::Answered { .. }) {
+            return div().into_any_element();
+        }
         if piece > 0 {
             let piece = row.read(cx).more_pieces().get(piece - 1).cloned();
             return centred(column.children(piece));
@@ -1815,6 +1839,9 @@ impl Row {
                 }
             }
             _ => {}
+        }
+        if !matches!(block, Block::Approval { .. }) {
+            self.card = None;
         }
         self.block = Rc::new(block);
         cx.notify();
@@ -2388,6 +2415,7 @@ impl Render for Row {
                     .into_any_element()
             }
             Block::Approval { number } => self.render_card(*number, cx).into_any_element(),
+            Block::Answered { .. } => div().into_any_element(),
             Block::Command(result) => {
                 let toggle = cx.listener(|this, _, _, cx| {
                     this.open = !this.open;
