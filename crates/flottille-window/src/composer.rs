@@ -1,7 +1,11 @@
 //! The composer that starts a session, in two layers: an outer shell, the field with its own
 //! border and focus ring, and the pickers below it (the place, the agent and model, send). The field is its own view: typing redraws it, never the page.
 
-use flottille_ui::{Align, Button, Dropdown, Icon, MenuItem, Type, palette};
+use flottille_ui::color::mix;
+use flottille_ui::motion::HOVER;
+use flottille_ui::{
+    Align, Button, Dropdown, Icon, MenuItem, Type, enter, fade, hoverable, palette, presence_of,
+};
 use gpui_kit::base::input::{InputEditorStyle, InputEvent, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -792,21 +796,19 @@ impl Composer {
                     why.into_iter()
                         .map(|line| div().child(SharedString::from(line))),
                 )
-                .child(
+                .child(hoverable(
                     div()
                         .id("open-settings")
                         .mt(px(2.))
-                        .text_color(p.text)
                         .cursor_pointer()
-                        .hover(|d| d.underline())
                         .child("Open the settings")
                         .on_click(move |_, window, cx| {
                             shell
                                 .update(cx, |shell, cx| shell.open(Selection::Settings, window, cx))
                                 .ok();
-                        })
-                        .test_support(),
-                ),
+                        }),
+                    move |d, t| d.text_color(mix(p.mute, p.text, t)),
+                )),
         )
     }
 
@@ -887,9 +889,10 @@ pub fn agents_label(n: usize) -> String {
 }
 
 impl Render for Composer {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
         let p = palette(cx);
+        let focus = fade("composer-focus", self.focused, HOVER, window, cx);
         let body = div()
             .id("composer-field")
             .px(px(14.))
@@ -921,14 +924,10 @@ impl Render for Composer {
                     .rounded(px(11.))
                     .bg(p.field)
                     .border_1()
-                    .border_color(if self.focused {
-                        p.focus_line
-                    } else {
-                        p.field_line
-                    })
-                    .when(self.focused, |d| {
+                    .border_color(mix(p.field_line, p.focus_line, focus))
+                    .when(focus > 0.0, |d| {
                         d.shadow(vec![gpui_kit::BoxShadow {
-                            color: p.focus_ring,
+                            color: p.focus_ring.opacity(focus),
                             offset: gpui_kit::point(px(0.), px(0.)),
                             blur_radius: px(0.),
                             spread_radius: px(3.),
@@ -940,8 +939,10 @@ impl Render for Composer {
             )
             .child(self.render_pickers(cx).into_any_element())
             .children(self.render_not_ready(cx))
-            .when_some(self.model_refused(), |d, why| {
-                d.child(
+            .child(presence_of(
+                "composer-model-refused-line",
+                self.model_refused().map(SharedString::from),
+                move |why| {
                     div()
                         .id("composer-model-refused")
                         .px(px(10.))
@@ -949,9 +950,10 @@ impl Render for Composer {
                         .pb(px(2.))
                         .text_size(px(12.5))
                         .text_color(p.faint)
-                        .child(SharedString::from(why)),
-                )
-            })
+                        .child(why)
+                        .into_any_element()
+                },
+            ))
             .when_some(self.blocked.clone(), |d, why| {
                 d.child(
                     div()
@@ -964,8 +966,10 @@ impl Render for Composer {
                         .child(SharedString::from(why)),
                 )
             })
-            .when_some(self.error.clone(), |d, error| {
-                d.child(
+            .child(presence_of(
+                "composer-error-line",
+                self.error.clone(),
+                move |error| {
                     div()
                         .id("composer-error")
                         .px(px(10.))
@@ -973,11 +977,14 @@ impl Render for Composer {
                         .pb(px(2.))
                         .text_size(px(12.5))
                         .text_color(p.fail)
-                        .child(error),
-                )
-            })
+                        .child(error)
+                        .into_any_element()
+                },
+            ))
             .when(self.sending.is_some(), |d| {
-                d.child(
+                d.child(enter(
+                    "composer-starting",
+                    0,
                     div()
                         .px(px(10.))
                         .pt(px(6.))
@@ -985,7 +992,7 @@ impl Render for Composer {
                         .mono(11.5)
                         .text_color(p.faint)
                         .child("Starting…"),
-                )
+                ))
             })
     }
 }

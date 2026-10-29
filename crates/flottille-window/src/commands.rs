@@ -5,13 +5,15 @@
 //! one.
 
 use flottille_core::commands::TEMPLATES;
-use flottille_ui::{Button, Icon, ListRow, Modal, Type, icon, palette};
+use flottille_ui::{
+    Button, Icon, Item, ListRow, Listing, Modal, Type, enter, icon, palette, presence, presence_of,
+};
 use gpui_kit::base::input::{Input, InputEditorStyle, InputEvent, InputState, TextareaState};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement,
-    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, TestSupportExt as _, WeakEntity, Window, div, px,
+    AnyElement, App, AppContext as _, Context, ElementId, Entity, Focusable as _,
+    InteractiveElement, IntoElement, ParentElement, Render, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, TestSupportExt as _, WeakEntity, Window, div,
+    px,
 };
 use serde_json::Value;
 
@@ -90,6 +92,69 @@ pub(crate) fn boxed(id: &'static str, field: impl IntoElement, cx: &App) -> impl
         .test_support()
 }
 
+/// A section's line saying there is nothing yet: it unfolds when the list empties and folds away
+/// when a row comes. `id` is the line's, for the tests.
+pub(crate) fn empty_note(
+    id: &'static str,
+    empty: bool,
+    text: &'static str,
+    cx: &App,
+) -> impl IntoElement {
+    let p = palette(cx);
+    presence(
+        format!("{id}-block"),
+        empty,
+        div()
+            .id(id)
+            .text_size(px(12.5))
+            .text_color(p.faint)
+            .child(text)
+            .test_support(),
+    )
+    .gap(px(8.))
+}
+
+/// A line that says what went wrong, in the alarm colour: it unfolds when there is one and folds
+/// away when it is cleared. `id` is the line's; `gap` is what the parent puts between its children.
+pub(crate) fn problem_line(
+    id: &'static str,
+    problem: Option<SharedString>,
+    gap: f32,
+    cx: &App,
+) -> impl IntoElement {
+    let p = palette(cx);
+    presence_of(format!("{id}-block"), problem, move |problem| {
+        div()
+            .id(id)
+            .text_size(px(12.5))
+            .text_color(p.fail)
+            .child(problem)
+            .test_support()
+            .into_any_element()
+    })
+    .gap(px(gap))
+}
+
+/// What a modal's action holds: "Saving…" while the daemon works, else `save`.
+pub(crate) fn save_or_saving(
+    id: &'static str,
+    saving: bool,
+    save: impl FnOnce() -> Button,
+    cx: &App,
+) -> AnyElement {
+    let p = palette(cx);
+    if saving {
+        enter(
+            format!("{id}-saving"),
+            0,
+            div().mono(11.5).text_color(p.faint).child("Saving…"),
+        )
+        .into_any_element()
+    } else {
+        save().into_any_element()
+    }
+}
+
 /// The heading of a section of a project's pages.
 pub(crate) fn heading(
     title: &'static str,
@@ -140,6 +205,8 @@ pub struct CommandsSection {
     shell: WeakEntity<Shell>,
     project: String,
     listed: Option<Vec<CommandInfo>>,
+    /// The rows as drawn: a removed command folds away before it is gone.
+    rows: Listing<CommandInfo>,
     /// What the daemon said when the list could not be read, or a removal was refused.
     problem: Option<SharedString>,
     form: Form,
@@ -159,6 +226,7 @@ impl CommandsSection {
             shell,
             project,
             listed: None,
+            rows: Listing::default(),
             problem: None,
             form: Form::Closed,
             fields: None,
@@ -457,7 +525,7 @@ impl CommandsSection {
             })
             .child(if confirming {
                 let (cancel, remove) = (name.clone(), name.clone());
-                div()
+                let group = div()
                     .flex()
                     .gap(px(4.))
                     .child(
@@ -473,8 +541,8 @@ impl CommandsSection {
                     .child(
                         Button::secondary(id("confirm-remove-command"), format!("Remove {name}"))
                             .on_click(cx.listener(move |this, _, _, cx| this.remove(&remove, cx))),
-                    )
-                    .into_any_element()
+                    );
+                enter(id("confirm-command"), 0, group).into_any_element()
             } else {
                 let remove = name.clone();
                 Button::quiet(id("remove-command"), "Remove")
@@ -498,14 +566,7 @@ impl CommandsSection {
             .on_close(move |_, cx| {
                 this.update(cx, |this, cx| this.close(cx)).ok();
             });
-        let error = self.form_error.clone().map(|error| {
-            div()
-                .id("command-error")
-                .text_size(px(12.5))
-                .text_color(p.fail)
-                .child(error)
-                .test_support()
-        });
+        let error = problem_line("command-error", self.form_error.clone(), 14., cx);
         match self.form.clone() {
             Form::Closed => modal,
             Form::Choosing => {
@@ -540,7 +601,7 @@ impl CommandsSection {
                             .child(blank)
                             .test_support(),
                     )
-                    .children(error)
+                    .child(error)
             }
             Form::Editing(original) => {
                 let fields = self.fields.as_ref().expect("made when the form opens");
@@ -580,17 +641,15 @@ impl CommandsSection {
                             .test_support(),
                     )
                     .test_support();
-                modal.child(body).children(error).action(if self.saving {
-                    div()
-                        .mono(11.5)
-                        .text_color(p.faint)
-                        .child("Saving…")
-                        .into_any_element()
-                } else {
-                    Button::primary("save-command", "Save")
-                        .on_click(cx.listener(|this, _, _, cx| this.save(cx)))
-                        .into_any_element()
-                })
+                modal.child(body).child(error).action(save_or_saving(
+                    "command",
+                    self.saving,
+                    || {
+                        Button::primary("save-command", "Save")
+                            .on_click(cx.listener(|this, _, _, cx| this.save(cx)))
+                    },
+                    cx,
+                ))
             }
         }
     }
@@ -598,15 +657,25 @@ impl CommandsSection {
 
 impl Render for CommandsSection {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = palette(cx);
+        if let Some(listed) = self.listed.clone() {
+            let now = cx.background_executor().now();
+            let reduce = cx.reduce_motion();
+            self.rows
+                .sync(listed.into_iter().map(|c| (c.name.clone(), c)), now, reduce);
+        }
         let rows: Vec<_> = self
-            .listed
-            .clone()
-            .unwrap_or_default()
-            .iter()
-            .map(|info| self.row(info, cx).into_any_element())
+            .rows
+            .rows()
+            .map(|row| {
+                Item::new(
+                    ElementId::Name(format!("command-item-{}", row.key).into()),
+                    row.placement,
+                    self.row(row.value, cx),
+                )
+                .gap(px(8.))
+            })
             .collect();
-        let count = rows.len();
+        let count = self.rows.len();
         let empty = self.listed.as_ref().is_some_and(Vec::is_empty);
         let modal = self.modal(window, cx);
         div()
@@ -625,30 +694,20 @@ impl Render for CommandsSection {
                     .flex_col()
                     .gap(px(8.))
                     .children(rows)
-                    .when(empty, |d| {
-                        d.child(
-                            div()
-                                .id("no-commands")
-                                .text_size(px(12.5))
-                                .text_color(p.faint)
-                                .child(
-                                    "No command yet: add one from a template to open the pull \
-                                     requests of a workspace, merge a stack or close it. /name \
-                                     in a session's composer sends it to the agent.",
-                                )
-                                .test_support(),
-                        )
-                    })
-                    .when_some(self.problem.clone(), |d, problem| {
-                        d.child(
-                            div()
-                                .id("commands-problem")
-                                .text_size(px(12.5))
-                                .text_color(p.fail)
-                                .child(problem)
-                                .test_support(),
-                        )
-                    }),
+                    .child(empty_note(
+                        "no-commands",
+                        empty,
+                        "No command yet: add one from a template to open the pull requests of \
+                         a workspace, merge a stack or close it. /name in a session's composer \
+                         sends it to the agent.",
+                        cx,
+                    ))
+                    .child(problem_line(
+                        "commands-problem",
+                        self.problem.clone(),
+                        8.,
+                        cx,
+                    )),
             )
             .child(modal)
     }

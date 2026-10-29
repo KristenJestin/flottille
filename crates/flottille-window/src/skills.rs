@@ -9,7 +9,9 @@
 
 use std::path::{Path, PathBuf};
 
-use flottille_ui::{Button, Icon, Modal, Switch, Type, palette};
+use flottille_ui::{
+    Button, Icon, Item, Listing, Modal, Switch, Type, enter, hoverable, palette, presence,
+};
 use gpui_kit::base::input::{Input, InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -19,7 +21,10 @@ use gpui_kit::{
 };
 
 use crate::actions::{Command, SkillWrite};
-use crate::commands::{boxed, editor_style, heading, line_field, perform_later};
+use crate::commands::{
+    boxed, editor_style, empty_note, heading, line_field, perform_later, problem_line,
+    save_or_saving,
+};
 use crate::shell::Shell;
 
 /// How many entries of a folder the picker lists.
@@ -95,6 +100,8 @@ pub struct SkillsSection {
     /// The project's folder, as the page knows it.
     folder: String,
     listed: Option<Vec<SkillInfo>>,
+    /// The rows as drawn: a removed skill folds away before it is gone.
+    rows: Listing<SkillInfo>,
     problem: Option<SharedString>,
     open: bool,
     /// The skill being edited; `None` for a new one.
@@ -119,6 +126,7 @@ impl SkillsSection {
             project,
             folder: String::new(),
             listed: None,
+            rows: Listing::default(),
             problem: None,
             open: false,
             editing: None,
@@ -485,7 +493,7 @@ impl SkillsSection {
             })
             .child(if confirming {
                 let (cancel, remove) = (name.clone(), name.clone());
-                div()
+                let group = div()
                     .flex()
                     .gap(px(4.))
                     .child(Button::quiet(id("cancel-remove-skill"), "Cancel").on_click(
@@ -499,8 +507,8 @@ impl SkillsSection {
                     .child(
                         Button::secondary(id("confirm-remove-skill"), format!("Remove {name}"))
                             .on_click(cx.listener(move |this, _, _, cx| this.remove(&remove, cx))),
-                    )
-                    .into_any_element()
+                    );
+                enter(id("confirm-skill"), 0, group).into_any_element()
             } else {
                 let remove = name.clone();
                 Button::quiet(id("remove-skill"), "Remove")
@@ -554,22 +562,21 @@ impl SkillsSection {
                     .test_support(),
             )
             .when(!self.browsing.as_os_str().is_empty(), |d| {
-                d.child(
+                d.child(hoverable(
                     div()
                         .id("skill-up")
                         .px(px(10.))
                         .py(px(4.))
                         .mono(12.)
                         .text_color(p.mute)
-                        .hover(|d| d.bg(p.hover))
                         .child("..")
-                        .on_click(cx.listener(|this, _, window, cx| this.up(window, cx)))
-                        .test_support(),
-                )
+                        .on_click(cx.listener(|this, _, window, cx| this.up(window, cx))),
+                    move |d, t| d.bg(p.hover.opacity(t)),
+                ))
             })
             .children(listed.into_iter().map(|entry| {
                 let name = entry.name.clone();
-                div()
+                let row = div()
                     .id(ElementId::Name(
                         format!("skill-entry-{}", entry.name).into(),
                     ))
@@ -579,7 +586,6 @@ impl SkillsSection {
                     .items_center()
                     .gap(px(6.))
                     .mono(12.)
-                    .hover(|d| d.bg(p.hover))
                     .child(
                         flottille_ui::icon(if entry.folder {
                             Icon::Folder
@@ -596,8 +602,8 @@ impl SkillsSection {
                     }))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.pick(&name, entry.folder, window, cx)
-                    }))
-                    .test_support()
+                    }));
+                hoverable(row, move |d, t| d.bg(p.hover.opacity(t)))
             }));
         let kind = div()
             .flex()
@@ -646,53 +652,67 @@ impl SkillsSection {
                 cx,
             ))
             .child(kind)
-            .when(self.as_text, |m| m.child(text))
-            .when(!self.as_text, |m| {
-                m.child(boxed("skill-path-field", Input::new(&fields.path), cx))
-                    .child(picker)
-            })
-            .when_some(self.form_error.clone(), |m, error| {
-                m.child(
+            // The text and the path with its picker fold into each other with the switch.
+            .child(presence("skill-text-block", self.as_text, text).gap(px(14.)))
+            .child(
+                presence(
+                    "skill-path-block",
+                    !self.as_text,
                     div()
-                        .id("skill-error")
-                        .text_size(px(12.5))
-                        .text_color(p.fail)
-                        .child(error)
-                        .test_support(),
+                        .flex()
+                        .flex_col()
+                        .gap(px(14.))
+                        .child(boxed("skill-path-field", Input::new(&fields.path), cx))
+                        .child(picker),
                 )
-            })
-            .action(if self.saving {
-                div()
-                    .mono(11.5)
-                    .text_color(p.faint)
-                    .child("Saving…")
-                    .into_any_element()
-            } else {
-                Button::primary(
-                    "save-skill",
-                    if self.editing.is_some() {
-                        "Save"
-                    } else {
-                        "Add"
-                    },
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.save(cx)))
-                .into_any_element()
-            })
+                .gap(px(14.)),
+            )
+            .child(problem_line(
+                "skill-error",
+                self.form_error.clone(),
+                14.,
+                cx,
+            ))
+            .action(save_or_saving(
+                "skill",
+                self.saving,
+                || {
+                    Button::primary(
+                        "save-skill",
+                        if self.editing.is_some() {
+                            "Save"
+                        } else {
+                            "Add"
+                        },
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.save(cx)))
+                },
+                cx,
+            ))
     }
 }
 
 impl Render for SkillsSection {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = palette(cx);
+        if let Some(listed) = self.listed.clone() {
+            let now = cx.background_executor().now();
+            let reduce = cx.reduce_motion();
+            self.rows
+                .sync(listed.into_iter().map(|s| (s.name.clone(), s)), now, reduce);
+        }
         let rows: Vec<_> = self
-            .listed
-            .clone()
-            .unwrap_or_default()
-            .iter()
-            .map(|skill| self.row(skill, cx).into_any_element())
+            .rows
+            .rows()
+            .map(|row| {
+                Item::new(
+                    ElementId::Name(format!("skill-item-{}", row.key).into()),
+                    row.placement,
+                    self.row(row.value, cx),
+                )
+                .gap(px(8.))
+            })
             .collect();
-        let count = rows.len();
+        let count = self.rows.len();
         let empty = self.listed.as_ref().is_some_and(Vec::is_empty);
         let modal = self.modal(cx);
         div()
@@ -711,29 +731,14 @@ impl Render for SkillsSection {
                     .flex_col()
                     .gap(px(8.))
                     .children(rows)
-                    .when(empty, |d| {
-                        d.child(
-                            div()
-                                .id("no-skills")
-                                .text_size(px(12.5))
-                                .text_color(p.faint)
-                                .child(
-                                    "No skill yet: add a file of the project, or a text, that \
-                                     your agents read when their task needs it.",
-                                )
-                                .test_support(),
-                        )
-                    })
-                    .when_some(self.problem.clone(), |d, problem| {
-                        d.child(
-                            div()
-                                .id("skills-problem")
-                                .text_size(px(12.5))
-                                .text_color(p.fail)
-                                .child(problem)
-                                .test_support(),
-                        )
-                    }),
+                    .child(empty_note(
+                        "no-skills",
+                        empty,
+                        "No skill yet: add a file of the project, or a text, that your agents \
+                         read when their task needs it.",
+                        cx,
+                    ))
+                    .child(problem_line("skills-problem", self.problem.clone(), 8., cx)),
             )
             .child(modal)
     }

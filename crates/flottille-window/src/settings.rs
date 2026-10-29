@@ -6,7 +6,9 @@
 
 use std::collections::HashMap;
 
-use flottille_ui::{Align, Card, Dropdown, MenuItem, Switch, Type, enter, palette};
+use flottille_ui::{
+    Align, Card, Dropdown, MenuItem, Switch, Type, enter, palette, presence, presence_of,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, Render,
@@ -526,18 +528,23 @@ impl Render for SettingsPage {
                     .when(self.providers.known, |d| d.child(judge))
                     .child(enter(key("label"), 1, label))
                     .child(enter(key("note"), 2, note))
-                    .when_some(self.providers.error.clone(), |d, error| {
-                        d.child(
+                    .child(presence_of(
+                        "providers-error-line",
+                        self.providers.error.clone().map(SharedString::from),
+                        move |error| {
                             div()
                                 .id("providers-error")
-                                .mb(px(12.))
+                                .pb(px(12.))
                                 .text_color(p.fail)
-                                .child(SharedString::from(error)),
-                        )
-                    })
-                    .when(!self.providers.known, |d| {
-                        d.child(div().text_color(p.faint).child("Asking the daemon…"))
-                    })
+                                .child(error)
+                                .into_any_element()
+                        },
+                    ))
+                    .child(presence(
+                        "providers-asking",
+                        !self.providers.known,
+                        div().text_color(p.faint).child("Asking the daemon…"),
+                    ))
                     .children(cards)
                     .child(enter(
                         key("rules"),

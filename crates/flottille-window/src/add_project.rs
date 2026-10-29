@@ -5,9 +5,8 @@
 
 use std::path::PathBuf;
 
-use flottille_ui::{Button, Modal, Type, palette};
+use flottille_ui::{Button, Modal, Type, enter, palette};
 use gpui_kit::base::input::{InputEvent, InputState};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement, IntoElement,
     ParentElement, PathPromptOptions, Render, SharedString, StatefulInteractiveElement, Styled,
@@ -16,6 +15,7 @@ use gpui_kit::{
 use serde_json::Value;
 
 use crate::actions::Command;
+use crate::commands::problem_line;
 use crate::project_settings::{field_frame, styled_input};
 use crate::shell::Shell;
 
@@ -269,11 +269,12 @@ impl Render for AddProject {
                 .test_support()
         });
         let action = match self.busy {
-            Some(busy) => div()
-                .mono(11.5)
-                .text_color(p.faint)
-                .child(busy)
-                .into_any_element(),
+            Some(busy) => enter(
+                "add-project-busy",
+                0,
+                div().mono(11.5).text_color(p.faint).child(busy),
+            )
+            .into_any_element(),
             None => Button::primary(
                 "add-project-next",
                 if self.detected.is_some() {
@@ -309,17 +310,13 @@ impl Render for AddProject {
                     ),
             )
             .child(field_frame("add-project-name", &self.name, cx))
-            .children(detected)
-            .when_some(self.error.clone(), |d, error| {
-                d.child(
-                    div()
-                        .id("add-project-error")
-                        .text_size(px(12.5))
-                        .text_color(p.fail)
-                        .child(error)
-                        .test_support(),
-                )
-            })
+            .children(detected.map(|detected| enter("add-project-detected-enter", 0, detected)))
+            .child(problem_line(
+                "add-project-error",
+                self.error.clone(),
+                14.,
+                cx,
+            ))
             .action(action)
     }
 }

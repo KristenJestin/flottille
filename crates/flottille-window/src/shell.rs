@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use flottille_ui::motion::{ENTER, HOVER, Motion, RISE};
 use flottille_ui::{
     AgentState, Badge, Button, Drawer, Icon, ListRow, Side, StateIcon, Status, Type,
     dismiss_on_navigate, dismiss_top_overlay, forget_overlays, icon, open_overlay, palette,
@@ -17,7 +18,7 @@ use gpui_kit::{
     App, AppContext as _, Bounds, Context, ElementId, Entity, FocusHandle, InteractiveElement,
     IntoElement, KeyDownEvent, Modifiers, MouseButton, NavigationDirection, ParentElement,
     PathBuilder, Pixels, Render, SharedString, StatefulInteractiveElement, Styled, Subscription,
-    Task, WeakEntity, Window, canvas, div, point, px,
+    Task, TestSupportExt as _, WeakEntity, Window, canvas, div, point, px,
 };
 
 use crate::actions::{Actions, Command, Outcome, Pick};
@@ -93,6 +94,8 @@ pub struct Shell {
     left: Entity<Drawer>,
     bell: Entity<BellList>,
     bell_open: bool,
+    /// How far the bell's list is in view: it rises in and fades out, and stays drawn until then.
+    bell_shown: Motion,
     projects: HashMap<String, Entity<ProjectNode>>,
     places: HashMap<(String, Place), Entity<PlaceNode>>,
     /// Each project's "Ended" group, while it holds a session.
@@ -220,6 +223,7 @@ impl Shell {
             left,
             bell,
             bell_open: false,
+            bell_shown: Motion::settled(0.0),
             projects: HashMap::new(),
             places: HashMap::new(),
             ended: HashMap::new(),
@@ -1355,7 +1359,31 @@ impl Shell {
     fn set_bell(&mut self, open: bool, cx: &mut Context<Self>) {
         if self.bell_open != open {
             self.bell_open = open;
-            self.bell.update(cx, |bell, cx| bell.show(open, cx));
+            let now = cx.background_executor().now();
+            let duration = if open { ENTER } else { HOVER };
+            self.bell_shown.animate(
+                if open { 1.0 } else { 0.0 },
+                duration,
+                now,
+                cx.reduce_motion(),
+            );
+            if open {
+                self.bell.update(cx, |bell, cx| bell.show(true, cx));
+            } else {
+                // The marks stay while the list fades out.
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(HOVER + Duration::from_millis(20))
+                        .await;
+                    this.update(cx, |this, cx| {
+                        if !this.bell_open {
+                            this.bell.update(cx, |bell, cx| bell.show(false, cx));
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
             cx.notify();
         }
     }
@@ -1383,8 +1411,16 @@ impl Shell {
 }
 
 impl Render for Shell {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
+        let now = cx.background_executor().now();
+        if self.bell_shown.is_running(now) {
+            window.request_animation_frame();
+        } else {
+            self.bell_shown.settle(now);
+        }
+        let bell_in = self.bell_shown.value(now);
+        let bell_drawn = self.bell_open || bell_in > 0.0;
         let side = match self.layout {
             Layout::Wide => Some(SIDEBAR),
             Layout::Medium => Some(SIDEBAR_MEDIUM),
@@ -1466,20 +1502,23 @@ impl Render for Shell {
             .child(self.top.clone())
             .child(body)
             .child(self.add_project.clone())
-            .when(self.bell_open, |d| {
+            .when(bell_drawn, |d| {
                 let scrim = div()
                     .id("bell-scrim")
                     .absolute()
                     .inset_0()
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_bell(cx)));
-                d.child(dismiss_on_navigate(scrim, move |_, cx| {
-                    shell.update(cx, |this, cx| this.set_bell(false, cx)).ok();
-                }))
+                d.when(self.bell_open, |d| {
+                    d.child(dismiss_on_navigate(scrim, move |_, cx| {
+                        shell.update(cx, |this, cx| this.set_bell(false, cx)).ok();
+                    }))
+                })
                 .child(
                     div()
                         .absolute()
-                        .top(px(40.))
+                        .top(px(40. + RISE * (1.0 - bell_in)))
                         .right(px(12.))
+                        .opacity(bell_in)
                         .child(self.bell.clone()),
                 )
             })
@@ -1685,12 +1724,15 @@ impl Render for BellList {
             shell.update(cx, |shell, cx| shell.set_bell(false, cx)).ok();
         });
         if self.items.is_empty() {
-            return list.child(
-                div()
-                    .p(px(10.))
-                    .text_color(p.faint)
-                    .child("Nothing waits for you."),
-            );
+            return list
+                .child(
+                    div()
+                        .p(px(10.))
+                        .text_color(p.faint)
+                        .child("Nothing waits for you."),
+                )
+                .test_support()
+                .into_any_element();
         }
         list.children(
             self.items
@@ -1712,6 +1754,8 @@ impl Render for BellList {
                     })
                 }),
         )
+        .test_support()
+        .into_any_element()
     }
 }
 

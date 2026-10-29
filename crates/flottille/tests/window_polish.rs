@@ -167,6 +167,8 @@ fn open_session<'a>(
     until(&shell, cx, "the session is in the tree", |cx| {
         cx.update(|window, _| window.try_find(session_id(lead)).is_some())
     });
+    // Its row unfolds into the tree: it is there to be clicked once it has.
+    settle(cx);
     cx.update(|window, cx| window.click(session_id(lead), cx));
     until(
         &shell,

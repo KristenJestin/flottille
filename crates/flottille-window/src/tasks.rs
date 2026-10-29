@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use flottille_ui::{Button, Modal, Switch, Type, palette};
+use flottille_ui::{Button, Item, Listing, Modal, Switch, Type, enter, palette};
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -17,7 +17,9 @@ use gpui_kit::{
 use serde_json::{Value, json};
 
 use crate::actions::Command;
-use crate::commands::{boxed, heading, line_field, perform_later};
+use crate::commands::{
+    boxed, empty_note, heading, line_field, perform_later, problem_line, save_or_saving,
+};
 use crate::runs::{CommandList, CommandOutput, CommandPanel, CommandRow};
 use crate::shell::Shell;
 
@@ -127,6 +129,8 @@ pub struct TasksSection {
     shell: WeakEntity<Shell>,
     project: String,
     listed: Option<Vec<TaskInfo>>,
+    /// The rows as drawn: a removed task folds away before it is gone.
+    rows: Listing<TaskInfo>,
     /// What the daemon said when the list could not be read, or a removal was refused.
     problem: Option<SharedString>,
     /// The form is open: on a new task (`Some(None)`) or the one named.
@@ -146,6 +150,7 @@ impl TasksSection {
             shell,
             project,
             listed: None,
+            rows: Listing::default(),
             problem: None,
             editing: None,
             flags: TaskInfo::default(),
@@ -371,7 +376,7 @@ impl TasksSection {
             })
             .child(if confirming {
                 let (cancel, remove) = (name.clone(), name.clone());
-                div()
+                let group = div()
                     .flex()
                     .gap(px(4.))
                     .child(
@@ -387,8 +392,8 @@ impl TasksSection {
                     .child(
                         Button::secondary(id("confirm-remove-task"), format!("Remove {name}"))
                             .on_click(cx.listener(move |this, _, _, cx| this.remove(&remove, cx))),
-                    )
-                    .into_any_element()
+                    );
+                enter(id("confirm-task"), 0, group).into_any_element()
             } else {
                 Button::quiet(id("remove-task"), "Remove")
                     .on_click(cx.listener(move |this, _, _, cx| this.remove(&name, cx)))
@@ -398,7 +403,6 @@ impl TasksSection {
     }
 
     fn modal(&mut self, cx: &mut Context<Self>) -> Modal {
-        let p = palette(cx);
         let this = cx.entity().downgrade();
         let title = match &self.editing {
             Some(Some(_)) => "Edit task",
@@ -437,26 +441,17 @@ impl TasksSection {
             .child(boxed("task-line", Input::new(&fields.line), cx))
             .child(boxed("task-repository", Input::new(&fields.repository), cx))
             .child(div().flex().flex_col().gap(px(6.)).children(switches))
+            .child(problem_line("task-error", self.form_error.clone(), 10., cx))
             .test_support();
-        let error = self.form_error.clone().map(|error| {
-            div()
-                .id("task-error")
-                .text_size(px(12.5))
-                .text_color(p.fail)
-                .child(error)
-                .test_support()
-        });
-        modal.child(body).children(error).action(if self.saving {
-            div()
-                .mono(11.5)
-                .text_color(p.faint)
-                .child("Saving…")
-                .into_any_element()
-        } else {
-            Button::primary("save-task", "Save")
-                .on_click(cx.listener(|this, _, _, cx| this.save(cx)))
-                .into_any_element()
-        })
+        modal.child(body).action(save_or_saving(
+            "task",
+            self.saving,
+            || {
+                Button::primary("save-task", "Save")
+                    .on_click(cx.listener(|this, _, _, cx| this.save(cx)))
+            },
+            cx,
+        ))
     }
 }
 
@@ -500,15 +495,25 @@ fn task_text(info: &TaskInfo, p: &flottille_ui::Palette) -> impl IntoElement {
 
 impl Render for TasksSection {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = palette(cx);
+        if let Some(listed) = self.listed.clone() {
+            let now = cx.background_executor().now();
+            let reduce = cx.reduce_motion();
+            self.rows
+                .sync(listed.into_iter().map(|t| (t.name.clone(), t)), now, reduce);
+        }
         let rows: Vec<_> = self
-            .listed
-            .clone()
-            .unwrap_or_default()
-            .iter()
-            .map(|info| self.row(info, cx).into_any_element())
+            .rows
+            .rows()
+            .map(|row| {
+                Item::new(
+                    ElementId::Name(format!("task-item-{}", row.key).into()),
+                    row.placement,
+                    self.row(row.value, cx),
+                )
+                .gap(px(8.))
+            })
             .collect();
-        let count = rows.len();
+        let count = self.rows.len();
         let empty = self.listed.as_ref().is_some_and(Vec::is_empty);
         let modal = self.modal(cx);
         div()
@@ -527,30 +532,14 @@ impl Render for TasksSection {
                     .flex_col()
                     .gap(px(8.))
                     .children(rows)
-                    .when(empty, |d| {
-                        d.child(
-                            div()
-                                .id("no-tasks")
-                                .text_size(px(12.5))
-                                .text_color(p.faint)
-                                .child(
-                                    "No task yet: name the lines the project runs (tests, lint, a \
-                                     server). Agents run them by name, and the project page has \
-                                     a Run button for each.",
-                                )
-                                .test_support(),
-                        )
-                    })
-                    .when_some(self.problem.clone(), |d, problem| {
-                        d.child(
-                            div()
-                                .id("tasks-problem")
-                                .text_size(px(12.5))
-                                .text_color(p.fail)
-                                .child(problem)
-                                .test_support(),
-                        )
-                    }),
+                    .child(empty_note(
+                        "no-tasks",
+                        empty,
+                        "No task yet: name the lines the project runs (tests, lint, a server). \
+                         Agents run them by name, and the project page has a Run button for each.",
+                        cx,
+                    ))
+                    .child(problem_line("tasks-problem", self.problem.clone(), 8., cx)),
             )
             .child(modal)
     }
