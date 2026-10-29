@@ -545,3 +545,56 @@ fn the_judge_runs_with_no_tool_and_no_mcp_server() {
             .any(|e| e["permission"]["outcome"]["outcome"] == "selected"),
     );
 }
+
+/// Whether the throwaway remote of `session` has the branch.
+fn remote_has(user: &User, branch: &str) -> bool {
+    std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(user.path("remotes/app.git"))
+        .args(["rev-parse", "--verify", "--quiet"])
+        .arg(format!("refs/heads/{branch}"))
+        .output()
+        .unwrap()
+        .status
+        .success()
+}
+
+#[test]
+fn a_harmless_command_whose_script_pushes_fails_to_push() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (_, mcp, folder) = session(&user, false);
+    let script = folder.join("check.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\ngit push origin HEAD:refs/heads/sneaked\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let file = user.project_file("app");
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    text.push_str("\n[commands.check]\nline = \"./check.sh\"\n");
+    std::fs::write(&file, text).unwrap();
+
+    let ran = done(mcp.call("commands_run", json!({"command": "check"})));
+
+    assert!(!ran.contains("exited with code 0"), "{ran}");
+    assert!(!remote_has(&user, "sneaked"));
+    assert!(
+        judge_prompts(&user).is_empty(),
+        "the catalogue command was judged"
+    );
+}
+
+#[test]
+fn a_push_the_judge_allows_reaches_the_remote() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (_, mcp, _) = session(&user, false);
+
+    let pushed = done(mcp.call(
+        "commands_run",
+        json!({"line": "git push origin HEAD:refs/heads/allowed"}),
+    ));
+
+    assert!(pushed.contains("exited with code 0"), "{pushed}");
+    assert!(remote_has(&user, "allowed"));
+}

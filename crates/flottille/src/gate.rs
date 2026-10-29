@@ -1190,6 +1190,15 @@ pub fn pushes(words: &[String]) -> bool {
     })
 }
 
+/// Whether the line's own program is git pushing, with no wrapper around it: the push the gate
+/// read, which may go out once it passed.
+pub fn is_push(words: &[String]) -> bool {
+    words.first().is_some_and(|program| program == "git") && {
+        let args = &words[1..];
+        args.get(git_globals(args).0).is_some_and(|w| w == "push")
+    }
+}
+
 /// git's global options before its command: where the command is, and each option with its
 /// value.
 fn git_globals(args: &[String]) -> (usize, Vec<(&str, Option<&str>)>) {

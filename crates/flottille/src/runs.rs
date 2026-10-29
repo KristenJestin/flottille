@@ -303,7 +303,9 @@ pub async fn commands_run(
     {
         return Outcome::Done(describe(daemon, &going.run.id, None, None, true));
     }
-    let env = match environment(daemon, place, &repository) {
+    // Only a push the gate read, and that the user or the judge let through, goes out.
+    let lift = approved && gate::is_push(&words);
+    let env = match environment(daemon, place, &repository, lift) {
         Ok(env) => env,
         Err(why) => return Outcome::Failed(why),
     };
@@ -361,11 +363,12 @@ fn wait_for_end(daemon: &Daemon, id: &str) -> impl Future<Output = ()> + use<> {
 }
 
 /// The environment of a run in the place: the daemon's, the place's variables filled, the forges
-/// and the daemon kept out of reach.
+/// and the daemon kept out of reach, and pushes too unless `lift`.
 fn environment(
     daemon: &Daemon,
     place: &Place,
     repository: &str,
+    lift: bool,
 ) -> Result<BTreeMap<OsString, OsString>, String> {
     let names = names(place, repository);
     let mut filled = BTreeMap::new();
@@ -375,7 +378,7 @@ fn environment(
     let mut env = variables::environment(std::env::vars_os(), &[&filled]);
     let empty = daemon.paths.state.join("empty");
     flottille_core::paths::ensure_private_dir(&empty).map_err(|e| e.to_string())?;
-    defend(&mut env, &empty);
+    defend(&mut env, &empty, lift);
     // Where the daemon's socket is: a client a run starts is refused anyway (`daemon.rs`).
     env.remove(&OsString::from("XDG_RUNTIME_DIR"));
     Ok(env)
@@ -417,9 +420,11 @@ pub fn groups_of(daemon: &Daemon, agent: &str) -> Vec<u32> {
 
 /// No forge token, the forge command lines' configuration in `empty` (`forge_write` is the way to
 /// the forge), and no hook: the hooks are files the agent writes, and a commit or a push the gate
-/// let through would run them where it does not look. A push that passed the gate is not
-/// neutralised: it was harmless, judged or allowed by the user (`docs/design.md` §7).
-fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path) {
+/// let through would run them where it does not look. Every push URL is rewritten to a path that
+/// is no remote (`url.<nowhere>.pushInsteadOf` of every URL), unless `lift`: the run is itself a
+/// `git push` the user or the judge let through. A harmless command cannot push from a script
+/// the gate never read (`docs/design.md` §7).
+fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path, lift: bool) {
     for name in FORGE_TOKENS {
         env.insert(name.into(), OsString::new());
     }
@@ -427,6 +432,13 @@ fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path) {
         env.insert(name.into(), empty.into());
     }
     configure(env, "core.hooksPath", "/dev/null");
+    if !lift {
+        configure(
+            env,
+            "url./dev/null/flottille-refused-push/.pushInsteadOf",
+            "",
+        );
+    }
 }
 
 /// One more git setting through the environment, after those it already has: it wins over the
@@ -903,7 +915,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_run_gets_no_forge_token_no_hook_and_its_push_is_not_neutralised() {
+    fn a_run_s_pushes_are_walled_unless_it_is_a_push_that_passed_the_gate() {
+        for lift in [false, true] {
+            let mut env = BTreeMap::new();
+            defend(&mut env, Path::new("/state/empty"), lift);
+            let keys: Vec<&str> = (0..3)
+                .filter_map(|n| env.get(&OsString::from(format!("GIT_CONFIG_KEY_{n}"))))
+                .map(|key| key.to_str().unwrap())
+                .collect();
+            assert_eq!(
+                keys.contains(&"url./dev/null/flottille-refused-push/.pushInsteadOf"),
+                !lift,
+                "{keys:?}"
+            );
+            assert!(keys.contains(&"core.hooksPath"));
+        }
+    }
+
+    #[test]
+    fn a_run_gets_no_forge_token_and_no_hook() {
         let mut env: BTreeMap<OsString, OsString> = [
             ("GH_TOKEN", "ghp_x"),
             ("GIT_CONFIG_COUNT", "2"),
@@ -913,7 +943,7 @@ mod tests {
         .map(|(k, v)| (k.into(), v.into()))
         .collect();
 
-        defend(&mut env, Path::new("/state/empty"));
+        defend(&mut env, Path::new("/state/empty"), true);
 
         let get = |name: &str| env[&OsString::from(name)].to_str().unwrap().to_owned();
         assert_eq!(get("GH_TOKEN"), "");
