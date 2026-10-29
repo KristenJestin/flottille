@@ -126,11 +126,14 @@ renamed over it: a link is replaced, never written through. The file's folder is
 inside the place on the disk after it is made and again just before the rename, so that a folder
 swapped for a link to the outside meanwhile is refused (`refused: X: its folder is no longer
 inside this agent's place …`, nothing written). A check is not a lock: a swap between the last
-check and the rename is not seen. The file's folder is checked to be
-inside the place on the disk after it is made and again just before the rename, so that a folder
-swapped for a link to the outside meanwhile is refused
-(`refused: X: its folder is no longer inside this agent's place …`, nothing written). A check is
-not a lock: a swap between it and the rename is not seen.
+check and the rename is not seen.
+
+A path outside the place, which the user or the judge allowed, is resolved again just before the
+file is opened, and before its folder is made and the rename: when it no longer leads where it
+did, or, allowed by the judge, now leads where the gate would hold the call as base (a folder
+swapped for a link to Flottille's own while the judge thought), it is refused (`refused: X: the
+path changed since it was allowed (…); nothing was done`). A file is opened without following a
+last part that became a link.
 
 ## Skills
 

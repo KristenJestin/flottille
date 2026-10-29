@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::daemon::Daemon;
-use crate::gate::{self, Verdict};
+use crate::gate::{self, Class, Verdict};
 use crate::mcp::{Outcome, arguments};
 use crate::place::{Place, Resolved};
 
@@ -76,8 +76,8 @@ pub struct Context<'a> {
     pub daemon: &'a Daemon,
     pub agent: &'a str,
     pub place: &'a Place,
-    /// The user allowed the call: its path may be outside the place.
-    pub approved: bool,
+    /// The user or the judge allowed the call, of this class: its path may be outside the place.
+    pub approved: Option<Class>,
 }
 
 impl Context<'_> {
@@ -85,12 +85,55 @@ impl Context<'_> {
     fn path(&self, repository: Option<&str>, named: &str) -> Result<Resolved, Outcome> {
         let (_, base) = self.place.base(repository).map_err(Outcome::Refused)?;
         let resolved = self.place.resolve(base, named);
-        if self.approved {
+        if self.approved == Some(Class::Judge)
+            && !resolved.inside
+            && let Some(why) = self.base_now(&resolved)
+        {
+            return Err(changed(&resolved, &why));
+        }
+        if self.approved.is_some() {
             return Ok(resolved);
         }
         match gate::contained(std::slice::from_ref(&resolved)) {
             Verdict::Deny(why) => Err(Outcome::Refused(why)),
             _ => Ok(resolved),
+        }
+    }
+
+    /// Why the gate would now hold a path outside the place for the user, if it would.
+    fn base_now(&self, path: &Resolved) -> Option<String> {
+        let paths = &self.daemon.paths;
+        let own = [
+            paths.data.clone(),
+            paths.config.clone(),
+            paths.state.clone(),
+            paths.runtime.clone(),
+        ];
+        let groups = crate::runs::groups_of(self.daemon, self.agent);
+        gate::process(&groups, path).or_else(|| {
+            gate::sensitive(&own, path)
+                .map(|place| format!("{} is a sensitive place ({place})", path.shown))
+        })
+    }
+
+    /// Refuses a path outside the place that no longer leads where it did when the call resolved
+    /// it, or, allowed as a call to judge, now leads where the gate holds for the user: a folder
+    /// of it may have become a link meanwhile. Checked just before the file is opened or renamed.
+    fn still(&self, path: &Resolved) -> Result<(), Outcome> {
+        if path.inside {
+            return Ok(());
+        }
+        let now = self.place.at(&path.path);
+        let why = if now.path != path.path || now.unfollowed.is_some() {
+            Some(format!("it now leads to {}", now.shown))
+        } else if self.approved == Some(Class::Judge) {
+            self.base_now(&now)
+        } else {
+            None
+        };
+        match why {
+            Some(why) => Err(changed(path, &why)),
+            None => Ok(()),
         }
     }
 
@@ -142,6 +185,14 @@ pub fn reaches(place: &Place, tool: &str, args: &Value) -> Vec<Resolved> {
     }
 }
 
+/// The refusal of a path that changed between the moment it was allowed and its use.
+fn changed(path: &Resolved, why: &str) -> Outcome {
+    Outcome::Refused(format!(
+        "refused: {}: the path changed since it was allowed ({why}); nothing was done",
+        path.shown
+    ))
+}
+
 fn not_regular(path: &Resolved) -> Outcome {
     Outcome::Refused(format!(
         "refused: {} is not a regular file (a pipe, a socket or a device): this tool reads files",
@@ -151,11 +202,11 @@ fn not_regular(path: &Resolved) -> Outcome {
 
 /// Opens a regular file to read. Opening a pipe waits until someone writes to it, which would hold
 /// the call's thread forever: it is opened without waiting, and refused (`InvalidInput`, which
-/// `failed` words).
+/// `failed` words). The path is a real one: its last part become a link since is not followed.
 fn open_regular(path: &Path) -> std::io::Result<File> {
     let file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NONBLOCK)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
         .open(path)?;
     if file.metadata()?.is_file() {
         Ok(file)
@@ -262,6 +313,9 @@ pub fn read_page(
     offset: u64,
     length: u64,
 ) -> std::io::Result<Outcome> {
+    if let Some(Err(outcome)) = cx.map(|cx| cx.still(path)) {
+        return Ok(outcome);
+    }
     let metadata = std::fs::metadata(&path.path)?;
     if metadata.is_dir() {
         return Ok(Outcome::Refused(format!(
@@ -962,7 +1016,7 @@ fn diff(before: &str, after: &str) -> String {
 /// Refuses unless the folder the file goes in is still inside the place on the disk: a folder
 /// swapped for a link since the path was resolved would take the write out of it.
 fn check_parent(place: &Place, parent: &Path, path: &Resolved) -> Result<(), Outcome> {
-    // Outside the place, the user allowed it.
+    // Outside the place, the user or the judge allowed it: `Context::still` checks it.
     if !path.inside || place.holds(parent) {
         return Ok(());
     }
@@ -975,10 +1029,13 @@ fn check_parent(place: &Place, parent: &Path, path: &Resolved) -> Result<(), Out
 
 /// Writes the file through a temporary file renamed over it (which replaces a link rather than
 /// writing through it), keeping its mode; then the session knows it as written. The folder is
-/// checked to be inside the place after it is made and again just before the rename.
+/// checked to be inside the place (or, outside, to lead where it did) after it is made and again
+/// just before the rename.
 fn write(cx: &Context, path: &Resolved, content: String) -> Result<usize, Outcome> {
     let failed = |error: std::io::Error| Outcome::Failed(format!("{}: {error}", path.shown));
     let parent = path.path.parent().unwrap_or(Path::new("/"));
+    // Outside the place, no folder is made where the path no longer leads.
+    cx.still(path)?;
     std::fs::create_dir_all(parent).map_err(failed)?;
     check_parent(cx.place, parent, path)?;
     let name = path
@@ -996,6 +1053,7 @@ fn write(cx: &Context, path: &Resolved, content: String) -> Result<usize, Outcom
         })
         .map_err(failed)
         .and_then(|()| check_parent(cx.place, parent, path))
+        .and_then(|()| cx.still(path))
         .and_then(|()| std::fs::rename(&temporary, &path.path).map_err(failed));
     if let Err(outcome) = written {
         let _ = std::fs::remove_file(&temporary);
