@@ -206,40 +206,55 @@ $ flottille project remove shop
 Removed project shop. Its folder was not touched.
 ```
 
-## References
+## Skills
 
-The documents of a project that its agents read with a tool when relevant (`docs/projects.md`,
-"References"). The file is edited in place, the rest of it left as written, comments included.
+The texts a project's agents read with a tool when their task needs them (`docs/skills.md`): a
+file or a folder of the project folder, or a text Flottille keeps in its data folder. The project's
+file is edited in place, the rest of it left as written, comments included. `flottille reference`
+is still read as `flottille skill` for one release.
 
-### `flottille reference list <project>`
+### `flottille skill list <project>`
 
-The references: name, path, description. `--json` prints `reference.list`.
-
-```
-$ flottille reference list shop
-NAME   PATH        DESCRIPTION
-react  docs/react  How we write React components
-```
-
-### `flottille reference add <project> <name> <path> --description <line>`
-
-Adds a reference: `path` is a file or a folder of the project folder, relative to it, and must
-exist. Refused for a name already used, an empty description, a path outside the project folder
-(`..`, an absolute path, a link that leads out) or through a `.git`. Agents started after it see it
-in their instructions.
+The skills: name, where it is (a path, or a text), description. `--json` prints `skill.list`.
 
 ```
-$ flottille reference add shop react docs/react --description "How we write React components"
-Added reference react to shop: docs/react.
+$ flottille skill list shop
+NAME    WHERE                  DESCRIPTION
+react   docs/react             How we write React components
+review  a text Flottille keeps How we review
 ```
 
-### `flottille reference remove <project> <name>`
+### `flottille skill show <project> <name>`
 
-Removes the reference; its files are never touched.
+Its description and where it is, with its text when Flottille keeps it. `--json` prints
+`skill.show`.
+
+### `flottille skill add <project> <name> --description <line>`
+
+With one of `--path <path>` (a file or a folder of the project folder, relative to it, that must
+exist), `--text <text>` or `--text-file <file>` (the text, kept by Flottille). Refused for a name
+already used, an empty description, a path outside the project folder (`..`, an absolute path, a
+link that leads out) or through a `.git`. Agents started after it see it in their instructions.
 
 ```
-$ flottille reference remove shop react
-Removed reference react from shop. Its files were not touched.
+$ flottille skill add shop react --path docs/react --description "How we write React components"
+Added skill react to shop: docs/react.
+$ flottille skill add shop review --text-file review.md --description "How we review"
+Added skill review to shop: a text Flottille keeps.
+```
+
+### `flottille skill edit <project> <name>`
+
+Changes what is given (`--description`, and one of `--path`, `--text`, `--text-file`). A text
+skill made a path leaves no text behind.
+
+### `flottille skill remove <project> <name>`
+
+Removes the skill, and the text Flottille kept for it; the project's files are never touched.
+
+```
+$ flottille skill remove shop react
+Removed skill react from shop. The project's files were not touched.
 ```
 
 ## Workspaces
@@ -335,75 +350,59 @@ $ flottille workspace remove shop login
 Removed workspace login of shop: its worktrees and its folder. Its branches are kept.
 ```
 
-## Procedures
+## Commands
 
-A procedure is a named action of a project, run by an agent in a workspace (`docs/procedures.md`).
-It grants nothing: the run's calls go through the gate like any other (`docs/design.md` §7).
+A command is a project's named instructions, sent to a session as `/name` (`docs/commands.md`). It
+grants nothing: what the session does goes through the gate like any other call (`docs/design.md`
+§7). `flottille procedure` is still read as `flottille command` for one release.
 
-### `flottille procedure list <project>`
-
-```
-$ flottille procedure list shop
-open-prs  Open the pull requests of the workspace
-```
-
-`--json` prints `procedure.list`.
-
-### `flottille procedure show <project> <name>`
+### `flottille command list <project>`
 
 ```
-$ flottille procedure show shop open-prs
-Procedure open-prs of project shop: Open the pull requests of the workspace
+$ flottille command list shop
+/open-prs  Open the pull requests of the workspace
+```
+
+`--json` prints `command.list`.
+
+### `flottille command show <project> <name>`
+
+```
+$ flottille command show shop open-prs
+Command open-prs of project shop: Open the pull requests of the workspace
 Instructions:
   Push the branch, then open one pull request per repository with commits.
 ```
 
-### `flottille procedure add <project> <name>`
+### `flottille command add <project> <name>`
 
 `--description <line>` and the instructions with `--instructions <text>` or `--instructions-file
 <file>`. Written in the project's file, what is around it kept.
 
 ```
-$ flottille procedure add shop open-prs --description "Open the pull requests of the workspace" \
+$ flottille command add shop open-prs --description "Open the pull requests of the workspace" \
     --instructions-file open-prs.md
-Added procedure open-prs to project shop. Edit it in the project's file, or with `flottille procedure edit`.
+Added command open-prs to project shop: /open-prs in a session's composer sends it. Edit it in the window, or with `flottille command edit`.
 ```
 
-`--template <template> [<name>]` writes one of Flottille's procedures instead, as it is, under its
-own name unless one is given: `open-prs`, `merge-stack` or `close` (`docs/procedures.md`,
-"Templates"). It takes none of the options above: the procedure is the project's once written,
-edited in the file or with `procedure edit`.
+`--template <template> [<name>]` writes one of Flottille's commands instead, as it is, under its
+own name unless one is given: `open-prs`, `merge-stack` or `close` (`docs/commands.md`,
+"Templates"). It takes none of the options above: the command is the project's once written.
 
-```
-$ flottille procedure add shop --template close
-Added procedure close to project shop. Edit it in the project's file, or with `flottille procedure edit`.
-```
-
-### `flottille procedure edit <project> <name>`
+### `flottille command edit <project> <name>`
 
 Changes what is given (`--description`, `--instructions`, `--instructions-file`).
 
-### `flottille procedure remove <project> <name>`
+### `flottille command remove <project> <name>`
 
 ```
-$ flottille procedure remove shop open-prs
-Removed procedure open-prs from project shop.
+$ flottille command remove shop open-prs
+Removed command open-prs from project shop.
 ```
 
-### `flottille procedure run <project> <name> --workspace <workspace>`
-
-Shows the procedure, asks for a yes (`--yes` starts without asking; no answer is a refusal), then
-starts the run's root agent in the workspace, in Auto. Nothing starts before the yes.
-
-```
-$ flottille procedure run shop open-prs --workspace login
-Procedure open-prs of project shop, in workspace login: Open the pull requests of the workspace
-It grants nothing: its session starts in Auto, and each call it makes goes through the gate like any other.
-Run it? [y/N] y
-Started agent 3f9a1c0b7d2e for procedure open-prs in workspace login: follow it with `flottille agent read 3f9a1c0b7d2e`.
-```
-
-`--json` prints `procedure.start`'s answer.
+A command is sent with `flottille agent send <agent> "/open-prs and the docs too"`, or as the
+message of `agent start` and `agent run`: the agent gets its instructions, then what follows the
+name.
 
 ## Agents
 

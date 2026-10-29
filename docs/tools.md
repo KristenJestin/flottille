@@ -4,9 +4,9 @@ The tools of the agents Flottille runs, and the MCP server that serves them: the
 `docs/design.md` §1. It follows `docs/reference/hemera.md` §3, with the rules of
 `docs/reference/mcp.md` §4 where they differ. A session lists the tools of its agent, which
 depend on what it can do (`docs/agents.md`): the file and command tools below for every agent,
-`reference_read`, then `forge_read`, `ticket_read`, `forge_write` and `workspace_remove` for an
+`skill_read`, then `forge_read`, `ticket_read`, `forge_write` and `workspace_remove` for an
 agent in a workspace,
-`procedure` and `project` for a root (below, "The project"),
+`skills`, `commands` and `project` for a root (below, "The project"),
 and the tree's tools (`agent_*`, `report`, `ask_user` or `ask_parent`,
 `approval_answer`).
 
@@ -117,28 +117,29 @@ swapped for a link to the outside meanwhile is refused
 (`refused: X: its folder is no longer inside this agent's place …`, nothing written). A check is
 not a lock: a swap between it and the rename is not seen.
 
-## References
+## Skills
 
 | Tool | Arguments | |
 |---|---|---|
-| `reference_read` | `name`, `path?`, `range? {offset?, length?}` | One of the project's references (`docs/projects.md`, "References"), read-only. A file reference is read by its name alone, a page at a time exactly as `fs_read` does (32 KiB at most, `range` to go on). A folder reference answers with its files and their sizes (`.git`, links, files of secrets and sensitive places left out, 1000 at most); `path`, relative to the reference, then names the file to read, or a folder of it to list. |
+| `skill_read` | `name`, `path?`, `range? {offset?, length?}` | One of the project's skills (`docs/skills.md`), read-only. A file or a text skill is read by its name alone, a page at a time exactly as `fs_read` does (32 KiB at most, `range` to go on). A folder skill answers with its files and their sizes (`.git`, links, files of secrets and sensitive places left out, 1000 at most); `path`, relative to the skill, then names the file to read, or a folder of it to list. |
 
 - **The list is the only door**: a name not in the agent's list is refused with `refused: no
-  reference named X: the project's references are a, b`; the reference is looked up in the
-  project's file as it is now.
-- **Nothing outside the reference is served**, as `fs_read` serves nothing outside the place: a
-  path that steps out of the reference with `..`, an absolute path, `~`, and a link that leads out
-  once followed are refused with `refused: X is outside the reference Y: it serves its own files
+  skill named X: the project's skills are a, b`; the skill is looked up in the project's file as
+  it is now.
+- **Nothing outside the skill is served**, as `fs_read` serves nothing outside the place: a
+  path that steps out of the skill with `..`, an absolute path, `~`, and a link that leads out
+  once followed are refused with `refused: X is outside the skill Y: it serves its own files
   only`; a path through a `.git` or naming a file of secrets (`.env`, `.env.*`) is refused; a
-  `path` for a file reference is refused.
-- **What `fs_read` holds for the user, a reference never serves**: a path in a sensitive place
+  `path` for a file or a text skill is refused.
+- **What `fs_read` holds for the user, a skill never serves**: a path in a sensitive place
   (The gate, 3: `.ssh`, `.netrc`, `.npmrc`, `.git-credentials`…), by the gate's own rule taken
   from the project folder, links followed, is refused with `refused: X is in a sensitive place
-  (…), which a reference never serves: read it with fs_read, which asks the user first`.
-- **The call goes through the gate** like every other and is allowed: it names a reference, not a
-  path of the place, and reads from the project folder whatever the agent's place. The result is
+  (…), which a skill never serves: read it with fs_read, which asks the user first`.
+- **The call goes through the gate** like every other and is allowed: it names a skill, not a path
+  of the place, and reads from the project folder (or Flottille's data folder, for a text)
+  whatever the agent's place. The result is
   masked like a file read, and recorded as an `agent.tool_served` event.
-- **It grants nothing**: unlike `fs_read`, reading a reference does not let the session write the
+- **It grants nothing**: unlike `fs_read`, reading a skill does not let the session write the
   file.
 
 ## Commands
@@ -149,7 +150,7 @@ not a lock: a swap between it and the rename is not seen.
 | `commands_run` | `command` or `line` (exactly one), `repository?`, `timeout? 1..600`, `why?` | Runs a catalogue command (`refused: the catalogue has no command X: list them with commands_list`) or one line, in the repository's folder (the catalogue's, or the one named) or the place's top. Its description holds a call of each form: `{"command": "test"}`, `{"line": "cargo test -p core", "repository": "api", "timeout": 120}`. |
 | `commands_status` | `run`, `action? output \| stop`, `tail? 1..1000`, `start?` | `action output` (the default): the run's state and lines of its output, the last `tail` (40 by default), or `tail` lines from line `start`. `action stop`: stops the run and everything in its process group, `SIGTERM`, then `SIGKILL` 5 s later, and answers once it ended; `tail` and `start` are refused with it. |
 
-- **No shell, ever.** A line is split as `flottille_core::command` does (the recipe's `run` steps
+- **No shell, ever.** A line is split as `flottille_core::command` does (the setup's `run` steps
   too): words on whitespace, a quoted part kept whole, a backslash literal. A newline, `|`, `&`,
   `;`, a backtick, a redirection, `$(`, `${`, `$VAR` or `%VAR%` outside single quotes, and `*`,
   `?`, a leading `~` or `[…]` outside any quotes are refused with: `Flottille runs a command
@@ -193,7 +194,7 @@ not a lock: a swap between it and the rename is not seen.
   the gate read and let through goes out. A harmless command (a catalogue command, a test run)
   cannot push from a script the gate never read. A push from a workspace is also refused, before
   git runs, when a repository's remote no longer leads where it did when the workspace was made
-  (`docs/procedures.md`, "Where the remote leads").
+  (`docs/commands.md`, "Where the remote leads").
 - **A stop ends the run's process group, not every descendant.** `commands_status` with `action stop`, a timeout of
   the call's client and the daemon's stop signal the group the run was spawned in (`SIGTERM`,
   then `SIGKILL` after 5 s), and what the run left in its group is killed when its own process
@@ -214,7 +215,7 @@ not a lock: a swap between it and the rename is not seen.
 |---|---|
 | `forge_read {repository?, detail? short \| full}` | The pull request of the workspace's branch in each of its repositories, or the one named: number, state, base, link, review, checks with their states, and how many comments and reviews it has (`comments: 2, read them with forge_read {"detail": "full"}`); `detail full` gives their texts, cut and under the result limit. Read only, through the user's own `gh`, run by the daemon; an agent has no forge sign-in of its own. A repository the workspace does not take is refused (`refused: X is not a repository of this agent's workspace: it has …`). Only an agent in a workspace has it. |
 
-| `forge_write {action, repository, title?, body?, draft?, waive?}` | Opens the pull request of the workspace's branch (`pr-create`, with the project's reviewers), merges it by squash (`pr-merge-squash`; refused while its checks fail or run or a review asks for changes, unless `waive` gives the user's words, which holds the merge for their approval) or re-runs the failed jobs of its last commit's pipelines (`pipeline-rerun`), in one of the workspace's repositories, through the user's own `gh` run by the daemon (`docs/procedures.md`, "`forge_write`"). Only an agent in a workspace has it. Its description holds a call of `pr-create` and of `pr-merge-squash`. |
+| `forge_write {action, repository, title?, body?, draft?, waive?}` | Opens the pull request of the workspace's branch (`pr-create`, with the project's reviewers), merges it by squash (`pr-merge-squash`; refused while its checks fail or run or a review asks for changes, unless `waive` gives the user's words, which holds the merge for their approval) or re-runs the failed jobs of its last commit's pipelines (`pipeline-rerun`), in one of the workspace's repositories, through the user's own `gh` run by the daemon (`docs/commands.md`, "`forge_write`"). Only an agent in a workspace has it. Its description holds a call of `pr-create` and of `pr-merge-squash`. |
 
 `forge_read` goes through the gate like every call, which allows it; a `forge_write` call is to
 judge, and one that waives the checks base.
@@ -240,30 +241,33 @@ turned into plain text, and what is assumed of `acli`'s output, is in [`tickets.
 ## The project
 
 What the user does in the window, the agent they talk to does too, under the gate, always on its
-own project: a root has these two tools, a child none (it does its brief). Two families with an
+own project: a root has these three tools, a child none (it does its brief). Families with an
 `action`, as `agent_status` is:
 
 | Tool | |
 |---|---|
-| `procedure {action: list \| show \| start, name?, workspace?}` | `list` and `show` read the project's procedures (`docs/procedures.md`). `start` runs one in a workspace, the agent's own when `workspace` is left out (one in the project folder must name one), as a new root of its own, in Auto: the same as the window's confirmation. Refused, nothing asked, for a procedure or a workspace the project has not. |
-| `project {action: settings \| set_settings \| add_reference \| remove_reference, …}` | `settings` reads each repository's forge (and what its remote proposes), the tracker and the references (`docs/projects.md`). `set_settings {repositories?: [{path, forge}], tracker?}` declares a repository's forge or the tracker (`null` removes it; a tracker left out is kept), checked as `project.set_settings` checks them; `add_reference {name, description, path}` and `remove_reference {name}` edit the references as `flottille reference add` and `remove` do. The file is written where it stands, its comments kept. |
+| `skills {action: list \| show \| add \| edit \| remove, name?, description?, path?, text?}` | The project's skills (`docs/skills.md`). `add` takes `name`, `description` and one of `path` (a file or a folder of the project folder) and `text` (a text Flottille keeps); `edit` changes what it is given; `remove` removes it, and its text. As `flottille skill` does. |
+| `commands {action: list \| show \| add \| edit \| remove, name?, description?, instructions?, template?}` | The project's commands (`docs/commands.md`). `add` takes `name`, `description` and `instructions`, or a `template` (`open-prs`, `merge-stack`, `close`) added as it is; `edit` changes what it is given. A command is sent to a child by writing `/name` in `agent_send`'s message. |
+| `project {action: settings \| set_settings, …}` | `settings` reads each repository's forge (and what its remote proposes) and the tracker (`docs/projects.md`). `set_settings {repositories?: [{path, forge}], tracker?}` declares a repository's forge or the tracker (`null` removes it; a tracker left out is kept), checked as `project.set_settings` checks them. |
 
-- **Reads run at once.** `procedure` `list` and `show`, `project` `settings`.
+The file is written where it stands, its comments kept.
+
+- **Reads run at once.** `list` and `show` of `skills` and `commands`, `project` `settings`.
 - **Every write is to judge** (a card in Ask, the judge in Auto), as any call is (answered at
   once that it waits, the result later as a delivery). Its request is an `action`: it says what
-  it changes in words, one sentence each (`Start the procedure ship in workspace login: …`;
-  `Set the tracker to Jira on acme.atlassian.net (ABC)`; `Add the reference style
-  (docs/STYLE.md): …`), allowed once, and it is done only while those words still hold: a
-  procedure whose instructions (`Its agent is told: …`) changed meanwhile is not started
-  (`Request #n (procedure) was not executed: what it does changed since the user allowed it; it
-  would now: …`). A change of the tracker is base: nothing checks it against the project, as a
-  forge is checked against its remote.
+  it changes in words, one sentence each (`Add the skill style (docs/STYLE.md): The code style`;
+  `Add the command /ship: …`, `Its instructions: …`; `Set the tracker to Jira on
+  acme.atlassian.net (ABC)`), allowed once, and it is done only while those words still hold: a
+  command whose instructions (`They were: …`) changed meanwhile is not written (`Request #n
+  (commands) was not executed: what it does changed since the user allowed it; it would now: …`).
+  A change of the tracker is base: nothing checks it against the project, as a forge is checked
+  against its remote.
 - **What an agent never does**: change a session's mode or choose the judge (no tool has them),
-  or reach another project (`project` is not an argument). An agent's reference is never the project
+  or reach another project (`project` is not an argument). An agent's skill is never the project
   folder itself nor a repository's root (`.`, `api`, or a link to one): what a whole checkout
-  holds is not a document to read.
+  holds is not a text to read.
   Such an argument is refused as one that does not fit the tool. A write that cannot be done (an
-  unknown procedure, a reference outside the project folder, a repository the project has not) is
+  unknown command, a skill outside the project folder, a repository the project has not) is
   refused before anything is asked.
 
 ## The tree's tools
@@ -357,7 +361,7 @@ says who answers a call to judge (`docs/design.md` §7.1).
    - a `forge_write` merge that waives the checks or a review; a change of the project's tracker.
 3. **Harmless**: passes in every mode.
    - reading inside the agent's place (the project folder or the workspace), the tree's tools,
-     `commands_list`, `commands_status`, `reference_read`, `forge_read`, `ticket_read`;
+     `commands_list`, `commands_status`, `skill_read`, `forge_read`, `ticket_read`;
    - writing inside a workspace (`fs_write`, `fs_edit`, and `git add`, `mv`, `rm` there);
    - a line the rules know to only read, inside the place: the reads of git (`status`, `log`,
      `diff`, `show`, `branch` and `tag` listings, `config` and `remote` reads…), of `gh` and
@@ -388,7 +392,7 @@ says who answers a call to judge (`docs/design.md` §7.1).
    branch on no remote, `git reset --hard` in a workspace, `git -c` or `--config-env` of other
    keys, git's other global options, `git remote` and `git config` writes of other keys; the
    forge command lines beyond their reads; `forge_write`, `workspace_remove`, and a write of
-   `procedure` or `project` ("The project").
+   `skills`, `commands` or `project` ("The project").
 
    The rules of 1 and 2 are judged on the line and on every program a wrapper runs, unwrapped in
    turn (16 at most): `env` (its options, `NAME=value` words and `-S` line), `sudo`, `doas`,

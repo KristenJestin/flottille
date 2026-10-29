@@ -50,9 +50,11 @@ child, and a child never asks the user anything: what it needs goes to its paren
 |---|---|
 | Project | A folder. Either a git repository itself, or a folder holding several independent repositories (and possibly being one itself). |
 | Repository | One git repository of a project, with its path relative to the project folder, its base branch rule and its remote. |
-| Workspace | The place one piece of work happens: one git worktree per repository it takes, on one branch name, in one folder, prepared by the project's recipe. |
-| Recipe | The project's ordered preparation steps for a new workspace: copy, link, run, plus the workspace's variables. |
-| Command catalogue | The project's named commands (`api:dev`, `test`, `lint`…), runnable by the user and by agents. |
+| Workspace | The place one piece of work happens: one git worktree per repository it takes, on one branch name, in one folder, prepared by the project's setup. |
+| Setup | The project's ordered preparation steps for a new workspace: copy, link, run, plus the workspace's variables. |
+| Tasks | The project's named command lines (`api:dev`, `test`, `lint`…), runnable by the user and by agents. |
+| Skill | A text of the project an agent reads with a tool when its task needs it: a path of the project folder, or a text Flottille keeps. |
+| Command | A project's named instructions, sent to a session as `/name`. |
 | Agent | One agent session: a provider (Claude Code first), a model, a role, a place, a conversation, a state. Survives process restarts; can be replaced. |
 | Root | An agent the user started. The only kind of agent the user writes to and the only one that can need the user. |
 | Lead | An agent that has children. Any agent can be one, within the limits. |
@@ -159,20 +161,19 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
 
 - files: `fs_read`, `fs_list`, `search`, `fs_write`, `fs_edit` (read-before-write fingerprints,
   temp file + rename, all-or-nothing edits);
-- commands: `commands_list`, `commands_run` (catalogue command or one line, **never a shell**),
+- commands: `commands_list`, `commands_run` (a task or one line, **never a shell**),
   `commands_status` (a run's output, or its stop);
 - forges (an agent in a workspace): `forge_read`, the pull requests of its workspace's
   repositories and their checks, read only (`forges.md`), and `forge_write`, which opens or merges
   them or re-runs a failed pipeline, each call to judge (§7);
 - the workspace (an agent in a workspace): `workspace_remove`, which removes the agent's own
   workspace once nothing in it would be lost, a call to judge;
-- references: `reference_read`, one of the project's references, documents read when relevant
-  (`docs/projects.md`, "References");
+- skills: `skill_read`, one of the project's skills, texts read when relevant (`skills.md`);
 - tickets (an agent in a workspace): `ticket_read`, the ticket its workspace is linked to, or
   another of the same tracker, read only (`tickets.md`);
-- the project (a root): `procedure` (list, show, start) and `project` (its settings, its forges and
-  tracker, its references), what the window does, each change a call to judge (`tools.md`, "The
-  project", `projects.md`);
+- the project (a root): `skills` and `commands` (list, show, add, edit, remove) and `project` (its
+  settings, its forges and tracker), what the window does, each change a call to judge
+  (`tools.md`, "The project", `projects.md`);
 
 Flottille's own tools:
 
@@ -196,9 +197,9 @@ Flottille's own tools:
   when the caller is a root. There is no way to allow a request.
 
 The tool list of a session is fixed for its whole life (prompt cache, `reference/hemera.md` §7)
-and depends on what the agent can do, known when it starts: a root gets `ask_user`, `procedure` and
-`project`, a child `ask_parent`; an agent at the depth limit gets no `agent_*` tools and no
-`approval_answer`. A root lead has about 18 tools, a leaf worker 11, four more each in a workspace (`forge_read`,
+and depends on what the agent can do, known when it starts: a root gets `ask_user`, `skills`,
+`commands` and `project`, a child `ask_parent`; an agent at the depth limit gets no `agent_*` tools
+and no `approval_answer`. A root lead has 19 tools, a leaf worker 11, four more each in a workspace (`forge_read`,
 `ticket_read`, `forge_write`, `workspace_remove`) (`reference/mcp.md` §4).
 
 ### 4.4 Roles
@@ -288,7 +289,7 @@ calls fail, the replacement limit (2 in 30 min; then a child fails and its paren
 - Per project: branch prefix, workspaces root (default
   `$XDG_DATA_HOME/flottille/workspaces/<project>`, or beside the project:
   `<parent>/<project>-work/`), which repositories a workspace takes by default (**all**, or a
-  chosen set), variables, command catalogue, recipe, "never" list, children cap.
+  chosen set), variables, tasks, setup, skills, commands, "never" list, children cap.
 - The project configuration is a TOML file Flottille owns (in its config folder), editable by
   hand and from the window. Nothing is written into the user's repositories.
 
@@ -303,7 +304,7 @@ by `reference/multi-repo-case.md`:
   ("environment scope is not change scope").
 - **Root entries**: when the project folder is not itself a repository, its other top-level
   entries (instruction files, shared folders) can be linked into the workspace folder by one
-  recipe step, never `.git` nor `.gitignore`.
+  setup step, never `.git` nor `.gitignore`.
 - **Ordered per repository**: `run` steps can be declared once "for each repository, in
   dependency order" (leaves first), with `{repository}` in the template.
 - **Variables replace shell hooks**: workspace variables (templated, for example
@@ -325,7 +326,7 @@ role, arguments decoded, place rules, then the call's **class**. The gate grants
 says what kind of call it is, and the session's **mode** says who answers it.
 
 - **Harmless** calls pass, in every mode: reading in the project, writing in a workspace, the
-  commands the rules know to only read, a catalogue command in a workspace. A known program is
+  commands the rules know to only read, a task in a workspace. A known program is
   the system's only: named bare and found through `PATH` outside the project, its workspaces and
   the place; an option that runs a program or reads past ignored files toward a secret takes it
   out of this class.
@@ -402,8 +403,8 @@ Agent-run commands get an environment without forge tokens, and without the repo
 hooks (`reference/hemera.md` §3), and with every push walled but the run that is itself a
 `git push` the gate let through: a push goes through the gate like any other call, and only so.
 
-**Procedures** are named steps of the project's work (`procedures.md`): a run grants nothing, each
-call it makes goes through the session's mode like any other.
+**Commands** are named instructions of the project (`commands.md`), sent to a session as `/name`:
+a command grants nothing, each call the session makes goes through its mode like any other.
 
 ## 8. Instructions
 
@@ -413,13 +414,13 @@ repository and for the project folder: `CLAUDE.md` or `AGENTS.md` (the agent's o
 **and the local files `CLAUDE.local.md` / `AGENTS.local.md` when present** (they hold rules the
 user keeps out of the repository).
 
-After the per-session part, before the project layer, comes the list of the project's **references** (documents an agent reads
-with the tool `reference_read`: what knowledge skills hold today): a name and one line each, never
-the content (`docs/projects.md`).
+After the per-session part, before the project layer, comes the list of the project's **skills** (texts an agent reads
+with the tool `skill_read`: what knowledge skills hold in other tools): a name and one line each,
+never the content (`skills.md`).
 
-Later (milestone "Forges and tickets"), a project gains **procedures** (named multi-step actions
-with their own scoped authorizations: what slash commands hold today, [`procedures.md`](procedures.md)), see
-`reference/multi-repo-case.md`. A procedure's instructions are its run's first message.
+A project's **commands** (`commands.md`) are what slash commands hold in other tools, see
+`reference/multi-repo-case.md`: `/name` sends a command's instructions, after a header that says
+the workspace, its repositories by dependency level and the project's pull requests.
 
 ## 9. The built-in orchestration standard
 
@@ -441,9 +442,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   opens its page and leaves its places as they were, only its chevron folds and unfolds them;
 - a project page: its repositories, its places with their sessions, creating and removing a
   workspace (with the preparation's progress and failure output), and the composer that starts
-  a session (place, agent, model, first message); its procedures (added from a list of the
-  templates and a blank one, edited, removed) and its references (add with a path picked in the
-  project folder, remove); its Settings: each repository's forge and the tracker;
+  a session (place, agent, model, first message); its Settings: each repository's forge and the
+  tracker, its Skills (a path picked in the project folder, or a text; added, edited, removed) and
+  its Commands (added from a list of the templates and a blank one, edited, removed);
 - a session page: the root's conversation, live (messages, thoughts collapsed, tool calls with
   their result, the children launched, reports, diffs), the approvals that reach the user, inline,
   each a card that says what the call does, then its class, then the judge's reason when one was
@@ -458,12 +459,11 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   a turn runs (`Thinking…`, `Writing…`, `Running <tool>…`) and goes with the turn. A running agent is
   drawn by its icon alone, in the tree and in the rail: no text badge, nothing in the header. In the
   composer, `/` at the start
-  of a message lists the project's procedures, filtered as the user types: picking one shows what
-  it runs and the workspace, and Confirm runs it in the session's workspace
-  (in `main` the list says procedures run in a workspace; a `/word` that names none is sent as
-  text); a rail with the session's
+  of a message lists the project's commands, filtered as the user types: picking one puts `/name `
+  in the field, and sending it sends the command's instructions with what follows the name (a
+  `/word` that names none is sent as text); a rail with the session's
   tree of agents, its workspace (each repository's forge as the daemon reads it, its ticket,
-  linked or unlinked there) and facts (the procedure it runs, while it runs). The
+  linked or unlinked there) and facts. The
   root's row menu ("⋯") holds End session, the only way the window ends an agent: it ends the root
   and its tree, after a confirmation that counts the agents that end. An ended session leaves its
   place in the left tree for its project's "Ended" group, folded at the bottom, and its page shows,
@@ -502,7 +502,7 @@ spans machines through deliveries).
 
 The plan is cut into GitHub milestones; each ends on something the user can use.
 
-1. **Usable from the CLI**: projects, multi-repository workspaces with recipes, Claude agents in
+1. **Usable from the CLI**: projects, multi-repository workspaces with their setup, Claude agents in
    bare mode over ACP, the generic tools, the gate with approvals, the tree with deliveries,
    reports and waking, the pilot door, the CLI and events. Accepted when the user runs a real
    piece of work on a multi-repository project from a terminal: a lead launches two workers in
@@ -512,9 +512,8 @@ The plan is cut into GitHub milestones; each ends on something the user can use.
 2. **The window**: the same piece of work followed and answered in the window.
 3. **More agents**: Codex and OpenCode in bare mode.
 4. **Forges and tickets**: GitHub and Bitbucket (pull requests, checks, pipelines),
-   issue trackers (GitHub issues, Jira read-only), linked to workspaces; procedures with scoped
-   authorizations (open the pull requests of a workspace, merge a stack in dependency order,
-   close a workspace). Reading a workspace's GitHub pull requests and checks is in
+   issue trackers (GitHub issues, Jira read-only), linked to workspaces; commands (open the pull
+   requests of a workspace, merge a stack in dependency order, close a workspace). Reading a workspace's GitHub pull requests and checks is in
    [`forges.md`](forges.md), and its ticket (a GitHub issue or a Jira work item) in
    [`tickets.md`](tickets.md).
 5. **Remote**: network transport, phone, other machines.

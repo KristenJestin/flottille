@@ -141,10 +141,10 @@ and the 2026 practice around it:
      `forge_read` and `ticket_read` are: listing grants nothing, each call goes through the gate's
      classes and the session's mode (`docs/tools.md`, "The gate").
 
-   - only a root gets `procedure` and `project`, the project's procedures and settings
-     (`docs/tools.md`, "The project"): a child does its brief.
+   - only a root gets `skills`, `commands` and `project`, the project's skills, commands and
+     settings (`docs/tools.md`, "The project"): a child does its brief.
 
-   A root lead has 18 tools, a leaf worker 11, four more each in a workspace (`forge_read`,
+   A root lead has 19 tools, a leaf worker 11, four more each in a workspace (`forge_read`,
    `ticket_read`, `forge_write`, `workspace_remove`).
 10. **The idempotency key** of a call is read from the call's `_meta` (`claudecode/toolUseId` for
     Claude). `claude` calls Flottille's server itself and sends it with every call; the bridge

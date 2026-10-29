@@ -3,7 +3,7 @@
 What the forge of each repository of a workspace says of the workspace's branch: its pull request
 and the pull request's checks. The first step of the milestone "Forges and tickets"
 (`docs/design.md` §13). **Reading**, and the writes an agent in a workspace makes with `forge_write`, each a call to
-judge at the gate ([`procedures.md`](procedures.md)).
+judge at the gate ([`commands.md`](commands.md)).
 
 GitHub and Bitbucket (Cloud and Data Center) are the forges read. In the code a forge is one member
 of `forge::Forge`, read through its own command line (`gh`, `bkt`); others will sit beside them.
@@ -83,9 +83,7 @@ forge from an alias: the user chooses it in the Settings, and saving it is check
 A name that could pass for a flag or a path (a leading `-`, anything but letters, digits, `.`, `_`,
 `~` and `-`) is no repository, and a host is a name alone (no scheme, port or path).
 
-**A procedure that writes to a forge refuses to start** (`procedure.run`, and a session started
-with one) when a repository of its workspace has no forge declared, naming the repositories
-(`docs/procedures.md`). `forge_write` refuses the same for the repository it names.
+**`forge_write` refuses a repository with no forge declared**, naming it (`docs/commands.md`).
 
 ## What is read
 
@@ -208,7 +206,7 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
 
 ### `forge_write` on Bitbucket
 
-The three actions of [`procedures.md`](procedures.md), under the same classes and the same checks
+The three actions of [`commands.md`](commands.md), under the same classes and the same checks
 (the remote leads where it led when the workspace was created; the repository is one of the
 workspace's; the pull request is the workspace's own branch's, from the repository itself, into
 the base the repository started from):
@@ -259,7 +257,7 @@ project's reviewers), merges it by squash (never while its checks fail or run or
 changes, unless the user waives it), or re-runs the failed pipelines of its last commit, with the
 same `gh` (or `bkt`, for a Bitbucket repository) and the same rules (spawned by the daemon, the
 repository named, its output masked, no token to the agent). Only an agent in a workspace has it, and
-each call is to judge (a merge that waives the checks is base): see [`procedures.md`](procedures.md).
+each call is to judge (a merge that waives the checks is base): see [`commands.md`](commands.md).
 
 ## Tickets
 

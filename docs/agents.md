@@ -220,8 +220,8 @@ bridge sets on `claude` ("The Claude bridge", below):
   and `report`; one that can have children (below the depth limit) also
   `agent_launch`, `agent_send`, `agent_status`, `agent_stop` and
   `approval_answer`; a root `ask_user`, a child `ask_parent`. An agent in a workspace also has
-  `forge_read`, `ticket_read`, `forge_write` and `workspace_remove`. A root outside a workspace gets, in this order, the first eight, `reference_read`, the four
-  `agent_*`, `report`, `ask_user`, `approval_answer` (16). The list is
+  `forge_read`, `ticket_read`, `forge_write` and `workspace_remove`. A root outside a workspace gets, in this order, the first eight, `skill_read`, the four
+  `agent_*`, `skills`, `commands`, `project`, `report`, `ask_user`, `approval_answer` (19). The list is
   frozen in the agent when it is created (the prompt cache depends on it).
 - `settingSources: []`: Claude Code's own default loads the user's settings, hooks, plugins,
   skills and instruction files; this overrides it.
@@ -718,8 +718,7 @@ workspace of the project, or a new one, made and prepared before it starts.
   `agent.failed` when it is a failure that spreads), what was queued for it is superseded, the
   pending requests it made or held are cancelled (`approval.cancelled`: the user never sees them),
   its process and its runs are stopped. Workspaces stay. Nothing is delivered to an agent that
-  ended. A root that ends, stopped or failed, ends the procedure run it is the root of
-  (`docs/procedures.md`). What Flottille keeps of its session goes (the bridge's history, Codex's
+  ended. What Flottille keeps of its session goes (the bridge's history, Codex's
   thread), but for a root that ended (not failed) whose agent resumes or loads sessions: that one
   is kept, so that the user can resume the root on it. It holds the whole conversation, what the
   agent's tools printed included (masked as the daemon masks what it keeps), and it is kept 7
@@ -730,8 +729,7 @@ workspace of the project, or a new one, made and prepared before it starts.
   stopped), its conversation and its session; the next message starts its process, which resumes
   or loads the session as after an idle release. That message comes after a `resume` delivery,
   queued without waking it: the user stopped it, and the requests of its own that were cancelled
-  then, never executed. Its children stay ended, and its procedure run too: a resumed root is an
-  ordinary session, in the mode it had, and so are the children it launches. It is refused while its
+  then, never executed. Its children stay ended: a resumed root is an ordinary session, in the mode it had, and so are the children it launches. It is refused while its
   last process is still stopping, and when its workspace or its project is gone (one made again
   under the same name is another). A failed root is not resumed: its session could not go on, and
   went.
