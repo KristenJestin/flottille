@@ -1791,6 +1791,18 @@ impl Store {
         rows.map(|row| row?).collect()
     }
 
+    /// The last event of that name, read from the end.
+    pub fn last_event_named(&self, name: &str) -> Result<Option<Event>> {
+        self.connection
+            .query_row(
+                "SELECT seq, at, name, data FROM events WHERE name = ?1 ORDER BY seq DESC LIMIT 1",
+                [name],
+                event_row,
+            )
+            .optional()?
+            .transpose()
+    }
+
     /// The number of the last event, 0 when there is none.
     pub fn last_seq(&self) -> Result<u64> {
         let seq: Option<u64> = self

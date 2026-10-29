@@ -852,8 +852,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
                 }
             };
             if set_judge(&daemon.paths, judge.as_ref())? {
-                daemon
-                    .emit("provider.judge_changed", json!({"judge": judge}))
+                judge_changed(&daemon, judge.as_ref())
                     .map_err(|error| Failure::new("unavailable", error.to_string()))?;
             }
             Ok(json!({"judge": judge}))
@@ -863,8 +862,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
                 let judge = Settings::load(&daemon.paths)
                     .map_err(|error| Failure::new("invalid-config", error))?
                     .judge;
-                daemon
-                    .emit("provider.judge_changed", json!({"judge": judge}))
+                judge_changed(&daemon, judge.as_ref())
                     .map_err(|error| Failure::new("unavailable", error.to_string()))?;
             }
             Ok(json!({}))
@@ -1015,23 +1013,24 @@ const PICKED: &str = "# Picked by Flottille as the Auto judge: the smallest mode
 /// fits.
 ///
 /// A user who chose before `judge = "none"` existed chose none by removing `[judge]`: their file
-/// says nothing of the judge, as a file never chosen in does. Any `provider.judge_changed` stored
-/// tells them apart: then their choice is written as `judge = "none"`, and nothing is picked.
+/// says nothing of the judge, as a file never chosen in does. The last `provider.judge_changed`
+/// stored tells them apart: when it chose no judge, their choice is written as `judge = "none"`,
+/// and nothing is picked. One that set a judge (the user's, or one picked) is no choice of none:
+/// a judge is picked again.
 pub fn pick_judge(daemon: &Daemon) -> Option<Judge> {
-    let chosen_before =
-        match daemon.read(|store| store.events_named(&["provider.judge_changed"], 0)) {
-            Ok(events) => !events.is_empty(),
-            Err(error) => {
-                unpicked(&error.to_string());
-                return None;
-            }
-        };
+    let chose_none = match chose_none(daemon) {
+        Ok(chose_none) => chose_none,
+        Err(error) => {
+            unpicked(&error.to_string());
+            return None;
+        }
+    };
     let mut picked = None;
     let written = edit_judge(&daemon.paths, |before, document| {
         if before.judge_set {
             return false;
         }
-        if chosen_before {
+        if chose_none {
             document.insert("judge", toml_edit::value(provider::NO_JUDGE));
             return true;
         }
@@ -1059,7 +1058,7 @@ pub fn pick_judge(daemon: &Daemon) -> Option<Judge> {
     });
     match written {
         Ok(true) if picked.is_some() => {
-            if let Err(error) = daemon.emit("provider.judge_changed", json!({"judge": picked})) {
+            if let Err(error) = judge_changed(daemon, picked.as_ref()) {
                 eprintln!("flottille daemon: the judge picked could not be said: {error}");
             }
             picked
@@ -1072,11 +1071,37 @@ pub fn pick_judge(daemon: &Daemon) -> Option<Judge> {
     }
 }
 
-/// Says in the daemon's log why no judge could be picked: once in the daemon's life, not at each
-/// judgement that tries again.
+/// Whether the last `provider.judge_changed` chose no judge: read once from the end of the store
+/// (a new user has none, and that would be a walk through every event at each judgement), then
+/// kept by `judge_changed`.
+fn chose_none(daemon: &Daemon) -> Result<bool, flottille_core::Error> {
+    let mut known = daemon.judge_chose_none.lock().unwrap();
+    if let Some(chose_none) = *known {
+        return Ok(chose_none);
+    }
+    let last = daemon.read(|store| store.last_event_named("provider.judge_changed"))?;
+    let chose_none = last.is_some_and(|event| event.data["judge"].is_null());
+    *known = Some(chose_none);
+    Ok(chose_none)
+}
+
+/// Says `provider.judge_changed`, and keeps what `chose_none` answers next.
+fn judge_changed(daemon: &Daemon, judge: Option<&Judge>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut known = daemon.judge_chose_none.lock().unwrap();
+    daemon.emit("provider.judge_changed", json!({"judge": judge}))?;
+    *known = Some(judge.is_none());
+    Ok(())
+}
+
+/// Says in the daemon's log why no judge could be picked: once for each reason in the daemon's
+/// life, not at each judgement that tries again.
 fn unpicked(why: &str) {
-    static SAID: std::sync::Once = std::sync::Once::new();
-    SAID.call_once(|| eprintln!("flottille daemon: no Auto judge could be picked: {why}"));
+    static SAID: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let mut said = SAID.lock().unwrap();
+    if !said.iter().any(|reason| reason == why) {
+        eprintln!("flottille daemon: no Auto judge could be picked: {why}");
+        said.push(why.to_owned());
+    }
 }
 
 /// The user saw the notice of the judge Flottille picked: it is theirs now, and the notice is not

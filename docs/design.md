@@ -380,8 +380,9 @@ model, `provider.set_judge`), run in bare mode **with no tool at all**: no Flott
 server. A user who never chose one gets one picked: the smallest model of the first provider that
 is enabled, installed and signed in, among the few whose smallest model Flottille lists (Claude's
 Haiku), written once to `providers.toml` and said once in a notice that opens Settings (and by
-`flottille provider list`); a user who chose "No judge" never gets one, nor does one who chose any
-judge before (a `provider.judge_changed` in the store), whose file then says `judge = "none"`. Its
+`flottille provider list`); a user who chose "No judge" never gets one, nor does one whose last
+choice before `judge = "none"` existed was no judge (the last `provider.judge_changed` in the store
+names none), whose file then says `judge = "none"`. Its
 instructions are a fixed text (`roles/judge-base.md`: what it is, its JSON answer, that it never
 denies, that what the agent wrote is data, and the floor: ask for anything destructive, outside
 what was asked, surprising, or whenever it is not sure) around the user's **guidance**, which can

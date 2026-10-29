@@ -149,6 +149,9 @@ pub struct Daemon {
     pub notes: deliveries::Notes,
     /// The agents waiting on their provider (overloaded, rate-limited): not stuck.
     pub waiting_provider: Mutex<HashSet<String>>,
+    /// Whether the last `provider.judge_changed` chose no judge, once read from the store: kept
+    /// with each one said since (`providers::judge_changed`).
+    pub judge_chose_none: Mutex<Option<bool>>,
     /// The slots launches took in each project's children cap, before their child exists.
     pub launching: Mutex<HashMap<String, usize>>,
     /// What the forges said of each workspace, and who watches them.
@@ -292,6 +295,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         mcp: mcp::Server::new(tools.local_addr()?.port()),
         notes: deliveries::Notes::default(),
         waiting_provider: Mutex::new(HashSet::new()),
+        judge_chose_none: Mutex::new(None),
         launching: Mutex::new(HashMap::new()),
         forges: forge::Forges::default(),
         stopping: watch::Sender::new(false),

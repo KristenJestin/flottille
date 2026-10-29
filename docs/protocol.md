@@ -921,9 +921,10 @@ picks one, at its start and at the first call to judge after a provider became r
 smallest model of the first provider, in Flottille's order, that is enabled, installed (its program
 on `PATH`) and signed in where Flottille can see it, among those whose smallest model Flottille
 knows (`providers::SMALLEST`: Claude's `haiku`). It writes `[judge]` once, with `picked = true`
-and a comment that says so, and emits `provider.judge_changed`. A store that holds any
-`provider.judge_changed` says the user chose before: until `judge = "none"` existed, choosing no
-judge removed `[judge]`. Then the daemon writes `judge = "none"` and picks nothing.
+and a comment that says so, and emits `provider.judge_changed`. Until `judge = "none"` existed,
+choosing no judge removed `[judge]`: when the last `provider.judge_changed` in the store names no
+judge, the daemon writes `judge = "none"` and picks nothing. When it names one (the user's, or one
+picked), a `[judge]` removed by hand is no choice of none: a judge is picked again.
 
 ### `provider.judge_noticed`
 

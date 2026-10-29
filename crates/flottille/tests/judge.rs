@@ -1311,6 +1311,30 @@ fn judge_sets_at_once_leave_one_text_whole() {
     );
 }
 
+#[test]
+fn a_judge_removed_by_hand_after_one_was_set_is_picked_again() {
+    // Claude installed and signed in: a judge is picked, and said, at the first start.
+    let user = User::with_fake_claude().with_fake_escalation();
+    user.status();
+    let written: toml_edit::DocumentMut = providers_file(&user).parse().unwrap();
+    assert_eq!(written["judge"]["provider"].as_str(), Some("claude"));
+    user.run(&["daemon", "stop"]);
+    // The user takes `[judge]` out of the file by hand: their last choice was a judge, not none.
+    user.write_providers("[claude]\nenabled = true\n");
+
+    user.status();
+
+    let file = providers_file(&user);
+    let written: toml_edit::DocumentMut = file.parse().unwrap();
+    assert_eq!(
+        written["judge"]["provider"].as_str(),
+        Some("claude"),
+        "{file}"
+    );
+    assert_eq!(written["judge"]["picked"].as_bool(), Some(true), "{file}");
+    no_escalation(&user);
+}
+
 /// `folder` becomes a link to `target`.
 fn swap_for_a_link(folder: &std::path::Path, target: &std::path::Path) {
     std::fs::remove_dir(folder).unwrap();
