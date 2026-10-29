@@ -266,7 +266,9 @@ A workspace is one git worktree per repository, on one branch, prepared by the p
 
 Fetches the base of each repository, makes the worktrees, then goes on with the setup in the
 background. `--repositories a,b` takes some repositories only, `--branch <branch>` names the
-branch (`<branch prefix>/<name>` otherwise), `--offline` fetches nothing, `--ticket <ticket>`
+branch (`<branch prefix>/<name>` otherwise), `--base <repository>=<branch>` (once per repository)
+starts a repository from that branch in place of its base rule, `--offline` fetches nothing,
+`--ticket <ticket>`
 links it to a ticket (`#123`, `123` or a Jira key such as `ABC-123`, [`tickets.md`](tickets.md)).
 
 ```
@@ -275,6 +277,9 @@ Workspace login of shop, branch shop/login, in ~/.local/share/flottille/workspac
   .: main, c9eba53c33ef, fetched
 Ready.
 ```
+
+A repository with no remote, or whose fetch fails, starts from its own branch, and its line says
+why: `  lib: main, no remote origin: started from the local main`.
 
 ### `flottille workspace list [project]`
 
