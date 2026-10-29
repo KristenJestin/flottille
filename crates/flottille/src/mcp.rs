@@ -252,14 +252,16 @@ const SERVED: [Definition; 23] = [
         description: "Reads, on the forge, the pull request of this workspace's branch in each of \
             its repositories (or the one named): its number, state, base and link, its review, \
             its checks and their states, and how many comments and reviews it has: detail full \
-            gives their texts. Read only; it reaches no repository outside the workspace. A \
-            repository on a host Flottille cannot read yet says so. Use it rather than a forge's \
-            command line, which has no sign-in here.",
+            gives their texts. Read only; it reaches no repository outside the workspace. In a \
+            workspace it is yours; in main, workspace names the one to read. A repository on a \
+            host Flottille cannot read yet says so. Use it rather than a forge's command line, \
+            which has no sign-in here.",
         read_only: true,
         idempotent: true,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
+                "workspace": {"type": "string", "description": "A workspace of the project, by its name. Yours when left out; in main, name it."},
                 "repository": {"type": "string", "description": "One of the workspace's repositories, by its path; all of them when left out."},
                 "detail": {"type": "string", "enum": ["short", "full"], "description": "short by default; full adds the texts of the comments and reviews."}
             }, "additionalProperties": false})
@@ -294,7 +296,7 @@ const SERVED: [Definition; 23] = [
         description: "Reads, on its tracker, the ticket this workspace is linked to (a GitHub \
             issue, #123, or a Jira key, ABC-123): its title, state and description, and how many \
             comments it has: detail full gives their texts. Another ticket of the same tracker \
-            when `ticket` names it. Read only: it writes nothing to the tracker, and drafts of \
+            when `ticket` names it. In main, name a ticket or a workspace. Read only: it writes nothing to the tracker, and drafts of \
             comments go to the user, who posts them. Use it rather than a tracker's command \
             line, which has no sign-in here.",
         read_only: true,
@@ -302,6 +304,7 @@ const SERVED: [Definition; 23] = [
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
+                "workspace": {"type": "string", "description": "A workspace of the project, by its name. Yours when left out; in main, name it."},
                 "ticket": {"type": "string", "description": "A ticket of the same tracker as the workspace's, by its key (#123 or ABC-123); the workspace's own ticket when left out."},
                 "detail": {"type": "string", "enum": ["short", "full"], "description": "short by default; full adds the texts of the comments."}
             }, "additionalProperties": false})
@@ -310,12 +313,12 @@ const SERVED: [Definition; 23] = [
     Definition {
         name: "forge_write",
         title: "Write to the workspace's forge",
-        description: "Listed because your procedure grants some of it. Opens the pull request of \
-            this workspace's branch in one of its repositories (pr-create, with a title and a \
+        description: "Opens the pull request of this workspace's branch (yours; in main, workspace \
+            names it) in one of its repositories (pr-create, with a title and a \
             body, into the repository's base), merges it by squash (pr-merge-squash), or re-runs \
             the failed jobs of its branch's last pipelines (pipeline-rerun). Run by Flottille \
-            with the user's own forge sign-in; refused for an action the procedure does not \
-            grant, held for the user when it grants it with ask. A merge is refused while the \
+            with the user's own forge sign-in; the gate decides whether a call passes, is held \
+            for the user or is refused. A merge is refused while the \
             checks fail or run, or a review asks for changes, unless the user waives it. \
             {\"action\": \"pr-create\", \"repository\": \"api\", \"title\": \"fix(api): ...\", \
             \"body\": \"...\"}; {\"action\": \"pr-merge-squash\", \"repository\": \"api\"}.",
@@ -324,6 +327,7 @@ const SERVED: [Definition; 23] = [
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
+                "workspace": {"type": "string", "description": "A workspace of the project, by its name. Yours when left out; in main, name it."},
                 "action": {"type": "string", "enum": ["pr-create", "pr-merge-squash", "pipeline-rerun"]},
                 "repository": {"type": "string", "description": "One of the workspace's repositories, by its path."},
                 "title": {"type": "string", "description": "pr-create: the pull request's title."},
@@ -336,15 +340,20 @@ const SERVED: [Definition; 23] = [
     Definition {
         name: "workspace_remove",
         title: "Remove the workspace",
-        description: "Listed because your procedure grants it. Removes this agent's own \
-            workspace, as `flottille workspace remove` does. It refuses, touching nothing, while \
+        description: "Removes a workspace, as `flottille workspace remove` does: this agent's \
+            own, or, in main, the one workspace names. It refuses, touching nothing, while \
             a repository holds uncommitted work or commits on no remote, and names them; \
             otherwise it removes every worktree and the folder, and deletes the branches that \
-            hold no commit of their own. Nothing is left to work in afterwards: report next.",
+            hold no commit of their own. From inside the workspace, nothing is left to work in \
+            afterwards: report next.",
         read_only: false,
         idempotent: false,
         destructive: true,
-        schema: || json!({"type": "object", "properties": {}, "additionalProperties": false}),
+        schema: || {
+            json!({"type": "object", "properties": {
+                "workspace": {"type": "string", "description": "A workspace of the project, by its name. Yours when left out; in main, name it."}
+            }, "additionalProperties": false})
+        },
     },
     Definition {
         name: "procedure",
@@ -614,6 +623,50 @@ pub fn arguments<T: DeserializeOwned>(tool: &str, args: Value) -> Result<T, Outc
             "refused: the arguments do not fit {tool}: {error}; see its input schema"
         ))
     })
+}
+
+/// The workspace a forge, ticket or workspace tool acts on. In a workspace it is the agent's own
+/// (`named` left out, or naming it); in `main` the call names one of the project's.
+pub fn workspace_named(
+    daemon: &Daemon,
+    place: &Place,
+    named: Option<&str>,
+    tool: &str,
+) -> Result<String, Outcome> {
+    match (&place.workspace, named) {
+        (Some(own), None) => Ok(own.clone()),
+        (Some(own), Some(named)) if own == named => Ok(own.clone()),
+        (Some(own), Some(named)) => Err(Outcome::Refused(format!(
+            "refused: {tool} acts on this agent's own workspace, {own}, and {named} is another: \
+             leave workspace out"
+        ))),
+        (None, Some(named)) => match daemon.read(|store| store.workspace(&place.project, named)) {
+            Ok(Some(_)) => Ok(named.to_owned()),
+            Ok(None) => Err(Outcome::Refused(format!(
+                "refused: project {} has no workspace named {named}: {}",
+                place.project,
+                workspaces_of(daemon, place)
+            ))),
+            Err(error) => Err(Outcome::Failed(error.to_string())),
+        },
+        (None, None) => Err(Outcome::Refused(format!(
+            "refused: this agent works in main, which has no workspace of its own: name the \
+             workspace {tool} acts on, {{\"workspace\": \"login\"}}; {}",
+            workspaces_of(daemon, place)
+        ))),
+    }
+}
+
+/// The project's workspaces, for a refusal.
+fn workspaces_of(daemon: &Daemon, place: &Place) -> String {
+    let names: Vec<String> = daemon
+        .read(|store| store.workspaces(Some(&place.project)))
+        .map(|all| all.into_iter().map(|w| w.name).collect())
+        .unwrap_or_default();
+    match names.is_empty() {
+        true => "it has none".to_owned(),
+        false => format!("its workspaces are {}", names.join(", ")),
+    }
 }
 
 /// Whether a read is asked in full: `detail` is `short` (the default) or `full`.
@@ -1437,12 +1490,8 @@ mod tests {
             assert_eq!(tool["inputSchema"]["type"], "object");
             let name = format!("mcp__flottille__{}", definition.name);
             assert!(
-                claude::PROVIDER
-                    .tools(true, false, true, &all_grants())
-                    .contains(&name)
-                    || claude::PROVIDER
-                        .tools(false, false, true, &all_grants())
-                        .contains(&name),
+                claude::PROVIDER.tools(true, false, true).contains(&name)
+                    || claude::PROVIDER.tools(false, false, true).contains(&name),
                 "{} is a tool agents get",
                 definition.name
             );
@@ -1451,7 +1500,7 @@ mod tests {
 
     #[test]
     fn a_grant_holds_the_agent_s_served_tools_in_its_own_order() {
-        let mut leaf = claude::PROVIDER.tools(false, true, true, &all_grants());
+        let mut leaf = claude::PROVIDER.tools(false, true, true);
         assert_eq!(served(&claude::PROVIDER, &leaf).len(), 15);
         leaf.reverse();
         leaf.retain(|tool| !tool.ends_with("__search"));
@@ -1476,7 +1525,7 @@ mod tests {
         let lead = ["mcp__flottille__agent_status", "mcp__flottille__report"].map(String::from);
 
         for stored in [&worker[..], &lead[..]] {
-            let given = claude::PROVIDER.tools(false, false, true, &all_grants());
+            let given = claude::PROVIDER.tools(false, false, true);
             assert!(stored.iter().all(|tool| given.contains(tool)), "{stored:?}");
         }
         let served_worker = served(&claude::PROVIDER, &worker);
@@ -1558,7 +1607,7 @@ mod tests {
     fn the_biggest_list_stays_far_under_the_threshold_of_tool_search() {
         // About 4 characters a token: Anthropic suggests tool search past 10k tokens of
         // definitions (`docs/reference/mcp.md` §3), 40,000 characters.
-        let biggest = claude::PROVIDER.tools(true, false, true, &all_grants());
+        let biggest = claude::PROVIDER.tools(true, false, true);
         let chars: usize = served(&claude::PROVIDER, &biggest)
             .into_iter()
             .map(|name| {

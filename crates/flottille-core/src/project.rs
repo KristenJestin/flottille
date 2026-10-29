@@ -424,6 +424,12 @@ fn default_run_time_limit() -> u64 {
 }
 
 impl Project {
+    /// It declares a forge for a repository or a tracker: its agents get the forge and ticket
+    /// tools, wherever they work.
+    pub fn integrated(&self) -> bool {
+        self.tracker.is_some() || self.repositories.iter().any(|r| r.forge.is_some())
+    }
+
     /// A project that takes everything by default: each repository with its remote `origin` and
     /// the base rule `[main]`, nothing else configured. `name` must be valid and `folder`
     /// absolute, `data` is Flottille's data folder.

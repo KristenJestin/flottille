@@ -640,12 +640,52 @@ fn the_short_forge_read_of_a_named_repository_points_at_that_repository() {
 }
 
 #[test]
-fn an_agent_in_the_project_folder_has_no_forge_read() {
+fn a_root_agent_in_main_with_a_forge_lists_the_forge_tools() {
     let user = User::with_fake_agent().with_fake_gh();
     fixture(&user);
-    let (_, mcp) = agent_in(&user, None);
+    let (_, main) = agent_in(&user, None);
+    let (_, workspace) = agent_in(&user, Some("login"));
 
-    assert!(!mcp.names().contains(&"forge_read".to_owned()));
+    // The same tools wherever it works: the place does not decide.
+    for tool in [
+        "forge_read",
+        "ticket_read",
+        "forge_write",
+        "workspace_remove",
+    ] {
+        assert!(main.names().contains(&tool.to_owned()), "{tool}");
+    }
+    assert_eq!(main.names(), workspace.names());
+}
+
+#[test]
+fn in_main_forge_read_names_the_workspace_it_reads_and_in_a_workspace_only_its_own() {
+    let user = User::with_fake_agent().with_fake_gh();
+    fixture(&user);
+    one_pull_request(&user, pull(12, "Add the login page"));
+    let (_, main) = agent_in(&user, None);
+    let (_, inside) = agent_in(&user, Some("login"));
+
+    let nameless = main.call("forge_read", json!({}));
+    assert!(nameless.error, "{}", nameless.text);
+    assert!(
+        nameless
+            .text
+            .contains("name the workspace forge_read acts on")
+            && nameless.text.contains("its workspaces are login"),
+        "{}",
+        nameless.text
+    );
+    let unknown = main.call("forge_read", json!({"workspace": "elsewhere"}));
+    assert!(unknown.error && unknown.text.contains("has no workspace named elsewhere"));
+    let named = main.call("forge_read", json!({"workspace": "login"}));
+    assert!(!named.error, "{}", named.text);
+    assert!(named.text.contains("Add the login page"), "{}", named.text);
+    // In a workspace its own, named or not, and no other.
+    let own = inside.call("forge_read", json!({"workspace": "login"}));
+    assert_eq!(own.text, named.text);
+    let other = inside.call("forge_read", json!({"workspace": "elsewhere"}));
+    assert!(other.error && other.text.contains("acts on this agent's own workspace"));
 }
 
 #[test]

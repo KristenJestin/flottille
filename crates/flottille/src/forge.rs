@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
 use crate::git::{self, Class};
-use crate::mcp::{Outcome, arguments, full_detail};
+use crate::mcp::{Outcome, arguments, full_detail, workspace_named};
 use crate::place::Place;
 use crate::projects::{self, Failure};
 
@@ -837,6 +837,7 @@ pub fn poll(daemon: &Arc<Daemon>) {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ForgeRead {
+    workspace: Option<String>,
     repository: Option<String>,
     detail: Option<String>,
 }
@@ -852,14 +853,11 @@ pub async fn forge_read(daemon: &Daemon, place: &Place, args: Value) -> Outcome 
         Ok(full) => full,
         Err(refusal) => return refusal,
     };
-    let Some(name) = &place.workspace else {
-        return Outcome::Refused(
-            "refused: this agent works in the project folder, not in a workspace: forge_read \
-             reads a workspace's pull requests"
-                .into(),
-        );
+    let name = match workspace_named(daemon, place, asked.workspace.as_deref(), "forge_read") {
+        Ok(name) => name,
+        Err(refusal) => return refusal,
     };
-    let workspace = match daemon.read(|store| store.workspace(&place.project, name)) {
+    let workspace = match daemon.read(|store| store.workspace(&place.project, &name)) {
         Ok(Some(workspace)) => workspace,
         Ok(None) => return Outcome::Failed(format!("the workspace {name} is gone")),
         Err(error) => return Outcome::Failed(error.to_string()),
@@ -890,6 +888,7 @@ pub async fn forge_read(daemon: &Daemon, place: &Place, args: Value) -> Outcome 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ForgeWrite {
+    workspace: Option<String>,
     action: String,
     repository: String,
     title: Option<String>,
@@ -933,14 +932,11 @@ pub async fn forge_write(daemon: &Daemon, place: &Place, args: Value) -> Outcome
         Ok(asked) => asked,
         Err(refusal) => return refusal,
     };
-    let Some(name) = &place.workspace else {
-        return Outcome::Refused(
-            "refused: this agent works in the project folder, not in a workspace: forge_write \
-             writes for a workspace's branch"
-                .into(),
-        );
+    let name = match workspace_named(daemon, place, asked.workspace.as_deref(), "forge_write") {
+        Ok(name) => name,
+        Err(refusal) => return refusal,
     };
-    let workspace = match daemon.read(|store| store.workspace(&place.project, name)) {
+    let workspace = match daemon.read(|store| store.workspace(&place.project, &name)) {
         Ok(Some(workspace)) => workspace,
         Ok(None) => return Outcome::Failed(format!("the workspace {name} is gone")),
         Err(error) => return Outcome::Failed(error.to_string()),

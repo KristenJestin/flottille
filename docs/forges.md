@@ -259,7 +259,7 @@ project's reviewers), merges it by squash (never while its checks fail or run or
 changes, unless the user waives it), or re-runs the failed pipelines of its last commit, with the
 same `gh` (or `bkt`, for a Bitbucket repository) and the same rules (spawned by the daemon, the
 repository named, its output masked, no token to the agent). It is refused unless the agent works
-in a procedure's run that grants the action, and the tool is listed only to such an agent: see [`procedures.md`](procedures.md).
+in a procedure's run that grants the action; the tool is listed to every agent of a project that declares a forge or a tracker, and the gate decides: see [`procedures.md`](procedures.md).
 
 ## Tickets
 

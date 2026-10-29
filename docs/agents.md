@@ -219,13 +219,11 @@ bridge sets on `claude` ("The Claude bridge", below):
   `fs_list`, `search`, `fs_write`, `fs_edit`, `commands_list`, `commands_run`, `commands_status`
   and `report`; one that can have children (below the depth limit) also
   `agent_launch`, `agent_send`, `agent_status`, `agent_stop` and
-  `approval_answer`; a root `ask_user`, a child `ask_parent`. An agent in a workspace also has
-  `forge_read` and `ticket_read`, and `forge_write` or `workspace_remove` when the procedure run
-  it works in (or its parent's, when the run gives its grants to its children) grants what they
-  do. A root outside a workspace gets, in this order, the first eight, `reference_read`, the four
+  `approval_answer`; a root `ask_user`, a child `ask_parent`. Every agent has `workspace_remove`, and one of a
+  project that declares a forge or a tracker also `forge_read`, `ticket_read` and `forge_write`,
+  in `main` as in a workspace. A root outside a workspace gets, in this order, the first eight, `reference_read`, the four
   `agent_*`, `report`, `ask_user`, `approval_answer` (16). The list is
-  frozen in the agent when it is created (the prompt cache depends on it), with the run's grants
-  known at that moment.
+  frozen in the agent when it is created (the prompt cache depends on it).
 - `settingSources: []`: Claude Code's own default loads the user's settings, hooks, plugins,
   skills and instruction files; this overrides it.
 - `strictMcpConfig`: only the MCP servers given with the session.

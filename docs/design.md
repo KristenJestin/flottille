@@ -161,17 +161,16 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
   temp file + rename, all-or-nothing edits);
 - commands: `commands_list`, `commands_run` (catalogue command or one line, **never a shell**),
   `commands_status` (a run's output, or its stop);
-- forges (an agent in a workspace): `forge_read`, the pull requests of its workspace's
-  repositories and their checks, read only (`forges.md`), and `forge_write`, which opens or merges
-  them or re-runs a failed pipeline, listed only to an agent whose procedure run grants one of
-  those (`procedures.md`);
-- the workspace (an agent in a workspace): `workspace_remove`, which removes the agent's own
-  workspace once nothing in it would be lost, listed only to an agent whose procedure run grants
-  it;
+- forges (every agent of a project that declares a forge or a tracker, in `main` as in a
+  workspace): `forge_read`, the pull requests of a workspace's repositories and their checks, read
+  only (`forges.md`), and `forge_write`, which opens or merges them or re-runs a failed pipeline,
+  as the gate allows (`procedures.md`); in `main` they name the workspace;
+- the workspace (every agent): `workspace_remove`, which removes a workspace once nothing in
+  it would be lost, the agent's own or, in `main`, the one it names;
 - references: `reference_read`, one of the project's references, documents read when relevant
   (`docs/projects.md`, "References");
-- tickets (an agent in a workspace): `ticket_read`, the ticket its workspace is linked to, or
-  another of the same tracker, read only (`tickets.md`);
+- tickets (the same agents): `ticket_read`, the ticket a workspace is linked to, or another of
+  the same tracker, read only (`tickets.md`);
 - the project (a root): `procedure` (list, show, start) and `project` (its settings, its forges and
   tracker, its references), what the window does, each change held for the user unless the
   project lets its family run on its own (`tools.md`, "The project", `projects.md`);
@@ -200,9 +199,9 @@ Flottille's own tools:
 The tool list of a session is fixed for its whole life (prompt cache, `reference/hemera.md` §7)
 and depends on what the agent can do, known when it starts: a root gets `ask_user`, `procedure` and
 `project`, a child `ask_parent`; an agent at the depth limit gets no `agent_*` tools and no
-`approval_answer`. A root lead has about 18 tools, a leaf worker 11, two more each in a workspace (`forge_read`, `ticket_read`),
-and `forge_write` or `workspace_remove` for an agent whose procedure run grants what they do
-(`reference/mcp.md` §4).
+`approval_answer`. A root lead has about 19 tools, a leaf worker 12, and three more each when the project declares a
+forge or a tracker (`forge_read`, `ticket_read`, `forge_write`), whatever the place and whatever a
+run grants (`reference/mcp.md` §4).
 
 ### 4.4 Roles
 

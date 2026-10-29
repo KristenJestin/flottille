@@ -540,14 +540,16 @@ fn forge_write_creates_a_pull_request_with_the_fake_gh_only_when_granted() {
     let create = json!({"action": "pr-create", "repository": ".", "title": "Add the login page",
         "body": "What it does"});
 
-    // Outside a run, the tool is not listed and a call of it is refused; in a run that grants
-    // another action it is listed and the gate refuses this one: never asked of the forge.
+    // The tool is listed to everyone: outside a run the gate refuses the call, and in a run that
+    // grants another action it refuses this one: never asked of the forge.
     let outside = plain_agent(&user);
-    assert!(!outside.names().contains(&"forge_write".to_owned()));
+    assert!(outside.names().contains(&"forge_write".to_owned()));
     let answer = outside.call("forge_write", create.clone());
     assert!(answer.error, "{}", answer.text);
     assert!(
-        answer.text.contains("has no tool forge_write"),
+        answer
+            .text
+            .contains("only inside a procedure that grants it"),
         "{}",
         answer.text
     );
@@ -1450,19 +1452,22 @@ fn workspace_remove_is_refused_outside_a_run_that_grants_it_and_for_any_other_wo
     procedure(&user, "push", json!({"push": "allow"}), false);
     procedure(&user, "tree", json!({"workspace-remove": "allow"}), true);
 
+    // The tool is listed to everyone; the gate refuses it where no run grants it.
     let outside = plain_agent(&user);
-    assert!(!outside.names().contains(&"workspace_remove".to_owned()));
+    assert!(outside.names().contains(&"workspace_remove".to_owned()));
     let answer = outside.call("workspace_remove", json!({}));
     assert!(
-        answer.error && answer.text.contains("has no tool workspace_remove"),
+        answer.error
+            && answer
+                .text
+                .contains("only inside a procedure that grants it"),
         "{}",
         answer.text
     );
     let (_, push) = run(&user, "push");
-    assert!(!push.names().contains(&"workspace_remove".to_owned()));
     let answer = push.call("workspace_remove", json!({}));
     assert!(
-        answer.error && answer.text.contains("has no tool workspace_remove"),
+        answer.error && answer.text.contains("does not grant workspace-remove"),
         "{}",
         answer.text
     );
@@ -1478,10 +1483,12 @@ fn workspace_remove_is_refused_outside_a_run_that_grants_it_and_for_any_other_wo
     assert!(!launched.error, "{}", launched.text);
     let (url, authorization) = server_of(&user, opened);
     let child = Mcp::initialize(&url, &authorization);
-    assert!(!child.names().contains(&"workspace_remove".to_owned()));
     let answer = child.call("workspace_remove", json!({}));
     assert!(
-        answer.error && answer.text.contains("has no tool workspace_remove"),
+        answer.error
+            && answer
+                .text
+                .contains("only inside a procedure that grants it"),
         "{}",
         answer.text
     );
@@ -1548,14 +1555,16 @@ fn forge_write_creates_a_bitbucket_pull_request_with_the_fake_bkt_only_when_gran
     let create = json!({"action": "pr-create", "repository": ".", "title": "Add the login page",
         "body": "What it does"});
 
-    // Outside a run the tool is not listed; in a run that grants another action the gate refuses
-    // this one: never asked of the forge.
+    // The tool is listed to everyone: outside a run the gate refuses the call, and in a run that
+    // grants another action it refuses this one: never asked of the forge.
     let outside = plain_agent(&user);
-    assert!(!outside.names().contains(&"forge_write".to_owned()));
+    assert!(outside.names().contains(&"forge_write".to_owned()));
     let answer = outside.call("forge_write", create.clone());
     assert!(answer.error, "{}", answer.text);
     assert!(
-        answer.text.contains("has no tool forge_write"),
+        answer
+            .text
+            .contains("only inside a procedure that grants it"),
         "{}",
         answer.text
     );
@@ -2089,19 +2098,12 @@ fn child_of(user: &User, root: &Mcp, launch: Value) -> Mcp {
 }
 
 #[test]
-fn forge_write_and_workspace_remove_are_listed_only_to_an_agent_whose_run_grants_them() {
+fn forge_write_and_workspace_remove_are_listed_to_every_agent_and_the_gate_decides_by_the_run() {
     let user = User::with_fake_agent().with_fake_gh();
     on_github(&user);
     procedure(&user, "push", json!({"push": "allow"}), false);
     procedure(&user, "open", json!({"pr-create": "ask"}), false);
-    procedure(&user, "rerun", json!({"pipeline-rerun": "allow"}), false);
     procedure(&user, "tidy", json!({"workspace-remove": "allow"}), false);
-    procedure(
-        &user,
-        "ship",
-        json!({"pr-merge-squash": "allow", "workspace-remove": "ask"}),
-        false,
-    );
     let listed = |mcp: &Mcp| -> (bool, bool) {
         let names = mcp.names();
         (
@@ -2110,23 +2112,39 @@ fn forge_write_and_workspace_remove_are_listed_only_to_an_agent_whose_run_grants
         )
     };
 
-    assert_eq!(listed(&plain_agent(&user)), (false, false), "outside a run");
-    for (name, tools) in [
-        ("push", (false, false)),
-        ("open", (true, false)),
-        ("rerun", (true, false)),
-        ("tidy", (false, true)),
-        ("ship", (true, true)),
-    ] {
+    let outside = plain_agent(&user);
+    assert_eq!(listed(&outside), (true, true), "outside a run");
+    let first = outside.names();
+    for name in ["push", "open", "tidy"] {
         let (_, mcp) = run(&user, name);
-        assert_eq!(listed(&mcp), tools, "the run {name}");
-        // The tools of the others are still there, in the same order.
-        assert!(mcp.names().starts_with(&["fs_read".to_owned()]), "{name}");
+        assert_eq!(listed(&mcp), (true, true), "the run {name}");
+        // The same list, in the same order, whatever the run grants.
+        assert_eq!(mcp.names(), first, "the run {name}");
     }
+    // What a run does not grant is refused by the gate, with the run's own words.
+    let (_, push) = run(&user, "push");
+    let answer = push.call(
+        "forge_write",
+        json!({"action": "pr-create", "repository": ".", "title": "x"}),
+    );
+    assert!(
+        answer.error && answer.text.contains("does not grant pr-create"),
+        "{}",
+        answer.text
+    );
+    let answer = outside.call("workspace_remove", json!({}));
+    assert!(
+        answer.error
+            && answer
+                .text
+                .contains("only inside a procedure that grants it"),
+        "{}",
+        answer.text
+    );
 }
 
 #[test]
-fn a_child_of_a_run_lists_the_tools_its_run_gives_it_only_when_the_run_gives_its_grants() {
+fn a_child_of_a_run_is_let_through_by_the_run_s_grants_only_when_the_run_gives_them() {
     let user = User::with_fake_agent().with_fake_gh();
     on_github(&user);
     procedure(
@@ -2143,10 +2161,22 @@ fn a_child_of_a_run_lists_the_tools_its_run_gives_it_only_when_the_run_gives_its
     );
     let own = json!({"title": "same place", "brief": "Open the pull request."});
 
+    // Both children list the tools; the gate gives the grants to the child of the run that says so.
     let (_, alone) = run(&user, "alone");
     let child = child_of(&user, &alone, own.clone());
-    assert!(!child.names().contains(&"forge_write".to_owned()));
-    assert!(!child.names().contains(&"workspace_remove".to_owned()));
+    assert!(child.names().contains(&"forge_write".to_owned()));
+    let answer = child.call(
+        "forge_write",
+        json!({"action": "pr-create", "repository": ".", "title": "x"}),
+    );
+    assert!(
+        answer.error
+            && answer
+                .text
+                .contains("only inside a procedure that grants it"),
+        "{}",
+        answer.text
+    );
 
     let (_, together) = run(&user, "together");
     let child = child_of(&user, &together, own);
@@ -2232,7 +2262,6 @@ fn a_run_ends_with_its_stopped_root_and_the_resumed_root_and_its_new_children_ge
     assert!(!launched.error, "{}", launched.text);
     let (url, authorization) = server_of(&user, opened);
     let child = Mcp::initialize(&url, &authorization);
-    assert!(!child.names().contains(&"forge_write".to_owned()));
     let answer = line(&child, "git push origin app/login");
     assert!(answer.error, "{}", answer.text);
     assert!(

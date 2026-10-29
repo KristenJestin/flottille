@@ -208,10 +208,6 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             (Some(name), true)
         }
     };
-    // A run that gives its grants to its children lists the tools they let through; the list is
-    // frozen with the child.
-    let grants =
-        procedures::granted_to_child(daemon, &caller.id, &project.name, workspace.as_deref());
     let child = agents::create(
         daemon,
         &project,
@@ -225,7 +221,6 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             provider,
             model: asked.model,
             effort: asked.effort,
-            grants,
         },
     )
     .map_err(|f| refused(format!("refused: {}", f.message)))?;
