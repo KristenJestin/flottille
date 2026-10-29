@@ -150,6 +150,13 @@ fn settle(cx: &mut VisualTestContext) {
     cx.update(|window, cx| window.draw(cx).clear(cx));
 }
 
+/// A frame of the clock and a few of drawing: what a window that is looked at does while a
+/// block folds away.
+fn moving(cx: &mut VisualTestContext) {
+    cx.executor().advance_clock(Duration::from_millis(16));
+    frames(cx);
+}
+
 /// A few frames, as a window draws them after a change.
 fn frames(cx: &mut VisualTestContext) {
     for _ in 0..4 {
@@ -260,7 +267,7 @@ fn the_status_line_says_what_the_agent_does_and_goes_with_the_turn(cx: &mut Test
         });
         cancel(&user, &lead);
         until(&shell, cx, "the line goes with the turn", |cx| {
-            frames(cx);
+            moving(cx);
             status_line(cx).is_none() && !reply.read_with(cx, |r, _| r.is_running())
         });
     }
@@ -272,7 +279,7 @@ fn the_status_line_says_what_the_agent_does_and_goes_with_the_turn(cx: &mut Test
         status_line(cx).as_deref() == Some("Thinking…")
     });
     until(&shell, cx, "the line goes when the turn ends", |cx| {
-        frames(cx);
+        moving(cx);
         status_line(cx).is_none()
     });
 }
