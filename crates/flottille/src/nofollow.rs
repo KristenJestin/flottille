@@ -3,12 +3,15 @@
 //!
 //! A path the gate decided on is real: every link followed, no `..`. Opened with
 //! `RESOLVE_NO_SYMLINKS`, a link met on the way means that a folder changed since the check, and
-//! the open fails (`ELOOP`) instead of following it. Where `openat2` is missing (`ENOSYS`), each
-//! folder is opened in turn with `O_NOFOLLOW`, from `/` or from the folder below which the path
-//! must stay.
+//! the open fails (`ELOOP`) instead of following it. Where `openat2` is missing (`ENOSYS`, or
+//! `EPERM` from a seccomp filter), each folder is opened in turn with `O_NOFOLLOW`, from `/` or
+//! from the folder below which the path must stay. A folder only gone through is opened with
+//! `O_PATH`, which needs no permission to read it, as the kernel's own walk needs none.
 
 use std::fs::File;
+use std::io::ErrorKind;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path};
 
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
@@ -20,14 +23,22 @@ const FOLDER: OFlags = OFlags::RDONLY
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
 
-/// How a file is opened to read: a pipe is opened without waiting for a writer.
-pub const READ: OFlags = OFlags::RDONLY.union(OFlags::NONBLOCK);
+/// How a file is opened to read: a pipe is opened without waiting for a writer, a terminal never
+/// becomes the daemon's.
+pub const READ: OFlags = OFlags::RDONLY.union(OFlags::NONBLOCK).union(OFlags::NOCTTY);
 
 /// How anything is opened to be looked at, not read: a socket or a device too.
 #[cfg(target_os = "linux")]
 pub const LOOK: OFlags = OFlags::PATH;
 #[cfg(not(target_os = "linux"))]
 pub const LOOK: OFlags = READ;
+
+/// How a folder is opened to go through it, not read: looking at its entries by name needs only
+/// the permission to search it.
+pub const THROUGH: OFlags = LOOK
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
 
 /// Opens the real, absolute path `path`, refusing any link on the way (`ELOOP`).
 pub fn open(path: &Path, flags: OFlags) -> std::io::Result<File> {
@@ -42,10 +53,10 @@ pub fn open(path: &Path, flags: OFlags) -> std::io::Result<File> {
         Mode::empty(),
         rustix::fs::ResolveFlags::NO_SYMLINKS,
     ) {
-        Err(Errno::NOSYS) => {}
+        Err(Errno::NOSYS | Errno::PERM) => {}
         done => return Ok(done?.into()),
     }
-    let root = rustix::fs::open("/", FOLDER, Mode::empty())?;
+    let root = rustix::fs::open("/", THROUGH, Mode::empty())?;
     let relative = path.strip_prefix("/").map_err(|_| Errno::INVAL)?;
     Ok(walk(root.as_fd(), relative, flags)?.into())
 }
@@ -61,7 +72,7 @@ pub fn open_beneath(folder: BorrowedFd, relative: &Path, flags: OFlags) -> std::
         Mode::empty(),
         rustix::fs::ResolveFlags::NO_SYMLINKS | rustix::fs::ResolveFlags::BENEATH,
     ) {
-        Err(Errno::NOSYS) => {}
+        Err(Errno::NOSYS | Errno::PERM) => {}
         done => return Ok(done?.into()),
     }
     Ok(walk(folder, relative, flags)?.into())
@@ -84,7 +95,7 @@ fn walk(start: BorrowedFd, relative: &Path, flags: OFlags) -> rustix::io::Result
     let mut folder: Option<OwnedFd> = None;
     for name in folders {
         let at = folder.as_ref().map_or(start, AsFd::as_fd);
-        folder = Some(open_at(at, name, FOLDER)?);
+        folder = Some(open_at(at, name, THROUGH)?);
     }
     let at = folder.as_ref().map_or(start, AsFd::as_fd);
     open_at(at, last, flags)
@@ -104,32 +115,60 @@ fn open_at(at: BorrowedFd, name: &std::ffi::OsStr, flags: OFlags) -> rustix::io:
     }
 }
 
-/// Opens the real folder `path`, making those of its folders that are missing a folder at a
-/// time, each in the one opened before it: none of them is ever a link.
+/// Opens the real folder `path` to go through it, making those of its folders that are missing:
+/// below the deepest one that exists, a folder at a time, each in the one opened before it. None
+/// of them is ever a link.
 pub fn folder_made(path: &Path) -> std::io::Result<OwnedFd> {
-    match open(path, FOLDER) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        done => return Ok(done?.into()),
-    }
-    let mut folder = rustix::fs::open("/", FOLDER, Mode::empty())?;
-    for part in path.components() {
-        let name = match part {
-            Component::Normal(name) => name,
-            Component::RootDir | Component::CurDir => continue,
-            _ => return Err(Errno::XDEV.into()),
-        };
-        folder = match open_at(folder.as_fd(), name, FOLDER) {
-            Err(Errno::NOENT) => {
-                match rustix::fs::mkdirat(&folder, name, Mode::from_raw_mode(0o777)) {
-                    Ok(()) | Err(Errno::EXIST) => {}
-                    Err(error) => return Err(error.into()),
-                }
-                open_at(folder.as_fd(), name, FOLDER)?
+    let mut missing = Vec::new();
+    let mut existing = path;
+    let mut folder: OwnedFd = loop {
+        match open(existing, THROUGH) {
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                missing.push(existing.file_name().ok_or(Errno::INVAL)?);
+                existing = existing.parent().ok_or(Errno::INVAL)?;
             }
-            opened => opened?,
-        };
+            done => break done?.into(),
+        }
+    };
+    for name in missing.into_iter().rev() {
+        match rustix::fs::mkdirat(&folder, name, Mode::from_raw_mode(0o777)) {
+            Ok(()) | Err(Errno::EXIST) => {}
+            Err(error) => return Err(error.into()),
+        }
+        folder = open_at(folder.as_fd(), name, THROUGH)?;
     }
     Ok(folder)
+}
+
+/// Opens the regular file at the real path `path` to read it, never a link on the way.
+pub fn open_file(path: &Path) -> std::io::Result<File> {
+    same_file(open(path, LOOK)?, || open(path, READ))
+}
+
+/// Opens the regular file `relative` below `folder` to read it, as `open_beneath` does.
+pub fn open_file_beneath(folder: BorrowedFd, relative: &Path) -> std::io::Result<File> {
+    same_file(open_beneath(folder, relative, LOOK)?, || {
+        open_beneath(folder, relative, READ)
+    })
+}
+
+/// The file `looked` at, opened to read once it is known to be a regular file, so that a device,
+/// a pipe or a folder is never opened: `IsADirectory`, `InvalidInput`. What is opened must be
+/// the file looked at; another means the path changed in between (`ELOOP`).
+fn same_file(looked: File, read: impl FnOnce() -> std::io::Result<File>) -> std::io::Result<File> {
+    let before = looked.metadata()?;
+    if before.is_dir() {
+        return Err(ErrorKind::IsADirectory.into());
+    }
+    if !before.is_file() {
+        return Err(ErrorKind::InvalidInput.into());
+    }
+    let file = read()?;
+    let after = file.metadata()?;
+    if (after.dev(), after.ino()) != (before.dev(), before.ino()) {
+        return Err(Errno::LOOP.into());
+    }
+    Ok(file)
 }
 
 /// Opens the folder below `folder` named `name`, to read its entries.
@@ -214,5 +253,25 @@ mod tests {
         );
         assert!(!base.join("real/new").exists());
         assert!(folder_made(&base.join("real/new/deeper")).is_ok());
+    }
+
+    #[test]
+    fn without_openat2_a_folder_that_may_only_be_gone_through_is_gone_through() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(base.join("locked/sub")).unwrap();
+        std::fs::write(base.join("locked/sub/f.txt"), "x").unwrap();
+        std::fs::set_permissions(base.join("locked"), PermissionsExt::from_mode(0o311)).unwrap();
+        let root = rustix::fs::open("/", FOLDER, Mode::empty()).unwrap();
+        let path = base.join("locked/sub/f.txt");
+        let walked = walk(
+            root.as_fd(),
+            path.strip_prefix("/").unwrap(),
+            READ | OFlags::CLOEXEC,
+        );
+        std::fs::set_permissions(base.join("locked"), PermissionsExt::from_mode(0o755)).unwrap();
+        // Root may read any folder, so this shows something only for another user.
+        assert!(walked.is_ok(), "{walked:?}");
     }
 }

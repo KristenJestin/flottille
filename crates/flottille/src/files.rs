@@ -202,24 +202,16 @@ fn not_regular(path: &Resolved) -> Outcome {
     ))
 }
 
-/// Opens a regular file to read. Opening a pipe waits until someone writes to it, which would hold
-/// the call's thread forever: it is opened without waiting, and refused (`InvalidInput`, which
-/// `failed` words). The path is a real one: no link on its way is followed (`nofollow`).
+/// Opens a regular file to read. A pipe, a socket or a device is never opened, only looked at,
+/// and refused (`InvalidInput`, which `failed` words): opening one can wait for a writer or act
+/// on the device. The path is a real one: no link on its way is followed (`nofollow`).
 fn open_regular(path: &Path) -> std::io::Result<File> {
-    regular(nofollow::open(path, nofollow::READ)?)
+    nofollow::open_file(path)
 }
 
 /// `relative` below the folder `folder`, opened as `open_regular` does.
 fn open_regular_beneath(folder: BorrowedFd, relative: &Path) -> std::io::Result<File> {
-    regular(nofollow::open_beneath(folder, relative, nofollow::READ)?)
-}
-
-fn regular(file: File) -> std::io::Result<File> {
-    if file.metadata()?.is_file() {
-        Ok(file)
-    } else {
-        Err(std::io::Error::from(ErrorKind::InvalidInput))
-    }
+    nofollow::open_file_beneath(folder, relative)
 }
 
 fn read_regular(path: &Path) -> std::io::Result<Vec<u8>> {
@@ -237,9 +229,10 @@ pub fn failed(path: &Resolved, error: std::io::Error) -> Outcome {
                  nothing was done",
                 path.shown
             ),
+            // `/proc/self`, `/proc/mounts`, `/proc/net`: the reader's own, here the daemon's.
             None if path.path.starts_with("/proc") => format!(
-                "refused: {} goes through a link of /proc, which the file tools do not follow; \
-                 nothing was done",
+                "refused: {} goes through /proc/self, which is the daemon's own: the file tools \
+                 do not follow it; nothing was done",
                 path.shown
             ),
             None => format!(
@@ -250,6 +243,7 @@ pub fn failed(path: &Resolved, error: std::io::Error) -> Outcome {
     }
     match error.kind() {
         ErrorKind::InvalidInput => not_regular(path),
+        ErrorKind::IsADirectory => Outcome::Refused(format!("refused: {} is a folder", path.shown)),
         ErrorKind::NotFound => Outcome::Refused(format!("refused: {} does not exist", path.shown)),
         _ => Outcome::Failed(format!("{}: {error}", path.shown)),
     }
@@ -338,18 +332,17 @@ pub fn read_page(
     offset: u64,
     length: u64,
 ) -> std::io::Result<Outcome> {
-    let mut file = nofollow::open(&path.path, nofollow::READ)?;
-    let metadata = file.metadata()?;
-    if metadata.is_dir() {
-        return Ok(Outcome::Refused(format!(
-            "refused: {} is a folder: list it with fs_list",
-            path.shown
-        )));
-    }
-    if !metadata.is_file() {
-        return Ok(not_regular(path));
-    }
-    let size = metadata.len();
+    let mut file = match open_regular(&path.path) {
+        Err(error) if error.kind() == ErrorKind::IsADirectory => {
+            return Ok(Outcome::Refused(format!(
+                "refused: {} is a folder: list it with fs_list",
+                path.shown
+            )));
+        }
+        Err(error) if error.kind() == ErrorKind::InvalidInput => return Ok(not_regular(path)),
+        opened => opened?,
+    };
+    let size = file.metadata()?.len();
     if offset > size {
         return Ok(Outcome::Refused(format!(
             "refused: offset {offset} is past the end of {} ({size} bytes)",
@@ -622,7 +615,7 @@ fn search_in(place: &Place, base: &Resolved, args: &SearchArguments) -> Outcome 
         Ok(cursor) => cursor,
         Err(refusal) => return refusal,
     };
-    let root = match nofollow::open(&base.path, nofollow::READ) {
+    let root = match nofollow::open(&base.path, nofollow::LOOK) {
         Ok(root) => root,
         Err(error) => return failed(base, error),
     };
@@ -1011,23 +1004,11 @@ fn fresh_against(
     known: Option<String>,
     kept: Option<String>,
 ) -> Result<bool, Outcome> {
-    let file = match nofollow::open(&path.path, nofollow::READ) {
+    let file = match open_regular(&path.path) {
         Ok(file) => Some(file),
         Err(error) if error.kind() == ErrorKind::NotFound => None,
         Err(error) => return Err(failed(path, error)),
     };
-    if let Some(file) = &file {
-        let metadata = file.metadata().map_err(|e| failed(path, e))?;
-        if metadata.is_dir() {
-            return Err(Outcome::Refused(format!(
-                "refused: {} is a folder",
-                path.shown
-            )));
-        }
-        if !metadata.is_file() {
-            return Err(not_regular(path));
-        }
-    }
     match (file, known) {
         (None, None) => Ok(false),
         (None, Some(_)) => Err(Outcome::Refused(format!(
@@ -1420,6 +1401,80 @@ mod tests {
             panic!("{}", said(&outcome));
         };
         assert!(why.contains("ermission denied"), "{why}");
+    }
+
+    #[test]
+    fn a_pipe_or_a_device_is_refused_without_being_opened_for_reading() {
+        let scene = Scene::new();
+        let fifo = scene.root.join("sub/pipe");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o644) }, 0);
+        // Any open for reading or writing is an `IN_OPEN` event; a look (`O_PATH`) is none.
+        let watch = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        assert!(watch >= 0);
+        assert!(unsafe { libc::inotify_add_watch(watch, name.as_ptr(), libc::IN_OPEN) } >= 0);
+        let path = scene.resolve(Path::new("sub/pipe"));
+
+        let read = read_page(None, &path, 0, 100).unwrap_or_else(|e| failed(&path, e));
+        let fresh = fresh_against(&scene.place, &path, Some("sha".into()), None).unwrap_err();
+        let text = text_of(&path).unwrap_err();
+        let root = nofollow::open(&scene.root, nofollow::LOOK).unwrap();
+        let beneath = open_regular_beneath(root.as_fd(), Path::new("sub/pipe")).unwrap_err();
+        for outcome in [read, fresh, text, failed(&path, beneath)] {
+            assert!(
+                said(&outcome).contains("is not a regular file"),
+                "{}",
+                said(&outcome)
+            );
+        }
+        let mut event = [0u8; 256];
+        let got = unsafe { libc::read(watch, event.as_mut_ptr().cast(), event.len()) };
+        unsafe { libc::close(watch) };
+        assert_eq!(got, -1, "the pipe was opened");
+    }
+
+    #[test]
+    fn making_a_folder_needs_only_to_go_through_the_folders_above() {
+        let scene = Scene::new();
+        // A folder above the place that may be gone through but not read.
+        let locked = scene.base.join("locked");
+        std::fs::create_dir_all(locked.join("app")).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o311)).unwrap();
+        if std::fs::read_dir(&locked).is_ok() {
+            // Root reads any folder: nothing to show.
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+        let place = Place {
+            root: locked.join("app"),
+            ..scene.place.clone()
+        };
+        let path = place.resolve(&place.root, "newdir/f.txt");
+        let written = put(&path, b"x");
+        let read = read_page(None, &path, 0, 10).map_err(|e| failed(&path, e));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(written.is_ok(), "{}", said(&written.unwrap_err()));
+        assert!(read.is_ok());
+        assert_eq!(
+            std::fs::read_to_string(locked.join("app/newdir/f.txt")).unwrap(),
+            "x"
+        );
+    }
+
+    #[test]
+    fn a_link_of_proc_to_the_daemon_s_own_is_refused_as_such() {
+        let scene = Scene::new();
+        for named in ["/proc/mounts", "/proc/net/dev"] {
+            let path = scene.place.resolve(&scene.root, named);
+            let outcome = read_page(None, &path, 0, 100).unwrap_or_else(|e| failed(&path, e));
+            let Outcome::Refused(refusal) = outcome else {
+                panic!("{named}: {}", said(&outcome));
+            };
+            assert!(
+                refusal.contains("goes through /proc/self, which is the daemon's own"),
+                "{refusal}"
+            );
+        }
     }
 
     #[test]

@@ -103,10 +103,11 @@ done`), and nothing of where it now leads is read, shown or made. `search` opens
 its top folder's descriptor, never out of it (`RESOLVE_BENEATH`); a write opens its folder (and
 makes the missing ones, a folder at a time, each in the one opened before), then makes its
 temporary file and renames it in that open folder. A path that goes through a process's folder in
-`/proc` is never opened, whoever allowed it (`refused: X goes through …: Flottille's file tools
-never open a path through a process's folder in /proc`); one the gate could not follow for
-another reason, once the user allowed it, is opened as written, and refused if a link stands on
-its way.
+`/proc` is never opened, whoever allowed it, and neither is one through `/proc/self` under another
+name (`/proc/mounts`, `/proc/net/…`), which would be the daemon's own (`refused: X goes through …:
+Flottille's file tools never open a path through a process's folder in /proc`); one the gate could
+not follow for another reason, once the user allowed it, is opened as written, and refused if a
+link stands on its way.
 
 A run's program resolves its own paths: the gate's checks on the words of a run are a first
 filter, not a guarantee of what the program will open.
@@ -125,7 +126,9 @@ Paths are shown relative to the place's top.
 
 **Only regular files are read.** `fs_read` and `fs_edit` refuse a pipe, a socket or a device
 (`refused: X is not a regular file …`), which would hold the call forever; `search` skips them.
-Files are opened without waiting, so that even one swapped for a pipe meanwhile is refused.
+A file is looked at first (`O_PATH`), and opened to read only once it is known to be a regular
+file, and then must be the same file: a device or a pipe is never opened. A folder that is only
+gone through needs only the permission to search it, as for the kernel.
 
 **Optimistic writes, per session.** Reading a file (any page) or writing it keeps its SHA-256 for
 the agent, in the store (`session_files`), so it holds across restarts; the text of a file of
