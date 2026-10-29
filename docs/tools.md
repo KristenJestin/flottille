@@ -411,7 +411,12 @@ says who answers a call to judge (`docs/design.md` §7.1).
      `.pypirc`, `.git-credentials`, `.local/share/keyrings`, `Library/Keychains` and the agents'
      logins (`.claude`, `.claude.json`, `.codex`, `.local/share/opencode`) wherever they sit along
      the path, `/etc/shadow`, `/etc/sudoers`, `/etc/sudoers.d`, and Flottille's own folders (data,
-     configuration, state, runtime). Inside the place only what sits below it counts;
+     configuration, state, runtime). Inside the place only what sits below it counts. A path
+     outside is checked as written and as it leads, through the links of its longest existing
+     part (a link anyone made, a configuration folder that is a link), against Flottille's
+     folders as named and resolved;
+   - a path in `/proc` through what of any process leads elsewhere on the disk: its `root`,
+     `cwd`, `fd`, `exe` or `map_files` (`/proc/self/root/…`, `/proc/<pid>/cwd/…`);
    - a recursive deletion that would take a repository: `rm` with `-r`, `-R` or `--recursive`,
      and `find` with `-delete` (or `-exec rm -r`), when a target, resolved from the folder the
      run starts in, is the place's folder, a repository's, or a folder above one (`rm -rf .`,

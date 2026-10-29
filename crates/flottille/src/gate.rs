@@ -13,7 +13,7 @@ use flottille_core::project::Task;
 use serde_json::Value;
 
 use crate::mcp::Grant;
-use crate::place::Resolved;
+use crate::place::{self, Resolved};
 
 /// A call, as the gate sees it.
 pub struct Call<'a> {
@@ -1100,8 +1100,13 @@ fn holds_secret(own: &[PathBuf], root: &Path, folder: &Path) -> Option<String> {
     None
 }
 
-/// Why a path in `/proc` is base: a process's environment, with its secrets, or anything of a
-/// process that is not one of the agent's runs. The reading program's own (`self`) is its own.
+/// What a process's folder in `/proc` holds that leads elsewhere: its root, its working folder,
+/// its open files, its program, its mapped files.
+const LEADS_ELSEWHERE: [&str; 5] = ["root", "cwd", "fd", "exe", "map_files"];
+
+/// Why a path in `/proc` is base: what leads elsewhere (`LEADS_ELSEWHERE`) of any process, a
+/// process's environment, with its secrets, or anything of a process that is not one of the
+/// agent's runs. The reading program's own (`self`) is its own.
 fn process(groups: &[u32], path: &Resolved) -> Option<String> {
     if path.inside {
         return None;
@@ -1112,6 +1117,16 @@ fn process(groups: &[u32], path: &Resolved) -> Option<String> {
         .map(|part| part.as_os_str().to_string_lossy().into_owned())
         .collect();
     let process = parts.first()?;
+    if let Some(part) = parts[1..]
+        .iter()
+        .find(|part| LEADS_ELSEWHERE.contains(&part.as_str()))
+    {
+        return Some(format!(
+            "{} goes through a process's {part}, which leads anywhere on the disk, Flottille's \
+             own folders included",
+            path.shown
+        ));
+    }
     let id = process.parse::<u32>().ok();
     if id.is_none() && process != "self" && process != "thread-self" {
         return None;
@@ -2348,20 +2363,34 @@ fn checks_out_paths(call: &Call, rest: &[String]) -> bool {
 /// The sensitive place a path is in, if it is in one: inside the place, only what sits below it
 /// counts.
 pub fn sensitive(own: &[PathBuf], path: &Resolved) -> Option<String> {
-    let parts: Vec<String> = if path.inside {
-        Path::new(&path.shown)
-    } else {
-        if own.iter().any(|own| path.path.starts_with(own)) {
+    if path.inside {
+        return sensitive_names(Path::new(&path.shown));
+    }
+    // A path outside is taken as written and as it leads, through the links of its longest
+    // existing part: a link anyone made, `/proc/self/root`, a configuration folder that is a link.
+    let real = place::real_path(&path.path).unwrap_or_else(|_| path.path.clone());
+    let own: Vec<PathBuf> = own
+        .iter()
+        .flat_map(|own| [Some(own.clone()), place::real_path(own).ok()])
+        .flatten()
+        .collect();
+    for path in [&path.path, &real] {
+        if own.iter().any(|own| path.starts_with(own)) {
             return Some("Flottille's own folder".into());
         }
-        if let Some(system) = SYSTEM_SENSITIVE.iter().find(|s| path.path.starts_with(s)) {
+        if let Some(system) = SYSTEM_SENSITIVE.iter().find(|s| path.starts_with(s)) {
             return Some((*system).into());
         }
-        path.path.as_path()
     }
-    .components()
-    .map(|part| part.as_os_str().to_string_lossy().into_owned())
-    .collect();
+    sensitive_names(&path.path).or_else(|| sensitive_names(&real))
+}
+
+/// The sensitive place a path names along its parts, if any.
+fn sensitive_names(path: &Path) -> Option<String> {
+    let parts: Vec<String> = path
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect();
     for (at, part) in parts.iter().enumerate() {
         if part == ".env"
             || (part.starts_with(".env.") && !TEMPLATES.iter().any(|t| part.ends_with(t)))
@@ -3437,6 +3466,76 @@ mod tests {
         assert!(base_class(
             &fixture.file("fs_read", &format!("/proc/{me}/environ"))
         ));
+    }
+
+    #[test]
+    fn a_path_through_a_process_s_root_cwd_or_files_in_proc_is_base() {
+        let mut fixture = Fixture::workspace();
+        let own = fixture.own[0].clone();
+        std::fs::create_dir_all(&own).unwrap();
+        let me = std::process::id();
+        // Even the agent's own runs: their root leads anywhere on the disk.
+        fixture.groups = vec![unsafe { libc::getpgid(0) } as u32];
+        let judge = own.join("judge.md");
+        let judge = judge.display();
+        for path in [
+            format!("/proc/self/root{judge}"),
+            format!("/proc/thread-self/root{judge}"),
+            format!("/proc/{me}/root{judge}"),
+            format!("/proc/1/root{judge}"),
+            format!("/proc/{me}/cwd/judge.md"),
+            format!("/proc/self/fd/3"),
+            format!("/proc/self/task/{me}/root{judge}"),
+            format!("/proc/{me}/exe"),
+        ] {
+            for tool in ["fs_write", "fs_edit", "fs_read"] {
+                let verdict = fixture.file(tool, &path);
+                assert!(base_class(&verdict), "{tool} {path}: {verdict:?}");
+            }
+        }
+        let verdict = fixture.run(&format!("cat /proc/self/root{judge}"));
+        assert!(base_class(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn flottille_s_own_folder_reached_through_a_link_is_base() {
+        let mut fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        // `XDG_CONFIG_HOME` (or `~/.config`) is a link: Flottille names its folder through it.
+        std::fs::create_dir_all(base.join("real-config/flottille")).unwrap();
+        std::fs::create_dir_all(base.join("xdg")).unwrap();
+        std::os::unix::fs::symlink(base.join("real-config"), base.join("xdg/config")).unwrap();
+        fixture.own = vec![base.join("xdg/config/flottille")];
+        let real = base.join("real-config/flottille/judge.md");
+        // A link the agent made outside its place, and one inside it, to Flottille's folder.
+        std::fs::create_dir_all(base.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(base.join("xdg/config"), base.join("elsewhere/link")).unwrap();
+        std::os::unix::fs::symlink(base.join("real-config"), fixture.root.join("src/link"))
+            .unwrap();
+        for path in [
+            real.display().to_string(),
+            base.join("elsewhere/link/flottille/judge.md")
+                .display()
+                .to_string(),
+            base.join("elsewhere/link/flottille/new/judge.md")
+                .display()
+                .to_string(),
+            "src/link/flottille/judge.md".into(),
+        ] {
+            for tool in ["fs_write", "fs_edit", "fs_read"] {
+                let verdict = fixture.file(tool, &path);
+                assert!(base_class(&verdict), "{tool} {path}: {verdict:?}");
+                assert!(
+                    reasons(&verdict).contains("Flottille's own folder"),
+                    "{tool} {path}: {verdict:?}"
+                );
+            }
+        }
+        // A sensitive place of the home through a link the agent made is still that place.
+        std::fs::create_dir_all(base.join("home/.ssh")).unwrap();
+        std::os::unix::fs::symlink(base.join("home/.ssh"), base.join("elsewhere/keys")).unwrap();
+        let path = base.join("elsewhere/keys/id_ed25519").display().to_string();
+        assert!(base_class(&fixture.file("fs_read", &path)));
     }
 
     #[test]

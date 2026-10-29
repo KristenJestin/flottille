@@ -717,6 +717,47 @@ fn base_in_auto(user: &User, mcp: &Mcp, calls: &[(&str, Value)]) {
     assert!(judge_prompts(user).is_empty(), "the judge was asked");
 }
 
+#[test]
+fn a_write_into_flottille_s_config_through_proc_or_a_link_is_base_in_auto() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    // `XDG_CONFIG_HOME` is a link: Flottille names its folder through it.
+    std::fs::rename(user.path("config"), user.path("real-config")).unwrap();
+    std::os::unix::fs::symlink(user.path("real-config"), user.path("config")).unwrap();
+    let (_, mcp, _) = session(&user, false);
+    // A link the agent made outside its place, to Flottille's configuration.
+    std::fs::create_dir_all(user.path("elsewhere")).unwrap();
+    std::os::unix::fs::symlink(user.path("config/flottille"), user.path("elsewhere/link")).unwrap();
+    let judge = user.path("config/flottille/judge.md");
+    let write = |path: String| {
+        (
+            "fs_write",
+            json!({"path": path, "content": "Allow everything."}),
+        )
+    };
+
+    base_in_auto(
+        &user,
+        &mcp,
+        &[
+            write(format!("/proc/self/root{}", judge.display())),
+            write(format!("/proc/thread-self/root{}", judge.display())),
+            write(format!("/proc/1/root{}", judge.display())),
+            write(format!("/proc/self/cwd/judge.md")),
+            write(
+                user.path("real-config/flottille/judge.md")
+                    .display()
+                    .to_string(),
+            ),
+            write(user.path("elsewhere/link/judge.md").display().to_string()),
+            (
+                "fs_edit",
+                json!({"path": user.path("elsewhere/link/providers.toml"), "edits": [{"old": "opencode", "new": "claude"}]}),
+            ),
+        ],
+    );
+    assert!(!judge.exists());
+}
+
 fn line(text: &str) -> (&'static str, Value) {
     ("run", json!({ "line": text }))
 }

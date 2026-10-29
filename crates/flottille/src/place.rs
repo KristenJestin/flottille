@@ -197,7 +197,7 @@ fn lexical(path: &Path) -> PathBuf {
 /// The real path, every link followed (at most `LINKS_MAX`); a missing part and what follows it
 /// are taken as written, so a file about to be made resolves to its real folder and its name. A
 /// dangling link resolves to its target.
-fn real_path(path: &Path) -> std::io::Result<PathBuf> {
+pub fn real_path(path: &Path) -> std::io::Result<PathBuf> {
     let mut pending: Vec<PathBuf> = path
         .components()
         .rev()
