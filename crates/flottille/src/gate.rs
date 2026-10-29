@@ -13,7 +13,7 @@ use flottille_core::project::Task;
 use serde_json::Value;
 
 use crate::mcp::Grant;
-use crate::place::{self, Resolved};
+use crate::place::{self, Resolved, Unfollowed};
 
 /// A call, as the gate sees it.
 pub struct Call<'a> {
@@ -291,6 +291,9 @@ pub fn decide(call: &Call) -> Verdict {
 
 /// A file tool: reading inside the place, and writing in a workspace, are harmless.
 fn files(call: &Call) -> Verdict {
+    if let Some(why) = malformed(call.paths) {
+        return Verdict::Deny(why);
+    }
     let write = WRITES.contains(&call.tool);
     let mut found = Found::default();
     for path in call.paths {
@@ -525,6 +528,9 @@ fn run(call: &Call) -> Verdict {
         found.base(format!("{word} reaches a .git folder, which git keeps"));
     }
     let reached = reached(call, &layers);
+    if let Some(why) = malformed(&reached) {
+        return Verdict::Deny(why);
+    }
     for path in &reached {
         if in_git(path) {
             found.base(format!(
@@ -2030,6 +2036,19 @@ fn reached(call: &Call, layers: &[Vec<String>]) -> Vec<Resolved> {
         }
     }
     reached
+}
+
+/// The refusal of a call that names a folder that does not exist and then goes up out of it: the
+/// kernel would fail it (`ENOENT`), and what follows cannot be followed.
+pub fn malformed(paths: &[Resolved]) -> Option<String> {
+    let path = paths
+        .iter()
+        .find(|path| path.unfollowed == Some(Unfollowed::UpFromMissing))?;
+    Some(format!(
+        "refused: {} {}: name the path without going through a folder that is not there",
+        path.shown,
+        Unfollowed::UpFromMissing
+    ))
 }
 
 /// What a word of a line can name as a path: itself, an option's value after `=`, an
@@ -3711,6 +3730,60 @@ mod tests {
         // Reading it is not taking it away.
         assert!(to_judge(&fixture.run(&format!("ls {shown}"))));
         assert!(to_judge(&fixture.file("fs_list", "~/.config")));
+    }
+
+    #[test]
+    fn a_missing_folder_followed_by_dot_dot_is_refused() {
+        let fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        let home = base.join("home");
+        std::fs::create_dir_all(home.join(".config/nvim")).unwrap();
+        std::fs::create_dir_all(&fixture.own[0]).unwrap();
+        std::os::unix::fs::symlink(home.join(".config/nvim"), fixture.root.join("src/cfg"))
+            .unwrap();
+        // `src/up` leads to the folder holding the work, the home and Flottille's folders.
+        std::os::unix::fs::symlink("../../..", fixture.root.join("src/up")).unwrap();
+        // A link whose own target goes up out of a folder that does not exist.
+        std::os::unix::fs::symlink("zz/../cfg", fixture.root.join("src/via")).unwrap();
+
+        for path in [
+            "m/../src/cfg/init.lua",
+            "m/../src/up/xdg/data/flottille/judge.md",
+            "src/via/init.lua",
+        ] {
+            for tool in FS_TOOLS {
+                let verdict = fixture.file(tool, path);
+                assert!(denied(&verdict), "{tool} {path}: {verdict:?}");
+                assert!(
+                    reasons(&verdict).contains("does not exist and then goes up out of it"),
+                    "{tool} {path}: {verdict:?}"
+                );
+            }
+            let verdict = fixture.run(&format!("cat {path}"));
+            assert!(denied(&verdict), "cat {path}: {verdict:?}");
+        }
+        // Deciding made nothing on the disk.
+        assert!(!fixture.root.join("m").exists());
+        assert!(!fixture.root.join("src/zz").exists());
+        // A `..` out of a folder that exists is still followed.
+        assert_eq!(fixture.file("fs_read", "src/../src/a.rs"), Verdict::Allow);
+    }
+
+    #[test]
+    fn a_name_too_long_or_below_a_file_is_taken_as_written_not_base() {
+        let fixture = Fixture::workspace();
+        std::fs::write(fixture.root.join("src/a.rs"), "fn main() {}\n").unwrap();
+        let long = "word ".repeat(60);
+        for line in [
+            format!("git commit -m '{long}'"),
+            format!("echo '{long}'"),
+            "cat src/a.rs/x".to_owned(),
+        ] {
+            let verdict = fixture.run(&line);
+            assert!(!base_class(&verdict), "{line}: {verdict:?}");
+            assert!(!denied(&verdict), "{line}: {verdict:?}");
+        }
+        assert!(!base_class(&fixture.file("fs_read", "src/a.rs/x")));
     }
 
     #[test]

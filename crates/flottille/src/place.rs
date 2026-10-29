@@ -18,6 +18,36 @@ const LINKS_MAX: usize = 40;
 /// its open files, its program, its mapped files.
 pub const LEADS_ELSEWHERE: [&str; 5] = ["root", "cwd", "fd", "exe", "map_files"];
 
+/// Why a path could not be followed to where it leads.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Unfollowed {
+    /// It goes through a process's folder in `/proc` that leads elsewhere (`LEADS_ELSEWHERE`),
+    /// under whatever name it was reached.
+    Through(PathBuf),
+    /// The disk would not let it be followed: more than `LINKS_MAX` links, a folder it may not
+    /// look into.
+    Failed(String),
+    /// It names a folder that does not exist, then goes up out of it: a malformed path, which
+    /// the kernel refuses too, and whose later parts the gate cannot follow.
+    UpFromMissing,
+}
+
+impl std::fmt::Display for Unfollowed {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Unfollowed::Through(process) => write!(
+                f,
+                "goes through {}, which leads anywhere on the disk",
+                process.display()
+            ),
+            Unfollowed::Failed(why) => write!(f, "could not be followed on the disk ({why})"),
+            Unfollowed::UpFromMissing => {
+                f.write_str("names a folder that does not exist and then goes up out of it")
+            }
+        }
+    }
+}
+
 /// The place of an agent: its folder, the project's repositories in it, and what a command run
 /// there is given.
 #[derive(Clone, Debug)]
@@ -48,9 +78,8 @@ pub struct Resolved {
     pub inside: bool,
     /// Absolute, as written: `.` and `..` taken on the text. Checked by its names too.
     pub written: PathBuf,
-    /// Why the path could not be followed on the disk, or the process's folder in `/proc` it goes
-    /// through, which leads anywhere: where it leads is not known.
-    pub unfollowed: Option<String>,
+    /// Why where the path leads is not known.
+    pub unfollowed: Option<Unfollowed>,
 }
 
 impl Resolved {
@@ -124,7 +153,7 @@ impl Place {
     pub fn at(&self, joined: &Path) -> Resolved {
         let written = lexical(joined);
         let real_root = std::fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
-        let unfollowed = |why: String| Resolved {
+        let unfollowed = |why: Unfollowed| Resolved {
             shown: self.shown_outside(&written),
             path: written.clone(),
             inside: false,
@@ -135,10 +164,7 @@ impl Place {
             Ok(Followed {
                 through: Some(process),
                 ..
-            }) => unfollowed(format!(
-                "goes through {}, which leads anywhere on the disk",
-                process.display()
-            )),
+            }) => unfollowed(Unfollowed::Through(process)),
             Ok(Followed { path: real, .. }) => match real.strip_prefix(&real_root) {
                 Ok(relative) => Resolved {
                     shown: shown_inside(relative),
@@ -157,7 +183,7 @@ impl Place {
                 },
             },
             // Anything that cannot be resolved is neither inside nor known.
-            Err(error) => unfollowed(format!("could not be followed on the disk ({error})")),
+            Err(why) => unfollowed(why),
         }
     }
 
@@ -254,13 +280,18 @@ pub struct Followed {
 /// are taken as written, so a file about to be made resolves to its real folder and its name. A
 /// dangling link resolves to its target.
 pub fn real_path(path: &Path) -> std::io::Result<PathBuf> {
-    follow(path).map(|followed| followed.path)
+    follow(path)
+        .map(|followed| followed.path)
+        .map_err(|why| std::io::Error::other(why.to_string()))
 }
 
 /// `real_path`, saying which process's folder in `/proc` it went through. Below `/proc`, links
 /// are not followed: `/proc/self` is the reader's own, which is not Flottille's, and what a
-/// process's folder leads to is its own.
-pub fn follow(path: &Path) -> std::io::Result<Followed> {
+/// process's folder leads to is its own. A part the kernel would not find (missing, too long a
+/// name, below a file) is missing; a `..` after it is refused, since nothing after it can be
+/// followed.
+pub fn follow(path: &Path) -> Result<Followed, Unfollowed> {
+    let failed = |error: std::io::Error| Unfollowed::Failed(error.to_string());
     let mut pending: Vec<PathBuf> = path
         .components()
         .rev()
@@ -277,6 +308,7 @@ pub fn follow(path: &Path) -> std::io::Result<Followed> {
                 continue;
             }
             Some(Component::CurDir) | None => continue,
+            Some(Component::ParentDir) if missing => return Err(Unfollowed::UpFromMissing),
             Some(Component::ParentDir) => {
                 real.pop();
                 continue;
@@ -295,11 +327,9 @@ pub fn follow(path: &Path) -> std::io::Result<Followed> {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 links += 1;
                 if links > LINKS_MAX {
-                    return Err(std::io::Error::other(format!(
-                        "more than {LINKS_MAX} links"
-                    )));
+                    return Err(Unfollowed::Failed(format!("more than {LINKS_MAX} links")));
                 }
-                let target = std::fs::read_link(&next)?;
+                let target = std::fs::read_link(&next).map_err(failed)?;
                 pending.extend(
                     target
                         .components()
@@ -308,17 +338,27 @@ pub fn follow(path: &Path) -> std::io::Result<Followed> {
                 );
             }
             Ok(_) => real = next,
-            Err(error) if error.kind() == ErrorKind::NotFound => {
+            Err(error) if not_there(&error) => {
                 missing = true;
                 real = next;
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(failed(error)),
         }
     }
     Ok(Followed {
         path: real,
         through,
     })
+}
+
+/// Whether the kernel would say a part is not there: missing, too long a name, or below a file.
+/// What it cannot look at (`EACCES`, `EIO`) is not known to be missing.
+fn not_there(error: &std::io::Error) -> bool {
+    error.kind() == ErrorKind::NotFound
+        || matches!(
+            error.raw_os_error(),
+            Some(libc::ENAMETOOLONG | libc::ENOTDIR)
+        )
 }
 
 /// Whether a path is a process's folder in `/proc` that leads elsewhere, or below one.
@@ -365,7 +405,13 @@ mod tests {
         }
         assert_eq!(place.resolve(&root, "~/x").shown, "~/x");
         assert_eq!(place.resolve(&root, ".").shown, ".");
+        std::fs::create_dir(root.join("a")).unwrap();
         assert!(place.resolve(&root, "a/../b").inside);
+        // Up out of a folder that is not there: the kernel would not find it.
+        assert_eq!(
+            place.resolve(&root, "m/../b").unfollowed,
+            Some(Unfollowed::UpFromMissing)
+        );
     }
 
     #[test]
