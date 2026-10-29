@@ -293,7 +293,7 @@ The file is written where it stands, its comments kept.
 
 - **Reads run at once.** `list` and `show` of `tasks`, `skills` and `commands`, `setup` `list`,
   `project` `settings` and `rules`.
-- **Every write is to judge** (a card in Ask, the judge in Auto), as any call is (answered at
+- **Every write is to judge** (a card in Ask, the judge in Auto) unless it is base below, as any call is (answered at
   once that it waits, the result later as a delivery). Its request is an `action`: it says what
   it changes in words, one sentence each (`Add the skill style (docs/STYLE.md): The code style`;
   `Add the command /ship: …`, `Its instructions: …`; `Set the tracker to Jira on
@@ -303,13 +303,35 @@ The file is written where it stands, its comments kept.
   since the user allowed it; it would now: …`). A change of the tracker is base: nothing checks it
   against the project, as a forge is checked against its remote. A `set_rules` is base too: it
   rewrites the instructions of every agent created after it, so no judge decides it.
-- **A line set is judged as a run of it.** A task's `line` and a setup step's `run` run later
-  without the gate: a task in a workspace is harmless, a workspace's setup plays on its own. So
-  `add` and `edit` that set one are also judged as `run` would judge that line in the agent's
-  place, each reason said as `the line it sets, …`: base when the run would be (`sudo`, a forced
-  push, the never list), refused with shell syntax. An edit's request says what it was (`It was:
-  …`), a step's what it does and where (`Add setup step 2: run \`npm ci\` in each repository,
-  leaves first`).
+- **A line set is judged as a run of it.** A task's `line` and a setup step's `run` or `task`
+  run later without the gate: a task in a workspace is harmless, a workspace's setup plays on
+  its own. So `add` and `edit` that set one are also judged as `run` would judge that run, with
+  the same inputs, each reason said as `the line it sets, …`: base when the run would be
+  (`sudo`, a forced push, a sensitive path the line names, the never list), refused with shell
+  syntax.
+  - A task is judged as a run of that task, as the write leaves it (its flags, its name in the
+    never list), in the folder it would run in; a `task` step as a run of the task it names, in
+    the step's repository or the task's.
+  - A setup step is judged in each folder it would run in, those of the agent's own place
+    standing for the workspace not made yet: its workspace, or the project's repositories in
+    `main`.
+  - Whether a rewrite is of history on a remote is looked at for the line set, in its folder.
+  - A line that is an existing task's keeps that task's rules under another name: never-listed,
+    it is base to set and to run (`run {task}` of a copy, `run {line}` of it); marked
+    `ask_before_running`, a copy of it without the flag is base to set.
+- **What only the user's word may say is base.** Beside the line, a write is base when it:
+  - turns `ask_before_running` off (`tasks edit`);
+  - sets `check` or `read_only` (`tasks add` or `edit`): the window and the lists show them as
+    what the task is, so an agent does not claim them;
+  - adds or edits a `link` or `root_entries` step, which makes what is written in each workspace
+    reach the user's checkout;
+  - adds or edits a `copy` step with a glob that matches a sensitive name: `.env` and `.env.*`
+    but the templates, a key (`*.pem`, `*.key`, `id_rsa`, `id_ed25519`…), a sensitive place
+    of "The gate" or a folder holding one (`.ssh`, `.npmrc`, `.netrc`, `.config`…). Copying a
+    secret into every workspace is the user's choice, not the judge's.
+
+  An edit's request says what it was (`It was: …`), a step's what it does and where (`Add
+  setup step 2: run \`npm ci\` in each repository, leaves first`).
 - **What an agent never does**: change a session's mode or choose the judge (no tool has them),
   or reach another project (`project` is not an argument). An agent's skill is never the project
   folder itself nor a repository's root (`.`, `api`, or a link to one): what a whole checkout
@@ -360,7 +382,8 @@ says who answers a call to judge (`docs/design.md` §7.1).
      daemon itself (`docs/protocol.md`, "Transport").
 2. **Base**: a card for the user in every mode, never the judge's, with a strong warning.
    - the project's `never` list: an entry matches a line's words from any position (its first
-     word is a program, in any folder), or a task by its name; and a run when the
+     word is a program, in any folder), or a task by its name, and then every task and line of
+     the same words as that task's; and a run when the
      project's configuration cannot be read, since what it never allows is not known;
    - a write under a `.git` folder or file (`fs_write`, `fs_edit`, a link that leads there), and a
      command any of whose words (or an option's value after `=`, or a `NAME=value`'s value) names
@@ -424,7 +447,10 @@ says who answers a call to judge (`docs/design.md` §7.1).
      emptied as `gh`'s is (`docs/forges.md`, "Bitbucket"). An agent reads a ticket with
      `ticket_read` and the pull requests with `forge_read`;
    - a `forge_write` merge that waives the checks or a review; a change of the project's tracker
-     or of its rules (`set_rules`).
+     or of its rules (`set_rules`);
+   - a write of `tasks` or `setup` whose line, or task, would be base to run, and one that says
+     what only the user's word may say ("The project": asking turned off, `check` or `read_only`
+     set, a `link` or `root_entries` step, a `copy` of a sensitive name).
 3. **Harmless**: passes in every mode.
    - reading inside the agent's place (the project folder or the workspace), the tree's tools,
      `tasks` `list` and `show`, `run_status`, `skill_read`, `forge_read`, `ticket_read`;
