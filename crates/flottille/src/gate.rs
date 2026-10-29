@@ -532,13 +532,25 @@ fn run(call: &Call) -> Verdict {
     reached.extend(
         named
             .iter()
+            .map(|(_, path)| path)
             .filter(|path| !call.paths.contains(path))
             .cloned(),
     );
-    if let Some(why) = malformed(&reached) {
-        return Verdict::Deny(why);
-    }
     for path in &reached {
+        // A word that goes up out of a folder that is not there is often no path at all (a
+        // `sed` expression, a message, a URL): the kernel would not find it, the gate cannot
+        // follow it, and the judge reads it as written.
+        if path.unfollowed == Some(Unfollowed::UpFromMissing) {
+            let word = named
+                .iter()
+                .find(|(_, named)| named == path)
+                .map_or(path.shown.as_str(), |(word, _)| word);
+            found.judge(format!(
+                "{word} {}: the gate cannot tell where it leads",
+                Unfollowed::UpFromMissing
+            ));
+            continue;
+        }
         if in_git(path) {
             found.base(format!(
                 "{} is in a .git folder, which git keeps",
@@ -615,8 +627,10 @@ fn run(call: &Call) -> Verdict {
     // The words only: a run's own folder holding Flottille's (a project in the home folder) is
     // where it works, not what it takes away.
     if !reads {
-        for path in &named {
-            if let Some(why) = above_own(call.own, path) {
+        for (_, path) in &named {
+            if path.unfollowed != Some(Unfollowed::UpFromMissing)
+                && let Some(why) = above_own(call.own, path)
+            {
                 found.base(why);
             }
         }
@@ -2029,8 +2043,9 @@ fn split(
 }
 
 /// The paths a run's words name: every word of every layer that can name one, resolved from the
-/// folder it runs in (its program is wherever it is installed), but the run's own streams.
-fn named(call: &Call, layers: &[Vec<String>]) -> Vec<Resolved> {
+/// folder it runs in (its program is wherever it is installed), but the run's own streams; each
+/// with the word that names it.
+fn named<'a>(call: &Call, layers: &'a [Vec<String>]) -> Vec<(&'a str, Resolved)> {
     let mut named = Vec::new();
     let Some(folder) = call.paths.first().filter(|_| call.tool == "run") else {
         return named;
@@ -2038,8 +2053,8 @@ fn named(call: &Call, layers: &[Vec<String>]) -> Vec<Resolved> {
     for word in layers.iter().flat_map(|layer| &layer[1..]) {
         if let Some(word) = named_paths(word).filter(|word| !STREAMS.contains(word)) {
             let path = call.grant.place.resolve(&folder.path, word);
-            if !named.contains(&path) {
-                named.push(path);
+            if !named.iter().any(|(_, named)| *named == path) {
+                named.push((word, path));
             }
         }
     }
@@ -3782,8 +3797,9 @@ mod tests {
                     "{tool} {path}: {verdict:?}"
                 );
             }
+            // A run's word is judged instead (`a_run_s_word_going_up_out_of_a_missing_folder_…`).
             let verdict = fixture.run(&format!("cat {path}"));
-            assert!(denied(&verdict), "cat {path}: {verdict:?}");
+            assert!(to_judge(&verdict), "cat {path}: {verdict:?}");
         }
         // Deciding made nothing on the disk.
         assert!(!fixture.root.join("m").exists());
@@ -3937,6 +3953,26 @@ mod tests {
                 assert!(base_class(&verdict), "{tool} {path}: {verdict:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_run_s_word_going_up_out_of_a_missing_folder_is_judged_and_named_as_written() {
+        let fixture = Fixture::workspace();
+        for (line, word) in [
+            ("sed -i 's/a/../' src/a.rs", "s/a/../"),
+            ("echo 'x/../y'", "x/../y"),
+            ("git commit -m 'move foo/../bar'", "move foo/../bar"),
+            ("curl http://h/../x", "http://h/../x"),
+        ] {
+            let verdict = fixture.run(line);
+            assert!(to_judge(&verdict), "{line}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains(&format!("{word} names a folder")),
+                "{line}: {verdict:?}"
+            );
+        }
+        // The file tools still refuse it.
+        assert!(denied(&fixture.file("fs_read", "m/../x")));
     }
 
     #[test]
