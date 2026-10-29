@@ -1170,6 +1170,39 @@ fn switched(name: &str, enabled: bool, announced: Result<(), String>) -> Value {
     answer
 }
 
+/// `flottille provider list`: each provider, whether its agents can run, and the Auto judge,
+/// said picked by Flottille until the user saw it.
+pub fn list_text(answer: &Value) -> String {
+    let mut shown = String::new();
+    for provider in answer["providers"].as_array().into_iter().flatten() {
+        let name = provider["name"].as_str().unwrap_or_default();
+        shown.push_str(
+            &match (provider["enabled"] == true, provider["why"].as_str()) {
+                (false, _) => format!("{name}: disabled\n"),
+                (true, None) => format!("{name}: enabled, its agents can run\n"),
+                (true, Some(why)) => format!("{name}: enabled, its agents cannot run: {why}\n"),
+            },
+        );
+    }
+    let judge = &answer["judge"];
+    shown.push_str(&match judge["provider"].as_str() {
+        None => "Auto judge: none, so Auto asks like Ask.\n".into(),
+        Some(provider) => {
+            let model = judge["model"]
+                .as_str()
+                .map(|model| format!(" ({model})"))
+                .unwrap_or_default();
+            let picked = if judge["picked"] == true {
+                ", picked by Flottille: change it in Settings, or choose no judge there"
+            } else {
+                ""
+            };
+            format!("Auto judge: {provider}{model}{picked}.\n")
+        }
+    });
+    shown
+}
+
 /// Every provider as `doctor` reports it, with the models it offers (`null` until a session of
 /// its agent said them; those another version said, outdated, until a session says them again),
 /// and the project's default provider and model when one is named.

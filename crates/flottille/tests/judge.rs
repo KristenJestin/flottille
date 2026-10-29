@@ -1205,6 +1205,29 @@ fn a_user_who_chose_none_before_judge_none_existed_gets_no_judge_picked() {
 }
 
 #[test]
+fn provider_list_says_the_judge_was_picked_by_flottille() {
+    let user = User::with_fake_claude().with_fake_escalation();
+    user.status();
+
+    let shown = user.run(&["provider", "list"]);
+    assert!(shown.status.success(), "{shown:?}");
+    let text = String::from_utf8(shown.stdout).unwrap();
+    assert!(
+        text.contains("Auto judge: claude (haiku), picked by Flottille"),
+        "{text}"
+    );
+    let shown = user.run(&["provider", "list", "--json"]);
+    let listed: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(listed["judge"]["picked"], true, "{listed}");
+
+    user.call("provider.judge_noticed", json!({})).unwrap();
+    let text = String::from_utf8(user.run(&["provider", "list"]).stdout).unwrap();
+    assert!(text.contains("Auto judge: claude (haiku)."), "{text}");
+    assert!(!text.contains("picked"), "{text}");
+    no_escalation(&user);
+}
+
+#[test]
 fn a_judge_md_over_the_limit_or_unreadable_makes_the_judgement_fail_and_ask() {
     let user = User::with_fake_agent()
         .with_fake_escalation()

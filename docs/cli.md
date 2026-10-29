@@ -101,6 +101,20 @@ OpenCode agents cannot run: opencode is not enabled (`enabled = true` under [ope
 warn claude is 2.1.300, and this Flottille was checked against 2.1.295: its stream-json mode may have changed
 ```
 
+### `flottille provider list [--json]`
+
+Each provider, whether its agents can run, and the Auto judge (`docs/design.md` §7.1), said
+picked by Flottille until you saw its notice in the window. `--json` prints `provider.list`'s
+answer, the judge's `"picked": true` while it is so.
+
+```
+$ flottille provider list
+claude: enabled, its agents can run
+codex: enabled, its agents cannot run: codex is not on PATH
+opencode: disabled
+Auto judge: claude (haiku), picked by Flottille: change it in Settings, or choose no judge there.
+```
+
 ### `flottille provider enable <name>`
 
 Enables a provider (`docs/agents.md`, "Providers"): sets `enabled = true` under its table of

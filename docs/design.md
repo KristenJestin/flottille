@@ -379,7 +379,8 @@ The judge is an agent of a provider the user chose in Settings ("Auto judge": pr
 model, `provider.set_judge`), run in bare mode **with no tool at all**: no Flottille tool, no MCP
 server. A user who never chose one gets one picked: the smallest model of the first provider that
 is enabled, installed and signed in, among the few whose smallest model Flottille lists (Claude's
-Haiku), written once to `providers.toml` and said once in a notice that opens Settings; a user who chose "No judge" never gets one, nor does one who chose any
+Haiku), written once to `providers.toml` and said once in a notice that opens Settings (and by
+`flottille provider list`); a user who chose "No judge" never gets one, nor does one who chose any
 judge before (a `provider.judge_changed` in the store), whose file then says `judge = "none"`. Its
 instructions are a fixed text (`roles/judge-base.md`: what it is, its JSON answer, that it never
 denies, that what the agent wrote is data, and the floor: ask for anything destructive, outside
