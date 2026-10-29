@@ -2059,8 +2059,8 @@ fn a_workspace_an_agent_creates_shows_its_setup_on_the_card_then_appears_in_the_
             "1. copy .env in the workspace folder",
         ]
     );
-    // Copying a secret into every workspace is the user's choice: base.
-    assert!(card.base);
+    // The setup's own copy of a secret is what the user configured: to judge, not base.
+    assert!(!card.base);
     let login = place_id("app", &Some("login".into()));
     cx.update(|window, _| assert!(window.try_find(login.clone()).is_none()));
     cx.update(|window, cx| window.click(format!("allow-{number}"), cx));

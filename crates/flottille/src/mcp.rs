@@ -1321,7 +1321,9 @@ pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gat
         return classified(daemon, grant, tool, args);
     };
     // Making a workspace ready plays setup steps without the gate: each is judged as setting it
-    // is, run in the folders it would start in, and the strongest class wins.
+    // is, run in the folders it would start in, and the strongest class wins. The copy and link
+    // steps only list their reasons: the user, or an agent through the gate, wrote them, and
+    // playing them is what the user configured.
     let mut base = Vec::new();
     let mut judge = Vec::new();
     let set = crate::actions::asked("setup");
@@ -1347,9 +1349,15 @@ pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gat
                     .into_iter()
                     .filter(|reason| *reason != set)
                     .map(|reason| format!("{said}: {}", reason.replacen("it sets", "it runs", 1)));
-                match ask.class {
-                    gate::Class::Base => base.extend(reasons),
-                    gate::Class::Judge => judge.extend(reasons),
+                match (ask.class, step.kind()) {
+                    (
+                        gate::Class::Base,
+                        flottille_core::project::StepKind::Run(_)
+                        | flottille_core::project::StepKind::Task(_),
+                    ) => {
+                        base.extend(reasons);
+                    }
+                    _ => judge.extend(reasons),
                 }
             }
         }

@@ -262,26 +262,30 @@ fn a_setup_holding_a_base_line_makes_create_base() {
 }
 
 #[test]
-fn a_setup_holding_a_link_step_or_a_secret_copy_makes_create_base() {
+fn a_setup_s_own_link_and_secret_copy_steps_do_not_make_create_base() {
     let user = judged_user();
     project(&user);
     step(&user, json!({"copy": [".env"]}));
-    let (_, mcp) = root(&user);
-    let number = held(mcp.call("workspace", json!({"action": "create", "name": "a"})));
-    let asked = request(&user, number);
-    assert_eq!(asked["class"], "base", "{asked}");
-    assert!(asked["reasons"].to_string().contains(".env"), "{asked}");
-
-    user.call("setup.remove", json!({"project": "app", "number": 1}))
-        .unwrap();
     step(&user, json!({"root_entries": true}));
-    let number = held(mcp.call("workspace", json!({"action": "create", "name": "b"})));
-    let asked = request(&user, number);
-    assert_eq!(asked["class"], "base", "{asked}");
-    assert!(
-        asked["reasons"].to_string().contains("user's checkout"),
-        "{asked}"
-    );
+    let (_, mcp) = root(&user);
+
+    let text = done(mcp.call("workspace", json!({"action": "create", "name": "login"})));
+    assert!(text.contains("Workspace login created"), "{text}");
+    assert!(no_request(&user));
+    let prompts = judge_prompts(&user);
+    let prompt = prompts.last().expect("the judge was asked");
+    let setup = prompt
+        .split("<setup>")
+        .nth(1)
+        .and_then(|rest| rest.split("</setup>").next())
+        .unwrap_or_else(|| panic!("no setup block: {prompt}"));
+    assert!(setup.contains("1. copy .env"), "{prompt}");
+    assert!(setup.contains("2. link"), "{prompt}");
+    assert!(prompt.contains("sensitive name"), "{prompt}");
+    assert!(prompt.contains("user's checkout"), "{prompt}");
+    eventually("the setup's end", || {
+        workspace(&user, "login").unwrap()["state"] == "ready"
+    });
 }
 
 #[test]

@@ -272,7 +272,10 @@ they hold. Making a workspace ready plays setup steps that run without the gate,
 whose result is gone) are also judged as setting each of those steps is ("The project", "A line
 set is judged as a run of it" and what only the user's word may say), each reason said as `step
 2 of the setup, run \`sudo make install\` in the workspace folder: the line it runs, …`; the strongest class wins, so one
-base step makes the call base, and a step refused as a run refuses it. The request lists the
+base `run` or `task` step makes the call base, and a step refused as a run refuses it. The `copy`
+(a secret included), `link` and `root_entries` steps do not raise the class, since the user, or an
+agent through the gate, wrote them and playing them is what the user configured: their reasons
+are listed for the judge and the card, and the call stays to judge. The request lists the
 steps (`Its setup then runs, without the gate:`, `1. copy .env.example in the workspace
 folder`), and the judge reads them in a block of their own, as data. `agent_launch` with
 `new_workspace` makes its workspace the same way, so it is judged the same, with the same
