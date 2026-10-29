@@ -510,6 +510,15 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   forward buttons and `Alt+Left` / `Alt+Right` move in it; an open list, modal or drawer takes
   the button first and closes; a page that no longer exists is skipped.
 
+Motion: **everything that moves is animated**, with the grammar of `reference/gpui.md` (ease-out
+cubic, the durations of `crates/flottille-ui/src/motion.rs`: hover 140 ms, press 90 ms, an entrance
+240 ms, a fold or a state 280 ms; reduced motion honoured). Hover and press on every interactive
+element; a state that changes (selected, chosen, focused, open); an element or a block that
+appears or leaves, with the gap around it; a row inserted into, removed from or moved in a list; a
+fold; a panel or a menu that opens or closes; a page and its sections, one after the other (at most
+eight waits, whatever the length). At rest nothing moves and nothing is redrawn. An issue about
+the window without its animations is incomplete.
+
 Colours: Flottille's own palette, or, on an Omarchy desktop, the current Omarchy theme's colours
 followed live. Shapes, type and motion do not change with the theme. A state is drawn the same
 everywhere, by shape as well as colour.

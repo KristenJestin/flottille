@@ -2,7 +2,9 @@
 //! (`agent.mode`). In Auto without a judge chosen, calls to judge come to the user as in Ask, and
 //! the bar says once where to choose one.
 
-use flottille_ui::{Switch, palette};
+use flottille_ui::color::mix;
+use flottille_ui::motion::HOVER;
+use flottille_ui::{Switch, enter, fade, palette};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Context, InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled,
@@ -102,9 +104,14 @@ impl ModeSwitch {
 }
 
 impl Render for ModeSwitch {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let auto = self.mode() == Some("auto");
+        let ink = mix(
+            p.mute,
+            p.text,
+            fade("reply-mode-ink", auto, HOVER, window, cx),
+        );
         let switch = Switch::new("reply-mode-switch", auto, "Auto mode")
             .disabled(self.mode.is_none() || self.pending.is_some())
             .on_click(cx.listener(|this, _, _, cx| this.flip(cx)));
@@ -116,22 +123,25 @@ impl Render for ModeSwitch {
             .items_center()
             .gap(px(7.))
             .text_size(px(12.5))
-            .text_color(if auto { p.text } else { p.mute })
+            .text_color(ink)
             .child(switch)
             .child(if auto { "Auto" } else { "Ask" })
+            // A word beside the switch, not a block: it fades in and does not fold.
             .when_some(self.said(), |d, said| {
                 let color = if self.refused.is_some() {
                     p.fail
                 } else {
                     p.faint
                 };
-                d.child(
+                d.child(enter(
+                    "reply-mode-said-enter",
+                    0,
                     div()
                         .id("reply-mode-said")
                         .text_color(color)
                         .child(SharedString::from(said))
                         .test_support(),
-                )
+                ))
             })
             .test_support()
     }

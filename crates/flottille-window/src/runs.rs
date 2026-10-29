@@ -11,7 +11,10 @@ use std::time::Duration;
 
 use flottille_core::ansi;
 use flottille_ui::color::mix;
-use flottille_ui::{Button, Card, Icon, Modal, Palette, Type, icon, palette, section_label};
+use flottille_ui::{
+    Button, Card, Icon, Item, Listing, Modal, Palette, Type, hoverable, icon, palette,
+    section_label,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, ClickEvent, Context, ElementId, FocusHandle, Hsla, InteractiveElement,
@@ -297,17 +300,15 @@ pub fn card(
             true => "Fold".to_owned(),
             false => format!("Show {hidden} earlier lines"),
         };
-        div()
+        let more = div()
             .id(id("more"))
             .px(px(14.))
             .pb(px(8.))
             .mono(11.)
-            .text_color(p.faint)
             .cursor_pointer()
-            .hover(|s| s.text_color(p.text))
             .on_click(toggle)
-            .child(SharedString::from(said))
-            .test_support()
+            .child(SharedString::from(said));
+        hoverable(more, move |d, t| d.text_color(mix(p.faint, p.text, t)))
     });
     let allowed = card.allowed_by.as_ref().map(|by| {
         div()
@@ -341,6 +342,8 @@ fn seconds_text(seconds_taken: Option<f64>) -> String {
 pub struct CommandList {
     page: Owner,
     rows: Vec<CommandRow>,
+    /// The rows as drawn: one that was dismissed folds away before it is gone.
+    list: Listing<CommandRow>,
     /// How the tree names each agent.
     names: HashMap<String, String>,
     error: Option<SharedString>,
@@ -354,6 +357,7 @@ impl CommandList {
         Self {
             page: page.into(),
             rows: Vec::new(),
+            list: Listing::default(),
             names: HashMap::new(),
             error: None,
             ticker: None,
@@ -429,12 +433,19 @@ impl CommandList {
 impl Render for CommandList {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
-        if self.rows.is_empty() {
+        let at = cx.background_executor().now();
+        self.list.sync(
+            self.rows.iter().map(|row| (row.run.clone(), row.clone())),
+            at,
+            cx.reduce_motion(),
+        );
+        if self.list.rows().next().is_none() {
             return div().id("rail-commands").into_any_element();
         }
         let p = palette(cx);
         let now = now_ms();
-        let rows = self.rows.iter().map(|row| {
+        let rows = self.list.rows().map(|listed| {
+            let row = listed.value;
             let ended = !row.running();
             let (glyph, color, said) = mark_of(row.ending(), &p);
             let run = row.run.clone();
@@ -468,7 +479,7 @@ impl Render for CommandList {
                 })
             };
             let last = ansi::strip(&row.last_line);
-            div()
+            let card = div()
                 .id(ElementId::Name(format!("command-{}", row.run).into()))
                 .flex()
                 .flex_col()
@@ -477,7 +488,6 @@ impl Render for CommandList {
                 .py(px(6.))
                 .rounded(px(8.))
                 .cursor_pointer()
-                .hover(|s| s.bg(p.hover))
                 .when(ended, |d| d.opacity(0.6))
                 .on_click(open)
                 .child(
@@ -565,8 +575,12 @@ impl Render for CommandList {
                         })
                         .child(div().flex_1())
                         .child(button),
-                )
-                .test_support()
+                );
+            Item::new(
+                ElementId::Name(format!("command-item-{}", row.run).into()),
+                listed.placement,
+                hoverable(card, move |d, t| d.bg(p.hover.opacity(t))),
+            )
         });
         div()
             .id("rail-commands")

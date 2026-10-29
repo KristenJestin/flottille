@@ -1537,6 +1537,8 @@ fn open_session<'a>(
     until(&shell, cx, "the session is in the tree", |cx| {
         cx.update(|window, _| window.try_find(session_id(lead)).is_some())
     });
+    // Its row unfolds into the tree: it is there to be clicked once it has.
+    settle(cx);
     if width < 860. {
         cx.update(|window, cx| window.click("open-tree", cx));
         settle(cx);
@@ -4034,12 +4036,16 @@ fn a_report_is_folded_until_clicked(cx: &mut TestAppContext) {
         assert!(window.try_find("row-0-report-text").is_none(), "folded");
     });
 
+    // It unfolds and folds over a moment, and is drawn until it has.
     cx.update(|window, cx| window.click("row-0-report-toggle", cx));
     frame(cx);
     cx.update(|window, _| assert!(window.try_find("row-0-report-text").is_some()));
+    settle(cx);
 
     cx.update(|window, cx| window.click("row-0-report-toggle", cx));
     frame(cx);
+    cx.update(|window, _| assert!(window.try_find("row-0-report-text").is_some(), "folding"));
+    settle(cx);
     cx.update(|window, _| assert!(window.try_find("row-0-report-text").is_none()));
 }
 
@@ -6895,7 +6901,7 @@ fn agent_steps_are_folded_until_clicked_and_stay_open_while_the_session_is_shown
     });
 
     cx.update(|window, cx| window.click("row-0-steps-toggle", cx));
-    frame(cx);
+    settle(cx);
     cx.update(|window, _| {
         assert!(window.find("step-0-0").visible());
         assert!(window.find("step-0-1").visible());
@@ -6907,7 +6913,7 @@ fn agent_steps_are_folded_until_clicked_and_stay_open_while_the_session_is_shown
     cx.update(|window, _| assert!(window.find("step-0-2").visible()));
 
     cx.update(|window, cx| window.click("row-0-steps-toggle", cx));
-    frame(cx);
+    settle(cx);
     cx.update(|window, _| {
         assert!(window.try_find("step-0-0").is_none());
         assert_eq!(
@@ -7407,4 +7413,165 @@ fn run_on_a_task_of_the_project_page_lists_its_run_and_opens_its_output(cx: &mut
         })
     });
     assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
+}
+
+// ── Everything that moves is animated ─────────────────────────────────────────────────────────
+
+fn y_of(id: &str, cx: &mut VisualTestContext) -> f32 {
+    let id = id.to_owned();
+    cx.update(|window, _| f32::from(window.find(id).bounds().origin.y))
+}
+
+fn seed_skills(user: &User, names: &[&str]) {
+    for name in names {
+        user.call(
+            "skill.add",
+            json!({"project": "atlas", "name": name, "description": format!("The {name}"),
+                   "text": "Read it before you start."}),
+        )
+        .unwrap();
+    }
+}
+
+#[gpui_kit::test]
+fn the_sections_of_a_project_s_settings_below_the_forges_enter_as_the_forges_do(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    open_project(&shell, "atlas", cx);
+    cx.update(|window, cx| window.click("project-settings", cx));
+    until(&shell, cx, "the settings are read", |cx| {
+        settings_of(&shell, cx).is_some_and(|page| {
+            page.read_with(cx, |page, _| page.name() == "atlas" && page.is_loaded())
+        })
+    });
+    let ids = [
+        "forges", "tracker", "save", "skills", "commands", "tasks", "setup", "rules",
+    ]
+    .map(|part| format!("enter-settings-atlas-{part}"));
+    // Every section sits in an entrance, and the last ones are still waiting for theirs while
+    // the first are done: they come one after the other, as the forges do.
+    run_for(Duration::from_millis(420), cx);
+    let waiting: Vec<f32> = ids.iter().map(|id| y_of(id, cx)).collect();
+    run_for(Duration::from_millis(1500), cx);
+    let arrived: Vec<f32> = ids.iter().map(|id| y_of(id, cx)).collect();
+    let rise = |at: usize| waiting[at] - arrived[at];
+    assert!(rise(0).abs() < 0.5, "the forges are in place: {}", rise(0));
+    for (at, id) in ids.iter().enumerate().skip(3) {
+        assert!(
+            (rise(at) - 6.0).abs() < 0.5,
+            "{id} was still to rise {}px (it rises 6px)",
+            rise(at)
+        );
+    }
+}
+
+#[gpui_kit::test]
+fn a_skill_that_is_removed_folds_away_before_it_is_gone_and_the_empty_line_unfolds(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    seed_skills(&user, &["alpha"]);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", cx);
+    until(&shell, cx, "the skill is listed", |cx| {
+        !skills_listed(&shell, cx).is_empty()
+    });
+    settle(cx);
+    assert!(text_of("skill-description-alpha", cx).is_some());
+
+    cx.update(|window, cx| window.click("remove-skill-alpha", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("confirm-remove-skill-alpha", cx));
+    until(&shell, cx, "the skill is gone from the list", |cx| {
+        skills_listed(&shell, cx).is_empty()
+    });
+    // The daemon has answered, and the row is still there, folding.
+    run_for(Duration::from_millis(100), cx);
+    let height = cx.update(|window, _| {
+        window
+            .try_find("skill-item-alpha")
+            .map(|row| f32::from(row.bounds().size.height))
+    });
+    assert!(
+        height.is_some_and(|h| h > 0.0),
+        "the removed row is still drawn, part way: {height:?}"
+    );
+    run_for(Duration::from_millis(600), cx);
+    assert!(
+        cx.update(|window, _| window.try_find("skill-item-alpha").is_none()),
+        "and gone once folded"
+    );
+    cx.update(|window, _| assert!(window.find("no-skills").visible()));
+}
+
+#[gpui_kit::test]
+fn a_setup_step_moved_down_slides_instead_of_jumping(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    for step in [json!({"copy": [".env"]}), json!({"link": "node_modules"})] {
+        user.call("setup.add", json!({"project": "atlas", "step": step}))
+            .unwrap();
+    }
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", cx);
+    until(&shell, cx, "the steps are listed", |cx| {
+        steps_listed(&shell, cx).len() == 2
+    });
+    settle(cx);
+    let (first, second) = (y_of("setup-step-1", cx), y_of("setup-step-2", cx));
+    assert!(first < second);
+
+    cx.update(|window, cx| window.click("setup-down-1", cx));
+    until(&shell, cx, "the list is read in its new order", |cx| {
+        steps_listed(&shell, cx)
+            .first()
+            .is_some_and(|step| step.link.is_some())
+    });
+    // The link step is first now, and it is drawn where it was, on its way up.
+    run_for(Duration::from_millis(16), cx);
+    let sliding = y_of("setup-step-1", cx);
+    assert!(
+        sliding > first + 10.0,
+        "the step that went up starts from its old place: {sliding} (in place: {first})"
+    );
+    settle(cx);
+    assert_eq!(y_of("setup-step-1", cx), first);
+    assert_eq!(y_of("setup-step-2", cx), second);
+}
+
+#[gpui_kit::test]
+fn the_bell_s_list_rises_in_and_fades_out_instead_of_appearing_and_vanishing(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    settle(cx);
+    cx.update(|window, cx| window.click("bell", cx));
+    run_for(Duration::from_millis(32), cx);
+    let rising = y_of("bell-list", cx);
+    run_for(Duration::from_millis(600), cx);
+    let open = y_of("bell-list", cx);
+    assert!(
+        rising > open + 1.0,
+        "it rises into place: {rising} → {open}"
+    );
+
+    shell.update(cx, |shell, cx| shell.toggle_bell(cx));
+    assert!(!shell.read_with(cx, |s, _| s.bell_open()));
+    run_for(Duration::from_millis(32), cx);
+    assert!(
+        cx.update(|window, _| window.try_find("bell-list").is_some()),
+        "it stays drawn while it fades"
+    );
+    run_for(Duration::from_millis(600), cx);
+    assert!(
+        cx.update(|window, _| window.try_find("bell-list").is_none()),
+        "and is gone once it has"
+    );
 }

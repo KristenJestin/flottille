@@ -6,9 +6,8 @@
 //! The text is frozen in an agent when it is created, so a change reaches the agents created
 //! after it only: the editor says so.
 
-use flottille_ui::{Button, Card, palette};
+use flottille_ui::{Button, Card, palette, presence_of};
 use gpui_kit::base::input::{InputEvent, TextareaState};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement,
     Render, SharedString, Styled, Subscription, TestSupportExt as _, WeakEntity, Window, div, px,
@@ -295,18 +294,27 @@ impl Render for RulesEditor {
                     .child(field)
                     .test_support(),
             )
-            .when_some(
-                self.shown.as_ref().and_then(|shown| shown.cut.clone()),
-                |d, cut| {
-                    d.child(
-                        div()
-                            .id(id("cut"))
-                            .text_size(px(12.5))
-                            .text_color(p.fail)
-                            .child(SharedString::from(format!("Cut: {cut}.")))
-                            .test_support(),
-                    )
-                },
+            .child(
+                presence_of(
+                    id("cut-block"),
+                    self.shown
+                        .as_ref()
+                        .and_then(|shown| shown.cut.clone())
+                        .map(|cut| SharedString::from(format!("Cut: {cut}."))),
+                    {
+                        let cut = id("cut");
+                        move |line| {
+                            div()
+                                .id(cut)
+                                .text_size(px(12.5))
+                                .text_color(p.fail)
+                                .child(line)
+                                .test_support()
+                                .into_any_element()
+                        }
+                    },
+                )
+                .gap(px(8.)),
             )
             .child(
                 div()
@@ -316,16 +324,21 @@ impl Render for RulesEditor {
                     .child(REACH)
                     .test_support(),
             )
-            .when_some(self.problem.clone(), |d, problem| {
-                d.child(
-                    div()
-                        .id(id("problem"))
-                        .text_size(px(12.5))
-                        .text_color(p.fail)
-                        .child(problem)
-                        .test_support(),
-                )
-            })
+            .child(
+                presence_of(id("problem-block"), self.problem.clone(), {
+                    let problem = id("problem");
+                    move |line| {
+                        div()
+                            .id(problem)
+                            .text_size(px(12.5))
+                            .text_color(p.fail)
+                            .child(line)
+                            .test_support()
+                            .into_any_element()
+                    }
+                })
+                .gap(px(8.)),
+            )
             .child(buttons);
         Card::new().title("Rules").child(body)
     }
