@@ -481,8 +481,9 @@ Deliveries were sent (`how`: `prompt`, or `note` on a tool result), given back t
 
 ### The events of a run
 
-A command an agent ran with `commands_run` (`docs/tools.md`). Every event of a run has `agent`,
-the agent that started it, and `run`, its id.
+A command an agent ran with `run` (`docs/tools.md`), or a task the user ran (`task.run`). Every
+event of a run has `agent`, the agent that started it (`null` for the user), `project`, and `run`,
+its id.
 
 #### `run.started`
 
@@ -498,7 +499,7 @@ the agent that started it, and `run`, its id.
 | Field | |
 |---|---|
 | `agent`, `run` | |
-| `state` | `exited` (by itself), `stopped` (`commands_status` with `action: stop`, `run.stop`, or the call that started it stopped), `interrupted` (the daemon stopped, or the one that ran it is gone). |
+| `state` | `exited` (by itself), `stopped` (`run_status` with `action: stop`, `run.stop`, or the call that started it stopped), `interrupted` (the daemon stopped, or the one that ran it is gone). |
 | `exit_code` | Its exit code, `null` when it did not exit by itself or a signal ended it. |
 | `signal` | The signal that ended it, `null` otherwise. |
 

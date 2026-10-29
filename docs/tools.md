@@ -73,7 +73,7 @@ and the tree's tools (`agent_*`, `report`, `ask_user` or `ask_parent`,
 The agent's place is its folder: a workspace, or the project folder (`main`).
 
 **Every call is decided once**, by the gate (below), after the tool is known to be the agent's
-and before it is performed: `commands_status` as much as the file tools. A
+and before it is performed: `run_status` as much as the file tools. A
 path outside the place is asked for; the tools check again that a path they resolve is inside,
 and refuse it with `refused: X is outside this agent's place: …`, unless the user allowed the call.
 A path is resolved this way:
@@ -152,13 +152,18 @@ not a lock: a swap between it and the rename is not seen.
 - **It grants nothing**: unlike `fs_read`, reading a skill does not let the session write the
   file.
 
-## Commands
+## Tasks and runs
 
 | Tool | Arguments | |
 |---|---|---|
-| `commands_list` | none | The project's catalogue (`docs/projects.md`), one line each: `name: line`, and where it runs, whether it keeps running, is a check, changes nothing, is held for approval. |
-| `commands_run` | `command` or `line` (exactly one), `repository?`, `timeout? 1..600`, `why?` | Runs a catalogue command (`refused: the catalogue has no command X: list them with commands_list`) or one line, in the repository's folder (the catalogue's, or the one named) or the place's top. Its description holds a call of each form: `{"command": "test"}`, `{"line": "cargo test -p core", "repository": "api", "timeout": 120}`. |
-| `commands_status` | `run`, `action? output \| stop`, `tail? 1..1000`, `start?` | `action output` (the default): the run's state and lines of its output, the last `tail` (40 by default), or `tail` lines from line `start`. `action stop`: stops the run and everything in its process group, `SIGTERM`, then `SIGKILL` 5 s later, and answers once it ended; `tail` and `start` are refused with it. |
+| `tasks` | `action list \| show \| add \| edit \| remove`, `name?`, `line?`, `repository?`, `serve?`, `check?`, `read_only?`, `ask_before_running?` | The project's tasks (`docs/projects.md`, "Tasks"). `list` gives one line each: `name: line`, and where it runs, whether it keeps running, is a check, changes nothing, is judged each time it runs; `show` gives one. Every agent reads them; a root writes them ("The project"): `add` takes `name` and `line` and the flags, `edit` changes what it is given (`repository: null` puts the task back at the place's top), `remove` removes it, refused while a setup step runs it. A child's write is refused, pointing it to `ask_parent`. |
+| `run` | `task` or `line` (exactly one), `repository?`, `timeout? 1..600`, `why?` | Runs a task (`refused: the project has no task X: list them with tasks {"action": "list"}`) or one line, in the repository's folder (the task's, or the one named) or the place's top. Its description holds a call of each form: `{"task": "test"}`, `{"line": "cargo test -p core", "repository": "api", "timeout": 120}`. |
+| `run_status` | `run`, `action? output \| stop`, `tail? 1..1000`, `start?` | `action output` (the default): the run's state and lines of its output, the last `tail` (40 by default), or `tail` lines from line `start`. `action stop`: stops the run and everything in its process group, `SIGTERM`, then `SIGKILL` 5 s later, and answers once it ended; `tail` and `start` are refused with it. |
+
+Until #131 these were `commands_list`, `commands_run` (its `command` now `task`) and
+`commands_status`. For one release a call under an old name is the new tool's (`commands_list`
+is `tasks` with `action list`), and the store renamed them in the agents' fixed lists and their
+pending requests.
 
 - **No shell, ever.** A line is split as `flottille_core::command` does (the setup's `run` steps
   too): words on whitespace, a quoted part kept whole, a backslash literal. A newline, `|`, `&`,
@@ -167,13 +172,13 @@ not a lock: a swap between it and the rename is not seen.
   without a shell, and “T” is shell syntax: put it in a script of the repository and run the
   script.` A line naming a shell as its program is split like any other; the gate judges the
   line a shell runs with `-c` (below).
-- **Waiting**: the call waits `timeout` seconds (30 by default) for the end. A catalogue command
+- **Waiting**: the call waits `timeout` seconds (30 by default) for the end. A task
   that keeps running (`serve`) answers at once, and one already running for the agent is joined.
   A call stopped by its client stops its run.
 - **The answer**: `run <id>: <name> <state> after <s> s` (`is running`, `exited with code N`,
   `was killed by signal N`, `was stopped`, `was interrupted…`), then, while it runs, `it keeps
-  going: read it with commands_status {"run": "<id>"}, stop it with commands_status {"run": "<id>", "action": "stop"}; Flottille tells you when it ends`, then `(lines a-b of N…)` with
-  how to read the lines before or after (`commands_status {"run", "start"}`), then the lines. A
+  going: read it with run_status {"run": "<id>"}, stop it with run_status {"run": "<id>", "action": "stop"}; Flottille tells you when it ends`, then `(lines a-b of N…)` with
+  how to read the lines before or after (`run_status {"run", "start"}`), then the lines. A
   line longer than 2,000 characters shows as several; the lines shown are cut to stay under the
   limit.
 - **Only the agent that started a run** reads or stops it: `refused: X is not a run this agent
@@ -201,11 +206,11 @@ not a lock: a swap between it and the rename is not seen.
     rewrites every push URL to a path that is no remote, unless the run is itself a `git push`
     (its own line, no wrapper) the user or the judge let through.
 - **A push is the gate's**: `git push` is a call to judge, a forced one base, and only the push
-  the gate read and let through goes out. A harmless command (a catalogue command, a test run)
+  the gate read and let through goes out. A harmless command (a task, a test run)
   cannot push from a script the gate never read. A push from a workspace is also refused, before
   git runs, when a repository's remote no longer leads where it did when the workspace was made
   (`docs/commands.md`, "Where the remote leads").
-- **A stop ends the run's process group, not every descendant.** `commands_status` with `action stop`, a timeout of
+- **A stop ends the run's process group, not every descendant.** `run_status` with `action stop`, a timeout of
   the call's client and the daemon's stop signal the group the run was spawned in (`SIGTERM`,
   then `SIGKILL` after 5 s), and what the run left in its group is killed when its own process
   ends. A process that left the group (`setsid`, a daemon that forks and detaches) escapes all
@@ -219,7 +224,7 @@ not a lock: a swap between it and the rename is not seen.
   child's report and by the same path (`docs/design.md` §5.2: stored, then pumped between turns or
   pinned as a note on the next tool result): the line, how it ended (`exited with code N`, `was
   killed by signal N`, or `was stopped by the user`), how long it ran and the last 20 lines of its
-  output, masked. A command whose call saw it end, one the agent stopped with `commands_status`,
+  output, masked. A command whose call saw it end, one the agent stopped with `run_status`,
   and those that stop with their agent or the daemon deliver nothing. No timer is involved. A
   command that ends at the very moment its call answers can give both: the call's answer (the end
   it saw, or the run still going) and the delivery, so the agent may be told the same end twice;
@@ -229,7 +234,11 @@ not a lock: a swap between it and the rename is not seen.
 - **The user sees them** (`docs/design.md` §10): the session's right rail lists the commands of
   its tree, a project and a session with one running show it in the left sidebar, and the user can
   read a command's output live, stop it (its whole process group, as above) or dismiss it once it
-  ended (`docs/protocol.md`, "The run methods"; `flottille commands`, `docs/cli.md`).
+  ended (`docs/protocol.md`, "The run methods"; `flottille runs`, `docs/cli.md`).
+- **The user runs a task too**: the Run button of a task on the project page (`task.run`) runs it
+  in the project folder, with the project's variables, as a run of no agent: no gate (the user
+  asked), no delivery, the same records. It is listed on the project page with the same rows and
+  output panel as the session's rail, and in the left sidebar with the project's runs.
 - **Runs are records**: the store's `runs` (with the end of their output once ended), and the
   `run.started` and `run.ended` events. Each run's process group is recorded while it runs: a
   daemon started after a crash kills the groups a previous one left (only while their leader is
@@ -270,19 +279,20 @@ turned into plain text, and what is assumed of `acli`'s output, is in [`tickets.
 ## The project
 
 What the user does in the window, the agent they talk to does too, under the gate, always on its
-own project: a root has these three tools, a child none (it does its brief). Families with an
-`action`, as `agent_status` is:
+own project: a root has these four tools and the writes of `tasks` (above), a child none of them
+(it does its brief). Families with an `action`, as `agent_status` is:
 
 | Tool | |
 |---|---|
 | `skills {action: list \| show \| add \| edit \| remove, name?, description?, path?, text?}` | The project's skills (`docs/skills.md`). `add` takes `name`, `description` and one of `path` (a file or a folder of the project folder) and `text` (a text Flottille keeps); `edit` changes what it is given; `remove` removes it, and its text. As `flottille skill` does. |
 | `commands {action: list \| show \| add \| edit \| remove, name?, description?, instructions?, template?}` | The project's commands (`docs/commands.md`). `add` takes `name`, `description` and `instructions`, or a `template` (`open-prs`, `merge-stack`, `close`) added as it is; `edit` changes what it is given. A command is sent to a child by writing `/name` in `agent_send`'s message. |
+| `setup {action: list \| add \| edit \| remove \| move, number?, to?, step?}` | The project's setup (`docs/projects.md`, "The setup"), its steps numbered from 1 in order. `add {step, number?}` adds one, the last when `number` is left out; `edit {number, step}` replaces one; `remove {number}`; `move {number, to}`. A `step` is whole, as the file has it: one of `copy` (globs), `link`, `root_entries`, `run` (a line) and `task`, with `repository` or `for_each_repository`, and `time_limit` (seconds) with `run` or `task`; it is checked as the file is. The workspaces made after play it; one already made keeps its own. |
 | `project {action: settings \| set_settings \| rules \| set_rules, …}` | `settings` reads each repository's forge (and what its remote proposes) and the tracker (`docs/projects.md`). `set_settings {repositories?: [{path, forge}], tracker?}` declares a repository's forge or the tracker (`null` removes it; a tracker left out is kept), checked as `project.set_settings` checks them. `rules` reads the rules the project's agents get from now on and where they come from (the project's own, the user's for all projects, or Flottille's default, `docs/projects.md`, "Rules"); `set_rules {text}` replaces the project's own rules by `text` (8,000 characters at most), for the agents created after: the one that asked keeps what it started with. |
 
 The file is written where it stands, its comments kept.
 
-- **Reads run at once.** `list` and `show` of `skills` and `commands`, `project` `settings` and
-  `rules`.
+- **Reads run at once.** `list` and `show` of `tasks`, `skills` and `commands`, `setup` `list`,
+  `project` `settings` and `rules`.
 - **Every write is to judge** (a card in Ask, the judge in Auto), as any call is (answered at
   once that it waits, the result later as a delivery). Its request is an `action`: it says what
   it changes in words, one sentence each (`Add the skill style (docs/STYLE.md): The code style`;
@@ -293,6 +303,13 @@ The file is written where it stands, its comments kept.
   since the user allowed it; it would now: …`). A change of the tracker is base: nothing checks it
   against the project, as a forge is checked against its remote. A `set_rules` is base too: it
   rewrites the instructions of every agent created after it, so no judge decides it.
+- **A line set is judged as a run of it.** A task's `line` and a setup step's `run` run later
+  without the gate: a task in a workspace is harmless, a workspace's setup plays on its own. So
+  `add` and `edit` that set one are also judged as `run` would judge that line in the agent's
+  place, each reason said as `the line it sets, …`: base when the run would be (`sudo`, a forced
+  push, the never list), refused with shell syntax. An edit's request says what it was (`It was:
+  …`), a step's what it does and where (`Add setup step 2: run \`npm ci\` in each repository,
+  leaves first`).
 - **What an agent never does**: change a session's mode or choose the judge (no tool has them),
   or reach another project (`project` is not an argument). An agent's skill is never the project
   folder itself nor a repository's root (`.`, `api`, or a link to one): what a whole checkout
@@ -308,7 +325,7 @@ The tools through which agents launch other agents and answer for them (`docs/de
 reach only the caller's own children, and are refused with `refused: <id> is not one of your
 children: agent_status lists them` for any other agent.
 
-Two of them take an `action`, as the tools of a family do: `agent_status` (`status` or `conversation`) and `commands_status` above.
+Two of them take an `action`, as the tools of a family do: `agent_status` (`status` or `conversation`) and `run_status` above.
 
 | Tool | |
 |---|---|
@@ -328,14 +345,14 @@ daemon's secrets before anyone else reads them.
 
 Every call goes through `gate::decide` once (`docs/design.md` §7), in the order of
 `docs/reference/hemera.md` §4. It is given the agent's place, the tool, the arguments, the words
-of the line a run would start, the catalogue command it names, the paths the call reaches, the
+of the line a run would start, the task it names, the paths the call reaches, the
 project's never list, Flottille's own folders and whether the workspace's branch is on a remote,
 and answers with the call's class, or a refusal. The class does not depend on the mode: the mode
 says who answers a call to judge (`docs/design.md` §7.1).
 
 1. **Refused**, with a sentence saying why and what to do instead (under 2,000 characters): what
    cannot be made as it is, in every mode.
-   - shell syntax in a line (`commands_run` splits a line without a shell, and refuses what it
+   - shell syntax in a line (`run` splits a line without a shell, and refuses what it
      cannot split), and a call whose arguments do not fit the tool;
    - a login printed: `gh auth token`, `glab auth token`, `auth status` with `--show-token` (`-t`);
    - `flottille` itself: it drives the daemon, and agents act only through their tools. A copy
@@ -343,7 +360,7 @@ says who answers a call to judge (`docs/design.md` §7.1).
      daemon itself (`docs/protocol.md`, "Transport").
 2. **Base**: a card for the user in every mode, never the judge's, with a strong warning.
    - the project's `never` list: an entry matches a line's words from any position (its first
-     word is a program, in any folder), or a catalogue command by its name; and a run when the
+     word is a program, in any folder), or a task by its name; and a run when the
      project's configuration cannot be read, since what it never allows is not known;
    - a write under a `.git` folder or file (`fs_write`, `fs_edit`, a link that leads there), and a
      command any of whose words (or an option's value after `=`, or a `NAME=value`'s value) names
@@ -410,7 +427,7 @@ says who answers a call to judge (`docs/design.md` §7.1).
      or of its rules (`set_rules`).
 3. **Harmless**: passes in every mode.
    - reading inside the agent's place (the project folder or the workspace), the tree's tools,
-     `commands_list`, `commands_status`, `skill_read`, `forge_read`, `ticket_read`;
+     `tasks` `list` and `show`, `run_status`, `skill_read`, `forge_read`, `ticket_read`;
    - writing inside a workspace (`fs_write`, `fs_edit`, and `git add`, `mv`, `rm` there);
    - a line the rules know to only read, inside the place: the reads of git (`status`, `log`,
      `diff`, `show`, `branch` and `tag` listings, `config` and `remote` reads…), of `gh` and
@@ -427,12 +444,11 @@ says who answers a call to judge (`docs/design.md` §7.1).
    - an option of those programs that writes a file, inside a workspace only (`git diff`,
      `log`, `show` `--output`, `git format-patch`, `tree -o`, `find -fprint`, `file -C`): in
      `main`, it is to judge;
-   - a catalogue command in a workspace, not marked `ask_before_running` and whose program is not
-     a shell. A line is the catalogue command it is when the catalogue holds the same words where
-     it runs.
+   - a task in a workspace, not marked `ask_before_running` and whose program is not a shell. A
+     line is the task it is when the project has a task of the same words where it runs.
 4. **To judge**: everything else, a card in Ask and the judge in Auto. Among them: writing in the
-   project folder (`main`); a path outside the place, or one that cannot be resolved; a catalogue
-   command in `main`, marked `ask_before_running`, or whose program is a shell; a line the rules
+   project folder (`main`); a path outside the place, or one that cannot be resolved; a task in
+   `main`, marked `ask_before_running`, or whose program is a shell; a line the rules
    do not know to only read, or whose program is the agent's own file; an option of a reading
    program that runs one (`find -exec`, `-execdir`, `-ok`; `fd -x`, `-X`; `rg --pre`,
    `--hostname-bin`; `git grep -O`; `--ext-diff`, `--textconv`, `cat-file --filters`; `git help`
@@ -443,14 +459,14 @@ says who answers a call to judge (`docs/design.md` §7.1).
    branch on no remote, `git reset --hard` in a workspace, `git -c` or `--config-env` of other
    keys, git's other global options, `git remote` and `git config` writes of other keys; the
    forge command lines beyond their reads; `forge_write`, `workspace_remove`, and a write of
-   `skills`, `commands` or `project` ("The project").
+   `tasks`, `setup`, `skills`, `commands` or `project` ("The project"), with the line it sets.
 
    The rules of 1 and 2 are judged on the line and on every program a wrapper runs, unwrapped in
    turn (16 at most): `env` (its options, `NAME=value` words and `-S` line), `sudo`, `doas`,
    `nice`, `nohup`, `timeout`, `time`, `stdbuf`, `command`, `exec`, `xargs`, `npx` (and its `-c`
    line), `pnpm dlx`/`exec`, `yarn dlx`/`exec`, `bunx`, `uvx`, and a shell (`sh`, `bash`, `zsh`,
    `dash`, `ksh`, `mksh`, `ash`, `fish`) with `-c`, `script -c` and `watch`, whose line is split
-   as `commands_run` splits one and judged in turn: a line that cannot be split is refused. A
+   as `run` splits one and judged in turn: a line that cannot be split is refused. A
    shell running a script is not unwrapped: the script is not read. The line an option of a
    reading program runs (`fd -X git push -f`) is read the same way, and so is each line of `git
    rebase -x` and `--exec` (`git rebase -x 'git push -f'` is a forced push); git runs those

@@ -481,6 +481,75 @@ had. Answers the command.
 
 `{"project", "name"}`: `{"project", "removed": "<name>"}`.
 
+### The task methods
+
+A project's tasks (`docs/projects.md`, "Tasks"), as its Settings edit them. A task in a result is
+`{"name", "line", "repository", "serve", "check", "read_only", "ask_before_running"}`,
+`repository` `null` for the place's top. Each write is checked as the file is, and written under
+`[tasks.<name>]` where it stands, what is around it kept, a flag that is off left out.
+`not-found` for a project or a task that does not exist, `refused` for a task the file would
+refuse, `invalid-config` when the project's file cannot be used.
+
+#### `task.list`
+
+`{"project"}`: `{"project", "tasks": [...]}`, by name.
+
+#### `task.show`
+
+`{"project", "name"}`: the task.
+
+#### `task.add`
+
+`{"project", "name", "line", "repository"?, "serve"?, "check"?, "read_only"?,
+"ask_before_running"?}`: the task. `refused` when the project has one of that name.
+
+#### `task.edit`
+
+`{"project", "name", "line"?, "repository"?, "serve"?, "check"?, "read_only"?,
+"ask_before_running"?}`: what is given replaces what the task had (`repository: null` puts it back
+at the top). Answers the task.
+
+#### `task.remove`
+
+`{"project", "name"}`: `{"project", "removed": "<name>"}`. `refused` while a setup step runs it.
+
+#### `task.run`
+
+`{"project", "name"}`: `{"project", "name", "run"}`, at once. The user runs the task in the
+project folder with the project's variables, as a run of no agent: no gate, no delivery
+(`docs/tools.md`, "Tasks and runs"). A task that keeps running (`serve`) and already runs for the
+user is joined: its run is answered. It is followed with the run methods.
+
+### The setup methods
+
+A project's setup (`docs/projects.md`, "The setup"): the steps that prepare each new workspace,
+as `[[setup]]` tables, in order. A step in a result is the step's keys as the file has them, and
+`number`, its place from 1. Each write is checked as the file is, and the tables are edited
+where they stand: a step keeps the comments above it, and moves with them. Each answers
+`{"project", "steps": [...]}`, the whole setup after it. `not-found` for a project or a number it
+does not have, `refused` for a step the file would refuse, `invalid-config` when the file's setup
+is not `[[setup]]` tables.
+
+#### `setup.list`
+
+`{"project"}`.
+
+#### `setup.add`
+
+`{"project", "step", "at"?}`: `at` the number it takes, the last when left out.
+
+#### `setup.edit`
+
+`{"project", "number", "step"}`: the step replaced, whole.
+
+#### `setup.remove`
+
+`{"project", "number"}`.
+
+#### `setup.move`
+
+`{"project", "number", "to"}`: the step takes number `to`, the others between moving by one.
+
 ### The agent methods
 
 An agent is one agent session run over ACP (`docs/agents.md`), named by an opaque id. None of
@@ -684,8 +753,8 @@ page: newer ones, or with `before` older ones.
 
 ### The run methods
 
-The commands the agents run with `commands_run` (`docs/tools.md`), as the user sees them. A
-command in a result:
+The commands the agents run with `run` (`docs/tools.md`), and the tasks the user runs with
+`task.run`, as the user sees them. A command in a result:
 
 ```json
 {
@@ -706,7 +775,8 @@ command in a result:
 }
 ```
 
-`name` is the catalogue command it runs, `null` for a line of the agent's. `state` is `running`,
+`name` is the task it runs, `null` for a line of the agent's. `agent` and `root` are `null` for a
+task the user ran; `project` is always the project's. `state` is `running`,
 `exited`, `stopped` or `interrupted` (`docs/events.md`, "The events of a run"). `last_line` is the
 last line of its output with something on it, masked of secrets and as the program wrote it
 (colours included), cut at 300 characters. `tail` is the last 20 lines
@@ -715,16 +785,17 @@ card in the conversation shows folded, a running command's as well as one that e
 
 #### `run.list`
 
-`{"project"?, "tree"?, "ended"?}`. `{"commands": [...]}`: the commands running, oldest first. With
-`project`, the project's; with `tree`, an agent's id, those of the agents of its root's tree; without
-either, every one. With `ended`, the commands that ended and were not dismissed come after them,
+`{"project"?, "tree"?, "ended"?, "user"?}`. `{"commands": [...]}`: the commands running, oldest
+first. With `project`, the project's, the user's included; with `tree`, an agent's id, those of the
+agents of its root's tree; without either, every one. With `user` (and `project`, required), only
+the tasks the user ran in the project, as its page lists them. With `ended`, the commands that ended and were not dismissed come after them,
 the last 30 to have ended at most, and none for a tree whose root ended or failed: they go with
 their session, and the daemon forgets them when the session is over for good (`docs/tools.md`)
 (`not-found` when `tree` names no agent).
 
 #### `run.output`
 
-`{"run", "tail"?}`. The command without `root`, `project` and `workspace`, with `output`, the last
+`{"run", "tail"?}`. The command without `root` and `workspace`, with `output`, the last
 `tail` lines (200 by default, 1 to 1000) of what it wrote, standard output and error together, masked
 and as the program wrote it, and `earlier`, whether lines before them were left out. Of a
 command running, what it wrote so far. `not-found` when there is no such run.
@@ -732,8 +803,8 @@ command running, what it wrote so far. `not-found` when there is no such run.
 #### `run.stop`
 
 `{"run"}`. `{"run": {...}}`: stops the command and everything in its process group (`SIGTERM`, then
-`SIGKILL` 5 s later, as `commands_status` with `action: stop` does) and answers once it ended. The
-agent that started it is told the user stopped it (`command-ended`, `docs/tools.md`). A command that
+`SIGKILL` 5 s later, as `run_status` with `action: stop` does) and answers once it ended. The
+agent that started it, if one did, is told the user stopped it (`command-ended`, `docs/tools.md`). A command that
 already ended is answered as it is. `not-found` when there is no such run.
 
 #### `run.dismiss`

@@ -151,7 +151,7 @@ window: written into its file as they are, under the template's name unless anot
 they are the project's own from then on, to edit like any other (its instructions are a
 multi-line string). They are what
 `docs/reference/multi-repo-case.md` runs by hand with slash commands. Their agents use Flottille's
-tools only (`forge_read`, `forge_write`, `workspace_remove`, git lines through `commands_run`),
+tools only (`forge_read`, `forge_write`, `workspace_remove`, git lines through `run`),
 never a forge's command line, so they work on every forge Flottille writes to.
 
 | Template | What its agent does |
