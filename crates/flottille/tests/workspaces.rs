@@ -411,30 +411,210 @@ fn every_step_is_an_event() {
     );
 }
 
+/// Makes `name` a repository of this machine alone: its remote is gone, with its tracking refs,
+/// and its `main` holds a commit no remote has. The commit of that `main`.
+fn local_only(fixture: &Fixture, name: &str) -> String {
+    let repository = fixture.folder.join(name);
+    fixture
+        .user
+        .git(&repository, &["remote", "remove", "origin"]);
+    std::fs::write(repository.join("LOCAL.md"), "only here\n").unwrap();
+    fixture.user.git(&repository, &["add", "."]);
+    fixture
+        .user
+        .git(&repository, &["commit", "--quiet", "-m", "only here"]);
+    fixture.git(&repository, &["rev-parse", "HEAD"])
+}
+
 #[test]
-fn the_fetch_failing_stops_the_creation_with_the_reason() {
+fn a_workspace_of_a_repository_with_no_remote_is_created_from_the_local_branch() {
     let fixture = Fixture::new(false);
     fixture.configure("");
-    std::fs::rename(fixture.remote("lib"), fixture.user.path("remotes/gone.git")).unwrap();
+    let local = local_only(&fixture, "lib");
 
-    let (code, message) = fixture.create(json!({})).unwrap_err();
+    let created = fixture.create(json!({})).unwrap();
+
+    let lib = &created["repositories"][2];
+    assert_eq!(lib["path"], "lib");
+    assert_eq!(lib["base"]["branch"], "main");
+    assert_eq!(lib["base"]["ref"], "refs/heads/main");
+    assert_eq!(lib["base"]["commit"], local.as_str());
+    assert_eq!(lib["base"]["fetched_now"], false);
+    assert_eq!(
+        lib["base"]["note"],
+        "no remote origin: started from the local main"
+    );
+    // The others still fetch, and say nothing.
+    assert_eq!(created["repositories"][0]["base"]["fetched_now"], true);
+    assert_eq!(created["repositories"][0]["base"].get("note"), None);
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    let worktree = fixture.workspace("login").join("lib");
+    assert_eq!(fixture.git(&worktree, &["rev-parse", "HEAD"]), local);
+    assert!(worktree.join("LOCAL.md").is_file());
+}
+
+#[test]
+fn a_failed_fetch_falls_back_the_same_way() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    // `origin` of lib now leads nowhere: its fetch fails.
+    std::fs::rename(fixture.remote("lib"), fixture.user.path("remotes/gone.git")).unwrap();
+    let local = fixture.git(&fixture.folder.join("lib"), &["rev-parse", "main"]);
+
+    let created = fixture.create(json!({})).unwrap();
+
+    let base = &created["repositories"][2]["base"];
+    assert_eq!(base["branch"], "main");
+    assert_eq!(base["ref"], "refs/heads/main");
+    assert_eq!(base["commit"], local.as_str());
+    assert_eq!(base["fetched_now"], false);
+    let note = base["note"].as_str().unwrap();
+    assert!(note.starts_with("origin could not be fetched ("), "{note}");
+    assert!(note.ends_with("): started from the local main"), "{note}");
+    assert!(!note.contains('\n'), "one line: {note}");
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    assert_eq!(
+        fixture.git(
+            &fixture.workspace("login").join("lib"),
+            &["rev-parse", "HEAD"]
+        ),
+        local
+    );
+}
+
+#[test]
+fn the_command_line_says_in_one_line_where_a_repository_without_remote_started() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    local_only(&fixture, "lib");
+
+    let output = fixture.user.run(&["workspace", "create", "app", "login"]);
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        text.contains("  lib: main, no remote origin: started from the local main\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_workspace_created_with_two_of_three_repositories() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+
+    let created = fixture
+        .create(json!({"repositories": ["web", "lib"], "bases": {"web": "main"}}))
+        .unwrap();
+
+    let bases: Vec<_> = created["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            format!(
+                "{} {}",
+                r["path"].as_str().unwrap(),
+                r["base"]["branch"].as_str().unwrap()
+            )
+        })
+        .collect();
+    // `web` would take develop by its rule: the base chosen for it wins.
+    assert_eq!(bases, ["web main", "lib main"]);
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    assert!(fixture.workspace("login").join("web/.git").exists());
+    assert!(!fixture.workspace("login").join("api").exists());
+    assert!(!fixture.workspace("login").join("web/DEVELOP.md").exists());
+}
+
+#[test]
+fn a_base_chosen_for_a_repository_the_workspace_does_not_take_is_refused() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+
+    let (code, message) = fixture
+        .create(json!({"repositories": ["web"], "bases": {"api": "main"}}))
+        .unwrap_err();
 
     assert_eq!(code, "refused");
+    assert_eq!(
+        message,
+        "a base is chosen for api, which the workspace does not take"
+    );
+    assert!(!fixture.workspace("login").exists());
+}
+
+#[test]
+fn the_per_repository_status() {
+    let fixture = Fixture::new(false);
+    let script = fixture.script("ok.sh", "exit 0\n");
+    fixture.configure(&format!(
+        "[[setup]]\nrun = \"sh {}\"\nfor_each_repository = true\n",
+        script.display()
+    ));
+    fixture.create(json!({})).unwrap();
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    let web = fixture.workspace("login").join("web");
+    for (file, subject) in [("a.ts", "first"), ("b.ts", "second")] {
+        std::fs::write(web.join(file), "export {}\n").unwrap();
+        fixture.user.git(&web, &["add", "."]);
+        fixture
+            .user
+            .git(&web, &["commit", "--quiet", "-m", subject]);
+    }
+    std::fs::write(web.join("README.md"), "changed\n").unwrap();
+    std::fs::write(web.join("draft.ts"), "draft\n").unwrap();
+
+    let shown = fixture.show("login").unwrap();
+
+    let web = &shown["repositories"][0];
+    assert_eq!(web["path"], "web");
+    assert_eq!(web["branch"], "app/login");
+    assert_eq!(web["ahead"], 2);
+    assert_eq!(web["uncommitted"], 2);
+    let lib = &shown["repositories"][2];
+    assert_eq!(lib["branch"], "app/login");
+    assert_eq!(lib["ahead"], 0);
+    assert_eq!(lib["uncommitted"], 0);
+}
+
+#[test]
+fn a_workspace_of_a_repository_with_no_remote_is_removed_unless_it_holds_commits_of_its_own() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    local_only(&fixture, "lib");
+    fixture
+        .create(json!({"name": "clean", "repositories": ["lib"]}))
+        .unwrap();
+    fixture
+        .create(json!({"name": "work", "repositories": ["lib"]}))
+        .unwrap();
+    fixture.settled("clean");
+    fixture.settled("work");
+    let lib = fixture.workspace("work").join("lib");
+    std::fs::write(lib.join("feature.rs"), "fn f() {}\n").unwrap();
+    fixture.user.git(&lib, &["add", "."]);
+    fixture
+        .user
+        .git(&lib, &["commit", "--quiet", "-m", "add the feature"]);
+    let commit = fixture.git(&lib, &["rev-parse", "--short", "HEAD"]);
+
+    let removed = fixture.remove("clean");
+    let (code, message) = fixture.remove("work").unwrap_err();
+
+    assert_eq!(removed, Ok(json!({"removed": "clean", "project": "app"})));
+    assert_eq!(code, "refused");
     assert!(
-        message.starts_with("cannot fetch the base of lib from origin: "),
+        message.contains(&format!(
+            "lib has commits on no other branch: {commit} add the feature"
+        )),
         "{message}"
     );
-    assert!(message.contains("--offline"), "{message}");
-    assert!(!fixture.workspace("login").exists());
-    assert_eq!(fixture.show("login").unwrap_err().0, "not-found");
-    assert!(
-        fixture
-            .git(
-                &fixture.folder.join("web"),
-                &["branch", "--list", "app/login"]
-            )
-            .is_empty()
-    );
+    assert!(lib.join("feature.rs").exists());
 }
 
 #[test]
