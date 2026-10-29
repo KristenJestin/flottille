@@ -34,7 +34,9 @@
 //!
 //! The writes answer as `bkt` does when they work: `pr create` prints `✓ Created pull request #N`
 //! (N is `created`, 1 by default), `pr merge` prints `✓ Merged pull request #N` and `pipeline run`
-//! `✓ Triggered pipeline …`.
+//! `✓ Triggered pipeline …`. `pr comment <id> --text T` prints `✓ Commented on pull request #N`
+//! and `pr edit <id>` (`--title`, `--description`, at least one) `✓ Updated pull request #N`, as
+//! `pkg/cmd/pr/pr.go` does (`:1707`, `:829`); both need a pull request of `pulls`.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -160,6 +162,33 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 "✓ Created pull request #{}",
                 script["created"].as_u64().unwrap_or(1)
             );
+            return 0;
+        }
+        ["pr", verb @ ("comment" | "edit"), id] => {
+            let held = script["pulls"][&key]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|pull| id.parse().ok() == pull["id"].as_u64());
+            if !held {
+                eprintln!("Error: 404 Not Found: pull request {id}");
+                return 1;
+            }
+            if *verb == "comment" {
+                if option("--text").is_none_or(str::is_empty) {
+                    eprintln!("Error: --text is required");
+                    return 1;
+                }
+                println!("✓ Commented on pull request #{id}");
+            } else {
+                if option("--title").is_none() && option("--description").is_none() {
+                    eprintln!(
+                        "Error: at least one of --title, --body, or --description is required"
+                    );
+                    return 1;
+                }
+                println!("✓ Updated pull request #{id}");
+            }
             return 0;
         }
         ["pr", "merge", id] => {

@@ -35,7 +35,18 @@
 //! The writes answer as `gh` does when they work: `pr create` prints the new pull request's URL
 //! (numbered `created`, 1 by default), `pr merge` and `run rerun` print nothing, and `run list`
 //! prints `runs` of the repository (`{"runs": {"acme/app": [{"databaseId": 7, …}]}}`), `[]`
-//! without.
+//! without. `pr comment` and `pr edit` print the pull request's URL, of one the script holds.
+//!
+//! `pr list` keeps, as `gh` does, the pull requests of `--state` (`open` by default: `OPEN`,
+//! drafts included; `closed`, `merged`, `all`) and of `--head` when given, newest first, at most
+//! `--limit`; each with the fields `--json` asks that it has, `headRefName` being its branch.
+//!
+//! `issue list` keeps the issues of `--state` (`open` by default), with a `--label` and an
+//! `--assignee` (`labels[].name`, `assignees[].login`) when given and, for `--search`, those whose
+//! title or body hold its words (a simplification of GitHub's search), newest first, at most
+//! `--limit`. `issue create` prints the new issue's URL (numbered `created_issue`, 1 by default);
+//! `issue comment`, `edit`, `close` and `reopen` need an issue the script holds and print its
+//! URL.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -61,6 +72,31 @@ fn main() {
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_else(|| json!({}));
     std::process::exit(answer(&script, &args));
+}
+
+/// The fields `--json` asks of each object that it has (`number` when none is asked), and
+/// `headRefName`, the branch a pull request is keyed by, when it is asked and not given.
+fn fields_of(objects: &[&Value], fields: Option<&str>, branches: Option<&[&str]>) -> Vec<Value> {
+    let fields = fields.unwrap_or("number");
+    objects
+        .iter()
+        .enumerate()
+        .map(|(at, object)| {
+            let mut asked: Map<String, Value> = fields
+                .split(',')
+                .filter(|field| !object[field].is_null())
+                .map(|field| (field.to_owned(), object[field].clone()))
+                .collect();
+            if let Some(branch) = branches.map(|branches| branches[at])
+                && fields.split(',').any(|field| field == "headRefName")
+            {
+                asked
+                    .entry("headRefName")
+                    .or_insert_with(|| Value::from(branch));
+            }
+            Value::from(asked)
+        })
+        .collect()
 }
 
 /// What `gh` prints for `args`, and its exit code.
@@ -115,6 +151,104 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 }
             }
         }
+        ["issue", "list", ..] => {
+            let Some(repository) = repository else {
+                eprintln!("fake gh: no -R");
+                return 2;
+            };
+            if let Some(failure) = script["fail"][repository].as_str() {
+                eprintln!("{failure}");
+                return 1;
+            }
+            let state = option("--state").unwrap_or("open");
+            let limit: usize = option("--limit").and_then(|n| n.parse().ok()).unwrap_or(30);
+            let named = |list: &Value, key: &str, name: &str| {
+                list.as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|item| item[key] == name)
+            };
+            let mut issues: Vec<&Value> = script["issues"][repository]
+                .as_object()
+                .into_iter()
+                .flat_map(|issues| issues.values())
+                .filter(|issue| match state {
+                    "all" => true,
+                    state => issue["state"].as_str() == Some(&state.to_uppercase()),
+                })
+                .filter(|issue| {
+                    option("--label").is_none_or(|l| named(&issue["labels"], "name", l))
+                })
+                .filter(|issue| {
+                    option("--assignee").is_none_or(|a| named(&issue["assignees"], "login", a))
+                })
+                .filter(|issue| {
+                    option("--search").is_none_or(|words| {
+                        let text = format!("{} {}", issue["title"], issue["body"]).to_lowercase();
+                        words
+                            .split_whitespace()
+                            .all(|word| text.contains(&word.to_lowercase()))
+                    })
+                })
+                .collect();
+            issues.sort_by_key(|issue| std::cmp::Reverse(issue["number"].as_u64()));
+            issues.truncate(limit);
+            println!(
+                "{}",
+                Value::from(fields_of(&issues, option("--json"), None))
+            );
+            0
+        }
+        [
+            "issue",
+            "create" | "comment" | "edit" | "close" | "reopen",
+            ..,
+        ] => {
+            let Some(repository) = repository else {
+                eprintln!("fake gh: no -R");
+                return 2;
+            };
+            if let Some(failure) = script["fail"][repository].as_str() {
+                eprintln!("{failure}");
+                return 1;
+            }
+            let number = match words[1] {
+                "create" => script["created_issue"].as_u64().unwrap_or(1).to_string(),
+                _ => {
+                    let number = words.get(2).copied().unwrap_or_default();
+                    if script["issues"][repository].get(number).is_none() {
+                        eprintln!(
+                            "GraphQL: Could not resolve to an Issue with the number of {number}."
+                        );
+                        return 1;
+                    }
+                    number.to_owned()
+                }
+            };
+            println!("https://github.com/{repository}/issues/{number}");
+            0
+        }
+        ["pr", "comment" | "edit", number, ..] => {
+            let Some(repository) = repository else {
+                eprintln!("fake gh: no -R");
+                return 2;
+            };
+            if let Some(failure) = script["fail"][repository].as_str() {
+                eprintln!("{failure}");
+                return 1;
+            }
+            let held = script["pulls"][repository]
+                .as_object()
+                .into_iter()
+                .flat_map(|branches| branches.values())
+                .any(|pull| number.parse().ok() == pull["number"].as_u64());
+            if !held {
+                eprintln!("no pull requests found for #{number}");
+                return 1;
+            }
+            println!("https://github.com/{repository}/pull/{number}");
+            0
+        }
         ["pr", "create" | "merge", ..] | ["run", "list" | "rerun", ..] => {
             let Some(repository) = repository else {
                 eprintln!("fake gh: no -R");
@@ -148,21 +282,27 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             }
             let pulls = &script["pulls"][repository];
             if *sub == "list" {
-                // The fields asked of the branch's pull request that its script gives.
-                let fields = option("--json").unwrap_or("number");
-                let found = option("--head")
-                    .map(|branch| &pulls[branch])
-                    .filter(|pull| pull["number"].is_u64())
-                    .map(|pull| {
-                        let asked: Map<String, Value> = fields
-                            .split(',')
-                            .filter(|field| !pull[field].is_null())
-                            .map(|field| (field.to_owned(), pull[field].clone()))
-                            .collect();
-                        vec![Value::from(asked)]
+                let state = option("--state").unwrap_or("open");
+                let limit: usize = option("--limit").and_then(|n| n.parse().ok()).unwrap_or(30);
+                let mut found: Vec<(&String, &Value)> = pulls
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .filter(|(branch, _)| option("--head").is_none_or(|head| head == *branch))
+                    .filter(|(_, pull)| pull["number"].is_u64())
+                    .filter(|(_, pull)| match (state, pull["state"].as_str()) {
+                        ("all", _) => true,
+                        ("open", state) => state.is_none_or(|s| s == "OPEN"),
+                        (asked, Some(state)) => state.eq_ignore_ascii_case(asked),
+                        _ => false,
                     })
-                    .unwrap_or_default();
-                println!("{}", Value::from(found));
+                    .collect();
+                found.sort_by_key(|(_, pull)| std::cmp::Reverse(pull["number"].as_u64()));
+                found.truncate(limit);
+                let branches: Vec<&str> = found.iter().map(|(b, _)| b.as_str()).collect();
+                let pulls: Vec<&Value> = found.iter().map(|(_, pull)| *pull).collect();
+                let listed = fields_of(&pulls, option("--json"), Some(&branches));
+                println!("{}", Value::from(listed));
                 return 0;
             }
             let number: u64 = rest.first().and_then(|n| n.parse().ok()).unwrap_or(0);

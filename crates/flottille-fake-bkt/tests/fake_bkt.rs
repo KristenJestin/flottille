@@ -203,3 +203,33 @@ fn the_writes_answer_as_bkt_does_and_api_answers_the_scripted_body() {
     assert_eq!(json_of(api), json!({"id": 1}));
     assert!(!missing.success());
 }
+
+#[test]
+fn a_comment_and_an_edit_answer_as_bkt_does_for_a_pull_request_it_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    script(
+        dir.path(),
+        json!({"pulls": {"acme/api": [{"id": 12, "state": "OPEN"}]}}),
+    );
+    let run = |args: &[&str]| {
+        let mut all = args.to_vec();
+        all.extend(["--context", "cloud", "--workspace", "acme", "--repo", "api"]);
+        fake(dir.path()).args(all).output().unwrap()
+    };
+
+    let commented = run(&["pr", "comment", "12", "--text", "Looks good"]);
+    let edited = run(&["pr", "edit", "12", "--title", "New title"]);
+    let empty_edit = run(&["pr", "edit", "12"]);
+    let missing = run(&["pr", "comment", "13", "--text", "x"]);
+
+    assert_eq!(
+        String::from_utf8_lossy(&commented.stdout).trim(),
+        "✓ Commented on pull request #12"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&edited.stdout).trim(),
+        "✓ Updated pull request #12"
+    );
+    assert!(!empty_edit.status.success());
+    assert!(!missing.status.success());
+}

@@ -57,3 +57,28 @@ fn auth_status_and_a_work_item_follow_the_script_and_every_call_is_recorded() {
     let received = std::fs::read_to_string(dir.path().join("received.jsonl")).unwrap();
     assert_eq!(received.lines().count(), 5);
 }
+
+#[test]
+fn a_search_answers_the_scripted_items_up_to_its_limit_and_needs_its_jql() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        json!({"search": [{"key": "ABC-2"}, {"key": "ABC-1"}]}).to_string(),
+    )
+    .unwrap();
+    let search = |extra: &[&str]| {
+        let mut args = vec!["jira", "workitem", "search"];
+        args.extend(extra);
+        fake(dir.path()).args(args).output().unwrap()
+    };
+
+    let all = search(&["--jql", "project = ABC", "--json"]);
+    let one = search(&["--jql", "project = ABC", "--json", "--limit", "1"]);
+    let without_jql = search(&["--json"]);
+
+    let items: Value = serde_json::from_slice(&all.stdout).unwrap();
+    assert_eq!(items, json!([{"key": "ABC-2"}, {"key": "ABC-1"}]));
+    let items: Value = serde_json::from_slice(&one.stdout).unwrap();
+    assert_eq!(items, json!([{"key": "ABC-2"}]));
+    assert_eq!(without_jql.status.code(), Some(2));
+}
