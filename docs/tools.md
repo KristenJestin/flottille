@@ -428,10 +428,13 @@ says who answers a call to judge (`docs/design.md` §7.1).
      resolved;
    - a write, a move or a removal of a folder above Flottille's own (`mv ~/.config ~/c.bak`, `rm
      -r` of it, `fs_write` over it), which would take its configuration or data away: by a file
-     tool that writes, or by a run that is not known to only read;
+     tool that writes, or by a run that is not known to only read and names it as a word (the
+     folder a run starts in may hold Flottille's: a project in the home folder);
    - a path in `/proc` through what of any process leads elsewhere on the disk: its `root`,
      `cwd`, `fd`, `exe` or `map_files` (`/proc/self/root/…`, `/proc/<pid>/cwd/…`), under any
-     name it is reached by (`/dev/fd/3`, `/dev/stdin`, a link to `/proc/self/cwd`);
+     name it is reached by (`/dev/fd/3`, a link to `/proc/self/cwd`; `/dev/stdin` for a file
+     tool). The words of a run that name its own streams or nothing (`/dev/stdin`,
+     `/dev/stdout`, `/dev/stderr`, `/dev/null`, `/dev/fd/0` to `/dev/fd/2`) are harmless;
    - a path that cannot be followed on the disk (more than 40 links, a folder that cannot be
      read): where it leads is not known;
    - a recursive deletion that would take a repository: `rm` with `-r`, `-R` or `--recursive`,

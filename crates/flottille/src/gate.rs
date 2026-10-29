@@ -527,7 +527,14 @@ fn run(call: &Call) -> Verdict {
     if let Some(word) = git_word {
         found.base(format!("{word} reaches a .git folder, which git keeps"));
     }
-    let reached = reached(call, &layers);
+    let named = named(call, &layers);
+    let mut reached = call.paths.to_vec();
+    reached.extend(
+        named
+            .iter()
+            .filter(|path| !call.paths.contains(path))
+            .cloned(),
+    );
     if let Some(why) = malformed(&reached) {
         return Verdict::Deny(why);
     }
@@ -605,8 +612,10 @@ fn run(call: &Call) -> Verdict {
             shown_words(call.words)
         ));
     }
+    // The words only: a run's own folder holding Flottille's (a project in the home folder) is
+    // where it works, not what it takes away.
     if !reads {
-        for path in &reached {
+        for path in &named {
             if let Some(why) = above_own(call.own, path) {
                 found.base(why);
             }
@@ -2019,24 +2028,35 @@ fn split(
     Ok(Some(words))
 }
 
-/// The paths a call reaches: those its tool resolved and, for a run, every word of every layer
-/// that can name one, resolved from the folder it runs in (its program is wherever it is
-/// installed).
-fn reached(call: &Call, layers: &[Vec<String>]) -> Vec<Resolved> {
-    let mut reached = call.paths.to_vec();
+/// The paths a run's words name: every word of every layer that can name one, resolved from the
+/// folder it runs in (its program is wherever it is installed), but the run's own streams.
+fn named(call: &Call, layers: &[Vec<String>]) -> Vec<Resolved> {
+    let mut named = Vec::new();
     let Some(folder) = call.paths.first().filter(|_| call.tool == "run") else {
-        return reached;
+        return named;
     };
     for word in layers.iter().flat_map(|layer| &layer[1..]) {
-        if let Some(named) = named_paths(word) {
-            let path = call.grant.place.resolve(&folder.path, named);
-            if !reached.contains(&path) {
-                reached.push(path);
+        if let Some(word) = named_paths(word).filter(|word| !STREAMS.contains(word)) {
+            let path = call.grant.place.resolve(&folder.path, word);
+            if !named.contains(&path) {
+                named.push(path);
             }
         }
     }
-    reached
+    named
 }
+
+/// What names the run's own streams, or nothing: harmless words of a run. Another of its open
+/// files (`/dev/fd/3`) may be anything.
+const STREAMS: [&str; 7] = [
+    "/dev/stdin",
+    "/dev/stdout",
+    "/dev/stderr",
+    "/dev/null",
+    "/dev/fd/0",
+    "/dev/fd/1",
+    "/dev/fd/2",
+];
 
 /// The refusal of a call that names a folder that does not exist and then goes up out of it: the
 /// kernel would fail it (`ENOENT`), and what follows cannot be followed.
@@ -3695,8 +3715,11 @@ mod tests {
                 let verdict = fixture.file(tool, path);
                 assert!(base_class(&verdict), "{tool} {path}: {verdict:?}");
             }
-            let verdict = fixture.run(&format!("cat {path}"));
-            assert!(base_class(&verdict), "cat {path}: {verdict:?}");
+            // A run's own streams are its own (`the_run_s_own_streams_are_harmless_words`).
+            if path != "/dev/stdin" {
+                let verdict = fixture.run(&format!("cat {path}"));
+                assert!(base_class(&verdict), "cat {path}: {verdict:?}");
+            }
         }
         // The reading program's own status is still its own.
         assert!(!base_class(&fixture.run("cat /proc/self/status")));
@@ -3784,6 +3807,52 @@ mod tests {
             assert!(!denied(&verdict), "{line}: {verdict:?}");
         }
         assert!(!base_class(&fixture.file("fs_read", "src/a.rs/x")));
+    }
+
+    #[test]
+    fn a_run_s_own_folder_above_flottille_s_folders_is_not_base() {
+        let mut fixture = Fixture::workspace();
+        // A project whose folder holds Flottille's own folders: a dotfiles repository.
+        fixture.own = vec![fixture.root.join("sub/flottille")];
+        std::fs::create_dir_all(&fixture.own[0]).unwrap();
+
+        for line in ["git commit -m x", "git add notes.md"] {
+            let verdict = fixture.run(line);
+            assert!(!base_class(&verdict), "{line}: {verdict:?}");
+        }
+        for line in [
+            format!("rm -r {}", fixture.root.join("sub").display()),
+            "rm -r sub".to_owned(),
+            "rm -r .".to_owned(),
+        ] {
+            let verdict = fixture.run(&line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains("Flottille's own folders"),
+                "{line}: {verdict:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_run_s_own_streams_are_harmless_words() {
+        let fixture = Fixture::workspace();
+        for stream in [
+            "/dev/stdin",
+            "/dev/stdout",
+            "/dev/stderr",
+            "/dev/null",
+            "/dev/fd/0",
+            "/dev/fd/1",
+            "/dev/fd/2",
+        ] {
+            let line = format!("tee {stream}");
+            let verdict = fixture.run(&line);
+            assert!(!base_class(&verdict), "{line}: {verdict:?}");
+            assert!(!reasons(&verdict).contains(stream), "{line}: {verdict:?}");
+        }
+        assert!(base_class(&fixture.run("tee /dev/fd/3")));
+        assert!(base_class(&fixture.run("cat /dev/fd/3")));
     }
 
     #[test]
