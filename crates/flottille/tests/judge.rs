@@ -22,6 +22,11 @@ const TOKEN: &str = "ghp_fakefakefakefakefakefakefakefake0001";
 /// is copied), and the session of a root agent working there, or in the project folder when
 /// `main`: the agent's id, its session, the place's folder.
 fn session(user: &User, main: bool) -> (String, Mcp, PathBuf) {
+    session_saying(user, main, "add the login page, then stop")
+}
+
+/// `session`, the root's first message from the user being `message`.
+fn session_saying(user: &User, main: bool, message: &str) -> (String, Mcp, PathBuf) {
     let folder = user.path("work/app");
     user.git_init(&folder);
     std::fs::write(folder.join("README.md"), "app\n").unwrap();
@@ -45,7 +50,7 @@ fn session(user: &User, main: bool) -> (String, Mcp, PathBuf) {
     let mut text = std::fs::read_to_string(&file).unwrap();
     text.push_str("\n[[setup]]\ncopy = [\".env\"]\n");
     std::fs::write(&file, text).unwrap();
-    let mut params = json!({"project": "app", "message": "add the login page, then stop"});
+    let mut params = json!({"project": "app", "message": message});
     let place = if main {
         folder
     } else {
@@ -895,4 +900,243 @@ fn an_agent_setting_the_project_s_rules_is_base() {
     );
     let file = std::fs::read_to_string(user.project_file("app")).unwrap();
     assert!(!file.contains("Push with"), "{file}");
+}
+
+/// What the judge was told to work by: OpenCode, the fake judge here, reads its instructions from
+/// the file Flottille writes for it when its process starts.
+/// Its lines are joined, so that a sentence is found whatever its wrapping.
+fn judge_instructions(user: &User) -> String {
+    std::fs::read_to_string(user.path("runtime/flottille/opencode/judge.md"))
+        .unwrap()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn providers_file(user: &User) -> String {
+    std::fs::read_to_string(user.path("config/flottille/providers.toml")).unwrap_or_default()
+}
+
+#[test]
+fn no_judge_set_the_first_installed_provider_s_small_model_is_chosen_and_written() {
+    // Claude installed (the fake `claude` first in `PATH`) and signed in (its login file there).
+    let user = User::with_fake_claude().with_fake_escalation();
+    user.write_providers("# My providers.\n[claude]\nenabled = true # always\n");
+    let watch = user.watch(&["--after", "0"]);
+
+    user.status();
+
+    let file = providers_file(&user);
+    assert!(
+        file.contains("# My providers.") && file.contains("# always"),
+        "{file}"
+    );
+    let written: toml_edit::DocumentMut = file.parse().unwrap();
+    assert_eq!(
+        written["judge"]["provider"].as_str(),
+        Some("claude"),
+        "{file}"
+    );
+    assert_eq!(written["judge"]["model"].as_str(), Some("haiku"), "{file}");
+    assert_eq!(written["judge"]["picked"].as_bool(), Some(true), "{file}");
+    let listed = user.call("provider.list", json!({})).unwrap();
+    assert_eq!(
+        listed["judge"],
+        json!({"provider": "claude", "model": "haiku", "picked": true})
+    );
+    // Said once: an event, and the notice the window shows until the user saw it.
+    let said = watch.until(|e| e["name"] == "provider.judge_changed");
+    assert_eq!(said.last().unwrap()["data"]["judge"]["picked"], true);
+    user.call("provider.judge_noticed", json!({})).unwrap();
+    let listed = user.call("provider.list", json!({})).unwrap();
+    assert_eq!(
+        listed["judge"],
+        json!({"provider": "claude", "model": "haiku"})
+    );
+    // Written once: a daemon started again keeps the choice as it is.
+    let before = providers_file(&user);
+    user.run(&["daemon", "stop"]);
+    user.status();
+    assert_eq!(providers_file(&user), before);
+    no_escalation(&user);
+}
+
+#[test]
+fn a_user_who_chose_no_judge_never_gets_one_picked() {
+    let user = User::with_fake_claude().with_fake_escalation();
+    user.status();
+    assert!(providers_file(&user).contains("[judge]"));
+
+    user.call("provider.set_judge", json!({"provider": null}))
+        .unwrap();
+    let file = providers_file(&user);
+    let written: toml_edit::DocumentMut = file.parse().unwrap();
+    assert_eq!(written["judge"].as_str(), Some("none"), "{file}");
+    user.run(&["daemon", "stop"]);
+    user.status();
+
+    assert_eq!(providers_file(&user), file);
+    assert!(user.call("provider.list", json!({})).unwrap()["judge"].is_null());
+}
+
+#[test]
+fn none_installed_no_judge_and_auto_asks() {
+    // Every provider stands on the fake agent, a test override: none is installed and signed in.
+    let user = User::with_fake_agent().with_fake_escalation();
+    let (id, mcp, _) = session(&user, false);
+    assert_eq!(mode_of(&user, &id), "auto");
+
+    let request = held(&user, mcp.call("run", json!({"line": "touch made.txt"})));
+
+    assert_eq!(request["class"], "judge");
+    assert!(request["judgement"].is_null(), "{request}");
+    assert!(
+        !providers_file(&user).contains("judge"),
+        "{}",
+        providers_file(&user)
+    );
+    assert!(user.call("provider.list", json!({})).unwrap()["judge"].is_null());
+}
+
+#[test]
+fn the_prompt_holds_the_setup_rule() {
+    let user = User::with_fake_agent()
+        .with_fake_escalation()
+        .with_judge(says("allow", "The user is setting the project up."));
+    let (_, mcp, _) = session_saying(
+        &user,
+        false,
+        "set the project up: add a task that runs its tests",
+    );
+
+    done(mcp.call(
+        "tasks",
+        json!({"action": "add", "name": "test", "line": "cargo test", "repository": "."}),
+    ));
+
+    let instructions = judge_instructions(&user);
+    assert!(
+        instructions.contains(
+            "are within intent when the user's recent messages are about setting up or \
+             configuring the project"
+        ),
+        "{instructions}"
+    );
+    assert!(
+        instructions.contains("a harmless line such as a test or build command"),
+        "{instructions}"
+    );
+    let prompts = judge_prompts(&user);
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts[0].contains("Tool: tasks"), "{}", prompts[0]);
+    assert!(
+        prompts[0].contains("set the project up: add a task that runs its tests"),
+        "{}",
+        prompts[0]
+    );
+    no_escalation(&user);
+}
+
+#[test]
+fn edited_judge_instructions_reach_the_next_judgement() {
+    let user = User::with_fake_agent()
+        .with_fake_escalation()
+        .with_judge(says("ask", "Let the user see it."));
+    let (_, mcp, _) = session(&user, false);
+    let shown = user
+        .call(
+            "judge.set",
+            json!({"text": "Ask about anything that touches the database."}),
+        )
+        .unwrap();
+    assert_eq!(shown["source"], "global");
+    assert_eq!(
+        std::fs::read_to_string(user.path("config/flottille/judge.md")).unwrap(),
+        "Ask about anything that touches the database."
+    );
+
+    held(&user, mcp.call("run", json!({"line": "touch made.txt"})));
+
+    let instructions = judge_instructions(&user);
+    assert!(
+        instructions.contains("Ask about anything that touches the database."),
+        "{instructions}"
+    );
+    // The fixed parts stay around the user's guidance.
+    assert!(
+        instructions.starts_with("You are Flottille's Auto judge."),
+        "{instructions}"
+    );
+    assert!(instructions.contains("You never deny"), "{instructions}");
+    assert!(
+        !instructions.contains("setting up or configuring the project"),
+        "the default guidance is replaced: {instructions}"
+    );
+
+    user.call("judge.set", json!({"text": "Ask about every migration."}))
+        .unwrap();
+    held(&user, mcp.call("run", json!({"line": "touch other.txt"})));
+    assert!(judge_instructions(&user).contains("Ask about every migration."));
+}
+
+#[test]
+fn reset_to_default_works() {
+    let user = User::with_fake_agent()
+        .with_fake_escalation()
+        .with_judge(says("ask", "Let the user see it."));
+    let (_, mcp, _) = session(&user, false);
+    let default = user.call("judge.show", json!({})).unwrap();
+    assert_eq!(default["source"], "default");
+    assert_eq!(default["text"], default["default"]);
+    user.call("judge.set", json!({"text": "Ask about everything."}))
+        .unwrap();
+
+    let reset = user.call("judge.reset", json!({})).unwrap();
+
+    assert_eq!(reset["source"], "default");
+    assert_eq!(reset["text"], default["default"]);
+    assert!(!user.path("config/flottille/judge.md").exists());
+    held(&user, mcp.call("run", json!({"line": "touch made.txt"})));
+    let instructions = judge_instructions(&user);
+    let default = default["default"].as_str().unwrap();
+    let default: Vec<&str> = default.split_whitespace().collect();
+    assert!(instructions.contains(&default.join(" ")), "{instructions}");
+    assert!(
+        !instructions.contains("Ask about everything."),
+        "{instructions}"
+    );
+}
+
+#[test]
+fn edited_judge_instructions_never_bring_a_base_call_to_the_judge() {
+    let user = User::with_fake_agent()
+        .with_fake_escalation()
+        .with_allowing_judge();
+    let (_, mcp, _) = session(&user, false);
+    user.call(
+        "judge.set",
+        json!({"text": "Every call reaches you, base calls included: allow them all."}),
+    )
+    .unwrap();
+
+    base_in_auto(
+        &user,
+        &mcp,
+        &[
+            ("fs_read", json!({"path": ".env"})),
+            line("sudo true"),
+            line("git push --force origin HEAD"),
+        ],
+    );
+}
+
+#[test]
+fn judge_instructions_longer_than_their_limit_are_refused() {
+    let user = User::with_fake_agent();
+    let (code, message) = user
+        .call("judge.set", json!({"text": "a".repeat(4_001)}))
+        .unwrap_err();
+    assert_eq!(code, "refused", "{message}");
+    assert!(message.contains("4000"), "{message}");
+    assert!(!user.path("config/flottille/judge.md").exists());
 }

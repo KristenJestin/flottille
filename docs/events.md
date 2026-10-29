@@ -81,12 +81,18 @@ An edit of `providers.toml` by hand is not announced: it is read again at the ne
 
 ### `provider.judge_changed`
 
-The user chose the Auto judge, or none, through the daemon (`provider.set_judge`). An edit of
-`providers.toml` by hand is not announced.
+The user chose the Auto judge, or none, through the daemon (`provider.set_judge`), Flottille picked
+one for a user who never chose (`"picked": true`), or the user saw the notice of the one picked
+(`provider.judge_noticed`). An edit of `providers.toml` by hand is not announced.
 
 | Field | |
 |---|---|
-| `judge` | `{"provider", "model"}`, `model` `null` for the provider's default; `null` when none is chosen. |
+| `judge` | `{"provider", "model", "picked"?}`, `model` `null` for the provider's default; `null` when none is chosen. |
+
+### `judge.changed`
+
+The user edited the Auto judge's guidance, or reset it to the default (`judge.set`,
+`judge.reset`). It has no field: `judge.show` says the text.
 
 ### `workspace.created`
 

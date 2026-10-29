@@ -25,6 +25,7 @@ use crate::commands;
 use crate::deliveries;
 use crate::forge;
 use crate::inbox;
+use crate::judge;
 use crate::mcp;
 use crate::projects::{self, Projects};
 use crate::providers;
@@ -316,6 +317,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     runs::settle_at_start(&daemon);
     approvals::settle_at_start(&daemon);
     projects::migrate_files(&daemon);
+    providers::pick_judge(&daemon);
     tokio::spawn(mcp::serve(
         daemon.clone(),
         tools,
@@ -647,6 +649,13 @@ fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) 
         }
         method if method.starts_with("inbox.") => (
             match inbox::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+            },
+            None,
+        ),
+        method if method.starts_with("judge.") => (
+            match judge::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => Message::error(Some(id), failure.code, failure.message),
             },

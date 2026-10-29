@@ -847,6 +847,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
                     Some(Judge {
                         provider: provider.name.to_owned(),
                         model: model.filter(|m| !m.trim().is_empty()),
+                        picked: false,
                     })
                 }
             };
@@ -856,6 +857,17 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
                     .map_err(|error| Failure::new("unavailable", error.to_string()))?;
             }
             Ok(json!({"judge": judge}))
+        }
+        "provider.judge_noticed" => {
+            if judge_noticed(&daemon.paths)? {
+                let judge = Settings::load(&daemon.paths)
+                    .map_err(|error| Failure::new("invalid-config", error))?
+                    .judge;
+                daemon
+                    .emit("provider.judge_changed", json!({"judge": judge}))
+                    .map_err(|error| Failure::new("unavailable", error.to_string()))?;
+            }
+            Ok(json!({}))
         }
         method => Err(Failure::new(
             "unknown-method",
@@ -921,9 +933,42 @@ fn set_enabled(paths: &Paths, name: &str, enabled: bool) -> Result<bool, Failure
     Ok(true)
 }
 
-/// Sets `[judge]` in `providers.toml`, or removes it when `judge` is none, the rest of the file
-/// kept as the user wrote it. Whether it changed.
+/// Sets `[judge]` in `providers.toml`, or `judge = "none"` when `judge` is none: the user chose
+/// no judge, and none is ever picked for them. The rest of the file is kept as the user wrote it.
+/// Whether it changed.
 fn set_judge(paths: &Paths, judge: Option<&Judge>) -> Result<bool, Failure> {
+    edit_judge(paths, |before, document| {
+        if before.judge_set && before.judge.as_ref() == judge {
+            return false;
+        }
+        document.remove("judge");
+        match judge {
+            Some(judge) => document.insert("judge", judge_table(judge)),
+            None => document.insert("judge", toml_edit::value(provider::NO_JUDGE)),
+        };
+        true
+    })
+}
+
+/// `[judge]` as `providers.toml` holds it.
+fn judge_table(judge: &Judge) -> toml_edit::Item {
+    let mut table = toml_edit::Table::new();
+    table.insert("provider", toml_edit::value(judge.provider.as_str()));
+    if let Some(model) = &judge.model {
+        table.insert("model", toml_edit::value(model.as_str()));
+    }
+    if judge.picked {
+        table.insert("picked", toml_edit::value(true));
+    }
+    toml_edit::Item::Table(table)
+}
+
+/// Changes `providers.toml` with `edit`, given the settings it held: the file is written when
+/// `edit` says it changed it, after the text is read back as settings. Whether it changed.
+fn edit_judge(
+    paths: &Paths,
+    edit: impl FnOnce(&Settings, &mut toml_edit::DocumentMut) -> bool,
+) -> Result<bool, Failure> {
     let _writing = WRITING.lock().unwrap();
     let file = provider::file(paths);
     let unavailable =
@@ -934,9 +979,6 @@ fn set_judge(paths: &Paths, judge: Option<&Judge>) -> Result<bool, Failure> {
         Err(error) => return Err(unavailable(error)),
     };
     let before = Settings::parse(&text).map_err(|error| Failure::new("invalid-config", error))?;
-    if before.judge.as_ref() == judge {
-        return Ok(false);
-    }
     let mut document: toml_edit::DocumentMut =
         text.parse().map_err(|error: toml_edit::TomlError| {
             Failure::new(
@@ -944,20 +986,90 @@ fn set_judge(paths: &Paths, judge: Option<&Judge>) -> Result<bool, Failure> {
                 format!("providers.toml: {}", error.message()),
             )
         })?;
-    document.remove("judge");
-    if let Some(judge) = judge {
-        let mut table = toml_edit::Table::new();
-        table.insert("provider", toml_edit::value(judge.provider.as_str()));
-        if let Some(model) = &judge.model {
-            table.insert("model", toml_edit::value(model.as_str()));
-        }
-        document.insert("judge", toml_edit::Item::Table(table));
+    if !edit(&before, &mut document) {
+        return Ok(false);
     }
     let text = document.to_string();
     Settings::parse(&text).map_err(|error| Failure::new("invalid-config", error))?;
     std::fs::create_dir_all(&paths.config).map_err(unavailable)?;
     write_in_place(&file, &text).map_err(unavailable)?;
     Ok(true)
+}
+
+/// The smallest model of each provider, in the form its agent takes it: what Flottille picks as
+/// the Auto judge for a user who never chose one (`docs/design.md` §7.1). A provider not listed
+/// gets nothing picked: its smallest model is not known for sure.
+pub const SMALLEST: [(&str, &str); 1] = [("claude", "haiku")];
+
+/// What the comment above a judge Flottille picked says.
+const PICKED: &str = "# Picked by Flottille as the Auto judge: the smallest model of the first \
+                      provider installed and signed in.\n# Change it in Settings, or choose no \
+                      judge there (judge = \"none\").\n";
+
+/// Picks the Auto judge of a user who never chose one, nor chose none: the smallest model
+/// (`SMALLEST`) of the first provider, in Flottille's order, that is enabled, installed (its
+/// program on `PATH`; a test override is not an install) and signed in where Flottille can see
+/// it (its login file present, never opened, or its sign-in variable set). Written once to
+/// `providers.toml`, marked `picked` until the user saw the notice, and said once with
+/// `provider.judge_changed`. Nothing when the file says anything of the judge, or no provider
+/// fits.
+pub fn pick_judge(daemon: &Daemon) -> Option<Judge> {
+    let mut picked = None;
+    let written = edit_judge(&daemon.paths, |before, document| {
+        if before.judge_set {
+            return false;
+        }
+        let Some(judge) = PROVIDERS.iter().find_map(|provider| {
+            let (_, model) = SMALLEST.iter().find(|(name, _)| *name == provider.name)?;
+            let check = Check::of(provider, before, Version::Skip);
+            let signed_in = check.login_present || check.api_key.is_some();
+            (check.program.is_some() && check.ready() && signed_in).then(|| Judge {
+                provider: provider.name.to_owned(),
+                model: Some((*model).to_owned()),
+                picked: true,
+            })
+        }) else {
+            return false;
+        };
+        let mut table = judge_table(&judge);
+        if let Some(table) = table.as_table_mut() {
+            // A blank line from what stands before it, when anything does.
+            let blank = if document.is_empty() { "" } else { "\n" };
+            table.decor_mut().set_prefix(format!("{blank}{PICKED}"));
+        }
+        document.insert("judge", table);
+        picked = Some(judge);
+        true
+    });
+    match written {
+        Ok(true) => {
+            if let Err(error) = daemon.emit("provider.judge_changed", json!({"judge": picked})) {
+                eprintln!("flottille daemon: the judge picked could not be said: {error}");
+            }
+            picked
+        }
+        Ok(false) => None,
+        Err(failure) => {
+            eprintln!(
+                "flottille daemon: no Auto judge could be picked: {}",
+                failure.message
+            );
+            None
+        }
+    }
+}
+
+/// The user saw the notice of the judge Flottille picked: it is theirs now, and the notice is not
+/// shown again. Whether it changed.
+fn judge_noticed(paths: &Paths) -> Result<bool, Failure> {
+    edit_judge(paths, |before, document| {
+        if !before.judge.as_ref().is_some_and(|judge| judge.picked) {
+            return false;
+        }
+        document["judge"]
+            .as_table_like_mut()
+            .is_some_and(|table| table.remove("picked").is_some())
+    })
 }
 
 /// Writes `text` in place of `file`, through a temporary file beside it so that a reader sees
