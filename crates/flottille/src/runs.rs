@@ -321,7 +321,7 @@ pub async fn commands_run(
             .find(|g| g.run.agent == agent && g.run.name == name)
             .cloned()
     {
-        return Outcome::Done(describe(daemon, &going.run.id, None, None, true));
+        return Outcome::Done(describe(daemon, &going.run.id, None, None, true, false));
     }
     // Only a push the gate read, and that the user or the judge let through, goes out.
     let lift = approved && gate::is_push(&words);
@@ -353,8 +353,10 @@ pub async fn commands_run(
     }
     if serve {
         detach(daemon, &id);
-        return Outcome::Done(describe(daemon, &id, None, None, true));
+        return Outcome::Done(describe(daemon, &id, None, None, true, false));
     }
+    // Held now: once ended, the run is no longer among those going on.
+    let going = daemon.mcp.runs.runs.lock().unwrap().get(&id).cloned();
     let ended = wait_for_end(daemon, &id);
     tokio::select! {
         () = ended => {}
@@ -364,7 +366,8 @@ pub async fn commands_run(
             return Outcome::Failed("the call was stopped before it ended".into());
         }
     }
-    Outcome::Done(describe(daemon, &id, None, None, true))
+    let by_user = going.is_some_and(|going| going.stopped_by_user.load(Ordering::SeqCst));
+    Outcome::Done(describe(daemon, &id, None, None, true, by_user))
 }
 
 /// The call that started the run answers while it runs: its end wakes the agent, unless it
@@ -680,10 +683,7 @@ async fn follow(
 /// What the agent is told of a run that ended after its call: how it ended, how long it ran and
 /// the end of its output.
 fn ended_text(going: &Going, end: End, output: &str, by_user: bool) -> String {
-    let state = match (end.state, by_user) {
-        (RunState::Stopped, true) => "was stopped by the user".to_owned(),
-        _ => state_text(Some(end)),
-    };
+    let state = state_text(Some(end), by_user);
     let seconds = (now_ms() - going.run.started_at) as f64 / 1000.0;
     let mut text = format!(
         "Your command `{}` (run {}) {state} after {seconds:.1} s.",
@@ -725,8 +725,8 @@ async fn stop(daemon: &Daemon, id: &str, state: RunState) {
     let _ = end.wait_for(Option::is_some).await;
 }
 
-/// How a run is: running, or how it ended.
-fn state_text(end: Option<End>) -> String {
+/// How a run is: running, or how it ended; `by_user` when the user stopped it.
+fn state_text(end: Option<End>, by_user: bool) -> String {
     match end {
         None => "is running".to_owned(),
         Some(End {
@@ -739,6 +739,10 @@ fn state_text(end: Option<End>) -> String {
             signal,
             ..
         }) => format!("was killed by signal {}", signal.unwrap_or_default()),
+        Some(End {
+            state: RunState::Stopped,
+            ..
+        }) if by_user => "was stopped by the user".to_owned(),
         Some(End {
             state: RunState::Stopped,
             ..
@@ -823,7 +827,14 @@ pub async fn commands_status(daemon: &Daemon, agent: &str, args: Value) -> Outco
                     "refused: tail must be 1 to {TAIL_LINES_MAX} lines: read on with start"
                 ));
             }
-            Outcome::Done(describe(daemon, &args.run, Some(tail), args.start, false))
+            Outcome::Done(describe(
+                daemon,
+                &args.run,
+                Some(tail),
+                args.start,
+                false,
+                false,
+            ))
         }
         "stop" => {
             if args.tail.is_some() || args.start.is_some() {
@@ -834,7 +845,7 @@ pub async fn commands_status(daemon: &Daemon, agent: &str, args: Value) -> Outco
                 );
             }
             stop(daemon, &args.run, RunState::Stopped).await;
-            Outcome::Done(describe(daemon, &args.run, None, None, false))
+            Outcome::Done(describe(daemon, &args.run, None, None, false, false))
         }
         other => Outcome::Refused(format!(
             "refused: commands_status has no action {other:?}: its actions are output (the \
@@ -862,6 +873,7 @@ fn describe(
     tail: Option<usize>,
     start: Option<usize>,
     answer_of_run: bool,
+    by_user: bool,
 ) -> String {
     let going = daemon.mcp.runs.runs.lock().unwrap().get(id).cloned();
     let (run, end, output, cut) = match &going {
@@ -887,7 +899,7 @@ fn describe(
         Some(name) => format!("{name} (`{}`)", run.line),
         None => format!("`{}`", run.line),
     };
-    let state = state_text(end);
+    let state = state_text(end, by_user);
     let seconds = (run.ended_at.unwrap_or_else(now_ms) - run.started_at) as f64 / 1000.0;
     let mut text = format!("run {}: {label} {state} after {seconds:.1} s", run.id);
     if end.is_none() && answer_of_run {

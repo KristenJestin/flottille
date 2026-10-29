@@ -23,6 +23,10 @@ type Answer = Result<Value, Failure>;
 const ENDED_LISTED: usize = 30;
 /// A run's last line is cut to this many characters.
 const LAST_LINE_CHARS: usize = 300;
+/// What a list reads of an ended run's output: its last characters, which hold the lines below.
+const TAIL_CHARS: usize = 8 * 1024;
+/// The lines of an ended run's output a list gives, for the card of its result.
+const CARD_LINES: usize = 20;
 /// The lines of output `command.output` gives by default and at most.
 const TAIL_LINES: usize = 200;
 const TAIL_LINES_MAX: usize = 1000;
@@ -97,33 +101,42 @@ fn list(daemon: &Daemon, asked: List) -> Answer {
         ),
         (None, None) => (agents.iter().map(|a| a.id.clone()).collect(), asked.ended),
     };
-    let mut running = Vec::new();
-    let mut ended = Vec::new();
-    for stored in daemon.read(|store| store.runs_of(&ids))? {
-        if stored.state == RunState::Running {
-            if let Some(view) = runs::view(daemon, &stored.id) {
-                running.push((view.run, view.output));
-            }
-        } else if ended_listed {
-            let output = stored.output.clone();
-            ended.push((stored, output));
+    let mut commands: Vec<Value> = Vec::new();
+    for stored in daemon.read(|store| store.running_runs_of(&ids))? {
+        if let Some(view) = runs::view(daemon, &stored.id) {
+            let last = last_line(&view.output);
+            commands.push(listed(daemon, &by_id, &view.run, last, None));
         }
     }
-    ended.drain(..ended.len().saturating_sub(ENDED_LISTED));
-    let commands: Vec<Value> = running
-        .into_iter()
-        .chain(ended)
-        .map(|(run, output)| {
-            let agent = by_id.get(run.agent.as_str());
-            let mut shown = run_json(&run);
-            shown["root"] = tree::root_of(daemon, &run.agent).into();
-            shown["project"] = agent.map(|a| a.project.clone()).into();
-            shown["workspace"] = agent.and_then(|a| a.workspace.clone()).into();
-            shown["last_line"] = last_line(&output).into();
-            shown
-        })
-        .collect();
+    if ended_listed {
+        for stored in daemon.read(|store| store.ended_runs_of(&ids, ENDED_LISTED, TAIL_CHARS))? {
+            let last = last_line(&stored.output);
+            let tail = tail_lines(&stored.output);
+            commands.push(listed(daemon, &by_id, &stored, last, Some(tail)));
+        }
+    }
     Ok(json!({"commands": commands}))
+}
+
+/// A run of a list: the run, where it is, its last line, and for one that ended the lines of its
+/// output a card shows.
+fn listed(
+    daemon: &Daemon,
+    agents: &HashMap<&str, &Agent>,
+    run: &Run,
+    last_line: String,
+    tail: Option<Vec<String>>,
+) -> Value {
+    let agent = agents.get(run.agent.as_str());
+    let mut shown = run_json(run);
+    shown["root"] = tree::root_of(daemon, &run.agent).into();
+    shown["project"] = agent.map(|a| a.project.clone()).into();
+    shown["workspace"] = agent.and_then(|a| a.workspace.clone()).into();
+    shown["last_line"] = last_line.into();
+    if let Some(tail) = tail {
+        shown["tail"] = tail.into();
+    }
+    shown
 }
 
 fn output(daemon: &Daemon, asked: Output) -> Answer {
@@ -192,6 +205,20 @@ fn run_json(run: &Run) -> Value {
     })
 }
 
+/// The last lines of the end of an output, to the card's size. An output cut by the store's
+/// tail starts mid-line: that piece is left out.
+fn tail_lines(tail: &str) -> Vec<String> {
+    let mut lines: Vec<&str> = tail.trim_end().lines().collect();
+    if tail.chars().count() >= TAIL_CHARS && !lines.is_empty() {
+        lines.remove(0);
+    }
+    let from = lines.len().saturating_sub(CARD_LINES);
+    lines[from..]
+        .iter()
+        .map(|line| line.chars().take(LAST_LINE_CHARS).collect())
+        .collect()
+}
+
 /// The last line of the output with something on it, as the program wrote it.
 fn last_line(output: &str) -> String {
     // A line redrawn in place ends with its last state: the window keeps what follows `\r`.
@@ -207,6 +234,18 @@ fn last_line(output: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_tail_is_the_last_lines_without_the_piece_the_cut_left_at_its_start() {
+        assert_eq!(tail_lines("one\ntwo\n"), ["one", "two"]);
+        assert!(tail_lines("").is_empty());
+        let cut = format!("rest of a line\nwhole\n{}", "x".repeat(TAIL_CHARS));
+        let lines = tail_lines(&cut);
+        assert_eq!(lines[0], "whole", "{lines:?}");
+        let many: String = (0..30).map(|n| format!("l{n}\n")).collect();
+        let lines = tail_lines(&many);
+        assert_eq!((lines.len(), lines[0].as_str()), (CARD_LINES, "l10"));
+    }
 
     #[test]
     fn the_last_line_is_the_last_with_something_on_it_cut_to_a_length() {

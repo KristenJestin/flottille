@@ -708,14 +708,17 @@ command in a result:
 `name` is the catalogue command it runs, `null` for a line of the agent's. `state` is `running`,
 `exited`, `stopped` or `interrupted` (`docs/events.md`, "The events of a run"). `last_line` is the
 last line of its output with something on it, masked of secrets and as the program wrote it
-(colours included), cut at 300 characters.
+(colours included), cut at 300 characters. A command that ended also has `tail`, the last 20 lines
+of its output (a list of texts, masked and as written, each cut at 300 characters), which a result
+card in the conversation shows folded; a command running has none.
 
 #### `command.list`
 
 `{"project"?, "tree"?, "ended"?}`. `{"commands": [...]}`: the commands running, oldest first. With
 `project`, the project's; with `tree`, an agent's id, those of the agents of its root's tree; without
 either, every one. With `ended`, the commands that ended and were not dismissed come after them,
-the last 30 at most, and none for a tree whose root ended or failed: they go with their session
+the last 30 to have ended at most, and none for a tree whose root ended or failed: they go with
+their session, and the daemon forgets them when the session is over for good (`docs/tools.md`)
 (`not-found` when `tree` names no agent).
 
 #### `command.output`

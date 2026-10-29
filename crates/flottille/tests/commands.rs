@@ -385,3 +385,78 @@ fn flottille_commands_lists_the_running_commands_of_a_project_and_stops_one() {
     let after = cli(&user, &["commands", "list", "app"]).unwrap();
     assert!(after.contains("No command is running"), "{after}");
 }
+
+#[test]
+fn an_ended_command_is_listed_with_the_tail_of_its_output() {
+    let user = User::with_fake_agent();
+    let (agent, mcp, _) = session(&user);
+    let run = start(&mcp, "ends");
+    prompted(&user, &["[flottille:command-ended]", &run]);
+
+    let commands = listed(&user, &agent);
+
+    assert_eq!(
+        commands[0]["tail"],
+        json!(["start", "\u{1b}[31mred\u{1b}[0m tail-line"]),
+        "the lines the card of the window folds"
+    );
+    // A command that runs has its last line, not a tail.
+    let live = start(&mcp, "server");
+    let running = listed(&user, &agent);
+    let running = running.iter().find(|c| c["run"] == live).unwrap();
+    assert!(running.get("tail").is_none(), "{running}");
+    ok(mcp.call("commands_status", json!({"run": live, "action": "stop"})));
+}
+
+#[test]
+fn a_user_stop_while_the_call_waits_is_told_in_the_call_s_answer() {
+    let user = User::with_fake_agent();
+    let (agent, mcp, _) = session(&user);
+
+    let answer = std::thread::scope(|scope| {
+        let call =
+            scope.spawn(|| mcp.call("commands_run", json!({"command": "ends", "timeout": 30})));
+        eventually("the command to run", || !listed(&user, &agent).is_empty());
+        let run = listed(&user, &agent)[0]["run"].as_str().unwrap().to_owned();
+        user.call("command.stop", json!({"run": run})).unwrap();
+        call.join().unwrap()
+    });
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("was stopped by the user"),
+        "{}",
+        answer.text
+    );
+    // The agent's own stop says what it is: its own.
+    let run = start(&mcp, "server");
+    let own = ok(mcp.call("commands_status", json!({"run": run, "action": "stop"})));
+    assert!(own.contains("was stopped after"), "{own}");
+}
+
+#[test]
+fn the_runs_of_a_session_are_pruned_when_it_is_forgotten_for_good() {
+    let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_CLOCK", "1");
+    let (agent, mcp, _) = session(&user);
+    let quick = run_id(&ok(mcp.call("commands_run", json!({"command": "quick"}))));
+    let server = start(&mcp, "server");
+    user.call("command.stop", json!({"run": server})).unwrap();
+    assert!(user.call("command.output", json!({"run": quick})).is_ok());
+
+    user.call("agent.stop", json!({"agent": agent})).unwrap();
+    user.call("test.advance", json!({"ms": 60_000})).unwrap();
+    assert!(
+        user.call("command.output", json!({"run": quick})).is_ok(),
+        "the session can be resumed: its runs are kept"
+    );
+    // A session kept to be resumed is forgotten after 7 days.
+    user.call("test.advance", json!({"ms": 7 * 24 * 3_600_000_u64}))
+        .unwrap();
+
+    for run in [&quick, &server] {
+        let gone = user
+            .call("command.output", json!({"run": run}))
+            .unwrap_err();
+        assert_eq!(gone.0, "not-found", "{gone:?}");
+    }
+}

@@ -44,6 +44,7 @@ pub fn sweep(daemon: &Arc<Daemon>) {
     tree::end_late_reporters(daemon);
     crate::forge::poll(daemon);
     agents::forget_kept_sessions(daemon);
+    forget_runs(daemon);
     let agents = daemon.read(Store::agents).unwrap_or_default();
     let now = now_ms();
     for agent in agents.iter().filter(|a| !a.state.is_final()) {
@@ -52,6 +53,39 @@ pub fn sweep(daemon: &Arc<Daemon>) {
             AgentState::Idle => children_status(daemon, agent, now),
             _ => {}
         }
+    }
+}
+
+/// The runs of a session that ended for good go with it, as its other data does: a root that
+/// failed, or ended and cannot be resumed, or whose kept session was forgotten, and the tree under
+/// it. A run still running is left to end.
+fn forget_runs(daemon: &Daemon) {
+    let Ok(with_runs) = daemon.read(Store::agents_with_runs) else {
+        return;
+    };
+    if with_runs.is_empty() {
+        return;
+    }
+    let agents = daemon.read(Store::agents).unwrap_or_default();
+    let by_id: std::collections::HashMap<&str, &flottille_core::agent::Agent> =
+        agents.iter().map(|a| (a.id.as_str(), a)).collect();
+    let over: Vec<String> = with_runs
+        .into_iter()
+        .filter(|id| {
+            let mut at = by_id.get(id.as_str());
+            while let Some(agent) = at {
+                match &agent.parent {
+                    Some(parent) => at = by_id.get(parent.as_str()),
+                    None => return agent.state.is_final() && !tree::keeps_session(agent),
+                }
+            }
+            false
+        })
+        .collect();
+    if !over.is_empty()
+        && let Err(error) = daemon.read(|store| store.forget_runs_of(&over))
+    {
+        eprintln!("flottille daemon: forgetting the runs of ended sessions: {error}");
     }
 }
 
