@@ -92,8 +92,10 @@ A path is resolved this way:
   the run to judge; but a program may make the missing folder first (`install -D`), so a `..`
   after a missing part cancels it and the word is followed on, on the disk, and checked where it
   then leads like any other (`install -D f m/../../.ssh/x` is base). After a part that can never
-  be made (a name too long, below a file), nothing can be followed and the word is only to
-  judge. Each part is looked at in the folder opened before
+  be made (a name too long, below a file), nothing can be followed on the disk, but a program
+  that takes `..` on the text (`git restore`, `python3 -m zipfile`) still reaches the path as
+  written: the word is checked as written (`git restore -- <a long name>/../.env` is base).
+  Each part is looked at in the folder opened before
   it, as the kernel walks, so a path whose links expand past the longest path the kernel takes at
   once is still followed. Below `/proc`, links are not followed: `/proc/self` is the reading
   program's own; a `..` below `/proc` goes where such a link leads (`/proc/net/..` is

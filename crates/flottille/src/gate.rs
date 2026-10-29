@@ -540,8 +540,16 @@ fn run(call: &Call) -> Verdict {
         // A word that goes up out of a folder that is not there is often no path at all (a
         // `sed` expression, a message, a URL), and the judge reads it as written. A program may
         // make that folder first (`install -D`): it is checked where it then leads. One the
-        // kernel could never make leads nowhere the gate can follow.
+        // kernel could never make, a program that takes `..` on the text still reaches
+        // (`git restore`, `python3 -m zipfile`): it is checked as written.
         let unmade = path.unfollowed == Some(Unfollowed::UpFromMissing);
+        let written;
+        let path = if unmade {
+            written = as_written(path);
+            &written
+        } else {
+            path
+        };
         if unmade || path.up_from_missing {
             let word = named
                 .iter()
@@ -556,9 +564,6 @@ fn run(call: &Call) -> Verdict {
                     ""
                 }
             ));
-            if unmade {
-                continue;
-            }
         }
         if in_git(path) {
             found.base(format!(
@@ -570,7 +575,7 @@ fn run(call: &Call) -> Verdict {
             found.base(why);
         } else if let Some(place) = sensitive(call.own, path) {
             found.base(format!("{} is a sensitive place ({place})", path.shown));
-        } else if !path.inside {
+        } else if !path.inside && !unmade {
             found.judge(format!("{} is outside this agent's place", path.shown));
         }
     }
@@ -637,9 +642,14 @@ fn run(call: &Call) -> Verdict {
     // where it works, not what it takes away.
     if !reads {
         for (_, path) in &named {
-            if path.unfollowed != Some(Unfollowed::UpFromMissing)
-                && let Some(why) = above_own(call.own, path)
-            {
+            let written;
+            let path = if path.unfollowed == Some(Unfollowed::UpFromMissing) {
+                written = as_written(path);
+                &written
+            } else {
+                path
+            };
+            if let Some(why) = above_own(call.own, path) {
                 found.base(why);
             }
         }
@@ -2149,6 +2159,16 @@ fn named<'a>(call: &Call, layers: &'a [Vec<String>]) -> Vec<(&'a str, Resolved)>
         }
     }
     named
+}
+
+/// A path that could not be followed, taken as written: `..` on the text, as a program that
+/// never asks the kernel reaches it.
+fn as_written(path: &Resolved) -> Resolved {
+    Resolved {
+        path: path.written.clone(),
+        unfollowed: None,
+        ..path.clone()
+    }
 }
 
 /// What names the run's own streams, or nothing: harmless words of a run. Another of its open
@@ -4165,6 +4185,39 @@ mod tests {
         // Without a pathspec, `git clean` cleans the folder it runs in only.
         let verdict = fixture.run("git clean -fdx");
         assert!(!base_class(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_word_through_a_name_the_kernel_could_never_make_is_checked_as_written() {
+        let fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        std::fs::create_dir_all(base.join("home/.ssh")).unwrap();
+        std::fs::write(fixture.root.join("notes.md"), "n").unwrap();
+        let own = fixture.own[0].clone();
+        std::fs::create_dir_all(&own).unwrap();
+        let long = "n".repeat(300);
+        let own_word = own.strip_prefix(&base).unwrap().display().to_string();
+        // `git restore` and `python3 -m zipfile` take `..` on the text: they reach the path as
+        // written.
+        for line in [
+            format!("git restore -- {long}/../.env"),
+            format!("python3 -m zipfile -e a.zip {long}/../../../home/.ssh/z2"),
+            "python3 -m zipfile -e a.zip notes.md/x/../../../../home/.ssh".into(),
+            format!("python3 -m zipfile -e a.zip {long}/../../../{own_word}"),
+        ] {
+            let verdict = fixture.run(&line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains("names a folder that does not exist"),
+                "{line}: {verdict:?}"
+            );
+        }
+        let verdict = fixture.run("git commit -m 'fix foo/../bar'");
+        assert!(to_judge(&verdict), "{verdict:?}");
+        // The file tools still refuse it.
+        assert!(denied(
+            &fixture.file("fs_write", &format!("{long}/../.env"))
+        ));
     }
 
     #[test]
