@@ -165,7 +165,9 @@ and whatever else they want.
 
 The project's rules **replace** the global ones, they do not extend them: a project that wants
 both copies the global text and adds to it. A project without its own follows the global rules,
-or the default when there are none. Rules are at most 8,000 characters; an empty text is no rules.
+or the default when there are none. Rules are at most 8,000 characters; an empty text is no rules. A `rules.md` or a `rules` key
+edited by hand past the limit is cut to it: agents get the first 8,000 characters, and the
+daemon's log, `rules.show`, `project {action: "rules"}` and the editor say why.
 
 ```toml
 rules = """

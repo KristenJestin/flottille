@@ -58,31 +58,83 @@ pub fn global(paths: &Paths) -> Result<Option<String>, Failure> {
 }
 
 /// The rules of a project's agents: its own, else the user's, else the default. A file that
-/// cannot be read is the default, said in the daemon's log: no agent is kept from starting.
+/// cannot be read is the default, said in the daemon's log: no agent is kept from starting. Rules
+/// edited by hand beyond the limit are cut to it, which the daemon's log says.
 pub fn effective(paths: &Paths, project: &Project) -> Rules {
-    if let Some(text) = &project.rules {
-        return Rules {
-            text: text.clone(),
-            source: Source::Project,
-        };
+    let (rules, cut) = resolved(paths, project);
+    if let Some(cut) = cut {
+        eprintln!("flottille daemon: rules: {cut}");
     }
-    match global(paths) {
-        Ok(Some(text)) => Rules {
+    rules
+}
+
+/// `effective`, with why the text was cut when it was.
+pub fn resolved(paths: &Paths, project: &Project) -> (Rules, Option<String>) {
+    match &project.rules {
+        Some(text) => limited(
             text,
-            source: Source::Global,
-        },
-        Ok(None) => Rules {
-            text: DEFAULT.to_owned(),
-            source: Source::Default,
-        },
-        Err(failure) => {
-            eprintln!("flottille daemon: rules: {}", failure.message);
+            Source::Project,
+            &format!(
+                "the rules of project {} (the rules key of its file)",
+                project.name
+            ),
+        ),
+        None => users(paths),
+    }
+}
+
+/// The rules a project without its own follows: the user's, else the default.
+fn users(paths: &Paths) -> (Rules, Option<String>) {
+    match global(paths) {
+        Ok(Some(text)) => limited(
+            &text,
+            Source::Global,
+            &format!("your rules for all projects ({})", paths.rules().display()),
+        ),
+        Ok(None) => (
             Rules {
                 text: DEFAULT.to_owned(),
                 source: Source::Default,
-            }
+            },
+            None,
+        ),
+        Err(failure) => {
+            eprintln!("flottille daemon: rules: {}", failure.message);
+            (
+                Rules {
+                    text: DEFAULT.to_owned(),
+                    source: Source::Default,
+                },
+                None,
+            )
         }
     }
+}
+
+/// The rules as stored, cut to the limit when a hand edit went past it: `rules.set` refuses such
+/// a text, a file edited by hand does not go through it.
+fn limited(text: &str, source: Source, whose: &str) -> (Rules, Option<String>) {
+    let count = text.chars().count();
+    if count <= LIMIT {
+        return (
+            Rules {
+                text: text.to_owned(),
+                source,
+            },
+            None,
+        );
+    }
+    let cut = format!(
+        "{whose} are {count} characters long and may hold {LIMIT}: agents get the first {LIMIT} \
+         only, since the rules ride in every agent's instructions; shorten them"
+    );
+    (
+        Rules {
+            text: text.chars().take(LIMIT).collect(),
+            source,
+        },
+        Some(cut),
+    )
 }
 
 /// What is wrong with a text offered as rules.
@@ -164,29 +216,23 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
     }
 }
 
-/// `{"project"?, "text", "source", "default", "global"}`: the text agents get from now on at that
-/// level, where it comes from, Flottille's default, and the text a project without rules of its
-/// own follows.
+/// `{"project"?, "text", "source", "cut", "default", "global"}`: the text agents get from now on
+/// at that level, where it comes from, why it was cut to the limit (`null` when it was not),
+/// Flottille's default, and the text a project without rules of its own follows.
 fn show(daemon: &Daemon, project: Option<&str>) -> Result<Value, Failure> {
     let paths = &daemon.paths;
-    let global = global(paths)?;
-    let followed = Rules {
-        text: global.clone().unwrap_or_else(|| DEFAULT.to_owned()),
-        source: if global.is_some() {
-            Source::Global
-        } else {
-            Source::Default
-        },
-    };
-    let (rules, name) = match project {
-        Some(name) => (
-            effective(paths, &projects::load_project(daemon, name)?),
-            Some(name),
-        ),
-        None => (followed.clone(), None),
+    // A file that cannot be read is said to the user, not taken for the default.
+    global(paths)?;
+    let (followed, followed_cut) = users(paths);
+    let (rules, cut, name) = match project {
+        Some(name) => {
+            let (rules, cut) = resolved(paths, &projects::load_project(daemon, name)?);
+            (rules, cut, Some(name))
+        }
+        None => (followed.clone(), followed_cut, None),
     };
     Ok(
-        json!({"project": name, "text": rules.text, "source": rules.source.word(),
+        json!({"project": name, "text": rules.text, "source": rules.source.word(), "cut": cut,
         "default": DEFAULT, "global": followed.text}),
     )
 }

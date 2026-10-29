@@ -254,6 +254,68 @@ fn rules_longer_than_the_limit_are_refused() {
 }
 
 #[test]
+fn rules_md_edited_by_hand_beyond_the_limit_is_cut_and_the_cut_is_said() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let long = format!("{}TAIL", "x".repeat(8_000));
+    std::fs::create_dir_all(user.path("config/flottille")).unwrap();
+    std::fs::write(user.path("config/flottille/rules.md"), &long).unwrap();
+
+    let (agent, _) = root(&user, None);
+    let (before, _) = instructions(&user, &agent);
+    assert!(
+        before.contains(&"x".repeat(8_000)),
+        "the first 8000 are given"
+    );
+    assert!(!before.contains("TAIL"), "past the limit is cut");
+    let shown = user.call("rules.show", json!({})).unwrap();
+    let cut = shown["cut"].as_str().unwrap_or_else(|| panic!("{shown}"));
+    assert!(
+        cut.contains("8004 characters") && cut.contains("8000") && cut.contains("rules.md"),
+        "{cut}"
+    );
+    // The file is the user's: it is read, never rewritten.
+    assert_eq!(
+        std::fs::read_to_string(user.path("config/flottille/rules.md")).unwrap(),
+        long
+    );
+}
+
+#[test]
+fn a_project_rules_key_edited_by_hand_beyond_the_limit_is_cut_and_the_cut_is_said() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let file = user.project_file("app");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(
+        &file,
+        format!("rules = \"{}TAIL\"\n{text}", "y".repeat(8_000)),
+    )
+    .unwrap();
+
+    let (agent, mcp) = root(&user, None);
+    let (_, after) = instructions(&user, &agent);
+    assert!(
+        after.contains(&"y".repeat(8_000)),
+        "the first 8000 are given"
+    );
+    assert!(!after.contains("TAIL"), "past the limit is cut");
+    let shown = user.call("rules.show", json!({"project": "app"})).unwrap();
+    let cut = shown["cut"].as_str().unwrap_or_else(|| panic!("{shown}"));
+    assert!(
+        cut.contains("project app") && cut.contains("8004 characters") && cut.contains("8000"),
+        "{cut}"
+    );
+    // The agent reading them is told too.
+    let read = done(mcp.call("project", json!({"action": "rules"})));
+    assert!(read.contains(cut), "{read}");
+    assert!(!read.contains("TAIL"), "{read}");
+    // Within the limit, nothing is said.
+    let fine = user.call("rules.show", json!({})).unwrap();
+    assert!(fine["cut"].is_null(), "{fine}");
+}
+
+#[test]
 fn an_agent_reads_the_rules_and_its_set_rules_is_held_and_applied_on_approval() {
     let user = User::with_fake_agent();
     project(&user);

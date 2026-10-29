@@ -328,17 +328,19 @@ fn rules_say(project: &Project, call: &ProjectCall) -> Result<Vec<String>, Outco
     ])
 }
 
-/// What `rules` answers: the rules the agents started from now on get, and where they come from.
+/// What `rules` answers: the rules the agents created from now on get, and where they come from.
 fn rules_text(project: &Project, paths: &flottille_core::paths::Paths) -> String {
-    let rules = crate::rules::effective(paths, project);
+    let (rules, cut) = crate::rules::resolved(paths, project);
     let from = match rules.source {
         crate::rules::Source::Project => "this project's own rules",
         crate::rules::Source::Global => "the user's rules for all projects",
         crate::rules::Source::Default => "Flottille's default rules",
     };
+    let cut = cut.map_or_else(String::new, |cut| format!(" Cut: {cut}."));
     format!(
-        "The rules agents of project {} get from now on are {from}. Yours are in your \
-         instructions; set_rules proposes a change, held for the user.\n\n{}",
+        "The rules agents of project {} get from now on are {from}.{cut} Yours are in your \
+         instructions; set_rules proposes a change, to judge like the project's other \
+         changes.\n\n{}",
         project.name,
         rules.text.trim_end()
     )

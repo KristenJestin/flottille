@@ -235,9 +235,10 @@ is not taken or not read; it is not a refusal.
 rules for all projects (`rules.md` in Flottille's configuration folder), with it on the project's
 own (the `rules` key of its file, where it stands, what is around it kept).
 
-- `rules.show {project?}` answers `{"project", "text", "source", "default", "global"}`: the text
-  agents started from now on get at that level, its `source` (`default`, `global` or `project`),
-  Flottille's default text, and the text a project without its own follows.
+- `rules.show {project?}` answers `{"project", "text", "source", "cut", "default", "global"}`: the
+  text agents created from now on get at that level, its `source` (`default`, `global` or
+  `project`), why it was cut to the limit (`null` when it was not), Flottille's default text, and
+  the text a project without its own follows.
 - `rules.set {project?, text}` writes the text and answers as `rules.show`. `refused` above
   8,000 characters. An empty text is no rules.
 - `rules.reset {project?}` removes the file or the key, and answers as `rules.show`.
