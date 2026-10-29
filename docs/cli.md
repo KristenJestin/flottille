@@ -278,8 +278,8 @@ Workspace login of shop, branch shop/login, in ~/.local/share/flottille/workspac
 Ready.
 ```
 
-A repository with no remote, or whose fetch fails, starts from its own branch, and its line says
-why: `  lib: main, no remote origin: started from the local main`.
+A repository with no remote, or whose fetch fails, starts from its tracking ref as last fetched or
+from its own branch, and its line says why: `  lib: main, no remote origin: started from the local main`.
 
 ### `flottille workspace list [project]`
 

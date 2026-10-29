@@ -459,6 +459,11 @@ fn a_failed_fetch_falls_back_the_same_way() {
     fixture.configure("");
     // `origin` of lib now leads nowhere: its fetch fails.
     std::fs::rename(fixture.remote("lib"), fixture.user.path("remotes/gone.git")).unwrap();
+    // Nothing tracked of it: the local branch is what is left.
+    fixture.user.git(
+        &fixture.folder.join("lib"),
+        &["update-ref", "-d", "refs/remotes/origin/main"],
+    );
     let local = fixture.git(&fixture.folder.join("lib"), &["rev-parse", "main"]);
 
     let created = fixture.create(json!({})).unwrap();
@@ -617,6 +622,47 @@ fn a_workspace_of_a_repository_with_no_remote_is_removed_unless_it_holds_commits
     assert!(lib.join("feature.rs").exists());
 }
 
+#[test]
+fn a_failed_fetch_starts_from_the_tracking_ref_the_offline_creation_would_take() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    // `lib` has `origin/develop` as last fetched, and no `develop` of its own.
+    let lib = fixture.folder.join("lib");
+    fixture
+        .user
+        .git(&lib, &["checkout", "--quiet", "-b", "develop"]);
+    std::fs::write(lib.join("DEVELOP.md"), "on develop\n").unwrap();
+    fixture.user.git(&lib, &["add", "."]);
+    fixture
+        .user
+        .git(&lib, &["commit", "--quiet", "-m", "on develop"]);
+    fixture
+        .user
+        .git(&lib, &["push", "--quiet", "origin", "develop"]);
+    fixture.user.git(&lib, &["checkout", "--quiet", "main"]);
+    fixture
+        .user
+        .git(&lib, &["branch", "--quiet", "-D", "develop"]);
+    let tracked = fixture.git(&lib, &["rev-parse", "refs/remotes/origin/develop"]);
+    std::fs::rename(fixture.remote("lib"), fixture.user.path("remotes/gone.git")).unwrap();
+
+    let created = fixture.create(json!({"repositories": ["lib"]})).unwrap();
+
+    let base = &created["repositories"][0]["base"];
+    assert_eq!(base["branch"], "develop");
+    assert_eq!(base["ref"], "refs/remotes/origin/develop");
+    assert_eq!(base["commit"], tracked.as_str());
+    assert_eq!(base["fetched_now"], false);
+    let note = base["note"].as_str().unwrap();
+    assert!(note.starts_with("origin could not be fetched ("), "{note}");
+    assert!(
+        note.ends_with("): started from origin/develop as last fetched"),
+        "{note}"
+    );
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    assert!(fixture.workspace("login").join("lib/DEVELOP.md").is_file());
+}
+
 /// A commit of `lib`'s own `main`, kept local.
 fn local_commit(fixture: &Fixture) {
     let lib = fixture.folder.join("lib");
@@ -632,6 +678,10 @@ fn a_workspace_started_from_a_local_base_is_removed_when_the_fetch_failed() {
     let fixture = Fixture::new(false);
     fixture.configure("");
     std::fs::rename(fixture.remote("lib"), fixture.user.path("remotes/gone.git")).unwrap();
+    fixture.user.git(
+        &fixture.folder.join("lib"),
+        &["update-ref", "-d", "refs/remotes/origin/main"],
+    );
     local_commit(&fixture);
     fixture.create(json!({"repositories": ["lib"]})).unwrap();
     assert_eq!(fixture.settled("login")["state"], "ready");
@@ -675,6 +725,10 @@ fn a_workspace_started_from_a_local_base_still_refuses_its_own_commits() {
     let fixture = Fixture::new(false);
     fixture.configure("");
     std::fs::rename(fixture.remote("lib"), fixture.user.path("remotes/gone.git")).unwrap();
+    fixture.user.git(
+        &fixture.folder.join("lib"),
+        &["update-ref", "-d", "refs/remotes/origin/main"],
+    );
     local_commit(&fixture);
     fixture.create(json!({"repositories": ["lib"]})).unwrap();
     fixture.settled("login");

@@ -346,7 +346,7 @@ A workspace is one worktree per repository, on one branch, prepared by the proje
 creation, not yet filled. A base's `fetched_now` is false when the workspace was created offline or from a local branch;
 `note` is there when it started from the repository's own branch rather than the remote's, and
 says why in one line (`no remote origin: started from the local main`, `origin could not be
-fetched (…): started from the local develop`);
+fetched (…): started from origin/develop as last fetched`, `…: started from the local main`);
 `fetched_at` (milliseconds since the Unix epoch) is when its tracking ref was last updated, `null`
 when unknown. Its `urls` are where its remote led at creation, fetch and push, credentials taken
 out (`docs/commands.md`); absent for a workspace created before they were recorded. A step's `kind` is `worktree`, `copy` (`globs`), `link` (`path`), `root_entries`

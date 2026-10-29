@@ -64,8 +64,10 @@ the one branch chosen for it (`--base`, the form's base field), is read against 
 fetching it fails (a network down, an address that leads nowhere), or when none of the rule's
 branches is on it, the base is the first branch of the rule the repository has itself
 (`refs/heads/<b>`), as it is, and the creation says why in one line, the base's `note`: `no remote
-origin: started from the local main`, `origin could not be fetched (<git's reason>): started from
-the local develop`. The CLI prints it on the repository's line, the agent's `workspace create`
+origin: started from the local main`. When the listing or the fetch fails, the same lookup as
+`--offline` comes first (the first branch of the rule with a tracking ref, as last fetched), then
+the local branches: `origin could not be fetched (<git's reason>): started from origin/develop as
+last fetched`, `…: started from the local main`. The CLI prints it on the repository's line, the agent's `workspace create`
 says it, and the window shows it under the repository on the workspace's card and in the rail. A
 stale cache once based a branch on `main` instead of `develop`: the line is there so that a base
 taken without a fetch is never silent. Only a repository with none of its base branches, on the

@@ -460,9 +460,10 @@ async fn commit_of(main: &Path, reference: &str) -> Result<Option<String>, Failu
 }
 
 /// The base of one repository's branch: the first branch of the rule that is on the remote,
-/// fetched into its tracking ref. Offline, the first one with a tracking ref, as it is. A fetch is
-/// never a requirement: with no remote, a fetch that fails, or none of the rule there, it is the
-/// first branch of the rule the repository has itself ([`local_base`]).
+/// fetched into its tracking ref. Offline, or when the fetch fails, the first one with a tracking
+/// ref, as it is ([`tracked_base`]). A fetch is never a requirement: with no remote, no tracking
+/// ref, or none of the rule on the remote, it is the first branch of the rule the repository has
+/// itself ([`local_base`]).
 async fn up_to_date_base(
     main: &Path,
     path: &str,
@@ -483,38 +484,8 @@ async fn up_to_date_base(
         return local_base(main, path, remote, rule, format!("no remote {remote}")).await;
     }
     if offline {
-        for branch in rule {
-            if let Some(commit) = commit_of(main, &tracking(branch)).await? {
-                let updated = git::run(
-                    main,
-                    &[
-                        "log",
-                        "-g",
-                        "-n1",
-                        "--format=%ct",
-                        "--end-of-options",
-                        &tracking(branch),
-                    ],
-                    Class::Read,
-                )
-                .await
-                .map_err(Failure::refused)?;
-                let fetched_at = updated
-                    .success
-                    .then(|| updated.stdout.trim().parse::<u64>().ok())
-                    .flatten()
-                    .map(|seconds| seconds * 1000);
-                return Ok(Base {
-                    branch: branch.clone(),
-                    remote: remote.to_owned(),
-                    urls: forge::urls_of(main, remote).await,
-                    reference: tracking(branch),
-                    commit,
-                    fetched_now: false,
-                    fetched_at,
-                    note: None,
-                });
-            }
+        if let Some(base) = tracked_base(main, remote, rule).await? {
+            return Ok(base);
         }
         let why = format!(
             "offline, no tracking ref of {remote} for {}",
@@ -538,7 +509,9 @@ async fn up_to_date_base(
     .await
     {
         Ok(heads) => heads,
-        Err(reason) => return local_base(main, path, remote, rule, cannot_fetch(reason)).await,
+        Err(reason) => {
+            return after_failed_fetch(main, path, remote, rule, cannot_fetch(reason)).await;
+        }
     };
     let on_remote: Vec<&String> = rule
         .iter()
@@ -562,7 +535,7 @@ async fn up_to_date_base(
             .map(|branch| format!("+refs/heads/{branch}:{}", tracking(branch))),
     );
     if let Err(reason) = git::output(main, &fetch, Class::Read).await {
-        return local_base(main, path, remote, rule, cannot_fetch(reason)).await;
+        return after_failed_fetch(main, path, remote, rule, cannot_fetch(reason)).await;
     }
     let commit = commit_of(main, &tracking(branch)).await?.ok_or_else(|| {
         Failure::refused(format!(
@@ -580,6 +553,67 @@ async fn up_to_date_base(
         fetched_at: Some(now_ms()),
         note: None,
     })
+}
+
+/// The first branch of the rule that has a tracking ref, as it is.
+async fn tracked_base(main: &Path, remote: &str, rule: &[String]) -> Result<Option<Base>, Failure> {
+    for branch in rule {
+        let reference = format!("refs/remotes/{remote}/{branch}");
+        let Some(commit) = commit_of(main, &reference).await? else {
+            continue;
+        };
+        let updated = git::run(
+            main,
+            &[
+                "log",
+                "-g",
+                "-n1",
+                "--format=%ct",
+                "--end-of-options",
+                &reference,
+            ],
+            Class::Read,
+        )
+        .await
+        .map_err(Failure::refused)?;
+        let fetched_at = updated
+            .success
+            .then(|| updated.stdout.trim().parse::<u64>().ok())
+            .flatten()
+            .map(|seconds| seconds * 1000);
+        return Ok(Some(Base {
+            branch: branch.clone(),
+            remote: remote.to_owned(),
+            urls: forge::urls_of(main, remote).await,
+            reference,
+            commit,
+            fetched_now: false,
+            fetched_at,
+            note: None,
+        }));
+    }
+    Ok(None)
+}
+
+/// A fetch that failed starts from what `--offline` would take (the tracking refs as last
+/// fetched), then from the local branches, and says which.
+async fn after_failed_fetch(
+    main: &Path,
+    path: &str,
+    remote: &str,
+    rule: &[String],
+    why: String,
+) -> Result<Base, Failure> {
+    match tracked_base(main, remote, rule).await? {
+        Some(mut base) => {
+            base.note = Some(format!(
+                "{why}: started from {remote}/{} as last fetched",
+                base.branch
+            ));
+            Ok(base)
+        }
+        None => local_base(main, path, remote, rule, why).await,
+    }
 }
 
 /// The first branch of the rule the repository has itself, and a line that says why the base is
