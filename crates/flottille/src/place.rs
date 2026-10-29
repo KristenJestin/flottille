@@ -6,13 +6,21 @@
 //! `src/cfg/../x` is where `src/cfg` leads, then up: never `src/x` when `src/cfg` is a link.
 
 use std::collections::BTreeMap;
-use std::io::ErrorKind;
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Component, Path, PathBuf};
 
 use flottille_core::secrets;
+use rustix::fs::{AtFlags, FileType, Mode};
+use rustix::io::Errno;
+
+use crate::nofollow;
 
 /// Links followed at most, resolving one path: Linux follows 40.
 const LINKS_MAX: usize = 40;
+
+/// The longest name of one part of a path Linux takes; a longer one is not there.
+const NAME_MAX: usize = 255;
 
 /// What a process's folder in `/proc` holds that leads elsewhere: its root, its working folder,
 /// its open files, its program, its mapped files.
@@ -280,17 +288,24 @@ pub fn real_path(path: &Path) -> std::io::Result<PathBuf> {
 
 /// `real_path`, saying which process's folder in `/proc` it went through. Below `/proc`, links
 /// are not followed: `/proc/self` is the reader's own, which is not Flottille's, and what a
-/// process's folder leads to is its own. A part the kernel would not find (missing, too long a
-/// name, below a file) is missing; a `..` after it is refused, since nothing after it can be
-/// followed.
+/// process's folder leads to is its own; a `..` there is where such a link leads, so the path
+/// goes through it. A part the kernel would not find (missing, too long a name, below a file) is
+/// missing; a `..` after it is refused, since nothing after it can be followed.
+///
+/// Each part is looked at in the folder opened before it, as the kernel walks: the whole path,
+/// links expanded, may be longer than it takes in one name.
 pub fn follow(path: &Path) -> Result<Followed, Unfollowed> {
-    let failed = |error: std::io::Error| Unfollowed::Failed(error.to_string());
+    let failed = |error: Errno| Unfollowed::Failed(std::io::Error::from(error).to_string());
     let mut pending: Vec<PathBuf> = path
         .components()
         .rev()
         .map(|c| PathBuf::from(c.as_os_str()))
         .collect();
     let mut real = PathBuf::from("/");
+    // The open folders of `real`, `/` first; `file` when its last part is not a folder.
+    let root = rustix::fs::open("/", nofollow::THROUGH, Mode::empty()).map_err(failed)?;
+    let mut folders = vec![root];
+    let mut file = false;
     let mut links = 0;
     let mut missing = false;
     let mut through = None;
@@ -298,11 +313,27 @@ pub fn follow(path: &Path) -> Result<Followed, Unfollowed> {
         match part.components().next() {
             Some(Component::RootDir) => {
                 real = PathBuf::from("/");
+                folders.truncate(1);
+                file = false;
                 continue;
             }
             Some(Component::CurDir) | None => continue,
             Some(Component::ParentDir) if missing => return Err(Unfollowed::UpFromMissing),
+            Some(Component::ParentDir)
+                if real.starts_with("/proc") && real != Path::new("/proc") =>
+            {
+                let process = through.unwrap_or_else(|| real.clone());
+                return Ok(Followed {
+                    path: real,
+                    through: Some(process),
+                });
+            }
             Some(Component::ParentDir) => {
+                if file {
+                    file = false;
+                } else if folders.len() > 1 {
+                    folders.pop();
+                }
                 real.pop();
                 continue;
             }
@@ -316,22 +347,42 @@ pub fn follow(path: &Path) -> Result<Followed, Unfollowed> {
             }
             continue;
         }
-        match std::fs::symlink_metadata(&next) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                links += 1;
-                if links > LINKS_MAX {
-                    return Err(Unfollowed::Failed(format!("more than {LINKS_MAX} links")));
+        let name = part.as_os_str();
+        if file || name.len() > NAME_MAX {
+            missing = true;
+            real = next;
+            continue;
+        }
+        let folder = folders.last().expect("`/` is never left");
+        match rustix::fs::statat(folder, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => match FileType::from_raw_mode(stat.st_mode) {
+                FileType::Symlink => {
+                    links += 1;
+                    if links > LINKS_MAX {
+                        return Err(Unfollowed::Failed(format!("more than {LINKS_MAX} links")));
+                    }
+                    let target =
+                        rustix::fs::readlinkat(folder, name, Vec::new()).map_err(failed)?;
+                    let target = PathBuf::from(OsString::from_vec(target.into_bytes()));
+                    pending.extend(
+                        target
+                            .components()
+                            .rev()
+                            .map(|c| PathBuf::from(c.as_os_str())),
+                    );
                 }
-                let target = std::fs::read_link(&next).map_err(failed)?;
-                pending.extend(
-                    target
-                        .components()
-                        .rev()
-                        .map(|c| PathBuf::from(c.as_os_str())),
-                );
-            }
-            Ok(_) => real = next,
-            Err(error) if not_there(&error) => {
+                FileType::Directory => {
+                    let opened = rustix::fs::openat(folder, name, nofollow::THROUGH, Mode::empty())
+                        .map_err(failed)?;
+                    folders.push(opened);
+                    real = next;
+                }
+                _ => {
+                    file = true;
+                    real = next;
+                }
+            },
+            Err(Errno::NOENT) => {
                 missing = true;
                 real = next;
             }
@@ -342,16 +393,6 @@ pub fn follow(path: &Path) -> Result<Followed, Unfollowed> {
         path: real,
         through,
     })
-}
-
-/// Whether the kernel would say a part is not there: missing, too long a name, or below a file.
-/// What it cannot look at (`EACCES`, `EIO`) is not known to be missing.
-fn not_there(error: &std::io::Error) -> bool {
-    error.kind() == ErrorKind::NotFound
-        || matches!(
-            error.raw_os_error(),
-            Some(libc::ENAMETOOLONG | libc::ENOTDIR)
-        )
 }
 
 /// Whether a path is a process's folder in `/proc` that leads elsewhere, or below one.

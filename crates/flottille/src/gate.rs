@@ -3855,6 +3855,90 @@ mod tests {
         assert!(base_class(&fixture.run("cat /dev/fd/3")));
     }
 
+    /// Makes `parts` as folders below the open folder `at`, one at a time, so that their whole
+    /// path may be longer than the kernel takes at once; returns the deepest, open.
+    fn folders_below(at: std::os::fd::BorrowedFd, parts: &[String]) -> std::os::fd::OwnedFd {
+        use rustix::fs::{Mode, OFlags};
+        let mut deepest = rustix::fs::openat(at, ".", OFlags::PATH, Mode::empty()).unwrap();
+        for part in parts {
+            rustix::fs::mkdirat(&deepest, part.as_str(), Mode::from_raw_mode(0o755)).unwrap();
+            deepest = rustix::fs::openat(
+                &deepest,
+                part.as_str(),
+                OFlags::PATH | OFlags::DIRECTORY,
+                Mode::empty(),
+            )
+            .unwrap();
+        }
+        deepest
+    }
+
+    #[test]
+    fn a_path_too_long_once_its_links_are_expanded_still_has_them_followed() {
+        use std::os::fd::AsFd;
+        let fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        std::fs::create_dir_all(base.join("home/.ssh")).unwrap();
+        std::fs::write(base.join("home/.ssh/id"), "fake key").unwrap();
+        // `src/a`, then `b` and `c` where it leads, each seven folders of 200 characters
+        // deeper: their whole expanded path is longer than the kernel takes at once, a part at
+        // a time it is not. `x` leads to the home's `.ssh`.
+        let chain = |letter: char| -> Vec<String> {
+            (1..=7)
+                .map(|n| format!("{n}{}", letter.to_string().repeat(199)))
+                .collect()
+        };
+        let root = std::fs::File::open(&fixture.root).unwrap();
+        let mut at = folders_below(root.as_fd(), &chain('a'));
+        std::os::unix::fs::symlink(
+            format!("../{}", chain('a').join("/")),
+            fixture.root.join("src/a"),
+        )
+        .unwrap();
+        for (link, letter) in [("b", 'b'), ("c", 'c')] {
+            let next = folders_below(at.as_fd(), &chain(letter));
+            rustix::fs::symlinkat(chain(letter).join("/"), &at, link).unwrap();
+            at = next;
+        }
+        rustix::fs::symlinkat(base.join("home/.ssh"), &at, "x").unwrap();
+
+        let verdict = fixture.run("cat src/a/b/c/x/id");
+        assert!(base_class(&verdict), "{verdict:?}");
+        assert!(reasons(&verdict).contains(".ssh"), "{verdict:?}");
+        let verdict = fixture.file("fs_read", "src/a/b/c/x/id");
+        assert!(base_class(&verdict), "{verdict:?}");
+        // One name too long is still only a word.
+        let verdict = fixture.run(&format!("git commit -m '{}'", "w".repeat(300)));
+        assert!(!base_class(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn dot_dot_below_proc_is_base() {
+        let fixture = Fixture::workspace();
+        let own = fixture.own[0].clone();
+        std::fs::create_dir_all(&own).unwrap();
+        let judge = own.join("judge.md");
+        let judge = judge.display();
+        // `net` leads two folders down, `thread-self` three: the kernel stays in /proc.
+        for path in [
+            format!("/proc/net/../../self/root{judge}"),
+            format!("/proc/thread-self/../../../self/root{judge}"),
+        ] {
+            for line in [
+                format!("cat {path}"),
+                format!("tee {path}"),
+                format!("cp notes.md {path}"),
+            ] {
+                let verdict = fixture.run(&line);
+                assert!(base_class(&verdict), "{line}: {verdict:?}");
+            }
+            for tool in FS_TOOLS {
+                let verdict = fixture.file(tool, &path);
+                assert!(base_class(&verdict), "{tool} {path}: {verdict:?}");
+            }
+        }
+    }
+
     #[test]
     fn a_git_setting_whose_value_git_runs_is_base() {
         let keys = [

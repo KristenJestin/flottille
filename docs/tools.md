@@ -88,9 +88,13 @@ A path is resolved this way:
   the kernel would not find (missing, a name too long, a name below a file) is taken as written
   with what follows it. A `..` after such a part is refused (`refused: X names a folder that does
   not exist and then goes up out of it: …`): the kernel would fail it too, and nothing after it
-  can be followed. Below `/proc`, links are not followed: `/proc/self` is the reading program's
-  own. A link that leads out is outside, shown where it leads; a path that cannot be followed
-  (more than 40 links, a folder that cannot be read) is outside, and base (below);
+  can be followed. Each part is looked at in the folder opened before it, as the kernel walks, so
+  a path whose links expand past the longest path the kernel takes at once is still followed.
+  Below `/proc`, links are not followed: `/proc/self` is the reading
+  program's own; a `..` below `/proc` goes where such a link leads (`/proc/net/..` is
+  `/proc/self`), so it is taken as going through a process's folder. A link that leads out is
+  outside, shown where it leads; a path that cannot be followed (more than 40 links, a folder
+  that cannot be read) is outside, and base (below);
 - containment is by segments: `..notes` is a name inside, `../x` a step out.
 
 **What the gate guarantees to the file tools.** They open the real path the gate checked, and
