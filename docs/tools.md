@@ -286,7 +286,8 @@ own project: a root has these two tools, a child none (it does its brief). Two f
   done only while those words still hold: a procedure whose instructions (`Its agent is told: …`)
   changed meanwhile is not started (`Request #n (procedure) was not executed: what it does
   changed since the user allowed it; it would now: …`). A change of the tracker is base: nothing
-  checks it against the project, as a forge is checked against its remote.
+  checks it against the project, as a forge is checked against its remote. A `set_rules` is base
+  too: it rewrites the instructions of every agent created after it, so no judge decides it.
 - **What an agent never does**: change a session's mode or choose the judge (no tool has them),
   or reach another project (`project` is not an argument). An agent's reference is never the project
   folder itself nor a repository's root (`.`, `api`, or a link to one): what a whole checkout
@@ -356,13 +357,30 @@ says who answers a call to judge (`docs/design.md` §7.1).
      target`);
    - a push forced or that deletes: `--force`, `-f`, `--force-with-lease`, `--force-if-includes`,
      `--mirror`, `--delete`, `-d`, `--prune` (or any start of their names, as git takes them:
-     `--forc`, `--mirr`), a `+refspec` or a `:branch`;
+     `--forc`, `--mirr`), a `+refspec` or a `:branch`; and a push naming the program that
+     receives it (`--receive-pack`, `--exec`), which runs on this machine for a remote that is a
+     path;
    - git settings that run programs, lead pushes elsewhere or bring in other files: a key of
-     `core.*`, `alias.*`, `remote.*`, `url.*`, `push.*`, `credential.*` or `include*` given to
+     `core.*`, `alias.*`, `remote.*`, `url.*`, `push.*`, `credential.*` or `include*`, or a key
+     whose value git runs (`diff.external`, `diff.*.command` and `textconv`, `difftool.*`,
+     `mergetool.*`, `man.*` and `browser.*` `cmd` and `path`, `merge.*.driver`, `filter.*`,
+     `pager.*`, `hook.*`, `guitool.*`, `sendemail.*`, `instaweb.*`, `gpg.program`,
+     `gpg.*.program`, `gpg.ssh.defaultKeyCommand`, `sequence.editor`,
+     `interactive.diffFilter`, `submodule.*.update`, `uploadpack.packObjectsHook`,
+     `imap.tunnel`, `tar.*.command`, `web.browser`, `trailer.*.command` and `cmd`, and
+     `protocol.allow` and `protocol.*.allow`, which can let `ext::` URLs run programs) given to
      `git -c` or `--config-env`, or written by `git config` in any write form (`--edit`
-     included); `git remote add`, `rename`, `remove`, `set-url` and `set-branches`; and git's
+     included); `git remote add`, `rename`, `remove`, `set-url` and `set-branches`; git's
      configuration set or cleared through the environment (`GIT_CONFIG*=…`, `env -i`, `env -u
-     GIT_CONFIG…`), which would lift the wall on pushes and hooks;
+     GIT_CONFIG…`), which would lift the wall on pushes and hooks; and a program git runs named
+     through the environment (`GIT_EXTERNAL_DIFF`, `GIT_PAGER`, `GIT_EDITOR`,
+     `GIT_SEQUENCE_EDITOR`, `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_ASKPASS`, `GIT_PROXY_COMMAND`,
+     `GIT_EXEC_PATH`);
+   - removing git's safety net, in `main` and in a workspace, which share it: `git reflog
+     expire` and `delete`, `git gc --prune=<anything>`, and `git prune` but `-n` and
+     `--dry-run`;
+   - running as another user: `sudo`, `sudoedit`, `doas`, `pkexec`, `run0` and `su`, in any form.
+     An agent rarely needs it, and `sudo` resets the environment, which drops the wall on pushes;
    - reading a process's environment (`/proc/<pid>/environ`, `self` included), or anything under
      `/proc/<pid>/` of a process that is not one of the agent's runs;
    - rewriting history that is on a remote, or the user's own checkout's: `git rebase`,
@@ -383,7 +401,8 @@ says who answers a call to judge (`docs/design.md` §7.1).
      they run with the user's own sign-in, in a place no variable of ours moves, so it cannot be
      emptied as `gh`'s is (`docs/forges.md`, "Bitbucket"). An agent reads a ticket with
      `ticket_read` and the pull requests with `forge_read`;
-   - a `forge_write` merge that waives the checks or a review; a change of the project's tracker.
+   - a `forge_write` merge that waives the checks or a review; a change of the project's tracker
+     or of its rules (`set_rules`).
 3. **Harmless**: passes in every mode.
    - reading inside the agent's place (the project folder or the workspace), the tree's tools,
      `commands_list`, `commands_status`, `reference_read`, `forge_read`, `ticket_read`;
@@ -395,9 +414,11 @@ says who answers a call to judge (`docs/design.md` §7.1).
      field, no input and not `graphql`), and the common reading programs (`ls`, `cat`, `grep`,
      `rg`, `find`, `fd`, `tree`, `ps`, `pgrep`…; not `less` and `more`, whose commands run
      programs). A program counts as one of them only when it is the system's: named bare, and
-     found through the run's `PATH` outside the project folder, its workspaces and the place.
-     `./ls`, `/path/to/git` or an `ls` the agent put in a folder of `PATH` is the agent's own
-     file, to judge, and the judge is told so;
+     found through the run's `PATH` outside the project folder, its workspaces, the place and
+     the user's own `~/.local/bin` and `~/bin`, where an agent a judge allowed may have written
+     it. `PATH` is the run's own, filled for the repository it runs in. `./ls`, `/path/to/git`
+     or an `ls` the agent put in a folder of `PATH` is the agent's own file, to judge, and the
+     judge is told so;
    - an option of those programs that writes a file, inside a workspace only (`git diff`,
      `log`, `show` `--output`, `git format-patch`, `tree -o`, `find -fprint`, `file -C`): in
      `main`, it is to judge;
@@ -426,7 +447,9 @@ says who answers a call to judge (`docs/design.md` §7.1).
    `dash`, `ksh`, `mksh`, `ash`, `fish`) with `-c`, `script -c` and `watch`, whose line is split
    as `commands_run` splits one and judged in turn: a line that cannot be split is refused. A
    shell running a script is not unwrapped: the script is not read. The line an option of a
-   reading program runs (`fd -X git push -f`) is read the same way. git's global options are
+   reading program runs (`fd -X git push -f`) is read the same way, and so is each line of `git
+   rebase -x` and `--exec` (`git rebase -x 'git push -f'` is a forced push); git runs those
+   through a shell, so one that cannot be split is refused. git's global options are
    skipped to class its command, and count too: the stronger wins.
 
    The base rules are also judged on every end of every layer whose program is not a reading
