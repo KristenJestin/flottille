@@ -14,7 +14,8 @@ use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement,
-    Render, SharedString, Styled, Subscription, TestSupportExt as _, WeakEntity, Window, div, px,
+    Render, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
+    TestSupportExt as _, WeakEntity, Window, div, px,
 };
 use serde_json::Value;
 
@@ -48,6 +49,9 @@ pub struct Shown {
     pub source: Source,
     /// Why the stored text was cut to the limit: edited by hand past it.
     pub cut: Option<String>,
+    /// Why the judge cannot follow the stored guidance (`judge.show`): every judgement fails,
+    /// and asks, until it is fixed.
+    pub error: Option<String>,
 }
 
 impl Shown {
@@ -60,6 +64,7 @@ impl Shown {
                 _ => Source::Default,
             },
             cut: value["cut"].as_str().map(str::to_owned),
+            error: value["error"].as_str().map(str::to_owned),
         }
     }
 }
@@ -165,7 +170,11 @@ impl RulesEditor {
         let Some(shown) = &self.shown else {
             return false;
         };
-        self.typed(cx).is_some() && (self.is_edited(cx) || !self.is_own() || shown.cut.is_some())
+        self.typed(cx).is_some()
+            && (self.is_edited(cx)
+                || !self.is_own()
+                || shown.cut.is_some()
+                || shown.error.is_some())
     }
 
     /// Whether Reset to default has something to remove: rules of its own at this level.
@@ -350,6 +359,23 @@ impl Render for RulesEditor {
                             .text_size(px(12.5))
                             .text_color(p.fail)
                             .child(SharedString::from(format!("Cut: {cut}.")))
+                            .test_support(),
+                    )
+                },
+            )
+            .when_some(
+                self.shown.as_ref().and_then(|shown| shown.error.clone()),
+                |d, error| {
+                    let said = SharedString::from(format!(
+                        "The judge asks you about every call until this is fixed: {error}."
+                    ));
+                    d.child(
+                        div()
+                            .id(id("error"))
+                            .aria_label(said.clone())
+                            .text_size(px(12.5))
+                            .text_color(p.fail)
+                            .child(said)
                             .test_support(),
                     )
                 },

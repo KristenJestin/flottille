@@ -2339,6 +2339,54 @@ fn the_judge_section_edits_the_judge_s_guidance_and_resets_it_to_the_default(
 }
 
 #[gpui_kit::test]
+fn the_judge_section_shows_a_guidance_it_cannot_follow_and_follows_an_edit_made_elsewhere(
+    cx: &mut TestAppContext,
+) {
+    use flottille_window::rules::Source;
+    let user = user();
+    // Edited by hand past the limit: the judge cannot follow it, and the section says so.
+    std::fs::create_dir_all(user.path("config/flottille")).unwrap();
+    std::fs::write(user.path("config/flottille/judge.md"), "a".repeat(4_001)).unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    let page = open_settings(&shell, cx);
+    let editor = page.read_with(cx, |page, _| page.judge_guidance().clone());
+    let rules = page.read_with(cx, |page, _| page.rules().clone());
+    until(&shell, cx, "the error is shown", |cx| {
+        editor.read_with(cx, |e, _| {
+            e.shown().is_some_and(|shown| shown.error.is_some())
+        })
+    });
+    settle(cx);
+    cx.update(|window, _| assert!(window.find("judge-guidance-error").visible()));
+    let said = text_of("judge-guidance-error", cx).unwrap();
+    assert!(
+        said.contains("judge.md") && said.contains("4001 characters"),
+        "{said}"
+    );
+
+    // From the command line, while the page stays open.
+    user.call("judge.set", json!({"text": "Ask about every migration."}))
+        .unwrap();
+    user.call("rules.set", json!({"text": "Write tests first."}))
+        .unwrap();
+
+    until(&shell, cx, "the editors show the new texts", |cx| {
+        editor.read_with(cx, |e, cx| {
+            e.typed(cx).as_deref() == Some("Ask about every migration.")
+        }) && rules.read_with(cx, |e, cx| {
+            e.typed(cx).as_deref() == Some("Write tests first.")
+        })
+    });
+    editor.read_with(cx, |e, _| {
+        assert_eq!(e.shown().unwrap().source, Source::Global);
+        assert_eq!(e.shown().unwrap().error, None);
+    });
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find("judge-guidance-error").is_none()));
+}
+
+#[gpui_kit::test]
 fn a_judge_flottille_picked_is_said_once_in_a_notice_that_opens_settings(cx: &mut TestAppContext) {
     // Claude installed (the fake `claude`) and signed in: the daemon picks its smallest model.
     let user = User::with_fake_claude();

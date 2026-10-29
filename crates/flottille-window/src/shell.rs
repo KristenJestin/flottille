@@ -515,6 +515,10 @@ impl Shell {
             }
             Update::Done(outcome) => self.done(outcome, window, cx),
             Update::Providers(read, providers) => self.set_providers(read, providers, cx),
+            Update::TextChanged { judge: true, .. } => self.actions.send(Command::JudgeRead),
+            Update::TextChanged { project, .. } => {
+                self.actions.send(Command::RulesRead { project })
+            }
             // Only the open page's link is listened to: what an older one sends is dropped.
             Update::Session { token, update } => {
                 if let Some(page) = self.session_page.clone() {
