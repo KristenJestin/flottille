@@ -165,6 +165,40 @@ effect at once (`project.set_agent_actions`, `docs/protocol.md`): no tool of an 
 `[agent_actions]`, and an agent never reaches another project's file. A line run in the project
 folder that is not in the catalogue is held too, whatever this says (`docs/tools.md`, "The gate").
 
+## Rules
+
+An agent's instructions hold two texts about conduct. **What Flottille enforces** is fixed
+(`crates/flottille/roles/base.md`): it says what the gate does, so that an agent does not take it
+for its own discipline. **How to work** is the user's: commits only when asked, say what you did,
+and whatever else they want.
+
+| Level | Where it lives | Edited |
+|---|---|---|
+| Default | `crates/flottille/roles/rules.md`, in the binary | never; it is what Reset to default returns to |
+| All projects | `rules.md` in Flottille's configuration folder (`$XDG_CONFIG_HOME/flottille/`), absent while the default holds | the window's Settings, "Rules"; by hand |
+| One project | the `rules` key of its file | the project's Settings, "Rules"; by hand; `project {action: "set_rules"}` of an agent, held |
+
+The project's rules **replace** the global ones, they do not extend them: a project that wants
+both copies the global text and adds to it. A project without its own follows the global rules,
+or the default when there are none. Rules are at most 8,000 characters; an empty text is no rules.
+
+```toml
+rules = """
+Answer in French.
+Commit only when asked.
+"""
+```
+
+Reset to default removes the file (global) or the key (project), and the level below shows again.
+
+The text is read when an agent is created and frozen in its instructions (`docs/design.md` §8),
+so a change reaches the sessions started after it, and no session running. The global rules sit
+before the cache boundary, where every project shares them, so editing them changes the shared
+part once for everyone. A project's own rules would make that part differ from one project to
+the next, so they sit after the boundary. An agent reads the rules it will give new sessions with
+`project {action: "rules"}` and proposes a change with `set_rules {text}`, always held for the
+user (`docs/tools.md`, "The project"): `[agent_actions]` has no family for it.
+
 ## References
 
 `[references.<name>]` lists documents an agent reads with a tool when its task needs them, in place

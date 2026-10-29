@@ -416,6 +416,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         .iter()
         .map(|(name, reference)| (name.clone(), reference.description.clone()))
         .collect();
+    let rules = crate::rules::effective(&daemon.paths, project);
     let instructions = roles::instructions(
         new.role,
         &roles::Session {
@@ -425,6 +426,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
             title: new.title.as_deref(),
             at_depth_limit,
             references: &references,
+            rules: &rules,
         },
         &files,
     );

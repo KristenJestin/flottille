@@ -76,6 +76,12 @@ impl Paths {
         self.state.join("daemon.log")
     }
 
+    /// How the user wants agents to work, for every project (`docs/projects.md`, "Rules"); absent
+    /// while they keep Flottille's default.
+    pub fn rules(&self) -> PathBuf {
+        self.config.join("rules.md")
+    }
+
     /// One TOML file per project.
     pub fn projects(&self) -> PathBuf {
         self.config.join("projects")

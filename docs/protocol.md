@@ -236,6 +236,23 @@ the new-workspace form's preview (`docs/tickets.md`): `{"project", "ticket", "tr
 "tracker_said", "problem"}` and, once read, the fields of `workspace.ticket`. `problem` says why it
 is not taken or not read; it is not a refusal.
 
+### The rules methods
+
+`rules.show`, `rules.set` and `rules.reset` read, write and reset how agents are told to work
+(`docs/projects.md`, "Rules"). Each takes an optional `project`: without it they act on the user's
+rules for all projects (`rules.md` in Flottille's configuration folder), with it on the project's
+own (the `rules` key of its file, where it stands, what is around it kept).
+
+- `rules.show {project?}` answers `{"project", "text", "source", "default", "global"}`: the text
+  agents started from now on get at that level, its `source` (`default`, `global` or `project`),
+  Flottille's default text, and the text a project without its own follows.
+- `rules.set {project?, text}` writes the text and answers as `rules.show`. `refused` above
+  8,000 characters. An empty text is no rules.
+- `rules.reset {project?}` removes the file or the key, and answers as `rules.show`.
+
+A change to the user's rules emits `rules.changed {project: null}`; a project's emits
+`project.changed` like any edit of its file.
+
 ### The reference methods
 
 A project's references (`docs/projects.md`, "References"). The daemon edits the project's file in

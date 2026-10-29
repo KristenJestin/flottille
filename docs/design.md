@@ -172,8 +172,8 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
 - tickets (the same agents): `ticket_read`, the ticket a workspace is linked to, or another of
   the same tracker, read only (`tickets.md`);
 - the project (a root): `procedure` (list, show, start) and `project` (its settings, its forges and
-  tracker, its references), what the window does, each change held for the user unless the
-  project lets its family run on its own (`tools.md`, "The project", `projects.md`);
+  tracker, its references, its rules), what the window does, each change held for the user unless
+  the project lets its family run on its own (`tools.md`, "The project", `projects.md`);
 
 Flottille's own tools:
 
@@ -356,7 +356,13 @@ gate decides as above, and some things stay refused even inside one (`git stash`
 ## 8. Instructions
 
 Built as in `reference/hemera.md` §7: a shared base, the role template, a cache boundary, the
-per-session part, then the project layer, frozen per session. The project layer holds, per
+per-session part, then the project layer, frozen per session. The base has two parts. **What
+Flottille enforces** is fixed text that states what the gate does, so that an agent does not take
+it for its own discipline. **How to work** is the user's: a default text, the user's own for all
+projects, or a project's own (`projects.md`, "Rules"). The global rules sit in the base, before the
+boundary, where every project shares them; a project's own sit just after the per-session part,
+since they would otherwise make the shared part differ from one project to the next. Alongside, the
+MCP server's `instructions` explain Flottille itself to the agent (`tools.md`, "The server"). The project layer holds, per
 repository and for the project folder: `CLAUDE.md` or `AGENTS.md` (the agent's own name first),
 **and the local files `CLAUDE.local.md` / `AGENTS.local.md` when present** (they hold rules the
 user keeps out of the repository).

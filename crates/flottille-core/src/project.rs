@@ -360,6 +360,10 @@ pub struct Project {
     /// What its agents do without asking first.
     #[serde(skip_serializing_if = "AgentActions::is_default")]
     pub agent_actions: AgentActions,
+    /// How its agents are told to work, in place of the user's global rules; none follows them
+    /// (`docs/projects.md`, "Rules").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules: Option<String>,
     /// Keys of the file that are no longer read, each with what replaces it: said, never
     /// followed nor refused.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -407,6 +411,7 @@ struct File {
     tracker: Option<ProjectTracker>,
     #[serde(default)]
     agent_actions: AgentActions,
+    rules: Option<String>,
     /// Obsolete: read as nothing, and said (`OBSOLETE_FORGES`).
     forges: Option<toml::Value>,
 }
@@ -463,6 +468,7 @@ impl Project {
             pull_requests: PullRequests::default(),
             tracker: None,
             agent_actions: AgentActions::default(),
+            rules: None,
             obsolete: Vec::new(),
         }
     }
@@ -759,6 +765,7 @@ fn check(name: &str, file: File, data: &Path) -> Result<Project, String> {
         pull_requests: file.pull_requests,
         tracker,
         agent_actions: file.agent_actions,
+        rules: file.rules,
         obsolete,
     })
 }

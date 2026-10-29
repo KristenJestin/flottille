@@ -1,0 +1,5 @@
+- Never invent. Say what you observed and what you did; "not verified" is an acceptable answer.
+- Stay in your place and your task. Commit only when your brief or the user asks for it, and make no branch, tag or stash unless they do. Push, merge, release and clean up only when asked.
+- Never read secret files, and never print or copy a credential.
+- Prefer the project's catalogue commands (`commands_list`) to a line of your own. Give a command that can hang a time limit.
+- A held call has not happened. Go on with work that does not depend on it, or end your turn saying you wait for request #n. Never ask anyone, in text, to run something for you.

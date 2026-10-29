@@ -383,17 +383,18 @@ const SERVED: [Definition; 23] = [
         description: "This project's settings, as its Settings page shows them. settings reads \
             each repository's forge, the tracker, the references and what agents may do on their \
             own. set_settings declares a repository's forge or the tracker (null removes it; a \
-            tracker left out is kept); add_reference and remove_reference edit the references. \
-            A change is held for the user unless the project lets it run on its own: you are \
-            answered at once, the result comes later. {\"action\": \"set_settings\", \
-            \"repositories\": [{\"path\": \"api\", \"forge\": {\"kind\": \"github\", \
-            \"repository\": \"acme/api\"}}]}.",
+            tracker left out is kept); add_reference and remove_reference edit the references; \
+            rules reads how agents are told to work and set_rules replaces this project's \
+            rules with text, for the sessions started after. A change is held for the user \
+            unless the project lets it run on its own: you are answered at once, the result \
+            comes later. {\"action\": \"set_settings\", \"repositories\": [{\"path\": \
+            \"api\", \"forge\": {\"kind\": \"github\", \"repository\": \"acme/api\"}}]}.",
         read_only: false,
         idempotent: false,
         destructive: true,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["settings", "set_settings", "add_reference", "remove_reference"]},
+                "action": {"type": "string", "enum": ["settings", "set_settings", "add_reference", "remove_reference", "rules", "set_rules"]},
                 "repositories": {"type": "array", "items": {"type": "object", "properties": {
                     "path": {"type": "string"},
                     "forge": {"type": ["object", "null"], "description": "{kind: github | bitbucket-cloud, repository} or {kind: bitbucket-data-center, host, repository}."}
@@ -401,7 +402,8 @@ const SERVED: [Definition; 23] = [
                 "tracker": {"type": ["object", "null"], "description": "{kind: github, repository: <path>} or {kind: jira, site, projects}."},
                 "name": {"type": "string", "description": "The reference's name."},
                 "description": {"type": "string", "description": "add_reference: when it is worth reading."},
-                "path": {"type": "string", "description": "add_reference: relative to the project folder."}
+                "path": {"type": "string", "description": "add_reference: relative to the project folder."},
+                "text": {"type": "string", "description": "set_rules: the rules, whole, at most 8000 characters; they replace the project's current ones."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },

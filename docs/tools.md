@@ -248,13 +248,14 @@ own project: a root has these two tools, a child none (it does its brief). Two f
 | Tool | |
 |---|---|
 | `procedure {action: list \| show \| start, name?, workspace?}` | `list` and `show` read the project's procedures, with what each grants (`docs/procedures.md`). `start` runs one in a workspace, the agent's own when `workspace` is left out (one in the project folder must name one), as a new root of its own: the same as the window's confirmation, with the procedure's own grants as its file says them. Refused, nothing asked, for a procedure or a workspace the project has not, or one that writes to a forge none is declared for. |
-| `project {action: settings \| set_settings \| add_reference \| remove_reference, …}` | `settings` reads each repository's forge (and what its remote proposes), the tracker, the references and what agents do on their own (`docs/projects.md`). `set_settings {repositories?: [{path, forge}], tracker?}` declares a repository's forge or the tracker (`null` removes it; a tracker left out is kept), checked as `project.set_settings` checks them; `add_reference {name, description, path}` and `remove_reference {name}` edit the references as `flottille reference add` and `remove` do. The file is written where it stands, its comments kept. |
+| `project {action: settings \| set_settings \| add_reference \| remove_reference \| rules \| set_rules, …}` | `settings` reads each repository's forge (and what its remote proposes), the tracker, the references and what agents do on their own (`docs/projects.md`). `set_settings {repositories?: [{path, forge}], tracker?}` declares a repository's forge or the tracker (`null` removes it; a tracker left out is kept), checked as `project.set_settings` checks them; `add_reference {name, description, path}` and `remove_reference {name}` edit the references as `flottille reference add` and `remove` do. The file is written where it stands, its comments kept. `rules` reads the rules the project's agents get from now on and where they come from (the project's own, the user's for all projects, or Flottille's default, `docs/projects.md`, "Rules"); `set_rules {text}` replaces the project's own rules by `text` (8,000 characters at most), for the sessions started after: the one that asked keeps what it started with. |
 
-- **Reads run at once.** `procedure` `list` and `show`, `project` `settings`.
+- **Reads run at once.** `procedure` `list` and `show`, `project` `settings` and `rules`.
 - **Every write is held** for the user, as any held call is (answered at once that it waits, the
   result later as a delivery), unless the project's `[agent_actions]` lets its family run on its
   own (`docs/projects.md`, "What agents do on their own"): `procedures` for `start`, `settings`
-  for `set_settings`, `references` for the other two. Its request is an `action`: it says what it
+  for `set_settings`, `references` for the other two. `set_rules` has no family: it is always
+  held, and its request shows the new text whole. Its request is an `action`: it says what it
   changes in words, one sentence each (`Start the procedure ship in workspace login: …`, then each
   grant and whether the run's children get them; `Set the tracker to Jira on acme.atlassian.net
   (ABC)`; `Add the reference style (docs/STYLE.md): …`), the user confirms it once (never for the

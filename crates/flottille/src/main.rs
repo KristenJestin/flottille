@@ -32,6 +32,7 @@ mod providers;
 mod reference_command;
 mod references;
 mod roles;
+mod rules;
 mod runs;
 mod sweep;
 mod tickets;

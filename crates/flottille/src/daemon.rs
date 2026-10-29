@@ -28,6 +28,7 @@ use crate::mcp;
 use crate::procedures;
 use crate::projects::{self, Projects};
 use crate::providers;
+use crate::rules;
 use crate::runs;
 use crate::sweep;
 use crate::tickets;
@@ -641,6 +642,13 @@ fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) 
         }
         method if method.starts_with("inbox.") => (
             match inbox::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+            },
+            None,
+        ),
+        method if method.starts_with("rules.") => (
+            match rules::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => Message::error(Some(id), failure.code, failure.message),
             },

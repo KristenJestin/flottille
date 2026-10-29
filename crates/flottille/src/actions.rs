@@ -44,6 +44,8 @@ struct ProjectCall {
     name: Option<String>,
     description: Option<String>,
     path: Option<String>,
+    /// set_rules: the rules.
+    text: Option<String>,
 }
 
 #[derive(Clone, Deserialize, serde::Serialize)]
@@ -69,6 +71,7 @@ pub fn family(tool: &str, args: &Value) -> Option<&'static str> {
         ("procedure", "start") => Some("procedures"),
         ("project", "set_settings") => Some("settings"),
         ("project", "add_reference" | "remove_reference") => Some("references"),
+        ("project", "set_rules") => Some("rules"),
         _ => None,
     }
 }
@@ -78,6 +81,7 @@ pub fn asked(family: &str) -> String {
     let what = match family {
         "procedures" => "start a procedure",
         "settings" => "change the project's settings",
+        "rules" => "change how the project's agents are told to work",
         _ => "add or remove a reference",
     };
     format!("the project's agents {what} only once you allow it")
@@ -184,11 +188,9 @@ pub async fn prepared(
                         reference.path
                     )])
                 }
-                other => Err(unknown(
-                    "project",
-                    other,
-                    "settings, set_settings, add_reference and remove_reference",
-                )),
+                "rules" => Ok(Vec::new()),
+                "set_rules" => rules_say(&project, &call),
+                other => Err(unknown("project", other, PROJECT_ACTIONS)),
             }
         }
         _ => Ok(Vec::new()),
@@ -303,12 +305,58 @@ async fn performed(
                 call.name.unwrap_or_default()
             ))
         }
-        other => Err(unknown(
-            "project",
-            other,
-            "settings, set_settings, add_reference and remove_reference",
-        )),
+        "rules" => Ok(rules_text(&project, &daemon.paths)),
+        "set_rules" => {
+            rules_say(&project, &call)?;
+            let text = call.text.as_deref().unwrap_or_default();
+            crate::rules::set_project(daemon, &name, Some(text)).map_err(refusal)?;
+            Ok(
+                "Saved. The new rules reach the sessions started from now on; this session, and \
+                the ones already running, keep the rules they started with."
+                    .to_owned(),
+            )
+        }
+        other => Err(unknown("project", other, PROJECT_ACTIONS)),
     }
+}
+
+const PROJECT_ACTIONS: &str =
+    "settings, set_settings, add_reference, remove_reference, rules and set_rules";
+
+/// What `set_rules` changes, in words, or the refusal of a call that does not fit.
+fn rules_say(project: &Project, call: &ProjectCall) -> Result<Vec<String>, Outcome> {
+    let Some(text) = &call.text else {
+        return Err(Outcome::Refused(
+            "refused: set_rules needs text, the rules whole: {\"action\": \"set_rules\", \
+             \"text\": \"Answer in French.\"}; rules reads the current ones"
+                .into(),
+        ));
+    };
+    crate::rules::check(text).map_err(|why| Outcome::Refused(format!("refused: {why}")))?;
+    let replaced = match project.rules {
+        Some(_) => "its own rules",
+        None => "the rules it follows",
+    };
+    Ok(vec![
+        format!("Replace {replaced} for project {} by:", project.name),
+        text.trim_end().to_owned(),
+    ])
+}
+
+/// What `rules` answers: the rules the agents started from now on get, and where they come from.
+fn rules_text(project: &Project, paths: &flottille_core::paths::Paths) -> String {
+    let rules = crate::rules::effective(paths, project);
+    let from = match rules.source {
+        crate::rules::Source::Project => "this project's own rules",
+        crate::rules::Source::Global => "the user's rules for all projects",
+        crate::rules::Source::Default => "Flottille's default rules",
+    };
+    format!(
+        "The rules agents of project {} get from now on are {from}. Yours are in your \
+         instructions; set_rules proposes a change, held for the user.\n\n{}",
+        project.name,
+        rules.text.trim_end()
+    )
 }
 
 /// The agent's own project, as its file says now.
