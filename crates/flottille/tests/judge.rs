@@ -682,3 +682,26 @@ fn the_judge_s_own_child_processes_end_with_it() {
         assert!(!runs(pid), "hangs {hangs}");
     }
 }
+
+#[test]
+fn switching_the_root_to_ask_makes_a_child_s_next_call_a_card() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (lead, mcp, _) = session(&user, false);
+    let opened = user.received_requests("session/new").len();
+    let launched = mcp.call(
+        "agent_launch",
+        json!({"title": "worker", "brief": "Write the tests."}),
+    );
+    assert!(!launched.error, "{}", launched.text);
+    let (url, authorization) = server_of(&user, opened);
+    let child = Mcp::initialize(&url, &authorization);
+    done(child.call("commands_run", json!({"line": "touch first.txt"})));
+    assert_eq!(judge_prompts(&user).len(), 1);
+
+    set_mode(&user, &lead, "ask");
+
+    let answer = child.call("commands_run", json!({"line": "touch second.txt"}));
+    assert!(!answer.error, "{}", answer.text);
+    assert!(answer.text.starts_with("Waiting for"), "{}", answer.text);
+    assert_eq!(judge_prompts(&user).len(), 1, "the judge was asked");
+}

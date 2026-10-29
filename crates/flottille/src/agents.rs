@@ -192,7 +192,8 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                     ),
                 )
             })?;
-            let agent = find(daemon, &asked.agent)?;
+            // A tree has one mode, its root's.
+            let agent = find(daemon, &tree::root_of(daemon, &asked.agent))?;
             // Only the user's door reaches this method: no tool of an agent changes a mode.
             daemon.write(|store| {
                 let (_, event) = store.change_agent(
@@ -295,9 +296,14 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
 }
 
 fn find(daemon: &Daemon, id: &str) -> Result<Agent, Failure> {
-    daemon
+    let mut agent = daemon
         .read(|store| store.agent(id))?
-        .ok_or_else(|| Failure::new("not-found", format!("there is no agent {id}")))
+        .ok_or_else(|| Failure::new("not-found", format!("there is no agent {id}")))?;
+    // A child's mode is its root's: what it stored is not used.
+    if agent.parent.is_some() {
+        agent.gate_mode = crate::judge::mode(daemon, id);
+    }
+    Ok(agent)
 }
 
 /// A child belongs to its parent: only its parent writes to it, and it stops with its root.

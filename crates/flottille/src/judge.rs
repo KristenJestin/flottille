@@ -62,10 +62,12 @@ pub fn chosen(daemon: &Daemon) -> Option<Judge> {
     Settings::load(&daemon.paths).ok()?.judge
 }
 
-/// The mode of the agent's session.
+/// The mode of the agent's tree: its root's, read at each call, so that a switch reaches every
+/// agent of the tree at once.
 pub fn mode(daemon: &Daemon, agent: &str) -> GateMode {
+    let root = tree::root_of(daemon, agent);
     daemon
-        .read(|store| store.agent(agent))
+        .read(|store| store.agent(&root))
         .ok()
         .flatten()
         .map(|agent| agent.gate_mode)
