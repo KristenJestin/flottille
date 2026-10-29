@@ -25,6 +25,8 @@ pub struct Run {
     pub ended_at: Option<u64>,
     /// The end of its output once it ended, masked: at most what the daemon keeps of it.
     pub output: String,
+    /// The user dismissed it from the list of commands once it ended.
+    pub dismissed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -638,6 +638,24 @@ $ flottille inbox
 Answer a question with `flottille agent send <agent> <message>`; `flottille inbox --after <n>` lists what came since.
 ```
 
+### `flottille commands list [project]`
+
+The commands the agents run that are running now, of a project or of all of them: the run, the
+agent that started it, its place, its line and the last line of its output (without the colours the
+program wrote). `--json` prints `run.list` (`docs/protocol.md`, "The run methods").
+
+```
+$ flottille commands list app
+5d2c0f1a9b3e agent 3f9a1c0b7d2e (app/login): npm run dev
+    listening on :3000
+Stop one with `flottille commands stop <run>`.
+```
+
+### `flottille commands stop <run>`
+
+Stops the command and everything it started, and tells the agent that started it that you did
+(`run.stop`).
+
 ### `flottille approvals`
 
 The requests of your agents that wait for your answer: the call, its class, why the gate held it,

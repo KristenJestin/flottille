@@ -172,7 +172,7 @@ not a lock: a swap between it and the rename is not seen.
   A call stopped by its client stops its run.
 - **The answer**: `run <id>: <name> <state> after <s> s` (`is running`, `exited with code N`,
   `was killed by signal N`, `was stopped`, `was interrupted…`), then, while it runs, `it keeps
-  going: read it with commands_status {"run": "<id>"}, stop it with commands_status {"run": "<id>", "action": "stop"}`, then `(lines a-b of N…)` with
+  going: read it with commands_status {"run": "<id>"}, stop it with commands_status {"run": "<id>", "action": "stop"}; Flottille tells you when it ends`, then `(lines a-b of N…)` with
   how to read the lines before or after (`commands_status {"run", "start"}`), then the lines. A
   line longer than 2,000 characters shows as several; the lines shown are cut to stay under the
   limit.
@@ -213,11 +213,30 @@ not a lock: a swap between it and the rename is not seen.
   though: the daemon is the subreaper of what it starts, so a process orphaned there is taken in
   by the daemon rather than by init, waited for when it ends, and refused if it connects to the
   socket.
+- **The agent is told when a command that outlived its call ends.** A call that answered with the
+  command still running (a command that `serve`s, or one past the call's `timeout`) is followed by
+  a `command-ended` delivery to the agent that started it when the command ends, urgent like a
+  child's report and by the same path (`docs/design.md` §5.2: stored, then pumped between turns or
+  pinned as a note on the next tool result): the line, how it ended (`exited with code N`, `was
+  killed by signal N`, or `was stopped by the user`), how long it ran and the last 20 lines of its
+  output, masked. A command whose call saw it end, one the agent stopped with `commands_status`,
+  and those that stop with their agent or the daemon deliver nothing. No timer is involved. A
+  command that ends at the very moment its call answers can give both: the call's answer (the end
+  it saw, or the run still going) and the delivery, so the agent may be told the same end twice;
+  nothing is lost, and the delivery carries the run's id to recognise it. A command the user stops
+  while its call still waits says so in that answer (`was stopped by the user`); the agent's own
+  stop says `was stopped`.
+- **The user sees them** (`docs/design.md` §10): the session's right rail lists the commands of
+  its tree, a project and a session with one running show it in the left sidebar, and the user can
+  read a command's output live, stop it (its whole process group, as above) or dismiss it once it
+  ended (`docs/protocol.md`, "The run methods"; `flottille commands`, `docs/cli.md`).
 - **Runs are records**: the store's `runs` (with the end of their output once ended), and the
   `run.started` and `run.ended` events. Each run's process group is recorded while it runs: a
   daemon started after a crash kills the groups a previous one left (only while their leader is
   the process it started) and marks their runs interrupted. A daemon that stops stops its runs,
-  interrupted. When a run's own process ends, what it left in its group is killed with it.
+  interrupted. When a run's own process ends, what it left in its group is killed with it. The
+  runs that ended go with their session, as its images do: when its root failed or ended and
+  cannot be resumed, or 7 days after a root that can (`docs/protocol.md`, `agent.image`).
 
 ## The forge
 

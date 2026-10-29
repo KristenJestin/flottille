@@ -250,6 +250,11 @@ between turns, pinned as a note on the next tool result when it is mid-turn (wit
 fallback that cancels the turn and sends it as a prompt), given back when a turn fails, escaped so
 data can never forge a marker. No timers wake an agent: waking is always a delivery.
 
+The same path wakes an agent about its own command: a command that outlived its call (it keeps
+running, or ran past the call's wait) delivers `command-ended` to the agent that started it when it
+ends: the line, the exit code, the duration and the last lines of the output, masked
+(`docs/tools.md`, "Commands").
+
 ### 5.3 What the parent is told
 
 | Event of a child | Delivery to the parent |
@@ -483,6 +488,15 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   (`agent.resume`), enabled once its process is gone, which brings the composer back; its header
   says `STOPPED` or `FAILED`, as its rail does, and its conversation says it ended, then resumed. Selecting a child shows its
   conversation read-only;
+- the commands the agents run (`docs/tools.md`): the rail lists those of the session's tree, running
+  first, each with its line, who started it (the agent, and the catalogue command when it is one),
+  how long, its last output line and Stop; a click opens its output, live, in a panel. One that
+  ended stays listed, greyed, with its exit code, until the user dismisses it or the session ends.
+  A project, and a session, with a command running show a small icon in the left tree, so that no
+  server is forgotten. A command's result in the conversation is a card: the line, the exit code in
+  a colour, the duration, the output folded to its last lines and expandable, its ANSI colours
+  drawn (the stored output keeps the program's bytes, masked); a call that came back through an
+  approval is the same card with one line saying the user allowed it, never the daemon's raw text;
 - narrow and portrait windows: the rail, then the left tree, become drawers.
 - a history of the pages shown (project pages, sessions with the agent shown in them, settings),
   as a browser keeps one: it lives as long as the window and is not stored. The mouse's back and

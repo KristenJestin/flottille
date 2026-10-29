@@ -12,6 +12,7 @@ mod codex;
 mod codex_bridge;
 mod command_command;
 mod commands;
+mod commands_command;
 mod daemon;
 mod deliveries;
 mod files;
@@ -32,6 +33,7 @@ mod projects;
 mod providers;
 mod roles;
 mod rules;
+mod run_methods;
 mod runs;
 mod skill_command;
 mod skills;
@@ -53,6 +55,7 @@ use serde_json::Value;
 use crate::agent_command::AgentAction;
 use crate::client::Client;
 use crate::command_command::CommandAction;
+use crate::commands_command::CommandsAction;
 use crate::project_command::ProjectAction;
 use crate::skill_command::SkillAction;
 use crate::workspace_command::WorkspaceAction;
@@ -96,7 +99,7 @@ enum Command {
     },
     /// The commands of a project: named instructions, sent to an agent by /name
     #[command(name = "command", alias = "procedure")]
-    Commands {
+    NamedCommand {
         #[command(subcommand)]
         action: CommandAction,
     },
@@ -109,6 +112,11 @@ enum Command {
     Approvals {
         #[arg(long)]
         json: bool,
+    },
+    /// The commands your agents run: the ones running now, and stopping one
+    Commands {
+        #[command(subcommand)]
+        action: CommandsAction,
     },
     /// Allow a request: its call is checked again, performed, and its result handed to the agent
     Approve { number: u64 },
@@ -239,7 +247,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Skill { action } => return skill_command::run(&paths, action),
         Command::Workspace { action } => return workspace_command::run(&paths, action),
         Command::Agent { action } => return agent_command::run(&paths, action),
-        Command::Commands { action } => return command_command::run(&paths, action),
+        Command::NamedCommand { action } => return command_command::run(&paths, action),
         Command::Doctor { json } => return agent_command::doctor(&paths, json),
         Command::Provider { action } => {
             let (method, name) = match action {
@@ -260,6 +268,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 );
             }
         }
+        Command::Commands { action } => commands_command::run(&paths, action)?,
         Command::Approvals { json } => approval_command::approvals(&paths, json)?,
         Command::Approve { number } => approval_command::approve(&paths, number)?,
         Command::Deny { number } => approval_command::deny(&paths, number)?,
