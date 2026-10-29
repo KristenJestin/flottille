@@ -4080,6 +4080,13 @@ impl Render for Reply {
         self.renders += 1;
         let p = palette(cx);
         let can_send = (self.has_text || !self.attachments.is_empty()) && !self.sending;
+        let swap = fade(
+            "reply-stop-swap",
+            self.running && !can_send,
+            HOVER,
+            window,
+            cx,
+        );
         let status = self.status();
         let thumbs: Vec<AnyElement> = self
             .attachments
@@ -4245,19 +4252,37 @@ impl Render for Reply {
                             ),
                     )
                     .child(div().flex_1())
-                    .when(self.running, |d| {
-                        d.child(enter(
-                            "reply-stop-enter",
-                            0,
-                            Button::icon("reply-stop", Icon::Stop, STOP)
-                                .disabled(self.interrupting)
-                                .on_click(cx.listener(|this, _, _, cx| this.interrupt(cx))),
-                        ))
-                    })
                     .child(
-                        Button::round("reply-send", Icon::Send, SEND)
-                            .disabled(!can_send)
-                            .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
+                        // Stop takes Send's place while Send has nothing to send: the two cross-fade
+                        // in one slot.
+                        div()
+                            .id("reply-send-slot")
+                            .relative()
+                            .flex_none()
+                            .size(px(30.))
+                            .when(swap < 1.0, |d| {
+                                d.child(
+                                    div().absolute().inset_0().opacity(1.0 - swap).child(
+                                        Button::round("reply-send", Icon::Send, SEND)
+                                            .disabled(!can_send)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.send(window, cx)
+                                            })),
+                                    ),
+                                )
+                            })
+                            .when(swap > 0.0, |d| {
+                                d.child(
+                                    div().absolute().inset_0().opacity(swap).child(
+                                        Button::round("reply-stop", Icon::Stop, STOP)
+                                            .disabled(self.interrupting)
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| this.interrupt(cx)),
+                                            ),
+                                    ),
+                                )
+                            })
+                            .test_support(),
                     ),
             )
             .child(presence_of(
