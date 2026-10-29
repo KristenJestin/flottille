@@ -23,6 +23,7 @@ mod inbox;
 mod inbox_command;
 mod judge;
 mod mcp;
+mod nofollow;
 mod opencode;
 mod pilot;
 mod place;

@@ -93,8 +93,23 @@ A path is resolved this way:
   (more than 40 links, a folder that cannot be read) is outside, and base (below);
 - containment is by segments: `..notes` is a name inside, `../x` a step out.
 
-The tools open the real path the gate checked. A run's program resolves its own paths: the gate's
-checks on the words of a run are a first filter, not a guarantee of what the program will open.
+**What the gate guarantees to the file tools.** They open the real path the gate checked, and
+nothing else: every open (`fs_read`, `fs_list`, `fs_write`, `fs_edit`, the freshness check before
+a write, `search`) goes by descriptors, without following any link (`openat2` with
+`RESOLVE_NO_SYMLINKS`, or, where the kernel lacks it, each folder opened in turn with
+`O_NOFOLLOW`). The real path holds no link, so a link met on the way means a folder changed since
+the check: the call is refused (`refused: X: the path changed since it was checked; nothing was
+done`), and nothing of where it now leads is read, shown or made. `search` opens each file below
+its top folder's descriptor, never out of it (`RESOLVE_BENEATH`); a write opens its folder (and
+makes the missing ones, a folder at a time, each in the one opened before), then makes its
+temporary file and renames it in that open folder. A path that goes through a process's folder in
+`/proc` is never opened, whoever allowed it (`refused: X goes through …: Flottille's file tools
+never open a path through a process's folder in /proc`); one the gate could not follow for
+another reason, once the user allowed it, is opened as written, and refused if a link stands on
+its way.
+
+A run's program resolves its own paths: the gate's checks on the words of a run are a first
+filter, not a guarantee of what the program will open.
 
 Paths are shown relative to the place's top.
 
@@ -125,18 +140,14 @@ the agent, in the store (`session_files`), so it holds across restarts; the text
 - removed since: `refused: X was removed since this session read it; nothing was written`.
 
 A write goes to a temporary file `.<name>.<id>.flottille` beside the file, with the file's mode,
-renamed over it: a link is replaced, never written through. The file's folder is checked to be
-inside the place on the disk after it is made and again just before the rename, so that a folder
-swapped for a link to the outside meanwhile is refused (`refused: X: its folder is no longer
-inside this agent's place …`, nothing written). A check is not a lock: a swap between the last
-check and the rename is not seen.
+renamed over it: a link is replaced, never written through. Its folder is the one the gate
+checked, opened without following a link (above): a folder swapped for a link meanwhile is
+refused, and nothing is made or written where it leads.
 
-A path outside the place, which the user or the judge allowed, is resolved again just before the
-file is opened, and before its folder is made and the rename: when it no longer leads where it
-did, or, allowed by the judge, now leads where the gate would hold the call as base (a folder
-swapped for a link to Flottille's own while the judge thought), it is refused (`refused: X: the
-path changed since it was allowed (…); nothing was done`). A file is opened without following a
-last part that became a link.
+A path outside the place, which the judge allowed, is resolved again when the tool starts: when it
+now leads where the gate would hold the call as base (a folder swapped for a link to Flottille's
+own while the judge thought), it is refused (`refused: X: the path changed since it was allowed
+(…); nothing was done`). From there on, no link is followed.
 
 ## Skills
 
