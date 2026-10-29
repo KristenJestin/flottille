@@ -23,7 +23,6 @@ use crate::daemon::Daemon;
 use crate::deliveries;
 use crate::git::{self, Class};
 use crate::mcp::{Grant, Outcome, arguments};
-use crate::procedures;
 use crate::projects::{self, Failure};
 use crate::providers;
 use crate::roles;
@@ -339,12 +338,19 @@ fn send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     if asked.message.trim().is_empty() {
         return Err(refused("refused: the message is empty"));
     }
+    // `/name` sends the project's command of that name, as the user's composer does.
+    let message = crate::commands::message_for(
+        daemon,
+        &child.project,
+        child.workspace.as_deref(),
+        &asked.message,
+    );
     deliveries::deliver(
         daemon,
         &child.id,
         "parent",
         None,
-        &asked.message,
+        &message,
         approval::URGENT,
     );
     Ok(Outcome::Done(format!(
@@ -829,8 +835,6 @@ async fn report(daemon: &Arc<Daemon>, grant: &Grant, caller: &Agent, args: Value
         })
         .map_err(failed)?;
     if caller.parent.is_none() {
-        // A procedure's run ends with its root's report, and its grants with it.
-        crate::procedures::end(daemon, &caller.id, "reported");
         return Ok(Outcome::Done("Your report was shown to the user.".into()));
     }
     let mut body = format!("reported:\n\n{text}\n\n");
@@ -1161,10 +1165,6 @@ fn end(daemon: &Arc<Daemon>, id: &str, state: AgentState, reason: &str) -> bool 
         Some(reason.to_owned()),
         Some((event, json!({"reason": reason}))),
     );
-    if agent.parent.is_none() {
-        // A procedure's run ends with its root: resumed, the root is an ordinary session.
-        procedures::end(daemon, id, state.as_str());
-    }
     let _ = daemon.write(|store| Ok(((), store.supersede(id)?)));
     // Nobody is left to answer what it asked, nor to answer what it held: nobody sees them.
     let _ = daemon.write_all(|store| {

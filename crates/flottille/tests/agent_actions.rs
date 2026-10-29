@@ -1,5 +1,5 @@
 //! The scenarios of what an agent does of what the window does (`docs/tools.md`, "The project"):
-//! the project's procedures and settings read at once, every write of the project to judge (held
+//! the project's skills, commands and settings read at once, every write of the project to judge (held
 //! for the user here, where no judge is chosen), a change of the tracker base, and the lines an
 //! agent runs in the project folder classed as anywhere else. The agents are the fake agent's
 //! sessions, driven through their MCP server as their client would, on throwaway repositories and
@@ -17,7 +17,7 @@ use flottille_core::store::Store;
 use serde_json::{Value, json};
 
 /// A project `app` that is one repository with a docs folder, its file starting with a comment,
-/// its procedure `ship`, and its ready workspace `login`.
+/// its command `ship`, and its ready workspace `login`.
 fn project(user: &User) -> PathBuf {
     let folder = user.path("work/app");
     user.git_init(&folder);
@@ -42,7 +42,7 @@ fn project(user: &User) -> PathBuf {
     let text = std::fs::read_to_string(&file).unwrap();
     std::fs::write(&file, format!("# The user's own words.\n{text}")).unwrap();
     user.call(
-        "procedure.add",
+        "command.add",
         json!({"project": "app", "name": "ship", "description": "Ship the workspace",
             "instructions": "Push the branch."}),
     )
@@ -143,7 +143,7 @@ fn file(user: &User) -> String {
 }
 
 fn add_style() -> Value {
-    json!({"action": "add_reference", "name": "style", "description": "The code style",
+    json!({"action": "add", "name": "style", "description": "The code style",
         "path": "docs/STYLE.md"})
 }
 
@@ -153,10 +153,21 @@ fn each_family_s_read_runs_at_once() {
     project(&user);
     let (_, mcp) = root(&user, Some("login"));
 
-    let listed = done(mcp.call("procedure", json!({"action": "list"})));
-    assert!(listed.contains("- ship: Ship the workspace"), "{listed}");
-    let shown = done(mcp.call("procedure", json!({"action": "show", "name": "ship"})));
+    user.call(
+        "skill.add",
+        json!({"project": "app", "name": "style", "description": "The code style",
+            "text": "Write short."}),
+    )
+    .unwrap();
+
+    let listed = done(mcp.call("commands", json!({"action": "list"})));
+    assert!(listed.contains("- /ship: Ship the workspace"), "{listed}");
+    let shown = done(mcp.call("commands", json!({"action": "show", "name": "ship"})));
     assert!(shown.contains("Push the branch."), "{shown}");
+    let listed = done(mcp.call("skills", json!({"action": "list"})));
+    assert!(listed.contains("style"), "{listed}");
+    let shown = done(mcp.call("skills", json!({"action": "show", "name": "style"})));
+    assert!(shown.contains("Write short."), "{shown}");
     let settings = done(mcp.call("project", json!({"action": "settings"})));
     assert!(settings.contains("Project app."), "{settings}");
     assert!(settings.contains("Tracker: none"), "{settings}");
@@ -175,12 +186,12 @@ fn a_write_is_held_then_done_on_approval_and_not_done_on_refusal() {
     project(&user);
     let (_, mcp) = root(&user, Some("login"));
 
-    let number = held(mcp.call("project", add_style()));
+    let number = held(mcp.call("skills", add_style()));
     let asked = request(&user, number);
     assert_eq!(asked["kind"], "action");
     assert_eq!(
         asked["says"],
-        json!(["Add the reference style (docs/STYLE.md): The code style"])
+        json!(["Add the skill style (docs/STYLE.md): The code style"])
     );
     cli(&user, &["deny", &number.to_string()]).unwrap();
     assert!(
@@ -188,19 +199,19 @@ fn a_write_is_held_then_done_on_approval_and_not_done_on_refusal() {
             .body
             .contains("was refused by the user")
     );
-    assert!(!file(&user).contains("[references.style]"));
+    assert!(!file(&user).contains("[skills.style]"));
 
-    let number = held(mcp.call("project", add_style()));
+    let number = held(mcp.call("skills", add_style()));
     cli(&user, &["approve", &number.to_string()]).unwrap();
     let body = settled(&user, number).body;
     assert!(
         body.starts_with(&format!(
-            "Request #{number} (project) was approved by the user, and Flottille has now done it."
+            "Request #{number} (skills) was approved by the user, and Flottille has now done it."
         )),
         "{body}"
     );
     let text = file(&user);
-    assert!(text.contains("[references.style]"), "{text}");
+    assert!(text.contains("[skills.style]"), "{text}");
     assert!(text.starts_with("# The user's own words.\n"), "{text}");
 }
 
@@ -210,11 +221,12 @@ fn an_action_of_an_agent_is_to_judge_and_a_change_of_the_tracker_is_base() {
     project(&user);
     let (_, mcp) = root(&user, None);
 
-    let reference = held(mcp.call("project", add_style()));
-    let start = held(mcp.call(
-        "procedure",
-        json!({"action": "start", "name": "ship", "workspace": "login"}),
+    let skill = held(mcp.call("skills", add_style()));
+    let command = held(mcp.call(
+        "commands",
+        json!({"action": "edit", "name": "ship", "instructions": "Push it."}),
     ));
+    let removal = held(mcp.call("commands", json!({"action": "remove", "name": "ship"})));
     let forge = held(mcp.call(
         "project",
         json!({"action": "set_settings", "repositories": [{"path": ".", "forge": null}]}),
@@ -224,12 +236,12 @@ fn an_action_of_an_agent_is_to_judge_and_a_change_of_the_tracker_is_base() {
         json!({"action": "set_settings", "tracker": {"kind": "github", "repository": "acme/app"}}),
     ));
 
-    for number in [reference, start, forge] {
+    for number in [skill, command, removal, forge] {
         assert_eq!(request(&user, number)["class"], "judge", "#{number}");
         assert_eq!(request(&user, number)["kind"], "action", "#{number}");
     }
     assert_eq!(request(&user, tracker)["class"], "base");
-    let error = cli(&user, &["approve", &reference.to_string(), "--for-tree"]).unwrap_err();
+    let error = cli(&user, &["approve", &skill.to_string(), "--for-tree"]).unwrap_err();
     assert!(error.contains("--for-tree"), "{error}");
     assert!(!file(&user).contains("[tracker]"));
 }
@@ -278,8 +290,8 @@ fn an_old_agent_actions_table_lets_nothing_run_on_its_own() {
     .unwrap();
     let (_, mcp) = root(&user, Some("login"));
 
-    held(mcp.call("project", add_style()));
-    assert!(!file(&user).contains("[references.style]"));
+    held(mcp.call("skills", add_style()));
+    assert!(!file(&user).contains("[skills.style]"));
 }
 
 #[test]
@@ -288,7 +300,8 @@ fn the_daemon_s_start_removes_grants_families_and_always_from_the_project_s_file
     let user = User::with_fake_agent();
     project(&user);
     assert!(user.run(&["daemon", "stop"]).status.success());
-    let old = file(&user)
+    // The file as the release before wrote it: `ship` a procedure, `ls` in the catalogue.
+    let old = file(&user).replace("[commands.ship]", "[procedures.ship]")
         + "\n[agent_actions]\nprocedures = \"allow\"\n\
            \n[procedures.ship.grants]\npush = \"allow\"\n\
            \n[commands.ls]\nline = \"ls\"\nadded_by = \"approval\"\n";
@@ -305,9 +318,10 @@ fn the_daemon_s_start_removes_grants_families_and_always_from_the_project_s_file
     assert!(!text.contains("added_by"), "{text}");
     assert!(text.starts_with("# The user's own words.\n"), "{text}");
     assert!(
-        text.contains("[procedures.ship]") && text.contains("[commands.ls]"),
+        text.contains("[commands.ship]") && text.contains("[tasks.ls]"),
         "{text}"
     );
+    assert!(!text.contains("procedures"), "{text}");
     let shown = user
         .call("project.settings", json!({"name": "app"}))
         .unwrap();
@@ -315,47 +329,37 @@ fn the_daemon_s_start_removes_grants_families_and_always_from_the_project_s_file
 }
 
 #[test]
-fn an_agent_s_procedure_start_is_held_confirmed_then_started_in_its_workspace() {
+fn a_text_skill_is_created_by_an_agent_and_read_back() {
     let user = User::with_fake_agent();
     project(&user);
-    let (lead, mcp) = root(&user, Some("login"));
-    let agents = || {
-        user.call("agent.list", json!({})).unwrap()["agents"]
-            .as_array()
-            .unwrap()
-            .len()
-    };
-    let before = agents();
+    let (_, mcp) = root(&user, Some("login"));
 
-    let number = held(mcp.call("procedure", json!({"action": "start", "name": "ship"})));
-    let asked = request(&user, number);
-    assert_eq!(asked["kind"], "action");
+    let number = held(mcp.call(
+        "skills",
+        json!({"action": "add", "name": "style", "description": "The code style",
+            "text": "Short functions, no abbreviations."}),
+    ));
     assert_eq!(
-        asked["says"],
+        request(&user, number)["says"],
         json!([
-            "Start the procedure ship in workspace login: Ship the workspace",
-            "Its agent is told: Push the branch.",
+            "Add the skill style (a text Flottille keeps): The code style",
+            "Its text: Short functions, no abbreviations.",
         ])
     );
-    assert_eq!(agents(), before, "nothing starts before the user confirms");
-
     cli(&user, &["approve", &number.to_string()]).unwrap();
-    let body = settled(&user, number).body;
-    let started = body
-        .split("its agent is ")
-        .nth(1)
-        .unwrap_or_else(|| panic!("{body}"))[..12]
-        .to_owned();
-    assert_ne!(started, lead);
-    let run = user
-        .call("procedure.of", json!({"agent": started}))
-        .unwrap()["run"]
-        .clone();
-    assert_eq!(run["procedure"], "ship");
-    assert_eq!(run["workspace"], "login");
-    assert!(run.get("grants").is_none(), "{run}");
-    // The lead holds none of it.
-    assert!(user.call("procedure.of", json!({"agent": lead})).unwrap()["run"].is_null());
+    settled(&user, number);
+
+    let read = done(mcp.call("skill_read", json!({"name": "style"})));
+    assert!(
+        read.contains("Short functions, no abbreviations."),
+        "{read}"
+    );
+    let text = file(&user);
+    assert!(text.contains("[skills.style]"), "{text}");
+    assert!(
+        !text.contains("Short functions"),
+        "the text is Flottille's: {text}"
+    );
 }
 
 #[test]
@@ -366,13 +370,18 @@ fn an_agent_never_passes_a_grant_sets_what_runs_on_its_own_nor_reaches_another_p
 
     for (tool, args) in [
         (
-            "procedure",
-            json!({"action": "start", "name": "ship", "workspace": "login",
+            "commands",
+            json!({"action": "add", "name": "go", "description": "Go", "instructions": "Go.",
                 "grants": {"push": "allow"}}),
         ),
         (
-            "procedure",
-            json!({"action": "start", "name": "ship", "workspace": "login", "project": "other"}),
+            "commands",
+            json!({"action": "remove", "name": "ship", "project": "other"}),
+        ),
+        (
+            "skills",
+            json!({"action": "add", "name": "x", "description": "x", "text": "x",
+                "project": "other"}),
         ),
         (
             "project",
@@ -386,15 +395,12 @@ fn an_agent_never_passes_a_grant_sets_what_runs_on_its_own_nor_reaches_another_p
         let said = refused(mcp.call(tool, args.clone()));
         assert!(said.contains("the arguments do not fit"), "{args}: {said}");
     }
-    // A procedure starts only in a workspace, the agent's own when it has one.
-    let said = refused(mcp.call("procedure", json!({"action": "start", "name": "ship"})));
-    assert!(said.contains("runs in a workspace"), "{said}");
-    // A reference stays inside the project folder.
+    // A skill stays inside the project folder.
     let outside = refused(mcp.call(
-        "project",
-        json!({"action": "add_reference", "name": "x", "description": "x", "path": "../x"}),
+        "skills",
+        json!({"action": "add", "name": "x", "description": "x", "path": "../x"}),
     ));
-    assert!(outside.contains("references.x"), "{outside}");
+    assert!(outside.contains("skills.x"), "{outside}");
     assert!(
         user.call("approval.list", json!({})).unwrap()["requests"]
             .as_array()
@@ -425,7 +431,7 @@ fn in_main_a_known_read_runs_at_once_and_a_write_is_held_then_run_once() {
     assert!(body.contains("and Flottille has now done it"), "{body}");
     assert!(body.contains("exited with code 0"), "{body}");
     assert!(folder.join("notes.txt").exists());
-    assert_eq!(file(&user), before, "nothing is added to the catalogue");
+    assert_eq!(file(&user), before, "nothing is added to the tasks");
     // Once: the next run asks again.
     held(mcp.call("commands_run", json!({"line": "touch notes.txt"})));
 }
@@ -460,7 +466,7 @@ fn in_main_shell_syntax_is_still_refused_and_a_never_command_is_base() {
 }
 
 #[test]
-fn an_agent_s_reference_on_the_project_folder_or_a_repository_is_refused() {
+fn an_agent_s_skill_on_the_project_folder_or_a_repository_is_refused() {
     let user = User::with_fake_agent();
     let folder = project(&user);
     std::os::unix::fs::symlink(&folder, folder.join("docs/all")).unwrap();
@@ -468,8 +474,8 @@ fn an_agent_s_reference_on_the_project_folder_or_a_repository_is_refused() {
 
     for path in [".", "./", "docs/all"] {
         let said = refused(mcp.call(
-            "project",
-            json!({"action": "add_reference", "name": "all", "description": "Everything",
+            "skills",
+            json!({"action": "add", "name": "all", "description": "Everything",
                 "path": path}),
         ));
         assert!(said.contains("the project folder"), "{path}: {said}");
@@ -481,23 +487,26 @@ fn an_agent_s_reference_on_the_project_folder_or_a_repository_is_refused() {
             .is_empty(),
         "nothing was asked"
     );
-    assert!(!file(&user).contains("[references.all]"));
+    assert!(!file(&user).contains("[skills.all]"));
 }
 
 #[test]
-fn a_procedure_whose_instructions_changed_after_it_was_asked_is_not_started() {
+fn a_command_whose_instructions_changed_after_it_was_asked_is_not_written() {
     let user = User::with_fake_agent();
     project(&user);
     let (_, mcp) = root(&user, Some("login"));
-    let number = held(mcp.call("procedure", json!({"action": "start", "name": "ship"})));
+    let number = held(mcp.call(
+        "commands",
+        json!({"action": "edit", "name": "ship", "instructions": "Push it, then open the PR."}),
+    ));
     assert!(
         request(&user, number)["says"]
             .as_array()
             .unwrap()
-            .contains(&json!("Its agent is told: Push the branch."))
+            .contains(&json!("They were: Push the branch."))
     );
     user.call(
-        "procedure.edit",
+        "command.edit",
         json!({"project": "app", "name": "ship", "instructions": "Push it, then force-push."}),
     )
     .unwrap();
@@ -507,12 +516,16 @@ fn a_procedure_whose_instructions_changed_after_it_was_asked_is_not_started() {
     let body = settled(&user, number).body;
     assert!(
         body.starts_with(&format!(
-            "Request #{number} (procedure) was not executed: what it does changed since the user \
+            "Request #{number} (commands) was not executed: what it does changed since the user \
              allowed it"
         )),
         "{body}"
     );
     assert!(body.contains("then force-push"), "{body}");
+    let shown = user
+        .call("command.show", json!({"project": "app", "name": "ship"}))
+        .unwrap();
+    assert_eq!(shown["instructions"], "Push it, then force-push.");
 }
 
 #[test]
@@ -524,8 +537,8 @@ fn a_line_equal_to_a_catalogue_command_is_that_command_and_is_judged_in_main() {
     std::fs::write(
         &path,
         format!(
-            "{text}\n[commands.build]\nline = \"touch built.txt\"\n\n\
-             [commands.status]\nline = \"git status\"\ncheck = true\nread_only = true\n\
+            "{text}\n[tasks.build]\nline = \"touch built.txt\"\n\n\
+             [tasks.status]\nline = \"git status\"\ncheck = true\nread_only = true\n\
              ask_before_running = true\n"
         ),
     )
@@ -593,7 +606,7 @@ fn a_sensitive_line_is_base_and_allowed_only_once() {
     let error = cli(&user, &["approve", &number.to_string(), "--always"]).unwrap_err();
     assert!(error.contains("--always"), "{error}");
     assert_eq!(request(&user, number)["state"], "pending");
-    assert!(!file(&user).contains("[commands."));
+    assert!(!file(&user).contains("[tasks."));
 }
 
 #[test]

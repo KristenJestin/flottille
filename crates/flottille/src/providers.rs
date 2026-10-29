@@ -104,7 +104,7 @@ const FILE_AND_COMMAND_TOOLS: [&str; 8] = [
     "commands_status",
 ];
 const AGENT_TOOLS: [&str; 4] = ["agent_launch", "agent_send", "agent_status", "agent_stop"];
-const ACTION_TOOLS: [&str; 2] = ["procedure", "project"];
+const ACTION_TOOLS: [&str; 3] = ["skills", "commands", "project"];
 
 impl Provider {
     /// The exact tool names an agent gets, as the provider names them: what it can do decides
@@ -118,7 +118,7 @@ impl Provider {
         if in_workspace {
             names.push("forge_read");
         }
-        names.push("reference_read");
+        names.push("skill_read");
         if in_workspace {
             names.push("ticket_read");
             names.push("forge_write");
@@ -1086,12 +1086,13 @@ mod tests {
                 "commands_list",
                 "commands_run",
                 "commands_status",
-                "reference_read",
+                "skill_read",
                 "agent_launch",
                 "agent_send",
                 "agent_status",
                 "agent_stop",
-                "procedure",
+                "skills",
+                "commands",
                 "project",
                 "report",
                 "ask_user",
@@ -1115,10 +1116,11 @@ mod tests {
         assert!(lead_child.contains(&"ask_parent".to_owned()));
         assert!(lead_child.contains(&"approval_answer".to_owned()));
         assert!(!lead_child.contains(&"ask_user".to_owned()));
-        // A child does its brief: the project's procedures and settings are the root's.
+        // A child does its brief: the project's skills, commands and settings are the root's.
         for child in [&leaf, &lead_child] {
-            assert!(!child.contains(&"procedure".to_owned()));
-            assert!(!child.contains(&"project".to_owned()));
+            for family in ["skills", "commands", "project"] {
+                assert!(!child.contains(&family.to_owned()), "{family}");
+            }
         }
     }
 
@@ -1129,10 +1131,10 @@ mod tests {
         assert!(!main.contains(&"forge_read".to_owned()));
         assert!(!main.contains(&"ticket_read".to_owned()));
         let workspace = short(claude::PROVIDER.tools(true, false, true));
-        assert_eq!(workspace.len(), 22);
+        assert_eq!(workspace.len(), 23);
         assert_eq!(workspace[8], "forge_read", "after the command tools");
-        assert_eq!(workspace[9], "reference_read", "after forge_read");
-        assert_eq!(workspace[10], "ticket_read", "after reference_read");
+        assert_eq!(workspace[9], "skill_read", "after forge_read");
+        assert_eq!(workspace[10], "ticket_read", "after skill_read");
         let leaf = short(claude::PROVIDER.tools(false, true, true));
         assert_eq!(leaf.len(), 15);
     }

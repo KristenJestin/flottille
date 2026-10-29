@@ -49,8 +49,8 @@ use crate::judge;
 use crate::place::{Place, Resolved};
 use crate::projects;
 use crate::providers::{self, Provider};
-use crate::references;
 use crate::runs;
+use crate::skills;
 use crate::tree;
 
 /// The path the server is reached at; any path is served.
@@ -89,7 +89,7 @@ const REPLACED: &str = "refused: this session has been replaced: a new session o
 
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
 /// the order frozen in the agent.
-const SERVED: [Definition; 23] = [
+const SERVED: [Definition; 24] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -265,21 +265,21 @@ const SERVED: [Definition; 23] = [
         },
     },
     Definition {
-        name: "reference_read",
-        title: "Read a reference",
-        description: "Reads one of the project's references, the documents listed in your \
-            instructions (framework guides, test library, design system), when your task needs \
-            them. A file reference is read by its name, a page at a time (32 KiB at most) like \
-            fs_read; a folder reference lists its files, then path names the one to read. Only \
-            the reference's own files are served, never outside it. Refused for a name that is \
-            not in the list.",
+        name: "skill_read",
+        title: "Read a skill",
+        description: "Reads one of the project's skills, the texts listed in your instructions \
+            (framework guides, test library, design system, the project's ways), when your task \
+            needs them. A file or a text skill is read by its name, a page at a time (32 KiB at \
+            most) like fs_read; a folder skill lists its files, then path names the one to read. \
+            Only the skill's own files are served, never outside it. Refused for a name that is \
+            not the project's.",
         read_only: true,
         idempotent: true,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "name": {"type": "string", "description": "A reference of the list in your instructions."},
-                "path": {"type": "string", "description": "A folder reference only: a file of it, relative to the reference."},
+                "name": {"type": "string", "description": "A skill of the list in your instructions."},
+                "path": {"type": "string", "description": "A folder skill only: a file of it, relative to the skill."},
                 "range": {"type": "object", "properties": {
                     "offset": {"type": "integer", "minimum": 0, "description": "The byte to start at; a page names the next one."},
                     "length": {"type": "integer", "minimum": 1, "maximum": files::READ_PAGE_BYTES}
@@ -346,24 +346,50 @@ const SERVED: [Definition; 23] = [
         schema: || json!({"type": "object", "properties": {}, "additionalProperties": false}),
     },
     Definition {
-        name: "procedure",
-        title: "The project's procedures",
-        description: "The project's procedures, the named multi-step actions the user runs in a \
-            workspace (open the pull requests, merge a stack, close a workspace). list and show \
-            read them. start runs one in a workspace (yours when left out) as a new session of \
-            its own, once the session's judge or the user allows it; you are answered at once, \
-            and the result may come later. A run grants nothing: its calls go through the gate \
-            like yours. \
-            {\"action\": \"list\"}; {\"action\": \"start\", \"name\": \"open-prs\", \
-            \"workspace\": \"login\"}.",
+        name: "skills",
+        title: "The project's skills",
+        description: "The project's skills, the texts agents read with skill_read when their \
+            task needs them, as its Settings page shows them. list and show read them. add, edit \
+            and remove change them: a skill is a path of the project (a file or a folder, never a \
+            whole repository) or a text that Flottille keeps outside the project. A change is \
+            done once the session's judge or the user allows it: you are answered at once, the \
+            result may come later. {\"action\": \"add\", \"name\": \"style\", \"description\": \
+            \"The code style\", \"text\": \"...\"}; {\"action\": \"add\", \"name\": \"react\", \
+            \"description\": \"How we write components\", \"path\": \"docs/react\"}.",
         read_only: false,
         idempotent: false,
         destructive: true,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "show", "start"]},
-                "name": {"type": "string", "description": "show, start: the procedure's name."},
-                "workspace": {"type": "string", "description": "start: the workspace it runs in; yours when left out."}
+                "action": {"type": "string", "enum": ["list", "show", "add", "edit", "remove"]},
+                "name": {"type": "string", "description": "The skill's name: letters, digits, . - _."},
+                "description": {"type": "string", "description": "add, edit: one line, when it is worth reading."},
+                "path": {"type": "string", "description": "add, edit: a file or a folder, relative to the project folder."},
+                "text": {"type": "string", "description": "add, edit: its text, in Markdown, in place of a path."}
+            }, "required": ["action"], "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "commands",
+        title: "The project's commands",
+        description: "The project's commands: named instructions the user sends with /name in \
+            the composer (open the pull requests, merge a stack, close a workspace). list and \
+            show read them; /name at the start of agent_send's message sends one to a child. \
+            add (its own words, or a template: open-prs, merge-stack, close), edit and remove \
+            change them, once the session's judge or the user allows it: you are answered at \
+            once, the result may come later. {\"action\": \"show\", \"name\": \"open-prs\"}; \
+            {\"action\": \"add\", \"name\": \"release\", \"description\": \"Cut a release\", \
+            \"instructions\": \"...\"}.",
+        read_only: false,
+        idempotent: false,
+        destructive: true,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["list", "show", "add", "edit", "remove"]},
+                "name": {"type": "string", "description": "The command's name: letters, digits, . - _; a template's own when left out."},
+                "description": {"type": "string", "description": "add, edit: one line, what it does."},
+                "instructions": {"type": "string", "description": "add, edit: what the agent it is sent to is told."},
+                "template": {"type": "string", "enum": ["open-prs", "merge-stack", "close"], "description": "add: one of Flottille's commands, written as it is."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -371,27 +397,23 @@ const SERVED: [Definition; 23] = [
         name: "project",
         title: "The project's settings",
         description: "This project's settings, as its Settings page shows them. settings reads \
-            each repository's forge, the tracker and the references. set_settings declares a \
-            repository's forge or the tracker (null removes it; a tracker left out is kept); \
-            add_reference and remove_reference edit the references. A change is done once the \
-            session's judge or the user allows it, a change of the tracker only once the user \
-            does: you are answered at once, the result may come later. {\"action\": \"set_settings\", \
-            \"repositories\": [{\"path\": \"api\", \"forge\": {\"kind\": \"github\", \
-            \"repository\": \"acme/api\"}}]}.",
+            each repository's forge and the tracker. set_settings declares a repository's forge \
+            or the tracker (null removes it; a tracker left out is kept). A change is done once \
+            the session's judge or the user allows it, a change of the tracker only once the \
+            user does: you are answered at once, the result may come later. {\"action\": \
+            \"set_settings\", \"repositories\": [{\"path\": \"api\", \"forge\": {\"kind\": \
+            \"github\", \"repository\": \"acme/api\"}}]}.",
         read_only: false,
         idempotent: false,
         destructive: true,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["settings", "set_settings", "add_reference", "remove_reference"]},
+                "action": {"type": "string", "enum": ["settings", "set_settings"]},
                 "repositories": {"type": "array", "items": {"type": "object", "properties": {
                     "path": {"type": "string"},
                     "forge": {"type": ["object", "null"], "description": "{kind: github | bitbucket-cloud, repository} or {kind: bitbucket-data-center, host, repository}."}
                 }, "required": ["path", "forge"], "additionalProperties": false}},
-                "tracker": {"type": ["object", "null"], "description": "{kind: github, repository: <path>} or {kind: jira, site, projects}."},
-                "name": {"type": "string", "description": "The reference's name."},
-                "description": {"type": "string", "description": "add_reference: when it is worth reading."},
-                "path": {"type": "string", "description": "add_reference: relative to the project folder."}
+                "tracker": {"type": ["object", "null"], "description": "{kind: github, repository: <path>} or {kind: jira, site, projects}."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -1189,9 +1211,9 @@ pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gat
     let command = match command.as_deref() {
         Some(name) => project
             .as_ref()
-            .and_then(|project| project.commands.get_key_value(name)),
+            .and_then(|project| project.tasks.get_key_value(name)),
         None if !words.is_empty() => project.as_ref().and_then(|project| {
-            project.commands.iter().find(|(_, command)| {
+            project.tasks.iter().find(|(_, command)| {
                 flottille_core::command::split_line(&command.line).is_ok_and(|line| line == words)
             })
         }),
@@ -1412,7 +1434,7 @@ async fn perform(
                     "search" => files::search(&cx, args),
                     "fs_write" => files::fs_write(&cx, args),
                     "fs_edit" => files::fs_edit(&cx, args),
-                    "reference_read" => references::reference_read(&cx, args),
+                    "skill_read" => skills::skill_read(&cx, args),
                     other => Outcome::Failed(format!("{other} is not served")),
                 }
             })
@@ -1603,7 +1625,8 @@ mod tests {
                 tool.unwrap().len()
             })
             .sum();
-        // About 6k tokens since the project's procedures and settings came (#112).
+        // About 6k tokens since the project's settings came (#112), then its skills and commands
+        // (#127).
         assert!(chars < 24_000, "{chars} characters of definitions");
     }
 }

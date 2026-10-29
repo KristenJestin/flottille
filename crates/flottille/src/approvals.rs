@@ -267,7 +267,7 @@ async fn performed(daemon: &Arc<Daemon>, request: &Request) -> (&'static str, St
         return not_executed(mcp::masked(&why, &grant.place));
     }
     // What the user allowed is what they read: an action whose words changed meanwhile (its
-    // procedure was edited, its reference removed) is not done.
+    // command was edited, its skill removed) is not done.
     if request.kind == Kind::Action {
         match actions::prepared(daemon, &grant, tool, &request.arguments).await {
             Err(Outcome::Refused(why) | Outcome::Failed(why) | Outcome::Held(why)) => {

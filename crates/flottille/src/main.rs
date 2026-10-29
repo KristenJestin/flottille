@@ -10,6 +10,8 @@ mod claude;
 mod client;
 mod codex;
 mod codex_bridge;
+mod command_command;
+mod commands;
 mod daemon;
 mod deliveries;
 mod files;
@@ -24,16 +26,14 @@ mod mcp;
 mod opencode;
 mod pilot;
 mod place;
-mod procedure_command;
-mod procedures;
 mod program;
 mod project_command;
 mod projects;
 mod providers;
-mod reference_command;
-mod references;
 mod roles;
 mod runs;
+mod skill_command;
+mod skills;
 mod sweep;
 mod tickets;
 mod tree;
@@ -51,9 +51,9 @@ use serde_json::Value;
 
 use crate::agent_command::AgentAction;
 use crate::client::Client;
-use crate::procedure_command::ProcedureAction;
+use crate::command_command::CommandAction;
 use crate::project_command::ProjectAction;
-use crate::reference_command::ReferenceAction;
+use crate::skill_command::SkillAction;
 use crate::workspace_command::WorkspaceAction;
 
 pub const VERSION: &str = env!("FLOTTILLE_VERSION");
@@ -82,20 +82,22 @@ enum Command {
         #[command(subcommand)]
         action: ProjectAction,
     },
-    /// List, add and remove the references of a project: documents its agents read with a tool
-    Reference {
+    /// The skills of a project: texts its agents read with a tool when their task needs them
+    #[command(alias = "reference")]
+    Skill {
         #[command(subcommand)]
-        action: ReferenceAction,
+        action: SkillAction,
     },
     /// Make, follow and remove the workspaces of a project
     Workspace {
         #[command(subcommand)]
         action: WorkspaceAction,
     },
-    /// A project's procedures: named actions with grants, run by an agent in a workspace
-    Procedure {
+    /// The commands of a project: named instructions, sent to an agent by /name
+    #[command(name = "command", alias = "procedure")]
+    Commands {
         #[command(subcommand)]
-        action: ProcedureAction,
+        action: CommandAction,
     },
     /// Start, write to, read and stop Claude agents
     Agent {
@@ -233,10 +235,10 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             }
         }
         Command::Project { action } => return project_command::run(&paths, action),
-        Command::Reference { action } => return reference_command::run(&paths, action),
+        Command::Skill { action } => return skill_command::run(&paths, action),
         Command::Workspace { action } => return workspace_command::run(&paths, action),
         Command::Agent { action } => return agent_command::run(&paths, action),
-        Command::Procedure { action } => return procedure_command::run(&paths, action),
+        Command::Commands { action } => return command_command::run(&paths, action),
         Command::Doctor { json } => return agent_command::doctor(&paths, json),
         Command::Provider { action } => {
             let (method, name) = match action {

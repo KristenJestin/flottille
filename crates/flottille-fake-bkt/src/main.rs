@@ -1,5 +1,5 @@
 //! A scripted `bkt` (<https://github.com/avivsinai/bitbucket-cli>) for the tests of Flottille's
-//! Bitbucket reads and writes (`docs/forges.md`, `docs/procedures.md`), so that no test ever calls
+//! Bitbucket reads and writes (`docs/forges.md`, `docs/commands.md`), so that no test ever calls
 //! Bitbucket nor uses anyone's sign-in. It answers the few commands Flottille runs, in the shapes
 //! `docs/forges.md` takes from the pinned release's source, and records every call.
 //!

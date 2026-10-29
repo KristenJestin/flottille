@@ -5,7 +5,7 @@
 //! A remote's address still serves twice: to propose a declaration (the window pre-fills its
 //! settings with it, the user saves it or not), and to check that a declared forge is the one
 //! the remote leads to. A declaration that disagrees with its remote is refused with the reason;
-//! neither wins silently, since a procedure writes to the forge.
+//! neither wins silently, since a command's session writes to the forge.
 
 use serde::{Deserialize, Serialize};
 

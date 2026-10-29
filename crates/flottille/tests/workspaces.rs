@@ -53,7 +53,7 @@ impl Fixture {
     }
 
     /// Writes `projects/app.toml`: the repositories (with the root one first when there is one),
-    /// then `rest` (variables, recipe…).
+    /// then `rest` (variables, setup…).
     fn configure(&self, rest: &str) {
         let mut text = format!(
             "folder = \"{}\"\nworkspaces_root = \"{}\"\n",
@@ -227,7 +227,7 @@ fn a_shown_workspace_says_when_its_preparation_ended() {
 fn a_workspace_never_prepared_has_no_end_of_preparation() {
     let fixture = Fixture::new(false);
     let script = fixture.script("fail.sh", "exit 3\n");
-    fixture.configure(&format!("[[recipe]]\nrun = \"sh {}\"\n", script.display()));
+    fixture.configure(&format!("[[setup]]\nrun = \"sh {}\"\n", script.display()));
     fixture.create(json!({})).unwrap();
     assert_eq!(fixture.settled("login")["state"], "failed");
 
@@ -380,7 +380,7 @@ fn every_step_is_an_event() {
     let fixture = Fixture::new(false);
     let script = fixture.script("ok.sh", "exit 0\n");
     fixture.configure(&format!(
-        "[[recipe]]\nrun = \"sh {}\"\nrepository = \"lib\"\n",
+        "[[setup]]\nrun = \"sh {}\"\nrepository = \"lib\"\n",
         script.display()
     ));
 
@@ -514,7 +514,7 @@ fn a_copy_never_overwrites_a_file_already_there() {
     std::fs::create_dir(api.join(".env.d")).unwrap();
     std::fs::write(api.join(".env.d/extra"), "EXTRA=1\n").unwrap();
     fixture.configure(
-        "[[recipe]]\ncopy = [\".env\", \".env.*\", \"config.json\", \".env.missing\"]\nrepository = \"api\"\n",
+        "[[setup]]\ncopy = [\".env\", \".env.*\", \"config.json\", \".env.missing\"]\nrepository = \"api\"\n",
     );
 
     fixture.create(json!({})).unwrap();
@@ -546,7 +546,7 @@ fn root_entries_never_links_git_nor_gitignore() {
     std::fs::create_dir(fixture.folder.join("notes")).unwrap();
     std::fs::write(fixture.folder.join("notes/plan.md"), "plan\n").unwrap();
     std::fs::write(fixture.folder.join("AGENTS.local.md"), "local rules\n").unwrap();
-    fixture.configure("[[recipe]]\nroot_entries = true\n");
+    fixture.configure("[[setup]]\nroot_entries = true\n");
 
     // Without the root repository the workspace folder is a plain folder: `.git` and `.gitignore`
     // are not there, and linking them would make it look like the root's checkout.
@@ -594,7 +594,7 @@ fn run_steps_for_each_repository_run_in_dependency_order() {
     );
     text.push_str("[[repositories]]\npath = \"lib\"\n");
     text.push_str(&format!(
-        "[[recipe]]\nrun = \"sh {} {{repository}} {}\"\nfor_each_repository = true\n",
+        "[[setup]]\nrun = \"sh {} {{repository}} {}\"\nfor_each_repository = true\n",
         script.display(),
         order.display()
     ));
@@ -627,7 +627,7 @@ fn a_run_failing_stops_the_preparation_with_its_last_lines_kept() {
     let after = fixture.script("after.sh", "touch \"$1\"\n");
     let ran = fixture.user.path("after-ran");
     fixture.configure(&format!(
-        "[[recipe]]\nrun = \"sh {}\"\nrepository = \"api\"\n[[recipe]]\nrun = \"sh {} {}\"\n",
+        "[[setup]]\nrun = \"sh {}\"\nrepository = \"api\"\n[[setup]]\nrun = \"sh {} {}\"\n",
         failing.display(),
         after.display(),
         ran.display()
@@ -662,7 +662,7 @@ fn a_run_step_leaving_a_child_in_the_background_ends_with_its_own_process() {
         "sleep 60 &\necho $! > \"$1\"\necho started\n",
     );
     fixture.configure(&format!(
-        "[[recipe]]\nrun = \"sh {} {}\"\nrepository = \"lib\"\n",
+        "[[setup]]\nrun = \"sh {} {}\"\nrepository = \"lib\"\n",
         script.display(),
         pid.display()
     ));
@@ -687,7 +687,7 @@ fn a_run_step_past_its_time_limit_is_stopped_and_fails() {
     let fixture = Fixture::new(false);
     let script = fixture.script("slow.sh", "echo started\nsleep 60\n");
     fixture.configure(&format!(
-        "[[recipe]]\nrun = \"sh {}\"\nrepository = \"lib\"\ntime_limit = 1\n",
+        "[[setup]]\nrun = \"sh {}\"\nrepository = \"lib\"\ntime_limit = 1\n",
         script.display()
     ));
 
@@ -723,9 +723,9 @@ fn prepare_resumes_from_the_failed_step_and_never_reruns_a_finished_run() {
         "echo flaky >> \"$2\"\nif [ -e \"$1\" ]; then exit 0; fi\necho 'not yet'\nexit 1\n",
     );
     fixture.configure(&format!(
-        "[[recipe]]\nrun = \"sh {r} first {out}\"\n\
-         [[recipe]]\nrun = \"sh {f} {m} {out}\"\n\
-         [[recipe]]\nrun = \"sh {r} third {out}\"\n",
+        "[[setup]]\nrun = \"sh {r} first {out}\"\n\
+         [[setup]]\nrun = \"sh {f} {m} {out}\"\n\
+         [[setup]]\nrun = \"sh {r} third {out}\"\n",
         r = recorder.display(),
         f = flaky.display(),
         m = marker.display(),
@@ -804,7 +804,7 @@ fn the_variables_reach_a_run_step() {
     fixture.configure(&format!(
         "[variables]\nSTORE = \"{{workspace.path}}/.store\"\nCOMPOSE_PROJECT_NAME = \"{{project}}-{{workspace}}\"\n\
          REPOSITORY = \"{{repository}}\"\nPATH = \"{{workspace.path}}/bin\"\n\
-         [[recipe]]\nrun = \"sh {} {}\"\nrepository = \"api\"\n",
+         [[setup]]\nrun = \"sh {} {}\"\nrepository = \"api\"\n",
         script.display(),
         out.display()
     ));
@@ -890,7 +890,7 @@ fn removal_succeeds_on_a_clean_pushed_workspace_and_leaves_git_worktree_list_cle
     std::fs::create_dir(fixture.folder.join("notes")).unwrap();
     std::fs::write(fixture.folder.join("web/.env"), "A=1\n").unwrap();
     fixture.configure(
-        "[[recipe]]\nroot_entries = true\n[[recipe]]\ncopy = [\".env\"]\nfor_each_repository = true\n",
+        "[[setup]]\nroot_entries = true\n[[setup]]\ncopy = [\".env\"]\nfor_each_repository = true\n",
     );
     fixture.create(json!({})).unwrap();
     assert_eq!(fixture.settled("login")["state"], "ready");

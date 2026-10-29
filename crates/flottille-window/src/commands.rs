@@ -1,14 +1,10 @@
-//! A project's procedures on its page (`docs/procedures.md`), and their runs. The window writes
-//! nothing itself: every add, edit and removal is the daemon's (`procedure.*`), and the section
-//! shows the list the daemon gives next.
-//!
-//! * [`ProceduresSection`]: the "Procedures" section of the project page, with the modal that adds
-//!   one (from the list of templates, or blank) or edits one.
-//! * [`RunProcedure`]: the modal that runs one, picked with `/` in a session's composer, in that
-//!   session's workspace. It starts nothing before Confirm.
-//! * [`run_block`]: the run a session belongs to, in its rail's WORKSPACE section.
+//! A project's commands in its Settings (`docs/commands.md`): named instructions that `/name`
+//! sends to the session's agent. The window writes nothing itself: every add, edit and removal is
+//! the daemon's (`command.*`), and the section shows the list the daemon gives next. The
+//! "Commands" section has the modal that adds one (from the list of templates, or blank) or edits
+//! one.
 
-use flottille_core::procedure::TEMPLATES;
+use flottille_core::commands::TEMPLATES;
 use flottille_ui::{Button, Icon, ListRow, Modal, Type, icon, palette};
 use gpui_kit::base::input::{Input, InputEditorStyle, InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -19,19 +15,19 @@ use gpui_kit::{
 };
 use serde_json::Value;
 
-use crate::actions::{Command, ProcedureWrite};
+use crate::actions::{Command, CommandWrite};
 use crate::shell::Shell;
 
-/// A procedure as the daemon shows it (`docs/protocol.md`, "The procedure methods").
+/// A command as the daemon shows it (`docs/protocol.md`, "The command methods").
 #[derive(Clone, Debug, PartialEq)]
-pub struct ProcedureInfo {
+pub struct CommandInfo {
     pub name: String,
     pub description: String,
-    /// Empty unless the daemon gave it whole (`procedure.show`).
+    /// Empty unless the daemon gave it whole (`command.show`).
     pub instructions: String,
 }
 
-impl ProcedureInfo {
+impl CommandInfo {
     pub fn of(value: &Value) -> Self {
         let text = |value: &Value| value.as_str().unwrap_or_default().to_owned();
         Self {
@@ -94,7 +90,7 @@ pub(crate) fn boxed(id: &'static str, field: impl IntoElement, cx: &App) -> impl
         .test_support()
 }
 
-/// The heading of a section of the project page.
+/// The heading of a section of a project's pages.
 pub(crate) fn heading(
     title: &'static str,
     count: usize,
@@ -130,7 +126,7 @@ enum Form {
     Closed,
     /// Which template, or a blank one.
     Choosing,
-    /// A procedure written out: a new one, or the one named.
+    /// A command written out: a new one, or the one named.
     Editing(Option<String>),
 }
 
@@ -140,10 +136,10 @@ struct Fields {
     instructions: Entity<TextareaState>,
 }
 
-pub struct ProceduresSection {
+pub struct CommandsSection {
     shell: WeakEntity<Shell>,
     project: String,
-    listed: Option<Vec<ProcedureInfo>>,
+    listed: Option<Vec<CommandInfo>>,
     /// What the daemon said when the list could not be read, or a removal was refused.
     problem: Option<SharedString>,
     form: Form,
@@ -151,13 +147,13 @@ pub struct ProceduresSection {
     fields: Option<Fields>,
     saving: bool,
     form_error: Option<SharedString>,
-    /// The procedure being read to be edited.
+    /// The command being read to be edited.
     reading: Option<String>,
     confirming: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
-impl ProceduresSection {
+impl CommandsSection {
     pub fn new(shell: WeakEntity<Shell>, project: String) -> Self {
         Self {
             shell,
@@ -174,8 +170,8 @@ impl ProceduresSection {
         }
     }
 
-    /// The procedures as last listed; `None` until the daemon has said.
-    pub fn procedures(&self) -> Option<&[ProcedureInfo]> {
+    /// The commands as last listed; `None` until the daemon has said.
+    pub fn commands(&self) -> Option<&[CommandInfo]> {
         self.listed.as_deref()
     }
 
@@ -206,11 +202,11 @@ impl ProceduresSection {
     /// Asks the daemon for the list.
     pub fn read(&self, cx: &mut Context<Self>) {
         let project = self.project.clone();
-        perform_later(&self.shell, Command::Procedures { project }, cx);
+        perform_later(&self.shell, Command::Commands { project }, cx);
     }
 
     /// The daemon's list.
-    pub fn listed(&mut self, listed: Result<Vec<ProcedureInfo>, String>, cx: &mut Context<Self>) {
+    pub fn listed(&mut self, listed: Result<Vec<CommandInfo>, String>, cx: &mut Context<Self>) {
         match listed {
             Ok(list) => {
                 self.problem = None;
@@ -225,12 +221,12 @@ impl ProceduresSection {
 
     fn fields(&mut self, window: &mut Window, cx: &mut Context<Self>) -> &Fields {
         if self.fields.is_none() {
-            let name = line_field("name, for example open-prs", window, cx);
+            let name = line_field("name, typed after / to send it: open-prs", window, cx);
             let description = line_field("one line: what it does", window, cx);
             let instructions = cx.new(|cx| {
                 let mut field = TextareaState::new(window, cx)
                     .auto_grow(4, 10)
-                    .placeholder("what the agent is told to do");
+                    .placeholder("what the agent is sent");
                 field.set_editor_style(editor_style(cx));
                 field
             });
@@ -252,7 +248,7 @@ impl ProceduresSection {
         self.fields.as_ref().expect("made above")
     }
 
-    /// "New procedure": the list of the templates, and a blank one.
+    /// "New command": the list of the templates, and a blank one.
     pub fn add(&mut self, cx: &mut Context<Self>) {
         self.form = Form::Choosing;
         self.form_error = None;
@@ -265,14 +261,14 @@ impl ProceduresSection {
     }
 
     /// Opens the form on `info`, or empty.
-    fn fill(&mut self, info: Option<&ProcedureInfo>, window: &mut Window, cx: &mut Context<Self>) {
+    fn fill(&mut self, info: Option<&CommandInfo>, window: &mut Window, cx: &mut Context<Self>) {
         let fields = self.fields(window, cx);
         let (name, description, instructions) = (
             fields.name.clone(),
             fields.description.clone(),
             fields.instructions.clone(),
         );
-        let text = |f: fn(&ProcedureInfo) -> &str| info.map(f).unwrap_or_default().to_owned();
+        let text = |f: fn(&CommandInfo) -> &str| info.map(f).unwrap_or_default().to_owned();
         name.update(cx, |f, cx| {
             f.set_value(text(|i| &i.name), window, cx);
         });
@@ -292,11 +288,11 @@ impl ProceduresSection {
         cx.notify();
     }
 
-    /// Reads the procedure whole, then opens it for editing.
+    /// Reads the command whole, then opens it for editing.
     pub fn edit(&mut self, name: &str, cx: &mut Context<Self>) {
         self.reading = Some(name.to_owned());
         self.problem = None;
-        let command = Command::ProcedureRead {
+        let command = Command::CommandRead {
             project: self.project.clone(),
             name: name.to_owned(),
         };
@@ -304,11 +300,11 @@ impl ProceduresSection {
         cx.notify();
     }
 
-    /// The daemon's reading of the procedure to edit.
+    /// The daemon's reading of the command to edit.
     pub fn read_whole(
         &mut self,
         name: &str,
-        read: Result<ProcedureInfo, String>,
+        read: Result<CommandInfo, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -331,11 +327,11 @@ impl ProceduresSection {
         cx.notify();
     }
 
-    fn write(&mut self, write: ProcedureWrite, cx: &mut Context<Self>) {
+    fn write(&mut self, write: CommandWrite, cx: &mut Context<Self>) {
         self.saving = true;
         self.form_error = None;
         self.problem = None;
-        let command = Command::ProcedureWrite {
+        let command = Command::CommandWrite {
             project: self.project.clone(),
             write,
         };
@@ -345,14 +341,14 @@ impl ProceduresSection {
 
     fn template(&mut self, template: &str, cx: &mut Context<Self>) {
         self.write(
-            ProcedureWrite::Template {
+            CommandWrite::Template {
                 template: template.to_owned(),
             },
             cx,
         );
     }
 
-    /// Saves the form: a new procedure, or the one being edited.
+    /// Saves the form: a new command, or the one being edited.
     pub fn save(&mut self, cx: &mut Context<Self>) {
         let Form::Editing(original) = self.form.clone() else {
             return;
@@ -369,12 +365,12 @@ impl ProceduresSection {
             fields.instructions.read(cx).value().trim().to_owned(),
         );
         let write = match original {
-            Some(_) => ProcedureWrite::Edit {
+            Some(_) => CommandWrite::Edit {
                 name,
                 description,
                 instructions,
             },
-            None => ProcedureWrite::Add {
+            None => CommandWrite::Add {
                 name,
                 description,
                 instructions,
@@ -392,7 +388,7 @@ impl ProceduresSection {
         }
         self.confirming = None;
         self.write(
-            ProcedureWrite::Remove {
+            CommandWrite::Remove {
                 name: name.to_owned(),
             },
             cx,
@@ -414,13 +410,13 @@ impl ProceduresSection {
         cx.notify();
     }
 
-    fn row(&self, info: &ProcedureInfo, cx: &mut Context<Self>) -> impl IntoElement {
+    fn row(&self, info: &CommandInfo, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let name = info.name.clone();
         let id = |part: &str| ElementId::Name(format!("{part}-{}", info.name).into());
         let confirming = self.confirming.as_deref() == Some(&info.name);
         div()
-            .id(id("procedure"))
+            .id(id("command"))
             .px(px(14.))
             .py(px(10.))
             .rounded(px(10.))
@@ -445,7 +441,7 @@ impl ProceduresSection {
                     )
                     .child(
                         div()
-                            .id(id("procedure-description"))
+                            .id(id("command-description"))
                             .text_size(px(12.5))
                             .text_color(p.mute)
                             .aria_label(SharedString::from(info.description.clone()))
@@ -455,7 +451,7 @@ impl ProceduresSection {
             )
             .child({
                 let edit = name.clone();
-                Button::quiet(id("edit-procedure"), "Edit")
+                Button::quiet(id("edit-command"), "Edit")
                     .disabled(self.reading.is_some())
                     .on_click(cx.listener(move |this, _, _, cx| this.edit(&edit, cx)))
             })
@@ -465,23 +461,23 @@ impl ProceduresSection {
                     .flex()
                     .gap(px(4.))
                     .child(
-                        Button::quiet(id("cancel-remove-procedure"), "Cancel").on_click(
-                            cx.listener(move |this, _, _, cx| {
+                        Button::quiet(id("cancel-remove-command"), "Cancel").on_click(cx.listener(
+                            move |this, _, _, cx| {
                                 if this.confirming.as_deref() == Some(&cancel) {
                                     this.confirming = None;
                                     cx.notify();
                                 }
-                            }),
-                        ),
+                            },
+                        )),
                     )
                     .child(
-                        Button::secondary(id("confirm-remove-procedure"), format!("Remove {name}"))
+                        Button::secondary(id("confirm-remove-command"), format!("Remove {name}"))
                             .on_click(cx.listener(move |this, _, _, cx| this.remove(&remove, cx))),
                     )
                     .into_any_element()
             } else {
                 let remove = name.clone();
-                Button::quiet(id("remove-procedure"), "Remove")
+                Button::quiet(id("remove-command"), "Remove")
                     .on_click(cx.listener(move |this, _, _, cx| this.remove(&remove, cx)))
                     .into_any_element()
             })
@@ -493,10 +489,10 @@ impl ProceduresSection {
         let this = cx.entity().downgrade();
         let open = self.form != Form::Closed;
         let title = match &self.form {
-            Form::Editing(Some(_)) => "Edit procedure",
-            _ => "New procedure",
+            Form::Editing(Some(_)) => "Edit command",
+            _ => "New command",
         };
-        let modal = Modal::new("procedure-modal", title)
+        let modal = Modal::new("command-modal", title)
             .width(px(600.))
             .open(open)
             .on_close(move |_, cx| {
@@ -504,7 +500,7 @@ impl ProceduresSection {
             });
         let error = self.form_error.clone().map(|error| {
             div()
-                .id("procedure-error")
+                .id("command-error")
                 .text_size(px(12.5))
                 .text_color(p.fail)
                 .child(error)
@@ -514,7 +510,7 @@ impl ProceduresSection {
             Form::Closed => modal,
             Form::Choosing => {
                 let templates = TEMPLATES.into_iter().map(|template| {
-                    let description = flottille_core::procedure::template(template)
+                    let description = flottille_core::commands::template(template)
                         .map(|t| t.description)
                         .unwrap_or_default();
                     ListRow::new(
@@ -529,14 +525,14 @@ impl ProceduresSection {
                         }
                     }))
                 });
-                let blank = ListRow::new("blank-procedure", "Blank procedure")
+                let blank = ListRow::new("blank-command", "Blank command")
                     .leading(icon(Icon::Plus).size(px(14.)).text_color(p.faint))
-                    .line("Write your own: a name, what it does, and what the agent is told")
+                    .line("Write your own: a name, what it does, and what the agent is sent")
                     .on_click(cx.listener(|this, _, window, cx| this.blank(window, cx)));
                 modal
                     .child(
                         div()
-                            .id("procedure-templates")
+                            .id("command-templates")
                             .flex()
                             .flex_col()
                             .gap(px(2.))
@@ -549,7 +545,7 @@ impl ProceduresSection {
             Form::Editing(original) => {
                 let fields = self.fields.as_ref().expect("made when the form opens");
                 let body = div()
-                    .id("procedure-form")
+                    .id("command-form")
                     .max_h(window.viewport_size().height - px(200.))
                     .overflow_y_scroll()
                     .flex()
@@ -562,17 +558,17 @@ impl ProceduresSection {
                             .child(SharedString::from(name.clone()))
                             .into_any_element(),
                         None => {
-                            boxed("procedure-name", Input::new(&fields.name), cx).into_any_element()
+                            boxed("command-name", Input::new(&fields.name), cx).into_any_element()
                         }
                     })
                     .child(boxed(
-                        "procedure-description-field",
+                        "command-description-field",
                         Input::new(&fields.description),
                         cx,
                     ))
                     .child(
                         div()
-                            .id("procedure-instructions")
+                            .id("command-instructions")
                             .px(px(10.))
                             .py(px(8.))
                             .rounded(px(8.))
@@ -591,7 +587,7 @@ impl ProceduresSection {
                         .child("Saving…")
                         .into_any_element()
                 } else {
-                    Button::primary("save-procedure", "Save")
+                    Button::primary("save-command", "Save")
                         .on_click(cx.listener(|this, _, _, cx| this.save(cx)))
                         .into_any_element()
                 })
@@ -600,7 +596,7 @@ impl ProceduresSection {
     }
 }
 
-impl Render for ProceduresSection {
+impl Render for CommandsSection {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let rows: Vec<_> = self
@@ -614,11 +610,11 @@ impl Render for ProceduresSection {
         let empty = self.listed.as_ref().is_some_and(Vec::is_empty);
         let modal = self.modal(window, cx);
         div()
-            .id("procedures")
+            .id("commands")
             .child(heading(
-                "Procedures",
+                "Commands",
                 count,
-                Button::secondary("add-procedure", "New procedure")
+                Button::secondary("add-command", "New command")
                     .leading(flottille_ui::Icon::Plus)
                     .on_click(cx.listener(|this, _, _, cx| this.add(cx))),
                 cx,
@@ -632,12 +628,13 @@ impl Render for ProceduresSection {
                     .when(empty, |d| {
                         d.child(
                             div()
-                                .id("no-procedures")
+                                .id("no-commands")
                                 .text_size(px(12.5))
                                 .text_color(p.faint)
                                 .child(
-                                    "No procedure yet: add one from a template to open the pull \
-                                     requests of a workspace, merge a stack or close it.",
+                                    "No command yet: add one from a template to open the pull \
+                                     requests of a workspace, merge a stack or close it. /name \
+                                     in a session's composer sends it to the agent.",
                                 )
                                 .test_support(),
                         )
@@ -645,7 +642,7 @@ impl Render for ProceduresSection {
                     .when_some(self.problem.clone(), |d, problem| {
                         d.child(
                             div()
-                                .id("procedures-problem")
+                                .id("commands-problem")
                                 .text_size(px(12.5))
                                 .text_color(p.fail)
                                 .child(problem)
@@ -655,297 +652,4 @@ impl Render for ProceduresSection {
             )
             .child(modal)
     }
-}
-
-/// What the run modal says of what a run may do: nothing more than any agent.
-const RUN_SAYS: &str =
-    "It grants nothing: each call the run makes goes through the session's mode, like any other.";
-
-// ── The run modal ──────────────────────────────────────────────────────────────────────────────
-
-/// The modal that runs a procedure picked with `/` in the workspace of the session it was typed
-/// in: the procedure, the workspace, and Confirm. The daemon is asked to show the procedure
-/// (`procedure.show`), which starts nothing; `procedure.start` is asked only when the user
-/// confirms.
-pub struct RunProcedure {
-    shell: WeakEntity<Shell>,
-    open: bool,
-    project: String,
-    workspace: String,
-    chosen: Option<String>,
-    /// The procedure `chosen`, as the daemon shows it.
-    shown: Option<ProcedureInfo>,
-    starting: bool,
-    error: Option<SharedString>,
-}
-
-impl RunProcedure {
-    pub fn new(shell: WeakEntity<Shell>) -> Self {
-        Self {
-            shell,
-            open: false,
-            project: String::new(),
-            workspace: String::new(),
-            chosen: None,
-            shown: None,
-            starting: false,
-            error: None,
-        }
-    }
-
-    pub fn is_open(&self) -> bool {
-        self.open
-    }
-
-    pub fn project(&self) -> &str {
-        &self.project
-    }
-
-    pub fn workspace(&self) -> &str {
-        &self.workspace
-    }
-
-    pub fn chosen(&self) -> Option<&str> {
-        self.chosen.as_deref()
-    }
-
-    /// The procedure the daemon showed for the choice.
-    pub fn shown(&self) -> Option<&ProcedureInfo> {
-        self.shown.as_ref()
-    }
-
-    pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
-    }
-
-    pub fn is_starting(&self) -> bool {
-        self.starting
-    }
-
-    /// Opens the modal on a procedure to run in a workspace, nothing running: the daemon is asked
-    /// to show it.
-    pub fn open(&mut self, project: &str, workspace: &str, name: &str, cx: &mut Context<Self>) {
-        self.open = true;
-        self.project = project.to_owned();
-        self.workspace = workspace.to_owned();
-        self.starting = false;
-        self.choose(name, cx);
-    }
-
-    pub fn close(&mut self, cx: &mut Context<Self>) {
-        self.open = false;
-        self.error = None;
-        cx.notify();
-    }
-
-    /// Chooses a procedure: the daemon shows it. Nothing starts.
-    pub fn choose(&mut self, name: &str, cx: &mut Context<Self>) {
-        if self.starting {
-            return;
-        }
-        self.chosen = Some(name.to_owned());
-        self.shown = None;
-        self.error = None;
-        let command = Command::ProcedureShow {
-            project: self.project.clone(),
-            name: name.to_owned(),
-            workspace: self.workspace.clone(),
-        };
-        perform_later(&self.shell, command, cx);
-        cx.notify();
-    }
-
-    /// The chosen procedure, as the daemon shows it.
-    pub fn shown_by_daemon(
-        &mut self,
-        project: &str,
-        name: &str,
-        workspace: &str,
-        shown: Result<ProcedureInfo, String>,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.open
-            || self.project != project
-            || self.chosen.as_deref() != Some(name)
-            || self.workspace != workspace
-        {
-            return;
-        }
-        match shown {
-            Ok(shown) => self.shown = Some(shown),
-            Err(why) => self.error = Some(why.into()),
-        }
-        cx.notify();
-    }
-
-    /// Confirm: the run of the procedure that was shown starts.
-    pub fn confirm(&mut self, cx: &mut Context<Self>) {
-        let (Some(shown), false) = (self.shown.clone(), self.starting) else {
-            return;
-        };
-        self.starting = true;
-        self.error = None;
-        let command = Command::ProcedureStart {
-            project: self.project.clone(),
-            name: shown.name.clone(),
-            workspace: self.workspace.clone(),
-        };
-        perform_later(&self.shell, command, cx);
-        cx.notify();
-    }
-
-    /// The daemon's answer to Confirm: the modal closes (the shell opens the session), or it says
-    /// why nothing started.
-    pub fn started(&mut self, project: &str, refused: Option<String>, cx: &mut Context<Self>) {
-        if self.project != project {
-            return;
-        }
-        self.starting = false;
-        match refused {
-            None => self.open = false,
-            Some(why) => self.error = Some(why.into()),
-        }
-        cx.notify();
-    }
-}
-
-impl Render for RunProcedure {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = palette(cx);
-        let this = cx.entity().downgrade();
-        let mut modal = Modal::new("run-procedure-modal", "Run procedure")
-            .width(px(540.))
-            .open(self.open)
-            .on_close(move |_, cx| {
-                this.update(cx, |this, cx| this.close(cx)).ok();
-            });
-        if self.open || self.shown.is_some() {
-            modal = modal.child(
-                div()
-                    .id("run-workspace")
-                    .flex()
-                    .gap(px(8.))
-                    .text_size(px(12.5))
-                    .child(div().text_color(p.faint).child("in workspace"))
-                    .child(
-                        div()
-                            .mono(12.)
-                            .child(SharedString::from(self.workspace.clone())),
-                    )
-                    .test_support(),
-            );
-            if let Some(shown) = &self.shown {
-                modal = modal.child(
-                    div()
-                        .id("run-shown")
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.))
-                        .child(
-                            div()
-                                .mono(12.5)
-                                .semibold()
-                                .child(SharedString::from(shown.name.clone())),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.5))
-                                .text_color(p.mute)
-                                .child(SharedString::from(shown.description.clone())),
-                        )
-                        .child(
-                            div()
-                                .id("run-says")
-                                .aria_label(RUN_SAYS)
-                                .text_size(px(12.))
-                                .text_color(p.faint)
-                                .child(RUN_SAYS)
-                                .test_support(),
-                        )
-                        .test_support(),
-                );
-            }
-            modal = modal
-                .child(
-                    div()
-                        .id("run-notice")
-                        .aria_label("Nothing starts until you confirm.")
-                        .text_size(px(12.))
-                        .text_color(p.faint)
-                        .child("Nothing starts until you confirm.")
-                        .test_support(),
-                )
-                .when_some(self.error.clone(), |m, error| {
-                    m.child(
-                        div()
-                            .id("run-error")
-                            .text_size(px(12.5))
-                            .text_color(p.fail)
-                            .child(error)
-                            .test_support(),
-                    )
-                })
-                .action(if self.starting {
-                    div()
-                        .mono(11.5)
-                        .text_color(p.faint)
-                        .child("Starting…")
-                        .into_any_element()
-                } else {
-                    Button::primary("run-confirm", "Confirm")
-                        .disabled(self.shown.is_none())
-                        .on_click(cx.listener(|this, _, _, cx| this.confirm(cx)))
-                        .into_any_element()
-                });
-        }
-        div().id("run-procedure").child(modal)
-    }
-}
-
-// ── The rail ───────────────────────────────────────────────────────────────────────────────────
-
-/// The run a session is the root of, as its rail shows it while it goes on.
-#[derive(Clone, Debug, PartialEq)]
-pub struct RunFacts {
-    pub procedure: String,
-}
-
-impl RunFacts {
-    /// From `procedure.of`'s `run`; `None` when there is none, or it is over.
-    pub fn of(run: &Value) -> Option<Self> {
-        if run.is_null() || run["ended"] == true {
-            return None;
-        }
-        Some(Self {
-            procedure: run["procedure"].as_str().unwrap_or_default().to_owned(),
-        })
-    }
-}
-
-/// The run, in the WORKSPACE section of the rail: the procedure it runs.
-pub fn run_block(run: &RunFacts, cx: &App) -> impl IntoElement {
-    let p = palette(cx);
-    div()
-        .id("rail-run")
-        .px(px(8.))
-        .py(px(4.))
-        .flex()
-        .flex_col()
-        .gap(px(3.))
-        .child(
-            div()
-                .id("rail-run-title")
-                .aria_label(SharedString::from(format!("Running {}", run.procedure)))
-                .flex()
-                .gap(px(6.))
-                .text_size(px(11.5))
-                .child(div().text_color(p.faint).child("Running"))
-                .child(
-                    div()
-                        .mono(11.5)
-                        .child(SharedString::from(run.procedure.clone())),
-                )
-                .test_support(),
-        )
-        .test_support()
 }

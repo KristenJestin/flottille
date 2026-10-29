@@ -1,6 +1,6 @@
-//! The scenarios of the project's references (`docs/projects.md`, `docs/tools.md`): listed in an
-//! agent's instructions without their content, read with `reference_read` through the gate, and
-//! managed with `flottille reference`. Throwaway repositories and temporary XDG folders; no real
+//! The scenarios of the project's skills (`docs/skills.md`, `docs/tools.md`): listed in an agent's
+//! instructions without their content, read with `skill_read` through the gate, and managed with
+//! `flottille skill`. Throwaway repositories and temporary XDG folders; no real
 //! agent ever runs here.
 
 mod common;
@@ -14,8 +14,8 @@ use serde_json::{Value, json};
 const REACT_GUIDE: &str = "Use hooks, never classes.\nKeep components small.\n";
 const TOKEN: &str = "ghp_fakefakefakefakefakefakefake0007";
 
-/// A project `app` over a throwaway repository, with a one-file reference `style` and a folder
-/// reference `react` in its folder, and a secret file next to them that no reference holds.
+/// A project `app` over a throwaway repository, with a one-file skill `style` and a folder skill
+/// `react` in its folder, and a secret file next to them that no skill holds.
 fn project(user: &User) -> PathBuf {
     let folder = user.path("work/app");
     user.git_init(&folder);
@@ -43,16 +43,17 @@ fn project(user: &User) -> PathBuf {
     )
     .unwrap();
     std::fs::write(folder.join("docs/STYLE.md"), "Four spaces.\n").unwrap();
-    std::fs::write(folder.join("secret.txt"), "outside every reference\n").unwrap();
+    std::fs::write(folder.join("secret.txt"), "outside every skill\n").unwrap();
     folder
 }
 
-fn reference(user: &User, name: &str, description: &str, path: &str) {
+fn skill(user: &User, name: &str, description: &str, path: &str) {
     let output = user.run(&[
-        "reference",
+        "skill",
         "add",
         "app",
         name,
+        "--path",
         path,
         "--description",
         description,
@@ -64,9 +65,9 @@ fn reference(user: &User, name: &str, description: &str, path: &str) {
     );
 }
 
-fn references(user: &User) {
-    reference(user, "react", "How we write React components", "docs/react");
-    reference(user, "style", "The code style", "docs/STYLE.md");
+fn skills(user: &User) {
+    skill(user, "react", "How we write React components", "docs/react");
+    skill(user, "style", "The code style", "docs/STYLE.md");
 }
 
 /// A session of an agent working in the workspace `w`, and the agent's id.
@@ -113,14 +114,14 @@ fn failure(user: &User, args: &[&str]) -> String {
 }
 
 #[test]
-fn a_project_lists_adds_and_removes_its_references() {
+fn a_project_lists_adds_and_removes_its_skills() {
     let user = User::with_fake_agent();
     project(&user);
 
-    assert!(stdout(&user, &["reference", "list", "app"]).contains("no references"));
-    references(&user);
+    assert!(stdout(&user, &["skill", "list", "app"]).contains("no skills"));
+    skills(&user);
 
-    let listed = stdout(&user, &["reference", "list", "app"]);
+    let listed = stdout(&user, &["skill", "list", "app"]);
     assert!(
         listed.contains("react") && listed.contains("How we write React components"),
         "{listed}"
@@ -130,22 +131,22 @@ fn a_project_lists_adds_and_removes_its_references() {
         "{listed}"
     );
     let json: Value =
-        serde_json::from_str(&stdout(&user, &["reference", "list", "app", "--json"])).unwrap();
-    assert_eq!(json["references"][0]["name"], "react");
-    assert_eq!(json["references"][1]["path"], "docs/STYLE.md");
+        serde_json::from_str(&stdout(&user, &["skill", "list", "app", "--json"])).unwrap();
+    assert_eq!(json["skills"][0]["name"], "react");
+    assert_eq!(json["skills"][1]["path"], "docs/STYLE.md");
     assert_eq!(
-        user.call("project.show", json!({"name": "app"})).unwrap()["references"]["style"]["description"],
+        user.call("project.show", json!({"name": "app"})).unwrap()["skills"]["style"]["description"],
         "The code style"
     );
 
-    let removed = stdout(&user, &["reference", "remove", "app", "react"]);
+    let removed = stdout(&user, &["skill", "remove", "app", "react"]);
     assert!(removed.contains("react"), "{removed}");
-    let left = stdout(&user, &["reference", "list", "app"]);
+    let left = stdout(&user, &["skill", "list", "app"]);
     assert!(!left.contains("React") && left.contains("style"), "{left}");
 }
 
 #[test]
-fn editing_the_references_keeps_the_rest_of_the_file_as_the_user_wrote_it() {
+fn editing_the_skills_keeps_the_rest_of_the_file_as_the_user_wrote_it() {
     let user = User::with_fake_agent();
     let folder = project(&user);
     let file = user.project_file("app");
@@ -153,13 +154,13 @@ fn editing_the_references_keeps_the_rest_of_the_file_as_the_user_wrote_it() {
     let handwritten = format!("# my notes on this project\n{written}\n# footer\n");
     std::fs::write(&file, &handwritten).unwrap();
 
-    reference(&user, "style", "The code style", "docs/STYLE.md");
+    skill(&user, "style", "The code style", "docs/STYLE.md");
     let after = std::fs::read_to_string(&file).unwrap();
     assert!(after.starts_with("# my notes on this project\n"), "{after}");
     assert!(after.contains("# footer"), "{after}");
-    assert!(after.contains("[references.style]"), "{after}");
+    assert!(after.contains("[skills.style]"), "{after}");
 
-    stdout(&user, &["reference", "remove", "app", "style"]);
+    stdout(&user, &["skill", "remove", "app", "style"]);
     let removed = std::fs::read_to_string(&file).unwrap();
     assert_eq!(removed.trim_end(), handwritten.trim_end());
     assert!(
@@ -169,7 +170,7 @@ fn editing_the_references_keeps_the_rest_of_the_file_as_the_user_wrote_it() {
 }
 
 #[test]
-fn a_reference_that_cannot_be_used_is_refused_and_nothing_is_written() {
+fn a_skill_that_cannot_be_used_is_refused_and_nothing_is_written() {
     let user = User::with_fake_agent();
     project(&user);
     let file = user.project_file("app");
@@ -178,10 +179,11 @@ fn a_reference_that_cannot_be_used_is_refused_and_nothing_is_written() {
         failure(
             &user,
             &[
-                "reference",
+                "skill",
                 "add",
                 "app",
                 name,
+                "--path",
                 path,
                 "--description",
                 description,
@@ -201,10 +203,11 @@ fn a_reference_that_cannot_be_used_is_refused_and_nothing_is_written() {
         failure(
             &user,
             &[
-                "reference",
+                "skill",
                 "add",
                 "nobody",
                 "x",
+                "--path",
                 "docs/STYLE.md",
                 "--description",
                 "d"
@@ -214,11 +217,10 @@ fn a_reference_that_cannot_be_used_is_refused_and_nothing_is_written() {
     );
     assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
 
-    reference(&user, "style", "The code style", "docs/STYLE.md");
+    skill(&user, "style", "The code style", "docs/STYLE.md");
     assert!(add("style", "docs/STYLE.md", "again").contains("already"));
     assert!(
-        failure(&user, &["reference", "remove", "app", "nothing"])
-            .contains("no reference named nothing")
+        failure(&user, &["skill", "remove", "app", "nothing"]).contains("no skill named nothing")
     );
 }
 
@@ -226,7 +228,7 @@ fn a_reference_that_cannot_be_used_is_refused_and_nothing_is_written() {
 fn the_instructions_list_the_names_and_descriptions_and_never_the_content() {
     let user = User::with_fake_agent();
     project(&user);
-    references(&user);
+    skills(&user);
 
     let (_mcp, id) = session(&user);
 
@@ -237,7 +239,7 @@ fn the_instructions_list_the_names_and_descriptions_and_never_the_content() {
             && instructions.contains("- style: The code style"),
         "{instructions}"
     );
-    assert!(instructions.contains("reference_read"), "{instructions}");
+    assert!(instructions.contains("skill_read"), "{instructions}");
     assert!(
         !instructions.contains("Use hooks") && !instructions.contains("Four spaces"),
         "the content stays behind the tool"
@@ -252,7 +254,7 @@ fn the_instructions_list_the_names_and_descriptions_and_never_the_content() {
 }
 
 #[test]
-fn a_project_without_references_adds_nothing_to_the_instructions() {
+fn a_project_without_skills_adds_nothing_to_the_instructions() {
     let user = User::with_fake_agent();
     project(&user);
 
@@ -261,59 +263,50 @@ fn a_project_without_references_adds_nothing_to_the_instructions() {
     let agent = user.call("agent.show", json!({"agent": id})).unwrap();
     let instructions = agent["agent"]["instructions"].as_str().unwrap();
     assert!(
-        !instructions.contains("The project's references"),
+        !instructions.contains("The project's skills"),
         "{instructions}"
     );
 }
 
 #[test]
-fn reference_read_returns_a_file_reference_read_only_and_masked() {
+fn skill_read_returns_a_file_skill_read_only_and_masked() {
     let user = User::with_fake_agent();
     project(&user);
-    references(&user);
+    skills(&user);
     let (mcp, _) = session(&user);
 
     let tools = mcp.tools();
-    let tool = tools
-        .iter()
-        .find(|t| t["name"] == "reference_read")
-        .unwrap();
+    let tool = tools.iter().find(|t| t["name"] == "skill_read").unwrap();
     assert_eq!(tool["annotations"]["readOnlyHint"], true);
     assert_eq!(tool["_meta"]["anthropic/alwaysLoad"], true);
 
-    let style = ok(mcp.call("reference_read", json!({"name": "style"})));
+    let style = ok(mcp.call("skill_read", json!({"name": "style"})));
     assert!(style.contains("Four spaces."), "{style}");
-    let hooks = ok(mcp.call(
-        "reference_read",
-        json!({"name": "react", "path": "hooks.md"}),
-    ));
+    let hooks = ok(mcp.call("skill_read", json!({"name": "react", "path": "hooks.md"})));
     assert!(hooks.contains("Use hooks, never classes."), "{hooks}");
     let keys = ok(mcp.call(
-        "reference_read",
+        "skill_read",
         json!({"name": "react", "path": "deep/keys.md"}),
     ));
     assert!(keys.contains("[masked]") && !keys.contains(TOKEN), "{keys}");
 }
 
 #[test]
-fn reference_read_lists_a_folder_reference_and_reads_a_file_of_it_by_page() {
+fn skill_read_lists_a_folder_skill_and_reads_a_file_of_it_by_page() {
     let user = User::with_fake_agent();
     let folder = project(&user);
     let long: String = (1..=3000).map(|n| format!("line number {n}\n")).collect();
     std::fs::write(folder.join("docs/react/long.md"), &long).unwrap();
-    references(&user);
+    skills(&user);
     let (mcp, _) = session(&user);
 
-    let listing = ok(mcp.call("reference_read", json!({"name": "react"})));
+    let listing = ok(mcp.call("skill_read", json!({"name": "react"})));
     for file in ["hooks.md", "deep/keys.md", "long.md"] {
         assert!(listing.contains(file), "{listing}");
     }
     assert!(!listing.contains("Use hooks"), "a listing holds no content");
 
-    let page = ok(mcp.call(
-        "reference_read",
-        json!({"name": "react", "path": "long.md"}),
-    ));
+    let page = ok(mcp.call("skill_read", json!({"name": "react", "path": "long.md"})));
     assert!(page.contains("line number 1\n"), "{page}");
     let next = page
         .lines()
@@ -321,34 +314,34 @@ fn reference_read_lists_a_folder_reference_and_reads_a_file_of_it_by_page() {
         .map(|rest| rest.trim_end_matches(')').parse::<u64>().unwrap())
         .unwrap_or_else(|| panic!("no next page in {page}"));
     let second = ok(mcp.call(
-        "reference_read",
+        "skill_read",
         json!({"name": "react", "path": "long.md", "range": {"offset": next}}),
     ));
     assert!(!second.contains("line number 1\n"), "{second}");
 }
 
 #[test]
-fn reference_read_refuses_a_name_that_is_not_in_the_list() {
+fn skill_read_refuses_a_name_that_is_not_in_the_list() {
     let user = User::with_fake_agent();
     project(&user);
-    references(&user);
+    skills(&user);
     let (mcp, _) = session(&user);
 
-    let message = refused(mcp.call("reference_read", json!({"name": "secrets"})));
+    let message = refused(mcp.call("skill_read", json!({"name": "secrets"})));
 
     assert!(
-        message.contains("no reference named secrets") && message.contains("react, style"),
+        message.contains("no skill named secrets") && message.contains("react, style"),
         "{message}"
     );
-    let message = refused(mcp.call("reference_read", json!({"name": "../react"})));
-    assert!(message.contains("no reference named"), "{message}");
+    let message = refused(mcp.call("skill_read", json!({"name": "../react"})));
+    assert!(message.contains("no skill named"), "{message}");
 }
 
 #[test]
-fn reference_read_refuses_a_path_outside_the_reference() {
+fn skill_read_refuses_a_path_outside_the_skill() {
     let user = User::with_fake_agent();
     let folder = project(&user);
-    references(&user);
+    skills(&user);
     std::os::unix::fs::symlink(folder.join("secret.txt"), folder.join("docs/react/link.md"))
         .unwrap();
     std::os::unix::fs::symlink("/etc", folder.join("docs/react/etc")).unwrap();
@@ -357,8 +350,7 @@ fn reference_read_refuses_a_path_outside_the_reference() {
     std::fs::write(folder.join("docs/react/.env"), "KEY=value\n").unwrap();
     let (mcp, _) = session(&user);
 
-    let read =
-        |path: &str| refused(mcp.call("reference_read", json!({"name": "react", "path": path})));
+    let read = |path: &str| refused(mcp.call("skill_read", json!({"name": "react", "path": path})));
 
     for escape in [
         "../STYLE.md",
@@ -371,25 +363,22 @@ fn reference_read_refuses_a_path_outside_the_reference() {
         "etc",
     ] {
         let message = read(escape);
-        assert!(
-            message.contains("outside the reference"),
-            "{escape}: {message}"
-        );
+        assert!(message.contains("outside the skill"), "{escape}: {message}");
     }
     assert!(read(".git/config").contains(".git"));
     assert!(read(".env").contains("secrets"));
     let message = refused(mcp.call(
-        "reference_read",
+        "skill_read",
         json!({"name": "style", "path": "../secret.txt"}),
     ));
     assert!(message.contains("is a file"), "{message}");
 }
 
 #[test]
-fn reference_read_refuses_what_fs_read_holds_for_the_user() {
+fn skill_read_refuses_what_fs_read_holds_for_the_user() {
     let user = User::with_fake_agent();
     let folder = project(&user);
-    reference(&user, "all", "The whole project", ".");
+    skill(&user, "all", "The whole project", ".");
     std::fs::write(folder.join(".npmrc"), "//registry/:_authToken=x\n").unwrap();
     std::fs::write(folder.join(".netrc"), "machine example.com\n").unwrap();
     std::fs::write(folder.join(".git-credentials"), "https://u:p@example.com\n").unwrap();
@@ -406,47 +395,47 @@ fn reference_read_refuses_what_fs_read_holds_for_the_user() {
         ".ssh",
         "docs/npmrc.md",
     ] {
-        let message = refused(mcp.call("reference_read", json!({"name": "all", "path": path})));
+        let message = refused(mcp.call("skill_read", json!({"name": "all", "path": path})));
         assert!(
             message.contains("sensitive place") && message.contains("fs_read"),
             "{path}: {message}"
         );
     }
-    let listed = ok(mcp.call("reference_read", json!({"name": "all"})));
+    let listed = ok(mcp.call("skill_read", json!({"name": "all"})));
     assert!(listed.contains("README.md"), "{listed}");
     for hidden in [".npmrc", ".netrc", ".git-credentials", ".ssh"] {
         assert!(!listed.contains(hidden), "{hidden}: {listed}");
     }
-    // A reference that is the sensitive file itself is refused too.
-    reference(&user, "npm", "The registry", ".npmrc");
-    let message = refused(mcp.call("reference_read", json!({"name": "npm"})));
+    // A skill that is the sensitive file itself is refused too.
+    skill(&user, "npm", "The registry", ".npmrc");
+    let message = refused(mcp.call("skill_read", json!({"name": "npm"})));
     assert!(message.contains("sensitive place"), "{message}");
 }
 
 #[test]
-fn reference_read_reads_the_project_folder_from_a_workspace_and_follows_its_edits() {
+fn skill_read_reads_the_project_folder_from_a_workspace_and_follows_its_edits() {
     let user = User::with_fake_agent();
     let folder = project(&user);
-    references(&user);
+    skills(&user);
     let (mcp, _) = session(&user);
-    // Not committed, so the workspace does not hold it: the reference is the project's.
+    // Not committed, so the workspace does not hold it: the skill is the project's.
     std::fs::write(folder.join("docs/STYLE.md"), "Two spaces.\n").unwrap();
 
-    let style = ok(mcp.call("reference_read", json!({"name": "style"})));
+    let style = ok(mcp.call("skill_read", json!({"name": "style"})));
 
     assert!(style.contains("Two spaces."), "{style}");
-    stdout(&user, &["reference", "remove", "app", "style"]);
-    let message = refused(mcp.call("reference_read", json!({"name": "style"})));
-    assert!(message.contains("no reference named style"), "{message}");
+    stdout(&user, &["skill", "remove", "app", "style"]);
+    let message = refused(mcp.call("skill_read", json!({"name": "style"})));
+    assert!(message.contains("no skill named style"), "{message}");
 }
 
 #[test]
-fn reference_read_is_recorded_as_a_tool_served_with_the_gate_allowing_it() {
+fn skill_read_is_recorded_as_a_tool_served_with_the_gate_allowing_it() {
     let user = User::with_fake_agent();
     project(&user);
-    references(&user);
+    skills(&user);
     let (mcp, id) = session(&user);
-    ok(mcp.call("reference_read", json!({"name": "style"})));
+    ok(mcp.call("skill_read", json!({"name": "style"})));
 
     let events = user.call("agent.show", json!({"agent": id})).unwrap()["events"]
         .as_array()
@@ -455,8 +444,62 @@ fn reference_read_is_recorded_as_a_tool_served_with_the_gate_allowing_it() {
 
     let served = events
         .iter()
-        .find(|e| e["name"] == "agent.tool_served" && e["data"]["tool"] == "reference_read")
+        .find(|e| e["name"] == "agent.tool_served" && e["data"]["tool"] == "skill_read")
         .unwrap_or_else(|| panic!("no tool_served in {events:?}"));
     assert_eq!(served["data"]["gate"], "allow");
     assert_eq!(served["data"]["outcome"], "ok");
+}
+
+#[test]
+fn a_text_skill_is_kept_in_flottille_s_data_folder_and_read_with_skill_read() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let file = user.project_file("app");
+
+    stdout(
+        &user,
+        &[
+            "skill",
+            "add",
+            "app",
+            "review",
+            "--text",
+            "Read the diff twice.\n",
+            "--description",
+            "How we review",
+        ],
+    );
+    let written = std::fs::read_to_string(&file).unwrap();
+    assert!(written.contains("[skills.review]"), "{written}");
+    assert!(!written.contains("Read the diff"), "{written}");
+    let kept = user.path("data/flottille/skills/app/review.md");
+    assert_eq!(
+        std::fs::read_to_string(&kept).unwrap(),
+        "Read the diff twice.\n"
+    );
+    let (mcp, _) = session(&user);
+    let read = ok(mcp.call("skill_read", json!({"name": "review"})));
+    assert!(read.contains("Read the diff twice."), "{read}");
+    let shown = user
+        .call("skill.show", json!({"project": "app", "name": "review"}))
+        .unwrap();
+    assert_eq!(shown["kind"], "text");
+    assert_eq!(shown["text"], "Read the diff twice.\n");
+
+    // Made a path, it leaves no text behind; removed, nothing of it stays.
+    stdout(
+        &user,
+        &["skill", "edit", "app", "review", "--path", "docs/STYLE.md"],
+    );
+    assert!(!kept.exists());
+    let read = ok(mcp.call("skill_read", json!({"name": "review"})));
+    assert!(read.contains("Four spaces."), "{read}");
+    stdout(
+        &user,
+        &["skill", "edit", "app", "review", "--text", "Again."],
+    );
+    assert!(kept.exists());
+    stdout(&user, &["skill", "remove", "app", "review"]);
+    assert!(!kept.exists());
+    assert!(!std::fs::read_to_string(&file).unwrap().contains("review"));
 }

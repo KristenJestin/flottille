@@ -445,7 +445,7 @@ fn dc_comments(page: &Value) -> Vec<Comment> {
     comments
 }
 
-/// `forge_write` for a Bitbucket repository, once the gate let it through by a procedure's grant
+/// `forge_write` for a Bitbucket repository, once the gate let it through
 /// and the remote was found where the workspace was created: the same actions and the same
 /// checks as for GitHub, through `bkt`.
 pub(super) async fn write(

@@ -17,7 +17,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Subcommand)]
 pub enum WorkspaceAction {
-    /// Make a workspace: a worktree per repository on one branch, then the recipe, in the
+    /// Make a workspace: a worktree per repository on one branch, then the setup, in the
     /// background
     Create {
         project: String,
@@ -233,7 +233,7 @@ fn created_text(workspace: &Value) -> String {
         Some("ready") => shown.push_str("Ready.\n"),
         Some("failed") => shown.push_str(&failure_text(workspace)),
         _ => shown.push_str(&format!(
-            "The worktrees are made; the recipe goes on in the background: follow it with \
+            "The worktrees are made; the setup goes on in the background: follow it with \
              `flottille workspace show {} {}`.\n",
             text(workspace, "project"),
             text(workspace, "name")
@@ -440,7 +440,7 @@ fn forge_text(forge: &Value) -> String {
     shown
 }
 
-/// A step as the recipe said it.
+/// A step as the setup said it.
 fn describe(step: &Value) -> String {
     let place = step["repository"].as_str().unwrap_or(".");
     match step["kind"].as_str().unwrap_or_default() {

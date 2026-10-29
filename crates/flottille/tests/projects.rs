@@ -775,3 +775,40 @@ fn a_forge_is_checked_against_the_real_remote_and_shown_against_the_masked_one()
         "{saved}"
     );
 }
+
+#[test]
+fn the_daemon_s_start_brings_a_former_file_to_the_new_keys_and_keeps_its_comments() {
+    let user = User::new();
+    // A copy of the fixture, over a folder of this test's own.
+    let folder = user.path("work/app");
+    std::fs::create_dir_all(&folder).unwrap();
+    let former =
+        include_str!("../../flottille-core/tests/fixtures/multi-repo-case-former-keys.toml")
+            .replace(
+                "folder = \"/work/app\"",
+                &format!("folder = {:?}", folder.display().to_string()),
+            );
+    user.write_project_file("app", &former);
+
+    user.status();
+
+    let text = std::fs::read_to_string(user.project_file("app")).unwrap();
+    for kept in [
+        "# What we do before every review.\n[commands.open-prs]\n",
+        "[skills.style] # the team's own words\n",
+        "# Libraries before their consumers.\n[[setup]]\n",
+        "[tasks.generate-data]\n",
+        "task = \"generate-data\"",
+    ] {
+        assert!(text.contains(kept), "{kept}\n---\n{text}");
+    }
+    for former in ["[procedures", "[references", "[[recipe]]", "agent_actions"] {
+        assert!(!text.contains(former), "{former}\n---\n{text}");
+    }
+    // No temporary file is left beside it.
+    let files: Vec<_> = std::fs::read_dir(user.project_file("app").parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(files, ["app.toml"]);
+}

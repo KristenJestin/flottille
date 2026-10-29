@@ -21,14 +21,15 @@ use tokio::task::JoinSet;
 use crate::VERSION;
 use crate::agents::{self, Live};
 use crate::approvals;
+use crate::commands;
 use crate::deliveries;
 use crate::forge;
 use crate::inbox;
 use crate::mcp;
-use crate::procedures;
 use crate::projects::{self, Projects};
 use crate::providers;
 use crate::runs;
+use crate::skills;
 use crate::sweep;
 use crate::tickets;
 use crate::workspaces;
@@ -533,16 +534,9 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
         }
         // They run git or a provider's `--version`, wait on an agent's task or start what an
         // approval allows: answered by a task of their own, the connection goes on.
-        if [
-            "workspace.",
-            "agent.",
-            "approval.",
-            "test.",
-            "provider.",
-            "procedure.",
-        ]
-        .iter()
-        .any(|prefix| request.method.starts_with(prefix))
+        if ["workspace.", "agent.", "approval.", "test.", "provider."]
+            .iter()
+            .any(|prefix| request.method.starts_with(prefix))
             || [
                 "project.show",
                 "project.settings",
@@ -561,8 +555,6 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     providers::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("test.") {
                     sweep::call(daemon, &request.method, request.params).await
-                } else if request.method.starts_with("procedure.") {
-                    procedures::call(daemon, &request.method, request.params).await
                 } else if request.method == "project.show" {
                     projects::show(daemon, request.params).await
                 } else if request.method == "project.settings" {
@@ -644,8 +636,22 @@ fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) 
             },
             None,
         ),
-        method if method.starts_with("project.") || method.starts_with("reference.") => (
+        method if method.starts_with("project.") => (
             match projects::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+            },
+            None,
+        ),
+        method if method.starts_with("skill.") => (
+            match skills::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+            },
+            None,
+        ),
+        method if method.starts_with("command.") => (
+            match commands::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => Message::error(Some(id), failure.code, failure.message),
             },

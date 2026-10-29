@@ -1,5 +1,5 @@
 //! The `workspace.*` methods: workspaces made of one worktree per repository, prepared in the
-//! background by the project's recipe, and removed safely (`docs/workspaces.md`,
+//! background by the project's setup, and removed safely (`docs/workspaces.md`,
 //! `docs/protocol.md`).
 //!
 //! Git and the steps never run inside a store transaction nor on the daemon's thread: git and the
@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use flottille_core::command::split_line;
 use flottille_core::glob;
-use flottille_core::project::{Project, RecipeStep, RepositorySet, StepKind, valid_name};
+use flottille_core::project::{Project, RepositorySet, SetupStep, StepKind, valid_name};
 use flottille_core::protocol::{WorkspaceCreate, WorkspaceList, WorkspaceName};
 use flottille_core::secrets;
 use flottille_core::store::{Store, now_ms};
@@ -309,7 +309,7 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
     let id =
         daemon.write(|store| store.create_workspace(&workspace, ("workspace.created", event)))?;
 
-    // The answer waits for the worktrees; the rest of the recipe goes on in the background.
+    // The answer waits for the worktrees; the rest of the setup goes on in the background.
     let (made, worktrees) = oneshot::channel();
     daemon.preparing.lock().unwrap().insert(id);
     tokio::spawn(prepare(daemon.clone(), id, Some(made)));
@@ -500,7 +500,7 @@ async fn up_to_date_base(
     })
 }
 
-/// The steps of a new workspace: a worktree per repository, then the recipe as it is now, a step
+/// The steps of a new workspace: a worktree per repository, then the setup as it is now, a step
 /// for each repository expanded into one per repository.
 fn snapshot(project: &Project, taken: &[String]) -> Vec<Step> {
     let mut steps: Vec<(Option<String>, Action)> = taken
@@ -513,14 +513,14 @@ fn snapshot(project: &Project, taken: &[String]) -> Vec<Step> {
         .map(|r| r.path.clone())
         .filter(|path| taken.contains(path))
         .collect();
-    for step in &project.recipe {
+    for step in &project.setup {
         let action = action_of(project, step);
         let places: Vec<Option<String>> = if step.for_each_repository {
             in_order.iter().cloned().map(Some).collect()
         } else {
             match (step.kind(), &step.repository) {
                 (_, Some(path)) => vec![Some(path.clone())],
-                (StepKind::Command(name), None) => vec![project.commands[name].repository.clone()],
+                (StepKind::Task(name), None) => vec![project.tasks[name].repository.clone()],
                 _ => vec![None],
             }
         };
@@ -539,7 +539,7 @@ fn snapshot(project: &Project, taken: &[String]) -> Vec<Step> {
         .collect()
 }
 
-fn action_of(project: &Project, step: &RecipeStep) -> Action {
+fn action_of(project: &Project, step: &SetupStep) -> Action {
     let time_limit = step.time_limit.unwrap_or(project.run_time_limit);
     match step.kind() {
         StepKind::Copy(globs) => Action::Copy {
@@ -556,12 +556,12 @@ fn action_of(project: &Project, step: &RecipeStep) -> Action {
         },
         StepKind::Run(line) => Action::Run {
             line: line.into(),
-            command: None,
+            task: None,
             time_limit,
         },
-        StepKind::Command(name) => Action::Run {
-            line: project.commands[name].line.clone(),
-            command: Some(name.into()),
+        StepKind::Task(name) => Action::Run {
+            line: project.tasks[name].line.clone(),
+            task: Some(name.into()),
             time_limit,
         },
     }
@@ -1375,7 +1375,7 @@ struct WorkspaceRemove {}
 
 /// `workspace_remove`, once the gate let it through: the agent's own
 /// workspace removed as `workspace.remove` removes it, then the branches of it that hold no commit
-/// of their own deleted from their repositories (`docs/procedures.md`).
+/// of their own deleted from their repositories (`docs/commands.md`).
 pub async fn workspace_remove(
     daemon: &Arc<Daemon>,
     agent: &str,

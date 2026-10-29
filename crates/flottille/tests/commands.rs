@@ -1,6 +1,6 @@
-//! The scenarios of procedures (`docs/procedures.md`): named actions of a project, run by an agent
-//! in a workspace. A run grants nothing: what its agents write goes through the gate's classes,
-//! held here for the user, who allows it. The agents are the fake agent's sessions, driven through
+//! The scenarios of commands (`docs/commands.md`): named instructions of a project, sent to a
+//! session as `/name`. A command grants nothing: what its agents write goes through the gate's
+//! classes, held here for the user, who allows it. The agents are the fake agent's sessions, driven through
 //! their MCP server as their client would; the forge is the fake `gh`; the remotes are throwaway
 //! bare repositories.
 
@@ -76,10 +76,10 @@ fn bare(user: &User, name: &str) -> PathBuf {
     remote
 }
 
-/// Adds the procedure `name`.
-fn procedure(user: &User, name: &str) {
+/// Adds the command `name`.
+fn command(user: &User, name: &str) {
     user.call(
-        "procedure.add",
+        "command.add",
         json!({"project": "app", "name": name, "description": "Ship the workspace",
             "instructions": "Push the branch, then open its pull request."}),
     )
@@ -123,19 +123,14 @@ fn allowed_line(user: &User, mcp: &Mcp, text: &str) -> Answer {
     allowed(user, line(mcp, text))
 }
 
-/// Runs the procedure in `login` as the CLI does once confirmed: its root agent's id and MCP
-/// session.
+/// Starts a session in `login` with the command as its first message, as the composer sends
+/// `/name`: its root agent's id and MCP session.
 fn run(user: &User, name: &str) -> (String, Mcp) {
-    user.call(
-        "procedure.run",
-        json!({"project": "app", "name": name, "workspace": "login"}),
-    )
-    .unwrap();
     let opened = user.received_requests("session/new").len();
     let started = user
         .call(
-            "procedure.start",
-            json!({"project": "app", "name": name, "workspace": "login"}),
+            "agent.run",
+            json!({"project": "app", "workspace": "login", "message": format!("/{name}")}),
         )
         .unwrap();
     let (url, authorization) = server_of(user, opened);
@@ -145,7 +140,7 @@ fn run(user: &User, name: &str) -> (String, Mcp) {
     )
 }
 
-/// A root agent started in `login` outside any procedure.
+/// A root agent started in `login` with no command.
 fn plain_agent(user: &User) -> Mcp {
     plain_agent_with_id(user).1
 }
@@ -183,7 +178,7 @@ fn stderr(output: &std::process::Output) -> String {
 }
 
 #[test]
-fn a_procedure_is_added_listed_shown_edited_and_removed() {
+fn a_command_is_added_listed_shown_edited_and_removed() {
     let user = User::new();
     fixture(&user);
     // What the user wrote in the file stays around what the daemon edits.
@@ -192,7 +187,7 @@ fn a_procedure_is_added_listed_shown_edited_and_removed() {
     std::fs::write(&file, format!("# kept by hand\n{text}")).unwrap();
 
     let added = user.run(&[
-        "procedure",
+        "command",
         "add",
         "app",
         "open-prs",
@@ -203,12 +198,12 @@ fn a_procedure_is_added_listed_shown_edited_and_removed() {
     ]);
     assert!(added.status.success(), "{}", stderr(&added));
 
-    let listed = stdout(&user.run(&["procedure", "list", "app"]));
+    let listed = stdout(&user.run(&["command", "list", "app"]));
     assert!(
-        listed.contains("open-prs  Open the pull requests"),
+        listed.contains("/open-prs  Open the pull requests"),
         "{listed}"
     );
-    let shown = user.run(&["procedure", "show", "app", "open-prs", "--json"]);
+    let shown = user.run(&["command", "show", "app", "open-prs", "--json"]);
     let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
     assert!(shown.get("grants").is_none(), "{shown}");
     assert_eq!(
@@ -217,11 +212,11 @@ fn a_procedure_is_added_listed_shown_edited_and_removed() {
     );
     let text = std::fs::read_to_string(&file).unwrap();
     assert!(text.starts_with("# kept by hand\n"), "{text}");
-    assert!(text.contains("[procedures.open-prs]"), "{text}");
+    assert!(text.contains("[commands.open-prs]"), "{text}");
 
     // A grant is no option any more.
     let refused = user.run(&[
-        "procedure",
+        "command",
         "edit",
         "app",
         "open-prs",
@@ -230,7 +225,7 @@ fn a_procedure_is_added_listed_shown_edited_and_removed() {
     ]);
     assert!(!refused.status.success());
     let edited = user.run(&[
-        "procedure",
+        "command",
         "edit",
         "app",
         "open-prs",
@@ -240,14 +235,14 @@ fn a_procedure_is_added_listed_shown_edited_and_removed() {
     assert!(edited.status.success(), "{}", stderr(&edited));
     let shown = user
         .call(
-            "procedure.show",
+            "command.show",
             json!({"project": "app", "name": "open-prs"}),
         )
         .unwrap();
     assert_eq!(shown["description"], "Open them all");
     assert_eq!(
         user.call(
-            "procedure.add",
+            "command.add",
             json!({"project": "app", "name": "open-prs", "description": "d", "instructions": "i"})
         )
         .unwrap_err()
@@ -255,95 +250,67 @@ fn a_procedure_is_added_listed_shown_edited_and_removed() {
         "refused"
     );
 
-    let removed = user.run(&["procedure", "remove", "app", "open-prs"]);
+    let removed = user.run(&["command", "remove", "app", "open-prs"]);
     assert!(removed.status.success(), "{}", stderr(&removed));
     let listed = user
-        .call("procedure.list", json!({"project": "app"}))
+        .call("command.list", json!({"project": "app"}))
         .unwrap();
-    assert_eq!(listed["procedures"], json!([]));
+    assert_eq!(listed["commands"], json!([]));
     let text = std::fs::read_to_string(&file).unwrap();
-    assert!(!text.contains("procedures"), "{text}");
+    assert!(!text.contains("open-prs"), "{text}");
     assert!(text.starts_with("# kept by hand\n"), "{text}");
 }
 
 #[test]
-fn running_one_shows_it_and_starts_nothing_until_confirmed() {
+fn slash_name_sends_the_instructions_with_the_trailing_text() {
     let user = User::with_fake_agent();
     fixture(&user);
-    procedure(&user, "ship");
+    command(&user, "ship");
 
-    // Refused, or no answer at all: nothing starts.
-    for input in ["n\n", ""] {
-        let output = user.run_with_input(
-            &["procedure", "run", "app", "ship", "--workspace", "login"],
-            input,
-        );
-        assert!(!output.status.success());
-        let shown = stderr(&output);
-        assert!(
-            shown.contains("Procedure ship of project app, in workspace login"),
-            "{shown}"
-        );
-        assert!(shown.contains("It grants nothing"), "{shown}");
-        assert!(shown.contains("not started"), "{shown}");
-    }
-    assert_eq!(agents(&user), 0);
-    // The protocol's first request shows it and starts nothing either.
-    let shown = user
-        .call(
-            "procedure.run",
-            json!({"project": "app", "name": "ship", "workspace": "login"}),
-        )
-        .unwrap();
-    assert_eq!(shown["started"], false);
-    assert!(shown.get("grants").is_none(), "{shown}");
-    assert_eq!(agents(&user), 0);
-
-    let output = user.run_with_input(
-        &["procedure", "run", "app", "ship", "--workspace", "login"],
-        "y\n",
-    );
-    assert!(output.status.success(), "{}", stderr(&output));
+    let (agent, _) = run(&user, "ship and the tests too");
+    let brief = brief_of(&user, "The command ship of project app");
     assert!(
-        stdout(&output).contains("Started agent"),
-        "{}",
-        stdout(&output)
+        brief.contains("\nThe command ship of project app: Ship the workspace\n"),
+        "{brief}"
     );
-    assert_eq!(agents(&user), 1);
-    // A session like any other, in the tree, in Auto, its instructions as its first message.
-    let listed = user.call("agent.list", json!({})).unwrap();
-    let agent = &listed["agents"][0];
-    assert_eq!(agent["workspace"], "login");
-    assert_eq!(agent["gate_mode"], "auto");
-    let id = agent["id"].as_str().unwrap();
-    let tree = user.call("agent.tree", json!({"agent": id})).unwrap();
-    assert_eq!(tree["agents"].as_array().unwrap().len(), 1);
-    eventually("the brief", || {
-        user.received_requests("session/prompt")
-            .iter()
-            .any(|prompt| prompt.to_string().contains("Push the branch, then open"))
-    });
-    let prompt = user.received_requests("session/prompt")[0].to_string();
-    assert!(prompt.contains("You run the procedure ship"), "{prompt}");
+    assert!(
+        brief.contains("in workspace login (branch app/login)"),
+        "{brief}"
+    );
+    assert!(
+        brief.ends_with(
+            "\n---\n\nPush the branch, then open its pull request.\n\nand the tests too"
+        ),
+        "{brief}"
+    );
+    // A session like any other, in the tree, in Auto.
+    let shown = user.call("agent.show", json!({"agent": agent})).unwrap();
+    assert_eq!(shown["agent"]["workspace"], "login");
+    assert_eq!(shown["agent"]["gate_mode"], "auto");
 
-    let yes = user.run(&[
-        "procedure",
-        "run",
-        "app",
-        "ship",
-        "--workspace",
-        "login",
-        "--yes",
-    ]);
-    assert!(yes.status.success(), "{}", stderr(&yes));
-    assert_eq!(agents(&user), 2);
+    // To a session already going, and a word that names no command is sent as it is.
+    eventually("the first turn", || {
+        user.call("agent.show", json!({"agent": agent})).unwrap()["agent"]["state"] == "idle"
+    });
+    user.call(
+        "agent.send",
+        json!({"agent": agent, "message": "/deploy now"}),
+    )
+    .unwrap();
+    eventually("the plain text", || {
+        user.received_requests("session/prompt").iter().any(|p| {
+            p["params"]["prompt"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.ends_with("\n/deploy now"))
+        })
+    });
 }
 
 #[test]
 fn a_push_is_to_judge_for_any_agent_and_goes_through_once_the_user_allows_it() {
     let user = User::with_fake_agent();
     let (_, remote) = fixture(&user);
-    procedure(&user, "ship");
+    command(&user, "ship");
 
     for mcp in [plain_agent(&user), run(&user, "ship").1] {
         let answer = line(&mcp, "git push origin app/login");
@@ -478,29 +445,6 @@ fn forge_write_creates_a_pull_request_with_the_fake_gh_once_allowed() {
     assert!(!calls.iter().any(|call| call.contains("auth token")));
 }
 
-#[test]
-fn a_run_is_read_from_its_agent_while_it_goes_on_and_none_for_another() {
-    let user = User::with_fake_agent();
-    fixture(&user);
-    procedure(&user, "ship");
-    let (agent, root) = run(&user, "ship");
-
-    let held = user.call("procedure.of", json!({"agent": agent})).unwrap();
-
-    assert_eq!(held["run"]["procedure"], "ship");
-    assert_eq!(held["run"]["workspace"], "login");
-    assert_eq!(held["run"]["ended"], false);
-    assert!(held["run"].get("grants").is_none(), "{held}");
-    let plain = user
-        .call("procedure.of", json!({"agent": "no-such-agent"}))
-        .unwrap();
-    assert!(plain["run"].is_null(), "{plain}");
-
-    root.call("report", json!({"text": "Done."}));
-    let ended = user.call("procedure.of", json!({"agent": agent})).unwrap();
-    assert_eq!(ended["run"]["ended"], true);
-}
-
 /// A hook that leaves a mark in `marks` each time it runs.
 fn marking_hook(user: &User, folder: &Path, name: &str) {
     use std::os::unix::fs::PermissionsExt;
@@ -628,7 +572,7 @@ fn pointing_a_remote_elsewhere_is_to_judge_and_a_push_to_a_remote_changed_since_
 fn forge_write_refuses_a_remote_changed_since_the_workspace_was_created() {
     let user = User::with_fake_agent().with_fake_gh();
     let folder = on_github(&user);
-    procedure(&user, "open");
+    command(&user, "open");
     let (_, open) = run(&user, "open");
     user.git(
         &folder,
@@ -654,7 +598,7 @@ fn forge_write_refuses_a_remote_changed_since_the_workspace_was_created() {
 fn pr_merge_squash_merges_only_the_workspace_s_own_pull_request_into_its_base() {
     let user = User::with_fake_agent().with_fake_gh();
     on_github(&user);
-    procedure(&user, "merge");
+    command(&user, "merge");
     let (_, mcp) = run(&user, "merge");
     let merge = json!({"action": "pr-merge-squash", "repository": "."});
     let merges = |user: &User| {
@@ -699,10 +643,10 @@ fn pr_merge_squash_merges_only_the_workspace_s_own_pull_request_into_its_base() 
 /// them, an agent reaches the daemon's socket through `commands_run`. The agent names the socket's
 /// folder itself, which a run's environment no longer says.
 #[test]
-fn an_agent_s_commands_run_of_flottille_procedure_start_starts_no_run() {
+fn an_agent_s_commands_run_of_flottille_command_add_adds_nothing() {
     let user = User::with_fake_agent();
     let (_, remote) = fixture(&user);
-    procedure(&user, "plain");
+    command(&user, "plain");
     let (_, mcp) = run(&user, "plain");
     let before = agents(&user);
     let flottille = format!(
@@ -711,26 +655,22 @@ fn an_agent_s_commands_run_of_flottille_procedure_start_starts_no_run() {
         env!("CARGO_BIN_EXE_flottille")
     );
 
-    for done in [
-        format!("{flottille} procedure add app ship --description Ship --instructions Push"),
-        format!("{flottille} procedure run app ship --workspace login --yes"),
-    ] {
-        let answer = line(&mcp, &done);
-        // Approved by the user, the line changes nothing either.
-        if answer.text.contains("Waiting for the user's approval") {
-            let requests = user.call("approval.list", json!({})).unwrap()["requests"].clone();
-            let number = requests.as_array().unwrap().last().unwrap()["number"].clone();
-            user.call("approval.approve", json!({"number": number}))
-                .unwrap();
-            user.watch(&["--after", "0"])
-                .until(|e| e["name"] == "approval.settled" && e["data"]["number"] == number);
-        }
+    let done = format!("{flottille} command add app ship --description Ship --instructions Push");
+    let answer = line(&mcp, &done);
+    // Approved by the user, the line changes nothing either.
+    if answer.text.contains("Waiting for the user's approval") {
+        let requests = user.call("approval.list", json!({})).unwrap()["requests"].clone();
+        let number = requests.as_array().unwrap().last().unwrap()["number"].clone();
+        user.call("approval.approve", json!({"number": number}))
+            .unwrap();
+        user.watch(&["--after", "0"])
+            .until(|e| e["name"] == "approval.settled" && e["data"]["number"] == number);
     }
 
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(agents(&user), before);
     assert!(
-        user.call("procedure.show", json!({"project": "app", "name": "ship"}))
+        user.call("command.show", json!({"project": "app", "name": "ship"}))
             .is_err()
     );
     assert!(!remote_branches(&user, &remote).contains("app/login"));
@@ -806,11 +746,11 @@ fn line_in(mcp: &Mcp, repository: &str, line: &str) -> Answer {
 
 /// Adopts the template with the CLI, as the user does.
 fn adopt(user: &User, template: &str) {
-    let added = user.run(&["procedure", "add", "app", "--template", template]);
+    let added = user.run(&["command", "add", "app", "--template", template]);
     assert!(added.status.success(), "{}", stderr(&added));
 }
 
-/// The first prompt of the run's root: its brief.
+/// The first prompt that holds `what`: a command's brief.
 fn brief_of(user: &User, what: &str) -> String {
     eventually("the brief", || {
         user.received_requests("session/prompt")
@@ -849,10 +789,10 @@ fn a_template_is_adopted_with_one_command_into_the_project_s_file_where_the_user
     std::fs::write(&file, format!("# kept by hand\n{text}")).unwrap();
 
     adopt(&user, "open-prs");
-    let named = user.run(&["procedure", "add", "app", "finish", "--template", "close"]);
+    let named = user.run(&["command", "add", "app", "finish", "--template", "close"]);
     assert!(named.status.success(), "{}", stderr(&named));
     assert!(
-        stdout(&named).contains("Added procedure finish to project app."),
+        stdout(&named).contains("Added command finish to project app"),
         "{}",
         stdout(&named)
     );
@@ -861,9 +801,9 @@ fn a_template_is_adopted_with_one_command_into_the_project_s_file_where_the_user
     let text = std::fs::read_to_string(&file).unwrap();
     assert!(text.starts_with("# kept by hand\n"), "{text}");
     for table in [
-        "[procedures.open-prs]",
-        "[procedures.finish]",
-        "[procedures.merge-stack]",
+        "[commands.open-prs]",
+        "[commands.finish]",
+        "[commands.merge-stack]",
     ] {
         assert!(text.contains(table), "{text}");
     }
@@ -874,7 +814,7 @@ fn a_template_is_adopted_with_one_command_into_the_project_s_file_where_the_user
     );
     let shown = user
         .call(
-            "procedure.show",
+            "command.show",
             json!({"project": "app", "name": "open-prs"}),
         )
         .unwrap();
@@ -893,7 +833,7 @@ fn a_template_is_adopted_with_one_command_into_the_project_s_file_where_the_user
     std::fs::write(&file, text).unwrap();
     let shown = user
         .call(
-            "procedure.show",
+            "command.show",
             json!({"project": "app", "name": "open-prs"}),
         )
         .unwrap();
@@ -905,7 +845,7 @@ fn a_template_is_adopted_with_one_command_into_the_project_s_file_where_the_user
         "{shown}"
     );
 
-    let unknown = user.run(&["procedure", "add", "app", "--template", "deploy"]);
+    let unknown = user.run(&["command", "add", "app", "--template", "deploy"]);
     assert!(!unknown.status.success());
     assert!(
         stderr(&unknown).contains(
@@ -915,16 +855,16 @@ fn a_template_is_adopted_with_one_command_into_the_project_s_file_where_the_user
         "{}",
         stderr(&unknown)
     );
-    let twice = user.run(&["procedure", "add", "app", "--template", "open-prs"]);
+    let twice = user.run(&["command", "add", "app", "--template", "open-prs"]);
     assert!(!twice.status.success());
     assert!(
-        stderr(&twice).contains("already has a procedure named open-prs"),
+        stderr(&twice).contains("already has a command named open-prs"),
         "{}",
         stderr(&twice)
     );
     let mixed = user
         .call(
-            "procedure.add",
+            "command.add",
             json!({"project": "app", "name": "other", "template": "close",
                 "description": "Close it"}),
         )
@@ -951,7 +891,7 @@ fn open_the_pull_requests_reports_first_opens_nothing_before_the_confirmation_th
 
     let (_, mcp) = run(&user, "open-prs");
 
-    let brief = brief_of(&user, "You run the procedure open-prs");
+    let brief = brief_of(&user, "The command open-prs of project app");
     for said in [
         "in workspace login (branch app/login)",
         "- level 1: lib (base main, on origin)\n- level 2: api (base main, on origin), web (base \
@@ -1079,7 +1019,7 @@ fn merge_a_stack_refuses_while_a_check_is_failing_and_merges_the_levels_in_order
     adopt(&user, "merge-stack");
     user.gh_script(pulls("FAILURE", "SUCCESS", "FAILURE"));
     let (_, mcp) = run(&user, "merge-stack");
-    let brief = brief_of(&user, "You run the procedure merge-stack");
+    let brief = brief_of(&user, "The command merge-stack of project app");
     assert!(
         brief.contains("- level 1: lib (base main, on origin)\n- level 2: api"),
         "{brief}"
@@ -1162,7 +1102,7 @@ fn close_stops_on_unpushed_work_and_removes_a_workspace_whose_branches_are_merge
     committed(&user, &workspace.join("api"), "login.ts");
     adopt(&user, "close");
     let (_, mcp) = run(&user, "close");
-    let brief = brief_of(&user, "You run the procedure close");
+    let brief = brief_of(&user, "The command close of project app");
     assert!(brief.contains("call `workspace_remove`"), "{brief}");
 
     // api's commit is on no remote: refused, and nothing is touched.
@@ -1310,7 +1250,7 @@ fn forge_write_creates_a_bitbucket_pull_request_with_the_fake_bkt_once_allowed()
 fn a_bitbucket_pull_request_is_never_a_draft_and_needs_its_title() {
     let user = User::with_fake_agent().with_fake_bkt();
     on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
-    procedure(&user, "open");
+    command(&user, "open");
     let (_, open) = run(&user, "open");
 
     let draft = write(
@@ -1339,7 +1279,7 @@ fn forge_write_names_a_data_center_repository_by_its_project() {
             {"name": "cloud", "host": "bitbucket.org"},
             {"name": "work", "host": "bitbucket.example.com:7990"}],
         "created": 4}));
-    procedure(&user, "open");
+    command(&user, "open");
     let (_, open) = run(&user, "open");
 
     let answer = write(
@@ -1388,7 +1328,7 @@ fn a_host_bkt_has_no_context_for_is_a_failure_that_says_what_to_do() {
     let user = User::with_fake_agent().with_fake_bkt();
     on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
     user.bkt_script(json!({"contexts": []}));
-    procedure(&user, "open");
+    command(&user, "open");
     let (_, open) = run(&user, "open");
 
     let answer = write(
@@ -1410,7 +1350,7 @@ fn a_host_bkt_has_no_context_for_is_a_failure_that_says_what_to_do() {
 fn bitbucket_pr_merge_squash_merges_only_the_workspace_s_own_pull_request_into_its_base() {
     let user = User::with_fake_agent().with_fake_bkt();
     on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
-    procedure(&user, "merge");
+    command(&user, "merge");
     let (_, mcp) = run(&user, "merge");
     let merge = json!({"action": "pr-merge-squash", "repository": "."});
     // Its own page names no reviewer, and it has no check: nothing blocks the merge.
@@ -1473,7 +1413,7 @@ fn bitbucket_pr_merge_squash_merges_only_the_workspace_s_own_pull_request_into_i
 fn bitbucket_pipeline_rerun_starts_the_branch_s_pipeline_again_only_when_its_last_one_failed() {
     let user = User::with_fake_agent().with_fake_bkt();
     on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
-    procedure(&user, "rerun");
+    command(&user, "rerun");
     let (_, mcp) = run(&user, "rerun");
     let rerun = json!({"action": "pipeline-rerun", "repository": "."});
     let pipeline = |number: u64, branch: &str, result: &str| {
@@ -1532,7 +1472,7 @@ fn a_data_center_repository_has_no_pipeline_bkt_can_run() {
     let user = User::with_fake_agent().with_fake_bkt();
     on_bitbucket(&user, "ssh://git@bitbucket.example.com:7999/APP/app.git");
     user.bkt_script(json!({"contexts": [{"name": "work", "host": "bitbucket.example.com:7990"}]}));
-    procedure(&user, "rerun");
+    command(&user, "rerun");
     let (_, mcp) = run(&user, "rerun");
 
     let answer = write(
@@ -1554,7 +1494,7 @@ fn a_data_center_repository_has_no_pipeline_bkt_can_run() {
 fn a_bitbucket_write_is_refused_when_the_remote_leads_elsewhere_than_when_the_workspace_was_made() {
     let user = User::with_fake_agent().with_fake_bkt();
     let folder = on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
-    procedure(&user, "open");
+    command(&user, "open");
     let (_, open) = run(&user, "open");
     user.git(
         &folder,
@@ -1595,7 +1535,7 @@ fn bitbucket_pr_create_asks_the_project_s_reviewers() {
     on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
     name_the_reviewers(&user);
     user.bkt_script(json!({"created": 12}));
-    procedure(&user, "open");
+    command(&user, "open");
     let (_, open) = run(&user, "open");
 
     let answer = write(
@@ -1632,7 +1572,7 @@ fn bitbucket_pr_merge_squash_refuses_while_a_check_fails_or_runs_or_a_reviewer_a
  {
     let user = User::with_fake_agent().with_fake_bkt();
     on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
-    procedure(&user, "merge");
+    command(&user, "merge");
     let (_, mcp) = run(&user, "merge");
     let merge = json!({"action": "pr-merge-squash", "repository": "."});
     let page = "/repositories/acme/app/pullrequests/12";
@@ -1707,7 +1647,7 @@ fn a_data_center_pull_request_a_reviewer_marked_needs_work_is_not_merged() {
             "pulls": {"APP/app": [pull(status)]},
             "checks": {"APP/app": {"5": [{"state": "SUCCESSFUL", "name": "build"}]}}}));
     };
-    procedure(&user, "merge");
+    command(&user, "merge");
     let (_, mcp) = run(&user, "merge");
     let merge = json!({"action": "pr-merge-squash", "repository": "."});
 
@@ -1727,7 +1667,7 @@ fn a_data_center_pull_request_a_reviewer_marked_needs_work_is_not_merged() {
     assert_eq!(bkt_calls_starting(&user, "pr merge"), 1);
 }
 
-/// A root agent started in `login` outside any procedure: its id and MCP session.
+/// A root agent started in `login` with no command: its id and MCP session.
 fn plain_agent_with_id(user: &User) -> (String, Mcp) {
     let opened = user.received_requests("session/new").len();
     let started = user
@@ -1759,7 +1699,7 @@ fn sleeping(user: &User, mcp: &Mcp) -> String {
 }
 
 #[test]
-fn workspace_remove_is_refused_while_an_agent_outside_the_run_or_a_command_not_the_run_s_works_in_the_workspace()
+fn workspace_remove_is_refused_while_an_agent_outside_the_tree_or_a_command_not_the_tree_s_works_in_the_workspace()
  {
     let user = User::with_fake_agent();
     let workspace = stack(&user, false, "");
@@ -1767,7 +1707,7 @@ fn workspace_remove_is_refused_while_an_agent_outside_the_run_or_a_command_not_t
     let (outsider, outside) = plain_agent_with_id(&user);
     let theirs = sleeping(&user, &outside);
     let (_, mcp) = run(&user, "close");
-    // The run's own command is no obstacle.
+    // The tree's own command run is no obstacle.
     let ours = sleeping(&user, &mcp);
 
     let answer = remove(&user, &mcp, json!({}));
@@ -1804,7 +1744,7 @@ fn workspace_remove_is_refused_while_an_agent_outside_the_run_or_a_command_not_t
     assert!(!stopped.error, "{}", stopped.text);
 }
 
-/// The MCP session of the agent a run's root launched: the last session opened.
+/// The MCP session of the agent a root launched: the last session opened.
 fn child_of(user: &User, root: &Mcp, launch: Value) -> Mcp {
     let opened = user.received_requests("session/new").len();
     let launched = root.call("agent_launch", launch);
@@ -1817,7 +1757,7 @@ fn child_of(user: &User, root: &Mcp, launch: Value) -> Mcp {
 fn forge_write_and_workspace_remove_are_listed_to_every_agent_of_a_workspace() {
     let user = User::with_fake_agent().with_fake_gh();
     on_github(&user);
-    procedure(&user, "push");
+    command(&user, "push");
     let listed = |mcp: &Mcp| -> (bool, bool) {
         let names = mcp.names();
         (
@@ -1826,69 +1766,13 @@ fn forge_write_and_workspace_remove_are_listed_to_every_agent_of_a_workspace() {
         )
     };
 
-    assert_eq!(listed(&plain_agent(&user)), (true, true), "outside a run");
+    assert_eq!(listed(&plain_agent(&user)), (true, true), "a root");
     let (_, mcp) = run(&user, "push");
-    assert_eq!(listed(&mcp), (true, true), "in a run");
+    assert_eq!(listed(&mcp), (true, true), "a root sent a command");
     let child = child_of(
         &user,
         &mcp,
         json!({"title": "same place", "brief": "Open the pull request."}),
     );
     assert_eq!(listed(&child), (true, true), "its child");
-}
-
-/// The MCP session of the process that resumed or loaded a session, the `index`th to.
-fn reopened_server(user: &User, index: usize) -> Mcp {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let reopened: Vec<Value> = user
-            .received()
-            .into_iter()
-            .filter(|e| {
-                ["session/resume", "session/load"]
-                    .contains(&e["received"]["method"].as_str().unwrap_or(""))
-            })
-            .map(|e| e["received"].clone())
-            .collect();
-        if let Some(opened) = reopened.get(index) {
-            let server = &opened["params"]["mcpServers"][0];
-            let authorization = server["headers"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|h| h["name"] == "Authorization")
-                .and_then(|h| h["value"].as_str())
-                .unwrap()
-                .to_owned();
-            return Mcp::initialize(server["url"].as_str().unwrap(), &authorization);
-        }
-        assert!(Instant::now() < deadline, "no session was reopened");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-#[test]
-fn a_run_ends_with_its_stopped_root_and_the_resumed_root_is_judged_like_any_agent() {
-    let user = User::with_fake_agent().with_fake_gh();
-    on_github(&user);
-    procedure(&user, "ship");
-    let (agent, root) = run(&user, "ship");
-    assert!(root.names().contains(&"forge_write".to_owned()));
-    let ran = user.call("procedure.of", json!({"agent": agent})).unwrap();
-    assert_eq!(ran["run"]["ended"], false);
-
-    user.call("agent.stop", json!({"agent": agent})).unwrap();
-    let ended = user.call("procedure.of", json!({"agent": agent})).unwrap();
-    assert_eq!(ended["run"]["ended"], true, "the run ends with its root");
-    user.resume(&agent);
-    user.call("agent.send", json!({"agent": agent, "message": "go on"}))
-        .unwrap();
-    let resumed = reopened_server(&user, 0);
-
-    let answer = line(&resumed, "git push origin app/login");
-    assert!(
-        answer.text.contains("Waiting for the user's approval"),
-        "{}",
-        answer.text
-    );
 }

@@ -1,5 +1,6 @@
 //! A project's settings page: the forge each repository is on and the tracker of its tickets
-//! (`docs/projects.md`, "Forges and tracker"), and re-checking or removing the project. Flottille
+//! (`docs/projects.md`, "Forges and tracker"), re-checking or removing the project, then its
+//! Skills and Commands (`docs/skills.md`, `docs/commands.md`), each section saved on its own. Flottille
 //! never guesses a forge: the form is pre-filled with what each repository's remote proposes, and
 //! nothing is read nor written on a forge until the user saves. The window never writes the
 //! project's file: Save asks the daemon (`project.set_settings`), which checks each forge against
@@ -17,8 +18,10 @@ use gpui_kit::{
 use serde_json::{Value, json};
 
 use crate::actions::Command;
+use crate::commands::CommandsSection;
 use crate::project::repository_label;
 use crate::shell::Shell;
+use crate::skills::SkillsSection;
 
 /// A text field in Flottille's colours.
 pub fn styled_input(
@@ -217,6 +220,8 @@ pub struct ProjectSettingsPage {
     removing: bool,
     removed: Option<String>,
     narrow: bool,
+    skills: Entity<SkillsSection>,
+    commands: Entity<CommandsSection>,
 }
 
 impl ProjectSettingsPage {
@@ -226,6 +231,14 @@ impl ProjectSettingsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let skills = cx.new(|_| SkillsSection::new(shell.clone(), name.clone()));
+        let commands = cx.new(|_| CommandsSection::new(shell.clone(), name.clone()));
+        // Asked once the shell, which is making this page, is no longer being updated.
+        let (listing, skilling) = (commands.clone(), skills.clone());
+        cx.defer(move |cx| {
+            listing.update(cx, |section, cx| section.read(cx));
+            skilling.update(cx, |section, cx| section.read(cx));
+        });
         Self {
             shell,
             name,
@@ -247,7 +260,26 @@ impl ProjectSettingsPage {
             removing: false,
             removed: None,
             narrow: false,
+            skills,
+            commands,
         }
+    }
+
+    pub fn skills(&self) -> &Entity<SkillsSection> {
+        &self.skills
+    }
+
+    pub fn commands(&self) -> &Entity<CommandsSection> {
+        &self.commands
+    }
+
+    /// Whether the daemon has answered the lists the page asks for as it opens, with a list or
+    /// with a problem: an answer redraws the page, so the tests wait for it.
+    pub fn has_read(&self, cx: &App) -> bool {
+        let commands = self.commands.read(cx);
+        let skills = self.skills.read(cx);
+        (commands.commands().is_some() || commands.problem().is_some())
+            && (skills.skills().is_some() || skills.problem().is_some())
     }
 
     pub fn name(&self) -> &str {
@@ -325,6 +357,9 @@ impl ProjectSettingsPage {
         self.loaded = true;
         self.error = None;
         self.folder = settings["folder"].as_str().unwrap_or_default().to_owned();
+        let folder = self.folder.clone();
+        self.skills
+            .update(cx, |section, _| section.set_folder(&folder));
         self.obsolete = strings(&settings["obsolete"]);
         let forge = |value: &Value| serde_json::from_value::<RepositoryForge>(value.clone()).ok();
         let mut rows = Vec::new();
@@ -941,7 +976,7 @@ impl Render for ProjectSettingsPage {
                         key("forges-note"),
                         2,
                         note(
-                            "Flottille reads pull requests and writes through procedures only on \
+                            "Flottille reads pull requests and writes to them only on \
                              the forge you declare here, and only while the repository's remote \
                              leads there.",
                         ),
@@ -956,7 +991,9 @@ impl Render for ProjectSettingsPage {
                     .when_some(self.saved.clone(), |d, saved| {
                         d.child(said("project-settings-saved", &saved))
                     })
-                    .child(footer),
+                    .child(footer)
+                    .child(self.skills.clone())
+                    .child(self.commands.clone()),
             )
     }
 }

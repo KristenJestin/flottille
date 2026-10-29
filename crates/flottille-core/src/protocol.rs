@@ -100,32 +100,6 @@ pub struct RepositorySetting {
     pub forge: Option<crate::declared::RepositoryForge>,
 }
 
-/// The parameters of `reference.list`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReferenceList {
-    pub project: String,
-}
-
-/// The parameters of `reference.add`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReferenceAdd {
-    pub project: String,
-    pub name: String,
-    pub description: String,
-    /// Relative to the project folder.
-    pub path: String,
-}
-
-/// The parameters of `reference.remove`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReferenceRemove {
-    pub project: String,
-    pub name: String,
-}
-
 /// The parameters of `workspace.create`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -52,8 +52,8 @@ pub struct Session<'a> {
     pub title: Option<&'a str>,
     /// It cannot launch children of its own.
     pub at_depth_limit: bool,
-    /// The project's references: name and one line each, never the content (`reference_read`).
-    pub references: &'a [(String, String)],
+    /// The project's skills: name and one line each, never the content (`skill_read`).
+    pub skills: &'a [(String, String)],
 }
 
 /// One instruction file found for the project layer: its heading and its text.
@@ -93,13 +93,13 @@ pub fn instructions(role: &Role, session: &Session, files: &[File]) -> String {
         );
     }
     let mut text = format!("{shared}\n\n{BOUNDARY}\n\n{}", part.join(" "));
-    if !session.references.is_empty() {
+    if !session.skills.is_empty() {
         let env = std::env::vars_os().collect();
         text.push_str(
-            "\n\n# The project's references\n\nDocuments of the project that are not loaded here: \
-             read one with the tool reference_read when your task needs it.\n\n",
+            "\n\n# The project's skills\n\nTexts of the project that are not loaded here: \
+             read one with the tool skill_read when your task needs it.\n\n",
         );
-        for (name, description) in session.references {
+        for (name, description) in session.skills {
             text.push_str(&format!("- {name}: {}\n", secrets::mask(description, &env)));
         }
     }
@@ -176,13 +176,13 @@ mod tests {
             folder,
             title: None,
             at_depth_limit: false,
-            references: &[],
+            skills: &[],
         }
     }
 
     #[test]
-    fn the_references_are_listed_by_name_and_description_after_the_boundary() {
-        let references = [
+    fn the_skills_are_listed_by_name_and_description_after_the_boundary() {
+        let skills = [
             ("react".to_owned(), "How we write components".to_owned()),
             ("style".to_owned(), "The code style".to_owned()),
         ];
@@ -190,7 +190,7 @@ mod tests {
         let text = instructions(
             role(WORKER).unwrap(),
             &Session {
-                references: &references,
+                skills: &skills,
                 ..session(folder)
             },
             &[],
@@ -199,12 +199,12 @@ mod tests {
         let (before, after) = text.split_once(BOUNDARY).unwrap();
         assert!(!before.contains("react"));
         assert!(after.contains(
-            "# The project's references\n\nDocuments of the project that are not loaded here: \
-             read one with the tool reference_read when your task needs it.\n\n\
+            "# The project's skills\n\nTexts of the project that are not loaded here: \
+             read one with the tool skill_read when your task needs it.\n\n\
              - react: How we write components\n- style: The code style\n"
         ));
         let none = instructions(role(WORKER).unwrap(), &session(folder), &[]);
-        assert!(!none.contains("references"));
+        assert!(!none.contains("skills"));
     }
 
     #[test]
