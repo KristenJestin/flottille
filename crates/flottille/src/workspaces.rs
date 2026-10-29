@@ -1386,7 +1386,14 @@ async fn remove_held(daemon: &Daemon, workspace: &Workspace) -> Answer {
             true => (&[&exclude, "--branches"], "no other branch"),
             false => (&["--remotes"], "no remote"),
         };
-        let log = [&["log", "--format=%h %s", "HEAD", "--not"][..], elsewhere].concat();
+        // What the workspace started from is not its own work, wherever that base came from.
+        let base = worktree.base.commit.as_str();
+        let log = [
+            &["log", "--format=%h %s", "HEAD", "--not"][..],
+            elsewhere,
+            &[base],
+        ]
+        .concat();
         let commits = git::output(&dir, &log, Class::Read)
             .await
             .map_err(|error| cannot_check(&worktree.path, &error))?;

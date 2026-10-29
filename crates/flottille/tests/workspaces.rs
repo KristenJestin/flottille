@@ -617,6 +617,85 @@ fn a_workspace_of_a_repository_with_no_remote_is_removed_unless_it_holds_commits
     assert!(lib.join("feature.rs").exists());
 }
 
+/// A commit of `lib`'s own `main`, kept local.
+fn local_commit(fixture: &Fixture) {
+    let lib = fixture.folder.join("lib");
+    std::fs::write(lib.join("LOCAL.md"), "only here\n").unwrap();
+    fixture.user.git(&lib, &["add", "."]);
+    fixture
+        .user
+        .git(&lib, &["commit", "--quiet", "-m", "only here"]);
+}
+
+#[test]
+fn a_workspace_started_from_a_local_base_is_removed_when_the_fetch_failed() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    std::fs::rename(fixture.remote("lib"), fixture.user.path("remotes/gone.git")).unwrap();
+    local_commit(&fixture);
+    fixture.create(json!({"repositories": ["lib"]})).unwrap();
+    assert_eq!(fixture.settled("login")["state"], "ready");
+
+    let removed = fixture.remove("login");
+
+    assert_eq!(removed, Ok(json!({"removed": "login", "project": "app"})));
+    assert!(!fixture.workspace("login").exists());
+}
+
+#[test]
+fn a_workspace_started_from_a_local_base_is_removed_when_the_remote_is_empty() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    // `origin` of lib leads to a bare repository where `main` is not.
+    let empty = fixture.user.path("remotes/empty.git");
+    std::fs::create_dir_all(&empty).unwrap();
+    fixture.user.git(&empty, &["init", "--quiet", "--bare"]);
+    fixture.user.git(
+        &fixture.folder.join("lib"),
+        &["remote", "set-url", "origin", empty.to_str().unwrap()],
+    );
+    fixture.user.git(
+        &fixture.folder.join("lib"),
+        &["update-ref", "-d", "refs/remotes/origin/main"],
+    );
+    fixture.create(json!({"repositories": ["lib"]})).unwrap();
+    let workspace = fixture.settled("login");
+    assert_eq!(
+        workspace["repositories"][0]["base"]["ref"],
+        "refs/heads/main"
+    );
+
+    let removed = fixture.remove("login");
+
+    assert_eq!(removed, Ok(json!({"removed": "login", "project": "app"})));
+}
+
+#[test]
+fn a_workspace_started_from_a_local_base_still_refuses_its_own_commits() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    std::fs::rename(fixture.remote("lib"), fixture.user.path("remotes/gone.git")).unwrap();
+    local_commit(&fixture);
+    fixture.create(json!({"repositories": ["lib"]})).unwrap();
+    fixture.settled("login");
+    let lib = fixture.workspace("login").join("lib");
+    std::fs::write(lib.join("feature.rs"), "fn f() {}\n").unwrap();
+    fixture.user.git(&lib, &["add", "."]);
+    fixture
+        .user
+        .git(&lib, &["commit", "--quiet", "-m", "add the feature"]);
+    let commit = fixture.git(&lib, &["rev-parse", "--short", "HEAD"]);
+
+    let (code, message) = fixture.remove("login").unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert!(
+        message.contains(&format!("{commit} add the feature")),
+        "{message}"
+    );
+    assert!(!message.contains("only here"), "{message}");
+}
+
 #[test]
 fn offline_the_creation_proceeds_on_the_last_tracking_refs_and_says_their_age() {
     let fixture = Fixture::new(false);
