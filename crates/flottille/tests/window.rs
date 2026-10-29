@@ -5154,7 +5154,7 @@ fn listed_in(shell: &Entity<Shell>, place: Place, cx: &mut VisualTestContext) ->
 /// The sessions the "Ended" group of `app` lists, and whether it is open.
 fn ended_in_app(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> (Vec<String>, bool) {
     shell.read_with(cx, |s, cx| {
-        s.ended("app")
+        s.ended()
             .map(|node| {
                 let node = node.read(cx);
                 let ids = node
@@ -5176,9 +5176,9 @@ fn open_ended<'a>(
 ) -> (Entity<Shell>, &'a mut VisualTestContext) {
     let (shell, cx) = window(user, Arc::new(user.connector()), 1280., cx);
     until(&shell, cx, "the Ended group is in the tree", |cx| {
-        cx.update(|window, _| window.try_find("ended-app").is_some())
+        cx.update(|window, _| window.try_find("ended").is_some())
     });
-    cx.update(|window, cx| window.click("ended-app", cx));
+    cx.update(|window, cx| window.click("ended", cx));
     settle(cx);
     cx.update(|window, cx| window.click(session_id(lead), cx));
     until(
@@ -5213,10 +5213,12 @@ fn stop_during_a_turn_cancels_it_and_the_next_message_is_taken(cx: &mut TestAppC
     });
 
     send(&user, &lead, "HANG");
-    until(&shell, cx, "the turn runs and Stop is offered", |cx| {
+    until(&shell, cx, "the turn runs", |cx| {
         reply.read_with(cx, |r, _| r.is_running())
-            && cx.update(|window, _| window.try_find("reply-stop").is_some())
     });
+    // Stop fades in, in Send's place.
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find("reply-stop").is_some(), "Stop is offered"));
     cx.update(|window, cx| window.click("reply-stop", cx));
     until(&shell, cx, "the turn ends", |cx| {
         !reply.read_with(cx, |r, _| r.is_running())
@@ -5315,7 +5317,7 @@ fn end_session_asks_ends_the_tree_moves_it_to_ended_and_replaces_the_composer(
     });
     assert!(!ended_in_app(&shell, cx).1, "the group is folded");
     settle(cx);
-    cx.update(|window, cx| window.click("ended-app", cx));
+    cx.update(|window, cx| window.click("ended", cx));
     settle(cx);
     assert!(ended_in_app(&shell, cx).1);
     cx.update(|window, _| assert!(window.find(session_id(&lead)).visible()));
@@ -5625,15 +5627,17 @@ fn stop_and_escape_cancel_the_turn_that_runs_and_the_agent_stays_alive(cx: &mut 
 
     // The Stop button.
     send(&user, &lead, "HANG");
-    until(
-        &shell,
-        cx,
-        "the turn runs and the composer offers Stop",
-        |cx| {
-            reply.read_with(cx, |r, _| r.is_running())
-                && cx.update(|window, _| window.try_find("reply-stop").is_some())
-        },
-    );
+    until(&shell, cx, "the turn runs", |cx| {
+        reply.read_with(cx, |r, _| r.is_running())
+    });
+    // Stop fades in, in Send's place.
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(
+            window.try_find("reply-stop").is_some(),
+            "the composer offers Stop"
+        )
+    });
     cx.update(|window, cx| window.click("reply-stop", cx));
     until(&shell, cx, "the turn ends", |cx| {
         !reply.read_with(cx, |r, _| r.is_running())
@@ -5655,6 +5659,7 @@ fn stop_and_escape_cancel_the_turn_that_runs_and_the_agent_stays_alive(cx: &mut 
     assert_eq!(cancels(&user), 2);
     let agent = user.call("agent.show", json!({"agent": lead})).unwrap();
     assert_eq!(agent["agent"]["state"], "idle");
+    settle(cx);
     cx.update(|window, _| assert!(window.try_find("reply-stop").is_none()));
 }
 

@@ -456,8 +456,15 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
 - a top bar with search and a bell counting what waits for the user;
 - left: the tree project › place › session. `main` and the workspaces sit at the same level
   under their project; sessions sit under their place, with a mark when running or when the
-  root needs the user; a folded level shows the strongest mark it holds; a click on a project's name
-  opens its page and leaves its places as they were, only its chevron folds and unfolds them;
+  root needs the user. The mark is where the work is, once: on the session's own row while that row
+  is in sight, and on a folded place or project, which shows the strongest mark of what it holds,
+  only while it is folded (never on a row and on its parents together); a session whose agent
+  ended shows no mark. A click on a project's name opens its page and leaves its places as they
+  were, only its chevron folds and unfolds them. A place's row offers, under the pointer, a "+"
+  that opens its project's composer set to start there, with the field focused; a session's row
+  offers a "⋯" menu with End session (the confirmation of the session page, counting the agents
+  that end) and, on an ended session whose agent can resume, Resume, with no need to open the
+  session first;
 - a project page: its repositories, its places with their sessions, creating and removing a
   workspace (with the preparation's progress and failure output), the composer that starts
   a session (place, agent, model, first message), and its tasks, each with Run, which runs it in
@@ -469,13 +476,14 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   its Rules (a text editor, Reset to default, and a line saying a change reaches the agents
   created from now on);
 - Settings: the providers, the Auto judge, and the Rules for every project, edited the same way;
-- a session page: the root's conversation, live (messages, thoughts collapsed, tool calls with
+- a session page: the root's conversation, live (messages, the user's own as selectable as the agent's, thoughts collapsed, tool calls with
   their result, the children launched, reports, diffs), the approvals that reach the user, inline,
   each a card that says what the call does, then its class, then the judge's reason when one was
   asked, with Allow and Deny only (a base card stands apart, in the alarm colour, with a sentence
   that says why it always comes back), and a composer that writes to the root, with the session's
   mode switch (Ask, Auto) in its bar, whose Stop
-  button and `Escape` interrupt the turn that runs (the agent stays), which grows with its lines up to
+  button, in Send's place while a turn runs and Send has nothing to send (the two cross-fade), and
+  `Escape` interrupt the turn that runs (the agent stays), which grows with its lines up to
   about ten and then scrolls, and takes pictures (pasted from the clipboard, dropped from a file or
   picked with Attach: thumbnails with a remove button, sent with the message as ACP image blocks,
   stored in Flottille's data folder so the conversation shows them again; said in one sentence and
@@ -490,7 +498,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   linked or unlinked there) and facts. The
   root's row menu ("⋯") holds End session, the only way the window ends an agent: it ends the root
   and its tree, after a confirmation that counts the agents that end. An ended session leaves its
-  place in the left tree for its project's "Ended" group, folded at the bottom, and its page shows,
+  place in the left tree for the "Ended" group, folded, at the bottom of the whole tree below
+  every project (its rows say their project), and its page shows,
   in place of the composer, why it ended and Resume when its agent can resume or load its session
   (`agent.resume`), enabled once its process is gone, which brings the composer back; its header
   says `STOPPED` or `FAILED`, as its rail does, and its conversation says it ended, then resumed. Selecting a child shows its

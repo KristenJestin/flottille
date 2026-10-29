@@ -41,6 +41,7 @@ pub struct TreeRow {
     expanded: Option<bool>,
     selected: bool,
     trailing: Option<AnyElement>,
+    actions: Option<(AnyElement, bool)>,
     on_click: Option<OnClick>,
     on_toggle: Option<OnClick>,
 }
@@ -59,6 +60,7 @@ impl TreeRow {
             expanded: None,
             selected: false,
             trailing: None,
+            actions: None,
             on_click: None,
             on_toggle: None,
         }
@@ -84,6 +86,14 @@ impl TreeRow {
 
     pub fn on_click(mut self, f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
         self.on_click = Some(Box::new(f));
+        self
+    }
+
+    /// What the row offers under the pointer (a "⋯" menu, a "+"): it opens beside the trailing
+    /// mark over [`HOVER`](crate::motion::HOVER) as the pointer comes and closes as it leaves,
+    /// and stays while `keep` (its menu is open).
+    pub fn actions(mut self, element: impl IntoElement, keep: bool) -> Self {
+        self.actions = Some((element.into_any_element(), keep));
         self
     }
 
@@ -168,6 +178,26 @@ impl RenderOnce for TreeRow {
             )
             .when_some(self.trailing, |d, trailing| {
                 d.child(div().flex_none().flex().items_center().child(trailing))
+            })
+            .when_some(self.actions, |d, (actions, keep)| {
+                let t = if keep { 1.0 } else { now.hover };
+                d.when(t > 0.0, |d| {
+                    d.child(
+                        div()
+                            .id(ElementId::NamedChild(
+                                std::sync::Arc::new(self.id.clone()),
+                                "actions".into(),
+                            ))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .w(px(24. * t))
+                            .opacity(t)
+                            // What the row offers is not a click on the row.
+                            .on_click(|_, _, cx| cx.stop_propagation())
+                            .child(actions),
+                    )
+                })
             });
         if let Some(on_click) = self.on_click {
             row = row.on_click(on_click);

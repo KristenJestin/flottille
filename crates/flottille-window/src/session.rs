@@ -61,6 +61,18 @@ pub const RAIL: f32 = 290.;
 /// How the screen names the root agent, which has no name of its own there.
 pub const THE_CONVERSATION: &str = "the conversation";
 
+/// What the confirmation of ending a session says: how many agents end.
+pub fn end_sentence(count: usize) -> String {
+    match count {
+        0 | 1 => format!("This ends {THE_CONVERSATION}. Its workspace stays."),
+        n => format!(
+            "This ends {n} agents: {THE_CONVERSATION} and its {} sub-agent{}. Workspaces stay.",
+            n - 1,
+            if n == 2 { "" } else { "s" }
+        ),
+    }
+}
+
 /// The reply field's placeholder and its send button's tooltip: the field writes to the root.
 pub const REPLY_PLACEHOLDER: &str = "Reply…";
 pub const SEND: &str = "Send";
@@ -354,15 +366,7 @@ impl SessionPage {
         if !self.ending {
             return None;
         }
-        Some(match self.end_count() {
-            0 | 1 => format!("This ends {THE_CONVERSATION}. Its workspace stays."),
-            n => format!(
-                "This ends {n} agents: {THE_CONVERSATION} and its {} sub-agent{}. Workspaces \
-                 stay.",
-                n - 1,
-                if n == 2 { "" } else { "s" }
-            ),
-        })
+        Some(end_sentence(self.end_count()))
     }
 
     /// Opens the confirmation of ending the session, from the root's menu.
@@ -1728,8 +1732,27 @@ impl Row {
             .iter()
             .map(|piece| piece.read(cx).state.read(cx));
         let rendered = pieces.map(|state| state.rendered_text().as_str().to_owned());
-        matches!(*self.block, Block::Text { .. } | Block::Thought { .. })
-            .then(|| rendered.collect())
+        matches!(
+            *self.block,
+            Block::Text { .. } | Block::Thought { .. } | Block::Message { .. }
+        )
+        .then(|| rendered.collect())
+    }
+
+    /// Selects all the text the row shows, as `Ctrl+A` over it does.
+    pub fn select_all(&self, cx: &mut Context<Self>) {
+        for piece in &self.markdown {
+            let state = piece.read(cx).state.clone();
+            state.update(cx, |state, cx| state.select_all(cx));
+        }
+    }
+
+    /// What the user selected in the text the row shows.
+    pub fn selected_text(&self, cx: &gpui_kit::App) -> String {
+        self.markdown
+            .iter()
+            .map(|piece| piece.read(cx).state.read(cx).selected_text())
+            .collect()
     }
 
     /// The pieces of a reply past its first, which the list draws as items of their own.
@@ -1793,6 +1816,10 @@ impl Row {
         if let Block::Text { text } | Block::Thought { text, .. } = &block {
             let muted = matches!(block, Block::Thought { .. });
             self.set_markdown(text, muted, cx);
+        }
+        // The user's own message is selectable like a reply: the same view, fed what was typed.
+        if let Block::Message { text, .. } = &block {
+            self.set_markdown(&as_typed(text), false, cx);
         }
         match &block {
             Block::Thought { since, until, .. } => {
@@ -1894,6 +1921,26 @@ impl Row {
         self.error = refused;
         cx.notify();
     }
+}
+
+/// What the user typed, as the Markdown that draws it as typed: each mark is escaped, each line
+/// keeps its break and its indentation.
+fn as_typed(text: &str) -> String {
+    let line = |line: &str| {
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        let mut out = "\u{a0}".repeat(indent);
+        for c in line[indent..].chars() {
+            if "\\`*_{}[]()#+-.!|<>~&$".contains(c) {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        out
+    };
+    text.split("\n\n")
+        .map(|paragraph| paragraph.lines().map(line).collect::<Vec<_>>().join("\\\n"))
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// A reply or a thought, its Markdown pieces one under the other.
@@ -2002,7 +2049,7 @@ impl Render for Row {
         // The row's own block, not a copy of it.
         let block = self.block.clone();
         match &*block {
-            Block::Message { text, .. } => div()
+            Block::Message { .. } => div()
                 .id(id("message"))
                 .flex()
                 .flex_col()
@@ -2030,7 +2077,7 @@ impl Render for Row {
                                     .test_support(),
                             )
                         })
-                        .child(SharedString::from(text.clone())),
+                        .child(markdown_view(&self.markdown)),
                 )
                 .test_support()
                 .into_any_element(),
@@ -4080,6 +4127,13 @@ impl Render for Reply {
         self.renders += 1;
         let p = palette(cx);
         let can_send = (self.has_text || !self.attachments.is_empty()) && !self.sending;
+        let swap = fade(
+            "reply-stop-swap",
+            self.running && !can_send,
+            HOVER,
+            window,
+            cx,
+        );
         let status = self.status();
         let thumbs: Vec<AnyElement> = self
             .attachments
@@ -4245,19 +4299,37 @@ impl Render for Reply {
                             ),
                     )
                     .child(div().flex_1())
-                    .when(self.running, |d| {
-                        d.child(enter(
-                            "reply-stop-enter",
-                            0,
-                            Button::icon("reply-stop", Icon::Stop, STOP)
-                                .disabled(self.interrupting)
-                                .on_click(cx.listener(|this, _, _, cx| this.interrupt(cx))),
-                        ))
-                    })
                     .child(
-                        Button::round("reply-send", Icon::Send, SEND)
-                            .disabled(!can_send)
-                            .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
+                        // Stop takes Send's place while Send has nothing to send: the two cross-fade
+                        // in one slot.
+                        div()
+                            .id("reply-send-slot")
+                            .relative()
+                            .flex_none()
+                            .size(px(30.))
+                            .when(swap < 1.0, |d| {
+                                d.child(
+                                    div().absolute().inset_0().opacity(1.0 - swap).child(
+                                        Button::round("reply-send", Icon::Send, SEND)
+                                            .disabled(!can_send)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.send(window, cx)
+                                            })),
+                                    ),
+                                )
+                            })
+                            .when(swap > 0.0, |d| {
+                                d.child(
+                                    div().absolute().inset_0().opacity(swap).child(
+                                        Button::round("reply-stop", Icon::Stop, STOP)
+                                            .disabled(self.interrupting)
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| this.interrupt(cx)),
+                                            ),
+                                    ),
+                                )
+                            })
+                            .test_support(),
                     ),
             )
             .child(presence_of(

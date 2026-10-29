@@ -98,8 +98,8 @@ pub struct Shell {
     bell_shown: Motion,
     projects: HashMap<String, Entity<ProjectNode>>,
     places: HashMap<(String, Place), Entity<PlaceNode>>,
-    /// Each project's "Ended" group, while it holds a session.
-    ended: HashMap<String, Entity<PlaceNode>>,
+    /// The "Ended" group at the bottom of the tree, made when a session first ends.
+    ended: Option<Entity<PlaceNode>>,
     sessions: HashMap<String, Entity<SessionRow>>,
     /// Each project's composer and new workspace form, made when its page first opens: a draft,
     /// a send and a name asked belong to their project.
@@ -226,7 +226,7 @@ impl Shell {
             bell_shown: Motion::settled(0.0),
             projects: HashMap::new(),
             places: HashMap::new(),
-            ended: HashMap::new(),
+            ended: None,
             sessions: HashMap::new(),
             forms: HashMap::new(),
             actions,
@@ -443,6 +443,43 @@ impl Shell {
         }
     }
 
+    /// The "+" of a place's row: the composer of its project, set to start there, with the field
+    /// focused.
+    pub fn start_in(
+        &mut self,
+        project: &str,
+        choice: Choice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open(Selection::Project(project.to_owned()), window, cx);
+        // The focus given while the page is built is taken back by what is built after it: wait
+        // for the frame, then give it.
+        let project = project.to_owned();
+        cx.defer_in(window, move |shell, window, cx| {
+            shell.compose_in(&project, choice, window, cx)
+        });
+    }
+
+    /// "End session" in a session's row: the confirmation, which counts the agents that end.
+    pub fn ask_end_of(&mut self, session: &str, cx: &mut Context<Self>) {
+        let Some(found) = self.snapshot.session(session) else {
+            return;
+        };
+        let (id, count) = (found.id.clone(), found.live);
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.ask_end(id, count, cx));
+    }
+
+    /// "Resume" in an ended session's row.
+    pub fn resume_of(&mut self, session: &str, cx: &mut Context<Self>) {
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.resuming(session, cx));
+        self.perform(Command::Resume {
+            session: session.to_owned(),
+        });
+    }
+
     /// What the window shows now, as the daemon last gave it.
     pub fn snapshot(&self) -> &Snapshot {
         &self.snapshot
@@ -484,9 +521,9 @@ impl Shell {
         self.sessions.get(id)
     }
 
-    /// The project's "Ended" group, while it holds a session.
-    pub fn ended(&self, project: &str) -> Option<&Entity<PlaceNode>> {
-        self.ended.get(project)
+    /// The "Ended" group at the bottom of the tree, once a session ended.
+    pub fn ended(&self) -> Option<&Entity<PlaceNode>> {
+        self.ended.as_ref()
     }
 
     fn relayout(&mut self, first: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -564,6 +601,9 @@ impl Shell {
                 }
             }
             Outcome::Stopped { session, refused } => {
+                self.sidebar.update(cx, |sidebar, cx| {
+                    sidebar.answered(&session, refused.clone(), cx)
+                });
                 if let Some(page) = self.session_page.clone()
                     && page.read(cx).id() == session
                 {
@@ -571,6 +611,9 @@ impl Shell {
                 }
             }
             Outcome::Resumed { session, refused } => {
+                self.sidebar.update(cx, |sidebar, cx| {
+                    sidebar.answered(&session, refused.clone(), cx)
+                });
                 if let Some(page) = self.session_page.clone()
                     && page.read(cx).id() == session
                 {
@@ -1067,6 +1110,12 @@ impl Shell {
             if row.read(cx).commands() != session.commands {
                 row.update(cx, |row, cx| row.set_commands(session.commands, cx));
             }
+            // Ended, it sits among other projects' sessions: its row says whose it is.
+            let scope = session.ended.then_some(session.project.as_str());
+            row.update(cx, |row, cx| {
+                row.set_scope(scope, cx);
+                row.set_actions(session.ended, session.resumable, cx)
+            });
             marks.extend(session.mark);
             shown.push(row.clone());
             rows.insert(session.id.clone(), row);
@@ -1081,7 +1130,6 @@ impl Shell {
         let this = cx.entity().downgrade();
         let mut projects = HashMap::new();
         let mut places = HashMap::new();
-        let mut ended_groups = HashMap::new();
         let mut sessions = HashMap::new();
         let mut project_nodes = Vec::new();
         for project in &snapshot.projects {
@@ -1099,7 +1147,8 @@ impl Shell {
                 let key = (project.name.clone(), place.clone());
                 let node = self.places.remove(&key).unwrap_or_else(|| {
                     let (name, place) = key.clone();
-                    cx.new(|cx| PlaceNode::new(name, place, cx))
+                    let this = this.clone();
+                    cx.new(|cx| PlaceNode::new(name, place, this, cx))
                 });
                 let mark = AgentState::strongest(marks.iter().copied());
                 if !node.read(cx).holds(&rows, mark, cx) {
@@ -1108,24 +1157,6 @@ impl Shell {
                 project_marks.extend(mark);
                 place_nodes.push(node.clone());
                 places.insert(key, node);
-            }
-            // The ended sessions leave their places for one folded group at the bottom.
-            let mut marks = Vec::new();
-            let ended = snapshot
-                .sessions
-                .iter()
-                .filter(|session| session.project == project.name && session.ended);
-            let rows = self.session_rows(ended, &mut sessions, &mut marks, now, cx);
-            if !rows.is_empty() {
-                let node = self.ended.remove(&project.name).unwrap_or_else(|| {
-                    let name = project.name.clone();
-                    cx.new(|cx| PlaceNode::ended(name, cx))
-                });
-                if !node.read(cx).holds(&rows, None, cx) {
-                    node.update(cx, |node, cx| node.set(rows, None, cx));
-                }
-                place_nodes.push(node.clone());
-                ended_groups.insert(project.name.clone(), node);
             }
             let node = self.projects.remove(&project.name).unwrap_or_else(|| {
                 let name = project.name.clone();
@@ -1142,7 +1173,21 @@ impl Shell {
             project_nodes.push(node.clone());
             projects.insert(project.name.clone(), node);
         }
-        self.ended = ended_groups;
+        // The ended sessions leave their places for one folded group below every project.
+        let ended = snapshot.sessions.iter().filter(|session| session.ended);
+        let mut marks = Vec::new();
+        let rows = self.session_rows(ended, &mut sessions, &mut marks, now, cx);
+        let present = !rows.is_empty();
+        if self.ended.is_none() && present {
+            self.ended = Some(cx.new(|cx| PlaceNode::ended(this.clone(), cx)));
+        }
+        if let Some(group) = self.ended.clone() {
+            if !group.read(cx).holds(&rows, None, cx) {
+                group.update(cx, |group, cx| group.set(rows, None, cx));
+            }
+            self.sidebar
+                .update(cx, |sidebar, cx| sidebar.set_ended(group, present, cx));
+        }
         self.projects = projects;
         self.places = places;
         self.sessions = sessions;
