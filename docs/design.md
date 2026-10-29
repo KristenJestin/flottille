@@ -364,7 +364,7 @@ a malformed call, a login printed, the daemon driven from a command.
 
 ### 7.1 The mode and the judge
 
-Each session is in **Ask** or **Auto**, a switch in the composer's bar. A new session starts in
+Each session is in **Ask** or **Auto**, a small two-choice control in the composer's bar. A new session starts in
 Auto. A tree has one mode, its root's, stored with the root and read at each call: a switch
 reaches every agent of the tree at once, children included. Only the user changes it, in the
 window or with `flottille agent mode <agent> ask|auto` (`agent.mode`, which switches the tree's
@@ -388,8 +388,8 @@ whole asks without it. A process of the provider is started for each judgement, 
 process group stopped after it. Each verdict is recorded with the
 call (who judged, what, why: the `judgement` of its `agent.tool_served` event, and of its request
 when it asks), shown on the card and in `flottille approvals`.
-Without a judge chosen, Auto behaves as Ask, and the composer says once "Choose an Auto judge in
-Settings". A judgement is a turn of the judge's model: it uses the user's quota on that provider,
+Without a judge chosen, Auto behaves as Ask, and the control carries a small warning icon whose
+tooltip says so and whose click opens Settings, where the judge is chosen. A judgement is a turn of the judge's model: it uses the user's quota on that provider,
 which Settings say.
 
 ### 7.2 Requests
@@ -477,24 +477,30 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   created from now on);
 - Settings: the providers, the Auto judge, and the Rules for every project, edited the same way;
 - a session page: the root's conversation, live (messages, the user's own as selectable as the agent's, thoughts collapsed, tool calls with
-  their result, the children launched, reports, diffs), the approvals that reach the user, inline,
-  each a card that says what the call does, then its class, then the judge's reason when one was
-  asked, with Allow and Deny only (a base card stands apart, in the alarm colour, with a sentence
-  that says why it always comes back), and a composer that writes to the root, with the session's
-  mode switch (Ask, Auto) in its bar, whose Stop
+  their result, the children launched, reports, diffs), one compact line for each command a
+  tool call ran (an icon, the line, how it ended, how long: a click opens the output panel the
+  rail opens, and the output itself is only there), one line for each request that reached the
+  user ("Waiting for you: Run pnpm test", which scrolls the rail to its card and lights it, then,
+  once answered, the outcome), and a composer that writes to the root, with the session's mode
+  (an Ask | Auto control, with a warning icon when Auto has no judge) in its bar, whose Stop
   button, in Send's place while a turn runs and Send has nothing to send (the two cross-fade), and
   `Escape` interrupt the turn that runs (the agent stays), which grows with its lines up to
   about ten and then scrolls, and takes pictures (pasted from the clipboard, dropped from a file or
   picked with Attach: thumbnails with a remove button, sent with the message as ACP image blocks,
   stored in Flottille's data folder so the conversation shows them again; said in one sentence and
-  left out when the session's agent takes none); a line just above it says what the root does while
-  a turn runs (`Thinking…`, `Writing…`, `Running <tool>…`) and goes with the turn. A running agent is
+  left out when the session's agent takes none); what the root does while a turn runs (`Thinking…`,
+  `Writing…`, `Running <tool>…`) is said in the same bar, where the words cross-fade as they change,
+  and goes with the turn. A running agent is
   drawn by its icon alone, in the tree and in the rail: no text badge, nothing in the header. In the
   composer, `/` at the start
   of a message lists the project's commands, filtered as the user types: picking one puts `/name `
   in the field, and sending it sends the command's instructions with what follows the name (a
-  `/word` that names none is sent as text); a rail with the session's
-  tree of agents, its workspace (each repository's forge as the daemon reads it, its ticket,
+  `/word` that names none is sent as text); a rail with, from its top, "Waiting for you" (each
+  request that reached the user is a card that says what the call does, then its class, then the
+  judge's reason when one was asked, then why it was held, one sentence for each reason, with
+  Allow and Deny only; a base card stands apart, in the alarm colour, with a sentence that says
+  why it always comes back; an answered card leaves), the session's
+  tree of agents, its runs, its workspace (each repository's forge as the daemon reads it, its ticket,
   linked or unlinked there) and facts. The
   root's row menu ("⋯") holds End session, the only way the window ends an agent: it ends the root
   and its tree, after a confirmation that counts the agents that end. An ended session leaves its
@@ -504,15 +510,18 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   (`agent.resume`), enabled once its process is gone, which brings the composer back; its header
   says `STOPPED` or `FAILED`, as its rail does, and its conversation says it ended, then resumed. Selecting a child shows its
   conversation read-only;
-- the commands the agents run (`docs/tools.md`): the rail lists those of the session's tree, running
-  first, each with its line, who started it (the agent, and the task when it is one),
-  how long, its last output line and Stop; a click opens its output, live, in a panel. One that
-  ended stays listed, greyed, with its exit code, until the user dismisses it or the session ends.
-  A project, and a session, with a command running show a small icon in the left tree, so that no
-  server is forgotten. A command's result in the conversation is a card: the line, the exit code in
-  a colour, the duration, the output folded to its last lines and expandable, its ANSI colours
-  drawn (the stored output keeps the program's bytes, masked); a call that came back through an
-  approval is the same card with one line saying the user allowed it, never the daemon's raw text;
+- the runs of the agents (`docs/tools.md`, "Tasks and runs"): the rail's **Runs** section lists
+  those of the session's tree (it is not called "Commands", which are the project's `/name`
+  instructions), running first, each with its line, who started it (the agent, and the task when
+  it is one), how long, its last output line and Stop; a click opens its output, live, in a panel,
+  and the panel is the same when the conversation's line for that run is clicked. One that ended
+  stays listed, greyed, with its exit code, until the user dismisses it or the session ends; the
+  last three that ended are in sight, the older ones, and any that ended before the session's last
+  turn began, fold into one row, "N ended", which opens them, each still with its Dismiss. A
+  project, and a session, with a command running show a small icon in the left tree, so that no
+  server is forgotten. The conversation draws a run as one line, its ANSI colours turned into the
+  palette's in the panel (the stored output keeps the program's bytes, masked); a call that came
+  back through an approval is the same line with "allowed by you", never the daemon's raw text;
 - narrow and portrait windows: the rail, then the left tree, become drawers.
 - a history of the pages shown (project pages, sessions with the agent shown in them, settings),
   as a browser keeps one: it lives as long as the window and is not stored. The mouse's back and
