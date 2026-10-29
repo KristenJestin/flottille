@@ -1430,6 +1430,7 @@ pub fn summary(daemon: &Daemon, agent: &Agent) -> Value {
         "project": agent.project,
         "workspace": agent.workspace,
         "parent": agent.parent,
+        "launched_by": agent.launched_by,
         "depth": agent.depth,
         "epoch": agent.epoch,
         "state": agent.state,

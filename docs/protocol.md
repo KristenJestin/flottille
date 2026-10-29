@@ -567,6 +567,7 @@ there. An agent in a result:
   "epoch": 0,
   "title": null,
   "brief": null,
+  "launched_by": null,
   "reported_at": null,
   "quiet_turns": 0,
   "waiting_on_answer": false,
@@ -602,7 +603,9 @@ when it last opened one, `false` once Flottille forgot an ended root's session; 
 it took images in a prompt when it last started, `null` before it did. `active_at` is its last sign of activity, `null` before the
 first. `instructions` and `tools` are frozen when the agent is created. `parent` is the agent that
 launched it (`null` for a root), `depth` its depth in the tree, `epoch` the number of its session
-(each replacement adds one), `title` and `brief` a child's task, `reported_at` when it reported,
+(each replacement adds one), `title` and `brief` a child's task, `launched_by` the id of the agent
+that started a root for the user (`null` for a root the user started, and for a child), whose
+`brief` is then that agent's first message, never the user's, `reported_at` when it reported,
 `quiet_turns` its turns ended without a report in a row, `waiting_on_answer` whether a question of
 it waits for an answer: a child's from its parent, a root's from the user, until that one writes to
 it (`docs/agents.md`, "The tree"). `gate_mode` is its session's mode, `ask` or `auto`
@@ -700,7 +703,7 @@ alone reaches it: no tool of an agent changes a mode.
 
 `{"agent"}`. The whole tree of the agent's root, each agent before its children:
 `{"agents": [{"agent", "doing", "waiting_on", "needs_user"}]}`. `agent` is the agent in short
-(`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `depth`, `epoch`, `state`,
+(`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `launched_by`, `depth`, `epoch`, `state`,
 `state_reason`, `created_at`, `active_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
 took at the last start of its process, else the one asked, `null` for the agent's default before it
 started; `resumable`: whether `agent.resume` takes it once its last process is gone; `stopping`:

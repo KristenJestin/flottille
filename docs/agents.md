@@ -743,7 +743,8 @@ workspace of the project, or a new one, made and prepared before it starts.
 ### Deliveries
 
 Everything Flottille hands to an agent is a delivery: the user's messages (`user`), a brief
-(`brief`), a parent's message (`parent`), what happens to a child (`child-report`,
+(`brief`), the first message of a session an agent started for the user (`launched`, under a first
+line naming that agent: it is the agent's words, never the user's), a parent's message (`parent`), what happens to a child (`child-report`,
 `child-question`, `child-asks`, `child-failed`, `child-stuck`, `child-idle`, `child-replaced`,
 `children-status`), an approval's answer (`approval`), a reminder (`reminder`), a session's
 restart (`resume`). It is stored before it is sent, under an id that makes it idempotent, and it
@@ -754,8 +755,8 @@ is the only thing that wakes an agent.
   are written `&lt;flottille-note` and `&lt;/flottille-note`, so that no text forges a delivery
   nor opens or closes a note. Every tool's result is escaped the same way (`docs/tools.md`).
   Bodies are masked of the daemon's secrets.
-- **Between turns**, the agent's queued deliveries are sent together as one prompt: a `brief`
-  first, then a `resume`, then the others in their order.
+- **Between turns**, the agent's queued deliveries are sent together as one prompt: a `brief` (or
+  a `launched`) first, then a `resume`, then the others in their order.
 - **During a turn**, an urgent one (`child-report`, `child-failed`, `child-asks`, `parent`,
   `approval`) is pinned as a note on the agent's next tool result:
   `<flottille-note id="…">`, the delivery, `</flottille-note>`. A note rides only in the room its

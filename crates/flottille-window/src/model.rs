@@ -143,6 +143,9 @@ pub struct Session {
     pub created_at: u64,
     /// How many commands the agents of its tree run now.
     pub commands: usize,
+    /// The agent that started it for the user, by the name it goes by: `None` for a session the
+    /// user started. Its title stays the first line of its brief.
+    pub started_by: Option<String>,
 }
 
 /// One thing that waits for the user. Choosing it opens its session.
@@ -289,6 +292,15 @@ impl Snapshot {
                 .filter(|command| command[key].as_str() == Some(name))
                 .count()
         };
+        let name_of = |id: &str| {
+            let agent = agents.iter().find(|a| a["id"].as_str() == Some(id));
+            agent
+                .and_then(|a| a["title"].as_str())
+                .map(str::to_owned)
+                .or_else(|| answers.briefs.get(id).map(|brief| title_of(brief)))
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| format!("agent {id}"))
+        };
         let mut sessions: Vec<Session> = agents
             .iter()
             .filter(|agent| agent["parent"].is_null())
@@ -317,6 +329,7 @@ impl Snapshot {
                     active_at,
                     created_at: number(agent, "created_at"),
                     commands: commands_of("root", &id),
+                    started_by: agent["launched_by"].as_str().map(&name_of),
                     id,
                 }
             })
@@ -492,6 +505,34 @@ mod tests {
         );
         assert_eq!(snapshot.sessions[0].title, "agent r2");
         assert_eq!(snapshot.projects[0].workspaces, ["login"]);
+    }
+
+    #[test]
+    fn a_session_an_agent_started_keeps_its_title_and_names_the_agent_that_started_it() {
+        let mut started = agent("r2", None, "idle", None);
+        started["launched_by"] = json!("r1");
+        let mut child = agent("c1", Some("r1"), "idle", None);
+        child["title"] = json!("planner");
+        let mut by_child = agent("r3", None, "idle", None);
+        by_child["launched_by"] = json!("c1");
+        let snapshot = Snapshot::build(Answers {
+            projects: &json!({"projects": []}),
+            workspaces: &json!({"workspaces": []}),
+            agents: &json!({"agents": [agent("r1", None, "idle", None), started, child, by_child]}),
+            approvals: &json!({"requests": []}),
+            needs_user: &HashSet::new(),
+            questions: &HashMap::new(),
+            briefs: &HashMap::from([
+                ("r1".into(), "Lead the work".into()),
+                ("r2".into(), "Write the docs\nwith care".into()),
+            ]),
+            commands: &json!({"commands": []}),
+        });
+        let by = |id: &str| snapshot.session(id).unwrap().started_by.clone();
+        assert_eq!(snapshot.session("r2").unwrap().title, "Write the docs");
+        assert_eq!(by("r2").as_deref(), Some("Lead the work"));
+        assert_eq!(by("r3").as_deref(), Some("planner"));
+        assert_eq!(by("r1"), None, "a session the user started names nobody");
     }
 
     fn workspace_json(steps: Value) -> Value {

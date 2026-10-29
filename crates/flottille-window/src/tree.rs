@@ -4,8 +4,8 @@
 
 use flottille_ui::rows::TreeLevel;
 use flottille_ui::{
-    AgentState, Button, Fold, Icon, StateIcon, Status, TreeRow, meta, palette, section_label,
-    tree_children,
+    AgentState, Button, Fold, Icon, StateIcon, Status, TreeRow, enter, meta, palette,
+    section_label, tree_children,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -47,6 +47,11 @@ pub fn project_commands_id(name: &str) -> ElementId {
 }
 
 /// The element id of the icon that says a command runs in a session.
+/// The element id of the small text a session started by an agent says it with.
+pub fn session_started_by_id(id: &str) -> ElementId {
+    ElementId::Name(format!("started-by-session-{id}").into())
+}
+
 pub fn session_commands_id(id: &str) -> ElementId {
     ElementId::Name(format!("commands-session-{id}").into())
 }
@@ -478,6 +483,8 @@ pub struct SessionRow {
     mark: Mark,
     /// How many commands its agents run now.
     commands: usize,
+    /// The agent that started the session for the user, when one did.
+    started_by: Option<SharedString>,
     active_at: u64,
     ago: SharedString,
     selected: bool,
@@ -492,6 +499,7 @@ impl SessionRow {
             title: SharedString::default(),
             mark: Mark::new(cx),
             commands: 0,
+            started_by: None,
             active_at: 0,
             ago: SharedString::default(),
             selected: false,
@@ -506,6 +514,18 @@ impl SessionRow {
     /// How many commands its agents run now.
     pub fn commands(&self) -> usize {
         self.commands
+    }
+
+    /// The agent that started the session, as the row says it.
+    pub fn started_by(&self) -> Option<&str> {
+        self.started_by.as_deref()
+    }
+
+    pub fn set_started_by(&mut self, by: Option<&str>, cx: &mut Context<Self>) {
+        if self.started_by() != by {
+            self.started_by = by.map(|by| SharedString::from(by.to_owned()));
+            cx.notify();
+        }
     }
 
     pub fn set_commands(&mut self, commands: usize, cx: &mut Context<Self>) {
@@ -607,9 +627,33 @@ impl Render for SessionRow {
                     .ok();
             });
         let id = session_commands_id(&self.id);
-        match self.mark.shown {
-            Some(_) => row.trailing(trailing(id, self.commands, self.mark.icon.clone(), cx)),
-            None => row.trailing(trailing(id, self.commands, meta(self.ago.clone(), cx), cx)),
-        }
+        let last = match self.mark.shown {
+            Some(_) => self.mark.icon.clone().into_any_element(),
+            None => meta(self.ago.clone(), cx).into_any_element(),
+        };
+        // A session an agent started says so, small, before its mark or its time ago, and
+        // comes in like the rest of the tree's rows.
+        let last = match &self.started_by {
+            Some(by) => {
+                let said = SharedString::from(format!("started by {by}"));
+                let text = div()
+                    .id(session_started_by_id(&self.id))
+                    .flex_none()
+                    .max_w(px(120.))
+                    .overflow_hidden()
+                    .aria_label(said.clone())
+                    .child(meta(said, cx))
+                    .test_support();
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(enter(format!("started-by-enter-{}", self.id), 0, text))
+                    .child(last)
+                    .into_any_element()
+            }
+            None => last,
+        };
+        row.trailing(trailing(id, self.commands, last, cx))
     }
 }
