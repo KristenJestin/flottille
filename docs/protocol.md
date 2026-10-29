@@ -709,9 +709,9 @@ command in a result:
 `name` is the catalogue command it runs, `null` for a line of the agent's. `state` is `running`,
 `exited`, `stopped` or `interrupted` (`docs/events.md`, "The events of a run"). `last_line` is the
 last line of its output with something on it, masked of secrets and as the program wrote it
-(colours included), cut at 300 characters. A command that ended also has `tail`, the last 20 lines
+(colours included), cut at 300 characters. `tail` is the last 20 lines
 of its output (a list of texts, masked and as written, each cut at 300 characters), which a result
-card in the conversation shows folded; a command running has none.
+card in the conversation shows folded, a running command's as well as one that ended.
 
 #### `run.list`
 

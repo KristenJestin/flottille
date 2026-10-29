@@ -44,8 +44,8 @@ pub struct CommandRow {
     pub ended_at: Option<u64>,
     /// The last line of its output with something on it, as the program wrote it.
     pub last_line: String,
-    /// The last lines of its output once it ended, as the program wrote them: what the card of
-    /// its result shows. None while it runs.
+    /// The last lines of its output, as the program wrote them: what the card of its result
+    /// shows, while it runs as once it ended.
     pub tail: Vec<String>,
 }
 

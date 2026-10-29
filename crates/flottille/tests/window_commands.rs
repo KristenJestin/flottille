@@ -48,6 +48,9 @@ fn user() -> User {
             {"mcp": {"tool": "commands_run", "arguments": {"command": "colours"}}}]},
         {"when": "run fails", "do": [
             {"mcp": {"tool": "commands_run", "arguments": {"command": "fails", "timeout": 1}}}]},
+        {"when": "run slow", "do": [
+            {"mcp": {"tool": "commands_run", "arguments": {"command": "fails", "timeout": 1}}},
+            {"say": "The slow check is running."}]},
         {"when": "run server", "do": [
             {"mcp": {"tool": "commands_run", "arguments": {"command": "server"}}}]}
     ]}));
@@ -704,4 +707,79 @@ fn the_old_approval_line_is_dropped_when_the_card_follows(cx: &mut TestAppContex
         cx.update(|window, _| window.try_find(format!("command-allowed-{at}")).is_some()),
         "the card says who allowed it"
     );
+}
+
+#[gpui_kit::test]
+fn two_agent_messages_with_a_hidden_delivery_between_stay_two_blocks(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, _mcp, _) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, cx);
+    let page = session_page(&shell, cx);
+
+    // The agent says the check runs; the command ends by itself and its delivery, hidden by
+    // the card, wakes the agent, which says "ok".
+    user.call("agent.send", json!({"agent": lead, "message": "run slow"}))
+        .unwrap();
+    until(&shell, cx, "the agent answered the delivery", |cx| {
+        ending_of_card(&page, cx) == Some(Ending::Exited(3)) && texts_of(&page, cx).len() == 3
+    });
+    settle(cx);
+
+    // The first "ok" answers the session's first message.
+    assert_eq!(
+        texts_of(&page, cx),
+        ["ok", "The slow check is running.", "ok"],
+        "{:?}",
+        blocks_of(&page, cx)
+    );
+}
+
+fn texts_of(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Vec<String> {
+    blocks_of(page, cx)
+        .into_iter()
+        .filter_map(|block| match block {
+            Block::Text { text } => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui_kit::test]
+fn a_running_card_ticks_and_shows_the_last_lines_of_its_output(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp, _) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, cx);
+    let page = session_page(&shell, cx);
+
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": "run server"}),
+    )
+    .unwrap();
+    until(&shell, cx, "the card says the server runs", |cx| {
+        ending_of_card(&page, cx) == Some(Ending::Running)
+    });
+
+    // The card follows the rail's live row: its time moves on, and its lines are the server's.
+    until(&shell, cx, "the card's time and lines move on", |cx| {
+        matches!(card_of(&page, cx), Some((_, Block::Command(card)))
+            if card.seconds.is_some_and(|s| s >= 3.0)
+                && card.lines.last().is_some_and(|l| l.starts_with("tick")))
+    });
+    settle(cx);
+
+    let Some((at, Block::Command(card))) = card_of(&page, cx) else {
+        unreachable!()
+    };
+    assert_eq!(card.ending, Ending::Running);
+    assert_eq!(label(cx, &format!("command-exit-{at}")).unwrap(), "running");
+    let last = card.lines.len() - 1;
+    assert!(
+        label(cx, &format!("command-line-{at}-{last}")).is_some_and(|l| l.starts_with("tick")),
+        "the card draws the tail"
+    );
+    ok(mcp.call(
+        "commands_status",
+        json!({"run": card.run, "action": "stop"}),
+    ));
 }

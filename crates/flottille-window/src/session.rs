@@ -925,13 +925,13 @@ impl SessionPage {
         }
     }
 
-    /// Brings the cards of running commands up to the rail's list: a command that ended meanwhile
-    /// shows its end, and the end of its output when the list has it.
+    /// Brings the cards of running commands up to the rail's list, which is read each second while
+    /// one runs: their time, the end of their output, and how a command that ended meanwhile did.
     fn sync_command_cards(&self, cx: &mut Context<Self>) {
         let rows = self.commands(cx).read(cx).rows().to_vec();
         let conversation = self.conversation.clone();
         conversation.update(cx, |view, cx| {
-            let changes = view.model.update_commands(&rows);
+            let changes = view.model.update_commands(&rows, crate::shell::now_ms());
             view.changed(&changes, self, cx);
         });
     }

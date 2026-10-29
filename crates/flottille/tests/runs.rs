@@ -383,7 +383,7 @@ fn flottille_commands_lists_the_running_commands_of_a_project_and_stops_one() {
 }
 
 #[test]
-fn an_ended_command_is_listed_with_the_tail_of_its_output() {
+fn a_command_is_listed_with_the_tail_of_its_output() {
     let user = User::with_fake_agent();
     let (agent, mcp, _) = session(&user);
     let run = start(&mcp, "ends");
@@ -396,11 +396,11 @@ fn an_ended_command_is_listed_with_the_tail_of_its_output() {
         json!(["start", "\u{1b}[31mred\u{1b}[0m tail-line"]),
         "the lines the card of the window folds"
     );
-    // A command that runs has its last line, not a tail.
+    // A command that runs has its tail too: the card of its call follows it.
     let live = start(&mcp, "server");
     let running = listed(&user, &agent);
     let running = running.iter().find(|c| c["run"] == live).unwrap();
-    assert!(running.get("tail").is_none(), "{running}");
+    assert_eq!(running["tail"], json!(["listening on 8080"]), "{running}");
     ok(mcp.call("commands_status", json!({"run": live, "action": "stop"})));
 }
 
