@@ -202,10 +202,14 @@ fn checkout_of(project: &Project, path: &str) -> Option<PathBuf> {
 /// has no such remote. It is shown, never checked: the check reads the remote itself.
 async fn remote_url(project: &Project, path: &str, remote: &str) -> Option<String> {
     let folder = checkout_of(project, path)?;
-    git::output(&folder, &["remote", "get-url", remote], Class::Read)
-        .await
-        .ok()
-        .map(|url| crate::forge::masked(&crate::forge::without_credentials(url.trim())))
+    git::output(
+        &folder,
+        &["remote", "get-url", "--end-of-options", remote],
+        Class::Read,
+    )
+    .await
+    .ok()
+    .map(|url| crate::forge::masked(&crate::forge::without_credentials(url.trim())))
 }
 
 /// Why `forge` is not where the repository's remote leads (`forge::disagreement`), masked; none
@@ -444,6 +448,15 @@ pub async fn add_repository(
         return Err(Failure::refused(format!(
             "{path} is not a Git repository: {} holds no .git",
             project.folder.join(&path).display()
+        )));
+    }
+    // A link leading elsewhere would make a repository of the project out of someone else's.
+    let stays = std::fs::canonicalize(project.folder.join(&path))
+        .and_then(|folder| Ok(folder.starts_with(std::fs::canonicalize(&project.folder)?)))
+        .unwrap_or(false);
+    if !stays {
+        return Err(Failure::refused(format!(
+            "{path} leads outside the project folder"
         )));
     }
     let saved = rewrite(&daemon, &asked.name, |_, document| {

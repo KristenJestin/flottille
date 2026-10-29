@@ -969,6 +969,38 @@ fn the_repositories_list_with_add_remove_and_detect_writes_the_file() {
 }
 
 #[test]
+fn a_link_leading_outside_the_project_folder_is_not_added_as_a_repository() {
+    let user = User::new();
+    repositories_fixture(&user);
+    let elsewhere = user.path("elsewhere/secret");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    user.git_init(&elsewhere);
+    std::os::unix::fs::symlink(&elsewhere, user.path("work/app/outside")).unwrap();
+    // A link that stays inside is still a folder of the project.
+    std::os::unix::fs::symlink(user.path("work/app/web"), user.path("work/app/inside")).unwrap();
+    let before = std::fs::read_to_string(user.project_file("app")).unwrap();
+
+    let (code, message) = user
+        .call(
+            "project.add_repository",
+            json!({"name": "app", "path": "outside"}),
+        )
+        .unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert_eq!(message, "outside leads outside the project folder");
+    assert_eq!(
+        std::fs::read_to_string(user.project_file("app")).unwrap(),
+        before
+    );
+    user.call(
+        "project.add_repository",
+        json!({"name": "app", "path": "inside"}),
+    )
+    .unwrap();
+}
+
+#[test]
 fn a_repository_that_cannot_be_added_or_removed_leaves_the_file_as_it_was() {
     let user = User::new();
     repositories_fixture(&user);
