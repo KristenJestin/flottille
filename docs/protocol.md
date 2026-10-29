@@ -258,9 +258,11 @@ calls never do) nor of what its answer may be (`allow` or `ask`).
 
 - `judge.show` answers `{"text", "source", "error", "default"}`: the guidance the next judgement
   follows, its `source` (`default`, or `global` for the user's), why the judge cannot follow the
-  user's (`null` when it can), and Flottille's default. `judge.md` that cannot be read, is not
-  UTF-8 text or holds more than 4,000 characters is an `error`, `text` being what of it could be
-  read: until it is fixed, every judgement fails with that reason, and so asks.
+  user's (`null` when it can), and Flottille's default. `judge.md` that cannot be read, is not a
+  regular file, is not UTF-8 text or holds more than 4,000 characters is an `error`, `text` being
+  what of it could be read (no more than 4,000 characters can take is ever read): until it is
+  fixed, every judgement fails with that reason, and so asks. A `judge.md` of only spaces is the
+  default, as an empty `judge.set` is.
 - `judge.set {text}` writes the text and answers as `judge.show`. `refused` above 4,000
   characters. An empty text, or only spaces, resets it as `judge.reset` does.
 - `judge.reset` removes the file and answers as `judge.show`.

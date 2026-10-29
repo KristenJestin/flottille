@@ -54,24 +54,58 @@ pub fn instructions_with(guidance: &str) -> String {
     format!("{before}{}{after}", guidance.trim())
 }
 
-/// The guidance the user wrote, if any. A file that cannot be read whole, or holds more than the
-/// limit, is never cut nor taken for the default: it is an error, with what of it could be read,
-/// so that the judgement fails, and so asks, rather than judge by guidance the user did not write.
+/// The guidance the user wrote, if any: none when it is blank. A file that cannot be read whole,
+/// is not a regular file, or holds more than the limit, is never cut nor taken for the default: it
+/// is an error, with what of it could be read, so that the judgement fails, and so asks, rather
+/// than judge by guidance the user did not write. No more is read than the limit can hold.
 fn own(paths: &flottille_core::paths::Paths) -> Result<Option<String>, (String, String)> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+
     let file = paths.judge();
-    let bytes = match std::fs::read(&file) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err((
-                String::new(),
-                format!(
-                    "your judge's guidance ({}) cannot be read: {error}",
-                    file.display()
-                ),
-            ));
-        }
+    let cannot = |error: std::io::Error| {
+        (
+            String::new(),
+            format!(
+                "your judge's guidance ({}) cannot be read: {error}",
+                file.display()
+            ),
+        )
     };
+    // A pipe would hold the judgement until someone writes to it: opened without waiting.
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&file);
+    let opened = match opened {
+        Ok(opened) => opened,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(cannot(error)),
+    };
+    if !opened.metadata().map_err(cannot)?.is_file() {
+        return Err((
+            String::new(),
+            format!(
+                "your judge's guidance ({}) cannot be read: it is not a regular file; remove \
+                 it, or reset it",
+                file.display()
+            ),
+        ));
+    }
+    // A character is 4 bytes at most: one more than the limit can hold tells it is too long.
+    let most = (LIMIT as u64 + 1) * 4;
+    let mut bytes = Vec::new();
+    opened.take(most).read_to_end(&mut bytes).map_err(cannot)?;
+    if bytes.len() as u64 > LIMIT as u64 * 4 {
+        return Err((
+            String::new(),
+            format!(
+                "your judge's guidance ({}) is longer than the {LIMIT} characters it may hold: \
+                 shorten it, or reset it",
+                file.display()
+            ),
+        ));
+    }
     let text = match String::from_utf8(bytes) {
         Ok(text) => text,
         Err(error) => {
@@ -93,7 +127,7 @@ fn own(paths: &flottille_core::paths::Paths) -> Result<Option<String>, (String, 
         );
         return Err((text, why));
     }
-    Ok(Some(text))
+    Ok(Some(text).filter(|text| !text.trim().is_empty()))
 }
 
 /// The judge's instructions now: read at each judgement, so that an edit reaches the next one.
@@ -812,6 +846,33 @@ mod tests {
             why.contains("judge.md") && why.contains("cannot be read"),
             "{why}"
         );
+    }
+
+    #[test]
+    fn judge_md_is_read_only_as_a_regular_file_never_past_the_limit_and_blank_is_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        std::fs::create_dir_all(&paths.config).unwrap();
+
+        // A pipe nobody writes to: reading it would wait forever.
+        let fifo = std::ffi::CString::new(paths.judge().into_os_string().into_encoded_bytes());
+        assert_eq!(unsafe { libc::mkfifo(fifo.unwrap().as_ptr(), 0o600) }, 0);
+        let why = instructions(&paths).unwrap_err();
+        assert!(
+            why.contains("judge.md") && why.contains("not a regular file"),
+            "{why}"
+        );
+        std::fs::remove_file(paths.judge()).unwrap();
+
+        // A huge file, sparse: read whole, it would take the daemon's memory.
+        let file = std::fs::File::create(paths.judge()).unwrap();
+        file.set_len(1 << 34).unwrap();
+        let why = instructions(&paths).unwrap_err();
+        assert!(why.contains("judge.md") && why.contains("longer"), "{why}");
+        assert!(!why.contains(&format!("{}", 1u64 << 34)), "{why}");
+
+        std::fs::write(paths.judge(), " \n\t\n").unwrap();
+        assert_eq!(instructions(&paths).unwrap(), instructions_with(DEFAULT));
     }
 
     #[test]
