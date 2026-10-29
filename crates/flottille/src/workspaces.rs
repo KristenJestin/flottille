@@ -1115,7 +1115,7 @@ fn reset(daemon: &Daemon, workspace: &Workspace, redone: Vec<u32>) -> Result<Val
 }
 
 /// The done steps, other than runs (never run twice), whose result is gone from the disk.
-fn done_but_missing(workspace: &Workspace) -> Vec<u32> {
+pub(crate) fn done_but_missing(workspace: &Workspace) -> Vec<u32> {
     workspace
         .steps
         .iter()

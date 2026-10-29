@@ -262,7 +262,21 @@ judge, and one that waives the checks base.
 
 | Tool | |
 |---|---|
+| `workspace {action: list \| show \| create \| prepare \| link_ticket, name?, repositories?, ticket?}` | The project's workspaces, as the window manages them (`docs/workspaces.md`). `list` gives each one's state, branch, repositories and ticket; `show {name?}` one whole, each step of its preparation with its state and why a failed one failed. `create {name, repositories?, ticket?}` makes one as `workspace.create` does: its worktrees, answered once they are made, then its setup in the background. `prepare {name?}` resumes a failed preparation (`workspace.prepare`); `link_ticket {name?, ticket}` links its ticket (`workspace.link_ticket`). `name` is the agent's own workspace when left out, but for `create`; in `main` it names one. Only a root has it: a child is refused (`refused: the agent the user talks to manages the project's workspaces; … ask your parent (ask_parent)`). |
 | `workspace_remove {workspace?}` | Removes a workspace, the agent's own when `workspace` is left out and the one named in `main`, where it is required, as `flottille workspace remove` does (`docs/workspaces.md`, "Removal"): refused, nothing touched, while a repository holds uncommitted work or commits on no remote, or while another agent than the caller's tree works in the workspace or a command run not the tree's own runs there (`refused: workspace … is not removed, nothing was touched: the agent …, outside this agent's tree, works in it…`), each named; then deletes, in each repository, the workspace's branch when it holds no commit of its own (every commit of it is in its base's tracking ref), and keeps the others. Every agent has it; an agent in a workspace removes only its own; each call is to judge. |
+
+`list` and `show` run at once. `create`, `prepare` and `link_ticket` are to judge, as any write
+of "The project" is: an `action` request, which says what it does in words and is done only while
+they hold. Making a workspace ready plays setup steps that run without the gate, so `create`
+(the project's setup) and `prepare` (the steps it does again: those not done, and the done ones
+whose result is gone) are also judged as setting each of those steps is ("The project", "A line
+set is judged as a run of it" and what only the user's word may say), each reason said as `step
+2 of the setup, run \`sudo make install\` in the workspace folder: the line it runs, …`; the strongest class wins, so one
+base step makes the call base, and a step refused as a run refuses it. The request lists the
+steps (`Its setup then runs, without the gate:`, `1. copy .env.example in the workspace
+folder`), and the judge reads them in a block of their own, as data. `agent_launch` with
+`new_workspace` makes its workspace the same way, so it is judged the same, with the same
+reasons.
 
  How the forge is read, and what it never touches (a token,
 `gh auth token`), is in [`forges.md`](forges.md).
@@ -351,7 +365,7 @@ Two of them take an `action`, as the tools of a family do: `agent_status` (`stat
 
 | Tool | |
 |---|---|
-| `agent_launch {title, brief, provider?, model?, effort?, role?, new_workspace?, repositories?}` | Starts a child on one task and answers at once with its id. `provider` is the caller's when left out, and the child's for life; `model` and `effort` the provider's defaults when left out (`docs/agents.md`, "Providers"): a provider not enabled or not ready, or a model or an effort it is known not to offer, is refused naming those that are (`refused: provider opencode is not enabled (…); the ready providers are claude`). `role` is `worker` (by default) or `lead`; `workspace` is an existing workspace's name, `new_workspace` the name of a new one (made at once, with `repositories` as its repositories, the child's brief sent once it is prepared; a workspace that fails fails the child), neither for the caller's own place; both are plain optional fields, and a mix is refused naming the field to use (`refused: workspace and new_workspace are exclusive: …`, `refused: repositories goes with new_workspace, …`). Its description holds a call of each form. Refused, never queued, above the project's children cap (`refused: N children already run in project P, its cap: do the work yourself, or wait for one of them to end (agent_stop ends one of yours)`) and past the depth limit. |
+| `agent_launch {title, brief, provider?, model?, effort?, role?, new_workspace?, repositories?}` | Starts a child on one task and answers at once with its id. `provider` is the caller's when left out, and the child's for life; `model` and `effort` the provider's defaults when left out (`docs/agents.md`, "Providers"): a provider not enabled or not ready, or a model or an effort it is known not to offer, is refused naming those that are (`refused: provider opencode is not enabled (…); the ready providers are claude`). `role` is `worker` (by default) or `lead`; `workspace` is an existing workspace's name, `new_workspace` the name of a new one (made at once, with `repositories` as its repositories, the child's brief sent once it is prepared; a workspace that fails fails the child; the launch is judged as `workspace create` is, "The workspace"), neither for the caller's own place; both are plain optional fields, and a mix is refused naming the field to use (`refused: workspace and new_workspace are exclusive: …`, `refused: repositories goes with new_workspace, …`). Its description holds a call of each form. Refused, never queued, above the project's children cap (`refused: N children already run in project P, its cap: do the work yourself, or wait for one of them to end (agent_stop ends one of yours)`) and past the depth limit. |
 | `agent_send {agent_id, message}` | A message to a child, urgent: on its next tool result in a turn, a new turn otherwise. It answers the child's question. |
 | `agent_status {agent_id?, action? status \| conversation, detail? short \| full, after?}` | `action status` (the default): one line per child (or for the one named): what it does (in a turn, `running \`<line>\` for 12 min`, `waiting for approval #3`, `waiting on the provider`, idle, reported, ended or failed with why), the time since its last sign of activity, its context use. For all the children it stops there (`detail short`) and says how to get more; for the one named, or with `detail full`, each also has its last three messages. `action conversation` (with `agent_id`; `after` pages): a page of the child's conversation, oldest first, one line per event that says something (`#<n> sent: …`, `said: …` for a whole reply, its streamed pieces joined and masked, two messages apart, `tool call: …`, a tool served and its outcome, a turn's end, a replacement, a report), each line of 2,000 characters at most (a longer reply goes on, whole, on the next lines), the page under 30,000; it ends with the `after` to pass for the next page. |
 | `agent_stop {agent_id}` | Stops the child and its own children, deepest first; what was queued for them is superseded; their runs are stopped. Their workspaces stay. |
@@ -485,7 +499,9 @@ says who answers a call to judge (`docs/design.md` §7.1).
    branch on no remote, `git reset --hard` in a workspace, `git -c` or `--config-env` of other
    keys, git's other global options, `git remote` and `git config` writes of other keys; the
    forge command lines beyond their reads; `forge_write`, `workspace_remove`, and a write of
-   `tasks`, `setup`, `skills`, `commands` or `project` ("The project"), with the line it sets.
+   `tasks`, `setup`, `skills`, `commands` or `project` ("The project"), with the line it sets;
+   `workspace` `create`, `prepare` and `link_ticket`, and `agent_launch` with `new_workspace`,
+   with the setup steps they play ("The workspace").
 
    The rules of 1 and 2 are judged on the line and on every program a wrapper runs, unwrapped in
    turn (16 at most): `env` (its options, `NAME=value` words and `-S` line), `sudo`, `doas`,

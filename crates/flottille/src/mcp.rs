@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use flottille_core::agent::{Agent, GateMode};
-use flottille_core::approval::Judgement;
+use flottille_core::approval::{Judgement, Kind};
 use flottille_core::secrets;
 use http::{Request, Response, StatusCode};
 use http_body_util::combinators::BoxBody;
@@ -94,7 +94,7 @@ const REPLACED: &str = "refused: this session has been replaced: a new session o
 
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
 /// the order frozen in the agent.
-const SERVED: [Definition; 25] = [
+const SERVED: [Definition; 26] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -360,12 +360,11 @@ const SERVED: [Definition; 25] = [
     Definition {
         name: "workspace_remove",
         title: "Remove the workspace",
-        description: "Removes a workspace, as `flottille workspace remove` does: this agent's \
-            own, or, in main, the one workspace names, once the session's judge or the user \
-            allows it. It refuses, touching nothing, while \
-            a repository holds uncommitted work or commits on no remote, and names them; \
-            otherwise it removes every worktree and the folder, and deletes the branches that \
-            hold no commit of their own. From inside the workspace, nothing is left to work in \
+        description: "Removes a workspace: this agent's own, or, in main, the one workspace \
+            names, once the session's judge or the user allows it. It refuses, touching \
+            nothing, while a repository holds uncommitted work or commits on no remote, and \
+            names them; otherwise it removes every worktree and the folder, and deletes the \
+            branches that hold no commit of their own. From inside the workspace, nothing is left to work in \
             afterwards: report next.",
         read_only: false,
         idempotent: false,
@@ -381,8 +380,8 @@ const SERVED: [Definition; 25] = [
         title: "The project's skills",
         description: "The project's skills, texts agents read with skill_read. list and show \
             read them; add, edit and remove change them, once the session's judge or the user \
-            allows it: you are answered at once, the result may come later. {\"action\": \
-            \"add\", \"name\": \"style\", \"description\": \"The code style\", \"text\": \"...\"}.",
+            allows it. {\"action\": \"add\", \"name\": \"style\", \"description\": \
+            \"The code style\", \"text\": \"...\"}.",
         read_only: false,
         idempotent: false,
         destructive: true,
@@ -459,6 +458,25 @@ const SERVED: [Definition; 25] = [
                 }, "required": ["path", "forge"], "additionalProperties": false}},
                 "tracker": {"type": ["object", "null"], "description": "{kind: github, repository: <path>} or {kind: jira, site, projects}."},
                 "text": {"type": "string", "description": "set_rules: the rules, whole, at most 8000 characters; they replace the project's current ones."}
+            }, "required": ["action"], "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "workspace",
+        title: "The project's workspaces",
+        description: "The project's workspaces. list and show read them. create makes one, \
+            its worktrees then its setup; prepare resumes a failed setup; link_ticket links a ticket: judged as for tasks, create and prepare as \
+            a run of each setup step. name: yours when left out, but for create. \
+            {\"action\": \"create\", \"name\": \"login\"}.",
+        read_only: false,
+        idempotent: false,
+        destructive: false,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["list", "show", "create", "prepare", "link_ticket"]},
+                "name": {"type": "string"},
+                "repositories": {"type": "array", "items": {"type": "string"}, "description": "create: by path."},
+                "ticket": {"type": "string", "description": "#123 or ABC-123."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -1263,6 +1281,8 @@ async fn played(
                 }
             }
         }
+    } else if tool == "workspace" && !grant.tools.contains(&"ask_user") {
+        Outcome::Refused(crate::actions::CHILD_WORKSPACES.into())
     } else {
         Outcome::Refused(format!(
             "refused: this agent has no tool {tool}: its tools are {}",
@@ -1297,6 +1317,57 @@ async fn played(
 
 /// The gate's verdict on a call of one of the agent's tools.
 pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gate::Verdict {
+    let Some(steps) = crate::actions::plays(daemon, grant, tool, args) else {
+        return classified(daemon, grant, tool, args);
+    };
+    // Making a workspace ready plays setup steps without the gate: each is judged as setting it
+    // is, run in the folders it would start in, and the strongest class wins.
+    let mut base = Vec::new();
+    let mut judge = Vec::new();
+    let set = crate::actions::asked("setup");
+    for (at, step) in steps.iter().enumerate() {
+        let said = format!(
+            "step {} of the setup, {}",
+            at + 1,
+            crate::actions::step_said(step)
+        );
+        match classified(
+            daemon,
+            grant,
+            "setup",
+            &json!({"action": "add", "step": step}),
+        ) {
+            gate::Verdict::Allow => {}
+            gate::Verdict::Deny(why) => {
+                return gate::Verdict::Deny(format!("{why} ({said}, which it plays)"));
+            }
+            gate::Verdict::Ask(ask) => {
+                let reasons = ask
+                    .reasons
+                    .into_iter()
+                    .filter(|reason| *reason != set)
+                    .map(|reason| format!("{said}: {}", reason.replacen("it sets", "it runs", 1)));
+                match ask.class {
+                    gate::Class::Base => base.extend(reasons),
+                    gate::Class::Judge => judge.extend(reasons),
+                }
+            }
+        }
+    }
+    let class = match base.is_empty() {
+        true => gate::Class::Judge,
+        false => gate::Class::Base,
+    };
+    base.push(crate::actions::asked("workspace"));
+    base.extend(judge);
+    gate::Verdict::Ask(gate::Ask {
+        reasons: base,
+        class,
+        kind: Kind::Action,
+    })
+}
+
+fn classified(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gate::Verdict {
     let project = projects::load_project(daemon, &grant.place.project).ok();
     let no_tasks = BTreeMap::new();
     let tasks = project.as_ref().map_or(&no_tasks, |project| &project.tasks);
@@ -1810,7 +1881,8 @@ mod tests {
             })
             .sum();
         // About 6k tokens since the project's settings came (#112), then its skills and commands
-        // (#127), then its tasks and setup (#131).
+        // (#127), then its tasks and setup (#131), then its workspaces (#118): 26,889 characters,
+        // under the limit by shorter descriptions.
         assert!(chars < 27_000, "{chars} characters of definitions");
     }
 }
