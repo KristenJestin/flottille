@@ -538,18 +538,27 @@ fn run(call: &Call) -> Verdict {
     );
     for path in &reached {
         // A word that goes up out of a folder that is not there is often no path at all (a
-        // `sed` expression, a message, a URL): the kernel would not find it, the gate cannot
-        // follow it, and the judge reads it as written.
-        if path.unfollowed == Some(Unfollowed::UpFromMissing) {
+        // `sed` expression, a message, a URL), and the judge reads it as written. A program may
+        // make that folder first (`install -D`): it is checked where it then leads. One the
+        // kernel could never make leads nowhere the gate can follow.
+        let unmade = path.unfollowed == Some(Unfollowed::UpFromMissing);
+        if unmade || path.up_from_missing {
             let word = named
                 .iter()
                 .find(|(_, named)| named == path)
                 .map_or(path.shown.as_str(), |(word, _)| word);
             found.judge(format!(
-                "{word} {}: the gate cannot tell where it leads",
-                Unfollowed::UpFromMissing
+                "{word} {}{}",
+                Unfollowed::UpFromMissing,
+                if unmade {
+                    ": the gate cannot tell where it leads"
+                } else {
+                    ""
+                }
             ));
-            continue;
+            if unmade {
+                continue;
+            }
         }
         if in_git(path) {
             found.base(format!(
@@ -2111,7 +2120,7 @@ const STREAMS: [&str; 7] = [
 pub fn malformed(paths: &[Resolved]) -> Option<String> {
     let path = paths
         .iter()
-        .find(|path| path.unfollowed == Some(Unfollowed::UpFromMissing))?;
+        .find(|path| path.up_from_missing || path.unfollowed == Some(Unfollowed::UpFromMissing))?;
     Some(format!(
         "refused: {} {}: name the path without going through a folder that is not there",
         path.shown,
@@ -3830,9 +3839,14 @@ mod tests {
                     "{tool} {path}: {verdict:?}"
                 );
             }
-            // A run's word is judged instead (`a_run_s_word_going_up_out_of_a_missing_folder_…`).
+            // A run's word is checked where it leads once the folder is made instead
+            // (`a_word_going_up_out_of_a_folder_a_program_can_make_…`): Flottille's own is base.
             let verdict = fixture.run(&format!("cat {path}"));
-            assert!(to_judge(&verdict), "cat {path}: {verdict:?}");
+            if path.contains("flottille") {
+                assert!(base_class(&verdict), "cat {path}: {verdict:?}");
+            } else {
+                assert!(to_judge(&verdict), "cat {path}: {verdict:?}");
+            }
         }
         // Deciding made nothing on the disk.
         assert!(!fixture.root.join("m").exists());
@@ -4030,6 +4044,47 @@ mod tests {
         }
         // Stashing tracked changes only takes nothing of Flottille's.
         assert!(!base_class(&fixture.run("git stash")));
+    }
+
+    #[test]
+    fn a_word_going_up_out_of_a_folder_a_program_can_make_is_checked_where_it_leads() {
+        let fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        std::fs::create_dir_all(base.join("home/.ssh")).unwrap();
+        let own = fixture.own[0].clone();
+        std::fs::create_dir_all(&own).unwrap();
+        std::os::unix::fs::symlink(&base, fixture.root.join("src/h")).unwrap();
+        let judge = own.join("judge.md");
+        let judge = judge.display();
+        let own_word = format!(
+            "m/../../../{}/judge.md",
+            own.strip_prefix(&base).unwrap().display()
+        );
+        // `install -D` makes `m`, then writes through its `..`.
+        for line in [
+            "install -D notes.md m/../../../home/.ssh/authorized_keys".to_owned(),
+            format!("install -D notes.md {own_word}"),
+            "install -D notes.md src/h/m/../home/.ssh/authorized_keys".into(),
+            "install -D notes.md m/../src/h/home/.ssh/authorized_keys".into(),
+            format!("install -D notes.md /m/../proc/self/root{judge}"),
+            "install -D -t m/../../../home/.ssh notes.md".into(),
+            "install -D --target-directory=m/../../../home/.ssh notes.md".into(),
+        ] {
+            let verdict = fixture.run(&line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains("names a folder that does not exist"),
+                "{line}: {verdict:?}"
+            );
+        }
+        for line in [
+            "sed -i 's/a/../' src/a.rs",
+            "git commit -m 'move foo/../bar'",
+        ] {
+            assert!(to_judge(&fixture.run(line)), "{line}");
+        }
+        // The file tools still refuse it.
+        assert!(denied(&fixture.file("fs_write", "m/../notes.md")));
     }
 
     #[test]

@@ -35,8 +35,9 @@ pub enum Unfollowed {
     /// The disk would not let it be followed: more than `LINKS_MAX` links, a folder it may not
     /// look into.
     Failed(String),
-    /// It names a folder that does not exist, then goes up out of it: a malformed path, which
-    /// the kernel refuses too, and whose later parts the gate cannot follow.
+    /// It names what the kernel could never make, a name too long or a part below a file, then
+    /// goes up out of it: a malformed path, which the kernel refuses too, and whose later parts
+    /// the gate cannot follow.
     UpFromMissing,
 }
 
@@ -88,6 +89,9 @@ pub struct Resolved {
     pub written: PathBuf,
     /// Why where the path leads is not known.
     pub unfollowed: Option<Unfollowed>,
+    /// It names a folder that does not exist, then goes up out of it: `path` is where it leads
+    /// once a program makes that folder (`install -D`), which the kernel alone would refuse.
+    pub up_from_missing: bool,
 }
 
 impl Resolved {
@@ -99,6 +103,7 @@ impl Resolved {
             path,
             inside: true,
             unfollowed: None,
+            up_from_missing: false,
         }
     }
 }
@@ -167,19 +172,29 @@ impl Place {
             inside: false,
             written: written.clone(),
             unfollowed: Some(why),
+            up_from_missing: false,
         };
         match follow(joined) {
             Ok(Followed {
                 through: Some(process),
+                up_from_missing,
                 ..
-            }) => unfollowed(Unfollowed::Through(process)),
-            Ok(Followed { path: real, .. }) => match real.strip_prefix(&real_root) {
+            }) => Resolved {
+                up_from_missing,
+                ..unfollowed(Unfollowed::Through(process))
+            },
+            Ok(Followed {
+                path: real,
+                up_from_missing,
+                ..
+            }) => match real.strip_prefix(&real_root) {
                 Ok(relative) => Resolved {
                     shown: shown_inside(relative),
                     path: real.clone(),
                     inside: true,
                     written,
                     unfollowed: None,
+                    up_from_missing,
                 },
                 // A link that leads out: outside, and shown where it leads.
                 Err(_) => Resolved {
@@ -188,6 +203,7 @@ impl Place {
                     inside: false,
                     written,
                     unfollowed: None,
+                    up_from_missing,
                 },
             },
             // Anything that cannot be resolved is neither inside nor known.
@@ -275,6 +291,8 @@ pub struct Followed {
     /// The first of a process's folders in `/proc` that leads elsewhere (`LEADS_ELSEWHERE`) the
     /// path went through, under whatever name it was reached (`/dev/fd`, a link).
     pub through: Option<PathBuf>,
+    /// It went up out of a folder that does not exist (`Resolved::up_from_missing`).
+    pub up_from_missing: bool,
 }
 
 /// The real path, every link followed (at most `LINKS_MAX`); a missing part and what follows it
@@ -289,8 +307,10 @@ pub fn real_path(path: &Path) -> std::io::Result<PathBuf> {
 /// `real_path`, saying which process's folder in `/proc` it went through. Below `/proc`, links
 /// are not followed: `/proc/self` is the reader's own, which is not Flottille's, and what a
 /// process's folder leads to is its own; a `..` there is where such a link leads, so the path
-/// goes through it. A part the kernel would not find (missing, too long a name, below a file) is
-/// missing; a `..` after it is refused, since nothing after it can be followed.
+/// goes through it. A missing part and its `..` cancel out, as when a program makes that folder
+/// first (`install -D`): the walk goes on from the folder before it, on the disk. A `..` after a
+/// part the kernel could never make (too long a name, below a file) is refused, since nothing
+/// after it can be followed.
 ///
 /// Each part is looked at in the folder opened before it, as the kernel walks: the whole path,
 /// links expanded, may be longer than it takes in one name.
@@ -307,7 +327,11 @@ pub fn follow(path: &Path) -> Result<Followed, Unfollowed> {
     let mut folders = vec![root];
     let mut file = false;
     let mut links = 0;
-    let mut missing = false;
+    // The missing parts at the end of `real`, which have no open folder; `unmade` when one of
+    // them could never be made.
+    let mut missing = 0;
+    let mut unmade = false;
+    let mut up_from_missing = false;
     let mut through = None;
     while let Some(part) = pending.pop() {
         match part.components().next() {
@@ -315,10 +339,18 @@ pub fn follow(path: &Path) -> Result<Followed, Unfollowed> {
                 real = PathBuf::from("/");
                 folders.truncate(1);
                 file = false;
+                missing = 0;
+                unmade = false;
                 continue;
             }
             Some(Component::CurDir) | None => continue,
-            Some(Component::ParentDir) if missing => return Err(Unfollowed::UpFromMissing),
+            Some(Component::ParentDir) if unmade => return Err(Unfollowed::UpFromMissing),
+            Some(Component::ParentDir) if missing > 0 => {
+                missing -= 1;
+                up_from_missing = true;
+                real.pop();
+                continue;
+            }
             Some(Component::ParentDir)
                 if real.starts_with("/proc") && real != Path::new("/proc") =>
             {
@@ -326,6 +358,7 @@ pub fn follow(path: &Path) -> Result<Followed, Unfollowed> {
                 return Ok(Followed {
                     path: real,
                     through: Some(process),
+                    up_from_missing,
                 });
             }
             Some(Component::ParentDir) => {
@@ -340,7 +373,7 @@ pub fn follow(path: &Path) -> Result<Followed, Unfollowed> {
             _ => {}
         }
         let next = real.join(&part);
-        if missing || real.starts_with("/proc") {
+        if missing == 0 && real.starts_with("/proc") {
             real = next;
             if through.is_none() && leads_elsewhere(&real) {
                 through = Some(real.clone());
@@ -349,7 +382,13 @@ pub fn follow(path: &Path) -> Result<Followed, Unfollowed> {
         }
         let name = part.as_os_str();
         if file || name.len() > NAME_MAX {
-            missing = true;
+            missing += 1;
+            unmade = true;
+            real = next;
+            continue;
+        }
+        if missing > 0 {
+            missing += 1;
             real = next;
             continue;
         }
@@ -383,7 +422,7 @@ pub fn follow(path: &Path) -> Result<Followed, Unfollowed> {
                 }
             },
             Err(Errno::NOENT) => {
-                missing = true;
+                missing = 1;
                 real = next;
             }
             Err(error) => return Err(failed(error)),
@@ -392,6 +431,7 @@ pub fn follow(path: &Path) -> Result<Followed, Unfollowed> {
     Ok(Followed {
         path: real,
         through,
+        up_from_missing,
     })
 }
 
@@ -441,11 +481,20 @@ mod tests {
         assert_eq!(place.resolve(&root, ".").shown, ".");
         std::fs::create_dir(root.join("a")).unwrap();
         assert!(place.resolve(&root, "a/../b").inside);
-        // Up out of a folder that is not there: the kernel would not find it.
-        assert_eq!(
-            place.resolve(&root, "m/../b").unfollowed,
-            Some(Unfollowed::UpFromMissing)
-        );
+        // Up out of a folder that is not there: where it leads once that folder is made.
+        let up = place.resolve(&root, "m/n/../../b");
+        assert!(up.up_from_missing && up.inside && up.unfollowed.is_none());
+        assert_eq!(up.shown, "b");
+        assert!(!place.resolve(&root, "a/../b").up_from_missing);
+        // Below a file, or too long a name: it can never be made.
+        std::fs::write(root.join("f"), "").unwrap();
+        for path in ["f/x/../b".to_owned(), format!("{}/../b", "n".repeat(300))] {
+            assert_eq!(
+                place.resolve(&root, &path).unfollowed,
+                Some(Unfollowed::UpFromMissing),
+                "{path}"
+            );
+        }
     }
 
     #[test]

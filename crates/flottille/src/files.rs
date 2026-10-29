@@ -174,6 +174,11 @@ pub fn reaches(place: &Place, tool: &str, args: &Value) -> Vec<Resolved> {
 /// path that could not be followed for another reason is opened as written, without following a
 /// link (`failed` says it).
 fn never_opened(path: &Resolved) -> Option<Outcome> {
+    if path.up_from_missing {
+        return Some(Outcome::Refused(gate::malformed(std::slice::from_ref(
+            path,
+        ))?));
+    }
     match path.unfollowed.as_ref()? {
         Unfollowed::UpFromMissing => Some(Outcome::Refused(gate::malformed(
             std::slice::from_ref(path),
@@ -1332,7 +1337,7 @@ mod tests {
         std::fs::create_dir_all(scene.base.join("nvim")).unwrap();
         std::os::unix::fs::symlink(scene.base.join("nvim"), scene.root.join("cfg")).unwrap();
         let path = scene.place.resolve(&scene.root, "m/../cfg/new/init.lua");
-        assert_eq!(path.unfollowed, Some(Unfollowed::UpFromMissing));
+        assert!(path.up_from_missing);
         let Some(Outcome::Refused(refusal)) = never_opened(&path) else {
             panic!("a path up out of a missing folder must be refused");
         };
@@ -1340,8 +1345,7 @@ mod tests {
             refusal.contains("names a folder that does not exist and then goes up out of it"),
             "{refusal}"
         );
-        // Even written, it opens nothing through the link and makes nothing.
-        assert!(put(&path, b"x").is_err());
+        // Deciding made nothing.
         assert!(!scene.root.join("m").exists());
         assert!(!scene.base.join("nvim/new").exists());
     }

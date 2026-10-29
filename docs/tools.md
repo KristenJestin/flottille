@@ -87,9 +87,13 @@ A path is resolved this way:
   missing file is its real folder and its name, and a dangling link leads to its target; a part
   the kernel would not find (missing, a name too long, a name below a file) is taken as written
   with what follows it. A `..` after such a part is refused by the file tools (`refused: X names
-  a folder that does not exist and then goes up out of it: …`): the kernel would fail it too, and
-  nothing after it can be followed; in a run's word, often no path at all (`sed 's/a/../'`, a
-  message, a URL), it makes the run to judge. Each part is looked at in the folder opened before
+  a folder that does not exist and then goes up out of it: …`): the kernel would fail it too. A
+  run's word holding one is often no path at all (`sed 's/a/../'`, a message, a URL), and makes
+  the run to judge; but a program may make the missing folder first (`install -D`), so a `..`
+  after a missing part cancels it and the word is followed on, on the disk, and checked where it
+  then leads like any other (`install -D f m/../../.ssh/x` is base). After a part that can never
+  be made (a name too long, below a file), nothing can be followed and the word is only to
+  judge. Each part is looked at in the folder opened before
   it, as the kernel walks, so a path whose links expand past the longest path the kernel takes at
   once is still followed. Below `/proc`, links are not followed: `/proc/self` is the reading
   program's own; a `..` below `/proc` goes where such a link leads (`/proc/net/..` is
