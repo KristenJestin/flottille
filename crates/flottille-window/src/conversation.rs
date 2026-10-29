@@ -58,6 +58,32 @@ pub enum Block {
     Approval {
         number: u64,
     },
+    /// A command's result.
+    Command(CommandCard),
+}
+
+/// How a command ended, as its result says it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ending {
+    Running,
+    Exited(i32),
+    Killed(i32),
+    Stopped,
+    Interrupted,
+}
+
+/// A command's result as a card: what the daemon answered the call with, read back.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CommandCard {
+    pub run: String,
+    pub line: String,
+    pub ending: Ending,
+    pub seconds: Option<f64>,
+    /// The lines of its output the answer held, as the program wrote them (masked): colours
+    /// included, for the card to draw or strip.
+    pub lines: Vec<String>,
+    /// Who allowed the call when it came back through an approval.
+    pub allowed_by: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -126,6 +152,8 @@ pub enum Change {
 
 /// The prefix Claude Code gives the tools of Flottille's MCP server.
 const PREFIX: &str = "mcp__flottille__";
+/// Where a note pinned on a tool result begins.
+const NOTE_START: &str = "<flottille-note";
 
 pub struct Conversation {
     blocks: Vec<Block>,
@@ -505,6 +533,13 @@ impl Conversation {
         if let Some(diff) = edit {
             changes.extend(self.push(diff));
         }
+        if ended && matches!(call.name.as_str(), "commands_run" | "commands_status") {
+            let mut texts = Vec::new();
+            strings(&data["raw_output"], &mut texts);
+            if let Some(card) = texts.into_iter().find_map(command_card) {
+                changes.extend(self.push(Block::Command(card)));
+            }
+        }
         // A report delivered as a note on the result.
         for (kind, body) in notes(&data["raw_output"]) {
             if kind == "child-report" {
@@ -517,6 +552,9 @@ impl Conversation {
 
     /// The block of one delivery the agent was sent.
     fn delivered(&self, kind: &str, body: String) -> Block {
+        if kind == "approval" {
+            return approved(&body);
+        }
         match (kind, &self.parent) {
             ("" | "user" | "brief", None) => Block::Message {
                 from: USER.into(),
@@ -546,6 +584,99 @@ impl Conversation {
             .next()
             .unwrap_or_else(|| "a sub-agent".into())
     }
+}
+
+/// The card of a command's answer (`runs.rs`: `run <id>: <line> <how it is> after <s> s`, then
+/// the advice while it runs, the range of lines, the lines); `None` for any other text.
+pub fn command_card(text: &str) -> Option<CommandCard> {
+    // A note pinned on the result is not part of it.
+    let text = text.split(NOTE_START).next().unwrap_or(text).trim();
+    let (run, rest) = text.strip_prefix("run ")?.split_once(": ")?;
+    let (header, body) = rest.split_once('\n').unwrap_or((rest, ""));
+    let open = header.find('`')?;
+    let close = open + 1 + header[open + 1..].find('`')?;
+    let line = &header[open + 1..close];
+    let after = header[close + 1..].trim_start_matches(')').trim();
+    let (how, seconds) = match after.rsplit_once(" after ") {
+        Some((how, time)) => (
+            how,
+            time.strip_suffix(" s").and_then(|t| t.parse::<f64>().ok()),
+        ),
+        None => (after, None),
+    };
+    let ending = match how {
+        "is running" => Ending::Running,
+        "was stopped" => Ending::Stopped,
+        how if how.starts_with("was interrupted") => Ending::Interrupted,
+        how => match (
+            how.strip_prefix("exited with code "),
+            how.strip_prefix("was killed by signal "),
+        ) {
+            (Some(code), _) => Ending::Exited(code.parse().ok()?),
+            (_, Some(signal)) => Ending::Killed(signal.parse().ok()?),
+            _ => return None,
+        },
+    };
+    let mut lines = body.lines().peekable();
+    if lines
+        .peek()
+        .is_some_and(|l| l.starts_with("it keeps going:"))
+    {
+        lines.next();
+    }
+    if lines
+        .peek()
+        .is_some_and(|l| l.starts_with("(lines ") || *l == "(no output)")
+    {
+        lines.next();
+    }
+    Some(CommandCard {
+        run: run.to_owned(),
+        line: line.to_owned(),
+        ending,
+        seconds,
+        lines: lines.map(str::to_owned).collect(),
+        allowed_by: None,
+    })
+}
+
+/// What the daemon stored for an agent when the user answered a request (`approvals.rs`), as the
+/// conversation says it: a command's result is its card with who allowed it, any other answer a
+/// sentence. The daemon's own words are the agent's, never shown.
+fn approved(body: &str) -> Block {
+    let notice = |text: String| Block::Notice {
+        kind: "approval".into(),
+        text,
+    };
+    let parsed = body
+        .strip_prefix("Request #")
+        .and_then(|rest| rest.split_once(" ("))
+        .and_then(|(number, rest)| {
+            let (tool, said) = rest.split_once(") ")?;
+            Some((number, tool, said))
+        });
+    let Some((number, tool, said)) = parsed else {
+        return notice(body.to_owned());
+    };
+    if let Some((_, result)) = said.split_once("has now done it. Its result:\n\n") {
+        return match command_card(result) {
+            Some(card) => Block::Command(CommandCard {
+                allowed_by: Some(USER.into()),
+                ..card
+            }),
+            None => notice(format!("you allowed {tool} (request #{number})")),
+        };
+    }
+    notice(if said.starts_with("was refused by the user") {
+        format!("you refused {tool} (request #{number})")
+    } else if let Some(why) = said.strip_prefix("was not executed: ") {
+        format!("{tool} (request #{number}) was not done: {why}")
+    } else if let Some(why) = said.strip_prefix("was approved by the user, but nothing was done: ")
+    {
+        format!("you allowed {tool} (request #{number}) but nothing was done: {why}")
+    } else {
+        format!("{tool} (request #{number}) {said}")
+    })
 }
 
 fn call_state(status: Option<&str>) -> CallState {
@@ -992,6 +1123,147 @@ mod tests {
             ]
         );
         assert!(c.add_approval(7).is_empty(), "once");
+    }
+
+    const RUN_ANSWER: &str = "run 5d2c0f1a9b3e: `cargo test` exited with code 101 after 12.4 s\n(lines 1-3 of 3)\n\u{1b}[32mok\u{1b}[0m one\n\u{1b}[1;31mFAILED\u{1b}[0m two\nthree";
+
+    fn answered(id: &str, tool: &str, text: &str) -> [Event; 2] {
+        let at = if id == "b" { 10 } else { 1 };
+        [
+            event(
+                at,
+                "agent.tool_call",
+                json!({"id": id, "title": format!("mcp__flottille__{tool}"),
+                    "status": "in_progress", "raw_input": {"line": "cargo test"}}),
+            ),
+            event(
+                at + 1,
+                "agent.tool_call",
+                json!({"id": id, "update": true, "status": "completed", "raw_output":
+                    {"result": {"content": [{"type": "text", "text": text}]}}}),
+            ),
+        ]
+    }
+
+    #[test]
+    fn a_command_s_result_is_a_card_with_its_code_its_duration_and_its_lines() {
+        let mut c = root();
+        for event in answered("a", "commands_run", RUN_ANSWER) {
+            c.apply(&event);
+        }
+
+        let Block::Command(card) = &c.blocks()[1] else {
+            panic!("{:?}", c.blocks());
+        };
+        assert_eq!(card.line, "cargo test");
+        assert_eq!(card.ending, Ending::Exited(101));
+        assert_eq!(card.seconds, Some(12.4));
+        assert_eq!(card.allowed_by, None);
+        // The program's bytes, for the card to colour or strip.
+        assert_eq!(
+            card.lines,
+            [
+                "\u{1b}[32mok\u{1b}[0m one",
+                "\u{1b}[1;31mFAILED\u{1b}[0m two",
+                "three"
+            ]
+        );
+        assert!(
+            matches!(c.blocks()[0], Block::Steps { .. }),
+            "the call's line stays"
+        );
+    }
+
+    #[test]
+    fn a_command_still_running_when_it_answered_is_a_running_card_without_the_advice() {
+        let mut c = root();
+        let text = "run r1: server (`npm run dev`) is running after 1.0 s\nit keeps going: read it with commands_status {\"run\": \"r1\"}, stop it with commands_status {\"run\": \"r1\", \"action\": \"stop\"}\n(lines 1-1 of 1)\nlistening";
+        for event in answered("a", "commands_run", text) {
+            c.apply(&event);
+        }
+
+        let Block::Command(card) = &c.blocks()[1] else {
+            panic!("{:?}", c.blocks());
+        };
+        assert_eq!(card.line, "npm run dev");
+        assert_eq!(card.ending, Ending::Running);
+        assert_eq!(card.lines, ["listening"]);
+    }
+
+    #[test]
+    fn a_result_that_is_no_command_s_is_no_card() {
+        let mut c = root();
+        for event in answered(
+            "a",
+            "commands_run",
+            "refused: the catalogue has no command x",
+        ) {
+            c.apply(&event);
+        }
+        for event in answered("b", "fs_read", RUN_ANSWER) {
+            c.apply(&event);
+        }
+
+        assert!(c.blocks().iter().all(|b| !matches!(b, Block::Command(_))));
+    }
+
+    #[test]
+    fn an_approved_command_is_the_same_card_and_says_who_allowed_it_never_the_raw_text() {
+        let mut c = root();
+        let body = format!(
+            "[flottille:approval]\nRequest #7 (commands_run) was approved by the user, and \
+             Flottille has now done it. Its result:\n\n{RUN_ANSWER}"
+        );
+        c.apply(&event(1, "agent.prompted", json!({ "text": body })));
+
+        let Block::Command(card) = &c.blocks()[0] else {
+            panic!("{:?}", c.blocks());
+        };
+        assert_eq!(card.ending, Ending::Exited(101));
+        assert_eq!(card.allowed_by.as_deref(), Some("you"));
+        assert_eq!(card.lines.len(), 3);
+        assert!(c.blocks().iter().all(|b| !matches!(
+            b,
+            Block::Notice { text, .. } if text.contains("Request #")
+        )));
+    }
+
+    #[test]
+    fn the_other_answers_to_a_request_are_a_sentence_and_never_the_raw_text() {
+        let mut c = root();
+        for (n, body) in [
+            "Request #1 (commands_run) was refused by the user. Nothing was done.",
+            "Request #2 (fs_write) was not executed: the agent that asked has ended.",
+            "Request #3 (fs_write) was approved by the user, and Flottille has now done it. Its result:\n\nwrote 3 bytes",
+            "Request #4 (commands_run) was approved by the user, but nothing was done: cannot run it",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            c.apply(&event(
+                n as u64 + 1,
+                "agent.prompted",
+                json!({"text": format!("[flottille:approval]\n{body}")}),
+            ));
+        }
+
+        let said: Vec<&str> = c
+            .blocks()
+            .iter()
+            .map(|b| match b {
+                Block::Notice { text, .. } => text.as_str(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            said,
+            [
+                "you refused commands_run (request #1)",
+                "fs_write (request #2) was not done: the agent that asked has ended.",
+                "you allowed fs_write (request #3)",
+                "you allowed commands_run (request #4) but nothing was done: cannot run it",
+            ]
+        );
     }
 
     #[test]

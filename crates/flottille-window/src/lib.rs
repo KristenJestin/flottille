@@ -4,6 +4,7 @@
 
 pub mod actions;
 pub mod add_project;
+pub mod commands;
 pub mod composer;
 pub mod conversation;
 pub mod history;

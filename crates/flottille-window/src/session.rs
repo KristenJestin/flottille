@@ -39,6 +39,7 @@ use gpui_kit::{
 };
 
 use crate::actions::{Answer, Command, Picture};
+use crate::commands::{self, CommandList, CommandPanel};
 use crate::conversation::{Activity, Block, Call, CallState, Change, Conversation, DiffLine, USER};
 use crate::link::{Connect, Update};
 use crate::mode::ModeSwitch;
@@ -152,6 +153,10 @@ pub struct SessionPage {
     rail: Entity<SessionRail>,
     drawer: Entity<Drawer>,
     reply: Entity<Reply>,
+    /// The panel that follows one command's output.
+    command_panel: Entity<CommandPanel>,
+    /// The command whose output the link reads, when its panel is open.
+    watching: Option<String>,
     requests: HashMap<u64, Request>,
     decisions: HashMap<u64, String>,
     /// How many pages of the shown agent's conversation are read, from its end.
@@ -194,6 +199,7 @@ impl SessionPage {
     ) -> Self {
         let page = cx.entity().downgrade();
         let rail = cx.new(|cx| SessionRail::new(page.clone(), opened.id.clone(), &opened, cx));
+        let command_panel = cx.new(|_| CommandPanel::new(page.clone()));
         let drawer = cx.new(|_| Drawer::new("rail-drawer", Side::Right, px(RAIL), rail.clone()));
         let pill = cx.new(|cx| Pill::new(status.clone(), cx).quiet_running());
         let shown = opened.id.clone();
@@ -223,6 +229,8 @@ impl SessionPage {
             rail,
             drawer,
             reply,
+            command_panel,
+            watching: None,
             requests: HashMap::new(),
             decisions: HashMap::new(),
             pages: 1,
@@ -289,6 +297,16 @@ impl SessionPage {
 
     pub fn rail(&self) -> &Entity<SessionRail> {
         &self.rail
+    }
+
+    /// The rail's Commands section.
+    pub fn commands(&self, cx: &gpui_kit::App) -> Entity<CommandList> {
+        self.rail.read(cx).commands.clone()
+    }
+
+    /// The panel that follows a command's output.
+    pub fn command_panel(&self) -> &Entity<CommandPanel> {
+        &self.command_panel
     }
 
     pub fn drawer(&self) -> &Entity<Drawer> {
@@ -490,6 +508,57 @@ impl SessionPage {
             },
             self.pages,
         ));
+        if let Some(link) = &self.link {
+            link.watch(self.watching.clone());
+        }
+    }
+
+    /// Opens a command's output in its panel, followed live.
+    pub fn open_command(&mut self, run: &str, cx: &mut Context<Self>) {
+        self.watching = Some(run.to_owned());
+        if let Some(link) = &self.link {
+            link.watch(Some(run.to_owned()));
+        }
+        self.command_panel
+            .update(cx, |panel, cx| panel.open(run, cx));
+    }
+
+    /// Closes the panel: the output is read no more.
+    pub fn close_command(&mut self, cx: &mut Context<Self>) {
+        self.watching = None;
+        if let Some(link) = &self.link {
+            link.watch(None);
+        }
+        self.command_panel.update(cx, |panel, cx| panel.close(cx));
+    }
+
+    /// The user stops a command: its whole group, and the agent that started it is told.
+    pub fn stop_command(&mut self, run: &str, cx: &mut Context<Self>) {
+        self.run_command(run, false, cx);
+    }
+
+    /// The user dismisses a command that ended.
+    pub fn dismiss_command(&mut self, run: &str, cx: &mut Context<Self>) {
+        self.run_command(run, true, cx);
+    }
+
+    fn run_command(&mut self, run: &str, dismiss: bool, cx: &mut Context<Self>) {
+        let list = self.commands(cx);
+        list.update(cx, |list, cx| list.failed(None, cx));
+        self.perform(
+            Command::Run {
+                session: self.opened.id.clone(),
+                run: run.to_owned(),
+                dismiss,
+            },
+            cx,
+        );
+    }
+
+    /// What the daemon answered to a stop or a dismissal: why, when it refused.
+    pub fn command_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
+        let list = self.commands(cx);
+        list.update(cx, |list, cx| list.failed(refused, cx));
     }
 
     /// Reads one more page of the shown agent's conversation, before those shown.
@@ -639,6 +708,14 @@ impl SessionPage {
             SessionUpdate::Place(facts) => {
                 self.rail
                     .update(cx, |rail, cx| rail.set_place(facts.map(|facts| *facts), cx));
+            }
+            SessionUpdate::Commands(rows) => {
+                let list = self.commands(cx);
+                list.update(cx, |list, cx| list.set(rows, cx));
+            }
+            SessionUpdate::CommandOutput(output) => {
+                self.command_panel
+                    .update(cx, |panel, cx| panel.set(*output, cx));
             }
         }
     }
@@ -800,6 +877,8 @@ impl SessionPage {
             })
             .collect();
         self.rail.update(cx, |rail, cx| rail.set_agents(rows, cx));
+        let list = self.commands(cx);
+        list.update(cx, |list, cx| list.set_names(names.clone(), cx));
         let changed = self.tree != tree;
         let ended = |tree: &[TreeAgent]| {
             tree.iter()
@@ -1062,6 +1141,7 @@ impl Render for SessionPage {
             }))
             .when(!wide, |d| d.child(self.drawer.clone()))
             .child(self.end_modal(cx))
+            .child(self.command_panel.clone())
     }
 }
 
@@ -2308,6 +2388,13 @@ impl Render for Row {
                     .into_any_element()
             }
             Block::Approval { number } => self.render_card(*number, cx).into_any_element(),
+            Block::Command(result) => {
+                let toggle = cx.listener(|this, _, _, cx| {
+                    this.open = !this.open;
+                    cx.notify();
+                });
+                commands::card(result, self.at, self.open, toggle, cx)
+            }
         }
     }
 }
@@ -2620,6 +2707,8 @@ pub struct SessionRail {
     menu: Entity<Menu>,
     /// The "⋯" menu of the root's row: it ends the session.
     agent_menu: Entity<Menu>,
+    /// The commands of the session's tree.
+    commands: Entity<CommandList>,
     /// Where a ticket is typed to link it, made when the section first shows a workspace.
     ticket_field: Option<Entity<InputState>>,
     /// What the daemon said of the ticket typed.
@@ -2657,8 +2746,10 @@ impl SessionRail {
                 },
             )
         });
+        let commands = cx.new(|_| CommandList::new(page.clone()));
         Self {
             page,
+            commands,
             agents: Vec::new(),
             marks: HashMap::new(),
             open_ended: HashSet::new(),
@@ -3187,6 +3278,7 @@ impl Render for SessionRail {
             .flex_col()
             .child(section_label("Agents", cx))
             .children(rows)
+            .child(self.commands.clone())
             .child(div().h(px(1.)).bg(p.line).mx(px(6.)).my(px(16.)))
             .child(
                 div()
