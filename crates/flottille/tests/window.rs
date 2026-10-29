@@ -6282,6 +6282,11 @@ fn a_text_skill_is_written_in_the_settings_and_read_back_to_edit(cx: &mut TestAp
 
     cx.update(|window, cx| window.click("add-skill", cx));
     settle(cx);
+    assert_eq!(
+        text_of("skill-as-text-label", cx).as_deref(),
+        Some("A text Flottille keeps, rather than a file of the project"),
+        "the switch says what it switches"
+    );
     cx.simulate_input("style");
     cx.update(|window, cx| window.click("skill-as-text", cx));
     settle(cx);

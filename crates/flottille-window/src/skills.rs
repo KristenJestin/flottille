@@ -25,6 +25,9 @@ use crate::shell::Shell;
 /// How many entries of a folder the picker lists.
 const LISTED: usize = 200;
 
+/// What the switch of the form says it switches.
+const AS_TEXT: &str = "A text Flottille keeps, rather than a file of the project";
+
 /// A skill as the daemon lists it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SkillInfo {
@@ -596,15 +599,27 @@ impl SkillsSection {
                     }))
                     .test_support()
             }));
-        let kind = Switch::new(
-            "skill-as-text",
-            self.as_text,
-            "A text Flottille keeps, rather than a file of the project",
-        )
-        .on_click(cx.listener(|this, _, _, cx| {
-            let as_text = !this.as_text;
-            this.set_text(as_text, cx)
-        }));
+        let kind = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .text_size(px(12.5))
+            .text_color(p.mute)
+            .child(
+                Switch::new("skill-as-text", self.as_text, AS_TEXT).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        let as_text = !this.as_text;
+                        this.set_text(as_text, cx)
+                    },
+                )),
+            )
+            .child(
+                div()
+                    .id("skill-as-text-label")
+                    .aria_label(AS_TEXT)
+                    .child(AS_TEXT)
+                    .test_support(),
+            );
         let text = div()
             .id("skill-text")
             .px(px(10.))
