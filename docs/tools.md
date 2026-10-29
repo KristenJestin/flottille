@@ -36,6 +36,14 @@ and the tree's tools (`agent_*`, `report`, `ask_user` or `ask_parent`,
   lists and calls the tools of that agent only, in the order frozen in the agent
   (`docs/agents.md`), and works in that agent's place. The list is fixed (`listChanged: false`):
   it is part of the prompt cache.
+- **Instructions**: the `initialize` result (and `server/discover`'s) carries
+  `crates/flottille/roles/guide.md`, one text for every agent, under 400 words: what Flottille is
+  and that the agent runs in bare mode with a tool list fixed for the session; what a project,
+  `main` and a workspace are; what the references, the catalogue, the procedures and the rules are
+  and which tool reads each; that the gate decides every call and a held call's result comes later
+  as a delivery; what deliveries are and what wakes the agent. The names it uses for the
+  project's things (references, procedures, the catalogue) are in that file alone, and a test
+  checks that every tool it names exists.
 - **Every tool listed** has a `title`, a description (what it does, when to use it, its effects,
   when it refuses), `inputSchema`, annotations (`readOnlyHint`, `idempotentHint`,
   `destructiveHint`, `openWorldHint: false`) and `_meta["anthropic/alwaysLoad"]: true`: in bare

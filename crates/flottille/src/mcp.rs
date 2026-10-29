@@ -84,6 +84,10 @@ pub struct Definition {
     pub schema: fn() -> Value,
 }
 
+/// What Flottille tells every agent about itself, in the `initialize` result: the same text for
+/// all of them, since the tool list it speaks of differs by agent only in which tools it holds.
+const GUIDE: &str = include_str!("../roles/guide.md");
+
 /// What a call of a session that was replaced is answered.
 const REPLACED: &str = "refused: this session has been replaced: a new session of this agent goes \
     on with its work; stop here";
@@ -1027,7 +1031,9 @@ impl ServerHandler for Handler {
     fn get_info(&self) -> ServerConfig {
         let capabilities: ServerCapabilities =
             serde_json::from_value(json!({"tools": {"listChanged": false}})).expect("capabilities");
-        ServerConfig::new(capabilities).with_server_info(Implementation::new("flottille", VERSION))
+        ServerConfig::new(capabilities)
+            .with_server_info(Implementation::new("flottille", VERSION))
+            .with_instructions(GUIDE)
     }
 
     async fn list_tools(
@@ -1471,15 +1477,41 @@ mod tests {
         assert_eq!(base64url(&[0u8; 32]).len(), 43);
     }
 
-    /// The grants of a run that lets through everything `forge_write` and `workspace_remove` do.
-    fn all_grants() -> procedure::Grants {
-        [
-            procedure::Grant::PrCreate,
-            procedure::Grant::WorkspaceRemove,
-        ]
-        .into_iter()
-        .map(|grant| (grant, procedure::Mode::Allow))
-        .collect()
+    #[test]
+    fn the_server_instructions_name_only_existing_tools() {
+        // Every name between backticks is a tool, an action of a tool, or one of the few words
+        // the text defines itself.
+        let mut known: Vec<String> = SERVED.iter().map(|d| d.name.to_owned()).collect();
+        for definition in &SERVED {
+            let schema = (definition.schema)();
+            if let Some(actions) = schema["properties"]["action"]["enum"].as_array() {
+                known.extend(actions.iter().filter_map(Value::as_str).map(str::to_owned));
+            }
+        }
+        known.extend(["main".to_owned(), "[flottille:approval]".to_owned()]);
+        known.push("[flottille:<kind>]".to_owned());
+        let named: Vec<&str> = GUIDE.split('`').skip(1).step_by(2).collect();
+        assert!(
+            named.len() > 10,
+            "the text names its tools between backticks"
+        );
+        // The default rules are read by agents too: the tools they name exist as well.
+        let by_rules: Vec<&str> = crate::rules::DEFAULT
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .collect();
+        for name in named.into_iter().chain(by_rules) {
+            assert!(
+                known.iter().any(|k| k == name),
+                "{name} is no tool of Flottille's"
+            );
+        }
+    }
+
+    #[test]
+    fn the_server_instructions_stay_short() {
+        assert!(GUIDE.split_whitespace().count() < 400);
     }
 
     #[test]

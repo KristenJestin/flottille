@@ -153,11 +153,19 @@ and the 2026 practice around it:
     never sees MCP calls. Check that the `claude` version Flottille pins still sends it, and fall
     back to no deduplication, said once per agent in the daemon's log, when a call has none.
 
+11. **The server explains Flottille to the agent.** The `initialize` result (and `server/discover`'s)
+    carries the `instructions` of `crates/flottille/roles/guide.md`: under 400 words, well under
+    the 4,096 characters Claude Code keeps, one text for every agent. Anthropic's guidance asks
+    that a tool's description tell a new colleague what the tool is for; an agent that is told
+    nothing of the system around its tools invents it (it claimed that tools "may appear during the
+    session"). It says only what holds in the code, and a test checks that every tool it names
+    exists.
+
 ### Pilot door
 
-11. **The outside agent probably uses tool search**, so the pilot door's server instructions
+12. **The outside agent probably uses tool search**, so the pilot door's server instructions
     (under 4,096 characters) say what Flottille is and when to reach for its tools: start and
     follow agents, read their state and conversations, and catch up with events.
-12. **Waiting without polling**: `events_since {after, wait_seconds?}` holds the call up to
+13. **Waiting without polling**: `events_since {after, wait_seconds?}` holds the call up to
     `wait_seconds` (at most 90, under Claude Code's 2-minute backgrounding) and returns as soon
     as an event arrives, with the next sequence number to ask for.
