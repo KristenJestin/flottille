@@ -1233,7 +1233,6 @@ impl Shell {
         }
     }
 
-    /// Opens a project's page or a session's: a choice made in a drawer closes it.
     /// The sentence of the notice that says which Auto judge Flottille picked, while the user
     /// has not seen it.
     pub fn judge_notice(&self) -> Option<String> {
@@ -1311,6 +1310,7 @@ impl Shell {
             .test_support()
     }
 
+    /// Opens a project's page or a session's: a choice made in a drawer closes it.
     pub fn open(&mut self, selection: Selection, window: &mut Window, cx: &mut Context<Self>) {
         self.select(selection, window, cx);
         self.left.update(cx, |drawer, cx| drawer.close(cx));
