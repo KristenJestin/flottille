@@ -3,15 +3,15 @@
 //! compositor.
 //!
 //! ```text
-//! cargo run -p flottille-window --example shell [--features frames] -- [--project <name>] [--add-project <folder>] [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace] [--add-procedure] [--edit-procedure <name>] [--run <workspace>/<procedure>] [--slash <text>] [--attach <picture>] [--end] [--ended <project>] [--add-reference] [--project-settings <project>] [--size <w>x<h>]
+//! cargo run -p flottille-window --example shell [--features frames] -- [--project <name>] [--add-project <folder>] [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace] [--add-command] [--edit-command <name>] [--add-skill] [--edit-skill <name>] [--slash <text>] [--attach <picture>] [--end] [--ended <project>] [--project-settings <project>] [--size <w>x<h>]
 //! ```
 //!
 //! `--project` opens a project's page, `--add-project` the "Add a project" modal with the
 //! repositories detected in a folder, `--session` opens a session's page (`--agent` then reads one of its sub-agents), `--tree` the
 //! left drawer (in a narrow window), `--rail` the session page's drawer (in a window narrower than
 //! three columns), `--settings` the settings page, `--menu` one of the project page composer's
-//! pickers, `--new-workspace` the project page's new-workspace modal, `--add-procedure`,
-//! `--edit-procedure`, `--run` and `--add-reference` the modals of the procedures and references
+//! pickers, `--new-workspace` the project page's new-workspace modal, `--add-command`,
+//! `--edit-command`, `--add-skill` and `--edit-skill` the modals of the Commands and Skills
 //! sections, `--slash` types a text in the open session's composer (its `/` list), `--attach` attaches a picture file to it, `--end` opens the open
 //! session's "End the session?" confirmation, `--ended` unfolds a project's "Ended" group of the
 //! left tree, `--project-settings` a project's settings page, `--size` the window's size. The daemon is found on
