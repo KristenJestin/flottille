@@ -10,6 +10,8 @@ mod claude;
 mod client;
 mod codex;
 mod codex_bridge;
+mod commands;
+mod commands_command;
 mod daemon;
 mod deliveries;
 mod files;
@@ -52,6 +54,7 @@ use serde_json::Value;
 
 use crate::agent_command::AgentAction;
 use crate::client::Client;
+use crate::commands_command::CommandsAction;
 use crate::procedure_command::ProcedureAction;
 use crate::project_command::ProjectAction;
 use crate::reference_command::ReferenceAction;
@@ -107,6 +110,11 @@ enum Command {
     Approvals {
         #[arg(long)]
         json: bool,
+    },
+    /// The commands your agents run: the ones running now, and stopping one
+    Commands {
+        #[command(subcommand)]
+        action: CommandsAction,
     },
     /// Allow a request: its call is checked again, performed, and its result handed to the agent
     Approve { number: u64 },
@@ -258,6 +266,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 );
             }
         }
+        Command::Commands { action } => commands_command::run(&paths, action)?,
         Command::Approvals { json } => approval_command::approvals(&paths, json)?,
         Command::Approve { number } => approval_command::approve(&paths, number)?,
         Command::Deny { number } => approval_command::deny(&paths, number)?,

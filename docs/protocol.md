@@ -681,6 +681,62 @@ events, oldest first: at most 1000, the first ones (those numbered after `after`
 or with `before` the last ones numbered before it. `more` says whether events remain past the
 page: newer ones, or with `before` older ones.
 
+### The command methods
+
+The commands the agents run with `commands_run` (`docs/tools.md`), as the user sees them. A
+command in a result:
+
+```json
+{
+  "run": "5d2c0f1a9b3e",
+  "agent": "3f9a1c0b7d2e",
+  "root": "3f9a1c0b7d2e",
+  "project": "app",
+  "workspace": "login",
+  "name": "server",
+  "line": "npm run dev",
+  "folder": "/home/me/.local/share/flottille/workspaces/app/login",
+  "state": "running",
+  "exit_code": null,
+  "signal": null,
+  "started_at": 1792843730808,
+  "ended_at": null,
+  "last_line": "listening on :3000"
+}
+```
+
+`name` is the catalogue command it runs, `null` for a line of the agent's. `state` is `running`,
+`exited`, `stopped` or `interrupted` (`docs/events.md`, "The events of a run"). `last_line` is the
+last line of its output with something on it, masked of secrets and as the program wrote it
+(colours included), cut at 300 characters.
+
+#### `command.list`
+
+`{"project"?, "tree"?, "ended"?}`. `{"commands": [...]}`: the commands running, oldest first. With
+`project`, the project's; with `tree`, an agent's id, those of the agents of its root's tree; without
+either, every one. With `ended`, the commands that ended and were not dismissed come after them,
+the last 30 at most, and none for a tree whose root ended or failed: they go with their session
+(`not-found` when `tree` names no agent).
+
+#### `command.output`
+
+`{"run", "tail"?}`. The command without `root`, `project` and `workspace`, with `output`, the last
+`tail` lines (200 by default, 1 to 1000) of what it wrote, standard output and error together, masked
+and as the program wrote it, and `earlier`, whether lines before them were left out. Of a
+command running, what it wrote so far. `not-found` when there is no such run.
+
+#### `command.stop`
+
+`{"run"}`. `{"run": {...}}`: stops the command and everything in its process group (`SIGTERM`, then
+`SIGKILL` 5 s later, as `commands_status` with `action: stop` does) and answers once it ended. The
+agent that started it is told the user stopped it (`command-ended`, `docs/tools.md`). A command that
+already ended is answered as it is. `not-found` when there is no such run.
+
+#### `command.dismiss`
+
+`{"run"}`. `{"run"}`: a command that ended is no longer listed with `ended`, and `run.dismissed` is
+emitted. `refused` while it runs; `not-found` when there is no such run.
+
 ### `provider.list`
 
 `{"project"?}`. Every provider, in order, as `flottille doctor --json` reports it, with what it

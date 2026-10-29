@@ -11,10 +11,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flottille_core::agent::new_id;
+use flottille_core::approval;
 use flottille_core::command::split_line;
 use flottille_core::run::{Run, RunState};
 use flottille_core::secrets;
@@ -27,6 +29,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agents::{signal_group, start_time};
 use crate::daemon::Daemon;
+use crate::deliveries;
 use crate::gate::{self, Verdict};
 use crate::mcp::{Outcome, arguments, masked};
 use crate::place::{Place, Resolved};
@@ -47,6 +50,8 @@ const OUTPUT_KEPT: usize = 64 * 1024;
 const OUTPUT_MARGIN: usize = 16 * 1024;
 /// A run asked to stop has this long before its group is killed.
 const STOP_GRACE: Duration = Duration::from_secs(5);
+/// The lines of output a `command-ended` delivery holds.
+const ENDED_TAIL_LINES: usize = 20;
 
 /// The forge tokens a run never gets: each is set empty.
 const FORGE_TOKENS: [&str; 9] = [
@@ -82,6 +87,21 @@ struct Going {
     secrets: Vec<String>,
     /// Its process, which leads its process group.
     pid: u32,
+    /// Whether the call that started it still waits for its end, answered with it running, or
+    /// is over: only a run that outlived its call wakes the agent when it ends.
+    phase: Mutex<Phase>,
+    /// The user stopped it (`command.stop`), which the agent is told.
+    stopped_by_user: AtomicBool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// The call that started it waits for it.
+    Waited,
+    /// The call answered while it ran: its end is delivered.
+    Detached,
+    /// It ended.
+    Over,
 }
 
 #[derive(Default)]
@@ -326,23 +346,37 @@ pub async fn commands_run(
         started_at: now_ms(),
         ended_at: None,
         output: String::new(),
+        dismissed: false,
     };
     if let Err(why) = start(daemon, run, words, env, place.secret_values()) {
         return Outcome::Failed(why);
     }
     if serve {
+        detach(daemon, &id);
         return Outcome::Done(describe(daemon, &id, None, None, true));
     }
     let ended = wait_for_end(daemon, &id);
     tokio::select! {
         () = ended => {}
-        () = tokio::time::sleep(Duration::from_secs(wait)) => {}
+        () = tokio::time::sleep(Duration::from_secs(wait)) => detach(daemon, &id),
         () = cancelled.cancelled() => {
             stop(daemon, &id, RunState::Stopped).await;
             return Outcome::Failed("the call was stopped before it ended".into());
         }
     }
     Outcome::Done(describe(daemon, &id, None, None, true))
+}
+
+/// The call that started the run answers while it runs: its end wakes the agent, unless it
+/// ended meanwhile, which the answer then says.
+fn detach(daemon: &Daemon, id: &str) {
+    let going = daemon.mcp.runs.runs.lock().unwrap().get(id).cloned();
+    if let Some(going) = going {
+        let mut phase = going.phase.lock().unwrap();
+        if *phase == Phase::Waited {
+            *phase = Phase::Detached;
+        }
+    }
 }
 
 /// Ends when the run has ended.
@@ -531,6 +565,8 @@ fn start(
         env,
         secrets,
         pid,
+        phase: Mutex::new(Phase::Waited),
+        stopped_by_user: AtomicBool::new(false),
     });
     daemon
         .mcp
@@ -617,7 +653,57 @@ async fn follow(
         eprintln!("flottille daemon: run {}: {error}", run.id);
     }
     daemon.mcp.runs.runs.lock().unwrap().remove(&run.id);
+    let detached =
+        std::mem::replace(&mut *going.phase.lock().unwrap(), Phase::Over) == Phase::Detached;
+    let by_user = going.stopped_by_user.load(Ordering::SeqCst);
+    // Told to the agent only when no call was left to answer, and only for an end that is news
+    // to it: not its own stop, nor the daemon's or its own end.
+    let told = match end.state {
+        RunState::Exited => true,
+        RunState::Stopped => by_user,
+        RunState::Running | RunState::Interrupted => false,
+    };
+    if detached && told {
+        let body = ended_text(&going, end, &output, by_user);
+        deliveries::deliver(
+            &daemon,
+            &run.agent,
+            "command-ended",
+            Some(format!("command-ended-{}", run.id)),
+            &body,
+            approval::URGENT,
+        );
+    }
     going.end.send_replace(Some(end));
+}
+
+/// What the agent is told of a run that ended after its call: how it ended, how long it ran and
+/// the end of its output.
+fn ended_text(going: &Going, end: End, output: &str, by_user: bool) -> String {
+    let state = match (end.state, by_user) {
+        (RunState::Stopped, true) => "was stopped by the user".to_owned(),
+        _ => state_text(Some(end)),
+    };
+    let seconds = (now_ms() - going.run.started_at) as f64 / 1000.0;
+    let mut text = format!(
+        "Your command `{}` (run {}) {state} after {seconds:.1} s.",
+        going.run.line, going.run.id
+    );
+    let lines = display_lines(output);
+    if lines.is_empty() {
+        text.push_str("\nIt wrote nothing.");
+        return text;
+    }
+    let (from, to) = shown_range(&lines, ENDED_TAIL_LINES, None);
+    text.push_str(&format!(
+        "\nIts last lines (lines {}-{} of {}; read more with commands_status {{\"run\": \"{}\"}}):\n{}",
+        from + 1,
+        to,
+        lines.len(),
+        going.run.id,
+        lines[from..to].join("\n")
+    ));
+    text
 }
 
 fn masked_output(going: &Going) -> String {
@@ -637,6 +723,76 @@ async fn stop(daemon: &Daemon, id: &str, state: RunState) {
     let mut end = going.end.subscribe();
     going.stop.notify_one();
     let _ = end.wait_for(Option::is_some).await;
+}
+
+/// How a run is: running, or how it ended.
+fn state_text(end: Option<End>) -> String {
+    match end {
+        None => "is running".to_owned(),
+        Some(End {
+            state: RunState::Exited,
+            exit_code: Some(code),
+            ..
+        }) => format!("exited with code {code}"),
+        Some(End {
+            state: RunState::Exited,
+            signal,
+            ..
+        }) => format!("was killed by signal {}", signal.unwrap_or_default()),
+        Some(End {
+            state: RunState::Stopped,
+            ..
+        }) => "was stopped".to_owned(),
+        Some(End {
+            state: RunState::Interrupted,
+            ..
+        }) => "was interrupted: the daemon that ran it stopped".to_owned(),
+        Some(End {
+            state: RunState::Running,
+            ..
+        }) => "is running".to_owned(),
+    }
+}
+
+// What the user's clients read and do (`commands.rs`).
+
+/// A run as the user reads it: its record, and what it wrote so far, masked.
+pub struct View {
+    pub run: Run,
+    pub output: String,
+    /// The output was cut to its last 64 KiB.
+    pub cut: bool,
+}
+
+/// The run going on, or the stored one once it ended; `None` when there is no such run.
+pub fn view(daemon: &Daemon, id: &str) -> Option<View> {
+    let going = daemon.mcp.runs.runs.lock().unwrap().get(id).cloned();
+    if let Some(going) = going
+        && going.end.borrow().is_none()
+    {
+        let cut = going.output.lock().unwrap().cut > 0;
+        return Some(View {
+            output: masked_output(&going),
+            run: going.run.clone(),
+            cut,
+        });
+    }
+    let run = daemon.read(|store| store.run(id)).ok().flatten()?;
+    Some(View {
+        output: run.output.clone(),
+        cut: run.output.len() >= OUTPUT_KEPT,
+        run,
+    })
+}
+
+/// The user stops the run: its whole group, as the agent's own stop does, and the agent is told
+/// it was the user once it ended.
+pub async fn stop_by_user(daemon: &Daemon, id: &str) {
+    let going = daemon.mcp.runs.runs.lock().unwrap().get(id).cloned();
+    if let Some(going) = going {
+        going.stopped_by_user.store(true, Ordering::SeqCst);
+    }
+    stop(daemon, id, RunState::Stopped).await;
 }
 
 // Reading and stopping.
@@ -731,37 +887,14 @@ fn describe(
         Some(name) => format!("{name} (`{}`)", run.line),
         None => format!("`{}`", run.line),
     };
-    let state = match end {
-        None => "is running".to_owned(),
-        Some(End {
-            state: RunState::Exited,
-            exit_code: Some(code),
-            ..
-        }) => format!("exited with code {code}"),
-        Some(End {
-            state: RunState::Exited,
-            signal,
-            ..
-        }) => format!("was killed by signal {}", signal.unwrap_or_default()),
-        Some(End {
-            state: RunState::Stopped,
-            ..
-        }) => "was stopped".to_owned(),
-        Some(End {
-            state: RunState::Interrupted,
-            ..
-        }) => "was interrupted: the daemon that ran it stopped".to_owned(),
-        Some(End {
-            state: RunState::Running,
-            ..
-        }) => "is running".to_owned(),
-    };
+    let state = state_text(end);
     let seconds = (run.ended_at.unwrap_or_else(now_ms) - run.started_at) as f64 / 1000.0;
     let mut text = format!("run {}: {label} {state} after {seconds:.1} s", run.id);
     if end.is_none() && answer_of_run {
         text.push_str(&format!(
             "\nit keeps going: read it with commands_status {{\"run\": \"{id}\"}}, stop it with \
-             commands_status {{\"run\": \"{id}\", \"action\": \"stop\"}}",
+             commands_status {{\"run\": \"{id}\", \"action\": \"stop\"}}; Flottille tells you \
+             when it ends",
             id = run.id
         ));
     }

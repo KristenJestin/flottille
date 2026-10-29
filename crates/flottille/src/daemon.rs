@@ -21,6 +21,7 @@ use tokio::task::JoinSet;
 use crate::VERSION;
 use crate::agents::{self, Live};
 use crate::approvals;
+use crate::commands;
 use crate::deliveries;
 use crate::forge;
 use crate::inbox;
@@ -541,6 +542,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
             "test.",
             "provider.",
             "procedure.",
+            "command.",
         ]
         .iter()
         .any(|prefix| request.method.starts_with(prefix))
@@ -558,6 +560,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     agents::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("approval.") {
                     approvals::call(daemon, &request.method, request.params).await
+                } else if request.method.starts_with("command.") {
+                    commands::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("provider.") {
                     providers::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("test.") {

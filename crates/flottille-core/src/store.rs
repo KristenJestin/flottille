@@ -291,13 +291,17 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE procedure_runs DROP COLUMN grants;
     ALTER TABLE procedure_runs DROP COLUMN children;
 ",
+    "
+    -- A command that ended stays in the session's list until the user dismisses it.
+    ALTER TABLE runs ADD COLUMN dismissed INTEGER NOT NULL DEFAULT 0;
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
     identity, held_by, forwards, state, decision, created_at, decided_at, kind, says, judgement";
 
-const RUN_COLUMNS: &str =
-    "id, agent, name, line, folder, state, exit_code, signal, started_at, ended_at, output";
+const RUN_COLUMNS: &str = "id, agent, name, line, folder, state, exit_code, signal, started_at, \
+    ended_at, output, dismissed";
 
 const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, state, state_reason, \
     created_at, updated_at, active_at, ended_at, chosen_model, chosen_effort, chosen_mode, \
@@ -899,7 +903,7 @@ impl Store {
         transaction.execute(
             &format!(
                 "INSERT INTO runs ({RUN_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, \
-                 ?10, ?11)"
+                 ?10, ?11, ?12)"
             ),
             params![
                 run.id,
@@ -913,6 +917,7 @@ impl Store {
                 run.started_at,
                 run.ended_at,
                 run.output,
+                run.dismissed,
             ],
         )?;
         let event = append_event(&transaction, event.0, event.1)?;
@@ -963,6 +968,37 @@ impl Store {
         ))?;
         let rows = statement.query_map([], run_row)?;
         rows.map(|row| row?).collect()
+    }
+
+    /// The runs of these agents that were not dismissed, oldest first.
+    pub fn runs_of(&self, agents: &[String]) -> Result<Vec<Run>> {
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {RUN_COLUMNS} FROM runs WHERE agent = ?1 AND dismissed = 0"
+        ))?;
+        let mut found = Vec::new();
+        for agent in agents {
+            for row in statement.query_map(params![agent], run_row)? {
+                found.push(row??);
+            }
+        }
+        found.sort_by(|a, b| (a.started_at, &a.id).cmp(&(b.started_at, &b.id)));
+        Ok(found)
+    }
+
+    /// Dismisses a run that ended, with its event, in one transaction; `None` when it is still
+    /// running, already dismissed or unknown.
+    pub fn dismiss_run(&mut self, id: &str, event: (&str, Value)) -> Result<Option<Event>> {
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE runs SET dismissed = 1 WHERE id = ?1 AND state != 'running' AND dismissed = 0",
+            params![id],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let event = append_event(&transaction, event.0, event.1)?;
+        transaction.commit()?;
+        Ok(Some(event))
     }
 
     /// A run's process group started: its leader's pid and start time.
@@ -1753,6 +1789,7 @@ fn run_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Run>> {
         started_at: row.get(8)?,
         ended_at: row.get(9)?,
         output: row.get(10)?,
+        dismissed: row.get(11)?,
     }))
 }
 
@@ -3252,6 +3289,7 @@ mod tests {
             started_at: 5,
             ended_at: None,
             output: String::new(),
+            dismissed: false,
         };
         store.create_run(&run, ("run.started", json!({}))).unwrap();
         assert_eq!(store.run("r1").unwrap().unwrap(), run);
@@ -3288,6 +3326,58 @@ mod tests {
         assert_eq!(store.run_processes().unwrap(), [(4242, 7)]);
         store.remove_run_process(4242).unwrap();
         assert!(store.run_processes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_run_that_ended_is_dismissed_once_and_a_running_one_is_not() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .create_agent(&an_agent(), ("agent.created", json!({})))
+            .unwrap();
+        let agent = an_agent().id;
+        for (id, at) in [("r1", 5), ("r2", 6)] {
+            let run = Run {
+                id: id.into(),
+                agent: agent.clone(),
+                name: None,
+                line: "sleep 1".into(),
+                folder: "/w".into(),
+                state: RunState::Running,
+                exit_code: None,
+                signal: None,
+                started_at: at,
+                ended_at: None,
+                output: String::new(),
+                dismissed: false,
+            };
+            store.create_run(&run, ("run.started", json!({}))).unwrap();
+        }
+        store
+            .end_run(
+                "r1",
+                RunState::Exited,
+                Some(0),
+                None,
+                "",
+                ("run.ended", json!({})),
+            )
+            .unwrap();
+        let dismiss = |store: &mut Store, id: &str| {
+            store
+                .dismiss_run(id, ("run.dismissed", json!({"run": id})))
+                .unwrap()
+        };
+
+        assert!(dismiss(&mut store, "r2").is_none(), "still running");
+        assert!(dismiss(&mut store, "r1").is_some());
+        assert!(dismiss(&mut store, "r1").is_none(), "once");
+
+        let listed = store.runs_of(std::slice::from_ref(&agent)).unwrap();
+        assert_eq!(
+            listed.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["r2"]
+        );
+        assert!(store.run("r1").unwrap().unwrap().dismissed);
     }
 
     #[test]
