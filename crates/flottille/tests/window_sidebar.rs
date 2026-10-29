@@ -25,7 +25,7 @@ use flottille_window::tree::{
 };
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
-use serde_json::{Value, json};
+use serde_json::json;
 
 /// A user whose fake agent works while it is told to.
 fn user() -> User {
@@ -89,11 +89,6 @@ fn start(user: &User, project: &str, message: &str) -> String {
 fn send(user: &User, agent: &str, message: &str) {
     user.call("agent.send", json!({"agent": agent, "message": message}))
         .unwrap();
-}
-
-fn cancel(user: &User, agent: &str) {
-    user.call("agent.cancel", json!({"agent": agent})).unwrap();
-    eventually("the turn ends", || state_of(user, agent) == "idle");
 }
 
 fn window<'a>(
@@ -536,7 +531,7 @@ fn a_session_row_ends_its_session_from_its_menu_without_opening_it(cx: &mut Test
     cx.update(|window, cx| window.click(session_menu_id(&id), cx));
     settle(cx);
     assert!(
-        has_id(session_resume_id(&id), cx) == false,
+        !has_id(session_resume_id(&id), cx),
         "a running session has no Resume"
     );
     cx.update(|window, cx| window.click(session_end_id(&id), cx));
