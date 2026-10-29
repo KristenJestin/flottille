@@ -39,6 +39,8 @@ pub enum Source {
 pub struct Shown {
     pub text: String,
     pub source: Source,
+    /// Why the stored text was cut to the limit: edited by hand past it.
+    pub cut: Option<String>,
 }
 
 impl Shown {
@@ -50,6 +52,7 @@ impl Shown {
                 Some("global") => Source::Global,
                 _ => Source::Default,
             },
+            cut: value["cut"].as_str().map(str::to_owned),
         }
     }
 }
@@ -117,6 +120,16 @@ impl RulesEditor {
         }
     }
 
+    /// Whether Save has something to write: the text differs from what this level stores, not
+    /// from what is shown. A project that follows the user's rules stores none, so their very
+    /// text can be saved as its own; a text cut to the limit differs from what is stored too.
+    pub fn savable(&self, cx: &gpui_kit::App) -> bool {
+        let Some(shown) = &self.shown else {
+            return false;
+        };
+        self.typed(cx).is_some() && (self.is_edited(cx) || !self.is_own() || shown.cut.is_some())
+    }
+
     /// Whether Reset to default has something to remove: rules of its own at this level.
     pub fn is_own(&self) -> bool {
         let own = match self.project {
@@ -176,7 +189,7 @@ impl RulesEditor {
         let Some(text) = self.typed(cx) else {
             return;
         };
-        if self.waiting || !self.is_edited(cx) {
+        if self.waiting || !self.savable(cx) {
             return;
         }
         self.waiting = true;
@@ -239,8 +252,7 @@ impl Render for RulesEditor {
         };
         let scope = self.project.clone().unwrap_or_default();
         let id = |part: &str| ElementId::Name(format!("rules-{part}-{scope}").into());
-        let edited = self.is_edited(cx);
-        let loaded = self.shown.is_some();
+        let savable = self.savable(cx);
         let buttons = div()
             .flex()
             .items_center()
@@ -253,7 +265,7 @@ impl Render for RulesEditor {
             .child(div().flex_1())
             .child(
                 Button::primary(id("save"), "Save")
-                    .disabled(!edited || self.waiting || !loaded)
+                    .disabled(!savable || self.waiting)
                     .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
             );
         let body = div()
@@ -282,6 +294,19 @@ impl Render for RulesEditor {
                     .text_size(px(12.5))
                     .child(field)
                     .test_support(),
+            )
+            .when_some(
+                self.shown.as_ref().and_then(|shown| shown.cut.clone()),
+                |d, cut| {
+                    d.child(
+                        div()
+                            .id(id("cut"))
+                            .text_size(px(12.5))
+                            .text_color(p.fail)
+                            .child(SharedString::from(format!("Cut: {cut}.")))
+                            .test_support(),
+                    )
+                },
             )
             .child(
                 div()

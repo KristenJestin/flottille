@@ -7043,3 +7043,72 @@ fn a_project_s_settings_have_a_rules_section_that_replaces_the_global_rules_and_
             .contains("Spanish")
     );
 }
+
+#[gpui_kit::test]
+fn a_project_s_rules_can_be_saved_identical_to_the_global_text(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    user.call("rules.set", json!({"text": "Answer in French."}))
+        .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    let page = open_project_settings(&shell, "atlas", cx);
+    let editor = page.read_with(cx, |page, _| page.rules().clone());
+    until(&shell, cx, "the rules are shown", |cx| {
+        editor.read_with(cx, |e, _| e.shown().is_some())
+    });
+    settle(cx);
+
+    // What is shown is the user's text; what the project stores is nothing. Saving it unchanged
+    // gives the project the same text as its own, so a later change of the global rules leaves it.
+    assert!(editor.read_with(cx, |e, cx| e.savable(cx)));
+    cx.update(|window, cx| window.click("rules-save-atlas", cx));
+    until(&shell, cx, "the project's rules are saved", |cx| {
+        editor.read_with(cx, |e, _| e.is_own())
+    });
+    let shown = user
+        .call("rules.show", json!({"project": "atlas"}))
+        .unwrap();
+    assert_eq!(shown["source"], "project", "{shown}");
+    assert_eq!(shown["text"], "Answer in French.");
+    // Its own now, unchanged: nothing more to save.
+    assert!(!editor.read_with(cx, |e, cx| e.savable(cx)));
+}
+
+#[gpui_kit::test]
+fn the_rules_editor_says_when_rules_edited_by_hand_were_cut(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    std::fs::create_dir_all(user.path("config/flottille")).unwrap();
+    std::fs::write(
+        user.path("config/flottille/rules.md"),
+        format!("{}TAIL", "x".repeat(8_000)),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    let page = open_settings(&shell, cx);
+    let editor = page.read_with(cx, |page, _| page.rules().clone());
+    until(&shell, cx, "the rules are shown", |cx| {
+        editor.read_with(cx, |e, _| e.shown().is_some())
+    });
+    settle(cx);
+
+    let cut = editor.read_with(cx, |e, _| e.shown().unwrap().cut.clone());
+    let cut = cut.expect("the cut is said");
+    assert!(
+        cut.contains("8004 characters") && cut.contains("8000"),
+        "{cut}"
+    );
+    cx.update(|window, _| assert!(window.find("rules-cut-").visible()));
+    // The editor holds what agents get; saving it makes the file fit.
+    assert!(editor.read_with(cx, |e, cx| e.savable(cx)));
+    cx.update(|window, cx| window.click("rules-save-", cx));
+    until(&shell, cx, "the cut rules are saved", |cx| {
+        editor.read_with(cx, |e, _| e.shown().unwrap().cut.is_none())
+    });
+    assert_eq!(
+        std::fs::read_to_string(user.path("config/flottille/rules.md")).unwrap(),
+        "x".repeat(8_000)
+    );
+}
