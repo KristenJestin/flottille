@@ -595,7 +595,14 @@ fn reads(call: &Call, layer: &[String]) -> Line {
     }
     match program {
         "find" if args.iter().any(|w| w == "-delete") => return Line::Writes,
-        "date" if short(&['s']) || args.iter().any(|w| abbreviates(w, "set", 2)) => {
+        // `-s`, alone or after flags that take no value (`-us`); not `-Iseconds`.
+        "date"
+            if shorts(args).any(|w| {
+                w[1..]
+                    .split_once('s')
+                    .is_some_and(|(before, _)| before.chars().all(|c| "uR".contains(c)))
+            }) || args.iter().any(|w| abbreviates(w, "set", 2)) =>
+        {
             return Line::Judge("date -s sets the system's clock".into());
         }
         _ => {}
@@ -2323,6 +2330,7 @@ mod tests {
                 "find src -name '*.rs'",
                 "gh pr view 1",
                 "wc -l src/a.rs",
+                "date -Iseconds",
             ] {
                 assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
             }
@@ -2671,6 +2679,7 @@ mod tests {
                 "more src/a.rs",
                 "git help -w log",
                 "date -s 2020-01-01",
+                "date -us 2020-01-01",
                 "date --set=2020-01-01",
             ] {
                 let verdict = fixture.run(line);
