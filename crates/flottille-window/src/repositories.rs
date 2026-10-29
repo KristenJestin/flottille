@@ -132,6 +132,8 @@ pub struct ProjectRepositories {
     /// The repository whose Remove waits for its confirmation.
     confirming: Option<String>,
     busy: Option<Busy>,
+    /// How many requests were made: an answer to an older one never replaces a newer one's.
+    requests: u64,
     problem: Option<SharedString>,
     /// Where a repository's path is typed to add it, made at the first draw.
     field: Option<Entity<InputState>>,
@@ -147,6 +149,7 @@ impl ProjectRepositories {
             rows: Listing::default(),
             confirming: None,
             busy: None,
+            requests: 0,
             problem: None,
             field: None,
             _subscription: None,
@@ -169,21 +172,37 @@ impl ProjectRepositories {
         self.field.as_ref()
     }
 
+    /// The number of the last request: its answer is the one that counts.
+    pub fn last_request(&self) -> u64 {
+        self.requests
+    }
+
     fn ask(&mut self, method: &'static str, params: Value, busy: Option<Busy>, cx: &mut App) {
         self.busy = busy;
         self.problem = None;
+        self.send(method, params, cx);
+    }
+
+    fn send(&mut self, method: &'static str, params: Value, cx: &mut App) {
+        self.requests += 1;
         let command = Command::Repositories {
             project: self.project.clone(),
             method,
             params,
+            serial: self.requests,
         };
         perform_later(&self.shell, command, cx);
     }
 
-    /// Asks the daemon for the repositories as their checkouts stand.
+    /// Asks the daemon for the repositories as their checkouts stand. Not while a request of the
+    /// user's is on its way: its answer is the list, and a newer read would make it the older one,
+    /// so that its refusal would never be said.
     pub fn read(&mut self, cx: &mut App) {
+        if self.busy.is_some() {
+            return;
+        }
         let params = json!({"name": self.project});
-        self.ask("project.repositories", params, None, cx);
+        self.send("project.repositories", params, cx);
     }
 
     /// Detect again: the same read, said on its button while it runs.
@@ -223,13 +242,23 @@ impl ProjectRepositories {
         cx.notify();
     }
 
-    /// The daemon's answer: the list as it is now, or why not.
+    /// Whether the answer to request `serial` is still the one that counts.
+    pub fn is_latest(&self, serial: u64) -> bool {
+        serial >= self.requests
+    }
+
+    /// The daemon's answer to request `serial`: the list as it is now, or why not. An answer to
+    /// an older request than the last is dropped, and the busy words stay until the last one.
     pub fn answered(
         &mut self,
+        serial: u64,
         read: Result<Value, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.is_latest(serial) {
+            return;
+        }
         let added = matches!(self.busy.take(), Some(Busy::Adding(_)));
         match read {
             Ok(value) => {

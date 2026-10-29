@@ -109,6 +109,8 @@ pub enum Command {
         project: String,
         method: &'static str,
         params: Value,
+        /// The section's request number, given back with the answer.
+        serial: u64,
     },
     /// What the project's settings show: its declared forges and tracker, and what each
     /// repository's remote proposes.
@@ -446,6 +448,7 @@ pub enum Outcome {
     Repositories {
         project: String,
         read: Result<Value, String>,
+        serial: u64,
     },
     /// The project's repositories detected again (`project.check`), or why not.
     ProjectChecked {
@@ -833,9 +836,11 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             project,
             method,
             params,
+            serial,
         } => Outcome::Repositories {
             read: answer(ask_alone(connect, method, params, bounds.quick)),
             project,
+            serial,
         },
         Command::CheckProject(project) => Outcome::ProjectChecked {
             read: answer(ask_alone(

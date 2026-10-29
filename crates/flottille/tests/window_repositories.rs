@@ -259,6 +259,82 @@ fn the_project_page_lists_its_repositories_and_adds_removes_and_detects_them(
 }
 
 #[gpui_kit::test]
+fn an_older_answer_never_replaces_a_newer_one_and_busy_waits_for_the_last_answer(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    trio(&user);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "trio", cx);
+    let section = section_of(&shell, cx);
+    until(&shell, cx, "the repositories are read", |cx| {
+        section.read_with(cx, |s, _| s.repositories().is_some())
+    });
+    settle(cx);
+    let listed = |paths: &[&str]| {
+        json!({"new": [], "repositories": paths.iter()
+            .map(|path| json!({"path": path, "found": true, "remote": "origin",
+                "base": ["main"], "branches": ["main"]}))
+            .collect::<Vec<_>>()})
+    };
+    let first = section.read_with(cx, |s, _| s.last_request());
+    // Detect again, while the answer to an earlier request is still on its way. The answers are
+    // given here by hand, in the wrong order, before the window reads any of the real ones.
+    section.update(cx, |s, cx| s.detect(cx));
+    assert!(section.read_with(cx, |s, _| s.is_busy()));
+    // A read asked for meanwhile (the file was edited) is not made: it would outdate the answer
+    // of the user's request, a refusal included.
+    section.update(cx, |s, cx| s.read(cx));
+    assert_eq!(section.read_with(cx, |s, _| s.last_request()), first + 1);
+
+    section.update_in(cx, |s, window, cx| {
+        s.answered(first, Ok(listed(&["old"])), window, cx)
+    });
+    assert!(
+        section.read_with(cx, |s, _| s.is_busy()),
+        "an older answer does not end what the last request began"
+    );
+    assert_eq!(paths(&section, cx), ["api", "web", "lib"]);
+    section.update_in(cx, |s, window, cx| {
+        s.answered(first + 1, Ok(listed(&["new"])), window, cx)
+    });
+    assert!(!section.read_with(cx, |s, _| s.is_busy()));
+    assert_eq!(paths(&section, cx), ["new"]);
+    section.update_in(cx, |s, window, cx| {
+        s.answered(first, Ok(listed(&["old"])), window, cx)
+    });
+    assert_eq!(paths(&section, cx), ["new"], "the older one came last");
+}
+
+#[gpui_kit::test]
+fn a_project_edited_by_hand_shows_its_repositories_again_without_a_click(cx: &mut TestAppContext) {
+    let user = user();
+    let folder = trio(&user);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "trio", cx);
+    let section = section_of(&shell, cx);
+    until(&shell, cx, "the repositories are read", |cx| {
+        section.read_with(cx, |s, _| s.repositories().is_some())
+    });
+    settle(cx);
+    assert_eq!(paths(&section, cx), ["api", "web", "lib"]);
+
+    // The file is the user's to edit: the daemon notices at its next request.
+    let mut text = std::fs::read_to_string(user.project_file("trio")).unwrap();
+    text.push_str("\n[[repositories]]\npath = \"docs\"\n");
+    user.write_project_file("trio", &text);
+    assert!(folder.join("docs/.git").is_dir());
+    user.call("project.list", json!({})).unwrap();
+
+    until(&shell, cx, "docs joins the list", |cx| {
+        paths(&section, cx).contains(&"docs".to_owned())
+    });
+    settle(cx);
+    assert!(has("repository-row-docs", cx));
+    assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
+}
+
+#[gpui_kit::test]
 fn the_new_workspace_form_creates_a_workspace_with_two_of_three_repositories(
     cx: &mut TestAppContext,
 ) {
