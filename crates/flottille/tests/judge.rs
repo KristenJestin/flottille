@@ -598,3 +598,87 @@ fn a_push_the_judge_allows_reaches_the_remote() {
     assert!(pushed.contains("exited with code 0"), "{pushed}");
     assert!(remote_has(&user, "allowed"));
 }
+
+#[test]
+fn a_line_longer_than_the_judge_s_input_asks_without_the_judge() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (_, mcp, _) = session(&user, false);
+    let line = format!("touch {}", "ab ".repeat(3_000));
+
+    let request = held(&user, mcp.call("commands_run", json!({"line": line})));
+
+    assert_eq!(request["class"], "judge", "{request}");
+    assert_eq!(request["judgement"]["verdict"], "failed", "{request}");
+    assert!(
+        request["judgement"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("longer than"),
+        "{request}"
+    );
+    assert!(judge_prompts(&user).is_empty(), "the judge was asked");
+}
+
+#[test]
+fn a_long_line_reaches_the_judge_whole() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (_, mcp, _) = session(&user, false);
+    let line = format!("touch {}z", "ab ".repeat(500));
+
+    let _ = mcp.call("commands_run", json!({"line": line}));
+
+    let prompts = judge_prompts(&user);
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts[0].contains(&line), "{}", prompts[0]);
+}
+
+/// Makes the fake judge of `with_judge` leave a `sleep` behind in its own process group, its pid
+/// written to `fake-judge/sleepers`.
+fn judge_leaving_a_child(user: &User) -> PathBuf {
+    let launcher = user.path("fake-judge/agent");
+    let sleepers = user.path("fake-judge/sleepers");
+    let script = std::fs::read_to_string(&launcher).unwrap();
+    let script = script.replacen(
+        "#!/bin/sh\n",
+        &format!(
+            "#!/bin/sh\nsleep 300 &\necho $! >> '{}'\n",
+            sleepers.display()
+        ),
+        1,
+    );
+    std::fs::write(&launcher, script).unwrap();
+    sleepers
+}
+
+/// Whether a process still runs (a zombie does not).
+fn runs(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit_once(") ")
+            .is_some_and(|(_, rest)| !rest.starts_with('Z'))
+    })
+}
+
+#[test]
+fn the_judge_s_own_child_processes_end_with_it() {
+    for hangs in [false, true] {
+        let user = if hangs {
+            User::with_fake_agent()
+                .with_judge(json!([{"hang": true}]))
+                .with_env("FLOTTILLE_JUDGE_TIMEOUT_MS", "800")
+        } else {
+            User::with_fake_agent().with_allowing_judge()
+        };
+        let sleepers = judge_leaving_a_child(&user);
+        let (_, mcp, _) = session(&user, false);
+
+        let _ = mcp.call("commands_run", json!({"line": "touch made.txt"}));
+
+        let pid: u32 = std::fs::read_to_string(&sleepers)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        eventually("the judge's child ends", || !runs(pid));
+        assert!(!runs(pid), "hangs {hangs}");
+    }
+}
