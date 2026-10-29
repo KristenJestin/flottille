@@ -1,5 +1,5 @@
-//! A command run an agent started with `commands_run` (`docs/tools.md`): what it runs, where, and
-//! how it ended. What the store keeps.
+//! A command run an agent started with `run` (`docs/tools.md`), or a task the user ran from the
+//! window: what it runs, where, and how it ended. What the store keeps.
 
 use std::path::PathBuf;
 
@@ -9,9 +9,10 @@ use serde::{Deserialize, Serialize};
 pub struct Run {
     /// Opaque, given by the daemon.
     pub id: String,
-    /// The agent that started it: only that agent reads and stops it.
-    pub agent: String,
-    /// The catalogue command it runs, `None` for a free line.
+    /// The agent that started it: only that agent reads and stops it. `None` for a task the user
+    /// ran.
+    pub agent: Option<String>,
+    /// The task it runs, `None` for a free line.
     pub name: Option<String>,
     /// The line, as it was split and run.
     pub line: String,
@@ -27,6 +28,8 @@ pub struct Run {
     pub output: String,
     /// The user dismissed it from the list of commands once it ended.
     pub dismissed: bool,
+    /// The project it runs in.
+    pub project: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,7 +38,7 @@ pub enum RunState {
     Running,
     /// Its process ended by itself, with an exit code or by a signal.
     Exited,
-    /// Ended by `commands_status` with `action: stop`, or by the call that started it being stopped.
+    /// Ended by `run_status` with `action: stop`, or by the call that started it being stopped.
     Stopped,
     /// The daemon that ran it stopped, or died.
     Interrupted,

@@ -470,23 +470,20 @@ fn the_enforced_text_matches_the_gate_s_rules() {
             "fs_write",
             json!({"path": "README.md", "content": "app, edited\n"}),
         ));
-        done(mcp.call("commands_run", json!({"line": "git status"})));
+        done(mcp.call("run", json!({"line": "git status"})));
     }
     assert_eq!(judged(&user), 0, "a harmless call reached the judge");
 
     claim("Calls to judge are everything else");
     claim("In Ask a call to judge is held for the user.");
     set_mode(&user, &agent, "ask");
-    let asked = request(
-        &user,
-        mcp.call("commands_run", json!({"line": "touch made.txt"})),
-    );
+    let asked = request(&user, mcp.call("run", json!({"line": "touch made.txt"})));
     assert_eq!(asked["class"], "judge", "{asked}");
     assert_eq!(judged(&user), 0, "Ask reached the judge");
 
     claim("In Auto a judge model allows it or holds it for the user; it never refuses.");
     set_mode(&user, &agent, "auto");
-    done(mcp.call("commands_run", json!({"line": "touch made.txt"})));
+    done(mcp.call("run", json!({"line": "touch made.txt"})));
     assert!(workspace.join("made.txt").exists());
     assert_eq!(judged(&user), 1);
 
@@ -507,14 +504,11 @@ fn the_enforced_text_matches_the_gate_s_rules() {
         assert_eq!(base["class"], "base", "{base}");
         let forced = request(
             &user,
-            mcp.call(
-                "commands_run",
-                json!({"line": "git push --force origin login"}),
-            ),
+            mcp.call("run", json!({"line": "git push --force origin login"})),
         );
         assert_eq!(forced["class"], "base", "{forced}");
         for line in ["git gc --prune=now", "git -c pager.log=./x log", "sudo ls"] {
-            let base = request(&user, mcp.call("commands_run", json!({ "line": line })));
+            let base = request(&user, mcp.call("run", json!({ "line": line })));
             assert_eq!(base["class"], "base", "{line}: {base}");
         }
         let rules = request(
@@ -532,7 +526,7 @@ fn the_enforced_text_matches_the_gate_s_rules() {
     no_escalation(&user);
 
     claim("What is refused is a call that cannot be made as it is: a command with shell syntax");
-    let refused = mcp.call("commands_run", json!({"line": "ls | cat"}));
+    let refused = mcp.call("run", json!({"line": "ls | cat"}));
     assert!(
         refused.error && refused.text.contains("shell syntax"),
         "{}",
@@ -546,14 +540,14 @@ fn the_enforced_text_matches_the_gate_s_rules() {
         malformed.text
     );
     claim("a command that prints a login");
-    let login = mcp.call("commands_run", json!({"line": "gh auth token"}));
+    let login = mcp.call("run", json!({"line": "gh auth token"}));
     assert!(
         login.error && login.text.starts_with("refused: "),
         "{}",
         login.text
     );
     claim("`flottille` run as a command");
-    let daemon = mcp.call("commands_run", json!({"line": "flottille approvals"}));
+    let daemon = mcp.call("run", json!({"line": "flottille approvals"}));
     assert!(
         daemon.error && daemon.text.starts_with("refused: "),
         "{}",

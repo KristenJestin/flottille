@@ -362,7 +362,7 @@ fn a_silent_worker_with_its_own_command_running_is_not_stuck_and_without_one_is_
     let id = launch(&lead, "patient", "HANG while a command runs");
     let worker = titled(&user, "patient");
     eventually("the worker's turn", || state(&user, &id) == "working");
-    let text = ok(worker.call("commands_run", json!({"line": "sleep 600", "timeout": 1})));
+    let text = ok(worker.call("run", json!({"line": "sleep 600", "timeout": 1})));
     let run = text
         .strip_prefix("run ")
         .and_then(|rest| rest.split(':').next())
@@ -374,7 +374,7 @@ fn a_silent_worker_with_its_own_command_running_is_not_stuck_and_without_one_is_
     assert!(events(&user, &id, "agent.stuck").is_empty());
     assert_eq!(show(&user, &id)["agent"]["epoch"], 0);
 
-    ok(worker.call("commands_status", json!({"run": run, "action": "stop"})));
+    ok(worker.call("run_status", json!({"run": run, "action": "stop"})));
     advance(&user, 6 * MINUTE);
 
     eventually("the stuck worker", || {
@@ -637,11 +637,12 @@ fn a_lead_lists_the_agent_tools_ask_user_and_approval_answer_and_a_worker_at_the
     assert!(!names.iter().any(|n| n == "ticket_read"));
     assert!(!names.iter().any(|n| n == "forge_write"));
     assert!(names.iter().any(|n| n == "workspace_remove"));
-    // A root also reads and asks for changes to its project's skills, commands and settings.
-    for family in ["skills", "commands", "project"] {
+    // A root also reads and asks for changes to its project's skills, commands, setup and
+    // settings.
+    for family in ["skills", "commands", "setup", "project"] {
         assert!(names.iter().any(|n| n == family), "{family}");
     }
-    assert_eq!(names.len(), 20);
+    assert_eq!(names.len(), 21);
 
     let names = worker.names();
     assert!(names.iter().any(|n| n == "ask_parent"));
@@ -749,7 +750,7 @@ fn nothing_happening_for_20_minutes_gives_the_lead_children_status_then_after_40
         let id = launch(&lead, title, "HANG while the tests run");
         let worker = titled(&user, title);
         eventually("the worker's turn", || state(&user, &id) == "working");
-        ok(worker.call("commands_run", json!({"line": "sleep 600", "timeout": 1})));
+        ok(worker.call("run", json!({"line": "sleep 600", "timeout": 1})));
     }
     let count = || {
         prompts(&user)

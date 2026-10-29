@@ -1,5 +1,5 @@
-//! The command tools: `commands_list`, `commands_run`, `commands_status`
-//! (`docs/tools.md`, `docs/reference/hemera.md` §3 "Commands").
+//! The command tools: `run` and `run_status` (`docs/tools.md`, "Running", and
+//! `docs/reference/hemera.md` §3 "Commands"), and the tasks the user runs from the window.
 //!
 //! A run is a line split without a shell and spawned in a process group of its own, with the
 //! place's variables and an environment that keeps forges out of reach: no forge token, the forge
@@ -135,60 +135,14 @@ impl Output {
     }
 }
 
-// The catalogue.
-
-pub fn commands_list(daemon: &Daemon, place: &Place, args: Value) -> Outcome {
-    if let Err(refusal) = arguments::<Empty>("commands_list", args) {
-        return refusal;
-    }
-    let project = match projects::load_project(daemon, &place.project) {
-        Ok(project) => project,
-        Err(failure) => return Outcome::Failed(failure.message),
-    };
-    if project.tasks.is_empty() {
-        return Outcome::Done(
-            "the project's catalogue is empty: run a line with commands_run {\"line\": …}".into(),
-        );
-    }
-    let lines: Vec<String> = project
-        .tasks
-        .iter()
-        .map(|(name, command)| {
-            let mut notes = Vec::new();
-            if let Some(repository) = &command.repository {
-                notes.push(format!("in {repository}"));
-            }
-            for (set, note) in [
-                (command.serve, "keeps running"),
-                (command.check, "a check"),
-                (command.read_only, "changes nothing"),
-                (command.ask_before_running, "held for approval"),
-            ] {
-                if set {
-                    notes.push(note.to_owned());
-                }
-            }
-            let notes = if notes.is_empty() {
-                String::new()
-            } else {
-                format!(" ({})", notes.join(", "))
-            };
-            format!("{name}: {}{notes}", command.line)
-        })
-        .collect();
-    Outcome::Done(lines.join("\n"))
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Empty {}
-
 // Running.
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RunArguments {
-    command: Option<String>,
+    /// `command`, its name before tasks, is still read.
+    #[serde(alias = "command")]
+    task: Option<String>,
     line: Option<String>,
     repository: Option<String>,
     timeout: Option<u64>,
@@ -196,7 +150,7 @@ struct RunArguments {
     why: Option<String>,
 }
 
-/// What a call to `commands_run` asks, once its command is found and its line split.
+/// What a call to `run` asks, once its task is found and its line split.
 struct Request {
     name: Option<String>,
     line: String,
@@ -208,24 +162,25 @@ struct Request {
 }
 
 fn request(daemon: &Daemon, place: &Place, args: RunArguments) -> Result<Request, Outcome> {
-    let (name, line, repository, serve) = match (args.command, args.line) {
+    let (name, line, repository, serve) = match (args.task, args.line) {
         (Some(name), None) => {
             let project = match projects::load_project(daemon, &place.project) {
                 Ok(project) => project,
                 Err(failure) => return Err(Outcome::Failed(failure.message)),
             };
-            let Some(command) = project.tasks.get(&name) else {
+            let Some(task) = project.tasks.get(&name) else {
                 return Err(Outcome::Refused(format!(
-                    "refused: the catalogue has no command {name}: list them with commands_list"
+                    "refused: the project has no task {name}: list them with tasks {{\"action\": \
+                     \"list\"}}"
                 )));
             };
-            let repository = args.repository.or(command.repository.clone());
-            (Some(name), command.line.clone(), repository, command.serve)
+            let repository = args.repository.or(task.repository.clone());
+            (Some(name), task.line.clone(), repository, task.serve)
         }
         (None, Some(line)) => (None, line, args.repository, false),
         _ => {
             return Err(Outcome::Refused(
-                "refused: give exactly one of command (a catalogue command) and line".into(),
+                "refused: give exactly one of task (one of the project's) and line".into(),
             ));
         }
     };
@@ -245,16 +200,15 @@ fn request(daemon: &Daemon, place: &Place, args: RunArguments) -> Result<Request
     })
 }
 
-/// The folder a call to `commands_run` would run in, the words it would start and the catalogue
-/// command it names, for the gate; nothing for a call that does not fit (the tool refuses it) and
-/// for any other tool.
+/// The folder a call to `run` would run in, the words it would start and the task it names, for
+/// the gate; nothing for a call that does not fit (the tool refuses it) and for any other tool.
 pub fn reaches(
     daemon: &Daemon,
     place: &Place,
     tool: &str,
     args: &Value,
 ) -> (Vec<Resolved>, Vec<String>, Option<String>) {
-    if tool != "commands_run" {
+    if tool != "run" {
         return (Vec::new(), Vec::new(), None);
     }
     let args = if args.is_null() {
@@ -271,7 +225,7 @@ pub fn reaches(
 }
 
 /// `approved` when the user or the judge let the call through: it may then run outside the place.
-pub async fn commands_run(
+pub async fn run(
     daemon: &Arc<Daemon>,
     agent: &str,
     place: &Place,
@@ -279,7 +233,7 @@ pub async fn commands_run(
     approved: bool,
     cancelled: CancellationToken,
 ) -> Outcome {
-    let args: RunArguments = match arguments("commands_run", args) {
+    let args: RunArguments = match arguments("run", args) {
         Ok(args) => args,
         Err(refusal) => return refusal,
     };
@@ -287,7 +241,7 @@ pub async fn commands_run(
     if !(1..=WAIT_SECONDS_MAX).contains(&wait) {
         return Outcome::Refused(format!(
             "refused: timeout must be 1 to {WAIT_SECONDS_MAX} seconds: a run that takes longer \
-             keeps going, read it with commands_status"
+             keeps going, read it with run_status"
         ));
     }
     let Request {
@@ -318,7 +272,7 @@ pub async fn commands_run(
             .lock()
             .unwrap()
             .values()
-            .find(|g| g.run.agent == agent && g.run.name == name)
+            .find(|g| g.run.agent.as_deref() == Some(agent) && g.run.name == name)
             .cloned()
     {
         return Outcome::Done(describe(daemon, &going.run.id, None, None, true, false));
@@ -335,7 +289,7 @@ pub async fn commands_run(
     };
     let run = Run {
         id: id.clone(),
-        agent: agent.to_owned(),
+        agent: Some(agent.to_owned()),
         name,
         // What is stored, sent in `run.started` and shown is masked like a call's arguments.
         line: masked(&line, place),
@@ -347,6 +301,7 @@ pub async fn commands_run(
         ended_at: None,
         output: String::new(),
         dismissed: false,
+        project: place.project.clone(),
     };
     if let Err(why) = start(daemon, run, words, env, place.secret_values()) {
         return Outcome::Failed(why);
@@ -368,6 +323,53 @@ pub async fn commands_run(
     }
     let by_user = going.is_some_and(|going| going.stopped_by_user.load(Ordering::SeqCst));
     Outcome::Done(describe(daemon, &id, None, None, true, by_user))
+}
+
+/// A task the user runs from the window, in the project folder (`main`): a run of no agent's,
+/// which the gate does not see, since the user asked for it, in the environment an agent's run
+/// gets. It is not waited for: the window follows it in the project's list of commands. A task
+/// that keeps running and already runs for the user is joined, not started twice.
+pub fn run_for_user(
+    daemon: &Arc<Daemon>,
+    project: &flottille_core::project::Project,
+    name: &str,
+) -> Result<String, String> {
+    let task = project
+        .tasks
+        .get(name)
+        .ok_or_else(|| format!("project {} has no task named {name}", project.name))?;
+    if task.serve
+        && let Some(going) = daemon.mcp.runs.runs.lock().unwrap().values().find(|g| {
+            g.run.agent.is_none()
+                && g.run.project == project.name
+                && g.run.name.as_deref() == Some(name)
+        })
+    {
+        return Ok(going.run.id.clone());
+    }
+    let place = Place::main(project, project.folder.clone());
+    let words = split_line(&task.line)?;
+    let (repository, base) = place.base(task.repository.as_deref())?;
+    let folder = place.resolve(base, ".");
+    let env = environment(daemon, &place, repository, false)?;
+    let id = new_id().map_err(|error| error.to_string())?;
+    let run = Run {
+        id: id.clone(),
+        agent: None,
+        name: Some(name.to_owned()),
+        line: masked(&task.line, &place),
+        folder: folder.path,
+        state: RunState::Running,
+        exit_code: None,
+        signal: None,
+        started_at: now_ms(),
+        ended_at: None,
+        output: String::new(),
+        dismissed: false,
+        project: project.name.clone(),
+    };
+    start(daemon, run, words, env, place.secret_values())?;
+    Ok(id)
 }
 
 /// The call that started the run answers while it runs: its end wakes the agent, unless it
@@ -450,7 +452,7 @@ pub fn groups_of(daemon: &Daemon, agent: &str) -> Vec<u32> {
         .lock()
         .unwrap()
         .values()
-        .filter(|going| going.run.agent == agent)
+        .filter(|going| going.run.agent.as_deref() == Some(agent))
         .map(|going| going.pid)
         .collect()
 }
@@ -548,8 +550,8 @@ fn start(
     let pid = child.id().ok_or("the run ended at once")?;
     let reader = tokio::net::unix::pipe::Receiver::from_owned_fd(reader.into())
         .map_err(|e| format!("cannot read the output of {}: {e}", words[0]))?;
-    let event = json!({"agent": run.agent, "run": run.id, "name": run.name, "line": run.line,
-        "folder": run.folder});
+    let event = json!({"agent": run.agent, "project": run.project, "run": run.id,
+        "name": run.name, "line": run.line, "folder": run.folder});
     daemon
         .write(|store| {
             let event = store.create_run(&run, ("run.started", event))?;
@@ -638,8 +640,8 @@ async fn follow(
     };
     let output = masked_output(&going);
     let run = &going.run;
-    let event = json!({"agent": run.agent, "run": run.id, "state": end.state.as_str(),
-        "exit_code": end.exit_code, "signal": end.signal});
+    let event = json!({"agent": run.agent, "project": run.project, "run": run.id,
+        "state": end.state.as_str(), "exit_code": end.exit_code, "signal": end.signal});
     let result = daemon.write(|store| {
         store.remove_run_process(pid)?;
         let event = store.end_run(
@@ -666,11 +668,14 @@ async fn follow(
         RunState::Stopped => by_user,
         RunState::Running | RunState::Interrupted => false,
     };
-    if detached && told {
+    if detached
+        && told
+        && let Some(agent) = &run.agent
+    {
         let body = ended_text(&going, end, &output, by_user);
         deliveries::deliver(
             &daemon,
-            &run.agent,
+            agent,
             "command-ended",
             Some(format!("command-ended-{}", run.id)),
             &body,
@@ -696,7 +701,7 @@ fn ended_text(going: &Going, end: End, output: &str, by_user: bool) -> String {
     }
     let (from, to) = shown_range(&lines, ENDED_TAIL_LINES, None);
     text.push_str(&format!(
-        "\nIts last lines (lines {}-{} of {}; read more with commands_status {{\"run\": \"{}\"}}):\n{}",
+        "\nIts last lines (lines {}-{} of {}; read more with run_status {{\"run\": \"{}\"}}):\n{}",
         from + 1,
         to,
         lines.len(),
@@ -810,9 +815,9 @@ struct StatusArguments {
     start: Option<usize>,
 }
 
-/// `commands_status`: the state and the output of a run this agent started, or its stop.
-pub async fn commands_status(daemon: &Daemon, agent: &str, args: Value) -> Outcome {
-    let args: StatusArguments = match arguments("commands_status", args) {
+/// `run_status`: the state and the output of a run this agent started, or its stop.
+pub async fn run_status(daemon: &Daemon, agent: &str, args: Value) -> Outcome {
+    let args: StatusArguments = match arguments("run_status", args) {
         Ok(args) => args,
         Err(refusal) => return refusal,
     };
@@ -848,8 +853,8 @@ pub async fn commands_status(daemon: &Daemon, agent: &str, args: Value) -> Outco
             Outcome::Done(describe(daemon, &args.run, None, None, false, false))
         }
         other => Outcome::Refused(format!(
-            "refused: commands_status has no action {other:?}: its actions are output (the \
-             default) and stop"
+            "refused: run_status has no action {other:?}: its actions are output (the default) \
+             and stop"
         )),
     }
 }
@@ -857,7 +862,7 @@ pub async fn commands_status(daemon: &Daemon, agent: &str, args: Value) -> Outco
 /// The run, refused unless the agent started it.
 fn own(daemon: &Daemon, agent: &str, id: &str) -> Result<Run, Outcome> {
     match daemon.read(|store| store.run(id)) {
-        Ok(Some(run)) if run.agent == agent => Ok(run),
+        Ok(Some(run)) if run.agent.as_deref() == Some(agent) => Ok(run),
         Ok(_) => Err(Outcome::Refused(format!(
             "refused: {id} is not a run this agent started"
         ))),
@@ -904,9 +909,9 @@ fn describe(
     let mut text = format!("run {}: {label} {state} after {seconds:.1} s", run.id);
     if end.is_none() && answer_of_run {
         text.push_str(&format!(
-            "\nit keeps going: read it with commands_status {{\"run\": \"{id}\"}}, stop it with \
-             commands_status {{\"run\": \"{id}\", \"action\": \"stop\"}}; Flottille tells you \
-             when it ends",
+            "\nit keeps going: read it with run_status {{\"run\": \"{id}\"}}, stop it with \
+             run_status {{\"run\": \"{id}\", \"action\": \"stop\"}}; Flottille tells you when \
+             it ends",
             id = run.id
         ));
     }
@@ -924,13 +929,13 @@ fn describe(
     if from > 0 {
         let earlier = from.saturating_sub(tail) + 1;
         about.push_str(&format!(
-            "; earlier lines: commands_status {{\"run\": \"{}\", \"start\": {earlier}}}",
+            "; earlier lines: run_status {{\"run\": \"{}\", \"start\": {earlier}}}",
             run.id
         ));
     }
     if to < lines.len() {
         about.push_str(&format!(
-            "; later lines: commands_status {{\"run\": \"{}\", \"start\": {}}}",
+            "; later lines: run_status {{\"run\": \"{}\", \"start\": {}}}",
             run.id,
             to + 1
         ));
@@ -1016,8 +1021,8 @@ pub fn settle_at_start(daemon: &Daemon) {
                 &run.output,
                 (
                     "run.ended",
-                    json!({"agent": run.agent, "run": run.id, "state": "interrupted",
-                        "exit_code": null, "signal": null}),
+                    json!({"agent": run.agent, "project": run.project, "run": run.id,
+                        "state": "interrupted", "exit_code": null, "signal": null}),
                 ),
             )?;
             Ok(((), event))
@@ -1034,7 +1039,7 @@ pub async fn stop_runs_of(daemon: &Daemon, agent: &str) {
         .lock()
         .unwrap()
         .iter()
-        .filter(|(_, going)| going.run.agent == agent)
+        .filter(|(_, going)| going.run.agent.as_deref() == Some(agent))
         .map(|(id, _)| id.clone())
         .collect();
     futures::future::join_all(ids.iter().map(|id| stop(daemon, id, RunState::Stopped))).await;

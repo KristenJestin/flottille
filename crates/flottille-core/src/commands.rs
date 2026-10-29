@@ -108,7 +108,7 @@ Open the pull requests of this workspace: one per repository whose branch has co
 none for the others. You change no file and make no commit.
 
 1. Report before anything else. For each repository of the workspace (the list above), read, in
-   that repository (`commands_run` with its `repository`):
+   that repository (`run` with its `repository`):
    - uncommitted work: `git status --porcelain`;
    - commits on no remote: `git log --oneline HEAD --not --remotes`;
    - commits ahead of its base: `git log --oneline <remote>/<base>..HEAD`;
@@ -145,7 +145,7 @@ follows its merges is done. The repositories of one level are merged together.
    or whose review asks for changes, unless it is waived.
 2. Then, level by level:
    - a branch behind its base is brought up to date first: `git fetch <remote> <base>`, `git rebase
-     <remote>/<base>`, the project's checks for it (`commands_list`, `commands_run`), then `git push
+     <remote>/<base>`, the project's checks for it (its tasks, `tasks` and `run`), then `git push
      --force-with-lease <remote> <branch>`, and its checks are read again. A conflict you cannot
      resolve with certainty is `git rebase --abort` and a question to the user;
    - merge the level's pull requests with `forge_write` `pr-merge-squash`, one after the other;
@@ -166,7 +166,7 @@ const CLOSE: &str = "\
 Close this workspace: check that nothing in it would be lost, then remove it.
 
 1. Audit each repository of the workspace (the list above), reading in that repository
-   (`commands_run` with its `repository`):
+   (`run` with its `repository`):
    - uncommitted work: `git status --porcelain`;
    - commits on no remote: `git log --oneline HEAD --not --remotes`;
    - commits of its own: `git log --oneline <remote>/<base>..HEAD`;

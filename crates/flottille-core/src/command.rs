@@ -3,7 +3,7 @@
 //! Flottille never hands a line to a shell: it splits it here and spawns the first word with the
 //! others as its arguments. Anything a shell would read differently (a pipe, a redirection, a
 //! variable, a glob) is refused rather than quoted around, so that a line means what it says.
-//! The setup's `run` steps use it, and so will the agents' `commands_run`.
+//! The setup's `run` steps use it, and so does the agents' `run`.
 
 /// The words of `line`, or the sentence refusing it.
 ///

@@ -337,13 +337,64 @@ const MIGRATIONS: &[&str] = &[
             json_extract(action, '$.command'))
         WHERE json_type(action, '$.command') IS NOT NULL;
 ",
+    "
+    -- Tasks (`docs/tools.md`, \"Tasks\"): the user runs a task from the window too, a run of no
+    -- agent's, kept with its project. The command tools take the names of what they run: an agent
+    -- made before keeps its tools under their new names, in their order, and a request its tool's.
+    CREATE TABLE runs_by_project (
+        id         TEXT PRIMARY KEY,
+        agent      TEXT REFERENCES agents (id) ON DELETE CASCADE,
+        name       TEXT,
+        line       TEXT NOT NULL,
+        folder     TEXT NOT NULL,
+        state      TEXT NOT NULL,
+        exit_code  INTEGER,
+        signal     INTEGER,
+        started_at INTEGER NOT NULL,
+        ended_at   INTEGER,
+        output     TEXT NOT NULL,
+        dismissed  INTEGER NOT NULL DEFAULT 0,
+        project    TEXT NOT NULL DEFAULT ''
+    ) STRICT;
+    INSERT INTO runs_by_project (id, agent, name, line, folder, state, exit_code, signal,
+            started_at, ended_at, output, dismissed, project)
+        SELECT r.id, r.agent, r.name, r.line, r.folder, r.state, r.exit_code, r.signal,
+            r.started_at, r.ended_at, r.output, r.dismissed, coalesce(a.project, '')
+        FROM runs r LEFT JOIN agents a ON a.id = r.agent;
+    DROP TABLE runs;
+    ALTER TABLE runs_by_project RENAME TO runs;
+    CREATE INDEX runs_by_agent ON runs (agent);
+    CREATE INDEX runs_of_users ON runs (project) WHERE agent IS NULL;
+    UPDATE agents SET tools = (
+        SELECT json_group_array(name) FROM (
+            SELECT CASE value
+                WHEN 'mcp__flottille__commands_list' THEN 'mcp__flottille__tasks'
+                WHEN 'mcp__flottille__commands_run' THEN 'mcp__flottille__run'
+                WHEN 'mcp__flottille__commands_status' THEN 'mcp__flottille__run_status'
+                WHEN 'flottille_commands_list' THEN 'flottille_tasks'
+                WHEN 'flottille_commands_run' THEN 'flottille_run'
+                WHEN 'flottille_commands_status' THEN 'flottille_run_status'
+                ELSE value
+            END AS name FROM json_each(agents.tools) ORDER BY key
+        )
+    );
+    UPDATE approval_requests
+        SET arguments = json_set(json_remove(arguments, '$.command'), '$.task',
+            json_extract(arguments, '$.command'))
+        WHERE tool = 'commands_run' AND json_type(arguments, '$.command') IS NOT NULL;
+    UPDATE approval_requests SET tool = CASE tool
+        WHEN 'commands_run' THEN 'run'
+        WHEN 'commands_status' THEN 'run_status'
+        ELSE tool
+    END;
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
     identity, held_by, forwards, state, decision, created_at, decided_at, kind, says, judgement";
 
 const RUN_COLUMNS: &str = "id, agent, name, line, folder, state, exit_code, signal, started_at, \
-    ended_at, output, dismissed";
+    ended_at, output, dismissed, project";
 
 const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, state, state_reason, \
     created_at, updated_at, active_at, ended_at, chosen_model, chosen_effort, chosen_mode, \
@@ -933,7 +984,7 @@ impl Store {
         transaction.execute(
             &format!(
                 "INSERT INTO runs ({RUN_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, \
-                 ?10, ?11, ?12)"
+                 ?10, ?11, ?12, ?13)"
             ),
             params![
                 run.id,
@@ -948,6 +999,7 @@ impl Store {
                 run.ended_at,
                 run.output,
                 run.dismissed,
+                run.project,
             ],
         )?;
         let event = append_event(&transaction, event.0, event.1)?;
@@ -1021,7 +1073,7 @@ impl Store {
     pub fn ended_runs_of(&self, agents: &[String], limit: usize, tail: usize) -> Result<Vec<Run>> {
         let mut statement = self.connection.prepare_cached(&format!(
             "SELECT id, agent, name, line, folder, state, exit_code, signal, started_at, \
-             ended_at, substr(output, -{tail}), dismissed FROM runs \
+             ended_at, substr(output, -{tail}), dismissed, project FROM runs \
              WHERE agent = ?1 AND state != 'running' AND dismissed = 0 \
              ORDER BY ended_at DESC, id DESC LIMIT ?2"
         ))?;
@@ -1037,11 +1089,27 @@ impl Store {
         Ok(found)
     }
 
+    /// The runs the user started in the project, of no agent: those running, then the `limit`
+    /// that ended most recently and were not dismissed, each with the last `tail` characters of
+    /// its output; the oldest started first.
+    pub fn user_runs_of(&self, project: &str, limit: usize, tail: usize) -> Result<Vec<Run>> {
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT id, agent, name, line, folder, state, exit_code, signal, started_at, \
+             ended_at, substr(output, -{tail}), dismissed, project FROM runs \
+             WHERE agent IS NULL AND project = ?1 AND (state = 'running' OR (dismissed = 0 \
+             AND id IN (SELECT id FROM runs WHERE agent IS NULL AND project = ?1 \
+             AND state != 'running' AND dismissed = 0 ORDER BY ended_at DESC, id DESC LIMIT ?2))) \
+             ORDER BY started_at, id"
+        ))?;
+        let rows = statement.query_map(params![project, limit as u64], run_row)?;
+        rows.map(|row| row?).collect()
+    }
+
     /// The agents that have runs, ended or not.
     pub fn agents_with_runs(&self) -> Result<Vec<String>> {
         let mut statement = self
             .connection
-            .prepare_cached("SELECT DISTINCT agent FROM runs")?;
+            .prepare_cached("SELECT DISTINCT agent FROM runs WHERE agent IS NOT NULL")?;
         let rows = statement.query_map([], |row| row.get(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -1798,6 +1866,7 @@ fn run_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Run>> {
         ended_at: row.get(9)?,
         output: row.get(10)?,
         dismissed: row.get(11)?,
+        project: row.get(12)?,
     }))
 }
 
@@ -2206,13 +2275,14 @@ mod tests {
 
         let store = Store::open(&path).unwrap();
 
+        // Renamed again since by tasks (#131): `run` and `run_status`.
         let tools = |id: &str| store.agent(id).unwrap().unwrap().tools;
         assert_eq!(
             tools("000000000001"),
             [
                 "mcp__flottille__fs_read",
-                "mcp__flottille__commands_run",
-                "mcp__flottille__commands_status",
+                "mcp__flottille__run",
+                "mcp__flottille__run_status",
                 "mcp__flottille__report"
             ]
         );
@@ -2221,23 +2291,17 @@ mod tests {
             [
                 "flottille_agent_launch",
                 "flottille_agent_status",
-                "flottille_commands_status",
+                "flottille_run_status",
                 "flottille_report"
             ]
         );
         assert_eq!(
             tools("000000000003"),
-            [
-                "mcp__flottille__agent_status",
-                "mcp__flottille__commands_status"
-            ]
+            ["mcp__flottille__agent_status", "mcp__flottille__run_status"]
         );
         assert_eq!(
             tools("000000000004"),
-            [
-                "mcp__flottille__agent_status",
-                "mcp__flottille__commands_status"
-            ]
+            ["mcp__flottille__agent_status", "mcp__flottille__run_status"]
         );
     }
 
@@ -2745,6 +2809,104 @@ mod tests {
             )
             .unwrap();
         assert_eq!(tables, 0);
+    }
+
+    #[test]
+    fn the_migration_of_tasks_renames_the_command_tools_and_keeps_the_runs_with_their_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let old = Connection::open(&path).unwrap();
+        let previous = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("CREATE TABLE runs_by_project"))
+            .unwrap();
+        for migration in &MIGRATIONS[..previous] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.pragma_update(None, "user_version", previous).unwrap();
+        let agent = an_agent();
+        old.execute_batch(&format!(
+            "INSERT INTO agents (id, provider, role, project, folder, state, created_at, \
+             updated_at, instructions, tools) VALUES ('{}', 'claude', 'lead', 'app', '/w', \
+             'idle', 1, 1, 'i', '[\"mcp__flottille__fs_read\",\"mcp__flottille__commands_list\",\
+             \"mcp__flottille__commands_run\",\"mcp__flottille__commands_status\",\
+             \"mcp__flottille__skill_read\"]'); \
+             INSERT INTO approval_requests (number, agent, tool, arguments, shown, reasons, \
+             sensitive, identity, held_by, forwards, state, created_at, kind) VALUES \
+             (1, '{0}', 'commands_run', '{{\"command\":\"test\"}}', '{{}}', '[]', 0, 'x', \
+             'user', '[]', 'pending', 1, 'call'); \
+             INSERT INTO runs (id, agent, name, line, folder, state, started_at, output) VALUES \
+             ('r1', '{0}', 'test', 'make test', '/w', 'exited', 5, 'ok');",
+            agent.id
+        ))
+        .unwrap();
+        drop(old);
+
+        let store = Store::open(&path).unwrap();
+
+        assert_eq!(
+            store.agent(&agent.id).unwrap().unwrap().tools,
+            [
+                "mcp__flottille__fs_read",
+                "mcp__flottille__tasks",
+                "mcp__flottille__run",
+                "mcp__flottille__run_status",
+                "mcp__flottille__skill_read",
+            ]
+        );
+        let request = store.request(1).unwrap().unwrap();
+        assert_eq!(request.tool, "run");
+        assert_eq!(request.arguments, json!({"task": "test"}));
+        let run = store.run("r1").unwrap().unwrap();
+        assert_eq!(run.agent.as_deref(), Some(agent.id.as_str()));
+        assert_eq!(run.project, "app");
+    }
+
+    #[test]
+    fn a_task_the_user_ran_is_a_run_of_no_agent_listed_with_its_project() {
+        let mut store = Store::open_in_memory().unwrap();
+        let run = |id: &str, project: &str, at: u64| Run {
+            id: id.into(),
+            agent: None,
+            name: Some("test".into()),
+            line: "make test".into(),
+            folder: "/p".into(),
+            state: RunState::Running,
+            exit_code: None,
+            signal: None,
+            started_at: at,
+            ended_at: None,
+            output: String::new(),
+            dismissed: false,
+            project: project.into(),
+        };
+        for (id, project, at) in [("r1", "app", 5), ("r2", "app", 6), ("r3", "other", 7)] {
+            store
+                .create_run(&run(id, project, at), ("run.started", json!({})))
+                .unwrap();
+        }
+        store
+            .end_run(
+                "r1",
+                RunState::Exited,
+                Some(0),
+                None,
+                "done\n",
+                ("run.ended", json!({})),
+            )
+            .unwrap();
+        let ids = |runs: Vec<Run>| runs.into_iter().map(|r| r.id).collect::<Vec<_>>();
+
+        assert_eq!(
+            ids(store.user_runs_of("app", 30, 100).unwrap()),
+            ["r1", "r2"]
+        );
+        assert_eq!(ids(store.user_runs_of("other", 30, 100).unwrap()), ["r3"]);
+        store
+            .dismiss_run("r1", ("run.dismissed", json!({"run": "r1"})))
+            .unwrap();
+        assert_eq!(ids(store.user_runs_of("app", 30, 100).unwrap()), ["r2"]);
+        assert!(store.agents_with_runs().unwrap().is_empty());
     }
 
     #[test]
@@ -3359,7 +3521,7 @@ mod tests {
             .unwrap();
         let run = Run {
             id: "r1".into(),
-            agent: an_agent().id,
+            agent: Some(an_agent().id),
             name: Some("test".into()),
             line: "cargo test".into(),
             folder: "/w".into(),
@@ -3370,6 +3532,7 @@ mod tests {
             ended_at: None,
             output: String::new(),
             dismissed: false,
+            project: "app".into(),
         };
         store.create_run(&run, ("run.started", json!({}))).unwrap();
         assert_eq!(store.run("r1").unwrap().unwrap(), run);
@@ -3418,7 +3581,7 @@ mod tests {
         for (id, at) in [("r1", 5), ("r2", 6)] {
             let run = Run {
                 id: id.into(),
-                agent: agent.clone(),
+                agent: Some(agent.clone()),
                 name: None,
                 line: "sleep 1".into(),
                 folder: "/w".into(),
@@ -3429,6 +3592,7 @@ mod tests {
                 ended_at: None,
                 output: String::new(),
                 dismissed: false,
+                project: "app".into(),
             };
             store.create_run(&run, ("run.started", json!({}))).unwrap();
         }
@@ -3471,7 +3635,7 @@ mod tests {
         for (id, started_at, ended_at, output) in runs {
             let run = Run {
                 id: (*id).into(),
-                agent: agent.clone(),
+                agent: Some(agent.clone()),
                 name: None,
                 line: "make".into(),
                 folder: "/w".into(),
@@ -3486,6 +3650,7 @@ mod tests {
                 ended_at: *ended_at,
                 output: (*output).into(),
                 dismissed: false,
+                project: "app".into(),
             };
             store.create_run(&run, ("run.started", json!({}))).unwrap();
         }

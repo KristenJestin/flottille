@@ -188,12 +188,9 @@ fn harmless_calls_pass_in_ask_and_in_auto_without_the_judge() {
             "fs_write",
             json!({"path": "src/login.rs", "content": "fn login() {}\n"}),
         ));
-        let status = done(mcp.call("commands_run", json!({"line": "git status"})));
+        let status = done(mcp.call("run", json!({"line": "git status"})));
         assert!(status.contains("exited with code 0"), "{mode}: {status}");
-        done(mcp.call(
-            "commands_run",
-            json!({"line": "pgrep -f nothing-runs-like-this"}),
-        ));
+        done(mcp.call("run", json!({"line": "pgrep -f nothing-runs-like-this"})));
     }
     assert!(judge_prompts(&user).is_empty(), "the judge was asked");
 }
@@ -204,10 +201,7 @@ fn a_call_to_judge_in_ask_makes_a_card_and_never_reaches_the_judge() {
     let (id, mcp, _) = session(&user, false);
     set_mode(&user, &id, "ask");
 
-    let request = held(
-        &user,
-        mcp.call("commands_run", json!({"line": "touch made.txt"})),
-    );
+    let request = held(&user, mcp.call("run", json!({"line": "touch made.txt"})));
 
     assert_eq!(request["class"], "judge");
     assert!(request["judgement"].is_null(), "{request}");
@@ -243,7 +237,7 @@ fn in_auto_the_judge_allows_a_call_and_it_is_done_at_once_with_its_verdict_recor
 
     let started = Instant::now();
     let answer = done(mcp.call(
-        "commands_run",
+        "run",
         json!({"line": "touch made.txt", "why": "the build needs the file"}),
     ));
     let took = started.elapsed();
@@ -272,7 +266,7 @@ fn a_call_the_judge_let_through_is_recorded_with_the_key_the_window_matches_its_
     let (id, mcp, _) = session(&user, false);
 
     done(mcp.call_keyed(
-        "commands_run",
+        "run",
         json!({"line": "touch made.txt", "why": "the build needs the file"}),
         "toolu_card",
     ));
@@ -287,10 +281,7 @@ fn in_auto_the_judge_asks_and_the_card_and_the_command_line_say_its_reason() {
     let user = User::with_fake_agent().with_judge(says("ask", "Nothing in the task asks for it."));
     let (_, mcp, folder) = session(&user, false);
 
-    let request = held(
-        &user,
-        mcp.call("commands_run", json!({"line": "touch made.txt"})),
-    );
+    let request = held(&user, mcp.call("run", json!({"line": "touch made.txt"})));
 
     assert_eq!(request["class"], "judge");
     assert_eq!(
@@ -311,10 +302,7 @@ fn an_answer_of_the_judge_that_cannot_be_read_asks() {
     let user = User::with_fake_agent().with_judge(json!([{"say": "Looks fine to me."}]));
     let (_, mcp, _) = session(&user, false);
 
-    let request = held(
-        &user,
-        mcp.call("commands_run", json!({"line": "touch made.txt"})),
-    );
+    let request = held(&user, mcp.call("run", json!({"line": "touch made.txt"})));
 
     assert_eq!(request["judgement"]["verdict"], "failed", "{request}");
     assert!(
@@ -334,10 +322,7 @@ fn a_judge_that_never_answers_asks_once_its_time_is_up() {
     let (_, mcp, _) = session(&user, false);
 
     let started = Instant::now();
-    let request = held(
-        &user,
-        mcp.call("commands_run", json!({"line": "touch made.txt"})),
-    );
+    let request = held(&user, mcp.call("run", json!({"line": "touch made.txt"})));
 
     assert!(started.elapsed() >= Duration::from_millis(800));
     assert!(started.elapsed() < Duration::from_secs(10));
@@ -356,10 +341,7 @@ fn a_judge_that_says_anything_but_allow_or_ask_asks() {
     let user = User::with_fake_agent().with_judge(says("deny", "No."));
     let (_, mcp, _) = session(&user, false);
 
-    let request = held(
-        &user,
-        mcp.call("commands_run", json!({"line": "touch made.txt"})),
-    );
+    let request = held(&user, mcp.call("run", json!({"line": "touch made.txt"})));
 
     assert_eq!(request["judgement"]["verdict"], "failed", "{request}");
 }
@@ -370,10 +352,7 @@ fn without_a_judge_auto_asks_as_ask_does() {
     let (id, mcp, _) = session(&user, false);
     assert_eq!(mode_of(&user, &id), "auto");
 
-    let request = held(
-        &user,
-        mcp.call("commands_run", json!({"line": "touch made.txt"})),
-    );
+    let request = held(&user, mcp.call("run", json!({"line": "touch made.txt"})));
 
     assert_eq!(request["class"], "judge");
     assert!(request["judgement"].is_null(), "{request}");
@@ -386,11 +365,8 @@ fn a_base_call_in_auto_makes_a_card_and_never_reaches_the_judge() {
 
     for (tool, args) in [
         ("fs_read", json!({"path": ".env"})),
-        (
-            "commands_run",
-            json!({"line": "git push --force origin HEAD"}),
-        ),
-        ("commands_run", json!({"line": "rm -rf .git"})),
+        ("run", json!({"line": "git push --force origin HEAD"})),
+        ("run", json!({"line": "rm -rf .git"})),
     ] {
         let request = held(&user, mcp.call(tool, args.clone()));
         assert_eq!(request["class"], "base", "{args}");
@@ -417,7 +393,7 @@ fn shell_syntax_and_a_malformed_call_stay_refused_in_both_modes() {
 
     for mode in ["auto", "ask"] {
         set_mode(&user, &id, mode);
-        let shell = mcp.call("commands_run", json!({"line": "ls | wc -l"}));
+        let shell = mcp.call("run", json!({"line": "ls | wc -l"}));
         assert!(shell.error, "{mode}: {}", shell.text);
         let malformed = mcp.call(
             "forge_write",
@@ -528,7 +504,7 @@ fn the_judge_runs_with_no_tool_and_no_mcp_server() {
     let user = User::with_fake_agent().with_allowing_judge();
     let (_, mcp, _) = session(&user, false);
 
-    done(mcp.call("commands_run", json!({"line": "touch made.txt"})));
+    done(mcp.call("run", json!({"line": "touch made.txt"})));
 
     let opened: Vec<Value> = user
         .judge_received()
@@ -597,14 +573,11 @@ fn a_harmless_command_whose_script_pushes_fails_to_push() {
     text.push_str("\n[commands.check]\nline = \"./check.sh\"\n");
     std::fs::write(&file, text).unwrap();
 
-    let ran = done(mcp.call("commands_run", json!({"command": "check"})));
+    let ran = done(mcp.call("run", json!({"task": "check"})));
 
     assert!(!ran.contains("exited with code 0"), "{ran}");
     assert!(!remote_has(&user, "sneaked"));
-    assert!(
-        judge_prompts(&user).is_empty(),
-        "the catalogue command was judged"
-    );
+    assert!(judge_prompts(&user).is_empty(), "the task was judged");
 }
 
 #[test]
@@ -613,7 +586,7 @@ fn a_push_the_judge_allows_reaches_the_remote() {
     let (_, mcp, _) = session(&user, false);
 
     let pushed = done(mcp.call(
-        "commands_run",
+        "run",
         json!({"line": "git push origin HEAD:refs/heads/allowed"}),
     ));
 
@@ -627,7 +600,7 @@ fn a_line_longer_than_the_judge_s_input_asks_without_the_judge() {
     let (_, mcp, _) = session(&user, false);
     let line = format!("touch {}", "ab ".repeat(3_000));
 
-    let request = held(&user, mcp.call("commands_run", json!({"line": line})));
+    let request = held(&user, mcp.call("run", json!({"line": line})));
 
     assert_eq!(request["class"], "judge", "{request}");
     assert_eq!(request["judgement"]["verdict"], "failed", "{request}");
@@ -647,7 +620,7 @@ fn a_long_line_reaches_the_judge_whole() {
     let (_, mcp, _) = session(&user, false);
     let line = format!("touch {}z", "ab ".repeat(500));
 
-    let _ = mcp.call("commands_run", json!({"line": line}));
+    let _ = mcp.call("run", json!({"line": line}));
 
     let prompts = judge_prompts(&user);
     assert_eq!(prompts.len(), 1);
@@ -693,7 +666,7 @@ fn the_judge_s_own_child_processes_end_with_it() {
         let sleepers = judge_leaving_a_child(&user);
         let (_, mcp, _) = session(&user, false);
 
-        let _ = mcp.call("commands_run", json!({"line": "touch made.txt"}));
+        let _ = mcp.call("run", json!({"line": "touch made.txt"}));
 
         let pid: u32 = std::fs::read_to_string(&sleepers)
             .unwrap()
@@ -717,12 +690,12 @@ fn switching_the_root_to_ask_makes_a_child_s_next_call_a_card() {
     assert!(!launched.error, "{}", launched.text);
     let (url, authorization) = server_of(&user, opened);
     let child = Mcp::initialize(&url, &authorization);
-    done(child.call("commands_run", json!({"line": "touch first.txt"})));
+    done(child.call("run", json!({"line": "touch first.txt"})));
     assert_eq!(judge_prompts(&user).len(), 1);
 
     set_mode(&user, &lead, "ask");
 
-    let answer = child.call("commands_run", json!({"line": "touch second.txt"}));
+    let answer = child.call("run", json!({"line": "touch second.txt"}));
     assert!(!answer.error, "{}", answer.text);
     assert!(answer.text.starts_with("Waiting for"), "{}", answer.text);
     assert_eq!(judge_prompts(&user).len(), 1, "the judge was asked");
@@ -740,7 +713,7 @@ fn base_in_auto(user: &User, mcp: &Mcp, calls: &[(&str, Value)]) {
 }
 
 fn line(text: &str) -> (&'static str, Value) {
-    ("commands_run", json!({ "line": text }))
+    ("run", json!({ "line": text }))
 }
 
 #[test]
@@ -851,7 +824,7 @@ fn a_program_in_the_user_s_bin_folders_is_not_taken_for_installed() {
     .unwrap();
     let (_, mcp, _) = session(&user, false);
 
-    done(mcp.call("commands_run", json!({"line": "ls"})));
+    done(mcp.call("run", json!({"line": "ls"})));
 
     let prompts = judge_prompts(&user);
     assert_eq!(prompts.len(), 1, "a harmless call, never judged");
@@ -895,12 +868,12 @@ fn the_path_of_a_run_is_resolved_in_the_repository_it_runs_in() {
     let (url, authorization) = server_of(&user, opened);
     let mcp = Mcp::initialize(&url, &authorization);
 
-    done(mcp.call("commands_run", json!({"line": "ls", "repository": "api"})));
+    done(mcp.call("run", json!({"line": "ls", "repository": "api"})));
     assert!(
         judge_prompts(&user).is_empty(),
         "the system's ls was judged"
     );
-    done(mcp.call("commands_run", json!({"line": "ls", "repository": "web"})));
+    done(mcp.call("run", json!({"line": "ls", "repository": "web"})));
 
     let prompts = judge_prompts(&user);
     assert_eq!(prompts.len(), 1, "web's own ls, taken for the system's");

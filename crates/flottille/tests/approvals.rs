@@ -204,13 +204,13 @@ fn approving_it_performs_the_action_and_stores_the_result() {
 fn denying_it_stores_the_refusal_for_the_agent() {
     let user = User::with_fake_agent();
     let (_, mcp, _) = session(&user);
-    let number = held(mcp.call("commands_run", json!({"line": "cat /etc/hostname"})));
+    let number = held(mcp.call("run", json!({"line": "cat /etc/hostname"})));
 
     cli(&user, &["deny", &number.to_string()]).unwrap();
 
     assert_eq!(
         settled(&user, number).body,
-        format!("Request #{number} (commands_run) was refused by the user. Nothing was done.")
+        format!("Request #{number} (run) was refused by the user. Nothing was done.")
     );
     assert!(approvals(&user).is_empty());
     let error = cli(&user, &["approve", &number.to_string()]).unwrap_err();
@@ -237,7 +237,7 @@ fn an_approval_allows_that_call_once_and_the_same_call_asks_again() {
     let (_, mcp, _) = session(&user);
     std::fs::write(user.path("shared.txt"), "shared\n").unwrap();
     let line = format!("cat {}", user.path("shared.txt").display());
-    let number = held(mcp.call("commands_run", json!({"line": line})));
+    let number = held(mcp.call("run", json!({"line": line})));
 
     let said = cli(&user, &["approve", &number.to_string()]).unwrap();
     assert!(said.contains("is allowed"), "{said}");
@@ -248,7 +248,7 @@ fn an_approval_allows_that_call_once_and_the_same_call_asks_again() {
     );
 
     // Nothing is remembered: the same call asks again.
-    let next = held(mcp.call("commands_run", json!({"line": line})));
+    let next = held(mcp.call("run", json!({"line": line})));
     assert_ne!(next, number);
     let error = cli(&user, &["approve", &next.to_string(), "--for-tree"]).unwrap_err();
     assert!(
@@ -263,7 +263,7 @@ fn an_allowed_request_is_checked_again_before_it_is_performed() {
     let (_, mcp, _) = session(&user);
     std::fs::write(user.path("shared.txt"), "shared\n").unwrap();
     let line = format!("cat {}", user.path("shared.txt").display());
-    let number = held(mcp.call("commands_run", json!({"line": line})));
+    let number = held(mcp.call("run", json!({"line": line})));
     // Meanwhile the project comes to never allow it.
     let file = user.project_file("app");
     let text: String = std::fs::read_to_string(&file)
@@ -279,7 +279,7 @@ fn an_allowed_request_is_checked_again_before_it_is_performed() {
     let body = settled(&user, number).body;
     assert!(
         body.starts_with(&format!(
-            "Request #{number} (commands_run) was not executed: the situation changed since you \
+            "Request #{number} (run) was not executed: the situation changed since you \
              allowed it: the project's never list holds cat"
         )),
         "{body}"

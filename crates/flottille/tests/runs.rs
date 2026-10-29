@@ -12,7 +12,7 @@ use common::User;
 use common::mcp::{Answer, Mcp, server_of};
 use serde_json::{Value, json};
 
-/// The catalogue the scenarios run: scripts of the workspace, written by `session`.
+/// The tasks the scenarios run: scripts of the workspace, written by `session`.
 const CATALOGUE: &str = "\n[commands.ends]\nline = \"./ends.sh\"\n\
     [commands.quick]\nline = \"./quick.sh\"\n\
     [commands.server]\nline = \"./server.sh\"\nserve = true\n\
@@ -100,7 +100,7 @@ fn ok(answer: Answer) -> String {
     answer.text
 }
 
-/// The id of the run an answer of `commands_run` names.
+/// The id of the run an answer of `run` names.
 fn run_id(text: &str) -> String {
     text.strip_prefix("run ")
         .and_then(|rest| rest.split(':').next())
@@ -108,12 +108,9 @@ fn run_id(text: &str) -> String {
         .to_owned()
 }
 
-/// Runs a catalogue command, leaving the call after one second: its run's id.
+/// Runs a task, leaving the call after one second: its run's id.
 fn start(mcp: &Mcp, command: &str) -> String {
-    run_id(&ok(mcp.call(
-        "commands_run",
-        json!({"command": command, "timeout": 1}),
-    )))
+    run_id(&ok(mcp.call("run", json!({"task": command, "timeout": 1}))))
 }
 
 /// Every prompt the fake agent was sent, oldest first.
@@ -200,7 +197,7 @@ fn a_command_that_ended_within_its_call_delivers_nothing() {
     let user = User::with_fake_agent();
     let (_, mcp, _) = session(&user);
 
-    let answer = ok(mcp.call("commands_run", json!({"command": "quick"})));
+    let answer = ok(mcp.call("run", json!({"task": "quick"})));
 
     assert!(answer.contains("exited with code 0"), "{answer}");
     never_prompted(&user, "[flottille:command-ended]");
@@ -237,7 +234,7 @@ fn a_command_the_agent_stops_itself_delivers_nothing() {
     let (_, mcp, _) = session(&user);
     let run = start(&mcp, "server");
 
-    ok(mcp.call("commands_status", json!({"run": run, "action": "stop"})));
+    ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
 
     never_prompted(&user, "[flottille:command-ended]");
 }
@@ -281,7 +278,7 @@ fn the_session_lists_a_running_command_and_its_last_line() {
     // By project, the same.
     let by_project = user.call("run.list", json!({"project": "app"})).unwrap();
     assert_eq!(by_project["commands"][0]["run"], run);
-    ok(mcp.call("commands_status", json!({"run": run, "action": "stop"})));
+    ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
 }
 
 #[test]
@@ -332,7 +329,7 @@ fn a_dismissed_command_is_refused_while_it_runs_and_a_stranger_is_not_found() {
         .call("run.stop", json!({"run": "nothing"}))
         .unwrap_err();
     assert_eq!(missing.0, "not-found", "{missing:?}");
-    ok(mcp.call("commands_status", json!({"run": run, "action": "stop"})));
+    ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
 }
 
 #[test]
@@ -359,24 +356,24 @@ fn the_output_of_a_run_is_read_masked_and_whole() {
     assert_eq!(read["run"], run);
     assert_eq!(read["state"], "running");
     assert_eq!(read["output"], "listening on 8080");
-    ok(mcp.call("commands_status", json!({"run": run, "action": "stop"})));
+    ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
 }
 
 #[test]
-fn flottille_commands_lists_the_running_commands_of_a_project_and_stops_one() {
+fn flottille_runs_lists_the_running_commands_of_a_project_and_stops_one_and_commands_still_does() {
     let user = User::with_fake_agent();
     let (_, mcp, _) = session(&user);
     let run = start(&mcp, "server");
 
-    let text = cli(&user, &["commands", "list", "app"]).unwrap();
+    let text = cli(&user, &["runs", "list", "app"]).unwrap();
     assert!(text.contains(&run), "{text}");
     assert!(text.contains("./server.sh"), "{text}");
     assert!(text.contains("listening on 8080"), "{text}");
     let json: Value =
-        serde_json::from_str(&cli(&user, &["commands", "list", "app", "--json"]).unwrap()).unwrap();
+        serde_json::from_str(&cli(&user, &["runs", "list", "app", "--json"]).unwrap()).unwrap();
     assert_eq!(json["commands"][0]["run"], run);
 
-    let said = cli(&user, &["commands", "stop", &run]).unwrap();
+    let said = cli(&user, &["runs", "stop", &run]).unwrap();
     assert!(said.contains("stopped"), "{said}");
     let after = cli(&user, &["commands", "list", "app"]).unwrap();
     assert!(after.contains("No command is running"), "{after}");
@@ -401,7 +398,7 @@ fn a_command_is_listed_with_the_tail_of_its_output() {
     let running = listed(&user, &agent);
     let running = running.iter().find(|c| c["run"] == live).unwrap();
     assert_eq!(running["tail"], json!(["listening on 8080"]), "{running}");
-    ok(mcp.call("commands_status", json!({"run": live, "action": "stop"})));
+    ok(mcp.call("run_status", json!({"run": live, "action": "stop"})));
 }
 
 #[test]
@@ -410,8 +407,7 @@ fn a_user_stop_while_the_call_waits_is_told_in_the_call_s_answer() {
     let (agent, mcp, _) = session(&user);
 
     let answer = std::thread::scope(|scope| {
-        let call =
-            scope.spawn(|| mcp.call("commands_run", json!({"command": "ends", "timeout": 30})));
+        let call = scope.spawn(|| mcp.call("run", json!({"task": "ends", "timeout": 30})));
         eventually("the command to run", || !listed(&user, &agent).is_empty());
         let run = listed(&user, &agent)[0]["run"].as_str().unwrap().to_owned();
         user.call("run.stop", json!({"run": run})).unwrap();
@@ -426,7 +422,7 @@ fn a_user_stop_while_the_call_waits_is_told_in_the_call_s_answer() {
     );
     // The agent's own stop says what it is: its own.
     let run = start(&mcp, "server");
-    let own = ok(mcp.call("commands_status", json!({"run": run, "action": "stop"})));
+    let own = ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
     assert!(own.contains("was stopped after"), "{own}");
 }
 
@@ -434,7 +430,7 @@ fn a_user_stop_while_the_call_waits_is_told_in_the_call_s_answer() {
 fn the_runs_of_a_session_are_pruned_when_it_is_forgotten_for_good() {
     let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_CLOCK", "1");
     let (agent, mcp, _) = session(&user);
-    let quick = run_id(&ok(mcp.call("commands_run", json!({"command": "quick"}))));
+    let quick = run_id(&ok(mcp.call("run", json!({"task": "quick"}))));
     let server = start(&mcp, "server");
     user.call("run.stop", json!({"run": server})).unwrap();
     assert!(user.call("run.output", json!({"run": quick})).is_ok());

@@ -1206,7 +1206,7 @@ fn in_use(daemon: &Daemon, workspace: &Workspace, ours: &str) -> Result<Vec<Stri
         }
     }
     for run in daemon.read(Store::running_runs)? {
-        if run.folder.starts_with(&workspace.folder) && theirs(&run.agent) {
+        if run.folder.starts_with(&workspace.folder) && run.agent.as_deref().is_none_or(&theirs) {
             used.push(format!(
                 "the command run {} ({}) runs in it",
                 run.id, run.line

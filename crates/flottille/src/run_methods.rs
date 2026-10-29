@@ -1,7 +1,7 @@
-//! The commands of the agents, as the user's clients read them (`docs/protocol.md`, "The run
-//! methods"): the runs of a session, a project or the whole daemon with the last line of their
-//! output, a run's output, and the user's two answers, stop and dismiss. What the agents do with
-//! the same runs is `runs.rs`.
+//! The commands of the agents, and the tasks the user ran, as the user's clients read them
+//! (`docs/protocol.md`, "The run methods"): the runs of a session, a project or the whole daemon
+//! with the last line of their output, a run's output, and the user's two answers, stop and
+//! dismiss. What the agents do with the same runs is `runs.rs`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -40,6 +40,9 @@ struct List {
     /// Also the runs that ended and were not dismissed.
     #[serde(default)]
     ended: bool,
+    /// With `project`: only the tasks the user ran there, none of the agents' runs.
+    #[serde(default)]
+    user: bool,
 }
 
 #[derive(Deserialize)]
@@ -78,6 +81,28 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
 fn list(daemon: &Daemon, asked: List) -> Answer {
     let agents = daemon.read(Store::agents)?;
     let by_id: HashMap<&str, &Agent> = agents.iter().map(|a| (a.id.as_str(), a)).collect();
+    // The tasks the user ran in a project, as the project page lists them.
+    let users = |project: &str, ended: bool| -> Result<Vec<Value>, Failure> {
+        let mut commands = Vec::new();
+        for stored in daemon.read(|store| store.user_runs_of(project, ENDED_LISTED, TAIL_CHARS))? {
+            if stored.state != RunState::Running && !ended {
+                continue;
+            }
+            let (output, run) = match runs::view(daemon, &stored.id) {
+                Some(view) if stored.state == RunState::Running => (view.output, view.run),
+                _ => (stored.output.clone(), stored),
+            };
+            let tail = tail_lines(end_of(&output, TAIL_CHARS));
+            commands.push(listed(daemon, &by_id, &run, last_line(&output), tail));
+        }
+        Ok(commands)
+    };
+    if asked.user {
+        let Some(project) = &asked.project else {
+            return Err(Failure::refused("user goes with project"));
+        };
+        return Ok(json!({"commands": users(project, asked.ended)?}));
+    }
     let (ids, ended_listed) = match (&asked.tree, &asked.project) {
         (Some(agent), _) => {
             if !by_id.contains_key(agent.as_str()) {
@@ -102,6 +127,23 @@ fn list(daemon: &Daemon, asked: List) -> Answer {
         (None, None) => (agents.iter().map(|a| a.id.clone()).collect(), asked.ended),
     };
     let mut commands: Vec<Value> = Vec::new();
+    // A project's list, and the daemon's, hold the tasks the user ran too, as the left tree marks
+    // them.
+    match (&asked.tree, &asked.project) {
+        (Some(_), _) => {}
+        (None, Some(project)) => commands.extend(users(project, asked.ended)?),
+        (None, None) => {
+            for stored in daemon.read(Store::running_runs)? {
+                if stored.agent.is_none()
+                    && let Some(view) = runs::view(daemon, &stored.id)
+                {
+                    let tail = tail_lines(end_of(&view.output, TAIL_CHARS));
+                    let last = last_line(&view.output);
+                    commands.push(listed(daemon, &by_id, &view.run, last, tail));
+                }
+            }
+        }
+    }
     for stored in daemon.read(|store| store.running_runs_of(&ids))? {
         if let Some(view) = runs::view(daemon, &stored.id) {
             let last = last_line(&view.output);
@@ -128,10 +170,14 @@ fn listed(
     last_line: String,
     tail: Vec<String>,
 ) -> Value {
-    let agent = agents.get(run.agent.as_str());
+    let agent = run.agent.as_deref().and_then(|id| agents.get(id));
     let mut shown = run_json(run);
-    shown["root"] = tree::root_of(daemon, &run.agent).into();
-    shown["project"] = agent.map(|a| a.project.clone()).into();
+    shown["root"] = run
+        .agent
+        .as_deref()
+        .map(|agent| tree::root_of(daemon, agent))
+        .into();
+    shown["project"] = run.project.clone().into();
     shown["workspace"] = agent.and_then(|a| a.workspace.clone()).into();
     shown["last_line"] = last_line.into();
     shown["tail"] = tail.into();
@@ -154,8 +200,8 @@ fn output(daemon: &Daemon, asked: Output) -> Answer {
     Ok(shown)
 }
 
-/// Stops the run, all its process group, and answers once it ended. The agent that started it is
-/// told it was the user.
+/// Stops the run, all its process group, and answers once it ended. The agent that started it, if
+/// one did, is told it was the user.
 async fn stop(daemon: &Arc<Daemon>, id: &str) -> Answer {
     let view = runs::view(daemon, id).ok_or_else(|| not_found(id))?;
     if view.run.state == RunState::Running {
@@ -177,7 +223,10 @@ fn dismiss(daemon: &Daemon, id: &str) -> Answer {
     daemon.write(|store| {
         let event = store.dismiss_run(
             id,
-            ("run.dismissed", json!({"agent": run.agent, "run": id})),
+            (
+                "run.dismissed",
+                json!({"agent": run.agent, "project": run.project, "run": id}),
+            ),
         )?;
         Ok(((), event))
     })?;
@@ -193,6 +242,7 @@ fn run_json(run: &Run) -> Value {
     json!({
         "run": run.id,
         "agent": run.agent,
+        "project": run.project,
         "name": run.name,
         "line": run.line,
         "folder": run.folder,

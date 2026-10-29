@@ -1,6 +1,7 @@
 //! What an agent does of what the window does (`docs/tools.md`, "The project"): the project's
-//! skills (`skills`), its commands (`commands`), its settings (`project`), always its own project.
-//! Reads run at once; every write is a call to judge (a tracker's change is base, `gate.rs`), and
+//! tasks (`tasks`), skills (`skills`), commands (`commands`), setup (`setup`) and settings
+//! (`project`), always its own project. Reads run at once; every write is a call to judge (a
+//! tracker's change is base, and a line a task or a step sets is judged as its run, `gate.rs`), and
 //! its request says what it changes in words. No argument names another project: only the user
 //! does that.
 
@@ -8,7 +9,7 @@ use std::sync::Arc;
 
 use flottille_core::commands::{self, Command};
 use flottille_core::declared::{ProjectTracker, RepositoryForge};
-use flottille_core::project::{Project, Skill, check_skill};
+use flottille_core::project::{Project, SetupStep, Skill, StepKind, Task, check_skill, check_task};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
@@ -17,7 +18,7 @@ use crate::mcp::{Grant, Outcome, arguments};
 use crate::projects::{self, Failure};
 
 /// The tools of this module.
-pub const TOOLS: [&str; 3] = ["skills", "commands", "project"];
+pub const TOOLS: [&str; 5] = ["tasks", "skills", "commands", "setup", "project"];
 
 /// The actions of a family of the project's entries, `skills` and `commands`.
 const ACTIONS: &str = "list, show, add, edit and remove";
@@ -30,6 +31,30 @@ struct SkillsCall {
     description: Option<String>,
     path: Option<String>,
     text: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TasksCall {
+    action: String,
+    name: Option<String>,
+    line: Option<String>,
+    /// Left out: unchanged; `null`: at the top of the place.
+    #[serde(default, deserialize_with = "present")]
+    repository: Option<Option<String>>,
+    serve: Option<bool>,
+    check: Option<bool>,
+    read_only: Option<bool>,
+    ask_before_running: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetupCall {
+    action: String,
+    number: Option<usize>,
+    to: Option<usize>,
+    step: Option<SetupStep>,
 }
 
 #[derive(Deserialize)]
@@ -73,6 +98,8 @@ fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
 /// refuses it). For the gate, which judges every write.
 pub fn family(tool: &str, args: &Value) -> Option<&'static str> {
     match (tool, args["action"].as_str()?) {
+        ("tasks", "add" | "edit" | "remove") => Some("tasks"),
+        ("setup", "add" | "edit" | "remove" | "move") => Some("setup"),
         ("skills", "add" | "edit" | "remove") => Some("skills"),
         ("commands", "add" | "edit" | "remove") => Some("commands"),
         ("project", "set_settings") => Some("settings"),
@@ -84,12 +111,24 @@ pub fn family(tool: &str, args: &Value) -> Option<&'static str> {
 /// Why the gate holds a write of a family: what it does, as the window would.
 pub fn asked(family: &str) -> String {
     match family {
+        "tasks" => "it adds, changes or removes a task of the project",
+        "setup" => "it changes the setup that prepares the project's new workspaces",
         "skills" => "it adds, changes or removes a skill of the project",
         "commands" => "it adds, changes or removes a command of the project",
         "rules" => "it changes how the project's agents are told to work",
         _ => "it changes the project's settings",
     }
     .into()
+}
+
+/// The command line a write sets, which runs later without the gate: a task's, or a setup step's
+/// `run`. For the gate, which judges setting it as running it.
+pub fn line_of<'a>(tool: &str, args: &'a Value) -> Option<&'a str> {
+    match (tool, args["action"].as_str()?) {
+        ("tasks", "add" | "edit") => args["line"].as_str(),
+        ("setup", "add" | "edit") => args["step"]["run"].as_str(),
+        _ => None,
+    }
 }
 
 /// A call checked before the gate is asked: what a write changes, in words (nothing for a read),
@@ -105,6 +144,18 @@ pub async fn prepared(
     }
     let project = own(daemon, grant)?;
     match tool {
+        "tasks" => {
+            let call: TasksCall = arguments(tool, args.clone())?;
+            if family(tool, args).is_some() && !is_root(daemon, grant) {
+                return Err(Outcome::Refused(
+                    "refused: a child reads the project's tasks and runs them; the agent the user \
+                     talks to changes them: ask your parent (ask_parent)"
+                        .into(),
+                ));
+            }
+            tasks_says(&project, &call)
+        }
+        "setup" => setup_says(&project, &arguments(tool, args.clone())?),
         "skills" => skills_says(daemon, &project, &arguments(tool, args.clone())?),
         "commands" => commands_says(&project, &arguments(tool, args.clone())?),
         _ => {
@@ -116,6 +167,268 @@ pub async fn prepared(
                 "set_rules" => rules_say(&project, &call),
                 other => Err(unknown("project", other, PROJECT_ACTIONS)),
             }
+        }
+    }
+}
+
+/// Whether the agent is a root, the agent the user talks to.
+fn is_root(daemon: &Daemon, grant: &Grant) -> bool {
+    daemon
+        .read(|store| store.agent(&grant.agent))
+        .ok()
+        .flatten()
+        .is_some_and(|agent| agent.parent.is_none())
+}
+
+/// A task in words: its line, where it runs and what it is.
+fn task_said(task: &Task) -> String {
+    let mut notes = Vec::new();
+    if let Some(repository) = &task.repository {
+        notes.push(format!("in {repository}"));
+    }
+    for (set, note) in [
+        (task.serve, "keeps running"),
+        (task.check, "a check"),
+        (task.read_only, "changes nothing"),
+        (task.ask_before_running, "judged each time it runs"),
+    ] {
+        if set {
+            notes.push(note.to_owned());
+        }
+    }
+    match notes.is_empty() {
+        true => format!("`{}`", task.line),
+        false => format!("`{}` ({})", task.line, notes.join(", ")),
+    }
+}
+
+/// What a call of `tasks` changes, in words, once it can be done.
+fn tasks_says(project: &Project, call: &TasksCall) -> Result<Vec<String>, Outcome> {
+    let action = call.action.as_str();
+    if !["list", "show", "add", "edit", "remove"].contains(&action) {
+        return Err(unknown("tasks", action, ACTIONS));
+    }
+    if action == "list" {
+        return Ok(Vec::new());
+    }
+    let name = named(&call.name, "tasks", action, "test")?;
+    let known = |path: &str| project.repositories.iter().any(|r| r.path == path);
+    let check = |task: &Task| {
+        check_task(name, task, &known)
+            .map_err(|error| Outcome::Refused(format!("refused: tasks.{name}{error}")))?;
+        flottille_core::command::split_line(&task.line).map_err(Outcome::Refused)?;
+        Ok::<(), Outcome>(())
+    };
+    if action == "add" {
+        if project.tasks.contains_key(name) {
+            return Err(Outcome::Refused(format!(
+                "refused: project {} already has a task named {name}: edit it",
+                project.name
+            )));
+        }
+        let Some(line) = &call.line else {
+            return Err(Outcome::Refused(
+                "refused: add needs name and line: {\"action\": \"add\", \"name\": \"test\", \
+                 \"line\": \"cargo test\", \"check\": true}"
+                    .into(),
+            ));
+        };
+        let task = edited(
+            &Task {
+                line: line.trim().to_owned(),
+                repository: None,
+                serve: false,
+                check: false,
+                read_only: false,
+                ask_before_running: false,
+                added_by: None,
+            },
+            call,
+        );
+        check(&task)?;
+        return Ok(vec![format!("Add the task {name}: {}", task_said(&task))]);
+    }
+    let task = project.tasks.get(name).ok_or_else(|| {
+        Outcome::Refused(format!(
+            "refused: project {} has no task named {name}: its tasks are {}",
+            project.name,
+            listed(project.tasks.keys())
+        ))
+    })?;
+    match action {
+        "show" => Ok(Vec::new()),
+        "remove" => {
+            if let Some(at) = project
+                .setup
+                .iter()
+                .position(|step| step.task.as_deref() == Some(name))
+            {
+                return Err(Outcome::Refused(format!(
+                    "refused: step {} of the setup runs the task {name}: change or remove that \
+                     step first (setup)",
+                    at + 1
+                )));
+            }
+            Ok(vec![format!("Remove the task {name}: {}", task_said(task))])
+        }
+        _ => {
+            let changed = edited(task, call);
+            check(&changed)?;
+            if changed == *task {
+                return Err(Outcome::Refused(format!(
+                    "refused: this edit changes nothing of the task {name}: give line, \
+                     repository or a flag"
+                )));
+            }
+            // What it was is part of what the user allows: edited meanwhile, nothing is done.
+            Ok(vec![
+                format!("Change the task {name} to: {}", task_said(&changed)),
+                format!("It was: {}", task_said(task)),
+            ])
+        }
+    }
+}
+
+/// The task as a call of `tasks` leaves it.
+fn edited(task: &Task, call: &TasksCall) -> Task {
+    let mut task = task.clone();
+    if let Some(line) = &call.line {
+        task.line = line.trim().to_owned();
+    }
+    if let Some(repository) = &call.repository {
+        task.repository = repository.clone().filter(|r| !r.is_empty());
+    }
+    for (field, value) in [
+        (&mut task.serve, call.serve),
+        (&mut task.check, call.check),
+        (&mut task.read_only, call.read_only),
+        (&mut task.ask_before_running, call.ask_before_running),
+    ] {
+        if let Some(value) = value {
+            *field = value;
+        }
+    }
+    task
+}
+
+const SETUP_ACTIONS: &str = "list, add, edit, remove and move";
+
+/// A setup step in words: what it does and where.
+pub fn step_said(step: &SetupStep) -> String {
+    let what = match step.kind() {
+        StepKind::Copy(globs) => format!("copy {}", globs.join(", ")),
+        StepKind::Link(path) => format!("link {path}"),
+        StepKind::RootEntries => "link the project folder's other entries".to_owned(),
+        StepKind::Run(line) => format!("run `{line}`"),
+        StepKind::Task(name) => format!("run the task {name}"),
+    };
+    let place = match (&step.repository, step.for_each_repository, step.kind()) {
+        (_, _, StepKind::RootEntries) => String::new(),
+        (Some(repository), _, _) => format!(" in {repository}"),
+        (None, true, _) => " in each repository, leaves first".to_owned(),
+        (None, false, StepKind::Task(_)) => " where the task says".to_owned(),
+        (None, false, _) => " in the workspace folder".to_owned(),
+    };
+    let limit = step
+        .time_limit
+        .map_or_else(String::new, |limit| format!(", stopped after {limit} s"));
+    format!("{what}{place}{limit}")
+}
+
+/// What a call of `setup` changes, in words, once it can be done.
+fn setup_says(project: &Project, call: &SetupCall) -> Result<Vec<String>, Outcome> {
+    let action = call.action.as_str();
+    if !["list", "add", "edit", "remove", "move"].contains(&action) {
+        return Err(unknown("setup", action, SETUP_ACTIONS));
+    }
+    if action == "list" {
+        return Ok(Vec::new());
+    }
+    let len = project.setup.len();
+    let step_at = |number: Option<usize>| -> Result<(usize, &SetupStep), Outcome> {
+        let number = number.ok_or_else(|| {
+            Outcome::Refused(format!(
+                "refused: setup {action} needs number, the step's: {{\"action\": \"{action}\", \
+                 \"number\": 1}}; list numbers them"
+            ))
+        })?;
+        crate::setup::numbered(project, number)
+            .map(|step| (number, step))
+            .map_err(|failure| Outcome::Refused(format!("refused: {}", failure.message)))
+    };
+    let checked = |number: usize| -> Result<&SetupStep, Outcome> {
+        let step = call.step.as_ref().ok_or_else(|| {
+            Outcome::Refused(
+                "refused: give step, the step whole: {\"copy\": [\".env\"], \
+                 \"for_each_repository\": true}, {\"run\": \"npm install\", \"repository\": \
+                 \"web\"} or {\"root_entries\": true}"
+                    .into(),
+            )
+        })?;
+        let known = |path: &str| project.repositories.iter().any(|r| r.path == path);
+        flottille_core::project::check_step(
+            &format!("setup[{}]", number - 1),
+            step,
+            &known,
+            &project.tasks,
+        )
+        .map_err(|error| Outcome::Refused(format!("refused: {error}")))?;
+        Ok(step)
+    };
+    match action {
+        "add" => {
+            let number = call.number.unwrap_or(len + 1);
+            if !(1..=len + 1).contains(&number) {
+                return Err(Outcome::Refused(format!(
+                    "refused: number must be 1 to {}: the setup has {len} steps",
+                    len + 1
+                )));
+            }
+            let step = checked(number)?;
+            Ok(vec![format!(
+                "Add setup step {number}: {}",
+                step_said(step)
+            )])
+        }
+        "edit" => {
+            let (number, was) = step_at(call.number)?;
+            let step = checked(number)?;
+            if step == was {
+                return Err(Outcome::Refused(format!(
+                    "refused: this edit changes nothing of setup step {number}"
+                )));
+            }
+            Ok(vec![
+                format!("Change setup step {number} to: {}", step_said(step)),
+                format!("It was: {}", step_said(was)),
+            ])
+        }
+        "remove" => {
+            let (number, was) = step_at(call.number)?;
+            Ok(vec![format!(
+                "Remove setup step {number}: {}",
+                step_said(was)
+            )])
+        }
+        _ => {
+            let (number, was) = step_at(call.number)?;
+            let to = call.to.ok_or_else(|| {
+                Outcome::Refused(
+                    "refused: move needs to, the step's new number: {\"action\": \"move\", \
+                     \"number\": 3, \"to\": 1}"
+                        .into(),
+                )
+            })?;
+            step_at(Some(to))?;
+            if to == number {
+                return Err(Outcome::Refused(format!(
+                    "refused: setup step {number} is already there"
+                )));
+            }
+            Ok(vec![format!(
+                "Move setup step {number} ({}) to {to}",
+                step_said(was)
+            )])
         }
     }
 }
@@ -445,6 +758,90 @@ async fn performed(
                 other => Err(unknown("skills", other, ACTIONS)),
             }
         }
+        "tasks" => {
+            let call: TasksCall = arguments(tool, args)?;
+            let answer = |method: &str, params: Value| {
+                crate::tasks::call(daemon, method, params).map_err(refusal)
+            };
+            let task = call.name.clone().unwrap_or_default();
+            match call.action.as_str() {
+                "list" => Ok(tasks_text(&project)),
+                "show" => {
+                    let shown = project.tasks.get(&task).ok_or_else(|| {
+                        Outcome::Refused(format!(
+                            "refused: project {name} has no task named {task}: its tasks are {}",
+                            listed(project.tasks.keys())
+                        ))
+                    })?;
+                    Ok(format!(
+                        "Task {task}: {}\nRun it with run {{\"task\": \"{task}\"}}.",
+                        task_said(shown)
+                    ))
+                }
+                action @ ("add" | "edit") => {
+                    let mut params = json!({"project": name, "name": task});
+                    if let Some(line) = &call.line {
+                        params["line"] = line.clone().into();
+                    }
+                    if let Some(repository) = &call.repository {
+                        params["repository"] = repository.clone().into();
+                    }
+                    for (key, value) in [
+                        ("serve", call.serve),
+                        ("check", call.check),
+                        ("read_only", call.read_only),
+                        ("ask_before_running", call.ask_before_running),
+                    ] {
+                        if let Some(value) = value {
+                            params[key] = value.into();
+                        }
+                    }
+                    answer(&format!("task.{action}"), params)?;
+                    Ok(match action {
+                        "add" => format!(
+                            "Task {task} added: run {{\"task\": \"{task}\"}} runs it, and the \
+                             user's window has its Run button."
+                        ),
+                        _ => format!("Task {task} changed."),
+                    })
+                }
+                "remove" => {
+                    answer("task.remove", json!({"project": name, "name": task}))?;
+                    Ok(format!("Task {task} removed."))
+                }
+                other => Err(unknown("tasks", other, ACTIONS)),
+            }
+        }
+        "setup" => {
+            let call: SetupCall = arguments(tool, args)?;
+            let answer = |method: &str, params: Value| {
+                crate::setup::call(daemon, method, params).map_err(refusal)
+            };
+            let number = call.number;
+            match call.action.as_str() {
+                "list" => return Ok(setup_text(&project)),
+                "add" => answer(
+                    "setup.add",
+                    json!({"project": name, "step": call.step, "at": number}),
+                )?,
+                "edit" => answer(
+                    "setup.edit",
+                    json!({"project": name, "number": number, "step": call.step}),
+                )?,
+                "remove" => answer("setup.remove", json!({"project": name, "number": number}))?,
+                "move" => answer(
+                    "setup.move",
+                    json!({"project": name, "number": number, "to": call.to}),
+                )?,
+                other => return Err(unknown("setup", other, SETUP_ACTIONS)),
+            };
+            let saved = projects::load_project(daemon, &name).map_err(refusal)?;
+            Ok(format!(
+                "Saved: the workspaces created from now on are prepared by it; those that exist \
+                 keep theirs.\n{}",
+                setup_text(&saved)
+            ))
+        }
         "commands" => {
             let call: CommandsCall = arguments(tool, args)?;
             let answer = |method: &str, params: Value| {
@@ -693,6 +1090,42 @@ fn text_of(daemon: &Daemon, project: &Project, name: &str, skill: &Skill) -> Opt
     })
 }
 
+fn tasks_text(project: &Project) -> String {
+    if project.tasks.is_empty() {
+        return format!(
+            "Project {} has no task: run a line with run {{\"line\": …}}; tasks {{\"action\": \
+             \"add\"}} adds one.",
+            project.name
+        );
+    }
+    let mut text = format!(
+        "The tasks of project {} (run {{\"task\": …}} runs one):\n",
+        project.name
+    );
+    for (name, task) in &project.tasks {
+        text.push_str(&format!("- {name}: {}\n", task_said(task)));
+    }
+    text
+}
+
+fn setup_text(project: &Project) -> String {
+    if project.setup.is_empty() {
+        return format!(
+            "Project {} has no setup: a new workspace is its worktrees alone. setup {{\"action\": \
+             \"add\", \"step\": …}} adds a step.",
+            project.name
+        );
+    }
+    let mut text = format!(
+        "The setup of project {}, done in order for each new workspace:\n",
+        project.name
+    );
+    for (index, step) in project.setup.iter().enumerate() {
+        text.push_str(&format!("{}. {}\n", index + 1, step_said(step)));
+    }
+    text
+}
+
 fn skills_text(project: &Project) -> String {
     if project.skills.is_empty() {
         return format!(
@@ -799,11 +1232,18 @@ mod tests {
     fn only_the_writes_are_a_family_the_gate_holds() {
         let call = |tool: &str, action: &str| family(tool, &json!({"action": action}));
         for action in ["add", "edit", "remove"] {
+            assert_eq!(call("tasks", action), Some("tasks"));
             assert_eq!(call("skills", action), Some("skills"));
             assert_eq!(call("commands", action), Some("commands"));
         }
+        for action in ["add", "edit", "remove", "move"] {
+            assert_eq!(call("setup", action), Some("setup"));
+        }
         assert_eq!(call("project", "set_settings"), Some("settings"));
         for (tool, action) in [
+            ("tasks", "list"),
+            ("tasks", "show"),
+            ("setup", "list"),
             ("skills", "list"),
             ("skills", "show"),
             ("commands", "list"),
@@ -813,5 +1253,71 @@ mod tests {
             assert_eq!(call(tool, action), None, "{tool} {action}");
         }
         assert_eq!(family("commands", &json!({})), None);
+    }
+
+    #[test]
+    fn the_line_a_task_or_a_run_step_sets_is_what_the_gate_judges_as_a_run() {
+        let line = |tool: &str, args: Value| line_of(tool, &args).map(str::to_owned);
+        assert_eq!(
+            line(
+                "tasks",
+                json!({"action": "add", "name": "t", "line": "make"})
+            ),
+            Some("make".into())
+        );
+        assert_eq!(
+            line(
+                "tasks",
+                json!({"action": "edit", "name": "t", "check": true})
+            ),
+            None
+        );
+        assert_eq!(
+            line(
+                "setup",
+                json!({"action": "edit", "number": 1, "step": {"run": "npm ci"}})
+            ),
+            Some("npm ci".into())
+        );
+        assert_eq!(
+            line(
+                "setup",
+                json!({"action": "add", "step": {"copy": [".env"]}})
+            ),
+            None
+        );
+        assert_eq!(
+            line("tasks", json!({"action": "show", "name": "t", "line": "x"})),
+            None
+        );
+    }
+
+    #[test]
+    fn a_step_is_said_with_what_it_does_and_where() {
+        let step = |value: Value| serde_json::from_value::<SetupStep>(value).unwrap();
+        assert_eq!(
+            step_said(&step(
+                json!({"copy": [".env", ".env.*"], "for_each_repository": true})
+            )),
+            "copy .env, .env.* in each repository, leaves first"
+        );
+        assert_eq!(
+            step_said(&step(
+                json!({"run": "npm ci", "repository": "web", "time_limit": 60})
+            )),
+            "run `npm ci` in web, stopped after 60 s"
+        );
+        assert_eq!(
+            step_said(&step(json!({"root_entries": true}))),
+            "link the project folder's other entries"
+        );
+        assert_eq!(
+            step_said(&step(json!({"task": "build"}))),
+            "run the task build where the task says"
+        );
+        assert_eq!(
+            step_said(&step(json!({"link": "node_modules"}))),
+            "link node_modules in the workspace folder"
+        );
     }
 }
