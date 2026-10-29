@@ -812,3 +812,61 @@ fn the_daemon_s_start_brings_a_former_file_to_the_new_keys_and_keeps_its_comment
         .collect();
     assert_eq!(files, ["app.toml"]);
 }
+
+/// A file of this test's own project `app`, with a former key, over a folder that exists.
+fn former_file(user: &User, extra: &str) -> String {
+    let folder = user.path("work/app");
+    std::fs::create_dir_all(&folder).unwrap();
+    format!(
+        "folder = {:?}\n{extra}\n# Our style.\n[references.style] # theirs\ndescription = \"The style\"\n\
+         path = \"docs/style.md\"\n\n[[repositories]]\npath = \".\"\n",
+        folder.display().to_string()
+    )
+}
+
+#[test]
+fn a_file_invalid_for_an_unrelated_reason_is_left_byte_for_byte() {
+    let user = User::new();
+    let text = former_file(&user, "max_children = 9\n");
+    user.write_project_file("app", &text);
+
+    user.status();
+
+    assert_eq!(
+        std::fs::read_to_string(user.project_file("app")).unwrap(),
+        text
+    );
+}
+
+#[test]
+fn a_task_under_both_keys_is_left_with_both_and_nothing_is_lost() {
+    let user = User::new();
+    let text = former_file(
+        &user,
+        "\n# The build we had.\n[commands.build]\nline = \"make\"\n\n\
+         # The build we have.\n[tasks.build]\nline = \"make all\"\n",
+    );
+    user.write_project_file("app", &text);
+
+    user.status();
+
+    assert_eq!(
+        std::fs::read_to_string(user.project_file("app")).unwrap(),
+        text
+    );
+}
+
+#[test]
+fn the_same_file_without_its_fault_is_migrated() {
+    let user = User::new();
+    let text = former_file(&user, "");
+    user.write_project_file("app", &text);
+
+    user.status();
+
+    let written = std::fs::read_to_string(user.project_file("app")).unwrap();
+    assert!(
+        written.contains("# Our style.\n[skills.style] # theirs\n"),
+        "{written}"
+    );
+}

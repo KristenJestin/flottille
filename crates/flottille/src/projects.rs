@@ -431,15 +431,25 @@ pub fn migrate_files(daemon: &Daemon) {
         let Ok(text) = std::fs::read_to_string(&file) else {
             continue;
         };
+        for task in tasks_twice(&text) {
+            eprintln!(
+                "flottille daemon: projects/{name}.toml: commands.{task} and tasks.{task} are \
+                 both kept: remove the one you do not want"
+            );
+        }
         let Some(migrated) = migrated(&text) else {
             continue;
         };
+        // The file is written only when it reads afterwards: one that worked still does, one that
+        // did not now does, or else it stays as the user left it.
         let usable = |text: &str| Project::parse(&name, text, &projects.data).is_ok();
-        if usable(&text) && !usable(&migrated) {
-            eprintln!(
-                "flottille daemon: projects/{name}.toml: its former keys are kept: the file \
-                 would not read the same with their new names"
-            );
+        if !usable(&migrated) {
+            if usable(&text) {
+                eprintln!(
+                    "flottille daemon: projects/{name}.toml: its former keys are kept: the file \
+                     would not read the same with their new names"
+                );
+            }
             continue;
         }
         if let Err(error) = crate::providers::write_in_place(&file, &migrated) {
@@ -457,22 +467,26 @@ pub fn migrated(text: &str) -> Option<String> {
     former_keys_renamed(&mut document).then(|| document.to_string())
 }
 
-/// Renames the keys of earlier versions in the document, keeping everything else, the comments
-/// above and beside each entry included, and the order of the file:
-///
-/// - a task, `[commands.<name>]` with a `line`, goes under `[tasks.<name>]`;
-/// - `[procedures.<name>]` becomes `[commands.<name>]`, once the tasks have left `commands`;
-/// - `[references.<name>]` becomes `[skills.<name>]`;
-/// - `[[recipe]]` becomes `[[setup]]`, and a step's `command` its `task`;
-/// - the rights the gate no longer hands out go (`docs/design.md` §7): `[agent_actions]`, a
-///   task's `added_by`, a command's `grants` and `children`.
-///
-/// Whether anything changed.
-pub fn former_keys_renamed(document: &mut toml_edit::DocumentMut) -> bool {
-    let mut changed = false;
-    let root = document.as_table_mut();
-    let tasks: Vec<String> = root
-        .get("commands")
+/// The tasks a file holds twice, under their former key `[commands.<name>]` and under
+/// `[tasks.<name>]`: neither is moved, the user settles which one stays.
+pub fn tasks_twice(text: &str) -> Vec<String> {
+    let Ok(document) = text.parse::<toml_edit::DocumentMut>() else {
+        return Vec::new();
+    };
+    former_tasks(document.as_table())
+        .into_iter()
+        .filter(|name| {
+            document
+                .get("tasks")
+                .and_then(toml_edit::Item::as_table_like)
+                .is_some_and(|tasks| tasks.contains_key(name))
+        })
+        .collect()
+}
+
+/// The entries of `[commands]` that are tasks, by their `line`.
+fn former_tasks(root: &toml_edit::Table) -> Vec<String> {
+    root.get("commands")
         .and_then(toml_edit::Item::as_table_like)
         .map(|commands| {
             commands
@@ -485,9 +499,32 @@ pub fn former_keys_renamed(document: &mut toml_edit::DocumentMut) -> bool {
                 .map(|(name, _)| name.to_owned())
                 .collect()
         })
-        .unwrap_or_default();
-    for name in tasks {
-        changed |= moved(root, "commands", &name, "tasks");
+        .unwrap_or_default()
+}
+
+/// Renames the keys of earlier versions in the document, keeping everything else, the comments
+/// above and beside each entry included, and the order of the file:
+///
+/// - a task, `[commands.<name>]` with a `line`, goes under `[tasks.<name>]`, unless the file has
+///   that task there already (`tasks_twice`);
+/// - `[procedures.<name>]` becomes `[commands.<name>]`, once the tasks have left `commands`;
+/// - `[references.<name>]` becomes `[skills.<name>]`;
+/// - `[[recipe]]` becomes `[[setup]]`, and a step's `command` its `task`;
+/// - the rights the gate no longer hands out go (`docs/design.md` §7): `[agent_actions]`, a
+///   task's `added_by`, a command's `grants` and `children`.
+///
+/// Whether anything changed.
+pub fn former_keys_renamed(document: &mut toml_edit::DocumentMut) -> bool {
+    let mut changed = false;
+    let root = document.as_table_mut();
+    for name in former_tasks(root) {
+        let twice = root
+            .get("tasks")
+            .and_then(toml_edit::Item::as_table_like)
+            .is_some_and(|tasks| tasks.contains_key(&name));
+        if !twice {
+            changed |= moved(root, "commands", &name, "tasks");
+        }
     }
     changed |= merged(root, "procedures", "commands");
     changed |= merged(root, "references", "skills");
@@ -535,8 +572,14 @@ fn renamed(key: &toml_edit::Key, name: &str) -> toml_edit::Key {
 }
 
 /// Moves the entry `name` of the table `from` into the table `to`, made when it is missing; `from`
-/// goes once it is empty.
+/// goes once it is empty, unless its header holds a comment. Nothing moves when `to` is no table.
 fn moved(root: &mut toml_edit::Table, from: &str, name: &str, to: &str) -> bool {
+    if root
+        .get(to)
+        .is_some_and(|target| !target.is_table() && !target.is_inline_table())
+    {
+        return false;
+    }
     let Some(table) = root
         .get_mut(from)
         .and_then(toml_edit::Item::as_table_like_mut)
@@ -549,11 +592,19 @@ fn moved(root: &mut toml_edit::Table, from: &str, name: &str, to: &str) -> bool 
     let Some(entry) = table.remove(name) else {
         return false;
     };
-    if root
-        .get(from)
-        .and_then(toml_edit::Item::as_table_like)
-        .is_some_and(toml_edit::TableLike::is_empty)
-    {
+    let commented = |decor: &toml_edit::Decor| {
+        [decor.prefix(), decor.suffix()]
+            .into_iter()
+            .flatten()
+            .any(|text| text.as_str().is_some_and(|text| text.contains('#')))
+    };
+    if root.get(from).is_some_and(|table| match table {
+        toml_edit::Item::Table(table) => table.is_empty() && !commented(table.decor()),
+        toml_edit::Item::Value(toml_edit::Value::InlineTable(table)) => {
+            table.is_empty() && !commented(table.decor())
+        }
+        _ => false,
+    }) {
         root.remove(from);
     }
     let target = root.entry(to).or_insert_with(|| {
@@ -814,6 +865,47 @@ mod tests {
         assert_eq!(after.skills.keys().collect::<Vec<_>>(), ["style"]);
         assert_eq!(after.tasks.len(), 5);
         assert_eq!(after.setup.len(), 4);
+    }
+
+    #[test]
+    fn a_task_under_both_its_former_and_its_new_key_stays_under_both() {
+        let text = "folder = \"/work/app\"\n\n\
+            # The build we had.\n[commands.build]\nline = \"make\"\n\n\
+            # The build we have.\n[tasks.build]\nline = \"make all\"\n\n\
+            [references.style]\npath = \"docs/style.md\"\n";
+
+        assert_eq!(tasks_twice(text), ["build"]);
+        let migrated = migrated(text).expect("the reference is renamed");
+        for kept in [
+            "# The build we had.\n[commands.build]\nline = \"make\"\n",
+            "# The build we have.\n[tasks.build]\nline = \"make all\"\n",
+            "[skills.style]",
+        ] {
+            assert!(migrated.contains(kept), "{kept}\n---\n{migrated}");
+        }
+    }
+
+    #[test]
+    fn a_tasks_that_is_not_a_table_loses_nothing() {
+        let text = "tasks = \"oops\"\n\n# Ours.\n[commands.build]\nline = \"make\"\n";
+
+        assert_eq!(migrated(text), None);
+        let mut document: toml_edit::DocumentMut = text.parse().unwrap();
+        assert!(!former_keys_renamed(&mut document));
+        assert_eq!(document.to_string(), text);
+    }
+
+    #[test]
+    fn the_comment_of_a_commands_header_stays_when_its_tasks_leave() {
+        let text = "# What we run.\n[commands]\n\n[commands.build]\nline = \"make\"\n";
+
+        let migrated = migrated(text).unwrap();
+        assert!(
+            migrated.contains("# What we run.\n[commands]\n"),
+            "{migrated}"
+        );
+        assert!(migrated.contains("[tasks.build]\n"), "{migrated}");
+        assert!(!migrated.contains("[commands.build]"), "{migrated}");
     }
 
     #[test]
