@@ -258,8 +258,10 @@ agent working in a workspace has the tool.
 project's reviewers), merges it by squash (never while its checks fail or run or a review asks for
 changes, unless the user waives it), or re-runs the failed pipelines of its last commit, with the
 same `gh` (or `bkt`, for a Bitbucket repository) and the same rules (spawned by the daemon, the
-repository named, its output masked, no token to the agent). Only an agent in a workspace has it, and
-each call is to judge (a merge that waives the checks is base): see [`procedures.md`](procedures.md).
+repository named, its output masked, no token to the agent). It is listed to every agent of a
+project whose repository declares a forge, in `main` as in a workspace (in `main` it names the
+workspace), and each call is to judge (a merge that waives the checks is base): see
+[`procedures.md`](procedures.md).
 
 ## Tickets
 

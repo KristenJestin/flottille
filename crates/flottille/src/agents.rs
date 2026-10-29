@@ -543,10 +543,12 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
     let now = now_ms();
     let depth = new.parent.as_ref().map_or(0, |(_, depth)| depth + 1);
     let at_depth_limit = depth >= DEPTH_LIMIT;
+    let forge = project.repositories.iter().any(|r| r.forge.is_some());
     let tools = provider.tools(
         new.parent.is_none(),
         at_depth_limit,
-        new.workspace.is_some(),
+        forge,
+        project.tracker.is_some(),
     );
     let files = roles::project_files(&project.folder, &repositories);
     let references: Vec<(String, String)> = project
@@ -554,6 +556,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         .iter()
         .map(|(name, reference)| (name.clone(), reference.description.clone()))
         .collect();
+    let rules = crate::rules::effective(&daemon.paths, project);
     let instructions = roles::instructions(
         new.role,
         &roles::Session {
@@ -563,6 +566,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
             title: new.title.as_deref(),
             at_depth_limit,
             references: &references,
+            rules: &rules,
         },
         &files,
     );

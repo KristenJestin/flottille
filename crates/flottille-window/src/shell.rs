@@ -32,6 +32,7 @@ use crate::procedures::RunProcedure;
 use crate::project::{NewWorkspace, PlaceData, ProjectData, SessionLine, repository_label};
 use crate::project_settings::ProjectSettingsPage;
 use crate::providers::Providers;
+use crate::rules::RulesEditor;
 use crate::session::{Chose, Follow, Opened, Reply, SessionPage};
 use crate::settings::SettingsPage;
 use crate::tree::{PlaceNode, ProjectNode, SessionRow, Sidebar};
@@ -122,6 +123,8 @@ pub struct Shell {
     /// a composer with no project default starts there.
     last_pick: Option<Pick>,
     settings: Entity<SettingsPage>,
+    /// The editor of the user's rules, on the settings page.
+    rules: Entity<RulesEditor>,
     /// The modal that runs a procedure in a workspace, one for the window: the `/` of every session
     /// opens it.
     run: Entity<RunProcedure>,
@@ -186,7 +189,8 @@ impl Shell {
         let this = cx.entity().downgrade();
         let top = cx.new(|_| TopBar::new(this.clone()));
         let sidebar = cx.new(|_| Sidebar::new(this.clone()));
-        let settings = cx.new(|_| SettingsPage::new(this.clone()));
+        let rules = cx.new(|_| RulesEditor::new(this.clone(), None));
+        let settings = cx.new(|_| SettingsPage::new(this.clone(), rules.clone()));
         let run = cx.new(|_| RunProcedure::new(this.clone()));
         let main = {
             let (this, settings) = (this.clone(), settings.clone());
@@ -237,6 +241,7 @@ impl Shell {
             providers_read: 0,
             last_pick: None,
             settings,
+            rules,
             run,
             project_settings: None,
             add_project,
@@ -318,6 +323,9 @@ impl Shell {
         let made = cx.new(|cx| ProjectSettingsPage::new(this, name.clone(), window, cx));
         // The shell is being updated here: it asks the daemon itself, not through the page.
         self.perform(Command::ReadProjectSettings(name.clone()));
+        self.perform(Command::RulesRead {
+            project: Some(name.clone()),
+        });
         self.project_settings = Some(made.clone());
         Some(made)
     }
@@ -753,6 +761,23 @@ impl Shell {
                     .update(cx, |run, cx| run.started(&project, refused, cx));
                 if let Some(agent) = agent {
                     self.open(Selection::Session(agent), window, cx);
+                }
+            }
+            Outcome::Rules {
+                project,
+                written,
+                shown,
+            } => {
+                let editor = match &project {
+                    None => Some(self.rules.clone()),
+                    Some(name) => self
+                        .project_settings
+                        .clone()
+                        .filter(|page| page.read(cx).name() == name)
+                        .map(|page| page.read(cx).rules().clone()),
+                };
+                if let Some(editor) = editor {
+                    editor.update(cx, |editor, cx| editor.answered(shown, written, window, cx));
                 }
             }
             Outcome::References { project, listed } => {
@@ -1200,6 +1225,7 @@ impl Shell {
         // Opened, the page reads the providers again: the file is the user's to edit by hand.
         if selection == Selection::Settings && self.selected != Some(Selection::Settings) {
             self.actions.send(Command::ReadProviders);
+            self.actions.send(Command::RulesRead { project: None });
         }
         let page = self.page_of(&selection, cx);
         self.selected = Some(selection);

@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 
 use crate::actions::Command;
 use crate::project::repository_label;
+use crate::rules::RulesEditor;
 use crate::shell::Shell;
 
 /// A text field in Flottille's colours.
@@ -217,6 +218,8 @@ pub struct ProjectSettingsPage {
     removing: bool,
     removed: Option<String>,
     narrow: bool,
+    /// This project's own rules (`docs/projects.md`, "Rules").
+    rules: Entity<RulesEditor>,
 }
 
 impl ProjectSettingsPage {
@@ -226,6 +229,10 @@ impl ProjectSettingsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let rules = {
+            let (shell, project) = (shell.clone(), name.clone());
+            cx.new(|_| RulesEditor::new(shell, Some(project)))
+        };
         Self {
             shell,
             name,
@@ -247,7 +254,12 @@ impl ProjectSettingsPage {
             removing: false,
             removed: None,
             narrow: false,
+            rules,
         }
+    }
+
+    pub fn rules(&self) -> &Entity<RulesEditor> {
+        &self.rules
     }
 
     pub fn name(&self) -> &str {
@@ -956,7 +968,12 @@ impl Render for ProjectSettingsPage {
                     .when_some(self.saved.clone(), |d, saved| {
                         d.child(said("project-settings-saved", &saved))
                     })
-                    .child(footer),
+                    .child(footer)
+                    .child(enter(
+                        key("rules"),
+                        6 + count,
+                        div().mb(px(12.)).child(self.rules.clone()),
+                    )),
             )
     }
 }

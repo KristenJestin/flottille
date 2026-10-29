@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
 use crate::forge::{self, Checkout, Forge, Gh, masked};
-use crate::mcp::{Outcome, arguments, full_detail};
+use crate::mcp::{Outcome, arguments, full_detail, workspace_named};
 use crate::place::Place;
 use crate::projects::{self, Failure};
 
@@ -597,6 +597,7 @@ pub async fn preview(daemon: Arc<Daemon>, params: Value) -> Result<Value, Failur
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TicketRead {
+    workspace: Option<String>,
     ticket: Option<String>,
     detail: Option<String>,
 }
@@ -612,23 +613,29 @@ pub async fn ticket_read(daemon: &Daemon, place: &Place, args: Value) -> Outcome
         Ok(full) => full,
         Err(refusal) => return refusal,
     };
-    let Some(name) = &place.workspace else {
-        return Outcome::Refused(
-            "refused: this agent works in the project folder, not in a workspace: ticket_read \
-             reads a workspace's ticket"
-                .into(),
-        );
-    };
-    let workspace = match daemon.read(|store| store.workspace(&place.project, name)) {
-        Ok(Some(workspace)) => workspace,
-        Ok(None) => return Outcome::Failed(format!("the workspace {name} is gone")),
-        Err(error) => return Outcome::Failed(error.to_string()),
+    // A ticket named needs no workspace; without one, the workspace's own ticket is read.
+    let by_name = asked.ticket.is_some() && place.workspace.is_none() && asked.workspace.is_none();
+    let linked = if by_name {
+        None
+    } else {
+        let name = match workspace_named(daemon, place, asked.workspace.as_deref(), "ticket_read") {
+            Ok(name) => name,
+            Err(refusal) => return refusal,
+        };
+        match daemon.read(|store| store.workspace(&place.project, &name)) {
+            Ok(Some(workspace)) => Some(workspace),
+            Ok(None) => return Outcome::Failed(format!("the workspace {name} is gone")),
+            Err(error) => return Outcome::Failed(error.to_string()),
+        }
     };
     let project = match projects::load_project(daemon, &place.project) {
         Ok(project) => project,
         Err(failure) => return Outcome::Failed(failure.message),
     };
-    let key = match (&asked.ticket, &workspace.ticket) {
+    let key = match (
+        &asked.ticket,
+        linked.as_ref().and_then(|w| w.ticket.as_ref()),
+    ) {
         (Some(text), _) | (None, Some(text)) => match accepted(&project, text) {
             Ok(key) => key,
             Err(why) => return Outcome::Refused(format!("refused: {why}")),
@@ -637,7 +644,7 @@ pub async fn ticket_read(daemon: &Daemon, place: &Place, args: Value) -> Outcome
             return Outcome::Refused(format!(
                 "refused: workspace {} is linked to no ticket: name one of the project's tracker, \
                  or ask the user to link it",
-                workspace.name
+                linked.map_or_else(String::new, |w| w.name)
             ));
         }
     };

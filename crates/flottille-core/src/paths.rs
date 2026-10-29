@@ -76,6 +76,12 @@ impl Paths {
         self.state.join("daemon.log")
     }
 
+    /// How the user wants agents to work, for every project (`docs/projects.md`, "Rules"); absent
+    /// while they keep Flottille's default.
+    pub fn rules(&self) -> PathBuf {
+        self.config.join("rules.md")
+    }
+
     /// The images the user sent to an agent, one folder per agent: never the project's.
     pub fn images(&self, agent: &str) -> PathBuf {
         self.data.join("images").join(agent)

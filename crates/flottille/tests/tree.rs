@@ -631,16 +631,16 @@ fn a_lead_lists_the_agent_tools_ask_user_and_approval_answer_and_a_worker_at_the
         assert!(names.iter().any(|n| n == tool), "{tool} in {names:?}");
     }
     assert!(!names.iter().any(|n| n == "ask_parent"));
-    // In a workspace, it reads its pull requests and its ticket too, and writes to the forge and
-    // removes its workspace through the gate's classes, like any other call.
-    assert!(names.iter().any(|n| n == "forge_read"));
-    assert!(names.iter().any(|n| n == "ticket_read"));
-    assert!(names.iter().any(|n| n == "forge_write"));
+    // The project declares no forge nor tracker, so none of their tools is listed, in a workspace
+    // as anywhere; removing a workspace needs neither, and the gate decides who may.
+    assert!(!names.iter().any(|n| n == "forge_read"));
+    assert!(!names.iter().any(|n| n == "ticket_read"));
+    assert!(!names.iter().any(|n| n == "forge_write"));
     assert!(names.iter().any(|n| n == "workspace_remove"));
     // A root also reads and asks for changes to its project's procedures and settings.
     assert!(names.iter().any(|n| n == "procedure"));
     assert!(names.iter().any(|n| n == "project"));
-    assert_eq!(names.len(), 22);
+    assert_eq!(names.len(), 19);
 
     let names = worker.names();
     assert!(names.iter().any(|n| n == "ask_parent"));
@@ -649,7 +649,7 @@ fn a_lead_lists_the_agent_tools_ask_user_and_approval_answer_and_a_worker_at_the
     assert!(!names.iter().any(|n| n == "procedure" || n == "project"));
 
     let names = leaf.names();
-    assert_eq!(names.len(), 15, "{names:?}");
+    assert_eq!(names.len(), 12, "{names:?}");
     assert!(!names.iter().any(|n| n.starts_with("agent_")));
     assert!(!names.iter().any(|n| n == "approval_answer"));
     assert!(!names.iter().any(|n| n == "ask_user"));

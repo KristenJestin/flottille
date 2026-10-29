@@ -4,8 +4,10 @@ The tools of the agents Flottille runs, and the MCP server that serves them: the
 `docs/design.md` §1. It follows `docs/reference/hemera.md` §3, with the rules of
 `docs/reference/mcp.md` §4 where they differ. A session lists the tools of its agent, which
 depend on what it can do (`docs/agents.md`): the file and command tools below for every agent,
-`reference_read`, then `forge_read`, `ticket_read`, `forge_write` and `workspace_remove` for an
-agent in a workspace,
+`reference_read`, then `forge_read` and `forge_write` for every agent whose project's repositories
+declare a forge, `ticket_read` for every agent whose project declares a tracker, in `main` as in a
+workspace, and `workspace_remove` for every agent (a tool that could only refuse is not listed;
+what each may do is the gate's business, not the list's),
 `procedure` and `project` for a root (below, "The project"),
 and the tree's tools (`agent_*`, `report`, `ask_user` or `ask_parent`,
 `approval_answer`).
@@ -35,6 +37,14 @@ and the tree's tools (`agent_*`, `report`, `ask_user` or `ask_parent`,
   lists and calls the tools of that agent only, in the order frozen in the agent
   (`docs/agents.md`), and works in that agent's place. The list is fixed (`listChanged: false`):
   it is part of the prompt cache.
+- **Instructions**: the `initialize` result (and `server/discover`'s) carries
+  `crates/flottille/roles/guide.md`, one text for every agent, under 400 words: what Flottille is
+  and that the agent runs in bare mode with a tool list fixed for the session; what a project,
+  `main` and a workspace are; what the references, the catalogue, the procedures and the rules are
+  and which tool reads each; that the gate decides every call and a held call's result comes later
+  as a delivery; what deliveries are and what wakes the agent. The names it uses for the
+  project's things (references, procedures, the catalogue) are in that file alone, and a test
+  checks that every tool it names exists.
 - **Every tool listed** has a `title`, a description (what it does, when to use it, its effects,
   when it refuses), `inputSchema`, annotations (`readOnlyHint`, `idempotentHint`,
   `destructiveHint`, `openWorldHint: false`) and `_meta["anthropic/alwaysLoad"]: true`: in bare
@@ -212,9 +222,9 @@ not a lock: a swap between it and the rename is not seen.
 
 | Tool | |
 |---|---|
-| `forge_read {repository?, detail? short \| full}` | The pull request of the workspace's branch in each of its repositories, or the one named: number, state, base, link, review, checks with their states, and how many comments and reviews it has (`comments: 2, read them with forge_read {"detail": "full"}`); `detail full` gives their texts, cut and under the result limit. Read only, through the user's own `gh`, run by the daemon; an agent has no forge sign-in of its own. A repository the workspace does not take is refused (`refused: X is not a repository of this agent's workspace: it has …`). Only an agent in a workspace has it. |
+| `forge_read {workspace?, repository?, detail? short \| full}` | The pull request of a workspace's branch in each of its repositories, or the one named (`workspace` names the workspace: the agent's own when left out, required in `main`, where `refused: this agent works in main, which has no workspace of its own: name the workspace forge_read acts on …` lists the project's): number, state, base, link, review, checks with their states, and how many comments and reviews it has (`comments: 2, read them with forge_read {"detail": "full"}`); `detail full` gives their texts, cut and under the result limit. Read only, through the user's own `gh`, run by the daemon; an agent has no forge sign-in of its own. A repository the workspace does not take is refused (`refused: X is not a repository of this agent's workspace: it has …`). Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace; an agent in a workspace that names another workspace than its own is refused. |
 
-| `forge_write {action, repository, title?, body?, draft?, waive?}` | Opens the pull request of the workspace's branch (`pr-create`, with the project's reviewers), merges it by squash (`pr-merge-squash`; refused while its checks fail or run or a review asks for changes, unless `waive` gives the user's words, which holds the merge for their approval) or re-runs the failed jobs of its last commit's pipelines (`pipeline-rerun`), in one of the workspace's repositories, through the user's own `gh` run by the daemon (`docs/procedures.md`, "`forge_write`"). Only an agent in a workspace has it. Its description holds a call of `pr-create` and of `pr-merge-squash`. |
+| `forge_write {workspace?, action, repository, title?, body?, draft?, waive?}` | Opens the pull request of a workspace's branch (named as for `forge_read`) (`pr-create`, with the project's reviewers), merges it by squash (`pr-merge-squash`; refused while its checks fail or run or a review asks for changes, unless `waive` gives the user's words, which holds the merge for their approval) or re-runs the failed jobs of its last commit's pipelines (`pipeline-rerun`), in one of the workspace's repositories, through the user's own `gh` run by the daemon (`docs/procedures.md`, "`forge_write`"). Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `pr-create` and of `pr-merge-squash`. |
 
 `forge_read` goes through the gate like every call, which allows it; a `forge_write` call is to
 judge, and one that waives the checks base.
@@ -223,7 +233,7 @@ judge, and one that waives the checks base.
 
 | Tool | |
 |---|---|
-| `workspace_remove {}` | Removes the agent's own workspace as `flottille workspace remove` does (`docs/workspaces.md`, "Removal"): refused, nothing touched, while a repository holds uncommitted work or commits on no remote, or while another agent than the caller's tree works in the workspace or a command run not the tree's own runs there (`refused: workspace … is not removed, nothing was touched: the agent …, outside this agent's tree, works in it…`), each named; then deletes, in each repository, the workspace's branch when it holds no commit of its own (every commit of it is in its base's tracking ref), and keeps the others. Only an agent in a workspace has it, for its own workspace; each call is to judge. |
+| `workspace_remove {workspace?}` | Removes a workspace, the agent's own when `workspace` is left out and the one named in `main`, where it is required, as `flottille workspace remove` does (`docs/workspaces.md`, "Removal"): refused, nothing touched, while a repository holds uncommitted work or commits on no remote, or while another agent than the caller's tree works in the workspace or a command run not the tree's own runs there (`refused: workspace … is not removed, nothing was touched: the agent …, outside this agent's tree, works in it…`), each named; then deletes, in each repository, the workspace's branch when it holds no commit of its own (every commit of it is in its base's tracking ref), and keeps the others. Every agent has it; an agent in a workspace removes only its own; each call is to judge. |
 
  How the forge is read, and what it never touches (a token,
 `gh auth token`), is in [`forges.md`](forges.md).
@@ -232,7 +242,7 @@ judge, and one that waives the checks base.
 
 | Tool | |
 |---|---|
-| `ticket_read {ticket?, detail? short \| full}` | The ticket the agent's workspace is linked to, or `ticket`, another ticket of the same tracker by its key (`#123` or `ABC-123`): its reference, tracker, state, title, link and description, masked, and how many comments it has with the newest one's author (`Comments: 12, … read them with ticket_read {"detail": "full"}`); `detail full` gives the comments (the newest 30). Read only, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own, and none of either's write commands is reachable from it. The tracker is that of the workspace's ticket, or GitHub's (its own repositories' issues) when it has none; a key of the other tracker is refused (`refused: ABC-123 is a Jira ticket, and this workspace's tracker is GitHub issues (#123): …`), and nothing is asked of any tracker. A workspace with no ticket and no key is refused (`refused: workspace X is linked to no ticket: …`). An unreadable ticket (`gh` or `acli` missing or signed out, no such ticket) is an error saying why and what to do. Only an agent in a workspace has it, whether a ticket is linked or not. |
+| `ticket_read {workspace?, ticket?, detail? short \| full}` | The ticket the agent's workspace (or the one `workspace` names, required in `main` unless `ticket` is given) is linked to, or `ticket`, another ticket of the same tracker by its key (`#123` or `ABC-123`): its reference, tracker, state, title, link and description, masked, and how many comments it has with the newest one's author (`Comments: 12, … read them with ticket_read {"detail": "full"}`); `detail full` gives the comments (the newest 30). Read only, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own, and none of either's write commands is reachable from it. The tracker is that of the workspace's ticket, or GitHub's (its own repositories' issues) when it has none; a key of the other tracker is refused (`refused: ABC-123 is a Jira ticket, and this workspace's tracker is GitHub issues (#123): …`), and nothing is asked of any tracker. A workspace with no ticket and no key is refused (`refused: workspace X is linked to no ticket: …`). An unreadable ticket (`gh` or `acli` missing or signed out, no such ticket) is an error saying why and what to do. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
 
 It goes through the gate like every call, which allows it. How a ticket is read, Jira's text
 turned into plain text, and what is assumed of `acli`'s output, is in [`tickets.md`](tickets.md).
@@ -246,18 +256,18 @@ own project: a root has these two tools, a child none (it does its brief). Two f
 | Tool | |
 |---|---|
 | `procedure {action: list \| show \| start, name?, workspace?}` | `list` and `show` read the project's procedures (`docs/procedures.md`). `start` runs one in a workspace, the agent's own when `workspace` is left out (one in the project folder must name one), as a new root of its own, in Auto: the same as the window's confirmation. Refused, nothing asked, for a procedure or a workspace the project has not. |
-| `project {action: settings \| set_settings \| add_reference \| remove_reference, …}` | `settings` reads each repository's forge (and what its remote proposes), the tracker and the references (`docs/projects.md`). `set_settings {repositories?: [{path, forge}], tracker?}` declares a repository's forge or the tracker (`null` removes it; a tracker left out is kept), checked as `project.set_settings` checks them; `add_reference {name, description, path}` and `remove_reference {name}` edit the references as `flottille reference add` and `remove` do. The file is written where it stands, its comments kept. |
+| `project {action: settings \| set_settings \| add_reference \| remove_reference \| rules \| set_rules, …}` | `settings` reads each repository's forge (and what its remote proposes), the tracker and the references (`docs/projects.md`). `set_settings {repositories?: [{path, forge}], tracker?}` declares a repository's forge or the tracker (`null` removes it; a tracker left out is kept), checked as `project.set_settings` checks them; `add_reference {name, description, path}` and `remove_reference {name}` edit the references as `flottille reference add` and `remove` do. The file is written where it stands, its comments kept. `rules` reads the rules the project's agents get from now on and where they come from (the project's own, the user's for all projects, or Flottille's default, `docs/projects.md`, "Rules"); `set_rules {text}` replaces the project's own rules by `text` (8,000 characters at most), for the agents created after: the one that asked keeps what it started with. |
 
-- **Reads run at once.** `procedure` `list` and `show`, `project` `settings`.
+- **Reads run at once.** `procedure` `list` and `show`, `project` `settings` and `rules`.
 - **Every write is to judge** (a card in Ask, the judge in Auto), as any call is (answered at
   once that it waits, the result later as a delivery). Its request is an `action`: it says what
   it changes in words, one sentence each (`Start the procedure ship in workspace login: …`;
   `Set the tracker to Jira on acme.atlassian.net (ABC)`; `Add the reference style
-  (docs/STYLE.md): …`), allowed once, and it is done only while those words still hold: a
-  procedure whose instructions (`Its agent is told: …`) changed meanwhile is not started
-  (`Request #n (procedure) was not executed: what it does changed since the user allowed it; it
-  would now: …`). A change of the tracker is base: nothing checks it against the project, as a
-  forge is checked against its remote.
+  (docs/STYLE.md): …`; a `set_rules` request shows the new text whole), allowed once, and it is
+  done only while those words still hold: a procedure whose instructions (`Its agent is told: …`)
+  changed meanwhile is not started (`Request #n (procedure) was not executed: what it does
+  changed since the user allowed it; it would now: …`). A change of the tracker is base: nothing
+  checks it against the project, as a forge is checked against its remote.
 - **What an agent never does**: change a session's mode or choose the judge (no tool has them),
   or reach another project (`project` is not an argument). An agent's reference is never the project
   folder itself nor a repository's root (`.`, `api`, or a link to one): what a whole checkout

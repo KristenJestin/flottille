@@ -157,6 +157,7 @@ fn the_exact_claude_code_options_are_sent() {
         "commands_run",
         "commands_status",
         "reference_read",
+        "workspace_remove",
         "agent_launch",
         "agent_send",
         "agent_status",
