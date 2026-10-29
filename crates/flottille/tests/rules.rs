@@ -336,10 +336,39 @@ fn a_child_has_the_rules_in_its_instructions_but_no_tool_to_change_them() {
     assert!(after.contains("Answer in Spanish."), "{after}");
 }
 
+/// The request a held call made, as `approval.list` gives it.
+fn request(user: &User, answer: Answer) -> Value {
+    let number = held(answer);
+    user.call("approval.list", json!({})).unwrap()["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["number"] == number)
+        .cloned()
+        .unwrap()
+}
+
+/// How many prompts the judge was given.
+fn judged(user: &User) -> usize {
+    user.judge_received()
+        .iter()
+        .filter(|e| e["received"]["method"] == "session/prompt")
+        .count()
+}
+
+fn set_mode(user: &User, agent: &str, mode: &str) {
+    let output = user.run(&["agent", "mode", agent, mode]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn the_enforced_text_matches_the_gate_s_rules() {
-    let user = User::with_fake_agent();
-    let folder = project(&user);
+    let user = User::with_fake_agent().with_allowing_judge();
+    project(&user);
     let (agent, mcp) = root(&user, Some("login"));
     let (before, _) = instructions(&user, &agent);
     let workspace = user
@@ -349,33 +378,79 @@ fn the_enforced_text_matches_the_gate_s_rules() {
         .map(PathBuf::from)
         .unwrap();
     std::fs::write(workspace.join(".env"), "TOKEN=abc\n").unwrap();
-    let _ = folder;
 
-    // Each sentence of the text, with the call the gate answers it by.
+    // Each sentence of the text, with the calls the gate answers it by.
     let claim = |sentence: &str| {
         assert!(
             before.contains(sentence),
             "the text no longer says: {sentence}"
         );
     };
-    claim("Harmless calls pass: reading in the project, writing in a workspace");
-    done(mcp.call("fs_read", json!({"path": "README.md"})));
-    done(mcp.call(
-        "fs_write",
-        json!({"path": "README.md", "content": "app, edited\n"}),
-    ));
 
+    claim(
+        "Harmless calls pass: reading where you work, writing in a workspace, commands known to only read",
+    );
+    for mode in ["ask", "auto"] {
+        set_mode(&user, &agent, mode);
+        done(mcp.call("fs_read", json!({"path": "README.md"})));
+        done(mcp.call(
+            "fs_write",
+            json!({"path": "README.md", "content": "app, edited\n"}),
+        ));
+        done(mcp.call("commands_run", json!({"line": "git status"})));
+    }
+    assert_eq!(judged(&user), 0, "a harmless call reached the judge");
+
+    claim("Calls to judge are everything else");
+    claim("In Ask a call to judge is held for the user.");
+    set_mode(&user, &agent, "ask");
+    let asked = request(
+        &user,
+        mcp.call("commands_run", json!({"line": "touch made.txt"})),
+    );
+    assert_eq!(asked["class"], "judge", "{asked}");
+    assert_eq!(judged(&user), 0, "Ask reached the judge");
+
+    claim("In Auto a judge model allows it or holds it for the user; it never refuses.");
+    set_mode(&user, &agent, "auto");
+    done(mcp.call("commands_run", json!({"line": "touch made.txt"})));
+    assert!(workspace.join("made.txt").exists());
+    assert_eq!(judged(&user), 1);
+
+    claim("one mode for the whole tree, and only the user sets it");
+    assert!(
+        !mcp.names()
+            .iter()
+            .any(|n| n.contains("mode") || n.contains("judge")),
+        "{:?}",
+        mcp.names()
+    );
+
+    claim("Base calls are always held for the user, in both modes, and never reach the judge");
     claim("a sensitive place (`.env` files");
-    held(mcp.call("fs_read", json!({"path": ".env"})));
+    for mode in ["ask", "auto"] {
+        set_mode(&user, &agent, mode);
+        let base = request(&user, mcp.call("fs_read", json!({"path": ".env"})));
+        assert_eq!(base["class"], "base", "{base}");
+        let forced = request(
+            &user,
+            mcp.call(
+                "commands_run",
+                json!({"line": "git push --force origin login"}),
+            ),
+        );
+        assert_eq!(forced["class"], "base", "{forced}");
+    }
+    claim("a forced push");
+    assert_eq!(judged(&user), 1, "a base call reached the judge");
 
-    claim("Two kinds of call are refused: a command with shell syntax");
+    claim("What is refused is a call that cannot be made as it is: a command with shell syntax");
     let refused = mcp.call("commands_run", json!({"line": "ls | cat"}));
     assert!(
         refused.error && refused.text.contains("shell syntax"),
         "{}",
         refused.text
     );
-
     claim("a malformed call");
     let malformed = mcp.call("fs_read", json!({"path": "README.md", "unknown": 1}));
     assert!(
@@ -383,8 +458,26 @@ fn the_enforced_text_matches_the_gate_s_rules() {
         "{}",
         malformed.text
     );
+    claim("a command that prints a login");
+    let login = mcp.call("commands_run", json!({"line": "gh auth token"}));
+    assert!(
+        login.error && login.text.starts_with("refused: "),
+        "{}",
+        login.text
+    );
+    claim("`flottille` run as a command");
+    let daemon = mcp.call("commands_run", json!({"line": "flottille approvals"}));
+    assert!(
+        daemon.error && daemon.text.starts_with("refused: "),
+        "{}",
+        daemon.text
+    );
+    assert_eq!(judged(&user), 1, "a refused call reached the judge");
 
-    claim("A call that comes to the user is held, not refused");
+    claim("A held call has not happened: you are told at once that request #n waits");
+    claim(
+        "A refusal or a held request is an answer: do not retry it, and do not reach the same effect with another tool or another line.",
+    );
 }
 
 #[test]

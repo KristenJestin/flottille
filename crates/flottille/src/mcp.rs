@@ -1578,8 +1578,12 @@ mod tests {
             assert_eq!(tool["inputSchema"]["type"], "object");
             let name = format!("mcp__flottille__{}", definition.name);
             assert!(
-                claude::PROVIDER.tools(true, false, true, true).contains(&name)
-                    || claude::PROVIDER.tools(false, false, true, true).contains(&name),
+                claude::PROVIDER
+                    .tools(true, false, true, true)
+                    .contains(&name)
+                    || claude::PROVIDER
+                        .tools(false, false, true, true)
+                        .contains(&name),
                 "{} is a tool agents get",
                 definition.name
             );

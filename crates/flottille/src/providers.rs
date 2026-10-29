@@ -115,7 +115,13 @@ impl Provider {
     /// §4 rule 9): `forge_read` and `forge_write` need a repository with a declared forge,
     /// `ticket_read` a declared tracker; `workspace_remove` acts in any project. What each may do
     /// is the gate's business, not the list's.
-    pub fn tools(&self, root: bool, at_depth_limit: bool, forge: bool, tracker: bool) -> Vec<String> {
+    pub fn tools(
+        &self,
+        root: bool,
+        at_depth_limit: bool,
+        forge: bool,
+        tracker: bool,
+    ) -> Vec<String> {
         let mut names: Vec<&str> = FILE_AND_COMMAND_TOOLS.to_vec();
         if forge {
             names.push("forge_read");
@@ -1145,7 +1151,10 @@ mod tests {
         assert_eq!(both[10], "ticket_read", "after reference_read");
         assert_eq!(both[11], "forge_write", "after ticket_read");
         assert_eq!(both[12], "workspace_remove", "after forge_write");
-        assert_eq!(short(claude::PROVIDER.tools(false, true, true, true)).len(), 15);
+        assert_eq!(
+            short(claude::PROVIDER.tools(false, true, true, true)).len(),
+            15
+        );
     }
 
     #[test]
