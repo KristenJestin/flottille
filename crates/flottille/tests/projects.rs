@@ -870,3 +870,159 @@ fn the_same_file_without_its_fault_is_migrated() {
         "{written}"
     );
 }
+
+/// A project `app` of three repositories: `api` with its `origin` on GitHub and a `develop`
+/// branch, `lib` with no remote, and `web`, found in the folder but left out of the file, which
+/// holds comments of its user.
+fn repositories_fixture(user: &User) {
+    let app = user.path("work/app");
+    for name in ["api", "lib"] {
+        let repository = app.join(name);
+        user.git_init(&repository);
+        std::fs::write(repository.join("README.md"), format!("{name}\n")).unwrap();
+        user.git(&repository, &["add", "."]);
+        user.git(&repository, &["commit", "--quiet", "-m", "start"]);
+    }
+    user.git(&app.join("api"), &["branch", "develop"]);
+    user.git(
+        &app.join("api"),
+        &["remote", "add", "origin", "git@github.com:acme/api.git"],
+    );
+    let file = user.project_file("app");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(
+        &file,
+        format!(
+            "# my project, by hand\nfolder = \"{}\"\n\n# the API\n[[repositories]]\npath = \
+             \"api\"\nbase = [\"develop\", \"main\"]\nforge = {{ kind = \"github\", repository = \
+             \"acme/api\" }}\n\n# the library\n[[repositories]]\npath = \"lib\"\n",
+            app.display()
+        ),
+    )
+    .unwrap();
+    user.git_init(&app.join("web"));
+}
+
+#[test]
+fn the_repositories_list_with_add_remove_and_detect_writes_the_file() {
+    let user = User::new();
+    repositories_fixture(&user);
+
+    let listed = user
+        .call("project.repositories", json!({"name": "app"}))
+        .unwrap();
+
+    let api = settings_repository(&listed, "api");
+    assert_eq!(api["found"], true);
+    assert_eq!(api["branch"], "main");
+    assert_eq!(api["remote"], "origin");
+    assert_eq!(api["url"], "git@github.com:acme/api.git");
+    assert_eq!(
+        api["forge"],
+        json!({"kind": "github", "repository": "acme/api"})
+    );
+    assert_eq!(api["base"], json!(["develop", "main"]));
+    assert_eq!(api["branches"], json!(["develop", "main"]));
+    let lib = settings_repository(&listed, "lib");
+    assert_eq!(lib["url"], Value::Null, "local only: {lib}");
+    assert_eq!(lib["forge"], Value::Null);
+    // Detected again: what the folder holds that the file does not name.
+    assert_eq!(listed["new"], json!(["web"]));
+
+    let added = user
+        .call(
+            "project.add_repository",
+            json!({"name": "app", "path": "web"}),
+        )
+        .unwrap();
+    assert_eq!(added["new"], json!([]));
+    assert!(settings_repository(&added, "web")["found"] == true);
+    let text = std::fs::read_to_string(user.project_file("app")).unwrap();
+    assert!(text.starts_with("# my project, by hand\n"), "{text}");
+    assert!(text.contains("# the library\n"), "{text}");
+    assert!(
+        text.contains("[[repositories]]\npath = \"web\"\n"),
+        "{text}"
+    );
+
+    let removed = user
+        .call(
+            "project.remove_repository",
+            json!({"name": "app", "path": "lib"}),
+        )
+        .unwrap();
+    let paths: Vec<_> = removed["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["api", "web"]);
+    // Forgotten, never touched: the folder is still there, and found again.
+    assert!(user.path("work/app/lib/.git").is_dir());
+    assert_eq!(removed["new"], json!(["lib"]));
+    let text = std::fs::read_to_string(user.project_file("app")).unwrap();
+    assert!(!text.contains("path = \"lib\""), "{text}");
+    assert!(text.contains("# the API\n"), "{text}");
+    let shown = user.call("project.show", json!({"name": "app"})).unwrap();
+    assert_eq!(repository_paths(&shown), ["api", "web"]);
+}
+
+#[test]
+fn a_repository_that_cannot_be_added_or_removed_leaves_the_file_as_it_was() {
+    let user = User::new();
+    repositories_fixture(&user);
+    std::fs::create_dir_all(user.path("work/app/notes")).unwrap();
+    let before = std::fs::read_to_string(user.project_file("app")).unwrap();
+
+    let refusals = [
+        (
+            "project.add_repository",
+            "notes",
+            "notes is not a Git repository",
+        ),
+        (
+            "project.add_repository",
+            "api",
+            "api is already a repository of app",
+        ),
+        (
+            "project.add_repository",
+            "../elsewhere",
+            "../elsewhere is not a folder of app",
+        ),
+        (
+            "project.remove_repository",
+            "web",
+            "app has no repository web",
+        ),
+    ]
+    .map(|(method, path, said)| {
+        let (code, message) = user
+            .call(method, json!({"name": "app", "path": path}))
+            .unwrap_err();
+        (code, message, said)
+    });
+    let unchanged = std::fs::read_to_string(user.project_file("app")).unwrap();
+    user.call(
+        "project.remove_repository",
+        json!({"name": "app", "path": "lib"}),
+    )
+    .unwrap();
+    let (code, last) = user
+        .call(
+            "project.remove_repository",
+            json!({"name": "app", "path": "api"}),
+        )
+        .unwrap_err();
+
+    for (code, message, said) in refusals {
+        assert_eq!(code, "refused", "{message}");
+        assert!(message.contains(said), "{message}");
+    }
+    assert_eq!(code, "refused");
+    assert!(last.contains("at least one repository"), "{last}");
+    assert_eq!(unchanged, before);
+    let after = std::fs::read_to_string(user.project_file("app")).unwrap();
+    assert!(after.contains("path = \"api\""), "{after}");
+}
