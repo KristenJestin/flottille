@@ -329,7 +329,7 @@ impl Snapshot {
                     active_at,
                     created_at: number(agent, "created_at"),
                     commands: commands_of("root", &id),
-                    started_by: agent["launched_by"].as_str().map(&name_of),
+                    started_by: agent["launched_by"].as_str().map(name_of),
                     id,
                 }
             })
