@@ -154,7 +154,10 @@ the user wrote.
 
 An agent's instructions hold two texts about conduct. **What Flottille enforces** is fixed
 (`crates/flottille/roles/base.md`): it says what the gate does, so that an agent does not take it
-for its own discipline. **How to work** is the user's: commits only when asked, say what you did,
+for its own discipline: the three classes, the mode (Ask or Auto, one per tree, the user's alone)
+and the judge, what always comes to the user, what is refused, and that a refusal or a held
+request is an answer, never to be reached another way. A test checks each sentence against the
+gate's answers (`tests/rules.rs`). **How to work** is the user's: commits only when asked, say what you did,
 and whatever else they want.
 
 | Level | Where it lives | Edited |
