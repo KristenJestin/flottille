@@ -38,6 +38,31 @@ pub struct Pick {
     pub effort: Option<String>,
 }
 
+/// An image and its MIME type, as the daemon takes and gives them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Picture {
+    pub mime: String,
+    pub bytes: Vec<u8>,
+}
+
+impl Picture {
+    fn to_json(&self) -> Value {
+        use base64::Engine as _;
+        json!({"mime": self.mime,
+            "data": base64::engine::general_purpose::STANDARD.encode(&self.bytes)})
+    }
+
+    fn of(found: &Value) -> Option<Picture> {
+        use base64::Engine as _;
+        Some(Picture {
+            mime: found["mime"].as_str()?.to_owned(),
+            bytes: base64::engine::general_purpose::STANDARD
+                .decode(found["data"].as_str()?)
+                .ok()?,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     /// What the project page shows beyond the shell's read: branches and lines changed.
@@ -158,6 +183,13 @@ pub enum Command {
     Reply {
         session: String,
         message: String,
+        /// Pasted or dropped pictures that go with it, as the clipboard gave them.
+        images: Vec<Picture>,
+    },
+    /// Reads back an image the session's agent was sent, by the name its event gave.
+    Image {
+        session: String,
+        name: String,
     },
     /// Ends a session: its root agent and its tree stop.
     Stop {
@@ -346,6 +378,12 @@ pub enum Outcome {
     ReferenceWritten {
         project: String,
         refused: Option<String>,
+    },
+    /// An image read back from the daemon, `None` when it could not be.
+    ImageRead {
+        session: String,
+        name: String,
+        image: Option<Picture>,
     },
     /// A message to the session's root was taken, or refused with why.
     Replied {
@@ -811,10 +849,31 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             };
             Outcome::ReferenceWritten { project, refused }
         }
-        Command::Reply { session, message } => match ask_alone(
+        Command::Image { session, name } => {
+            let image = match ask_alone(
+                connect,
+                "agent.image",
+                json!({"agent": session, "name": name}),
+                bounds.quick,
+            ) {
+                Ok(Ok(found)) => Picture::of(&found),
+                Ok(Err(_)) | Err(_) => None,
+            };
+            Outcome::ImageRead {
+                session,
+                name,
+                image,
+            }
+        }
+        Command::Reply {
+            session,
+            message,
+            images,
+        } => match ask_alone(
             connect,
             "agent.send",
-            json!({"agent": session, "message": message}),
+            json!({"agent": session, "message": message,
+                "images": images.iter().map(Picture::to_json).collect::<Vec<_>>()}),
             bounds.quick,
         ) {
             Ok(Ok(_)) => Outcome::Replied {

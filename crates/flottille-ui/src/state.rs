@@ -409,13 +409,22 @@ fn cross(color: Hsla) -> gpui_kit::Canvas<()> {
 /// A state's pill: mono 10 px, weight 500, uppercase, 4×6 px padding, radius 5.
 pub struct Pill {
     shown: Shown,
+    /// The pill says nothing while the state is `Running`: the icon beside it already does.
+    quiet_running: bool,
 }
 
 impl Pill {
     pub fn new(status: Entity<Status>, cx: &mut Context<Self>) -> Self {
         Self {
             shown: Shown::new(status, false, cx),
+            quiet_running: false,
         }
+    }
+
+    /// A pill that draws nothing while the state is `Running`.
+    pub fn quiet_running(mut self) -> Self {
+        self.quiet_running = true;
+        self
     }
 }
 
@@ -423,6 +432,9 @@ impl Render for Pill {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let scale = self.shown.sync(false, window, cx);
         let state = self.shown.state;
+        if self.quiet_running && state == AgentState::Running {
+            return div().into_any_element();
+        }
         let (ink, bg) = state.colors(&palette(cx));
         let opacity = ((scale - SWAP_FROM) / (1.0 - SWAP_FROM)).clamp(0.0, 1.0);
         div()
@@ -441,6 +453,7 @@ impl Render for Pill {
             .whitespace_nowrap()
             .opacity(opacity)
             .child(state.label())
+            .into_any_element()
     }
 }
 

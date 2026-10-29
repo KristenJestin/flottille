@@ -241,9 +241,9 @@ fn a_session_that_starts_waiting_marks_its_row_its_folded_place_and_its_folded_p
     });
     assert_eq!(shell.read_with(cx, |s, cx| s.top().read(cx).count()), 0);
 
-    // Fold the place, then the project.
+    // Fold the place, then the project (its chevron: its name opens its page and folds nothing).
     cx.update(|window, cx| window.click(place_id("atlas", &None), cx));
-    cx.update(|window, cx| window.click(project_id("atlas"), cx));
+    cx.update(|window, cx| window.click(flottille_ui::toggle_id(project_id("atlas")), cx));
     let (place, project) = shell.read_with(cx, |shell, _| {
         (
             shell.place("atlas", &None).unwrap().clone(),

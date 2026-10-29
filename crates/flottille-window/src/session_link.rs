@@ -44,6 +44,8 @@ pub struct TreeAgent {
     pub resumable: bool,
     /// An agent that ended whose process is still stopping: it cannot be resumed yet.
     pub stopping: bool,
+    /// Whether its agent takes images in a prompt; `None` until its process first started.
+    pub images: Option<bool>,
 }
 
 impl TreeAgent {
@@ -65,6 +67,7 @@ impl TreeAgent {
             needs_user: entry["needs_user"] == true,
             resumable: agent["resumable"] == true,
             stopping: agent["stopping"] == true,
+            images: agent["images"].as_bool(),
         }
     }
 }
