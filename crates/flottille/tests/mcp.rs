@@ -954,8 +954,9 @@ fn gh_token_is_empty_in_a_run() {
     assert!(Path::new(&config).is_dir());
     assert_eq!(std::fs::read_dir(&config).unwrap().count(), 0);
     assert_eq!(value("GLAB_CONFIG_DIR").as_deref(), Some(config.as_str()));
-    assert_eq!(value("GIT_CONFIG_COUNT").as_deref(), Some("1"));
-    // No hook of the repository, which the agent writes, runs; a push is not sent nowhere.
+    assert_eq!(value("GIT_CONFIG_COUNT").as_deref(), Some("2"));
+    // No hook of the repository, which the agent writes, runs; and a push from a line that is
+    // not itself a push the gate let through goes nowhere.
     assert_eq!(
         value("GIT_CONFIG_KEY_0").as_deref(),
         Some("core.hooksPath"),
@@ -964,6 +965,11 @@ fn gh_token_is_empty_in_a_run() {
     assert_eq!(
         value("GIT_CONFIG_VALUE_0").as_deref(),
         Some("/dev/null"),
+        "{output}"
+    );
+    assert_eq!(
+        value("GIT_CONFIG_KEY_1").as_deref(),
+        Some("url./dev/null/flottille-refused-push/.pushInsteadOf"),
         "{output}"
     );
 }
