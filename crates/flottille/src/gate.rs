@@ -268,12 +268,7 @@ pub fn decide(call: &Call) -> Verdict {
     match call.tool {
         "forge" => forge(call),
         "tickets" => tickets(call),
-        // A session for the user acts with a root's tools, outside the caller's tree.
-        "agent_launch" if call.args["root"] == true => Found {
-            base: Vec::new(),
-            judge: vec![ROOT_LAUNCH.into()],
-        }
-        .verdict(Kind::Action),
+        "agent_launch" if call.args["root"] == true => root_launch(call.grant, call.args),
         "workspace" if call.args["action"] == "remove" => {
             // In `main` it names the workspace; elsewhere it is the agent's own.
             let named = call.args["name"].as_str();
@@ -329,6 +324,61 @@ fn files(call: &Call) -> Verdict {
 pub const ROOT_LAUNCH: &str = "it starts a new session for the user, a root agent with the \
     project's tools, outside this agent's tree";
 
+/// Why a session started by a root another agent started comes to the user: a chain of them
+/// needs the user at each step.
+pub const LAUNCHED_LAUNCH: &str = "this agent is a session another agent started for the user, \
+    and a session it starts comes to the user, since it was itself started by an agent";
+
+/// `agent_launch` with `root`: a session for the user acts with a root's tools, outside the
+/// caller's tree. Its first message is shown whole to the user and to the judge.
+pub fn root_launch(grant: &Grant, args: &Value) -> Verdict {
+    let mut found = Found::default();
+    found.judge(ROOT_LAUNCH.into());
+    if grant.launched {
+        found.base(LAUNCHED_LAUNCH.into());
+    }
+    if let Err(refused) = texts(grant, args, &["brief"], &mut found) {
+        return refused;
+    }
+    found.verdict(Kind::Action)
+}
+
+/// The texts a write posts or sends, which the user's card and the judge show whole: one longer
+/// than the judge is given whole is refused, and one that holds what the masking takes for a
+/// secret is base, since what is shown is masked and what is sent is not.
+fn texts(grant: &Grant, args: &Value, keys: &[&str], found: &mut Found) -> Result<(), Verdict> {
+    for key in keys {
+        let Some(text) = args[*key].as_str() else {
+            continue;
+        };
+        let count = text.chars().count();
+        if count > crate::judge::WHOLE_CHARS {
+            return Err(Verdict::Deny(format!(
+                "refused: the {key} is longer than the {} characters the user and the judge are \
+                 shown whole ({count}): shorten it",
+                crate::judge::WHOLE_CHARS
+            )));
+        }
+        if crate::mcp::masked(text, &grant.place) != text {
+            found.base(format!(
+                "its {key} holds what looks like a secret: the card shows it masked, and it is \
+                 sent as it is written"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A `title` given to a write that takes none: refused, as it would fail once allowed.
+fn untitled(tool: &str, action: &str, args: &Value) -> Result<(), Verdict> {
+    match args.get("title").filter(|title| !title.is_null()) {
+        Some(_) => Err(Verdict::Deny(format!(
+            "refused: {tool} {action} takes no title: title is for edit and create"
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// `forge`: its reads are harmless; a malformed call is refused; merging what the checks or a
 /// review block is base, since it is the user's own decision; the other writes are to judge.
 fn forge(call: &Call) -> Verdict {
@@ -346,8 +396,16 @@ fn forge(call: &Call) -> Verdict {
             ));
         }
     };
+    if action == "comment"
+        && let Err(refused) = untitled("forge", action, call.args)
+    {
+        return refused;
+    }
     let mut found = Found::default();
     found.judge(said.into());
+    if let Err(refused) = texts(call.grant, call.args, &["title", "body"], &mut found) {
+        return refused;
+    }
     if let Some(waived) = call.args.get("waive").filter(|w| !w.is_null()) {
         if action != "merge" {
             return Verdict::Deny(
@@ -391,11 +449,17 @@ fn tickets(call: &Call) -> Verdict {
             ));
         }
     };
-    Found {
-        base: Vec::new(),
-        judge: vec![said.into()],
+    if matches!(action, "comment" | "close" | "reopen")
+        && let Err(refused) = untitled("tickets", action, call.args)
+    {
+        return refused;
     }
-    .verdict(Kind::Call)
+    let mut found = Found::default();
+    found.judge(said.into());
+    if let Err(refused) = texts(call.grant, call.args, &["title", "body"], &mut found) {
+        return refused;
+    }
+    found.verdict(Kind::Call)
 }
 
 /// The tasks whose line is `words`.
@@ -2493,6 +2557,7 @@ mod tests {
                     variables: BTreeMap::new(),
                     home: Some(base.join("home")),
                 },
+                launched: false,
             };
             Fixture {
                 own: vec![base.join("xdg/data/flottille")],
@@ -2842,6 +2907,58 @@ mod tests {
             Some(&fixture.never),
         );
         assert_eq!(child, Verdict::Allow);
+    }
+
+    #[test]
+    fn base_a_session_started_by_a_root_an_agent_started_comes_to_the_user() {
+        let mut fixture = Fixture::main();
+        fixture.grant.launched = true;
+        let verdict = fixture.judge(
+            "agent_launch",
+            json!({"title": "t", "brief": "b", "root": true}),
+            Some(&fixture.never),
+        );
+        assert!(base_class(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn base_a_write_or_a_session_whose_text_holds_a_secret_and_refused_one_too_long() {
+        let fixture = Fixture::main();
+        let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let long = "x".repeat(crate::judge::WHOLE_CHARS + 1);
+        for (tool, args) in [
+            (
+                "tickets",
+                json!({"action": "comment", "ticket": "#1", "body": token}),
+            ),
+            ("forge", json!({"action": "create", "title": token})),
+            (
+                "agent_launch",
+                json!({"title": "t", "brief": token, "root": true}),
+            ),
+        ] {
+            let verdict = fixture.judge(tool, args, Some(&fixture.never));
+            assert!(base_class(&verdict), "{tool}: {verdict:?}");
+        }
+        for (tool, args) in [
+            (
+                "tickets",
+                json!({"action": "create", "title": "t", "body": long}),
+            ),
+            (
+                "forge",
+                json!({"action": "edit", "number": 1, "title": long}),
+            ),
+            (
+                "agent_launch",
+                json!({"title": "t", "brief": long, "root": true}),
+            ),
+        ] {
+            assert!(
+                denied(&fixture.judge(tool, args, Some(&fixture.never))),
+                "{tool}"
+            );
+        }
     }
 
     #[test]

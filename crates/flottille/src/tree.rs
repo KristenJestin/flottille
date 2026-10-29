@@ -239,6 +239,7 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             // A child's is not read: a tree runs in its root's mode (`judge::mode`). A new root
             // takes the mode of the tree that started it, never a looser one of its own.
             gate_mode: Some(crate::judge::mode(daemon, &caller.id)),
+            launched_by: asked.root.then(|| caller.id.clone()),
         },
     )
     .map_err(|f| refused(format!("refused: {}", f.message)))?;
@@ -306,20 +307,35 @@ impl Drop for Slot<'_> {
 }
 
 /// The first message of an agent a launch made: a child's brief, or the first message of a session
-/// for the user, which is the user's as one started from the window is.
+/// an agent started for the user.
 fn brief(daemon: &Arc<Daemon>, child: &Agent) {
-    let kind = match child.parent {
-        Some(_) => "brief",
-        None => "user",
-    };
+    let (kind, body) = first_message(daemon, child);
     deliveries::deliver(
         daemon,
         &child.id,
         kind,
         Some(format!("brief-{}-0", child.id)),
-        child.brief.as_deref().unwrap_or_default(),
+        &body,
         approval::BETWEEN_TURNS,
     );
+}
+
+/// What follows the launcher's name on the first line of a session an agent started for the user.
+pub const LAUNCHED: &str = " started this session for the user with this message:";
+
+/// The kind and the body of an agent's brief as it is delivered: `brief`, or for a session an
+/// agent started for the user `launched`, under a line naming that agent: never the user's words,
+/// for the window, the judge or the agent itself.
+pub fn first_message(daemon: &Daemon, agent: &Agent) -> (&'static str, String) {
+    let brief = agent.brief.clone().unwrap_or_default();
+    let Some(launcher) = &agent.launched_by else {
+        return ("brief", brief);
+    };
+    let who = match daemon.read(|store| store.agent(launcher)) {
+        Ok(Some(launcher)) => named(&launcher),
+        _ => format!("agent {launcher}"),
+    };
+    ("launched", format!("{who}{LAUNCHED}\n\n{brief}"))
 }
 
 /// The brief of a child whose new workspace is being prepared, once it is ready; a workspace

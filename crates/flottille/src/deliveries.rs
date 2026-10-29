@@ -305,7 +305,7 @@ pub fn pump(daemon: &Daemon, agent: &str) -> Option<Prompt> {
     }
     let rank = |kind: &str| match kind {
         "instructions" => 0,
-        "brief" => 1,
+        "brief" | "launched" => 1,
         "resume" => 2,
         _ => 3,
     };

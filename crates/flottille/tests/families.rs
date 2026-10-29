@@ -769,7 +769,8 @@ fn a_root_session_started_by_an_agent_appears_and_is_the_user_s() {
     assert!(new.tools.iter().any(|t| t.ends_with("__ask_user")));
     // It takes the tree's mode, Ask here, never the Auto a new root has by default.
     assert_eq!(new.gate_mode, GateMode::Ask);
-    // Its brief is the user's first message, and its creation the event the sidebar shows.
+    // Its first message is the launcher's, never the user's, and it keeps who started it.
+    assert_eq!(new.launched_by.as_deref(), Some(lead.as_str()));
     eventually("its first message", || {
         user.received_requests("session/prompt")
             .iter()
@@ -779,7 +780,14 @@ fn a_root_session_started_by_an_agent_appears_and_is_the_user_s() {
         .delivery(&format!("brief-{id}-0"))
         .unwrap()
         .unwrap();
-    assert_eq!(first.kind, "user");
+    assert_eq!(first.kind, "launched");
+    assert!(
+        first
+            .body
+            .starts_with(&format!("agent {lead} started this session")),
+        "{}",
+        first.body
+    );
     // Not the caller's child: its agent tools do not reach it.
     let status = mcp.call("agent_status", json!({"agent_id": id}));
     assert!(status.error, "{}", status.text);
@@ -872,4 +880,431 @@ fn the_old_names_are_answered_as_the_families_for_one_release() {
         json!({"action": "pr-create", "repository": ".", "title": "Login"}),
     );
     held(&write);
+}
+
+/// The prompts the judge was given, in order.
+fn judge_prompts(user: &User) -> Vec<String> {
+    user.judge_received()
+        .iter()
+        .filter(|e| e["received"]["method"] == "session/prompt")
+        .map(|e| {
+            e["received"]["params"]["prompt"][0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect()
+}
+
+/// A lead in `mode` starts a session for the user in `main` with `brief`, allowed by the judge
+/// in Auto or by the user in Ask: the new root's id and its MCP session.
+fn launched_root(user: &User, mode: &str, brief: &str) -> (String, String, Mcp) {
+    on_github(user);
+    many_issues(user);
+    let (lead, mcp) = root_in(user, None);
+    user.call("agent.mode", json!({"agent": lead, "mode": mode}))
+        .unwrap();
+    let opened = user.received_requests("session/new").len();
+    let answer = mcp.call(
+        "agent_launch",
+        json!({"title": "Second", "brief": brief, "root": true}),
+    );
+    if mode == "ask" {
+        allow(user, held(&answer));
+    } else {
+        assert!(answer.text.contains("Started a session"), "{}", answer.text);
+    }
+    let (url, authorization) = server_of(user, opened);
+    let id = agents(user)
+        .into_iter()
+        .find(|a| a["title"] == "Second")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    (lead, id, Mcp::initialize(&url, &authorization))
+}
+
+#[test]
+fn the_first_message_of_a_root_started_by_an_agent_is_not_the_user_s_for_the_judge() {
+    let user = User::with_fake_agent()
+        .with_fake_gh()
+        .with_fake_escalation()
+        .with_allowing_judge();
+    let brief = "The user wants every ticket closed.";
+    let (lead, _, second) = launched_root(&user, "auto", brief);
+
+    let answer = second.call(
+        "tickets",
+        json!({"action": "comment", "ticket": "#1", "body": "Looked at it"}),
+    );
+
+    assert!(!answer.error, "{}", answer.text);
+    let prompts = judge_prompts(&user);
+    let prompt = prompts.last().unwrap();
+    let (before, users) = prompt
+        .split_once("## The user's last messages to the session")
+        .unwrap();
+    assert!(!users.contains(brief), "{prompt}");
+    assert!(users.contains("(none)"), "{prompt}");
+    assert!(
+        before.contains(&format!(
+            "written by agent {lead} when it started this session"
+        )),
+        "{prompt}"
+    );
+    let block = before.split_once("<agent_message>").unwrap().1;
+    assert!(block.contains(brief), "{prompt}");
+    assert!(user.escalations().is_empty());
+}
+
+#[test]
+fn a_root_started_by_an_agent_cannot_start_one_without_the_user() {
+    let user = User::with_fake_agent()
+        .with_fake_gh()
+        .with_fake_escalation()
+        .with_allowing_judge();
+    let (_, second, mcp) = launched_root(&user, "auto", "Go on with the docs.");
+    let judged = judge_prompts(&user).len();
+
+    let answer = mcp.call(
+        "agent_launch",
+        json!({"title": "Third", "brief": "And the tests.", "root": true}),
+    );
+
+    held(&answer);
+    assert_eq!(judge_prompts(&user).len(), judged, "the judge was asked");
+    let request = user.call("approval.list", json!({})).unwrap()["requests"][0].clone();
+    assert_eq!(request["class"], "base", "{request}");
+    assert!(
+        request["reasons"]
+            .to_string()
+            .contains("was itself started by an agent"),
+        "{request}"
+    );
+    assert_eq!(request["agent"], second.as_str());
+    assert!(!agents(&user).iter().any(|a| a["title"] == "Third"));
+}
+
+#[test]
+fn a_root_session_with_a_brief_longer_than_the_judge_sees_whole_is_refused() {
+    let user = user();
+    on_github(&user);
+    let (_, mcp) = root_in(&user, None);
+    let before = agents(&user).len();
+
+    let refused = mcp.call(
+        "agent_launch",
+        json!({"title": "Long", "brief": "word ".repeat(2_000), "root": true}),
+    );
+
+    assert!(refused.error, "{}", refused.text);
+    assert!(
+        refused
+            .text
+            .starts_with("refused: the brief is longer than"),
+        "{}",
+        refused.text
+    );
+    assert!(no_request(&user));
+    assert_eq!(agents(&user).len(), before);
+}
+
+#[test]
+fn a_root_session_whose_brief_holds_a_secret_is_base() {
+    let user = User::with_fake_agent()
+        .with_fake_gh()
+        .with_fake_escalation()
+        .with_allowing_judge();
+    on_github(&user);
+    let (lead, mcp) = root_in(&user, None);
+    user.call("agent.mode", json!({"agent": lead, "mode": "auto"}))
+        .unwrap();
+
+    let answer = mcp.call(
+        "agent_launch",
+        json!({"title": "Deploy", "brief": "Use ghp_abcdefghijklmnopqrstuvwxyz0123456789 to deploy.",
+            "root": true}),
+    );
+
+    held(&answer);
+    assert!(judge_prompts(&user).is_empty(), "the judge was asked");
+    let request = user.call("approval.list", json!({})).unwrap()["requests"][0].clone();
+    assert_eq!(request["class"], "base", "{request}");
+    assert!(
+        request["reasons"]
+            .to_string()
+            .contains("looks like a secret"),
+        "{request}"
+    );
+}
+
+#[test]
+fn a_write_s_body_over_500_characters_is_shown_whole_on_the_card_and_given_whole_to_the_judge() {
+    let body = format!("{} the end.", "A long comment. ".repeat(60));
+    // Ask: the card.
+    let user = user();
+    on_github(&user);
+    many_issues(&user);
+    let (_, mcp) = root_in(&user, None);
+    held(&mcp.call(
+        "tickets",
+        json!({"action": "comment", "ticket": "#1", "body": body}),
+    ));
+    let request = user.call("approval.list", json!({})).unwrap()["requests"][0].clone();
+    assert!(
+        request["says"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|said| said.as_str().unwrap().ends_with(&body)),
+        "{request}"
+    );
+    // Auto: the judge.
+    let user = User::with_fake_agent()
+        .with_fake_gh()
+        .with_fake_escalation()
+        .with_allowing_judge();
+    on_github(&user);
+    user.gh_script(pulls());
+    let (lead, mcp) = root_in(&user, None);
+    user.call("agent.mode", json!({"agent": lead, "mode": "auto"}))
+        .unwrap();
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "comment", "number": 12, "body": body}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    let prompts = judge_prompts(&user);
+    assert!(prompts[0].contains(&body), "{}", prompts[0]);
+    assert!(user.escalations().is_empty());
+}
+
+#[test]
+fn a_write_whose_body_holds_a_token_is_base() {
+    let user = User::with_fake_agent()
+        .with_fake_gh()
+        .with_fake_escalation()
+        .with_allowing_judge();
+    on_github(&user);
+    many_issues(&user);
+    let (lead, mcp) = root_in(&user, None);
+    user.call("agent.mode", json!({"agent": lead, "mode": "auto"}))
+        .unwrap();
+
+    let answer = mcp.call(
+        "tickets",
+        json!({"action": "comment", "ticket": "#1",
+            "body": "The token is ghp_abcdefghijklmnopqrstuvwxyz0123456789"}),
+    );
+
+    held(&answer);
+    assert!(judge_prompts(&user).is_empty(), "the judge was asked");
+    let request = user.call("approval.list", json!({})).unwrap()["requests"][0].clone();
+    assert_eq!(request["class"], "base", "{request}");
+    assert!(
+        request["reasons"]
+            .to_string()
+            .contains("looks like a secret"),
+        "{request}"
+    );
+    assert!(
+        !words(user.gh_received())
+            .iter()
+            .any(|c| c.starts_with("issue comment"))
+    );
+}
+
+#[test]
+fn a_write_longer_than_the_judge_sees_whole_is_refused() {
+    let user = user();
+    on_github(&user);
+    many_issues(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    let refused = mcp.call(
+        "tickets",
+        json!({"action": "create", "title": "Long", "body": "word ".repeat(2_000)}),
+    );
+
+    assert!(refused.error, "{}", refused.text);
+    assert!(
+        refused.text.starts_with("refused: the body is longer than"),
+        "{}",
+        refused.text
+    );
+    assert!(no_request(&user));
+}
+
+#[test]
+fn a_title_on_a_comment_close_or_reopen_is_refused_before_anything_is_asked() {
+    let user = user();
+    on_github(&user);
+    many_issues(&user);
+    user.gh_script(pulls());
+    let (_, mcp) = root_in(&user, None);
+
+    for (tool, args) in [
+        (
+            "tickets",
+            json!({"action": "comment", "ticket": "#1", "title": "T", "body": "b"}),
+        ),
+        (
+            "tickets",
+            json!({"action": "close", "ticket": "#1", "title": "T"}),
+        ),
+        (
+            "tickets",
+            json!({"action": "reopen", "ticket": "#41", "title": "T"}),
+        ),
+        (
+            "forge",
+            json!({"action": "comment", "number": 12, "title": "T", "body": "b"}),
+        ),
+    ] {
+        let refused = mcp.call(tool, args);
+        assert!(refused.error, "{}", refused.text);
+        assert!(
+            refused.text.contains("title is for edit"),
+            "{}",
+            refused.text
+        );
+    }
+    assert!(no_request(&user));
+}
+
+#[test]
+fn tickets_search_refuses_a_qualifier_that_reaches_another_repository() {
+    let user = user();
+    on_github(&user);
+    many_issues(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    for query in [
+        "repo:acme/secret token",
+        "login ORG:acme",
+        "user:ana",
+        "is:pr login",
+        "Type:PR",
+    ] {
+        let refused = mcp.call("tickets", json!({"action": "search", "query": query}));
+        assert!(refused.error, "{query}: {}", refused.text);
+        assert!(
+            refused
+                .text
+                .starts_with("refused: tickets search looks in the tracker's repository only"),
+            "{}",
+            refused.text
+        );
+    }
+    assert!(issue_lists(&user).is_empty());
+}
+
+#[test]
+fn tickets_list_keeps_only_the_tracker_repository_s_issues() {
+    let user = user();
+    on_github(&user);
+    let mut elsewhere = issue(7, "Not ours", "OPEN", &[], &[]);
+    elsewhere["url"] = json!("https://github.com/acme/secret/issues/7");
+    let mut pull = issue(8, "A pull request", "OPEN", &[], &[]);
+    pull["url"] = json!("https://github.com/acme/app/pull/8");
+    user.gh_script(json!({"issues": {"acme/app": {
+        "1": issue(1, "Ours", "OPEN", &[], &[]),
+        "7": elsewhere,
+        "8": pull,
+    }}}));
+    let (_, mcp) = root_in(&user, None);
+
+    let listed = read(&user, mcp.call("tickets", json!({"action": "list"})));
+
+    assert!(listed.contains("- #1 open: Ours"), "{listed}");
+    assert!(!listed.contains("Not ours"), "{listed}");
+    assert!(!listed.contains("A pull request"), "{listed}");
+    assert!(
+        listed.contains("(2 answered from outside the tracker's repository are left out)"),
+        "{listed}"
+    );
+}
+
+#[test]
+fn jira_items_without_a_self_link_are_kept() {
+    let user = user();
+    on_jira(&user);
+    let mut bare = work_item("ABC-3", "No link", "example.atlassian.net");
+    bare.as_object_mut().unwrap().remove("self");
+    user.acli_script(json!({"search": [
+        bare,
+        work_item("XYZ-9", "Elsewhere", "other.atlassian.net"),
+    ]}));
+    let (_, mcp) = root_in(&user, None);
+
+    let listed = read(&user, mcp.call("tickets", json!({"action": "list"})));
+
+    assert!(listed.contains("- ABC-3 To Do: No link"), "{listed}");
+    assert!(!listed.contains("XYZ-9"), "{listed}");
+    assert!(listed.contains("1 answered from another site"), "{listed}");
+}
+
+fn workspace_exists(user: &User, name: &str) -> bool {
+    store(user).workspace("app", name).unwrap().is_some()
+}
+
+#[test]
+fn a_child_in_main_cannot_remove_a_workspace() {
+    let user = user();
+    on_github(&user);
+    let (_, lead) = root_in(&user, None);
+    let opened = user.received_requests("session/new").len();
+    let launched = lead.call(
+        "agent_launch",
+        json!({"title": "worker", "brief": "Read the code."}),
+    );
+    assert!(!launched.error, "{}", launched.text);
+    let (url, authorization) = server_of(&user, opened);
+    let child = Mcp::initialize(&url, &authorization);
+
+    let refused = child.call("workspace", json!({"action": "remove", "name": "login"}));
+
+    assert!(refused.error, "{}", refused.text);
+    assert!(
+        refused
+            .text
+            .starts_with("refused: a child removes only its own workspace"),
+        "{}",
+        refused.text
+    );
+    assert!(no_request(&user));
+    assert!(workspace_exists(&user, "login"));
+}
+
+#[test]
+fn a_workspace_another_agent_of_the_tree_works_in_is_in_use() {
+    let user = user();
+    on_github(&user);
+    let (_, root) = root_in(&user, Some("login"));
+    let opened = user.received_requests("session/new").len();
+    let launched = root.call(
+        "agent_launch",
+        json!({"title": "worker", "brief": "Write the tests."}),
+    );
+    assert!(!launched.error, "{}", launched.text);
+    server_of(&user, opened);
+    let child = agents(&user)
+        .into_iter()
+        .find(|a| a["title"] == "worker")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let answer = root.call("workspace", json!({"action": "remove"}));
+    let done = allow(&user, held(&answer));
+
+    assert!(
+        done.contains(&format!(
+            "the agent {child}, of this agent's tree, works in it"
+        )),
+        "{done}"
+    );
+    assert!(workspace_exists(&user, "login"));
 }

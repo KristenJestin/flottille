@@ -1188,21 +1188,28 @@ async fn remove(daemon: Arc<Daemon>, asked: WorkspaceName) -> Answer {
     removed
 }
 
-/// What works in the workspace outside the tree whose root is `ours`: its agents not ended and
-/// its command runs still running (`docs/design.md` §5.1), each as a sentence.
-fn in_use(daemon: &Daemon, workspace: &Workspace, ours: &str) -> Result<Vec<String>, Failure> {
+/// What works in the workspace but the agent `caller` of the tree whose root is `ours`: the
+/// other agents not ended, of its tree or not (a tree's agent loses its place as well), and the
+/// command runs still running outside the tree (`docs/design.md` §5.1), each as a sentence.
+fn in_use(
+    daemon: &Daemon,
+    workspace: &Workspace,
+    ours: &str,
+    caller: &str,
+) -> Result<Vec<String>, Failure> {
     let theirs = |agent: &str| tree::root_of(daemon, agent) != ours;
     let mut used = Vec::new();
     for agent in daemon.read(Store::agents)? {
         if agent.project == workspace.project
             && agent.workspace.as_deref() == Some(workspace.name.as_str())
             && !agent.state.is_final()
-            && theirs(&agent.id)
+            && agent.id != caller
         {
-            used.push(format!(
-                "the agent {}, outside this agent's tree, works in it",
-                agent.id
-            ));
+            let whose = match theirs(&agent.id) {
+                true => "outside this agent's tree",
+                false => "of this agent's tree",
+            };
+            used.push(format!("the agent {}, {whose}, works in it", agent.id));
         }
     }
     for run in daemon.read(Store::running_runs)? {
@@ -1390,7 +1397,7 @@ pub async fn workspace_remove(
         Ok(workspace) => workspace,
         Err(failure) => return Outcome::Failed(failure.message),
     };
-    let used = match in_use(daemon, &workspace, &tree::root_of(daemon, agent)) {
+    let used = match in_use(daemon, &workspace, &tree::root_of(daemon, agent), agent) {
         Ok(used) => used,
         Err(failure) => return Outcome::Failed(failure.message),
     };

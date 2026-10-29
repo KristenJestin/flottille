@@ -261,8 +261,11 @@ pub async fn prepared(
         let project = own(daemon, grant)?;
         return match crate::tickets::unwritable(&project, args) {
             Some(why) => Err(Outcome::Refused(why)),
-            None => Ok(Vec::new()),
+            None => Ok(posted_says(args)),
         };
+    }
+    if tool == "forge" {
+        return Ok(posted_says(args));
     }
     if !TOOLS.contains(&tool) {
         return Ok(Vec::new());
@@ -284,6 +287,13 @@ pub async fn prepared(
         "skills" => skills_says(daemon, &project, &arguments(tool, args.clone())?),
         "commands" => commands_says(&project, &arguments(tool, args.clone())?),
         "workspace" => {
+            // In `main` a workspace removed is named: one a child does not work in.
+            if args["action"] == "remove"
+                && grant.place.workspace.is_none()
+                && !is_root(daemon, grant)
+            {
+                return Err(Outcome::Refused(CHILD_MAIN_REMOVAL.into()));
+            }
             let mine = matches!(args["action"].as_str(), Some("list" | "show" | "remove"));
             if !mine && !is_root(daemon, grant) {
                 return Err(Outcome::Refused(CHILD_WORKSPACES.into()));
@@ -301,6 +311,25 @@ pub async fn prepared(
             }
         }
     }
+}
+
+/// Why a child in `main` cannot remove a workspace.
+const CHILD_MAIN_REMOVAL: &str = "refused: a child removes only its own workspace, and this one \
+    works in main, the project folder: ask your parent (ask_parent)";
+
+/// What a write of `forge` or `tickets` posts, whole: the user reads on the card what the forge
+/// or the tracker will show (the arguments recorded are cut). Nothing for a read.
+fn posted_says(args: &Value) -> Vec<String> {
+    if matches!(
+        args["action"].as_str(),
+        Some("list" | "search" | "show") | None
+    ) {
+        return Vec::new();
+    }
+    [("title", "Its title"), ("body", "Its body")]
+        .into_iter()
+        .filter_map(|(key, said)| Some(format!("{said}: {}", args[key].as_str()?)))
+        .collect()
 }
 
 /// Whether the agent is a root, the agent the user talks to.

@@ -1141,7 +1141,8 @@ async fn forge_note(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
             }
             let repo = forge.gh_repository();
             let mut args = vec!["pr", action, &number, "-R", &repo];
-            if let Some(title) = title {
+            // `gh pr comment` takes no title, and the gate refused one there.
+            if let Some(title) = title.filter(|_| action == "edit") {
                 args.extend(["--title", title]);
             }
             if let Some(body) = body {

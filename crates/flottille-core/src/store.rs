@@ -443,6 +443,11 @@ const MIGRATIONS: &[&str] = &[
         ELSE tool
     END;
 ",
+    "
+    -- A root an agent started for the user keeps who started it: such a root cannot start one in
+    -- turn without the user (`docs/tools.md`, \"The tree's tools\").
+    ALTER TABLE agents ADD COLUMN launched_by TEXT REFERENCES agents (id);
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -454,7 +459,8 @@ const RUN_COLUMNS: &str = "id, agent, name, line, folder, state, exit_code, sign
 const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, state, state_reason, \
     created_at, updated_at, active_at, ended_at, chosen_model, chosen_effort, chosen_mode, \
     taken_model, taken_effort, taken_mode, native_id, agent_version, instructions, tools, parent, \
-    depth, epoch, title, brief, reported_at, quiet_turns, waiting_on_answer, reopens, images, gate_mode";
+    depth, epoch, title, brief, reported_at, quiet_turns, waiting_on_answer, reopens, images, gate_mode, \
+    launched_by";
 
 const DELIVERY_COLUMNS: &str = "id, agent, kind, body, urgency, state, created_at, sent_at, images";
 
@@ -764,7 +770,7 @@ impl Store {
             &format!(
                 "INSERT INTO agents ({AGENT_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, \
                  ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, \
-                 ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33)"
+                 ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34)"
             ),
             params![
                 agent.id,
@@ -800,6 +806,7 @@ impl Store {
                 agent.reopens,
                 agent.images,
                 agent.gate_mode.as_str(),
+                agent.launched_by,
             ],
         )?;
         let event = append_agent_event(&transaction, &agent.id, event.0, event.1)?;
@@ -2061,6 +2068,7 @@ fn agent_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Agent>> {
         images: row.get(31)?,
         // A mode the store does not know is the safer one.
         gate_mode: GateMode::parse(&row.get::<_, String>(32)?).unwrap_or(GateMode::Ask),
+        launched_by: text(33)?,
     }))
 }
 
@@ -2624,6 +2632,7 @@ mod tests {
             reopens: false,
             images: None,
             gate_mode: GateMode::Auto,
+            launched_by: None,
         }
     }
 
@@ -2922,7 +2931,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("flottille.db");
         let old = Connection::open(&path).unwrap();
-        let previous = MIGRATIONS.len() - 1;
+        let previous = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("WHEN 'workspace_remove' THEN 'workspace'"))
+            .unwrap();
         for migration in &MIGRATIONS[..previous] {
             old.execute_batch(migration).unwrap();
         }

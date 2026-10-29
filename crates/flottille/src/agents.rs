@@ -461,6 +461,7 @@ fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
             model: asked.model,
             effort: asked.effort,
             gate_mode: None,
+            launched_by: None,
         },
     )?;
     // The root's brief is its first message: a replacement supersedes it by its id, as any
@@ -493,6 +494,8 @@ pub struct New {
     pub effort: Option<String>,
     /// Ask or Auto: a child's is its parent's; `None` for a new root, which starts in Auto.
     pub gate_mode: Option<GateMode>,
+    /// The agent that starts this root for the user; `None` for a child or the user's own root.
+    pub launched_by: Option<String>,
 }
 
 /// Writes a new agent, its instructions and tools frozen in it; nothing is sent to it yet.
@@ -614,6 +617,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         reopens: false,
         images: None,
         gate_mode: new.gate_mode.unwrap_or_default(),
+        launched_by: new.launched_by,
     };
     daemon.write(|store| {
         let event = store.create_agent(
@@ -1064,13 +1068,14 @@ pub fn replace(daemon: &Arc<Daemon>, id: &str, reason: &str, counted: bool, tell
     if let Some((provider, native)) = replaced {
         (provider.forget_session)(&daemon.paths, &native);
     }
-    if let Some(brief) = &agent.brief {
+    if agent.brief.is_some() {
+        let (kind, brief) = crate::tree::first_message(daemon, &agent);
         deliveries::deliver(
             daemon,
             id,
-            "brief",
+            kind,
             Some(format!("brief-{id}-{}", agent.epoch)),
-            brief,
+            &brief,
             approval::BETWEEN_TURNS,
         );
     }

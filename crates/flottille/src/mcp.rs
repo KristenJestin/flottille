@@ -642,6 +642,8 @@ pub struct Grant {
     pub epoch: u64,
     pub tools: Vec<&'static str>,
     pub place: Place,
+    /// The agent is a root another agent started for the user: it starts none without the user.
+    pub launched: bool,
 }
 
 /// What a tool did.
@@ -939,6 +941,7 @@ pub fn grant_of(daemon: &Daemon, agent: &Agent) -> Result<Grant, String> {
         epoch: agent.epoch,
         tools,
         place,
+        launched: agent.launched_by.is_some(),
     })
 }
 
@@ -1372,7 +1375,12 @@ pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gat
         }
     }
     if tool == "agent_launch" && args["root"] == true {
-        judge.push(gate::ROOT_LAUNCH.into());
+        match gate::root_launch(grant, args) {
+            gate::Verdict::Deny(why) => return gate::Verdict::Deny(why),
+            gate::Verdict::Ask(ask) if ask.class == gate::Class::Base => base.extend(ask.reasons),
+            gate::Verdict::Ask(ask) => judge.extend(ask.reasons),
+            gate::Verdict::Allow => {}
+        }
     }
     let class = match base.is_empty() {
         true => gate::Class::Judge,

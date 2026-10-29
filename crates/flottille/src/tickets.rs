@@ -703,6 +703,16 @@ async fn listed(project: &Project, asked: &TicketsCall) -> Outcome {
     let Some(tracker) = &project.tracker else {
         return Outcome::Refused(format!("refused: {NO_TRACKER}"));
     };
+    if let (ProjectTracker::Github { .. }, Some(query)) = (tracker, query) {
+        let lower = query.to_lowercase();
+        if REACHING.iter().any(|qualifier| lower.contains(qualifier)) {
+            return Outcome::Refused(
+                "refused: tickets search looks in the tracker's repository only: its query \
+                 cannot hold repo:, org:, user:, is:pr or type:pr; give the words alone"
+                    .into(),
+            );
+        }
+    }
     let filters = Filters {
         state,
         label: asked.label.as_deref(),
@@ -746,13 +756,19 @@ async fn listed(project: &Project, asked: &TicketsCall) -> Outcome {
         ));
     }
     if left_out > 0 {
-        text.push_str(&format!(
-            "({left_out} answered from another site than the tracker's are left out)\n"
-        ));
+        let from = match tracker {
+            ProjectTracker::Github { .. } => "outside the tracker's repository",
+            ProjectTracker::Jira { .. } => "another site than the tracker's",
+        };
+        text.push_str(&format!("({left_out} answered from {from} are left out)\n"));
     }
     text.push_str("tickets {\"action\": \"show\", \"ticket\": …} reads one.");
     Outcome::Done(text)
 }
+
+/// The qualifiers of GitHub's search that reach beyond the tracker's repository, or to pull
+/// requests, refused in a search's query.
+const REACHING: [&str; 5] = ["repo:", "org:", "user:", "is:pr", "type:pr"];
 
 /// What a list keeps.
 struct Filters<'a> {
@@ -796,10 +812,16 @@ async fn list_issues(forge: &Forge, filters: &Filters<'_>) -> Result<(Vec<Listed
             .filter(|name| !name.is_empty())
             .collect()
     };
-    let tickets = issues
-        .as_array()
-        .into_iter()
-        .flatten()
+    // Only the tracker's repository's issues are kept, whatever `gh` answered.
+    let ours = format!("https://{repo}/issues/").to_lowercase();
+    let all = issues.as_array().cloned().unwrap_or_default();
+    let (kept, other): (Vec<Value>, Vec<Value>) = all.into_iter().partition(|issue| {
+        issue["url"]
+            .as_str()
+            .is_some_and(|url| url.to_lowercase().starts_with(&ours))
+    });
+    let tickets = kept
+        .iter()
         .filter_map(|issue| {
             Some(Listed {
                 reference: format!("#{}", issue["number"].as_u64()?),
@@ -811,7 +833,7 @@ async fn list_issues(forge: &Forge, filters: &Filters<'_>) -> Result<(Vec<Listed
             })
         })
         .collect();
-    Ok((tickets, 0))
+    Ok((tickets, other.len()))
 }
 
 /// A text as JQL quotes it.
@@ -842,7 +864,8 @@ fn jql(projects: &[String], filters: &Filters<'_>) -> String {
 }
 
 /// `acli jira workitem search` on the tracker's projects, once `acli` is checked to be signed in
-/// to the tracker's site. An item that says another site is left out, and counted.
+/// to the tracker's site. An item that says another site is left out, and counted; one that says
+/// none is kept.
 async fn list_work_items(
     site: &str,
     projects: &[String],
@@ -887,7 +910,8 @@ async fn list_work_items(
     let mut left_out = 0;
     let mut tickets = Vec::new();
     for item in &items {
-        if site_of(item).as_deref() != Some(site) {
+        // An item that names no site is kept: the search was of the signed-in site's projects.
+        if site_of(item).is_some_and(|from| from != site) {
             left_out += 1;
             continue;
         }
@@ -1043,13 +1067,12 @@ async fn write(project: &Project, asked: &TicketsCall, key: &Key) -> Outcome {
     let repo = forge.gh_repository();
     let number = number.to_string();
     let mut args = vec!["issue", action, &number, "-R", &repo];
-    if action != "close" && action != "reopen" {
-        if let Some(title) = title {
-            args.extend(["--title", title]);
-        }
-        if let Some(body) = body {
-            args.extend(["--body", body]);
-        }
+    // `gh issue comment` takes no title, and the gate refused one there.
+    if let Some(title) = title.filter(|_| action == "edit") {
+        args.extend(["--title", title]);
+    }
+    if let Some(body) = body.filter(|_| action == "comment" || action == "edit") {
+        args.extend(["--body", body]);
     }
     let slug = forge.slug();
     match forge::gh_text(&args).await {
