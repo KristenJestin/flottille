@@ -2,19 +2,25 @@
 //! one session changing redraws its row and nothing else; a folded project or place shows the
 //! strongest mark of what it holds.
 
+use std::collections::HashSet;
+
+use flottille_ui::motion::PANEL;
 use flottille_ui::rows::TreeLevel;
 use flottille_ui::{
-    AgentState, Button, Fold, Icon, Item, Listing, StateIcon, Status, TreeRow, enter, meta,
-    palette, section_label, tree_children,
+    AgentState, Button, Fold, Icon, Item, Listing, Menu, Modal, StateIcon, Status, TreeRow, enter,
+    meta, palette, presence, presence_of, section_label, tree_children,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, TestSupportExt as _,
-    WeakEntity, Window, div, px,
+    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
+    TestSupportExt as _, WeakEntity, Window, div, px,
 };
 
+use crate::actions::Command;
+use crate::composer::Choice;
 use crate::model::{Place, ago};
+use crate::session::end_sentence;
 use crate::shell::{Selection, Shell};
 
 /// The element id of a project's row.
@@ -27,9 +33,29 @@ pub fn place_id(project: &str, place: &Place) -> ElementId {
     ElementId::Name(format!("place-{project}-{}", place_name(place)).into())
 }
 
-/// The element id of a project's "Ended" group.
-pub fn ended_id(project: &str) -> ElementId {
-    ElementId::Name(format!("ended-{project}").into())
+/// The element id of the "Ended" group, at the bottom of the tree.
+pub fn ended_id() -> ElementId {
+    ElementId::Name("ended".into())
+}
+
+/// The element id of the "+" a place's row offers, which starts a session there.
+pub fn place_new_id(project: &str, place: &Place) -> ElementId {
+    ElementId::Name(format!("place-new-{project}-{}", place_name(place)).into())
+}
+
+/// The element id of the "⋯" menu a session's row offers.
+pub fn session_menu_id(id: &str) -> ElementId {
+    ElementId::Name(format!("session-menu-{id}").into())
+}
+
+/// The element id of End session in a session's row menu.
+pub fn session_end_id(id: &str) -> ElementId {
+    ElementId::Name(format!("session-row-end-{id}").into())
+}
+
+/// The element id of Resume in an ended session's row menu.
+pub fn session_resume_id(id: &str) -> ElementId {
+    ElementId::Name(format!("session-row-resume-{id}").into())
 }
 
 /// The element id of a session's row.
@@ -90,6 +116,8 @@ struct Mark {
     shown: Option<AgentState>,
     status: Entity<Status>,
     icon: Entity<StateIcon>,
+    /// Puts the model at rest once the icon has folded away: it keeps its state while it does.
+    settling: Option<Task<()>>,
 }
 
 impl Mark {
@@ -100,30 +128,66 @@ impl Mark {
             shown: None,
             status,
             icon,
+            settling: None,
         }
     }
 
     /// Whether the row must be drawn again: only when the mark appears or goes away. A change
     /// from one mark to another redraws the icon alone.
     fn set<V: 'static>(&mut self, mark: Option<AgentState>, cx: &mut Context<V>) -> bool {
-        // A row at rest holds a still state, so that no ticker runs for it.
-        let state = mark.unwrap_or(AgentState::Idle);
-        // GPUI Fast takes any update of an entity for a change: touch it only when it is one.
-        if self.status.read(cx).state() != state {
-            self.status.update(cx, |status, cx| status.set(state, cx));
-        }
         let changed = self.shown.is_some() != mark.is_some();
         self.shown = mark;
+        match mark {
+            Some(state) => {
+                self.settling = None;
+                // GPUI Fast takes any update of an entity for a change: touch it only when it is
+                // one.
+                if self.status.read(cx).state() != state {
+                    self.status.update(cx, |status, cx| status.set(state, cx));
+                }
+            }
+            // A row at rest holds a still state, so that no ticker runs for it: once the icon,
+            // which keeps the state it had, has folded away.
+            None if changed => {
+                let status = self.status.clone();
+                self.settling = Some(cx.spawn(async move |_, cx| {
+                    cx.background_executor().timer(PANEL).await;
+                    status.update(cx, |status, cx| status.set(AgentState::Idle, cx));
+                }));
+            }
+            None => {}
+        }
         changed
+    }
+
+    /// The icon, folding in when the mark appears and away when it goes.
+    fn icon(&self, id: &str) -> impl IntoElement {
+        presence(
+            ElementId::Name(format!("mark-{id}").into()),
+            self.shown.is_some(),
+            div().flex().items_center().child(self.icon.clone()),
+        )
     }
 }
 
-/// The side panel: the primary button, the `PROJECTS` label and the projects.
+/// The side panel: the primary button, the `PROJECTS` label, the projects and, below them all,
+/// the "Ended" group.
 pub struct Sidebar {
     shell: WeakEntity<Shell>,
     projects: Vec<Entity<ProjectNode>>,
     /// The rows as drawn: a project that went folds away before it is gone.
     list: Listing<Entity<ProjectNode>>,
+    /// The "Ended" group, and whether it holds a session: it folds away when it holds none.
+    ended: Option<(Entity<PlaceNode>, bool)>,
+    /// The session whose ending the user is asked to confirm, and how many agents end.
+    ending: Option<(String, usize)>,
+    /// The count the confirmation said last, which it still shows while it fades out.
+    said: usize,
+    /// The sessions asked of the daemon from here: an answer that refuses is said here only for
+    /// them (the session's page says its own).
+    asked: HashSet<String>,
+    /// What the daemon refused of what was asked from a row.
+    refused: Option<SharedString>,
 }
 
 impl Sidebar {
@@ -132,6 +196,11 @@ impl Sidebar {
             shell,
             projects: Vec::new(),
             list: Listing::default(),
+            ended: None,
+            ending: None,
+            said: 0,
+            asked: HashSet::new(),
+            refused: None,
         }
     }
 
@@ -144,6 +213,68 @@ impl Sidebar {
             self.projects = projects;
             cx.notify();
         }
+    }
+
+    /// The "Ended" group, and whether it holds a session now.
+    pub fn set_ended(&mut self, group: Entity<PlaceNode>, present: bool, cx: &mut Context<Self>) {
+        let same = self
+            .ended
+            .as_ref()
+            .is_some_and(|(held, shown)| *held == group && *shown == present);
+        if !same {
+            self.ended = Some((group, present));
+            cx.notify();
+        }
+    }
+
+    /// Asks the user to confirm ending `session`, which ends `count` agents.
+    pub fn ask_end(&mut self, session: String, count: usize, cx: &mut Context<Self>) {
+        self.ending = Some((session, count));
+        self.said = count;
+        self.refused = None;
+        cx.notify();
+    }
+
+    /// The session whose ending is asked.
+    pub fn ending(&self) -> Option<&str> {
+        self.ending.as_ref().map(|(session, _)| session.as_str())
+    }
+
+    fn cancel_end(&mut self, cx: &mut Context<Self>) {
+        if self.ending.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn confirm_end(&mut self, cx: &mut Context<Self>) {
+        let Some((session, _)) = self.ending.take() else {
+            return;
+        };
+        self.asked.insert(session.clone());
+        self.shell
+            .update(cx, |shell, _| shell.perform(Command::Stop { session }))
+            .ok();
+        cx.notify();
+    }
+
+    /// A resume asked from a row.
+    pub fn resuming(&mut self, session: &str, cx: &mut Context<Self>) {
+        self.asked.insert(session.to_owned());
+        self.refused = None;
+        cx.notify();
+    }
+
+    /// The daemon answered what was asked of `session` from a row: a refusal is said.
+    pub fn answered(&mut self, session: &str, refused: Option<String>, cx: &mut Context<Self>) {
+        if self.asked.remove(session) && refused.is_some() {
+            self.refused = refused.map(SharedString::from);
+            cx.notify();
+        }
+    }
+
+    /// What the daemon refused of what was asked from a row.
+    pub fn refused(&self) -> Option<&str> {
+        self.refused.as_deref()
     }
 }
 
@@ -181,6 +312,35 @@ impl Render for Sidebar {
         let projects = framed(&mut self.list, &self.projects, "tree-project", cx);
         let shell = self.shell.clone();
         let adds = self.shell.clone();
+        let ended = self.ended.clone().map(|(group, present)| {
+            // Below every project, a little apart; it folds away when its last session leaves.
+            presence("sidebar-ended", present, div().pt(px(10.)).child(group))
+        });
+        let count = self.ending.as_ref().map_or(self.said, |(_, count)| *count);
+        let this = cx.entity().downgrade();
+        let modal = Modal::new("sidebar-end-modal", "End the session?")
+            .open(self.ending.is_some())
+            .on_close(move |_, cx| {
+                this.update(cx, |this, cx| this.cancel_end(cx)).ok();
+            })
+            .child(
+                div()
+                    .id("sidebar-end-question")
+                    .text_size(px(12.5))
+                    .text_color(p.mute)
+                    .child(SharedString::from(end_sentence(count)))
+                    .test_support(),
+            )
+            .action(
+                Button::primary(
+                    "sidebar-end-confirm",
+                    match count {
+                        0 | 1 => "End session".to_owned(),
+                        n => format!("End {n} agents"),
+                    },
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.confirm_end(cx))),
+            );
         div()
             .size_full()
             .bg(p.side)
@@ -225,8 +385,26 @@ impl Render for Sidebar {
                                 ),
                             ),
                     )
-                    .children(projects),
+                    .children(projects)
+                    .children(ended),
             )
+            .child(presence_of(
+                "sidebar-refused-line",
+                self.refused.clone(),
+                move |line| {
+                    div()
+                        .id("sidebar-refused")
+                        .aria_label(line.clone())
+                        .px(px(14.))
+                        .pb(px(10.))
+                        .text_size(px(12.5))
+                        .text_color(p.fail)
+                        .child(line)
+                        .test_support()
+                        .into_any_element()
+                },
+            ))
+            .child(modal)
     }
 }
 
@@ -235,6 +413,9 @@ pub struct ProjectNode {
     name: String,
     open: bool,
     mark: Mark,
+    /// The strongest mark of what it holds, which it shows only while it is folded: open, the
+    /// work is on its own row.
+    held: Option<AgentState>,
     /// How many commands its agents run now.
     commands: usize,
     places: Entity<Level<PlaceNode>>,
@@ -250,6 +431,7 @@ impl ProjectNode {
             name,
             open: true,
             mark: Mark::new(cx),
+            held: None,
             commands: 0,
             places,
             fold,
@@ -277,9 +459,9 @@ impl ProjectNode {
         self.open
     }
 
-    /// Whether it shows these places and this mark already.
+    /// Whether it holds these places and this mark already.
     pub fn holds(&self, places: &[Entity<PlaceNode>], mark: Option<AgentState>, cx: &App) -> bool {
-        self.mark.shown == mark && self.places.read(cx).rows == places
+        self.held == mark && self.places.read(cx).rows == places
     }
 
     pub fn set(
@@ -291,7 +473,13 @@ impl ProjectNode {
         if self.places.read(cx).rows != places {
             self.places.update(cx, |level, cx| level.set(places, cx));
         }
-        if self.mark.set(mark, cx) {
+        self.held = mark;
+        self.show_mark(cx);
+    }
+
+    fn show_mark(&mut self, cx: &mut Context<Self>) {
+        let shown = self.held.filter(|_| !self.open);
+        if self.mark.set(shown, cx) {
             cx.notify();
         }
     }
@@ -300,6 +488,7 @@ impl ProjectNode {
         self.open = !self.open;
         let open = self.open;
         self.fold.update(cx, |fold, cx| fold.set_open(open, cx));
+        self.show_mark(cx);
         cx.notify();
     }
 }
@@ -314,14 +503,12 @@ impl Render for ProjectNode {
             self.name.clone(),
         )
         .expanded(self.open)
-        .when(self.mark.shown.is_some() || self.commands > 0, |row| {
-            row.trailing(trailing(
-                project_commands_id(&self.name),
-                self.commands,
-                div().children(self.mark.shown.map(|_| self.mark.icon.clone())),
-                cx,
-            ))
-        })
+        .trailing(trailing(
+            project_commands_id(&self.name),
+            self.commands,
+            self.mark.icon(&format!("project-{}", self.name)),
+            cx,
+        ))
         .on_toggle(cx.listener(|this, _, _, cx| this.toggle(cx)))
         .on_click(cx.listener(move |_, _, window, cx| {
             let project = name.clone();
@@ -376,21 +563,29 @@ impl<V: Render> Render for Level<V> {
 }
 
 /// A place's row (`main` with a folder icon, a workspace with a git-branch icon) and, folding
-/// under it, its sessions; or, at the bottom of a project, the "Ended" group that gathers its
-/// ended sessions, folded until the user opens it.
+/// under it, its sessions; or, at the bottom of the tree, the "Ended" group that gathers the ended
+/// sessions of every project, folded until the user opens it.
 pub struct PlaceNode {
     project: String,
     place: Place,
-    /// The "Ended" group: no place of its own.
+    /// The "Ended" group: no project and no place of its own.
     ended: bool,
     open: bool,
     mark: Mark,
+    /// The strongest mark of its sessions, which it shows only while it is folded.
+    held: Option<AgentState>,
     sessions: Entity<Level<SessionRow>>,
     fold: Entity<Fold>,
+    shell: WeakEntity<Shell>,
 }
 
 impl PlaceNode {
-    pub fn new(project: String, place: Place, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        project: String,
+        place: Place,
+        shell: WeakEntity<Shell>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let sessions = cx.new(|_| Level::new());
         let fold = cx.new(|_| {
             Fold::new(
@@ -405,26 +600,31 @@ impl PlaceNode {
             ended: false,
             open: true,
             mark: Mark::new(cx),
+            held: None,
             sessions,
             fold,
+            shell,
         }
     }
 
-    /// The "Ended" group of a project, folded.
-    pub fn ended(project: String, cx: &mut Context<Self>) -> Self {
+    /// The "Ended" group, folded.
+    pub fn ended(shell: WeakEntity<Shell>, cx: &mut Context<Self>) -> Self {
         let sessions = cx.new(|_| Level::new());
-        let fold = cx.new(|_| Fold::new(format!("fold-ended-{project}"), sessions.clone(), false));
+        let fold = cx.new(|_| Fold::new("fold-ended", sessions.clone(), false));
         Self {
-            project,
+            project: String::new(),
             place: None,
             ended: true,
             open: false,
             mark: Mark::new(cx),
+            held: None,
             sessions,
             fold,
+            shell,
         }
     }
 
+    /// The mark it shows: that of its sessions, while it is folded.
     pub fn mark(&self) -> Option<AgentState> {
         self.mark.shown
     }
@@ -438,14 +638,14 @@ impl PlaceNode {
         self.sessions.read(cx).rows.clone()
     }
 
-    /// Whether it shows these sessions and this mark already.
+    /// Whether it holds these sessions and this mark already.
     pub fn holds(
         &self,
         sessions: &[Entity<SessionRow>],
         mark: Option<AgentState>,
         cx: &App,
     ) -> bool {
-        self.mark.shown == mark && self.sessions.read(cx).rows == sessions
+        self.held == mark && self.sessions.read(cx).rows == sessions
     }
 
     pub fn set(
@@ -462,7 +662,13 @@ impl PlaceNode {
                 cx.notify();
             }
         }
-        if self.mark.set(mark, cx) {
+        self.held = mark;
+        self.show_mark(cx);
+    }
+
+    fn show_mark(&mut self, cx: &mut Context<Self>) {
+        let shown = self.held.filter(|_| !self.open);
+        if self.mark.set(shown, cx) {
             cx.notify();
         }
     }
@@ -471,6 +677,7 @@ impl PlaceNode {
         self.open = !self.open;
         let open = self.open;
         self.fold.update(cx, |fold, cx| fold.set_open(open, cx));
+        self.show_mark(cx);
         cx.notify();
     }
 }
@@ -480,20 +687,42 @@ impl Render for PlaceNode {
         let row = match (self.ended, &self.place) {
             (true, _) => {
                 let count = self.sessions.read(cx).rows.len();
-                TreeRow::new(ended_id(&self.project), TreeLevel::Session, "Ended")
+                TreeRow::new(ended_id(), TreeLevel::Session, "Ended")
                     .trailing(meta(count.to_string(), cx))
             }
-            (false, place) => TreeRow::new(
-                place_id(&self.project, place),
-                match place {
-                    None => TreeLevel::Main,
-                    Some(_) => TreeLevel::Workspace,
-                },
-                SharedString::from(place_name(place).to_owned()),
-            )
-            .when_some(self.mark.shown, |row, _| {
-                row.trailing(self.mark.icon.clone())
-            }),
+            (false, place) => {
+                let (shell, project, choice) = (
+                    self.shell.clone(),
+                    self.project.clone(),
+                    place.clone().map_or(Choice::Main, Choice::Workspace),
+                );
+                TreeRow::new(
+                    place_id(&self.project, place),
+                    match place {
+                        None => TreeLevel::Main,
+                        Some(_) => TreeLevel::Workspace,
+                    },
+                    SharedString::from(place_name(place).to_owned()),
+                )
+                .trailing(
+                    self.mark
+                        .icon(&format!("place-{}-{}", self.project, place_name(place))),
+                )
+                .actions(
+                    Button::icon(
+                        place_new_id(&self.project, place),
+                        Icon::Plus,
+                        "New session here",
+                    )
+                    .on_click(move |_, window, cx| {
+                        let (project, choice) = (project.clone(), choice.clone());
+                        shell
+                            .update(cx, |shell, cx| shell.start_in(&project, choice, window, cx))
+                            .ok();
+                    }),
+                    false,
+                )
+            }
         }
         .expanded(self.open)
         .on_click(cx.listener(|this, _, _, cx| this.toggle(cx)));
@@ -521,7 +750,21 @@ pub struct SessionRow {
     active_at: u64,
     ago: SharedString,
     selected: bool,
+    /// The project it belongs to, said in the "Ended" group where projects are mixed.
+    scope: Option<SharedString>,
+    /// What its "⋯" menu offers: End session while it lives, Resume when it ended and can.
+    actions: Actions,
+    menu: Option<(Entity<Menu>, Subscription)>,
     shell: WeakEntity<Shell>,
+}
+
+/// What a session's row offers under the pointer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Actions {
+    #[default]
+    None,
+    End,
+    Resume,
 }
 
 impl SessionRow {
@@ -536,8 +779,61 @@ impl SessionRow {
             active_at: 0,
             ago: SharedString::default(),
             selected: false,
+            scope: None,
+            actions: Actions::None,
+            menu: None,
             shell,
         }
+    }
+
+    /// Says its project in its meta (the "Ended" group), or stops.
+    pub fn set_scope(&mut self, scope: Option<&str>, cx: &mut Context<Self>) {
+        if self.scope.as_deref() != scope {
+            self.scope = scope.map(|scope| SharedString::from(scope.to_owned()));
+            cx.notify();
+        }
+    }
+
+    /// What the row's menu offers: End session for a session that lives, Resume for an ended one
+    /// whose agent can resume, nothing else.
+    pub fn set_actions(&mut self, ended: bool, resumable: bool, cx: &mut Context<Self>) {
+        let actions = match (ended, resumable) {
+            (false, _) => Actions::End,
+            (true, true) => Actions::Resume,
+            (true, false) => Actions::None,
+        };
+        if self.actions == actions {
+            return;
+        }
+        self.actions = actions;
+        self.menu = match actions {
+            Actions::None => None,
+            offered => {
+                let (shell, id) = (self.shell.clone(), self.id.clone());
+                let menu = cx.new(|cx| {
+                    let menu = Menu::new(session_menu_id(&id), "Session actions", cx);
+                    match offered {
+                        Actions::End => menu.entry(
+                            session_end_id(&id),
+                            "End session…",
+                            Some(Icon::Stop),
+                            move |_, cx| {
+                                let id = id.clone();
+                                shell.update(cx, |shell, cx| shell.ask_end_of(&id, cx)).ok();
+                            },
+                        ),
+                        _ => menu.entry(session_resume_id(&id), "Resume", None, move |_, cx| {
+                            let id = id.clone();
+                            shell.update(cx, |shell, cx| shell.resume_of(&id, cx)).ok();
+                        }),
+                    }
+                });
+                // The row keeps the menu in sight while it is open: it draws again as it changes.
+                let watch = cx.observe(&menu, |_, _, cx| cx.notify());
+                Some((menu, watch))
+            }
+        };
+        cx.notify();
     }
 
     pub fn mark(&self) -> Option<AgentState> {
@@ -658,12 +954,26 @@ impl Render for SessionRow {
                         shell.open(Selection::Session(session), window, cx)
                     })
                     .ok();
+            })
+            .when_some(self.menu.as_ref(), |row, (menu, _)| {
+                row.actions(menu.clone(), menu.read(cx).is_open())
             });
-        let id = session_commands_id(&self.id);
-        let last = match self.mark.shown {
-            Some(_) => self.mark.icon.clone().into_any_element(),
-            None => meta(self.ago.clone(), cx).into_any_element(),
+        let when = match &self.scope {
+            Some(scope) => SharedString::from(format!("{scope} · {}", self.ago)),
+            None => self.ago.clone(),
         };
+        let id = session_commands_id(&self.id);
+        // The mark and the time take each other's place: one folds away as the other comes.
+        let last = div()
+            .flex()
+            .items_center()
+            .child(self.mark.icon(&self.id))
+            .child(presence(
+                ElementId::Name(format!("meta-{}", self.id).into()),
+                self.mark.shown.is_none(),
+                meta(when, cx),
+            ))
+            .into_any_element();
         // A session an agent started says so, small, before its mark or its time ago, and
         // comes in like the rest of the tree's rows.
         let last = match &self.started_by {
