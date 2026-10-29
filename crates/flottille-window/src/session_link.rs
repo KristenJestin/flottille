@@ -179,6 +179,19 @@ impl Request {
                     _ => format!("{} {}", self.tool, one_line(&self.call)),
                 }
             }
+            ("workspace", _, _) => {
+                let name = field("name").unwrap_or_else(|| "its own workspace".into());
+                match field("action").as_deref() {
+                    Some("create") => format!("Create the workspace {name}"),
+                    Some("prepare") => format!("Resume the preparation of {name}"),
+                    Some("link_ticket") => format!("Link {name} to a ticket"),
+                    _ => format!("workspace {}", one_line(&self.call)),
+                }
+            }
+            ("agent_launch", _, _) if field("new_workspace").is_some() => format!(
+                "Launch a child in a new workspace {}",
+                field("new_workspace").unwrap_or_default()
+            ),
             (tool, _, _) => format!("{tool} {}", one_line(&self.call)),
         }
     }

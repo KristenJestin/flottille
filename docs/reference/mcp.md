@@ -145,15 +145,18 @@ and the 2026 practice around it:
      the session's mode (`docs/tools.md`, "The gate"). In `main` they name the workspace they act
      on (`workspace`).
 
-   - only a root gets `skills`, `commands`, `setup` and `project`, the project's skills, commands,
-     setup and settings, and writes its tasks (`docs/tools.md`, "The project"): a child does its
-     brief. Every agent gets `tasks`, `run` and `run_status`, the names `commands_list`,
+   - only a root gets `skills`, `commands`, `setup`, `project` and `workspace`, the project's
+     skills, commands, setup, settings and workspaces, and writes its tasks (`docs/tools.md`,
+     "The project", "The workspace"): a child does its brief. Every agent gets `tasks`, `run` and `run_status`, the names `commands_list`,
      `commands_run` and `commands_status` had until #131, which are still served under them for
      one release.
 
-   A root lead has 21 tools, a leaf worker 12; two more each when the project's repositories
+   A root lead has 22 tools, a leaf worker 12; two more each when the project's repositories
    declare a forge (`forge_read`, `forge_write`), one more when it declares a tracker
    (`ticket_read`).
+   The biggest list, a root's with a forge and a tracker (25 tools), is 26,889 characters of
+   definitions, about 6,700 tokens: under the 27,000 a test holds it to, far under tool search's
+   threshold (§3).
 10. **The idempotency key** of a call is read from the call's `_meta` (`claudecode/toolUseId` for
     Claude). `claude` calls Flottille's server itself and sends it with every call; the bridge
     never sees MCP calls. Check that the `claude` version Flottille pins still sends it, and fall

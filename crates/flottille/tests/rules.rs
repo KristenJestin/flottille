@@ -538,7 +538,19 @@ fn the_enforced_text_matches_the_gate_s_rules() {
             assert_eq!(base["class"], "base", "{tool}: {base}");
         }
     }
-    claim("a task or setup step whose later run would be base");
+    user.call(
+        "setup.add",
+        json!({"project": "app", "step": {"run": "sudo make install"}}),
+    )
+    .unwrap();
+    let made = request(
+        &user,
+        mcp.call("workspace", json!({"action": "create", "name": "up"})),
+    );
+    assert_eq!(made["class"], "base", "{made}");
+    claim(
+        "a task or setup step whose later run would be base, a workspace made ready by a setup line that would be base to run",
+    );
     claim("a setup step that links the user's checkout into workspaces or copies a secret");
     claim("a task's asking turned off or its check and read-only flags set");
     claim("a forced push");

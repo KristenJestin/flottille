@@ -637,12 +637,12 @@ fn a_lead_lists_the_agent_tools_ask_user_and_approval_answer_and_a_worker_at_the
     assert!(!names.iter().any(|n| n == "ticket_read"));
     assert!(!names.iter().any(|n| n == "forge_write"));
     assert!(names.iter().any(|n| n == "workspace_remove"));
-    // A root also reads and asks for changes to its project's skills, commands, setup and
-    // settings.
-    for family in ["skills", "commands", "setup", "project"] {
+    // A root also reads and asks for changes to its project's skills, commands, setup,
+    // settings and workspaces.
+    for family in ["skills", "commands", "setup", "project", "workspace"] {
         assert!(names.iter().any(|n| n == family), "{family}");
     }
-    assert_eq!(names.len(), 21);
+    assert_eq!(names.len(), 22);
 
     let names = worker.names();
     assert!(names.iter().any(|n| n == "ask_parent"));
@@ -1015,8 +1015,12 @@ fn big_reports_pinned_on_a_conversation_page_keep_its_cursor_and_stay_under_4000
 
 #[test]
 fn two_launches_racing_for_the_last_slot_leave_no_workspace_of_the_refused_one() {
-    let user = user();
+    // A launch that makes a workspace is judged as creating it: in Auto, with no setup step to
+    // hold it for the user, the judge lets both through to race for the slot.
+    let user = user().with_allowing_judge();
     let (_, lead) = lead(&user);
+    user.call("setup.remove", json!({"project": "app", "number": 1}))
+        .unwrap();
     launch(&lead, "a", "HANG one");
     launch(&lead, "b", "HANG two");
     let (url, authorization) = server(&user, |prompt| prompt.contains("You are the root"));
@@ -1241,12 +1245,24 @@ fn agent_launch_refuses_a_mixed_workspace_with_a_sentence_naming_the_field() {
     // Each form on its own works: an existing workspace, a new one, the parent's place.
     let existing = launch(&lead, "existing", "HANG one");
     assert_eq!(show(&user, &existing)["agent"]["workspace"], "w");
+    // A new one is judged as creating it: held, since its setup copies a secret, and launched
+    // once the user allows it.
     let text = ok(lead.call(
         "agent_launch",
         json!({"title": "fresh", "brief": "HANG two", "new_workspace": "fresh"}),
     ));
-    let fresh = agent_id(&text).unwrap();
-    assert_eq!(show(&user, &fresh)["agent"]["workspace"], "fresh");
+    let number = text
+        .strip_prefix("Waiting for the user's approval, request #")
+        .and_then(|rest| rest.split('.').next())
+        .unwrap_or_else(|| panic!("not held: {text}"));
+    assert!(user.run(&["approve", number]).status.success());
+    eventually("the child in fresh", || {
+        user.call("agent.list", json!({})).unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|agent| agent["title"] == "fresh" && agent["workspace"] == "fresh")
+    });
     let text = ok(lead.call(
         "agent_launch",
         json!({"title": "own", "brief": "HANG three"}),

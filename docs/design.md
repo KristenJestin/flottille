@@ -201,8 +201,8 @@ Flottille's own tools:
 
 The tool list of a session is fixed for its whole life (prompt cache, `reference/hemera.md` §7)
 and depends on what the agent can do, known when it starts: a root gets `ask_user`, `skills`,
-`commands`, `setup` and `project`, a child `ask_parent`; an agent at the depth limit gets no `agent_*` tools
-and no `approval_answer`. A root lead has 20 tools, a leaf worker 12; two more each when the
+`commands`, `setup`, `project` and `workspace`, a child `ask_parent`; an agent at the depth limit gets no `agent_*` tools
+and no `approval_answer`. A root lead has 22 tools, a leaf worker 12; two more each when the
 project's repositories declare a forge (`forge_read`, `forge_write`), one more when it declares a
 tracker (`ticket_read`), whatever the place (`reference/mcp.md` §4).
 

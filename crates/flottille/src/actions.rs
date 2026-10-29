@@ -1,7 +1,8 @@
 //! What an agent does of what the window does (`docs/tools.md`, "The project"): the project's
-//! tasks (`tasks`), skills (`skills`), commands (`commands`), setup (`setup`) and settings
-//! (`project`), always its own project. Reads run at once; every write is a call to judge (a
-//! tracker's change is base, and a line a task or a step sets is judged as its run, `gate.rs`), and
+//! tasks (`tasks`), skills (`skills`), commands (`commands`), setup (`setup`), settings
+//! (`project`) and workspaces (`workspace`), always its own project. Reads run at once; every
+//! write is a call to judge (a tracker's change is base, a line a task or a step sets is judged as
+//! its run, `gate.rs`, and making a workspace ready as each setup step it plays, `mcp.rs`), and
 //! its request says what it changes in words. No argument names another project: only the user
 //! does that.
 
@@ -11,6 +12,7 @@ use std::sync::Arc;
 use flottille_core::commands::{self, Command};
 use flottille_core::declared::{ProjectTracker, RepositoryForge};
 use flottille_core::project::{Project, SetupStep, Skill, StepKind, Task, check_skill, check_task};
+use flottille_core::workspace::{Action, State, Step, StepState, Workspace};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
@@ -20,7 +22,14 @@ use crate::place::{Place, Resolved};
 use crate::projects::{self, Failure};
 
 /// The tools of this module.
-pub const TOOLS: [&str; 5] = ["tasks", "skills", "commands", "setup", "project"];
+pub const TOOLS: [&str; 6] = [
+    "tasks",
+    "skills",
+    "commands",
+    "setup",
+    "project",
+    "workspace",
+];
 
 /// The actions of a family of the project's entries, `skills` and `commands`.
 const ACTIONS: &str = "list, show, add, edit and remove";
@@ -81,6 +90,16 @@ struct ProjectCall {
     text: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceCall {
+    action: String,
+    /// The workspace; for all but create, the agent's own when left out.
+    name: Option<String>,
+    repositories: Option<Vec<String>>,
+    ticket: Option<String>,
+}
+
 #[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct RepositorySetting {
@@ -106,6 +125,8 @@ pub fn family(tool: &str, args: &Value) -> Option<&'static str> {
         ("commands", "add" | "edit" | "remove") => Some("commands"),
         ("project", "set_settings") => Some("settings"),
         ("project", "set_rules") => Some("rules"),
+        ("workspace", "create" | "prepare") => Some("workspace"),
+        ("workspace", "link_ticket") => Some("ticket"),
         _ => None,
     }
 }
@@ -118,6 +139,11 @@ pub fn asked(family: &str) -> String {
         "skills" => "it adds, changes or removes a skill of the project",
         "commands" => "it adds, changes or removes a command of the project",
         "rules" => "it changes how the project's agents are told to work",
+        "workspace" => {
+            "it makes a workspace ready, playing setup steps that run without the gate, each \
+             judged as its run"
+        }
+        "ticket" => "it links a workspace to a ticket, which its agents then read",
         _ => "it changes the project's settings",
     }
     .into()
@@ -226,6 +252,9 @@ pub async fn prepared(
     tool: &str,
     args: &Value,
 ) -> Result<Vec<String>, Outcome> {
+    if tool == "agent_launch" {
+        return launch_says(daemon, grant, args);
+    }
     if !TOOLS.contains(&tool) {
         return Ok(Vec::new());
     }
@@ -245,6 +274,12 @@ pub async fn prepared(
         "setup" => setup_says(&project, &arguments(tool, args.clone())?),
         "skills" => skills_says(daemon, &project, &arguments(tool, args.clone())?),
         "commands" => commands_says(&project, &arguments(tool, args.clone())?),
+        "workspace" => {
+            if !is_root(daemon, grant) {
+                return Err(Outcome::Refused(CHILD_WORKSPACES.into()));
+            }
+            workspace_says(daemon, grant, &project, &arguments(tool, args.clone())?)
+        }
         _ => {
             let call: ProjectCall = arguments(tool, args.clone())?;
             match call.action.as_str() {
@@ -983,6 +1018,65 @@ async fn performed(
                 other => Err(unknown("commands", other, ACTIONS)),
             }
         }
+        "workspace" => {
+            let call: WorkspaceCall = arguments(tool, args)?;
+            let answer = |method: &'static str, params: Value| async move {
+                crate::workspaces::call(daemon.clone(), method, params)
+                    .await
+                    .map_err(refusal)
+            };
+            match call.action.as_str() {
+                "list" => workspaces_text(daemon, &project),
+                "show" => Ok(workspace_text(&named_workspace(
+                    daemon,
+                    grant,
+                    call.name.as_deref(),
+                )?)),
+                "create" => {
+                    let created = answer(
+                        "workspace.create",
+                        json!({"project": name, "name": call.name,
+                            "repositories": call.repositories, "ticket": call.ticket}),
+                    )
+                    .await?;
+                    let made = created["name"].as_str().unwrap_or_default();
+                    Ok(format!(
+                        "Workspace {made} created in {}: its worktrees are made, and its setup \
+                         goes on without you; workspace {{\"action\": \"show\", \"name\": \
+                         \"{made}\"}} follows it, agent_launch {{\"workspace\": \"{made}\"}} \
+                         starts a child there.",
+                        created["folder"].as_str().unwrap_or_default()
+                    ))
+                }
+                "prepare" => {
+                    let workspace = named_workspace(daemon, grant, call.name.as_deref())?;
+                    answer(
+                        "workspace.prepare",
+                        json!({"project": name, "name": workspace.name}),
+                    )
+                    .await?;
+                    Ok(format!(
+                        "The preparation of workspace {} goes on: workspace {{\"action\": \
+                         \"show\", \"name\": \"{}\"}} follows it.",
+                        workspace.name, workspace.name
+                    ))
+                }
+                "link_ticket" => {
+                    let workspace = named_workspace(daemon, grant, call.name.as_deref())?;
+                    answer(
+                        "workspace.link_ticket",
+                        json!({"project": name, "name": workspace.name, "ticket": call.ticket}),
+                    )
+                    .await?;
+                    Ok(format!(
+                        "Workspace {} is linked to the ticket {}: ticket_read reads it.",
+                        workspace.name,
+                        call.ticket.unwrap_or_default()
+                    ))
+                }
+                other => Err(unknown("workspace", other, WORKSPACE_ACTIONS)),
+            }
+        }
         _ => {
             let call: ProjectCall = arguments(tool, args)?;
             match call.action.as_str() {
@@ -1023,6 +1117,339 @@ async fn performed(
             }
         }
     }
+}
+
+// The workspaces.
+
+const WORKSPACE_ACTIONS: &str = "list, show, create, prepare and link_ticket";
+
+/// What a child is told of the `workspace` family, which it does not hold.
+pub const CHILD_WORKSPACES: &str = "refused: the agent the user talks to manages the project's \
+    workspaces; you work in the place you were given: ask your parent (ask_parent)";
+
+/// The setup steps a call plays without the gate, as the gate judges them: creating a workspace
+/// (`workspace create`, `agent_launch` with `new_workspace`) plays the project's setup, resuming
+/// one (`workspace prepare`) the steps it does again. `None` for any other call, and for one that
+/// does not fit (the tool refuses it).
+pub fn plays(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> Option<Vec<SetupStep>> {
+    let creates = match tool {
+        "workspace" => match args["action"].as_str()? {
+            "create" => true,
+            "prepare" => false,
+            _ => return None,
+        },
+        // A launch that also names an existing workspace makes none: the tool refuses it.
+        "agent_launch" if args["new_workspace"].is_string() && args["workspace"].is_null() => true,
+        _ => return None,
+    };
+    let project = own(daemon, grant).ok()?;
+    if creates {
+        return Some(project.setup);
+    }
+    let workspace = named_workspace(daemon, grant, args["name"].as_str()).ok()?;
+    Some(again(&workspace).into_iter().filter_map(step_of).collect())
+}
+
+/// The steps a call plays, in words, numbered: what the judge reads of them.
+pub fn plays_said(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> Vec<String> {
+    plays(daemon, grant, tool, args)
+        .map(|steps| numbered(&steps))
+        .unwrap_or_default()
+}
+
+fn numbered(steps: &[SetupStep]) -> Vec<String> {
+    steps
+        .iter()
+        .enumerate()
+        .map(|(at, step)| format!("{}. {}", at + 1, step_said(step)))
+        .collect()
+}
+
+/// The steps of a workspace that resuming it does again: those not done, and the done ones whose
+/// result is gone. Its worktrees are left out: they are no step of the setup.
+fn again(workspace: &Workspace) -> Vec<&Step> {
+    let redone = crate::workspaces::done_but_missing(workspace);
+    workspace
+        .steps
+        .iter()
+        .filter(|step| step.action != Action::Worktree)
+        .filter(|step| {
+            matches!(
+                step.state,
+                StepState::Failed | StepState::Running | StepState::Pending
+            ) || redone.contains(&step.position)
+        })
+        .collect()
+}
+
+/// A step of a workspace as the setup step it plays: a task's step as the line it froze.
+fn step_of(step: &Step) -> Option<SetupStep> {
+    let mut set = SetupStep {
+        repository: step.repository.clone(),
+        ..SetupStep::default()
+    };
+    match &step.action {
+        Action::Worktree => return None,
+        Action::Copy { globs } => set.copy = Some(globs.clone()),
+        Action::Link { path } => set.link = Some(path.clone()),
+        Action::RootEntries { .. } => {
+            set.root_entries = Some(true);
+            set.repository = None;
+        }
+        Action::Run { line, .. } => set.run = Some(line.clone()),
+    }
+    Some(set)
+}
+
+/// The workspace a call names, or the agent's own when it names none.
+fn named_workspace(
+    daemon: &Daemon,
+    grant: &Grant,
+    name: Option<&str>,
+) -> Result<Workspace, Outcome> {
+    let project = &grant.place.project;
+    let Some(name) = name.or(grant.place.workspace.as_deref()) else {
+        return Err(Outcome::Refused(format!(
+            "refused: you work in main, which is no workspace: name one, {{\"name\": \"login\"}}; \
+             {}",
+            names_of(daemon, project)
+        )));
+    };
+    match daemon.read(|store| store.workspace(project, name)) {
+        Ok(Some(workspace)) => Ok(workspace),
+        Ok(None) => Err(Outcome::Refused(format!(
+            "refused: project {project} has no workspace named {name}: {}",
+            names_of(daemon, project)
+        ))),
+        Err(error) => Err(Outcome::Failed(error.to_string())),
+    }
+}
+
+fn names_of(daemon: &Daemon, project: &str) -> String {
+    let names: Vec<String> = daemon
+        .read(|store| store.workspaces(Some(project)))
+        .map(|all| all.into_iter().map(|w| w.name).collect())
+        .unwrap_or_default();
+    match names.is_empty() {
+        true => "it has none".into(),
+        false => format!("its workspaces are {}", names.join(", ")),
+    }
+}
+
+/// What a call of `workspace` changes, in words, once it can be done.
+fn workspace_says(
+    daemon: &Daemon,
+    grant: &Grant,
+    project: &Project,
+    call: &WorkspaceCall,
+) -> Result<Vec<String>, Outcome> {
+    let action = call.action.as_str();
+    if !["list", "show", "create", "prepare", "link_ticket"].contains(&action) {
+        return Err(unknown("workspace", action, WORKSPACE_ACTIONS));
+    }
+    match action {
+        "list" => Ok(Vec::new()),
+        "create" => {
+            let name = named(&call.name, "workspace", action, "login")?;
+            let mut says = create_says(daemon, project, name, &call.repositories)?;
+            if let Some(ticket) = &call.ticket {
+                let key = crate::tickets::accepted(project, ticket)
+                    .map_err(|why| Outcome::Refused(format!("refused: {why}")))?;
+                says[0].push_str(&format!(", linked to the ticket {}", key.text()));
+            }
+            Ok(says)
+        }
+        _ => {
+            let workspace = named_workspace(daemon, grant, call.name.as_deref())?;
+            let name = &workspace.name;
+            match action {
+                "show" => Ok(Vec::new()),
+                "prepare" => {
+                    if daemon.preparing.lock().unwrap().contains(&workspace.id) {
+                        return Err(Outcome::Refused(format!(
+                            "refused: workspace {name} is being prepared: workspace show follows \
+                             it"
+                        )));
+                    }
+                    let again: Vec<SetupStep> =
+                        again(&workspace).into_iter().filter_map(step_of).collect();
+                    let worktrees = workspace.steps.iter().any(|step| {
+                        step.action == Action::Worktree && step.state != StepState::Done
+                    });
+                    if again.is_empty() && !worktrees {
+                        return Err(Outcome::Refused(format!(
+                            "refused: workspace {name} has nothing to resume: its setup is done"
+                        )));
+                    }
+                    let mut says = vec![format!(
+                        "Resume the preparation of the workspace {name}, from where it stopped"
+                    )];
+                    if !again.is_empty() {
+                        says.push("These steps of its setup run again, without the gate:".into());
+                        says.extend(numbered(&again));
+                    }
+                    Ok(says)
+                }
+                _ => {
+                    let ticket = call.ticket.as_deref().ok_or_else(|| {
+                        Outcome::Refused(
+                            "refused: link_ticket needs ticket: {\"action\": \"link_ticket\", \
+                             \"name\": \"login\", \"ticket\": \"#123\"}"
+                                .into(),
+                        )
+                    })?;
+                    let key = crate::tickets::accepted(project, ticket)
+                        .map_err(|why| Outcome::Refused(format!("refused: {why}")))?;
+                    let was = workspace
+                        .ticket
+                        .as_ref()
+                        .map_or(String::new(), |was| format!(" (it was {was})"));
+                    Ok(vec![format!(
+                        "Link the workspace {name} to the ticket {}{was}",
+                        key.text()
+                    )])
+                }
+            }
+        }
+    }
+}
+
+/// What creating a workspace does, in words, or the refusal of one that cannot be made: the
+/// workspace, then each step of the setup it plays.
+fn create_says(
+    daemon: &Daemon,
+    project: &Project,
+    name: &str,
+    repositories: &Option<Vec<String>>,
+) -> Result<Vec<String>, Outcome> {
+    if !flottille_core::project::valid_name(name) {
+        return Err(Outcome::Refused(format!(
+            "refused: {name} is not a name for a workspace: use 1 to 64 letters, digits, dots, \
+             dashes or underscores, starting with a letter or a digit"
+        )));
+    }
+    if let Ok(Some(_)) = daemon.read(|store| store.workspace(&project.name, name)) {
+        return Err(Outcome::Refused(format!(
+            "refused: project {} already has a workspace named {name}: choose another name",
+            project.name
+        )));
+    }
+    let known = |path: &String| project.repositories.iter().any(|r| &r.path == path);
+    if let Some(unknown) = repositories.iter().flatten().find(|path| !known(path)) {
+        return Err(Outcome::Refused(format!(
+            "refused: {unknown} is not a repository of project {}: its repositories are {}",
+            project.name,
+            listed(project.repositories.iter().map(|r| &r.path))
+        )));
+    }
+    let taken = match repositories {
+        Some(paths) => format!("with the repositories {}", paths.join(", ")),
+        None => "with the project's default repositories".into(),
+    };
+    let mut says = vec![format!(
+        "Create the workspace {name} on the branch {}/{name}, {taken}",
+        project.branch_prefix
+    )];
+    match project.setup.is_empty() {
+        true => says.push("The project has no setup: nothing else runs.".into()),
+        false => {
+            says.push("Its setup then runs, without the gate:".into());
+            says.extend(numbered(&project.setup));
+        }
+    }
+    Ok(says)
+}
+
+/// What `agent_launch` with `new_workspace` does, in words, as `workspace create` says it: it
+/// creates the workspace the same way. Nothing for any other launch.
+fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<String>, Outcome> {
+    let (Some(name), true) = (args["new_workspace"].as_str(), args["workspace"].is_null()) else {
+        return Ok(Vec::new());
+    };
+    let project = own(daemon, grant)?;
+    let repositories: Option<Vec<String>> =
+        serde_json::from_value(args["repositories"].clone()).unwrap_or_default();
+    let mut says = create_says(daemon, &project, name, &repositories)?;
+    let title = args["title"].as_str().unwrap_or_default();
+    says[0].push_str(&format!(", for a child: \"{title}\""));
+    Ok(says)
+}
+
+/// The project's workspaces, a line each.
+fn workspaces_text(daemon: &Daemon, project: &Project) -> Result<String, Outcome> {
+    let all = daemon
+        .read(|store| store.workspaces(Some(&project.name)))
+        .map_err(|error| Outcome::Failed(error.to_string()))?;
+    if all.is_empty() {
+        return Ok(format!(
+            "Project {} has no workspace yet: workspace {{\"action\": \"create\", \"name\": \
+             \"login\"}} makes one.",
+            project.name
+        ));
+    }
+    let mut text = format!("The workspaces of project {}:\n", project.name);
+    for workspace in &all {
+        text.push_str(&format!("- {}\n", workspace_line(workspace)));
+    }
+    Ok(text)
+}
+
+/// A workspace in a line: its state, branch, repositories and ticket.
+fn workspace_line(workspace: &Workspace) -> String {
+    let state = match workspace.state() {
+        State::Preparing => "preparing",
+        State::Failed => "its preparation failed",
+        State::Ready => "ready",
+    };
+    let repositories: Vec<&str> = workspace
+        .repositories
+        .iter()
+        .map(|r| r.path.as_str())
+        .collect();
+    let ticket = workspace
+        .ticket
+        .as_ref()
+        .map_or(String::new(), |ticket| format!(", ticket {ticket}"));
+    format!(
+        "{}: {state}, branch {}, repositories {}{ticket}",
+        workspace.name,
+        workspace.branch,
+        repositories.join(", ")
+    )
+}
+
+/// A workspace whole: its line, its folder, and each step of its preparation with its state.
+fn workspace_text(workspace: &Workspace) -> String {
+    let mut text = format!(
+        "Workspace {}\nFolder: {}\nIts preparation:\n",
+        workspace_line(workspace),
+        workspace.folder.display()
+    );
+    for (at, step) in workspace.steps.iter().enumerate() {
+        let what = match step_of(step) {
+            Some(set) => step_said(&set),
+            None => format!(
+                "the worktree of {}",
+                step.repository.as_deref().unwrap_or(".")
+            ),
+        };
+        text.push_str(&format!("{}. {what}: {}\n", at + 1, step.state.as_str()));
+        if let Some(failure) = &step.failure {
+            text.push_str(&format!(
+                "   {}: {}\n",
+                failure.doing,
+                failure.output.trim_end()
+            ));
+        }
+    }
+    if workspace.state() == State::Failed {
+        text.push_str(&format!(
+            "workspace {{\"action\": \"prepare\", \"name\": \"{}\"}} resumes it once the cause \
+             is fixed.\n",
+            workspace.name
+        ));
+    }
+    text
 }
 
 const PROJECT_ACTIONS: &str = "settings, set_settings, rules and set_rules";
