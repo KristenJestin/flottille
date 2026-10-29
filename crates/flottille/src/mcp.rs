@@ -1329,6 +1329,13 @@ async fn played(
 
 /// The gate's verdict on a call of one of the agent's tools.
 pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gate::Verdict {
+    // A new workspace's launch is classified by its steps below, but its brief is held to the
+    // judge's limit like any other launch's.
+    if tool == "agent_launch"
+        && let Some(refused) = gate::too_long("brief", &args["brief"])
+    {
+        return refused;
+    }
     let Some(steps) = crate::actions::plays(daemon, grant, tool, args) else {
         return classified(daemon, grant, tool, args);
     };

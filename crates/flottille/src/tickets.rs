@@ -349,11 +349,13 @@ async fn read_work_item(key: &str, site: &str) -> Result<Ticket, String> {
 }
 
 /// The site a work item comes from: the host of its `self` link, its REST address, lowercase.
+/// `None` when the item has no `self` or it cannot be parsed.
 fn site_of(item: &Value) -> Option<String> {
-    item["self"]
-        .as_str()?
-        .strip_prefix("https://")?
-        .split('/')
+    let link = item["self"].as_str()?;
+    let rest = link
+        .strip_prefix("https://")
+        .or_else(|| link.strip_prefix("http://"))?;
+    rest.split('/')
         .next()
         .filter(|host| !host.is_empty())
         .map(str::to_ascii_lowercase)
@@ -704,13 +706,22 @@ async fn listed(project: &Project, asked: &TicketsCall) -> Outcome {
         return Outcome::Refused(format!("refused: {NO_TRACKER}"));
     };
     if let (ProjectTracker::Github { .. }, Some(query)) = (tracker, query) {
-        let lower = query.to_lowercase();
-        if REACHING.iter().any(|qualifier| lower.contains(qualifier)) {
+        if reaches(query) {
             return Outcome::Refused(
                 "refused: tickets search looks in the tracker's repository only: its query \
-                 cannot hold repo:, org:, user:, is:pr or type:pr; give the words alone"
+                 cannot hold repo:, org:, user:, owner:, is:pr or type:pr; give the words alone"
                     .into(),
             );
+        }
+        // The flags are joined into GitHub's search query by `gh`: a value with a quote or a
+        // colon could carry a qualifier of its own.
+        for (flag, value) in [("label", &asked.label), ("assignee", &asked.assignee)] {
+            if value.as_deref().is_some_and(|v| v.contains(['"', ':'])) {
+                return Outcome::Refused(format!(
+                    "refused: tickets search takes a {flag} without a quote or a colon: they \
+                     could add a qualifier that leaves the tracker's repository"
+                ));
+            }
         }
     }
     let filters = Filters {
@@ -755,12 +766,12 @@ async fn listed(project: &Project, asked: &TicketsCall) -> Outcome {
             "(the newest {LISTED}: narrow with label, assignee or a search)\n"
         ));
     }
-    if left_out > 0 {
-        let from = match tracker {
-            ProjectTracker::Github { .. } => "outside the tracker's repository",
-            ProjectTracker::Jira { .. } => "another site than the tracker's",
-        };
-        text.push_str(&format!("({left_out} answered from {from} are left out)\n"));
+    // GitHub's count is not given: it would tell how many issues of other repositories matched.
+    // Jira's filter is by site, not by hidden repositories.
+    if left_out > 0 && matches!(tracker, ProjectTracker::Jira { .. }) {
+        text.push_str(&format!(
+            "({left_out} answered from another site than the tracker's are left out)\n"
+        ));
     }
     text.push_str("tickets {\"action\": \"show\", \"ticket\": …} reads one.");
     Outcome::Done(text)
@@ -768,7 +779,21 @@ async fn listed(project: &Project, asked: &TicketsCall) -> Outcome {
 
 /// The qualifiers of GitHub's search that reach beyond the tracker's repository, or to pull
 /// requests, refused in a search's query.
-const REACHING: [&str; 5] = ["repo:", "org:", "user:", "is:pr", "type:pr"];
+const REACHING: [&str; 6] = ["repo:", "org:", "user:", "owner:", "is:pr", "type:pr"];
+
+/// Whether a word of the query starts with one of them: at its start, or after a space, an
+/// opening parenthesis or `-`, which is where GitHub reads a qualifier.
+fn reaches(query: &str) -> bool {
+    let lower = query.to_lowercase();
+    let mut word_start = true;
+    for (at, c) in lower.char_indices() {
+        if word_start && REACHING.iter().any(|q| lower[at..].starts_with(q)) {
+            return true;
+        }
+        word_start = c.is_whitespace() || c == '(' || c == '-';
+    }
+    false
+}
 
 /// What a list keeps.
 struct Filters<'a> {
@@ -864,8 +889,8 @@ fn jql(projects: &[String], filters: &Filters<'_>) -> String {
 }
 
 /// `acli jira workitem search` on the tracker's projects, once `acli` is checked to be signed in
-/// to the tracker's site. An item that says another site is left out, and counted; one that says
-/// none is kept.
+/// to the tracker's site. An item whose `self` names another site, or cannot be read, is left
+/// out and counted; one that has no `self` is kept.
 async fn list_work_items(
     site: &str,
     projects: &[String],
@@ -910,8 +935,10 @@ async fn list_work_items(
     let mut left_out = 0;
     let mut tickets = Vec::new();
     for item in &items {
-        // An item that names no site is kept: the search was of the signed-in site's projects.
-        if site_of(item).is_some_and(|from| from != site) {
+        // Only an item with no `self` at all is kept: the search was of the signed-in site's
+        // projects. One that has a `self` naming another site, or that cannot be read, is not.
+        let unlinked = item.get("self").is_none_or(Value::is_null);
+        if !unlinked && site_of(item).is_none_or(|from| from != site) {
             left_out += 1;
             continue;
         }

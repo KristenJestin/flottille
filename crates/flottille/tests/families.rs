@@ -1174,6 +1174,82 @@ fn a_title_on_a_comment_close_or_reopen_is_refused_before_anything_is_asked() {
 }
 
 #[test]
+fn a_text_a_write_never_posts_is_refused_before_anything_is_asked() {
+    let user = user();
+    on_github(&user);
+    many_issues(&user);
+    user.gh_script(pulls());
+    let (_, mcp) = root_in(&user, None);
+
+    for (tool, args, key) in [
+        (
+            "tickets",
+            json!({"action": "close", "ticket": "#1", "body": "b"}),
+            "body",
+        ),
+        (
+            "tickets",
+            json!({"action": "reopen", "ticket": "#41", "body": "b"}),
+            "body",
+        ),
+        (
+            "forge",
+            json!({"action": "merge", "number": 12, "title": "T"}),
+            "title",
+        ),
+        (
+            "forge",
+            json!({"action": "merge", "number": 12, "body": "b"}),
+            "body",
+        ),
+        (
+            "forge",
+            json!({"action": "checks", "number": 12, "body": "b"}),
+            "body",
+        ),
+        (
+            "forge",
+            json!({"action": "checks", "number": 12, "title": "T"}),
+            "title",
+        ),
+    ] {
+        let refused = mcp.call(tool, args);
+        assert!(refused.error, "{}", refused.text);
+        assert!(
+            refused.text.contains(&format!("takes no {key}")),
+            "{}",
+            refused.text
+        );
+    }
+    assert!(no_request(&user));
+}
+
+#[test]
+fn a_child_session_with_a_brief_longer_than_the_judge_sees_whole_is_refused() {
+    let user = user();
+    on_github(&user);
+    let (_, lead) = root_in(&user, None);
+    let before = agents(&user).len();
+
+    let refused = lead.call(
+        "agent_launch",
+        json!({"title": "Long", "brief": "word ".repeat(2_000), "new_workspace": "long"}),
+    );
+
+    assert!(refused.error, "{}", refused.text);
+    assert!(
+        refused
+            .text
+            .starts_with("refused: the brief is longer than"),
+        "{}",
+        refused.text
+    );
+    assert!(no_request(&user));
+    assert_eq!(agents(&user).len(), before);
+    assert!(!workspace_exists(&user, "long"));
+}
+
+#[test]
 fn tickets_search_refuses_a_qualifier_that_reaches_another_repository() {
     let user = user();
     on_github(&user);
@@ -1186,6 +1262,9 @@ fn tickets_search_refuses_a_qualifier_that_reaches_another_repository() {
         "user:ana",
         "is:pr login",
         "Type:PR",
+        "owner:acme login",
+        "login (repo:acme/secret)",
+        "login -user:ana",
     ] {
         let refused = mcp.call("tickets", json!({"action": "search", "query": query}));
         assert!(refused.error, "{query}: {}", refused.text);
@@ -1193,6 +1272,48 @@ fn tickets_search_refuses_a_qualifier_that_reaches_another_repository() {
             refused
                 .text
                 .starts_with("refused: tickets search looks in the tracker's repository only"),
+            "{}",
+            refused.text
+        );
+    }
+    assert!(issue_lists(&user).is_empty());
+}
+
+#[test]
+fn tickets_search_passes_a_word_that_only_ends_in_a_qualifier() {
+    let user = user();
+    on_github(&user);
+    many_issues(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    let found = mcp.call(
+        "tickets",
+        json!({"action": "search", "query": "the superuser:root cannot log in"}),
+    );
+
+    assert!(!found.error, "{}", found.text);
+}
+
+#[test]
+fn tickets_search_refuses_a_label_or_assignee_that_carries_a_qualifier() {
+    let user = user();
+    on_github(&user);
+    many_issues(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    for (field, value) in [
+        ("label", "bug\" repo:acme/secret \""),
+        ("label", "a:b"),
+        ("assignee", "ana\" org:acme"),
+        ("assignee", "owner:x"),
+    ] {
+        let refused = mcp.call(
+            "tickets",
+            json!({"action": "search", "query": "login", field: value}),
+        );
+        assert!(refused.error, "{field} {value}: {}", refused.text);
+        assert!(
+            refused.text.starts_with("refused: tickets search "),
             "{}",
             refused.text
         );
@@ -1220,10 +1341,7 @@ fn tickets_list_keeps_only_the_tracker_repository_s_issues() {
     assert!(listed.contains("- #1 open: Ours"), "{listed}");
     assert!(!listed.contains("Not ours"), "{listed}");
     assert!(!listed.contains("A pull request"), "{listed}");
-    assert!(
-        listed.contains("(2 answered from outside the tracker's repository are left out)"),
-        "{listed}"
-    );
+    assert!(!listed.contains("left out"), "{listed}");
 }
 
 #[test]
@@ -1243,6 +1361,30 @@ fn jira_items_without_a_self_link_are_kept() {
     assert!(listed.contains("- ABC-3 To Do: No link"), "{listed}");
     assert!(!listed.contains("XYZ-9"), "{listed}");
     assert!(listed.contains("1 answered from another site"), "{listed}");
+}
+
+#[test]
+fn jira_items_whose_self_link_names_another_site_or_none_that_parses_are_left_out() {
+    let user = user();
+    on_jira(&user);
+    let mut plain = work_item("XYZ-1", "Plain http elsewhere", "other.atlassian.net");
+    plain["self"] = json!("http://other.atlassian.net/rest/api/3/issue/1");
+    let mut odd = work_item("XYZ-2", "Not a link", "example.atlassian.net");
+    odd["self"] = json!("not a link");
+    let mut here = work_item("ABC-4", "Plain http here", "example.atlassian.net");
+    here["self"] = json!("http://Example.Atlassian.net/rest/api/3/issue/4");
+    user.acli_script(json!({"search": [here, plain, odd]}));
+    let (_, mcp) = root_in(&user, None);
+
+    let listed = read(&user, mcp.call("tickets", json!({"action": "list"})));
+
+    assert!(
+        listed.contains("- ABC-4 To Do: Plain http here"),
+        "{listed}"
+    );
+    assert!(!listed.contains("XYZ-1"), "{listed}");
+    assert!(!listed.contains("XYZ-2"), "{listed}");
+    assert!(listed.contains("2 answered from another site"), "{listed}");
 }
 
 fn workspace_exists(user: &User, name: &str) -> bool {

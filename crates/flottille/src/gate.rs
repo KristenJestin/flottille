@@ -269,6 +269,10 @@ pub fn decide(call: &Call) -> Verdict {
         "forge" => forge(call),
         "tickets" => tickets(call),
         "agent_launch" if call.args["root"] == true => root_launch(call.grant, call.args),
+        "agent_launch" => match too_long("brief", &call.args["brief"]) {
+            Some(refused) => refused,
+            None => Verdict::Allow,
+        },
         "workspace" if call.args["action"] == "remove" => {
             // In `main` it names the workspace; elsewhere it is the agent's own.
             let named = call.args["name"].as_str();
@@ -348,17 +352,12 @@ pub fn root_launch(grant: &Grant, args: &Value) -> Verdict {
 /// secret is base, since what is shown is masked and what is sent is not.
 fn texts(grant: &Grant, args: &Value, keys: &[&str], found: &mut Found) -> Result<(), Verdict> {
     for key in keys {
+        if let Some(refused) = too_long(key, &args[*key]) {
+            return Err(refused);
+        }
         let Some(text) = args[*key].as_str() else {
             continue;
         };
-        let count = text.chars().count();
-        if count > crate::judge::WHOLE_CHARS {
-            return Err(Verdict::Deny(format!(
-                "refused: the {key} is longer than the {} characters the user and the judge are \
-                 shown whole ({count}): shorten it",
-                crate::judge::WHOLE_CHARS
-            )));
-        }
         if crate::mcp::masked(text, &grant.place) != text {
             found.base(format!(
                 "its {key} holds what looks like a secret: the card shows it masked, and it is \
@@ -369,14 +368,35 @@ fn texts(grant: &Grant, args: &Value, keys: &[&str], found: &mut Found) -> Resul
     Ok(())
 }
 
-/// A `title` given to a write that takes none: refused, as it would fail once allowed.
-fn untitled(tool: &str, action: &str, args: &Value) -> Result<(), Verdict> {
-    match args.get("title").filter(|title| !title.is_null()) {
-        Some(_) => Err(Verdict::Deny(format!(
-            "refused: {tool} {action} takes no title: title is for edit and create"
-        ))),
-        None => Ok(()),
+/// The refusal of a text longer than the judge is given whole. A brief is handed to the judge in
+/// the agent block, so any launch's, child or root, is held to it.
+pub fn too_long(key: &str, text: &Value) -> Option<Verdict> {
+    let count = text.as_str()?.chars().count();
+    (count > crate::judge::WHOLE_CHARS).then(|| {
+        Verdict::Deny(format!(
+            "refused: the {key} is longer than the {} characters the user and the judge are \
+             shown whole ({count}): shorten it",
+            crate::judge::WHOLE_CHARS
+        ))
+    })
+}
+
+/// A text given to a write that takes none (a title on a comment, a body on a close, a title or a
+/// body on a merge): refused before anything is asked, since the card would show what is never
+/// posted.
+fn untexted(tool: &str, action: &str, args: &Value, keys: &[&str]) -> Result<(), Verdict> {
+    for key in keys {
+        if args.get(*key).is_some_and(|text| !text.is_null()) {
+            let takers = match *key {
+                "title" => "edit and create",
+                _ => "create, comment and edit",
+            };
+            return Err(Verdict::Deny(format!(
+                "refused: {tool} {action} takes no {key}: {key} is for {takers}"
+            )));
+        }
     }
+    Ok(())
 }
 
 /// `forge`: its reads are harmless; a malformed call is refused; merging what the checks or a
@@ -396,9 +416,12 @@ fn forge(call: &Call) -> Verdict {
             ));
         }
     };
-    if action == "comment"
-        && let Err(refused) = untitled("forge", action, call.args)
-    {
+    let none: &[&str] = match action {
+        "comment" => &["title"],
+        "merge" | "checks" => &["title", "body"],
+        _ => &[],
+    };
+    if let Err(refused) = untexted("forge", action, call.args, none) {
         return refused;
     }
     let mut found = Found::default();
@@ -449,9 +472,12 @@ fn tickets(call: &Call) -> Verdict {
             ));
         }
     };
-    if matches!(action, "comment" | "close" | "reopen")
-        && let Err(refused) = untitled("tickets", action, call.args)
-    {
+    let none: &[&str] = match action {
+        "comment" => &["title"],
+        "close" | "reopen" => &["title", "body"],
+        _ => &[],
+    };
+    if let Err(refused) = untexted("tickets", action, call.args, none) {
         return refused;
     }
     let mut found = Found::default();
