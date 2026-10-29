@@ -447,7 +447,8 @@ fn asked_skill(asked: &Written, description: &str) -> Result<Option<Skill>, Fail
 }
 
 /// Writes the skill under `[skills.<name>]`, its text first when it has one, once `fits` accepts
-/// the project as its file is now. A path must be there, inside the project folder.
+/// the project as its file is now; the text it had is put back when the file is not written. A
+/// path must be there, inside the project folder.
 fn write_skill(
     daemon: &Daemon,
     project: &str,
@@ -457,7 +458,7 @@ fn write_skill(
     fits: impl FnOnce(&Project) -> Result<(), Failure>,
 ) -> Result<(), Failure> {
     let file = Skill::text_file(&daemon.paths.data, project, name);
-    let existed = file.exists();
+    let former = std::fs::read_to_string(&file).ok();
     let mut written_text = false;
     let written = projects::rewrite(daemon, project, |project, document| {
         fits(project)?;
@@ -486,10 +487,13 @@ fn write_skill(
             toml_edit::Item::Table(skills)
         });
         let skills = skills
-            .as_table_mut()
+            .as_table_like_mut()
             .ok_or_else(|| not_a_table(&project.name))?;
-        // An entry edited keeps the comments the user wrote above it.
-        match skills.get_mut(name).and_then(toml_edit::Item::as_table_mut) {
+        // An entry edited keeps the comments the user wrote above it, and its form, inline or not.
+        match skills
+            .get_mut(name)
+            .and_then(toml_edit::Item::as_table_like_mut)
+        {
             Some(known) => {
                 known.remove("path");
                 for (key, value) in entry.iter() {
@@ -502,9 +506,17 @@ fn write_skill(
         }
         Ok(())
     });
-    // A text written for a skill the file then refused is not left behind.
-    if written.is_err() && written_text && !existed {
-        let _ = std::fs::remove_file(&file);
+    // A text written for a skill the file then refused is not left behind, nor in place of the
+    // one the skill had.
+    if written.is_err() && written_text {
+        match &former {
+            Some(former) => {
+                let _ = crate::providers::write_in_place(&file, former);
+            }
+            None => {
+                let _ = std::fs::remove_file(&file);
+            }
+        }
     }
     written.map(|_| ())
 }

@@ -503,3 +503,72 @@ fn a_text_skill_is_kept_in_flottille_s_data_folder_and_read_with_skill_read() {
     assert!(!kept.exists());
     assert!(!std::fs::read_to_string(&file).unwrap().contains("review"));
 }
+
+#[test]
+fn a_text_skill_whose_file_is_refused_keeps_its_former_text() {
+    use std::os::unix::fs::PermissionsExt;
+    let user = User::with_fake_agent();
+    project(&user);
+    stdout(
+        &user,
+        &[
+            "skill",
+            "add",
+            "app",
+            "review",
+            "--text",
+            "Read the diff twice.\n",
+            "--description",
+            "How we review",
+        ],
+    );
+    // The project's file cannot be replaced: its folder is read-only.
+    let projects = user.project_file("app").parent().unwrap().to_owned();
+    std::fs::set_permissions(&projects, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let refused = failure(
+        &user,
+        &["skill", "edit", "app", "review", "--text", "Never mind.\n"],
+    );
+
+    std::fs::set_permissions(&projects, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!refused.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(user.path("data/flottille/skills/app/review.md")).unwrap(),
+        "Read the diff twice.\n"
+    );
+}
+
+#[test]
+fn an_inline_skill_stays_inline_when_it_is_edited() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let file = user.project_file("app");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(
+        &file,
+        format!(
+            "{text}\n[skills]\nstyle = {{ description = \"Style\", path = \"docs/STYLE.md\" }}\n"
+        ),
+    )
+    .unwrap();
+
+    stdout(
+        &user,
+        &[
+            "skill",
+            "edit",
+            "app",
+            "style",
+            "--description",
+            "The code style",
+        ],
+    );
+
+    let edited = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        edited.contains("style = { description = \"The code style\", path = \"docs/STYLE.md\" }"),
+        "{edited}"
+    );
+    assert!(!edited.contains("[skills.style]"), "{edited}");
+}

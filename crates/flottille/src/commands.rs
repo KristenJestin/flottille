@@ -187,12 +187,12 @@ fn write(
         toml_edit::Item::Table(commands)
     });
     let commands = commands
-        .as_table_mut()
+        .as_table_like_mut()
         .ok_or_else(|| not_a_table(project))?;
-    // An entry edited keeps the comments the user wrote above it.
+    // An entry edited keeps the comments the user wrote above it, and its form, inline or not.
     match commands
         .get_mut(name)
-        .and_then(toml_edit::Item::as_table_mut)
+        .and_then(toml_edit::Item::as_table_like_mut)
     {
         Some(entry) => {
             for (key, value) in table.iter() {

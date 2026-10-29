@@ -1776,3 +1776,31 @@ fn forge_write_and_workspace_remove_are_listed_to_every_agent_of_a_workspace() {
     );
     assert_eq!(listed(&child), (true, true), "its child");
 }
+
+#[test]
+fn an_inline_command_stays_inline_when_it_is_edited() {
+    let user = User::new();
+    fixture(&user);
+    let file = user.project_file("app");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(
+        &file,
+        format!(
+            "{text}\n[commands]\nship = {{ description = \"Ship\", instructions = \"Push.\" }}\n"
+        ),
+    )
+    .unwrap();
+
+    user.call(
+        "command.edit",
+        json!({"project": "app", "name": "ship", "instructions": "Push it."}),
+    )
+    .unwrap();
+
+    let edited = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        edited.contains("ship = { description = \"Ship\", instructions = \"Push it.\" }"),
+        "{edited}"
+    );
+    assert!(!edited.contains("[commands.ship]"), "{edited}");
+}
