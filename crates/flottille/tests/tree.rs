@@ -1135,6 +1135,54 @@ fn a_daemon_restart_does_not_send_a_working_agent_its_prompt_again() {
 }
 
 #[test]
+fn a_daemon_restarted_while_a_new_workspace_prepares_still_delivers_the_brief() {
+    let user = user();
+    let (_, lead) = lead(&user);
+    // A setup step that waits for a file: the workspace stays preparing until it exists.
+    let go = user.path("go");
+    let waiting = user.path("tools/wait.sh");
+    std::fs::create_dir_all(waiting.parent().unwrap()).unwrap();
+    std::fs::write(&waiting, "while [ ! -e \"$1\" ]; do sleep 0.1; done\n").unwrap();
+    let file = user.project_file("app");
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    text.push_str(&format!(
+        "\n[[setup]]\nrun = \"sh {} {}\"\n",
+        waiting.display(),
+        go.display()
+    ));
+    std::fs::write(&file, text).unwrap();
+    let answer = ok(lead.call(
+        "agent_launch",
+        json!({"title": "slow", "brief": "HANG once the workspace is ready", "new_workspace": "slow"}),
+    ));
+    let number = answer
+        .strip_prefix("Waiting for the user's approval, request #")
+        .and_then(|rest| rest.split('.').next())
+        .unwrap_or_else(|| panic!("not held: {answer}"));
+    assert!(user.run(&["approve", number]).status.success());
+    eventually("the workspace preparing", || {
+        user.call("workspace.show", json!({"project": "app", "name": "slow"}))
+            .is_ok_and(|workspace| workspace["state"] == "preparing")
+    });
+    never_prompted(&user, "HANG once the workspace is ready");
+    let daemon = user.status()["pid"].as_u64().unwrap();
+
+    // SAFETY: kill has no memory precondition.
+    unsafe { libc::kill(daemon as i32, libc::SIGKILL) };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while std::path::Path::new(&format!("/proc/{daemon}")).exists() {
+        assert!(Instant::now() < deadline, "the daemon did not die");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    user.status();
+    std::fs::write(&go, "").unwrap();
+
+    prompted(&user, &["HANG once the workspace is ready"]);
+    never_prompted(&user, "could not be prepared");
+    assert_eq!(occurrences(&user, "HANG once the workspace is ready"), 1);
+}
+
+#[test]
 fn agent_status_gives_a_line_per_child_and_the_last_messages_only_when_asked() {
     let user = user();
     let (_, lead) = lead(&user);

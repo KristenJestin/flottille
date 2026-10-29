@@ -36,6 +36,7 @@ use crate::skills;
 use crate::sweep;
 use crate::tasks;
 use crate::tickets;
+use crate::tree;
 use crate::workspaces;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -313,6 +314,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     );
     workspaces::resume_at_start(&daemon);
     agents::settle_at_start(&daemon);
+    tree::brief_at_start(&daemon);
     runs::settle_at_start(&daemon);
     approvals::settle_at_start(&daemon);
     projects::migrate_files(&daemon);

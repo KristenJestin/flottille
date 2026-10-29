@@ -314,10 +314,43 @@ fn brief(daemon: &Arc<Daemon>, child: &Agent) {
         daemon,
         &child.id,
         kind,
-        Some(format!("brief-{}-0", child.id)),
+        Some(format!("brief-{}-{}", child.id, child.epoch)),
         &body,
         approval::BETWEEN_TURNS,
     );
+}
+
+/// At start: an agent whose first message was never delivered (a daemon stopped while its new
+/// workspace was preparing, and the wait for it lived in memory only) gets it, once its
+/// workspace is ready. The delivery's id is the key, so one stored already is not stored twice.
+pub fn brief_at_start(daemon: &Arc<Daemon>) {
+    let agents = match daemon.read(|store| store.agents()) {
+        Ok(agents) => agents,
+        Err(error) => {
+            eprintln!("flottille daemon: reading agents: {error}");
+            return;
+        }
+    };
+    for agent in agents {
+        // A session the user started has its message delivered where it is made, as theirs.
+        let launched = agent.parent.is_some() || agent.launched_by.is_some();
+        if agent.state.is_final() || agent.brief.is_none() || !launched {
+            continue;
+        }
+        let key = format!("brief-{}-{}", agent.id, agent.epoch);
+        if daemon
+            .read(|store| store.delivery(&key))
+            .is_ok_and(|d| d.is_some())
+        {
+            continue;
+        }
+        match agent.workspace {
+            Some(_) => {
+                tokio::spawn(brief_once_ready(daemon.clone(), agent));
+            }
+            None => brief(daemon, &agent),
+        }
+    }
 }
 
 /// What follows the launcher's name on the first line of a session an agent started for the user.
