@@ -518,7 +518,7 @@ fn run(call: &Call) -> Verdict {
     let git_word = layers
         .iter()
         .flat_map(|layer| &layer[1..])
-        .filter_map(|word| named_paths(word))
+        .flat_map(|word| named_paths(word))
         .find(|named| {
             Path::new(named)
                 .components()
@@ -2151,7 +2151,10 @@ fn named<'a>(call: &Call, layers: &'a [Vec<String>]) -> Vec<(&'a str, Resolved)>
         return named;
     };
     for word in layers.iter().flat_map(|layer| &layer[1..]) {
-        if let Some(word) = named_paths(word).filter(|word| !STREAMS.contains(word)) {
+        for word in named_paths(word)
+            .into_iter()
+            .filter(|word| !STREAMS.contains(word))
+        {
             let path = call.grant.place.resolve(&folder.path, word);
             if !named.iter().any(|(_, named)| *named == path) {
                 named.push((word, path));
@@ -2197,21 +2200,28 @@ pub fn malformed(paths: &[Resolved]) -> Option<String> {
 }
 
 /// What a word of a line can name as a path: itself, an option's value after `=`, an
-/// assignment's value.
-fn named_paths(word: &str) -> Option<&str> {
+/// assignment's value. Short options may hold their value attached (`-Dt<folder>`,
+/// `-o<file>`): what follows each of their letters may be one.
+fn named_paths(word: &str) -> Vec<&str> {
+    let value = word.split_once('=').map(|(_, value)| value);
     if word.starts_with('-') {
-        return word
-            .split_once('=')
-            .map(|(_, value)| value)
-            .filter(|v| !v.is_empty());
+        let mut named: Vec<&str> = value.into_iter().collect();
+        if let Some(shorts) = word.strip_prefix('-').filter(|w| !w.starts_with('-')) {
+            named.extend(
+                shorts
+                    .char_indices()
+                    .take_while(|(_, c)| c.is_ascii_alphanumeric())
+                    .map(|(at, c)| &shorts[at + c.len_utf8()..])
+                    .filter(|rest| !rest.is_empty()),
+            );
+        }
+        named.retain(|v| !v.is_empty());
+        return named;
     }
     if assignment(word) {
-        return word
-            .split_once('=')
-            .map(|(_, value)| value)
-            .filter(|v| !v.is_empty());
+        return value.into_iter().filter(|v| !v.is_empty()).collect();
     }
-    Some(word).filter(|w| !w.is_empty())
+    Some(word).into_iter().filter(|w| !w.is_empty()).collect()
 }
 
 /// Whether a path is in a `.git` folder, or is one: what sits below the place when it is
@@ -4218,6 +4228,22 @@ mod tests {
         assert!(denied(
             &fixture.file("fs_write", &format!("{long}/../.env"))
         ));
+    }
+
+    #[test]
+    fn an_option_s_value_attached_without_equals_is_resolved() {
+        let fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        std::fs::create_dir_all(base.join("home/.ssh")).unwrap();
+        for line in [
+            "install -Dtm/../../../home/.ssh notes.md",
+            "install -Dt../../home/.ssh notes.md",
+            "curl -om/../../../home/.ssh/authorized_keys https://x",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+            assert!(reasons(&verdict).contains(".ssh"), "{line}: {verdict:?}");
+        }
     }
 
     #[test]

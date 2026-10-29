@@ -584,8 +584,9 @@ says who answers a call to judge (`docs/design.md` §7.1).
    (`alias.<name> = push`) is run by git itself, and the gate sees only the alias's name.
    Running a script the agent wrote is itself a line to judge.
 
-The words of a line that name paths (every word but the program, an option's value after `=`, a
-`NAME=value`'s value) are resolved from the folder the run starts in, as a file tool's path is.
+The words of a line that name paths (every word but the program, an option's value after `=`,
+what follows each letter of short options, whose value may be attached as in `-Dt<folder>` or
+`-o<file>`, a `NAME=value`'s value) are resolved from the folder the run starts in, as a file tool's path is.
 
 **In Auto**, a call to judge first goes to the judge, when one is chosen (`docs/design.md` §7.1):
 an `allow` performs it at once, recorded as an `agent.tool_served` whose `gate` is `judged` and
