@@ -103,9 +103,7 @@ impl From<&RepositoryForge> for Forge {
     }
 }
 
-/// What is said of a repository whose forge is not declared: nothing is read nor written for it.
-pub const NO_FORGE: &str = "no forge set for this repository: choose it in the project's \
-    Settings (the window), or write its `forge` in the project's file; Flottille never guesses it";
+pub use flottille_core::declared::NO_FORGE;
 
 /// One repository of a workspace as a forge is read for it: its path, the folder of its main
 /// checkout (whose remotes its worktree shares), its remote and the forge the project declares.

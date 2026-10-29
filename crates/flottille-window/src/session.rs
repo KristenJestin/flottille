@@ -3232,6 +3232,25 @@ impl Render for SessionRail {
                 .find(|(repository, _)| repository == path)
                 .map(|(_, line)| line.clone())
         };
+        // Several repositories with no forge: said once under the section, not under each.
+        let no_forge: Vec<String> = self
+            .place
+            .iter()
+            .flat_map(|place| place.forges.iter())
+            .filter(|(_, line)| line.starts_with(flottille_core::declared::NO_FORGE))
+            .map(|(path, _)| crate::project::repository_label(&self.project, path))
+            .collect();
+        let once = no_forge.len() > 1;
+        let said = once.then(|| {
+            SharedString::from(format!(
+                "No forge set for {}: choose it in the project's Settings",
+                no_forge.join(", ")
+            ))
+        });
+        let forge_of = |path: &str| {
+            forge_of(path)
+                .filter(|line| !(once && line.starts_with(flottille_core::declared::NO_FORGE)))
+        };
         let status_of = |path: &str| {
             self.place
                 .iter()
@@ -3480,6 +3499,19 @@ impl Render for SessionRail {
                             .children(pull)
                     }),
             )
+            .child(presence(
+                ElementId::Name("rail-no-forge-block".into()),
+                once,
+                div()
+                    .id("rail-no-forge")
+                    .px(px(8.))
+                    .pb(px(4.))
+                    .text_size(px(11.5))
+                    .text_color(p.faint)
+                    .children(said.clone())
+                    .aria_label(said.unwrap_or_default())
+                    .test_support(),
+            ))
             .children(forge_problem.map(|problem| {
                 div()
                     .id("rail-forge-problem")

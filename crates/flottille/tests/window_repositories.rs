@@ -476,3 +476,100 @@ fn a_workspace_s_card_and_the_rail_show_where_each_repository_stands(cx: &mut Te
         )
     );
 }
+
+/// The rail of a session in the workspace `login` of `trio` over its three repositories, once
+/// it has read the forges.
+fn rail_over_three<'a>(
+    user: &User,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    user.call(
+        "workspace.create",
+        json!({"project": "trio", "name": "login", "repositories": ["api", "web", "lib"]}),
+    )
+    .unwrap();
+    eventually("the workspace is ready", || {
+        user.call(
+            "workspace.show",
+            json!({"project": "trio", "name": "login"}),
+        )
+        .unwrap()["state"]
+            == "ready"
+    });
+    let (shell, cx) = window(user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "trio", cx);
+    let lead = user
+        .call(
+            "agent.start",
+            json!({"project": "trio", "workspace": "login", "message": "hello"}),
+        )
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&lead)).is_some())
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click(session_id(&lead), cx));
+    until(&shell, cx, "the rail reads the forges", |cx| {
+        shell
+            .read_with(cx, |s, cx| s.main().read(cx).session_page().cloned())
+            .is_some_and(|page: Entity<SessionPage>| {
+                page.read_with(cx, |page, cx| {
+                    page.rail()
+                        .read(cx)
+                        .place()
+                        .is_some_and(|place| place.forges.len() == 3)
+                })
+            })
+    });
+    settle(cx);
+    (shell, cx)
+}
+
+#[gpui_kit::test]
+fn the_rail_says_once_that_several_repositories_have_no_forge(cx: &mut TestAppContext) {
+    let user = user();
+    trio(&user);
+    let (_shell, cx) = rail_over_three(&user, cx);
+
+    assert_eq!(
+        label_of("rail-no-forge", cx).as_deref(),
+        Some("No forge set for api, web, lib: choose it in the project's Settings")
+    );
+    for path in ["api", "web", "lib"] {
+        assert!(
+            !has(&format!("rail-forge-{path}"), cx),
+            "{path} does not repeat the sentence"
+        );
+    }
+    assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
+}
+
+#[gpui_kit::test]
+fn the_rail_names_only_the_repositories_with_no_forge_and_gives_the_others_their_line(
+    cx: &mut TestAppContext,
+) {
+    let user = user().with_fake_gh();
+    trio(&user);
+    user.git(
+        &user.path("work/trio/api"),
+        &["remote", "set-url", "origin", "git@github.com:acme/api.git"],
+    );
+    user.call(
+        "project.set_settings",
+        json!({"name": "trio", "repositories": [
+            {"path": "api", "forge": {"kind": "github", "repository": "acme/api"}}]}),
+    )
+    .unwrap();
+    let (_shell, cx) = rail_over_three(&user, cx);
+
+    assert_eq!(
+        label_of("rail-no-forge", cx).as_deref(),
+        Some("No forge set for web, lib: choose it in the project's Settings")
+    );
+    assert!(has("rail-forge-api", cx));
+    assert!(!has("rail-forge-web", cx));
+    assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
+}
