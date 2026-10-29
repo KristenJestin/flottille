@@ -220,12 +220,9 @@ bridge sets on `claude` ("The Claude bridge", below):
   and `report`; one that can have children (below the depth limit) also
   `agent_launch`, `agent_send`, `agent_status`, `agent_stop` and
   `approval_answer`; a root `ask_user`, a child `ask_parent`. An agent in a workspace also has
-  `forge_read` and `ticket_read`, and `forge_write` or `workspace_remove` when the procedure run
-  it works in (or its parent's, when the run gives its grants to its children) grants what they
-  do. A root outside a workspace gets, in this order, the first eight, `reference_read`, the four
+  `forge_read`, `ticket_read`, `forge_write` and `workspace_remove`. A root outside a workspace gets, in this order, the first eight, `reference_read`, the four
   `agent_*`, `report`, `ask_user`, `approval_answer` (16). The list is
-  frozen in the agent when it is created (the prompt cache depends on it), with the run's grants
-  known at that moment.
+  frozen in the agent when it is created (the prompt cache depends on it).
 - `settingSources: []`: Claude Code's own default loads the user's settings, hooks, plugins,
   skills and instruction files; this overrides it.
 - `strictMcpConfig`: only the MCP servers given with the session.
@@ -734,7 +731,7 @@ workspace of the project, or a new one, made and prepared before it starts.
   or loads the session as after an idle release. That message comes after a `resume` delivery,
   queued without waking it: the user stopped it, and the requests of its own that were cancelled
   then, never executed. Its children stay ended, and its procedure run too: a resumed root is an
-  ordinary session, without grants, and so are the children it launches. It is refused while its
+  ordinary session, in the mode it had, and so are the children it launches. It is refused while its
   last process is still stopping, and when its workspace or its project is gone (one made again
   under the same name is another). A failed root is not resumed: its session could not go on, and
   went.

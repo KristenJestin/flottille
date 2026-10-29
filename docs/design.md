@@ -163,18 +163,16 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
   `commands_status` (a run's output, or its stop);
 - forges (an agent in a workspace): `forge_read`, the pull requests of its workspace's
   repositories and their checks, read only (`forges.md`), and `forge_write`, which opens or merges
-  them or re-runs a failed pipeline, listed only to an agent whose procedure run grants one of
-  those (`procedures.md`);
+  them or re-runs a failed pipeline, each call to judge (§7);
 - the workspace (an agent in a workspace): `workspace_remove`, which removes the agent's own
-  workspace once nothing in it would be lost, listed only to an agent whose procedure run grants
-  it;
+  workspace once nothing in it would be lost, a call to judge;
 - references: `reference_read`, one of the project's references, documents read when relevant
   (`docs/projects.md`, "References");
 - tickets (an agent in a workspace): `ticket_read`, the ticket its workspace is linked to, or
   another of the same tracker, read only (`tickets.md`);
 - the project (a root): `procedure` (list, show, start) and `project` (its settings, its forges and
-  tracker, its references), what the window does, each change held for the user unless the
-  project lets its family run on its own (`tools.md`, "The project", `projects.md`);
+  tracker, its references), what the window does, each change a call to judge (`tools.md`, "The
+  project", `projects.md`);
 
 Flottille's own tools:
 
@@ -200,9 +198,8 @@ Flottille's own tools:
 The tool list of a session is fixed for its whole life (prompt cache, `reference/hemera.md` §7)
 and depends on what the agent can do, known when it starts: a root gets `ask_user`, `procedure` and
 `project`, a child `ask_parent`; an agent at the depth limit gets no `agent_*` tools and no
-`approval_answer`. A root lead has about 18 tools, a leaf worker 11, two more each in a workspace (`forge_read`, `ticket_read`),
-and `forge_write` or `workspace_remove` for an agent whose procedure run grants what they do
-(`reference/mcp.md` §4).
+`approval_answer`. A root lead has about 18 tools, a leaf worker 11, four more each in a workspace (`forge_read`,
+`ticket_read`, `forge_write`, `workspace_remove`) (`reference/mcp.md` §4).
 
 ### 4.4 Roles
 
@@ -318,41 +315,77 @@ by `reference/multi-repo-case.md`:
 - **Removal** refuses a worktree with uncommitted files **or commits not on any remote**
   (`git log HEAD --not --remotes`), names them, and never forces.
 
-Agents are placed in a workspace (writable) or in the main checkout (read-only by default).
+Agents are placed in a workspace or in the main checkout; what each may do there is the gate's
+(§7).
 
 ## 7. The gate
 
-Every tool call goes through one gate, as in `reference/hemera.md` §4, minus the remote judge:
-grant checks, tool admitted for the role, arguments decoded, place rules, then the verdict:
-deny (the project's never list; deleting `.git`; for agents by default: `git push`, history
-rewrites, branch deletion, forge writes, publishing), ask (sensitive places such as `.env`
-files and credential folders, commands marked "ask before running", anything outside the place),
-or allow (reads, catalogue commands, writes in the place).
+Every tool call goes through one gate, as in `reference/hemera.md` §4: tool admitted for the
+role, arguments decoded, place rules, then the call's **class**. The gate grants no right: it
+says what kind of call it is, and the session's **mode** says who answers it.
 
-An "ask" writes a numbered request (the frozen call, the reasons, the agent that asked) and is
-answered to the agent at once ("request #n is waiting…"). A tool call never waits for a human or
-an agent. Who holds the request depends on who asked:
+- **Harmless** calls pass, in every mode: reading in the project, writing in a workspace, the
+  commands the rules know to only read, a catalogue command in a workspace.
+- **To judge** is everything else: writing in `main`, reading outside the project, a line the
+  rules do not know, a commit, a push, a forge write, a change of the project an agent asks for.
+- **Base** calls always come to the user, in every mode, with a strong warning: a push forced
+  (with a lease or not), rewriting history that is on a remote, discarding work in `main`, `.git`
+  folders, sensitive places (`.env` files, credential folders, Flottille's own folders),
+  publishing, a merge whose checks are waived, a change of the project's tracker, and the
+  project's `never` list.
+
+What stays **refused** is not a permission but a call that cannot be made as it is: shell syntax,
+a malformed call, a login printed, the daemon driven from a command.
+
+### 7.1 The mode and the judge
+
+Each session is in **Ask** or **Auto**, a switch in the composer's bar. A new session starts in
+Auto; a child takes its parent's mode when it starts. Only the user changes it, in the window or
+with `flottille agent mode <agent> ask|auto` (`agent.mode`); no tool of an agent does. The mode is
+stored with the session and kept when it resumes.
+
+- In **Ask**, a call to judge is a card for the user.
+- In **Auto**, it goes to the **judge**, which allows it or asks the user: it cannot refuse, and
+  base calls never reach it.
+
+The judge is an agent of a provider the user chose in Settings ("Auto judge": provider and
+model, `provider.set_judge`), run in bare mode **with no tool at all**: no Flottille tool, no MCP
+server. Its instructions are `roles/judge.md`. It sees the call masked (secrets masked, contents
+cut to their first lines), the place, the user's last messages to the session and the agent's
+`why`, nothing else, and answers one JSON object, `{"verdict": "allow" | "ask", "reason": "…"}`.
+A failure, an answer that is not that object, or 30 seconds without one is an ask. A process of
+the provider is started for each judgement and stopped after it. Each verdict is recorded with the
+call (who judged, what, why: the `judgement` of its `agent.tool_served` event, and of its request
+when it asks), shown on the card and in `flottille approvals`.
+Without a judge chosen, Auto behaves as Ask, and the composer says once "Choose an Auto judge in
+Settings". A judgement is a turn of the judge's model: it uses the user's quota on that provider,
+which Settings say.
+
+### 7.2 Requests
+
+An "ask" writes a numbered request (the frozen call, its class, the reasons, the judge's verdict
+when one was asked, the agent that asked) and is answered to the agent at once ("request #n is
+waiting…"). A tool call never waits for a human or an agent. Who holds the request depends on
+who asked:
 
 - **A root's request is the user's.** It appears in the window, in `flottille approvals`, and in
-  the event stream. The user answers deny, allow once, or allow for the root's tree (an exact
-  identity grant, never for a sensitive place).
+  the event stream. The user allows it once or denies it: there is no lasting grant.
 - **A child's request is held by its parent**, as a `child-asks` delivery. The parent denies it or
-  forwards it with one sentence of why (`approval_answer`); forwarding passes it to the parent's own parent, one level at a time, and from the root to the user, with
-  every reason given on the way. **No agent can allow a request**: the gate's "ask" always ends
-  with the user or with a refusal. A request held by an agent is not in `flottille approvals` and
-  the user cannot answer it until it is forwarded.
+  forwards it with one sentence of why (`approval_answer`); forwarding passes it to the parent's
+  own parent, one level at a time, and from the root to the user, with every reason given on the
+  way. **No agent can allow a request**: the gate's "ask" always ends with the judge or with the
+  user, or with a refusal. A request held by an agent is not in `flottille approvals` and the user
+  cannot answer it until it is forwarded.
 
 An allowed request is re-checked and performed, and its result comes back to the agent that asked
 as an `approval` delivery; a denied one comes back as a refusal with the why.
 
-Agent-run commands get an environment without forge tokens and with `git push` neutralised
-(`reference/hemera.md` §3).
+Agent-run commands get an environment without forge tokens, and without the repository's git
+hooks (`reference/hemera.md` §3); `git push` is no longer neutralised, it goes through the gate
+like any other call.
 
-**Procedures** are the one way an agent commits, pushes or writes to a forge: a run of a
-procedure grants these, from a fixed vocabulary, `allow` or `ask`, to the agents of that run only,
-in its workspace, until it ends; the user confirms the grants before it starts. Outside a run the
-gate decides as above, and some things stay refused even inside one (`git stash`, `git reset
---hard`, a push forced without a lease). See [`procedures.md`](procedures.md).
+**Procedures** are named steps of the project's work (`procedures.md`): a run grants nothing, each
+call it makes goes through the session's mode like any other.
 
 ## 8. Instructions
 
@@ -368,8 +401,7 @@ the content (`docs/projects.md`).
 
 Later (milestone "Forges and tickets"), a project gains **procedures** (named multi-step actions
 with their own scoped authorizations: what slash commands hold today, [`procedures.md`](procedures.md)), see
-`reference/multi-repo-case.md`. A procedure's instructions are its run's first message, after
-what it grants.
+`reference/multi-repo-case.md`. A procedure's instructions are its run's first message.
 
 ## 9. The built-in orchestration standard
 
@@ -392,15 +424,14 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
 - a project page: its repositories, its places with their sessions, creating and removing a
   workspace (with the preparation's progress and failure output), and the composer that starts
   a session (place, agent, model, first message); its procedures (added from a list of the
-  templates and a blank one, edited with each grant a sentence of what a run may do and three
-  choices, No, After asking me (`ask`) and On its own (`allow`), removed) and its references (add
-  with a path picked in the project folder, remove); its Settings: each repository's forge, the
-  tracker, and a switch per family of an agent's changes (start a procedure, change the settings,
-  add or remove a reference) that lets it run on its own;
+  templates and a blank one, edited, removed) and its references (add with a path picked in the
+  project folder, remove); its Settings: each repository's forge and the tracker;
 - a session page: the root's conversation, live (messages, thoughts collapsed, tool calls with
   their result, the children launched, reports, diffs), the approvals that reach the user, inline,
-  with deny / allow for the tree / allow once (a line outside the catalogue in `main`: deny / always
-  / once; a change of the project an agent asks for, said in words: deny / confirm), and a composer that writes to the root, whose Stop
+  each a card that says what the call does, then its class, then the judge's reason when one was
+  asked, with Allow and Deny only (a base card stands apart, in the alarm colour, with a sentence
+  that says why it always comes back), and a composer that writes to the root, with the session's
+  mode switch (Ask, Auto) in its bar, whose Stop
   button and `Escape` interrupt the turn that runs (the agent stays), which grows with its lines up to
   about ten and then scrolls, and takes pictures (pasted from the clipboard, dropped from a file or
   picked with Attach: thumbnails with a remove button, sent with the message as ACP image blocks,
@@ -410,11 +441,11 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   drawn by its icon alone, in the tree and in the rail: no text badge, nothing in the header. In the
   composer, `/` at the start
   of a message lists the project's procedures, filtered as the user types: picking one shows what
-  it runs, the workspace and each grant in words, and Confirm runs it in the session's workspace
+  it runs and the workspace, and Confirm runs it in the session's workspace
   (in `main` the list says procedures run in a workspace; a `/word` that names none is sent as
   text); a rail with the session's
   tree of agents, its workspace (each repository's forge as the daemon reads it, its ticket,
-  linked or unlinked there) and facts (the grants of the procedure it runs, while it runs). The
+  linked or unlinked there) and facts (the procedure it runs, while it runs). The
   root's row menu ("⋯") holds End session, the only way the window ends an agent: it ends the root
   and its tree, after a confirmation that counts the agents that end. An ended session leaves its
   place in the left tree for its project's "Ended" group, folded at the bottom, and its page shows,
@@ -476,5 +507,10 @@ The plan is cut into GitHub milestones; each ends on something the user can use.
 - Children cap 3 per project, depth 2, quiet interval 20 min.
 - Claude reached through Flottille's own bridge; `claude` checked at a pinned version, another one
   only warned about.
-- No commit rights for agents unless a procedure's run grants them; push refused for agents
-  outside such a run (`procedures.md`).
+- A new session starts in Auto, and a child takes its parent's mode; Auto without a judge chosen
+  asks the user as Ask does.
+- One judge process per judgement, stopped after it, rather than one kept warm: nothing of a
+  judgement is kept for the next, and no process waits idle on the user's quota.
+- A judge silent for 30 seconds, or whose answer is not the JSON verdict, asks the user.
+- Commits and pushes are calls to judge; a forced push, even with a lease, and a rewrite of
+  history on a remote are base.

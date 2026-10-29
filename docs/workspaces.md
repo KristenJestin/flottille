@@ -159,13 +159,13 @@ worktree, the deepest first, with `git worktree remove` (never `--force`), then 
 prune`; the folder is removed (links as links, never followed); Flottille checks the folder is gone
 and that `git worktree list` no longer lists it, then forgets the workspace. Its branches are kept.
 
-A procedure's run that grants `workspace-remove` removes its own workspace the same way, with the
-agent's tool `workspace_remove`, and then deletes, in each repository, the workspace's branch when
+An agent in a workspace removes its own workspace the same way, with the tool `workspace_remove`
+(a call to judge), and then deletes, in each repository, the workspace's branch when
 it holds no commit of its own (every commit of it is in its base's tracking ref): an empty branch.
 A branch with commits is kept (`docs/procedures.md`). It is refused, nothing touched, while the
-workspace is in use outside the run (`docs/design.md` §5.1): an agent of another tree not ended
-that works in it, or a command run of another tree still running in it, each named; the run's own
-agents and command runs are no obstacle. The user's `flottille workspace remove` does not check
+workspace is in use outside the agent's tree (`docs/design.md` §5.1): an agent of another tree not
+ended that works in it, or a command run of another tree still running in it, each named; the
+tree's own agents and command runs are no obstacle. The user's `flottille workspace remove` does not check
 this.
 
 ## Git

@@ -137,20 +137,15 @@ and the 2026 practice around it:
    - only an agent that can have children gets `approval_answer`;
    - a root gets `ask_user`, a child gets `ask_parent`.
 
-   - `forge_write` and `workspace_remove` are listed only to an agent whose procedure run grants
-     what they do (`pr-create`, `pr-merge-squash` or `pipeline-rerun` for the first,
-     `workspace-remove` for the second): the run's root, and its children in the run's workspace
-     when the run gives them its grants. A tool that could only refuse is not listed. The run's
-     grants are known when the list is frozen, since the run is made with its root agent and a
-     child is made by a parent whose run is known; listing grants nothing, the gate still decides
-     each call.
+   - `forge_write` and `workspace_remove` are listed to an agent in a workspace, as
+     `forge_read` and `ticket_read` are: listing grants nothing, each call goes through the gate's
+     classes and the session's mode (`docs/tools.md`, "The gate").
 
    - only a root gets `procedure` and `project`, the project's procedures and settings
      (`docs/tools.md`, "The project"): a child does its brief.
 
-   A root lead has 18 tools, a leaf worker 11, two more each in a workspace (`forge_read`,
-   `ticket_read`), and up to two more inside a run that grants them (`forge_write`,
-   `workspace_remove`).
+   A root lead has 18 tools, a leaf worker 11, four more each in a workspace (`forge_read`,
+   `ticket_read`, `forge_write`, `workspace_remove`).
 10. **The idempotency key** of a call is read from the call's `_meta` (`claudecode/toolUseId` for
     Claude). `claude` calls Flottille's server itself and sends it with every call; the bridge
     never sees MCP calls. Check that the `claude` version Flottille pins still sends it, and fall
