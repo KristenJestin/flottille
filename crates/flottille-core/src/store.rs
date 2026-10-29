@@ -302,8 +302,20 @@ const MIGRATIONS: &[&str] = &[
     -- Skills and Commands (`docs/skills.md`, `docs/commands.md`): references are skills and
     -- procedures are commands, sent to an agent as a message, so the runs of procedures go. An
     -- agent made before keeps its tools under their new names, in their order; a request keeps
-    -- its tool's new name; a workspace's step names the task it runs.
+    -- its tool's new name; a workspace's step names the task it runs. A procedure the user had
+    -- not answered is refused, and its agent told what to do instead, as a refusal is.
     DROP TABLE procedure_runs;
+    INSERT OR IGNORE INTO deliveries (id, agent, kind, body, urgency, state, created_at)
+        SELECT 'approval-' || number, agent, 'approval',
+            'Request #' || number || ' (procedure) was refused: procedures were replaced by '
+                || 'commands; start it again with /'
+                || coalesce(json_extract(arguments, '$.name'), '<name>') || '.',
+            'urgent', 'queued', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
+        FROM approval_requests WHERE tool = 'procedure' AND state = 'pending';
+    UPDATE approval_requests
+        SET state = 'denied', decision = 'deny',
+            decided_at = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
+        WHERE tool = 'procedure' AND state = 'pending';
     UPDATE agents SET tools = (
         SELECT json_group_array(name) FROM (
             SELECT CASE value
@@ -2733,6 +2745,69 @@ mod tests {
             )
             .unwrap();
         assert_eq!(tables, 0);
+    }
+
+    #[test]
+    fn a_pending_procedure_request_is_refused_by_the_migration_and_its_agent_told() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let old = Connection::open(&path).unwrap();
+        let previous = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("DROP TABLE procedure_runs"))
+            .unwrap();
+        for migration in &MIGRATIONS[..previous] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.pragma_update(None, "user_version", previous).unwrap();
+        let agent = an_agent();
+        old.execute_batch(&format!(
+            "INSERT INTO agents (id, provider, role, project, folder, state, created_at, \
+             updated_at, instructions, tools) VALUES ('{}', 'claude', 'lead', 'app', '/w', \
+             'idle', 1, 1, 'i', '[]'); \
+             INSERT INTO approval_requests (number, agent, tool, arguments, shown, reasons, \
+             sensitive, identity, held_by, forwards, state, created_at, kind) VALUES \
+             (1, '{0}', 'procedure', '{{\"action\":\"start\",\"name\":\"ship\"}}', '{{}}', \
+             '[]', 0, 'x', 'user', '[]', 'pending', 1, 'action'), \
+             (2, '{0}', 'procedure', '{{\"action\":\"start\",\"name\":\"old\"}}', '{{}}', \
+             '[]', 0, 'y', 'user', '[]', 'denied', 1, 'action'), \
+             (3, '{0}', 'fs_write', '{{}}', '{{}}', '[]', 0, 'z', 'user', '[]', 'pending', 1, \
+             'action');",
+            agent.id
+        ))
+        .unwrap();
+        drop(old);
+
+        let store = Store::open(&path).unwrap();
+
+        let refused = store.request(1).unwrap().unwrap();
+        assert_eq!(refused.state, RequestState::Denied);
+        assert_eq!(
+            store.request(2).unwrap().unwrap().state,
+            RequestState::Denied
+        );
+        assert_eq!(
+            store.request(3).unwrap().unwrap().state,
+            RequestState::Pending
+        );
+        assert_eq!(
+            store
+                .pending_requests(approval::USER)
+                .unwrap()
+                .iter()
+                .map(|request| request.number)
+                .collect::<Vec<_>>(),
+            [3]
+        );
+        let told = store.deliveries(&agent.id, "queued").unwrap();
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0].id, "approval-1");
+        assert_eq!(told[0].kind, "approval");
+        assert_eq!(
+            told[0].body,
+            "Request #1 (procedure) was refused: procedures were replaced by commands; start it \
+             again with /ship."
+        );
     }
 
     #[test]
