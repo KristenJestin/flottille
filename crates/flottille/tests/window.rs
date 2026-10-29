@@ -345,7 +345,10 @@ fn one_session_changing_state_redraws_its_row_and_not_the_others(cx: &mut TestAp
     });
     // Atlas's page is open, its details and its lists read: an answer that lands later draws it.
     until(&shell, cx, "the page has its details", |cx| {
-        page_of(&shell, cx).read_with(cx, |page, _| page.chips()) == ["atlas · main"]
+        page_of(&shell, cx).read_with(cx, |page, cx| {
+            page.chips() == ["atlas · main"]
+                && page.repositories().read(cx).repositories().is_some()
+        })
     });
     settle(cx);
     let renders = |id: &str, cx: &mut VisualTestContext| {
