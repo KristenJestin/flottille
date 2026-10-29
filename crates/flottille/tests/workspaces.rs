@@ -588,6 +588,26 @@ fn the_per_repository_status() {
 }
 
 #[test]
+fn the_uncommitted_count_looks_inside_untracked_folders_and_skips_the_links_flottille_made() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    fixture.create(json!({})).unwrap();
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    let web = fixture.workspace("login").join("web");
+    // A link of Flottille's in a folder git does not know, and three files of the user's in another.
+    std::fs::create_dir_all(web.join("cache")).unwrap();
+    std::os::unix::fs::symlink(fixture.folder.join("api"), web.join("cache/api")).unwrap();
+    std::fs::create_dir_all(web.join("drafts")).unwrap();
+    for name in ["a.md", "b.md", "c.md"] {
+        std::fs::write(web.join("drafts").join(name), "draft\n").unwrap();
+    }
+
+    let shown = fixture.show("login").unwrap();
+
+    assert_eq!(shown["repositories"][0]["uncommitted"], 3);
+}
+
+#[test]
 fn a_workspace_of_a_repository_with_no_remote_is_removed_unless_it_holds_commits_of_its_own() {
     let fixture = Fixture::new(false);
     fixture.configure("");

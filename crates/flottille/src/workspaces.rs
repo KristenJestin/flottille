@@ -107,7 +107,13 @@ async fn show(daemon: &Daemon, asked: WorkspaceName) -> Answer {
                 .and_then(|count| count.trim().parse::<u64>().ok())
                 .map_or(Value::Null, Value::from);
             // Without the index's refresh: `status` would write it, as `diff` would.
-            let status = ["--no-optional-locks", "status", "--porcelain=v1", "-z"];
+            let status = [
+                "--no-optional-locks",
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+            ];
             repository["uncommitted"] = read(&status).await.map_or(Value::Null, |status| {
                 uncommitted(&workspace, &folder, &status).into()
             });
