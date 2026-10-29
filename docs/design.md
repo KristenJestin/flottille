@@ -325,14 +325,26 @@ role, arguments decoded, place rules, then the call's **class**. The gate grants
 says what kind of call it is, and the session's **mode** says who answers it.
 
 - **Harmless** calls pass, in every mode: reading in the project, writing in a workspace, the
-  commands the rules know to only read, a catalogue command in a workspace.
+  commands the rules know to only read, a catalogue command in a workspace. A known program is
+  the system's only: named bare and found through `PATH` outside the project, its workspaces and
+  the place; an option that runs a program or reads past ignored files toward a secret takes it
+  out of this class.
 - **To judge** is everything else: writing in `main`, reading outside the project, a line the
-  rules do not know, a commit, a push, a forge write, a change of the project an agent asks for.
+  rules do not know or whose program is the agent's own file, an option of a reading program
+  that runs one, a commit, a push, a forge write, a change of the project an agent asks for.
 - **Base** calls always come to the user, in every mode, with a strong warning: a push forced
-  (with a lease or not), rewriting history that is on a remote, discarding work in `main`, `.git`
-  folders, sensitive places (`.env` files, credential folders, Flottille's own folders),
+  (with a lease or not), rewriting history that is on a remote, discarding work in `main` or
+  moving the branch it has checked out, `.git` folders, git settings that run programs or lead
+  pushes (`core`, `alias`, `remote`, `url`, `push`, `credential`, `include`), sensitive places
+  (`.env` files, credential folders, Flottille's own folders, another process's `/proc`),
   publishing, a merge whose checks are waived, a change of the project's tracker, and the
-  project's `never` list.
+  project's `never` list. They are looked for in every line a wrapper or an option runs, and in
+  every end of a line whose program the gate does not know, so that no wrapper turns them into
+  calls to judge.
+
+Only a push the gate read and let through goes out: every run's environment rewrites push URLs
+to nowhere, but a run that is itself a `git push` the user or the judge allowed (`docs/tools.md`,
+"commands_run").
 
 What stays **refused** is not a permission but a call that cannot be made as it is: shell syntax,
 a malformed call, a login printed, the daemon driven from a command.
@@ -340,9 +352,11 @@ a malformed call, a login printed, the daemon driven from a command.
 ### 7.1 The mode and the judge
 
 Each session is in **Ask** or **Auto**, a switch in the composer's bar. A new session starts in
-Auto; a child takes its parent's mode when it starts. Only the user changes it, in the window or
-with `flottille agent mode <agent> ask|auto` (`agent.mode`); no tool of an agent does. The mode is
-stored with the session and kept when it resumes.
+Auto. A tree has one mode, its root's, stored with the root and read at each call: a switch
+reaches every agent of the tree at once, children included. Only the user changes it, in the
+window or with `flottille agent mode <agent> ask|auto` (`agent.mode`, which switches the tree's
+root whatever agent of it is named); no tool of an agent does. It is kept when the session
+resumes.
 
 - In **Ask**, a call to judge is a card for the user.
 - In **Auto**, it goes to the **judge**, which allows it or asks the user: it cannot refuse, and
@@ -350,11 +364,15 @@ stored with the session and kept when it resumes.
 
 The judge is an agent of a provider the user chose in Settings ("Auto judge": provider and
 model, `provider.set_judge`), run in bare mode **with no tool at all**: no Flottille tool, no MCP
-server. Its instructions are `roles/judge.md`. It sees the call masked (secrets masked, contents
-cut to their first lines), the place, the user's last messages to the session and the agent's
-`why`, nothing else, and answers one JSON object, `{"verdict": "allow" | "ask", "reason": "…"}`.
-A failure, an answer that is not that object, or 30 seconds without one is an ask. A process of
-the provider is started for each judgement and stopped after it. Each verdict is recorded with the
+server. Its instructions are `roles/judge.md`. It sees the call masked (secrets masked, the line
+and the path whole, contents cut to their first lines with how many they had), why the rules held
+it, the place, the agent's `why`, and last the user's last messages to the session, nothing else.
+What the agent wrote comes in blocks of its own, every `<` escaped, so that no text of the agent
+reads as the user's; only the user's messages say what is wanted. It answers one JSON object,
+`{"verdict": "allow" | "ask", "reason": "…"}`. A failure, an answer that is not that object, or
+30 seconds without one is an ask; a line or a path longer than the 8,000 characters it is given
+whole asks without it. A process of the provider is started for each judgement, and its whole
+process group stopped after it. Each verdict is recorded with the
 call (who judged, what, why: the `judgement` of its `agent.tool_served` event, and of its request
 when it asks), shown on the card and in `flottille approvals`.
 Without a judge chosen, Auto behaves as Ask, and the composer says once "Choose an Auto judge in
@@ -381,8 +399,8 @@ An allowed request is re-checked and performed, and its result comes back to the
 as an `approval` delivery; a denied one comes back as a refusal with the why.
 
 Agent-run commands get an environment without forge tokens, and without the repository's git
-hooks (`reference/hemera.md` §3); `git push` is no longer neutralised, it goes through the gate
-like any other call.
+hooks (`reference/hemera.md` §3), and with every push walled but the run that is itself a
+`git push` the gate let through: a push goes through the gate like any other call, and only so.
 
 **Procedures** are named steps of the project's work (`procedures.md`): a run grants nothing, each
 call it makes goes through the session's mode like any other.
@@ -507,8 +525,8 @@ The plan is cut into GitHub milestones; each ends on something the user can use.
 - Children cap 3 per project, depth 2, quiet interval 20 min.
 - Claude reached through Flottille's own bridge; `claude` checked at a pinned version, another one
   only warned about.
-- A new session starts in Auto, and a child takes its parent's mode; Auto without a judge chosen
-  asks the user as Ask does.
+- A new session starts in Auto, and a tree has one mode, its root's, read at each call; Auto
+  without a judge chosen asks the user as Ask does.
 - One judge process per judgement, stopped after it, rather than one kept warm: nothing of a
   judgement is kept for the next, and no process waits idle on the user's quota.
 - A judge silent for 30 seconds, or whose answer is not the JSON verdict, asks the user.

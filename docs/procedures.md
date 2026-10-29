@@ -52,7 +52,9 @@ resumes after it ended (`agent.resume`) does not start its run again: it is an o
 
 **The environment.** An agent's runs get their environment without forge tokens: a push goes with
 the user's own git credentials (an SSH key, a credential helper that needs no forge command line).
-`git push` is not neutralised: it is a call to judge, and a forced one (even with a lease) is base.
+`git push` is a call to judge, and a forced one (even with a lease) is base. Every other run has
+its pushes walled (`url.<nowhere>.pushInsteadOf`): only a run that is itself a `git push` the user
+or the judge let through goes out, so a script cannot push behind the gate (`docs/tools.md`).
 
 **No hook.** Every line an agent runs gets `core.hooksPath=/dev/null`, given through
 `GIT_CONFIG_COUNT` in its environment so that the agent's line is unchanged: the hooks are files of

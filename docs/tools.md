@@ -185,11 +185,15 @@ not a lock: a swap between it and the rename is not seen.
     `GIT_CONFIG_VALUE_<n>=/dev/null`, since the hooks are files the agent can write, and would
     run outside the gate's sight;
   - no `XDG_RUNTIME_DIR`, which says where the daemon's socket is (a client a run starts is
-    refused anyway).
-- **A push is the gate's**, not the environment's: `git push` is a call to judge, a forced one
-  base, and a push from a workspace is refused, before git runs, when a repository's remote no
-  longer leads where it did when the workspace was made (`docs/procedures.md`, "Where the remote
-  leads"). A script the agent wrote and runs is not read (below, "Known gaps").
+    refused anyway);
+  - no push: `url./dev/null/flottille-refused-push/.pushInsteadOf` set the same way, which
+    rewrites every push URL to a path that is no remote, unless the run is itself a `git push`
+    (its own line, no wrapper) the user or the judge let through.
+- **A push is the gate's**: `git push` is a call to judge, a forced one base, and only the push
+  the gate read and let through goes out. A harmless command (a catalogue command, a test run)
+  cannot push from a script the gate never read. A push from a workspace is also refused, before
+  git runs, when a repository's remote no longer leads where it did when the workspace was made
+  (`docs/procedures.md`, "Where the remote leads").
 - **A stop ends the run's process group, not every descendant.** `commands_status` with `action stop`, a timeout of
   the call's client and the daemon's stop signal the group the run was spawned in (`SIGTERM`,
   then `SIGKILL` after 5 s), and what the run left in its group is killed when its own process
@@ -322,14 +326,28 @@ says who answers a call to judge (`docs/design.md` §7.1).
      `rm -R <repository>`, `find . -delete`). Deleting inside a repository is not (`rm -r
      target`);
    - a push forced or that deletes: `--force`, `-f`, `--force-with-lease`, `--force-if-includes`,
-     `--mirror`, `--delete`, `-d`, `--prune`, a `+refspec` or a `:branch`;
+     `--mirror`, `--delete`, `-d`, `--prune` (or any start of their names, as git takes them:
+     `--forc`, `--mirr`), a `+refspec` or a `:branch`;
+   - git settings that run programs, lead pushes elsewhere or bring in other files: a key of
+     `core.*`, `alias.*`, `remote.*`, `url.*`, `push.*`, `credential.*` or `include*` given to
+     `git -c` or `--config-env`, or written by `git config` in any write form (`--edit`
+     included); `git remote add`, `rename`, `remove`, `set-url` and `set-branches`; and git's
+     configuration set or cleared through the environment (`GIT_CONFIG*=…`, `env -i`, `env -u
+     GIT_CONFIG…`), which would lift the wall on pushes and hooks;
+   - reading a process's environment (`/proc/<pid>/environ`, `self` included), or anything under
+     `/proc/<pid>/` of a process that is not one of the agent's runs;
    - rewriting history that is on a remote, or the user's own checkout's: `git rebase`,
      `git commit --amend` (and the fixups that amend or reword), `git reset <commit>`,
      `git update-ref`, when the workspace's branch is already on a remote or the agent works in
      `main`; `git filter-branch` and `filter-repo` anywhere;
-   - discarding work in the project folder (`main`): `git checkout` with `--`, `.`, `-f` or
-     `--force`; `git restore`, `git clean` and `git reset`, in any form; `git stash` but `list`
-     and `show`; `git worktree remove`; `git branch -d`, `-D` or `--delete`;
+   - discarding work in the project folder (`main`), or moving the branch it has checked out:
+     `git checkout` with `--`, `.`, `-f`, `-B`, `-p`, `--ours`, `--theirs`, or a word that is a
+     file or folder there, a pattern or a pathspec magic (not with `-b` or `--orphan`); `git
+     switch -f`, `--discard-changes`, `-C`; `git checkout-index -f`; `git read-tree -u`; `git
+     restore`, `git clean`, `git reset` and `git update-ref`, in any form; `git stash` but `list`
+     and `show`; `git worktree remove`; `git branch -d`, `-D`, `-f`, `-m`, `-M`, `-C`; `git rm`
+     but `--cached`; `git apply` and `am` with `--reject`; `--abort` of a merge, a cherry-pick, a
+     revert or `am`; `git symbolic-ref` that writes; `git submodule update` or `deinit` forced;
    - publishing: `npm`, `pnpm`, `yarn`, `bun`, `cargo`, `poetry`, `flit`, `hatch`, `uv` with
      `publish` or `unpublish`, `twine upload`, `gem`, `dotnet` and `nuget` with `push`;
    - `acli` and `bkt`, Atlassian's and Bitbucket's command lines, every line, reads included:
@@ -345,30 +363,53 @@ says who answers a call to judge (`docs/design.md` §7.1).
      `diff`, `show`, `branch` and `tag` listings, `config` and `remote` reads…), of `gh` and
      `glab` (`pr view/list/diff/checks/status`, `issue view/list`, `run view/list`, `mr
      view/list/diff`, `ci view/list/status`, `repo view`, `auth status`, `api` with GET, no
-     field, no input and not `graphql`), and the common reading programs;
+     field, no input and not `graphql`), and the common reading programs (`ls`, `cat`, `grep`,
+     `rg`, `find`, `fd`, `tree`, `ps`, `pgrep`…; not `less` and `more`, whose commands run
+     programs). A program counts as one of them only when it is the system's: named bare, and
+     found through the run's `PATH` outside the project folder, its workspaces and the place.
+     `./ls`, `/path/to/git` or an `ls` the agent put in a folder of `PATH` is the agent's own
+     file, to judge, and the judge is told so;
+   - an option of those programs that writes a file, inside a workspace only (`git diff`,
+     `log`, `show` `--output`, `git format-patch`, `tree -o`, `find -fprint`, `file -C`): in
+     `main`, it is to judge;
    - a catalogue command in a workspace, not marked `ask_before_running` and whose program is not
      a shell. A line is the catalogue command it is when the catalogue holds the same words where
      it runs.
 4. **To judge**: everything else, a card in Ask and the judge in Auto. Among them: writing in the
    project folder (`main`); a path outside the place, or one that cannot be resolved; a catalogue
    command in `main`, marked `ask_before_running`, or whose program is a shell; a line the rules
-   do not know to only read; `git commit`, `git push`, `git rebase` of a branch on no remote,
-   `git reset --hard` in a workspace, `git -c` or `--config-env`, `git remote` and `git config`
-   writes; the forge command lines beyond their reads; `forge_write`, `workspace_remove`, and a
-   write of `procedure` or `project` ("The project").
+   do not know to only read, or whose program is the agent's own file; an option of a reading
+   program that runs one (`find -exec`, `-execdir`, `-ok`; `fd -x`, `-X`; `rg --pre`,
+   `--hostname-bin`; `git grep -O`; `--ext-diff`, `--textconv`, `cat-file --filters`; `git help`
+   with an option; `date -s`); a recursive read that reaches hidden or ignored files (`grep -r`,
+   `-R`; `rg -u`, `--hidden`, `--no-ignore`; `git grep --untracked`, `--no-index`; `fd -H`, `-I`,
+   `-u`; `find -L`, `-H`) over a folder that holds a sensitive file, or more files than the gate
+   looks through (20,000), the judge told which; `git commit`, `git push`, `git rebase` of a
+   branch on no remote, `git reset --hard` in a workspace, `git -c` or `--config-env` of other
+   keys, git's other global options, `git remote` and `git config` writes of other keys; the
+   forge command lines beyond their reads; `forge_write`, `workspace_remove`, and a write of
+   `procedure` or `project` ("The project").
 
    The rules of 1 and 2 are judged on the line and on every program a wrapper runs, unwrapped in
    turn (16 at most): `env` (its options, `NAME=value` words and `-S` line), `sudo`, `doas`,
    `nice`, `nohup`, `timeout`, `time`, `stdbuf`, `command`, `exec`, `xargs`, `npx` (and its `-c`
    line), `pnpm dlx`/`exec`, `yarn dlx`/`exec`, `bunx`, `uvx`, and a shell (`sh`, `bash`, `zsh`,
-   `dash`, `ksh`, `mksh`, `ash`, `fish`) with `-c`, whose line is split as `commands_run` splits
-   one and judged in turn: a line that cannot be split is refused. A shell running a script is
-   not unwrapped: the script is not read.
+   `dash`, `ksh`, `mksh`, `ash`, `fish`) with `-c`, `script -c` and `watch`, whose line is split
+   as `commands_run` splits one and judged in turn: a line that cannot be split is refused. A
+   shell running a script is not unwrapped: the script is not read. The line an option of a
+   reading program runs (`fd -X git push -f`) is read the same way. git's global options are
+   skipped to class its command, and count too: the stronger wins.
+
+   The base rules are also judged on every end of every layer whose program is not a reading
+   one, from each word that is not an option (from after the command, for git): a wrapper the
+   gate does not know (`setsid`, `ionice`, `taskset`, `flock`, `chrt`, `strace`, `git bisect
+   run`…) cannot turn a base line into one to judge.
 
    **Known gaps**, which no command gate closes: a script written with `fs_write` and then run
-   (`./script.sh`, `sh script.sh`) is not read, so what it does is out of the gate's reach; a git
-   alias in the user's own configuration (`alias.<name> = push`) is run by git itself, and the
-   gate sees only the alias's name. Running a script the agent wrote is itself a line to judge.
+   (`./script.sh`, `sh script.sh`) is not read, so what it does is out of the gate's reach, but
+   for a push, which the environment walls; a git alias in the user's own configuration
+   (`alias.<name> = push`) is run by git itself, and the gate sees only the alias's name.
+   Running a script the agent wrote is itself a line to judge.
 
 The words of a line that name paths (every word but the program, an option's value after `=`, a
 `NAME=value`'s value) are resolved from the folder the run starts in, as a file tool's path is.

@@ -221,7 +221,7 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             provider,
             model: asked.model,
             effort: asked.effort,
-            // A child starts in its parent's mode.
+            // Not read: a tree runs in its root's mode (`judge::mode`).
             gate_mode: Some(caller.gate_mode),
         },
     )

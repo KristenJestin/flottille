@@ -574,9 +574,10 @@ Resumed agent bd7ed8152969 on its own session; it is idle now. Its next message 
 
 Sets the mode of a session (`docs/design.md` §7): in `ask`, every call to judge comes to you as a
 request; in `auto`, the judge chosen in the window's Settings decides it, and what it does not
-allow comes to you. Base calls come to you in both. A new session starts in `auto`, a child in its
-parent's mode; the mode is kept when the session is resumed. Only you set it: no tool of an agent
-does. `--json` prints `{"agent": {...}}`.
+allow comes to you. Base calls come to you in both. A tree has one mode, its root's: naming a
+child switches its root, and every agent of the tree follows at once. A new session starts in
+`auto`; the mode is kept when the session is resumed. Only you set it: no tool of an agent does.
+`--json` prints `{"agent": {...}}`, the root.
 
 ```
 $ flottille agent mode bd7ed8152969 ask
