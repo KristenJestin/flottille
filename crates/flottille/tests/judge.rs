@@ -261,6 +261,22 @@ fn in_auto_the_judge_allows_a_call_and_it_is_done_at_once_with_its_verdict_recor
 }
 
 #[test]
+fn a_call_the_judge_let_through_is_recorded_with_the_key_the_window_matches_its_card_by() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (id, mcp, _) = session(&user, false);
+
+    done(mcp.call_keyed(
+        "commands_run",
+        json!({"line": "touch made.txt", "why": "the build needs the file"}),
+        "toolu_card",
+    ));
+
+    let served = last_served(&user, &id);
+    assert_eq!(served["gate"], "judged");
+    assert_eq!(served["call_key"], "toolu_card");
+}
+
+#[test]
 fn in_auto_the_judge_asks_and_the_card_and_the_command_line_say_its_reason() {
     let user = User::with_fake_agent().with_judge(says("ask", "Nothing in the task asks for it."));
     let (_, mcp, folder) = session(&user, false);

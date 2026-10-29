@@ -21,6 +21,7 @@ use futures::channel::mpsc::UnboundedSender;
 use serde_json::{Value, json};
 
 use crate::actions::Changes;
+use crate::commands::{CommandOutput, CommandRow};
 use crate::conversation::one_line;
 use crate::link::{Conn, Connect, Update, quiet_wait};
 
@@ -314,6 +315,11 @@ pub enum SessionUpdate {
     },
     /// The place's facts; `None` when the daemon has none (the workspace was removed).
     Place(Option<Box<PlaceFacts>>),
+    /// The commands of the session's tree: those running, then those that ended and were not
+    /// dismissed.
+    Commands(Vec<CommandRow>),
+    /// The output of the command whose panel is open.
+    CommandOutput(Box<CommandOutput>),
 }
 
 /// Where the session works.
@@ -328,11 +334,19 @@ pub struct SessionLink {
     token: u64,
     stop: Arc<AtomicBool>,
     stream: Arc<Mutex<Option<UnixStream>>>,
+    /// The command whose output the link reads, about once a second.
+    watched: Arc<Mutex<Option<String>>>,
 }
 
 impl SessionLink {
     pub fn token(&self) -> u64 {
         self.token
+    }
+
+    /// Reads this command's output from now on (none to stop): the link sends what the daemon
+    /// says of it at its next turn, within a second.
+    pub fn watch(&self, run: Option<String>) {
+        *self.watched.lock().unwrap() = run;
     }
 }
 
@@ -368,6 +382,9 @@ const TREE_EVENTS: &[&str] = &[
 
 const FIRST_RETRY: Duration = Duration::from_millis(100);
 const LAST_RETRY: Duration = Duration::from_secs(5);
+/// How often the commands of the session, and the output of the one watched, are read while a
+/// command runs or an output is open: a command's output is no event.
+const COMMANDS_EVERY: Duration = Duration::from_secs(1);
 /// A connection that lasted this long was healthy: the next one is tried at once again. One that
 /// breaks sooner (a request that keeps failing) waits longer each time.
 const HEALTHY: Duration = Duration::from_secs(10);
@@ -385,6 +402,7 @@ pub fn spawn(
     let token = TOKENS.fetch_add(1, Ordering::Relaxed);
     let stop = Arc::new(AtomicBool::new(false));
     let stream = Arc::new(Mutex::new(None));
+    let watched = Arc::new(Mutex::new(None));
     let link = Link {
         connect,
         updates,
@@ -395,6 +413,7 @@ pub fn spawn(
         pages: pages.max(1),
         stop: stop.clone(),
         stream: stream.clone(),
+        watched: watched.clone(),
     };
     std::thread::Builder::new()
         .name("flottille-session".into())
@@ -404,6 +423,7 @@ pub fn spawn(
         token,
         stop,
         stream,
+        watched,
     }
 }
 
@@ -417,6 +437,7 @@ struct Link {
     pages: usize,
     stop: Arc<AtomicBool>,
     stream: Arc<Mutex<Option<UnixStream>>>,
+    watched: Arc<Mutex<Option<String>>>,
 }
 
 /// What outlives a connection: the last event seen, to resume after it, and whether the
@@ -432,16 +453,18 @@ struct Stale {
     tree: bool,
     requests: bool,
     place: bool,
+    commands: bool,
     /// When the first of them was marked.
     since: Option<Instant>,
 }
 
 impl Stale {
-    fn mark(&mut self, tree: bool, requests: bool, place: bool) {
+    fn mark(&mut self, tree: bool, requests: bool, place: bool, commands: bool) {
         self.tree |= tree;
         self.requests |= requests;
         self.place |= place;
-        if (tree || requests || place) && self.since.is_none() {
+        self.commands |= commands;
+        if (tree || requests || place || commands) && self.since.is_none() {
             self.since = Some(Instant::now());
         }
     }
@@ -505,12 +528,23 @@ impl Link {
         }
         let mut ticket = None;
         self.read_place(&mut conn, &mut ticket)?;
+        let mut running = self.read_commands(&mut conn)?;
+        let mut next_commands = Instant::now() + COMMANDS_EVERY;
+        // The command whose output was last read.
+        let mut read_output: Option<String> = None;
         let mut stale = Stale::default();
         loop {
             if self.stopped() {
                 return Ok(());
             }
-            let Some(event) = conn.next_event(quiet_wait(stale.since))? else {
+            // While a command runs the link wakes each second, events or not: what a program
+            // writes is no event. Otherwise it wakes as often to see a panel opened.
+            let wait = match quiet_wait(stale.since) {
+                Some(wait) => Some(wait),
+                None if running => Some(next_commands.saturating_duration_since(Instant::now())),
+                None => Some(COMMANDS_EVERY),
+            };
+            let Some(event) = conn.next_event(wait)? else {
                 if stale.tree {
                     tree = self.read_tree(&mut conn)?;
                 }
@@ -519,6 +553,19 @@ impl Link {
                 }
                 if stale.place {
                     self.read_place(&mut conn, &mut ticket)?;
+                }
+                let due = running && Instant::now() >= next_commands;
+                if stale.commands || due {
+                    running = self.read_commands(&mut conn)?;
+                    next_commands = Instant::now() + COMMANDS_EVERY;
+                }
+                // An output is read when its panel opens, then as long as the command runs.
+                let watched = self.watched.lock().unwrap().clone();
+                if watched != read_output || ((stale.commands || due) && watched.is_some()) {
+                    if let Some(run) = &watched {
+                        self.read_output(&mut conn, run)?;
+                    }
+                    read_output = watched;
                 }
                 stale = Stale::default();
                 continue;
@@ -531,7 +578,7 @@ impl Link {
                 && self.place.workspace.as_deref() == data["workspace"].as_str()
                 && data["project"] == self.place.project.as_str()
             {
-                stale.mark(false, false, true);
+                stale.mark(false, false, true, false);
             }
             let ours = tree.contains(agent)
                 || (name == "agent.created"
@@ -547,6 +594,7 @@ impl Link {
                 TREE_EVENTS.contains(&name) || approval,
                 approval,
                 name == "agent.turn_ended" || name.starts_with("procedure."),
+                name.starts_with("run."),
             );
             let decided = match name {
                 "approval.decided" => data["decision"].as_str(),
@@ -614,6 +662,31 @@ impl Link {
             .map(Request::of)
             .collect();
         self.send(SessionUpdate::Requests(requests));
+        Ok(())
+    }
+
+    /// The commands of the session's tree, sent; whether one runs.
+    fn read_commands(&self, conn: &mut Conn) -> Result<bool, String> {
+        let answer = conn.request("command.list", json!({"tree": self.root, "ended": true}))?;
+        let rows: Vec<CommandRow> = answer["commands"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(CommandRow::of)
+            .collect();
+        let running = rows.iter().any(CommandRow::running);
+        self.send(SessionUpdate::Commands(rows));
+        Ok(running)
+    }
+
+    /// The output of the command watched, sent. A command the daemon no longer knows is not an
+    /// error of the connection.
+    fn read_output(&self, conn: &mut Conn, run: &str) -> Result<(), String> {
+        if let Ok(output) = conn.ask("command.output", json!({"run": run}))? {
+            self.send(SessionUpdate::CommandOutput(Box::new(CommandOutput::of(
+                &output,
+            ))));
+        }
         Ok(())
     }
 

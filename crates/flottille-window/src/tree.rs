@@ -10,8 +10,8 @@ use flottille_ui::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, WeakEntity, Window,
-    div, px,
+    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, TestSupportExt as _,
+    WeakEntity, Window, div, px,
 };
 
 use crate::model::{Place, ago};
@@ -39,6 +39,45 @@ pub fn session_id(id: &str) -> ElementId {
 
 pub fn place_name(place: &Place) -> &str {
     place.as_deref().unwrap_or("main")
+}
+
+/// The element id of the icon that says a command runs in a project.
+pub fn project_commands_id(name: &str) -> ElementId {
+    ElementId::Name(format!("commands-project-{name}").into())
+}
+
+/// The element id of the icon that says a command runs in a session.
+pub fn session_commands_id(id: &str) -> ElementId {
+    ElementId::Name(format!("commands-session-{id}").into())
+}
+
+/// What ends a row: the small terminal icon while a command of the project or the session runs,
+/// so that no server is forgotten, then the row's own mark.
+fn trailing(id: ElementId, commands: usize, last: impl IntoElement, cx: &App) -> impl IntoElement {
+    let p = palette(cx);
+    let said = match commands {
+        1 => "A command is running".to_owned(),
+        n => format!("{n} commands are running"),
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .when(commands > 0, |d| {
+            d.child(
+                div()
+                    .id(id)
+                    .flex_none()
+                    .aria_label(SharedString::from(said))
+                    .child(
+                        flottille_ui::icon(Icon::Terminal)
+                            .size(px(12.))
+                            .text_color(p.run),
+                    )
+                    .test_support(),
+            )
+        })
+        .child(last)
 }
 
 /// A mark shown on a row: a state icon over its own model, shown or not.
@@ -159,6 +198,8 @@ pub struct ProjectNode {
     name: String,
     open: bool,
     mark: Mark,
+    /// How many commands its agents run now.
+    commands: usize,
     places: Entity<Level<PlaceNode>>,
     fold: Entity<Fold>,
     shell: WeakEntity<Shell>,
@@ -172,6 +213,7 @@ impl ProjectNode {
             name,
             open: true,
             mark: Mark::new(cx),
+            commands: 0,
             places,
             fold,
             shell,
@@ -180,6 +222,18 @@ impl ProjectNode {
 
     pub fn mark(&self) -> Option<AgentState> {
         self.mark.shown
+    }
+
+    /// How many commands its agents run now.
+    pub fn commands(&self) -> usize {
+        self.commands
+    }
+
+    pub fn set_commands(&mut self, commands: usize, cx: &mut Context<Self>) {
+        if self.commands != commands {
+            self.commands = commands;
+            cx.notify();
+        }
     }
 
     pub fn is_open(&self) -> bool {
@@ -223,8 +277,13 @@ impl Render for ProjectNode {
             self.name.clone(),
         )
         .expanded(self.open)
-        .when_some(self.mark.shown, |row, _| {
-            row.trailing(self.mark.icon.clone())
+        .when(self.mark.shown.is_some() || self.commands > 0, |row| {
+            row.trailing(trailing(
+                project_commands_id(&self.name),
+                self.commands,
+                div().children(self.mark.shown.map(|_| self.mark.icon.clone())),
+                cx,
+            ))
         })
         .on_toggle(cx.listener(|this, _, _, cx| this.toggle(cx)))
         .on_click(cx.listener(move |_, _, window, cx| {
@@ -417,6 +476,8 @@ pub struct SessionRow {
     renders: usize,
     title: SharedString,
     mark: Mark,
+    /// How many commands its agents run now.
+    commands: usize,
     active_at: u64,
     ago: SharedString,
     selected: bool,
@@ -430,6 +491,7 @@ impl SessionRow {
             renders: 0,
             title: SharedString::default(),
             mark: Mark::new(cx),
+            commands: 0,
             active_at: 0,
             ago: SharedString::default(),
             selected: false,
@@ -439,6 +501,18 @@ impl SessionRow {
 
     pub fn mark(&self) -> Option<AgentState> {
         self.mark.shown
+    }
+
+    /// How many commands its agents run now.
+    pub fn commands(&self) -> usize {
+        self.commands
+    }
+
+    pub fn set_commands(&mut self, commands: usize, cx: &mut Context<Self>) {
+        if self.commands != commands {
+            self.commands = commands;
+            cx.notify();
+        }
     }
 
     /// The session's root agent.
@@ -532,9 +606,10 @@ impl Render for SessionRow {
                     })
                     .ok();
             });
+        let id = session_commands_id(&self.id);
         match self.mark.shown {
-            Some(_) => row.trailing(self.mark.icon.clone()),
-            None => row.trailing(meta(self.ago.clone(), cx)),
+            Some(_) => row.trailing(trailing(id, self.commands, self.mark.icon.clone(), cx)),
+            None => row.trailing(trailing(id, self.commands, meta(self.ago.clone(), cx), cx)),
         }
     }
 }

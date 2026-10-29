@@ -246,13 +246,15 @@ fn note(seen: &Seen, event: &Event) {
     seen.events.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Whether an event changes what the shell shows. A conversation's pieces, tool calls and runs
-/// do not: they are many, and the session page follows them itself.
+/// Whether an event changes what the shell shows. A conversation's pieces and tool calls do not:
+/// they are many, and the session page follows them itself.
 fn matters(event: &Event) -> bool {
     let name = event.name.as_str();
     match name.split_once('.').map(|(subject, _)| subject) {
         // A workspace's preparation shows on its card, step by step.
         Some("project" | "approval" | "daemon" | "workspace") => true,
+        // A command starting or ending shows in the tree; its output is no event.
+        Some("run") => true,
         Some("agent") => matches!(
             name,
             "agent.created"
@@ -283,6 +285,7 @@ fn read(conn: &mut Conn, briefs: &mut HashMap<String, String>, seen: &Seen) -> R
     let workspaces = conn.request("workspace.list", json!({}))?;
     let agents = conn.request("agent.list", json!({}))?;
     let approvals = conn.request("approval.list", json!({}))?;
+    let commands = conn.request("command.list", json!({}))?;
     let needs_user = needing_the_user(conn)?;
     let roots: Vec<&str> = agents["agents"]
         .as_array()
@@ -309,6 +312,7 @@ fn read(conn: &mut Conn, briefs: &mut HashMap<String, String>, seen: &Seen) -> R
         needs_user: &needs_user,
         briefs,
         questions: &questions,
+        commands: &commands,
     }))
 }
 
@@ -552,6 +556,8 @@ mod tests {
         assert!(!matters(&event("delivery.queued", json!({"kind": "user"}))));
         assert!(matters(&event("approval.requested", json!({}))));
         assert!(matters(&event("agent.turn_ended", json!({}))));
+        assert!(matters(&event("run.started", json!({}))), "the tree's icon");
+        assert!(matters(&event("run.ended", json!({}))));
         assert!(matters(&event("workspace.created", json!({}))));
         assert!(
             matters(&event("workspace.step_done", json!({}))),

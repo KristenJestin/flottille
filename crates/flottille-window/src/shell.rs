@@ -602,6 +602,13 @@ impl Shell {
                     mode.update(cx, |mode, cx| mode.answered(refused, cx));
                 }
             }
+            Outcome::RunAnswered { session, refused } => {
+                if let Some(page) = self.session_page.clone()
+                    && page.read(cx).id() == session
+                {
+                    page.update(cx, |page, cx| page.command_answered(refused, cx));
+                }
+            }
             Outcome::Interrupted { session, refused } => {
                 if let Some(reply) = self.replies.get(&session).cloned() {
                     reply.update(cx, |reply, cx| reply.interrupted(refused, cx));
@@ -1029,6 +1036,9 @@ impl Shell {
                     row.set(&session.title, session.mark, session.active_at, now, cx)
                 });
             }
+            if row.read(cx).commands() != session.commands {
+                row.update(cx, |row, cx| row.set_commands(session.commands, cx));
+            }
             marks.extend(session.mark);
             shown.push(row.clone());
             rows.insert(session.id.clone(), row);
@@ -1097,6 +1107,9 @@ impl Shell {
             let mark = AgentState::strongest(project_marks);
             if !node.read(cx).holds(&place_nodes, mark, cx) {
                 node.update(cx, |node, cx| node.set(place_nodes, mark, cx));
+            }
+            if node.read(cx).commands() != project.commands {
+                node.update(cx, |node, cx| node.set_commands(project.commands, cx));
             }
             project_nodes.push(node.clone());
             projects.insert(project.name.clone(), node);

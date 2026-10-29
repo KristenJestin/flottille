@@ -32,6 +32,8 @@ pub struct Project {
     /// The provider and the model its file gives its agents, when it gives them.
     pub provider: Option<String>,
     pub model: Option<String>,
+    /// How many commands its agents run now: the tree shows an icon while there is one.
+    pub commands: usize,
 }
 
 /// A workspace as its card shows it.
@@ -139,6 +141,8 @@ pub struct Session {
     /// The last sign of activity of its tree, in milliseconds since the Unix epoch.
     pub active_at: u64,
     pub created_at: u64,
+    /// How many commands the agents of its tree run now.
+    pub commands: usize,
 }
 
 /// One thing that waits for the user. Choosing it opens its session.
@@ -169,6 +173,8 @@ pub struct Answers<'a> {
     pub briefs: &'a HashMap<String, String>,
     /// The question each root asking the user asked last, by id: its text and when.
     pub questions: &'a HashMap<String, (String, u64)>,
+    /// `command.list`: the commands running.
+    pub commands: &'a Value,
 }
 
 fn text(value: &Value, key: &str) -> String {
@@ -276,6 +282,13 @@ impl Snapshot {
             entry.1 = entry.1.max(active);
             entry.2 += 1;
         }
+        let running = list(answers.commands, "commands");
+        let commands_of = |key: &str, name: &str| {
+            running
+                .iter()
+                .filter(|command| command[key].as_str() == Some(name))
+                .count()
+        };
         let mut sessions: Vec<Session> = agents
             .iter()
             .filter(|agent| agent["parent"].is_null())
@@ -303,6 +316,7 @@ impl Snapshot {
                     ended: matches!(agent["state"].as_str(), Some("ended" | "failed")),
                     active_at,
                     created_at: number(agent, "created_at"),
+                    commands: commands_of("root", &id),
                     id,
                 }
             })
@@ -320,6 +334,7 @@ impl Snapshot {
                     .map(|w| text(w, "name"))
                     .collect();
                 workspaces.sort();
+                let commands = commands_of("project", &name);
                 Project {
                     folder: text(project, "folder"),
                     repositories: list(project, "repositories")
@@ -336,6 +351,7 @@ impl Snapshot {
                     workspaces,
                     provider: project["provider"].as_str().map(str::to_owned),
                     model: project["model"].as_str().map(str::to_owned),
+                    commands,
                 }
             })
             .collect();
@@ -407,6 +423,7 @@ mod tests {
             needs_user: &needs_user.iter().map(|id| id.to_string()).collect(),
             questions: &HashMap::new(),
             briefs: &HashMap::from([("r1".into(), "\n  Fix the login\nmore".into())]),
+            commands: &json!({"commands": []}),
         })
     }
 
@@ -500,6 +517,7 @@ mod tests {
             needs_user: &HashSet::new(),
             questions: &HashMap::new(),
             briefs: &HashMap::new(),
+            commands: &json!({"commands": []}),
         });
         snapshot.workspaces[0].clone()
     }
@@ -531,6 +549,44 @@ mod tests {
                 output: "npm ERR! made up".into()
             }
         );
+    }
+
+    #[test]
+    fn a_project_and_a_session_count_the_commands_running_in_them() {
+        let agents = json!({"agents": [agent("r1", None, "idle", Some("login")),
+            agent("c1", Some("r1"), "idle", Some("login")), agent("r2", None, "idle", None)]});
+        let commands = json!({"commands": [
+            {"run": "a", "agent": "c1", "root": "r1", "project": "app"},
+            {"run": "b", "agent": "r1", "root": "r1", "project": "app"},
+            {"run": "c", "agent": "r2", "root": "r2", "project": "app"}]});
+
+        let snapshot = Snapshot::build(Answers {
+            projects: &json!({"projects": [{"name": "app", "folder": "/work/app"},
+                {"name": "other", "folder": "/work/other"}]}),
+            workspaces: &json!({"workspaces": []}),
+            agents: &agents,
+            approvals: &json!({"requests": []}),
+            needs_user: &HashSet::new(),
+            questions: &HashMap::new(),
+            briefs: &HashMap::new(),
+            commands: &commands,
+        });
+
+        let of = |id: &str| snapshot.session(id).unwrap().commands;
+        assert_eq!(
+            (of("r1"), of("r2")),
+            (2, 1),
+            "a child's command is its root's"
+        );
+        let project = |name: &str| {
+            snapshot
+                .projects
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap()
+                .commands
+        };
+        assert_eq!((project("app"), project("other")), (3, 0));
     }
 
     #[test]

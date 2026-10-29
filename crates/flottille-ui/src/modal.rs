@@ -40,6 +40,7 @@ pub struct Modal {
     actions: Vec<AnyElement>,
     on_close: Option<Handler>,
     open: bool,
+    cancel: SharedString,
 }
 
 impl Modal {
@@ -53,11 +54,19 @@ impl Modal {
             actions: Vec::new(),
             on_close: None,
             open: true,
+            cancel: "Cancel".into(),
         }
     }
 
     pub fn width(mut self, width: Pixels) -> Self {
         self.width = width;
+        self
+    }
+
+    /// What the button that closes it says, `Cancel` unless said: a dialog that changes nothing
+    /// says `Close`.
+    pub fn cancel_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.cancel = label.into();
         self
     }
 
@@ -179,7 +188,7 @@ impl RenderOnce for Modal {
                     .items_center()
                     .gap(px(6.))
                     .child(
-                        Button::quiet(part(&self.id, "cancel"), "Cancel")
+                        Button::quiet(part(&self.id, "cancel"), self.cancel)
                             .on_click(move |_, window, cx| on_cancel(window, cx)),
                     )
                     .children(self.actions),

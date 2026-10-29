@@ -216,6 +216,12 @@ pub enum Command {
         session: String,
         mode: String,
     },
+    /// Stops a command of the session and everything it started, or dismisses one that ended.
+    Run {
+        session: String,
+        run: String,
+        dismiss: bool,
+    },
     /// The user's answer to a request they hold, given on the page of the session of `session`
     /// (its root agent).
     Answer {
@@ -418,6 +424,11 @@ pub enum Outcome {
     },
     /// The session's mode was changed, or the daemon refused with why.
     ModeSet {
+        session: String,
+        refused: Option<String>,
+    },
+    /// A command was stopped or dismissed as asked, or the daemon refused with why.
+    RunAnswered {
         session: String,
         refused: Option<String>,
     },
@@ -982,6 +993,22 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 Ok(Err(why)) | Err(why) => Some(why),
             };
             Outcome::Interrupted { session, refused }
+        }
+        Command::Run {
+            session,
+            run,
+            dismiss,
+        } => {
+            let method = if dismiss {
+                "command.dismiss"
+            } else {
+                "command.stop"
+            };
+            let refused = match ask_alone(connect, method, json!({"run": run}), bounds.quick) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::RunAnswered { session, refused }
         }
         Command::Answer {
             session,

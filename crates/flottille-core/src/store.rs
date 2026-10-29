@@ -291,13 +291,20 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE procedure_runs DROP COLUMN grants;
     ALTER TABLE procedure_runs DROP COLUMN children;
 ",
+    "
+    -- A command that ended stays in the session's list until the user dismisses it.
+    ALTER TABLE runs ADD COLUMN dismissed INTEGER NOT NULL DEFAULT 0;
+    -- The lists of a session's commands, and the runs that go with their agents, look runs up by
+    -- agent.
+    CREATE INDEX runs_by_agent ON runs (agent);
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
     identity, held_by, forwards, state, decision, created_at, decided_at, kind, says, judgement";
 
-const RUN_COLUMNS: &str =
-    "id, agent, name, line, folder, state, exit_code, signal, started_at, ended_at, output";
+const RUN_COLUMNS: &str = "id, agent, name, line, folder, state, exit_code, signal, started_at, \
+    ended_at, output, dismissed";
 
 const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, state, state_reason, \
     created_at, updated_at, active_at, ended_at, chosen_model, chosen_effort, chosen_mode, \
@@ -899,7 +906,7 @@ impl Store {
         transaction.execute(
             &format!(
                 "INSERT INTO runs ({RUN_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, \
-                 ?10, ?11)"
+                 ?10, ?11, ?12)"
             ),
             params![
                 run.id,
@@ -913,6 +920,7 @@ impl Store {
                 run.started_at,
                 run.ended_at,
                 run.output,
+                run.dismissed,
             ],
         )?;
         let event = append_event(&transaction, event.0, event.1)?;
@@ -963,6 +971,81 @@ impl Store {
         ))?;
         let rows = statement.query_map([], run_row)?;
         rows.map(|row| row?).collect()
+    }
+
+    /// The runs of these agents that are still running, oldest first.
+    pub fn running_runs_of(&self, agents: &[String]) -> Result<Vec<Run>> {
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {RUN_COLUMNS} FROM runs WHERE agent = ?1 AND state = 'running'"
+        ))?;
+        let mut found = Vec::new();
+        for agent in agents {
+            for row in statement.query_map(params![agent], run_row)? {
+                found.push(row??);
+            }
+        }
+        found.sort_by(|a, b| (a.started_at, &a.id).cmp(&(b.started_at, &b.id)));
+        Ok(found)
+    }
+
+    /// The `limit` runs of these agents that ended most recently and were not dismissed, the
+    /// oldest started first, each with only the last `tail` characters of its output: a list
+    /// reads the end of an output, not the 64 KiB a run keeps.
+    pub fn ended_runs_of(&self, agents: &[String], limit: usize, tail: usize) -> Result<Vec<Run>> {
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT id, agent, name, line, folder, state, exit_code, signal, started_at, \
+             ended_at, substr(output, -{tail}), dismissed FROM runs \
+             WHERE agent = ?1 AND state != 'running' AND dismissed = 0 \
+             ORDER BY ended_at DESC, id DESC LIMIT ?2"
+        ))?;
+        let mut found = Vec::new();
+        for agent in agents {
+            for row in statement.query_map(params![agent, limit as u64], run_row)? {
+                found.push(row??);
+            }
+        }
+        found.sort_by(|a, b| (b.ended_at, &b.id).cmp(&(a.ended_at, &a.id)));
+        found.truncate(limit);
+        found.sort_by(|a, b| (a.started_at, &a.id).cmp(&(b.started_at, &b.id)));
+        Ok(found)
+    }
+
+    /// The agents that have runs, ended or not.
+    pub fn agents_with_runs(&self) -> Result<Vec<String>> {
+        let mut statement = self
+            .connection
+            .prepare_cached("SELECT DISTINCT agent FROM runs")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The runs of these agents that ended go, their session being over for good. A run still
+    /// running is left to end.
+    pub fn forget_runs_of(&self, agents: &[String]) -> Result<usize> {
+        let mut statement = self
+            .connection
+            .prepare_cached("DELETE FROM runs WHERE agent = ?1 AND state != 'running'")?;
+        let mut forgotten = 0;
+        for agent in agents {
+            forgotten += statement.execute(params![agent])?;
+        }
+        Ok(forgotten)
+    }
+
+    /// Dismisses a run that ended, with its event, in one transaction; `None` when it is still
+    /// running, already dismissed or unknown.
+    pub fn dismiss_run(&mut self, id: &str, event: (&str, Value)) -> Result<Option<Event>> {
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE runs SET dismissed = 1 WHERE id = ?1 AND state != 'running' AND dismissed = 0",
+            params![id],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let event = append_event(&transaction, event.0, event.1)?;
+        transaction.commit()?;
+        Ok(Some(event))
     }
 
     /// A run's process group started: its leader's pid and start time.
@@ -1753,6 +1836,7 @@ fn run_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Run>> {
         started_at: row.get(8)?,
         ended_at: row.get(9)?,
         output: row.get(10)?,
+        dismissed: row.get(11)?,
     }))
 }
 
@@ -3252,6 +3336,7 @@ mod tests {
             started_at: 5,
             ended_at: None,
             output: String::new(),
+            dismissed: false,
         };
         store.create_run(&run, ("run.started", json!({}))).unwrap();
         assert_eq!(store.run("r1").unwrap().unwrap(), run);
@@ -3288,6 +3373,160 @@ mod tests {
         assert_eq!(store.run_processes().unwrap(), [(4242, 7)]);
         store.remove_run_process(4242).unwrap();
         assert!(store.run_processes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_run_that_ended_is_dismissed_once_and_a_running_one_is_not() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .create_agent(&an_agent(), ("agent.created", json!({})))
+            .unwrap();
+        let agent = an_agent().id;
+        for (id, at) in [("r1", 5), ("r2", 6)] {
+            let run = Run {
+                id: id.into(),
+                agent: agent.clone(),
+                name: None,
+                line: "sleep 1".into(),
+                folder: "/w".into(),
+                state: RunState::Running,
+                exit_code: None,
+                signal: None,
+                started_at: at,
+                ended_at: None,
+                output: String::new(),
+                dismissed: false,
+            };
+            store.create_run(&run, ("run.started", json!({}))).unwrap();
+        }
+        store
+            .end_run(
+                "r1",
+                RunState::Exited,
+                Some(0),
+                None,
+                "",
+                ("run.ended", json!({})),
+            )
+            .unwrap();
+        let dismiss = |store: &mut Store, id: &str| {
+            store
+                .dismiss_run(id, ("run.dismissed", json!({"run": id})))
+                .unwrap()
+        };
+
+        assert!(dismiss(&mut store, "r2").is_none(), "still running");
+        assert!(dismiss(&mut store, "r1").is_some());
+        assert!(dismiss(&mut store, "r1").is_none(), "once");
+
+        let agents = std::slice::from_ref(&agent);
+        let running = store.running_runs_of(agents).unwrap();
+        assert_eq!(
+            running.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["r2"]
+        );
+        assert!(store.ended_runs_of(agents, 30, 100).unwrap().is_empty());
+        assert!(store.run("r1").unwrap().unwrap().dismissed);
+    }
+
+    /// Runs of one agent, each started at its number and ended at `ended` when it did.
+    fn runs_of_an_agent(store: &mut Store, runs: &[(&str, u64, Option<u64>, &str)]) -> String {
+        let agent = an_agent().id;
+        store
+            .create_agent(&an_agent(), ("agent.created", json!({})))
+            .unwrap();
+        for (id, started_at, ended_at, output) in runs {
+            let run = Run {
+                id: (*id).into(),
+                agent: agent.clone(),
+                name: None,
+                line: "make".into(),
+                folder: "/w".into(),
+                state: if ended_at.is_some() {
+                    RunState::Exited
+                } else {
+                    RunState::Running
+                },
+                exit_code: ended_at.map(|_| 0),
+                signal: None,
+                started_at: *started_at,
+                ended_at: *ended_at,
+                output: (*output).into(),
+                dismissed: false,
+            };
+            store.create_run(&run, ("run.started", json!({}))).unwrap();
+        }
+        agent
+    }
+
+    #[test]
+    fn the_ended_runs_listed_are_the_latest_to_end_with_only_the_tail_of_their_output() {
+        let mut store = Store::open_in_memory().unwrap();
+        let agent = runs_of_an_agent(
+            &mut store,
+            &[
+                // Started first, ended last.
+                ("slow", 1, Some(90), "start\nabcdefghij"),
+                ("a", 2, Some(10), "a"),
+                ("b", 3, Some(20), "b"),
+                ("c", 4, Some(30), "c"),
+                ("live", 5, None, ""),
+            ],
+        );
+        let agents = std::slice::from_ref(&agent);
+
+        let listed = store.ended_runs_of(agents, 3, 4).unwrap();
+
+        assert_eq!(
+            listed.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["slow", "b", "c"],
+            "the three that ended last, in the order they started"
+        );
+        assert_eq!(listed[0].output, "ghij", "the last 4 characters of 16");
+        assert_eq!(listed[1].output, "b", "a shorter output is whole");
+        let running = store.running_runs_of(agents).unwrap();
+        assert_eq!(
+            running.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["live"]
+        );
+    }
+
+    #[test]
+    fn the_runs_that_ended_are_forgotten_and_the_one_that_runs_is_not() {
+        let mut store = Store::open_in_memory().unwrap();
+        let agent = runs_of_an_agent(
+            &mut store,
+            &[("done", 1, Some(2), "x"), ("live", 3, None, "")],
+        );
+        let agents = std::slice::from_ref(&agent);
+
+        assert_eq!(store.forget_runs_of(agents).unwrap(), 1);
+
+        assert!(store.run("done").unwrap().is_none());
+        assert!(store.run("live").unwrap().is_some());
+    }
+
+    #[test]
+    fn the_agents_that_have_runs_are_listed_once() {
+        let mut store = Store::open_in_memory().unwrap();
+        assert!(store.agents_with_runs().unwrap().is_empty());
+        let agent = runs_of_an_agent(&mut store, &[("a", 1, Some(2), ""), ("b", 3, None, "")]);
+
+        assert_eq!(store.agents_with_runs().unwrap(), [agent]);
+    }
+
+    #[test]
+    fn runs_are_looked_up_by_agent_through_an_index() {
+        let store = Store::open_in_memory().unwrap();
+        let plan: String = store
+            .connection
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT id FROM runs WHERE agent = 'a' AND state = 'running'",
+                [],
+                |row| row.get(3),
+            )
+            .unwrap();
+        assert!(plan.contains("runs_by_agent"), "{plan}");
     }
 
     #[test]

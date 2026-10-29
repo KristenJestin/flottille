@@ -3,7 +3,7 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::{SharedString, Styled, Svg, px, svg};
 
-gpui_kit::assets::icon_assets!(pub Icons, [Folder, GitBranch, Book, ChevronDown, Plus, Search, Bell, ExternalLink, Network, Menu, ArrowUp, ChevronsUpDown, Settings, Ellipsis, CircleStop]);
+gpui_kit::assets::icon_assets!(pub Icons, [Folder, GitBranch, Book, ChevronDown, Plus, Search, Bell, ExternalLink, Network, Menu, ArrowUp, ChevronsUpDown, Settings, Ellipsis, CircleStop, Terminal]);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
@@ -27,10 +27,12 @@ pub enum Icon {
     More,
     /// The composer's button that interrupts the turn that runs.
     Stop,
+    /// A command is running (the left tree, the rail's Commands).
+    Terminal,
 }
 
 impl Icon {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::Folder,
         Self::Branch,
         Self::Repository,
@@ -46,6 +48,7 @@ impl Icon {
         Self::Settings,
         Self::More,
         Self::Stop,
+        Self::Terminal,
     ];
 
     pub fn path(self) -> SharedString {
@@ -65,6 +68,7 @@ impl Icon {
             Self::Settings => IconName::Settings,
             Self::More => IconName::Ellipsis,
             Self::Stop => IconName::CircleStop,
+            Self::Terminal => IconName::Terminal,
         }
         .path()
     }
