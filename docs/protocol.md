@@ -570,7 +570,12 @@ images at most, 5 MiB each. The daemon writes them in `$XDG_DATA_HOME/flottille/
 (never the project's), and the `agent.prompted` event of the turn that sends them names them.
 `refused` for an image of another type, bad base64, an empty or too big image, too many, and
 when the agent's agent said, when it last started, that it takes no images (`images` of the
-agent, below); before it started once, `images` is `null` and the daemon sends them.
+agent, below); before it started once, `images` is `null` and the message is accepted: if the
+agent turns out to take no images, none is sent and the text of the turn ends with
+`[N images not sent: this agent takes no images]`. A file gone when the turn starts leaves
+`[image <name> is missing]` in the text. Merged queued messages make one prompt of 4 images and
+10 MiB at most (the first message is always whole); the others wait for the next turn. The
+images of an agent go with it: when it ends for good, or 7 days after a root that can be resumed.
 
 #### `agent.image`
 

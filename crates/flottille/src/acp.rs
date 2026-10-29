@@ -209,7 +209,7 @@ async fn drive(
     let initialized = serde_json::to_value(&initialized).unwrap_or_default();
     let loads = initialized["agentCapabilities"]["loadSession"] == true;
     let resumes = !initialized["agentCapabilities"]["sessionCapabilities"]["resume"].is_null();
-    let images = initialized["agentCapabilities"]["promptCapabilities"]["image"] == true;
+    let takes_images = initialized["agentCapabilities"]["promptCapabilities"]["image"] == true;
     let agent_version = format!(
         "{} {}",
         initialized["agentInfo"]["name"].as_str().unwrap_or("agent"),
@@ -332,7 +332,7 @@ async fn drive(
             mode: current("mode"),
         },
         loads || resumes,
-        images,
+        takes_images,
     );
 
     let mut turn: Option<Turn> = None;
@@ -346,16 +346,36 @@ async fn drive(
         if turn.is_none()
             && let Some(prompt) = turns.queued.pop_front()
         {
-            let text = prompt_text(prompt.text)?;
-            events.turn_started(&text, &prompt.images);
+            let mut text = prompt_text(prompt.text)?;
+            // What cannot go to the agent is said in the text, which the event keeps: the
+            // user's words are never lost, and the window shows why a picture is not there.
+            let mut sent = Vec::new();
+            let mut notes = Vec::new();
+            if !takes_images && !prompt.images.is_empty() {
+                let count = prompt.images.len();
+                notes.push(format!(
+                    "[{count} image{} not sent: this agent takes no images]",
+                    if count == 1 { "" } else { "s" }
+                ));
+            } else {
+                for name in prompt.images {
+                    match events.image(&name) {
+                        Some((mime, data)) => sent.push((name, mime, data)),
+                        None => notes.push(format!("[image {name} is missing]")),
+                    }
+                }
+            }
+            for note in notes {
+                text.push_str("\n\n");
+                text.push_str(&note);
+            }
+            let names: Vec<String> = sent.iter().map(|(name, ..)| name.clone()).collect();
+            events.turn_started(&text, &names);
             turns.running = true;
             let mut blocks = vec![ContentBlock::Text(TextContent::new(text))];
             blocks.extend(
-                prompt
-                    .images
-                    .iter()
-                    .filter_map(|name| events.image(name))
-                    .map(|(mime, data)| ContentBlock::Image(ImageContent::new(data, mime))),
+                sent.into_iter()
+                    .map(|(_, mime, data)| ContentBlock::Image(ImageContent::new(data, mime))),
             );
             let request = PromptRequest::new(native_id.clone(), blocks);
             turn = Some(Box::pin(cx.send_request(request).block_task()));

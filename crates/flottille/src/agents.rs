@@ -117,9 +117,12 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 None,
                 &asked.message,
                 approval::BETWEEN_TURNS,
-                images,
+                images.clone(),
             )
-            .ok_or_else(|| Failure::new("unavailable", "the message could not be stored"))?;
+            .ok_or_else(|| {
+                deliveries::discard_images(&daemon.paths, &agent.id, &images);
+                Failure::new("unavailable", "the message could not be stored")
+            })?;
             Ok(json!({"agent": agent.to_json(), "after": after, "delivery": delivery}))
         }
         "agent.image" => {
@@ -291,9 +294,7 @@ fn refuse_final(agent: &Agent) -> Result<(), Failure> {
     Ok(())
 }
 
-/// Most images one message carries, and the biggest one (the least any agent takes).
-const MAX_IMAGES: usize = 4;
-const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+use deliveries::{MAX_IMAGE_BYTES, MAX_IMAGES};
 
 /// The images of a message, checked and written to the agent's folder of images in the data
 /// folder (never the project's): the names of the files.
@@ -328,6 +329,13 @@ fn keep_images(
                     image.mime
                 ))
             })?;
+        // Judged before it is decoded: a huge request is not turned into bytes to be refused.
+        if image.data.len() > MAX_IMAGE_BYTES * 4 / 3 + 4 {
+            return Err(Failure::refused(format!(
+                "an image is empty or over {} MiB",
+                MAX_IMAGE_BYTES / 1024 / 1024
+            )));
+        }
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&image.data)
             .map_err(|_| Failure::refused("an image is not valid base64"))?;
@@ -341,12 +349,18 @@ fn keep_images(
     }
     let folder = daemon.paths.images(&agent.id);
     ensure_private_dir(&folder).map_err(|e| Failure::new("unavailable", e.to_string()))?;
-    let stamp = new_id().unwrap_or_default();
+    // Without a stamp two messages could share their names: none is better than a collision.
+    let stamp = new_id().map_err(|e| Failure::new("unavailable", format!("no stamp: {e}")))?;
     let mut names = Vec::new();
     for (at, (extension, bytes)) in checked.into_iter().enumerate() {
         let name = format!("{stamp}-{at}.{extension}");
-        std::fs::write(folder.join(&name), bytes)
-            .map_err(|e| Failure::new("unavailable", format!("an image cannot be stored: {e}")))?;
+        if let Err(error) = std::fs::write(folder.join(&name), bytes) {
+            deliveries::discard_images(&daemon.paths, &agent.id, &names);
+            return Err(Failure::new(
+                "unavailable",
+                format!("an image cannot be stored: {error}"),
+            ));
+        }
         names.push(name);
     }
     Ok(names)
@@ -707,6 +721,7 @@ async fn agent_task(daemon: Arc<Daemon>, id: String, orders: mpsc::UnboundedRece
         }
         (provider.forget_agent)(&daemon.paths, &agent.id);
     }
+    deliveries::forget_images(&daemon.paths, &id);
 }
 
 /// Forgets the sessions of the ended roots kept longer than `tree::KEPT_MS`: they are resumed no
@@ -741,6 +756,7 @@ pub fn forget_kept_sessions(daemon: &Daemon) {
         tokio::task::spawn_blocking(move || {
             (provider.forget_session)(&paths, &native);
             (provider.forget_agent)(&paths, &agent.id);
+            deliveries::forget_images(&paths, &agent.id);
         });
     }
 }

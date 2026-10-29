@@ -240,3 +240,226 @@ fn the_claude_bridge_hands_an_image_to_claude_in_the_same_user_message() {
     assert_eq!(content[1]["source"]["media_type"], "image/png");
     assert_eq!(content[1]["source"]["data"], base64_of(PNG));
 }
+
+/// A picture of that many bytes (a PNG's signature, then zeros).
+fn picture(len: usize) -> Value {
+    let mut bytes = PNG.to_vec();
+    bytes.resize(len, 0);
+    image("image/png", &bytes)
+}
+
+/// An agent in `app` whose first turn lasts `ms`, still working when this returns.
+fn busy_agent(user: &User, ms: u64) -> String {
+    user.fake_script(json!({
+        "images": true,
+        "turns": [{"when": "hello", "do": [{"wait": ms}]}]
+    }));
+    project(user);
+    let answer = user
+        .call("agent.start", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+    eventually("the first turn runs", || {
+        show(user, &id)["agent"]["state"] == "working"
+    });
+    id
+}
+
+/// The image blocks of each prompt the fake agent got, oldest first.
+fn images_per_prompt(user: &User) -> Vec<usize> {
+    user.received_requests("session/prompt")
+        .iter()
+        .map(|request| {
+            request["params"]["prompt"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|block| block["type"] == "image")
+                .count()
+        })
+        .collect()
+}
+
+#[test]
+fn an_image_queued_before_the_first_start_of_an_agent_without_images_is_not_sent() {
+    let user = User::with_fake_agent();
+    // `initialize` answers late: the daemon does not yet know that the agent takes no images, so
+    // it accepts the message.
+    user.fake_script(json!({"init_wait": 1500}));
+    project(&user);
+    let answer = user
+        .call("agent.start", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+    assert!(show(&user, &id)["agent"]["images"].is_null());
+    user.call(
+        "agent.send",
+        json!({"agent": id, "message": "look at this",
+            "images": [image("image/png", PNG), image("image/png", PNG)]}),
+    )
+    .unwrap();
+
+    let sentence = "[2 images not sent: this agent takes no images]";
+    eventually("the message reaches the agent", || {
+        user.received_requests("session/prompt")
+            .iter()
+            .any(|request| {
+                request["params"]["prompt"]
+                    .to_string()
+                    .contains("look at this")
+            })
+    });
+    let request = user
+        .received_requests("session/prompt")
+        .into_iter()
+        .find(|request| {
+            request["params"]["prompt"]
+                .to_string()
+                .contains("look at this")
+        })
+        .unwrap();
+    let blocks = request["params"]["prompt"].as_array().unwrap();
+    assert_eq!(blocks.len(), 1, "no image block: {blocks:?}");
+    assert_eq!(blocks[0]["type"], "text");
+    let text = blocks[0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("look at this") && text.contains(sentence),
+        "{text}"
+    );
+
+    // The event carries the sentence, for the window, and names no image.
+    eventually("the turn is recorded", || {
+        show(&user, &id)["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| {
+                e["name"] == "agent.prompted" && e["data"]["text"].to_string().contains(sentence)
+            })
+    });
+    let events = show(&user, &id)["events"].clone();
+    let prompted = events
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "agent.prompted" && e["data"]["text"].to_string().contains(sentence))
+        .unwrap();
+    assert!(prompted["data"].get("images").is_none(), "{prompted}");
+}
+
+#[test]
+fn a_prompt_carries_four_images_at_most_and_the_rest_waits_for_the_next_turn() {
+    let user = User::with_fake_agent();
+    let id = busy_agent(&user, 4000);
+    let two = || json!([image("image/png", PNG), image("image/png", PNG)]);
+    for message in ["first", "second", "third"] {
+        user.call(
+            "agent.send",
+            json!({"agent": id, "message": message, "images": two()}),
+        )
+        .unwrap();
+    }
+
+    eventually("the three messages are played", || {
+        user.received_requests("session/prompt").len() == 3
+    });
+
+    // `hello`, then four images of two messages, then the two of the third.
+    assert_eq!(images_per_prompt(&user), vec![0, 4, 2]);
+}
+
+#[test]
+fn a_prompt_carries_ten_mib_of_images_at_most_and_the_rest_waits_for_the_next_turn() {
+    let user = User::with_fake_agent();
+    let id = busy_agent(&user, 6000);
+    let five_mib = 5 * 1024 * 1024;
+    for (message, len) in [("first", five_mib), ("second", five_mib), ("third", 1024)] {
+        user.call(
+            "agent.send",
+            json!({"agent": id, "message": message, "images": [picture(len)]}),
+        )
+        .unwrap();
+    }
+
+    eventually("the three messages are played", || {
+        user.received_requests("session/prompt").len() == 3
+    });
+
+    // Three pictures are under the count, but 10 MiB and one more byte are over the bytes.
+    assert_eq!(images_per_prompt(&user), vec![0, 2, 1]);
+}
+
+#[test]
+fn an_image_that_is_gone_when_the_turn_starts_leaves_a_placeholder() {
+    let user = User::with_fake_agent();
+    let id = busy_agent(&user, 4000);
+    user.call(
+        "agent.send",
+        json!({"agent": id, "message": "look", "images": [image("image/png", PNG)]}),
+    )
+    .unwrap();
+    let folder = user.path(&format!("data/flottille/images/{id}"));
+    let name = std::fs::read_dir(&folder)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .into_owned();
+    std::fs::remove_file(folder.join(&name)).unwrap();
+
+    eventually("the message is played", || {
+        user.received_requests("session/prompt").len() == 2
+    });
+
+    let prompt = &user.received_requests("session/prompt")[1]["params"]["prompt"];
+    assert_eq!(prompt.as_array().unwrap().len(), 1, "{prompt}");
+    let text = prompt[0]["text"].as_str().unwrap();
+    assert!(
+        text.contains(&format!("[image {name} is missing]")),
+        "{text}"
+    );
+}
+
+#[test]
+fn the_images_of_an_agent_go_with_it_when_it_ends_for_good() {
+    let user = User::with_fake_agent();
+    // No session to resume: stopping it forgets it at once.
+    user.fake_script(json!({"images": true, "load": false, "resume": false}));
+    project(&user);
+    let id = idle_agent(&user);
+    user.call(
+        "agent.send",
+        json!({"agent": id, "message": "look", "images": [image("image/png", PNG)]}),
+    )
+    .unwrap();
+    eventually("the second turn ends", || {
+        user.received_requests("session/prompt").len() == 2
+    });
+    let folder = user.path(&format!("data/flottille/images/{id}"));
+    assert!(folder.exists());
+
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+
+    eventually("its images are gone", || !folder.exists());
+}
+
+#[test]
+fn a_request_far_over_the_size_is_refused_before_it_is_decoded() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"images": true}));
+    project(&user);
+    let id = idle_agent(&user);
+
+    // Not base64 at all: decoding it first would say so; the size is judged first.
+    let huge = "*".repeat(5 * 1024 * 1024 * 4 / 3 + 5);
+    let refused = user
+        .call(
+            "agent.send",
+            json!({"agent": id, "message": "x", "images": [{"mime": "image/png", "data": huge}]}),
+        )
+        .unwrap_err();
+
+    assert!(refused.1.contains("over 5 MiB"), "{}", refused.1);
+}

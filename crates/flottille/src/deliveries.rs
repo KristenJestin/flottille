@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use flottille_core::agent::{AgentState, new_id};
 use flottille_core::approval::{self, Delivery};
+use flottille_core::paths::Paths;
 use flottille_core::secrets;
 use flottille_core::store::{AgentChange, now_ms};
 
@@ -310,6 +311,7 @@ pub fn pump(daemon: &Daemon, agent: &str) -> Option<Prompt> {
     };
     queued.sort_by_key(|d| rank(&d.kind));
     daemon.notes.unpin(agent);
+    queued.truncate(fitting_images(daemon, agent, &queued));
     let ids: Vec<String> = queued.iter().map(|d| d.id.clone()).collect();
     let moved = daemon
         .write(|store| store.move_deliveries(agent, &ids, "queued", "sending", "prompt"))
@@ -328,6 +330,51 @@ pub fn pump(daemon: &Daemon, agent: &str) -> Option<Prompt> {
             .collect::<Vec<_>>()
             .join("\n\n"),
     })
+}
+
+/// Most images one message carries, and the biggest one (the least any agent takes).
+pub const MAX_IMAGES: usize = 4;
+pub const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+/// The most bytes of images one prompt carries once the queued messages are merged: 10 MiB, which is about
+/// 14 MB in base64, well under the 32 MB a request to the Claude API may weigh, and that request
+/// also holds the history. A message is never split, and the first one is always taken whole
+/// (one message may hold 20 MiB), so a message never waits for ever; the others wait for the
+/// next turn.
+pub const MAX_PROMPT_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// How many of the queued deliveries, in order, one prompt takes without more than `MAX_IMAGES`
+/// images or `MAX_PROMPT_IMAGE_BYTES` bytes of them; at least one.
+fn fitting_images(daemon: &Daemon, agent: &str, queued: &[Delivery]) -> usize {
+    let (mut count, mut bytes) = (0, 0);
+    for (at, delivery) in queued.iter().enumerate() {
+        let size: u64 = delivery
+            .images
+            .iter()
+            .map(|name| {
+                std::fs::metadata(daemon.paths.images(agent).join(name)).map_or(0, |m| m.len())
+            })
+            .sum();
+        if at > 0
+            && (count + delivery.images.len() > MAX_IMAGES || bytes + size > MAX_PROMPT_IMAGE_BYTES)
+        {
+            return at;
+        }
+        count += delivery.images.len();
+        bytes += size;
+    }
+    queued.len()
+}
+
+/// The images of the agent's folder go: the agent is forgotten.
+pub fn forget_images(paths: &Paths, agent: &str) {
+    let _ = std::fs::remove_dir_all(paths.images(agent));
+}
+
+/// The files of these images go, because the message that carried them was not stored.
+pub fn discard_images(paths: &Paths, agent: &str, names: &[String]) {
+    for name in names {
+        let _ = std::fs::remove_file(paths.images(agent).join(name));
+    }
 }
 
 /// The kinds of image a prompt takes, by the extension of the file that holds it.
@@ -384,6 +431,51 @@ pub fn fall_back(daemon: &Daemon) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn paths_in(dir: &std::path::Path) -> Paths {
+        Paths {
+            runtime: dir.join("run"),
+            state: dir.join("state"),
+            config: dir.join("config"),
+            data: dir.join("data"),
+        }
+    }
+
+    #[test]
+    fn the_images_of_a_forgotten_agent_go_and_those_of_the_others_stay() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        for agent in ["a", "b"] {
+            std::fs::create_dir_all(paths.images(agent)).unwrap();
+            std::fs::write(paths.images(agent).join("x.png"), b"x").unwrap();
+        }
+
+        forget_images(&paths, "a");
+        forget_images(&paths, "never-had-any");
+
+        assert!(!paths.images("a").exists());
+        assert!(paths.images("b").join("x.png").exists());
+    }
+
+    #[test]
+    fn the_files_of_a_message_that_was_not_stored_go_and_the_others_stay() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        std::fs::create_dir_all(paths.images("a")).unwrap();
+        for name in ["1-0.png", "1-1.png", "0-0.png"] {
+            std::fs::write(paths.images("a").join(name), b"x").unwrap();
+        }
+
+        discard_images(
+            &paths,
+            "a",
+            &["1-0.png".into(), "1-1.png".into(), "gone.png".into()],
+        );
+
+        assert!(!paths.images("a").join("1-0.png").exists());
+        assert!(!paths.images("a").join("1-1.png").exists());
+        assert!(paths.images("a").join("0-0.png").exists());
+    }
 
     fn delivery(body: &str) -> Delivery {
         Delivery {
