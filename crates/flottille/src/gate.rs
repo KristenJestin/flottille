@@ -656,24 +656,37 @@ fn run(call: &Call) -> Verdict {
     }
     // What deletes untracked files names none: the folder it runs in, or its whole worktree, is
     // what it takes away.
-    let untracked: Vec<Untracked> = layers
-        .iter()
-        .flat_map(|layer| suffixes(layer))
-        .filter_map(|(_, layer)| removes_untracked(layer))
-        .collect();
     if let Some(folder) = call.paths.first() {
-        let mut taken = Vec::new();
-        if untracked.contains(&Untracked::Folder) {
-            taken.push(folder.clone());
-        }
-        if untracked.contains(&Untracked::Worktree) {
-            taken.push(call.grant.place.at(&top(&call.grant.place, &folder.path)));
-        }
-        if let Some(why) = taken.iter().find_map(|taken| above_own(call.own, taken)) {
-            found.base(why);
+        let place = &call.grant.place;
+        let removals = layers
+            .iter()
+            .flat_map(|layer| suffixes(layer))
+            .filter_map(|(_, layer)| removes_untracked(layer));
+        for removal in removals {
+            let mut runs_in = folder.path.clone();
+            for chdir in &removal.chdirs {
+                runs_in = place.resolve(&runs_in, chdir).path;
+            }
+            let taken = match (removal.reach, removal.work_tree) {
+                (Untracked::Folder, _) => runs_in,
+                (Untracked::Worktree, Some(tree)) => place.resolve(&runs_in, tree).path,
+                (Untracked::Worktree, None) => top(&runs_in),
+            };
+            if let Some(why) = above_own(call.own, &place.at(&taken)) {
+                found.base(why);
+                break;
+            }
         }
     }
     found.verdict(Kind::Call)
+}
+
+/// A layer that deletes untracked files: where, the folders its `-C`s go to from the run's, and
+/// the worktree its `--work-tree` names.
+struct Removal<'a> {
+    reach: Untracked,
+    chdirs: Vec<&'a str>,
+    work_tree: Option<&'a str>,
 }
 
 /// Where a layer deletes untracked files.
@@ -687,14 +700,14 @@ enum Untracked {
 }
 
 /// Whether a layer deletes untracked files, and where.
-fn removes_untracked(layer: &[String]) -> Option<Untracked> {
+fn removes_untracked(layer: &[String]) -> Option<Removal<'_>> {
     if base(&layer[0]) != "git" {
         return None;
     }
     let args = &layer[1..];
-    let (at, _) = git_globals(args);
+    let (at, globals) = git_globals(args);
     let rest = args.get(at + 1..).unwrap_or_default();
-    match args.get(at).map(String::as_str) {
+    let reach = match args.get(at).map(String::as_str) {
         Some("clean") if rest.iter().any(|word| from_top(word)) => Some(Untracked::Worktree),
         Some("clean") => Some(Untracked::Folder),
         Some("stash")
@@ -705,7 +718,18 @@ fn removes_untracked(layer: &[String]) -> Option<Untracked> {
             Some(Untracked::Worktree)
         }
         _ => None,
-    }
+    }?;
+    let valued = |name: &'static str| {
+        globals
+            .iter()
+            .filter(move |(option, _)| *option == name)
+            .filter_map(|(_, value)| *value)
+    };
+    Some(Removal {
+        reach,
+        chdirs: valued("-C").collect(),
+        work_tree: valued("--work-tree").next_back(),
+    })
 }
 
 /// Whether a pathspec is taken from the top of the worktree: the magic `/` in its short form
@@ -726,16 +750,37 @@ fn from_top(word: &str) -> bool {
     }
 }
 
-/// The top of the worktree that holds `folder`: the deepest of the place's repositories that
-/// holds it, or the place's own folder.
-fn top(place: &place::Place, folder: &Path) -> PathBuf {
-    place
-        .repositories
+/// The top of the worktree that holds `folder`, as git finds it on the disk: the deepest folder
+/// from `/` to it that holds a `.git` (a folder, or a linked worktree's file), each looked at in
+/// the folder opened before it; `folder` itself when none does, where git would find no
+/// repository.
+fn top(folder: &Path) -> PathBuf {
+    use rustix::fs::{AtFlags, Mode};
+    let Ok(root) = rustix::fs::open("/", crate::nofollow::THROUGH, Mode::empty()) else {
+        return folder.to_owned();
+    };
+    let mut opened = vec![(PathBuf::from("/"), root)];
+    for part in folder
+        .components()
+        .filter(|part| matches!(part, std::path::Component::Normal(_)))
+    {
+        let (path, at) = opened.last().expect("`/` is opened first");
+        let Ok(next) = rustix::fs::openat(
+            at,
+            part.as_os_str(),
+            crate::nofollow::THROUGH,
+            Mode::empty(),
+        ) else {
+            break;
+        };
+        let path = path.join(part);
+        opened.push((path, next));
+    }
+    opened
         .iter()
-        .map(|(_, repository)| place::real_path(repository).unwrap_or_else(|_| repository.clone()))
-        .filter(|repository| folder.starts_with(repository))
-        .max_by_key(|repository| repository.components().count())
-        .unwrap_or_else(|| place.root.clone())
+        .rev()
+        .find(|(_, at)| rustix::fs::statat(at, ".git", AtFlags::SYMLINK_NOFOLLOW).is_ok())
+        .map_or_else(|| folder.to_owned(), |(path, _)| path.clone())
 }
 
 /// What a layer of a line does, by its program.
@@ -4177,6 +4222,7 @@ mod tests {
         let mut fixture = Fixture::workspace();
         fixture.own = vec![fixture.root.join("sub/flottille")];
         std::fs::create_dir_all(&fixture.own[0]).unwrap();
+        std::fs::write(fixture.root.join(".git"), "gitdir: elsewhere\n").unwrap();
         fixture.folder = "src".into();
         for line in [
             "git stash -u",
@@ -4243,6 +4289,34 @@ mod tests {
             let verdict = fixture.run(line);
             assert!(base_class(&verdict), "{line}: {verdict:?}");
             assert!(reasons(&verdict).contains(".ssh"), "{line}: {verdict:?}");
+        }
+    }
+
+    #[test]
+    fn the_top_of_a_worktree_is_found_on_the_disk() {
+        let mut fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        let home = base.join("home");
+        // The home itself is a repository, Flottille's data in it, a project folder below.
+        std::fs::create_dir_all(home.join(".git")).unwrap();
+        fixture.own = vec![home.join(".local/share/flottille")];
+        std::fs::create_dir_all(&fixture.own[0]).unwrap();
+        std::fs::create_dir_all(home.join("outer/sub")).unwrap();
+        let sub = home.join("outer/sub");
+        for line in [
+            format!("git -C {} stash -u", sub.display()),
+            format!(
+                "git -C {} -C sub clean -fdx :/",
+                home.join("outer").display()
+            ),
+            format!("git --work-tree={} stash --all", home.display()),
+        ] {
+            let verdict = fixture.run(&line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains("Flottille's own folders"),
+                "{line}: {verdict:?}"
+            );
         }
     }
 
