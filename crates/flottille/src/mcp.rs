@@ -201,9 +201,10 @@ const SERVED: [Definition; 25] = [
         description: "The project's tasks: named lines (tests, lint, servers…) that run runs by \
             name; prefer them to a line of your own, they are what the project means. list and \
             show read them; a root's add, edit and remove change them once the session's judge \
-            or the user allows it, judged as a run of the line: you are answered at once, the \
+            or the user allows it, judged as a run of the line (check and read_only are the \
+            user's word: setting them is held for the user): you are answered at once, the \
             result may come later. {\"action\": \"add\", \"name\": \"test\", \"line\": \
-            \"cargo test\", \"check\": true}.",
+            \"cargo test\"}.",
         read_only: false,
         idempotent: false,
         destructive: true,

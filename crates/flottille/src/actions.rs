@@ -316,7 +316,7 @@ fn tasks_says(project: &Project, call: &TasksCall) -> Result<Vec<String>, Outcom
         let Some(line) = &call.line else {
             return Err(Outcome::Refused(
                 "refused: add needs name and line: {\"action\": \"add\", \"name\": \"test\", \
-                 \"line\": \"cargo test\", \"check\": true}"
+                 \"line\": \"cargo test\"}"
                     .into(),
             ));
         };
