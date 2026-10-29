@@ -99,7 +99,7 @@ enum Command {
     },
     /// The commands of a project: named instructions, sent to an agent by /name
     #[command(name = "command", alias = "procedure")]
-    NamedCommand {
+    Named {
         #[command(subcommand)]
         action: CommandAction,
     },
@@ -247,7 +247,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Skill { action } => return skill_command::run(&paths, action),
         Command::Workspace { action } => return workspace_command::run(&paths, action),
         Command::Agent { action } => return agent_command::run(&paths, action),
-        Command::NamedCommand { action } => return command_command::run(&paths, action),
+        Command::Named { action } => return command_command::run(&paths, action),
         Command::Doctor { json } => return agent_command::doctor(&paths, json),
         Command::Provider { action } => {
             let (method, name) = match action {
