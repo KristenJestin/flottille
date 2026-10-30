@@ -1650,8 +1650,9 @@ pub async fn workspace_remove(
                     .starts_with(&format!("workspace {} of", workspace.name)) =>
             {
                 Outcome::Refused(format!(
-                    "refused: {}; only the user's answer to discard it (flottille approve <n> \
-                     --discard) removes it all the same",
+                    "refused: {}; this request is decided: to remove it all the same, call \
+                     workspace remove again, and the user may answer that new request with \
+                     discard (flottille approve <n> --discard)",
                     failure.message
                 ))
             }

@@ -1529,7 +1529,13 @@ fn workspace_remove_on_a_workspace_with_an_unpushed_commit_names_it_and_is_refus
 
     assert!(answer.contains("was not executed"), "{answer}");
     assert!(answer.contains("add the login"), "{answer}");
-    assert!(answer.contains("--discard"), "{answer}");
+    assert!(
+        answer.contains(
+            "this request is decided: to remove it all the same, call workspace remove again, \
+             and the user may answer that new request with discard"
+        ),
+        "{answer}"
+    );
     assert!(workspace_exists(&user, "login"));
     assert!(folder.join("login.ts").exists());
 
