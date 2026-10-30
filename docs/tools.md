@@ -271,8 +271,9 @@ pending requests.
   stop says `was stopped`.
 - **The user sees them** (`docs/design.md` §10): the session's right rail lists the commands of
   its tree, a project and a session with one running show it in the left sidebar, and the user can
-  read a command's output live, stop it (its whole process group, as above) or dismiss it once it
-  ended (`docs/protocol.md`, "The run methods"; `flottille runs`, `docs/cli.md`).
+  read a command's output live and stop it (its whole process group, as above); the rail keeps the
+  last five that ended, and the protocol and the command line can dismiss one
+  (`docs/protocol.md`, "The run methods"; `flottille runs`, `docs/cli.md`).
 - **The user runs a task too**: the Run button of a task on the project page (`task.run`) runs it
   in the project folder, with the project's variables, as a run of no agent: no gate (the user
   asked), no delivery, the same records. It is listed on the project page with the same rows and

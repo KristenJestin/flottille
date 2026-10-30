@@ -488,8 +488,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
 - left: the tree project › place › session. `main` and the workspaces sit at the same level
   under their project; a session is titled by the first line of its first message that says what the
   work is (a greeting or a single word does not: the session is `agent <id>` until a later message
-  of the user does); sessions sit under their place, with a mark when running or when the
-  root needs the user. The mark is where the work is, once: on the session's own row while that row
+  of the user does); sessions sit under their place, a session an agent started with "started by
+  <agent>", with a mark when running or when the root needs the user, and no text badge. The mark is where the work is, once: on the session's own row while that row
   is in sight, and on a folded place or project, which shows the strongest mark of what it holds,
   only while it is folded (never on a row and on its parents together); a session whose agent
   ended shows no mark. A click on a project's name opens its page and leaves its places as they
@@ -521,8 +521,10 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   their result, the children launched, reports, diffs), one compact line for each command a
   tool call ran (an icon, the line, how it ended, how long: a click opens the output panel the
   rail opens, and the output itself is only there), one line for each request that reached the
-  user ("Waiting for you: Run pnpm test", which scrolls the rail to its card and lights it, then,
-  once answered, the outcome), and a composer that writes to the root, with the session's mode
+  user, neutral ("Request #1 · Run pnpm test", which lights its card in the rail, then, once
+  answered, the outcome), each picture sent inside the bubble of its message, above its words, a
+  message another session sent with `session_send` marked with its sender ("from <session>"), and
+  the same message in the sender's conversation marked with whom it went to, never as the user's, and a composer that writes to the root, with the session's mode
   (an Ask | Auto control, with a warning icon when Auto has no judge) in its bar, whose Stop
   button, in Send's place while a turn runs and Send has nothing to send (the two cross-fade), and
   `Escape` interrupt the turn that runs (the agent stays), which grows with its lines up to
@@ -536,30 +538,36 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   composer, `/` at the start
   of a message lists the project's commands, filtered as the user types: picking one puts `/name `
   in the field, and sending it sends the command's instructions with what follows the name (a
-  `/word` that names none is sent as text); a rail with, from its top, "Waiting for you" (each
-  request that reached the user is a card that says what the call does, then its class, then the
-  judge's reason when one was asked, then why it was held, one sentence for each reason, with
-  Allow and Deny only; a base card stands apart, in the alarm colour, with a sentence that says
-  why it always comes back; an answered card leaves), the session's
-  tree of agents, its runs, its workspace (each repository's branch, commits ahead, files not
-  committed and setup steps played, and its forge as the daemon reads it, its ticket,
-  linked or unlinked there) and facts. The
+  `/word` that names none is sent as text); the header says the session's title and its place,
+  and no state; a rail with, from its top, the session's tree of agents (each row with the share
+  of its context the agent used, a percentage over a thin bar; the composer's bar does not say
+  it), its workspace (labelled lines: each repository with its changes, branch, commits ahead,
+  files not committed and setup steps played, its pull request, its ticket; one sentence for the
+  repositories with no forge; its actions in a "⋯" menu, the same as the workspace's card, with
+  Link a ticket… and Unlink the ticket) and facts, its runs, then, pinned at the very bottom and
+  folding away when nothing waits, "Waiting for you", the one place of the page that says the user
+  is needed (each request that reached the user is a compact card: the call on one line, its class
+  and the judge's reason, or the first reason it was held, on one line, "Details" unfolding the
+  rest (why it was held, one sentence for each reason, and for a base card the sentence that says
+  why it always comes back), and Deny and Allow; a base card stands apart, in the alarm colour;
+  an answered card leaves). The
   root's row menu ("⋯") holds End session, the only way the window ends an agent: it ends the root
   and its tree, after a confirmation that counts the agents that end. An ended session leaves its
-  place in the left tree for the "Ended" group, folded, at the bottom of the whole tree below
-  every project (its rows say their project), and its page shows,
+  place in the left tree for the "Ended" group, folded, pinned at the bottom of the sidebar
+  whatever the tree's length and unfolding upward over it (its rows say their project), and its
+  page shows,
   in place of the composer, why it ended and Resume when its agent can resume or load its session
-  (`agent.resume`), enabled once its process is gone, which brings the composer back; its header
-  says `STOPPED` or `FAILED`, as its rail does, and its conversation says it ended, then resumed. Selecting a child shows its
+  (`agent.resume`), enabled once its process is gone, which brings the composer back; that bar is
+  where it says it ended, not its header, and its conversation says it ended, then resumed. Selecting a child shows its
   conversation read-only;
 - the runs of the agents (`docs/tools.md`, "Tasks and runs"): the rail's **Runs** section lists
   those of the session's tree (it is not called "Commands", which are the project's `/name`
   instructions), running first, each with its line, who started it (the agent, and the task when
-  it is one), how long, its last output line and Stop; a click opens its output, live, in a panel,
-  and the panel is the same when the conversation's line for that run is clicked. One that ended
-  stays listed, greyed, with its exit code, until the user dismisses it or the session ends; the
-  last three that ended are in sight, the older ones, and any that ended before the session's last
-  turn began, fold into one row, "N ended", which opens them, each still with its Dismiss. A
+  it is one), how long, its last output line and Stop, then the last five that ended, greyed, with
+  how they ended; a click opens the run's drawer (the same on the project page): its command, its
+  task, where it runs, who started it (a link to the agent in its session), since when or how it
+  ended, its output, live and following its end, Copy, and Stop while it runs; `Escape` closes it,
+  and the conversation's line for that run opens the same drawer. A
   project, and a session, with a command running show a small icon in the left tree, so that no
   server is forgotten. The conversation draws a run as one line, its ANSI colours turned into the
   palette's in the panel (the stored output keeps the program's bytes, masked); a call that came
