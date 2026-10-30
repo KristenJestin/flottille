@@ -638,19 +638,23 @@ pub fn line(daemon: &Daemon, agent: &Agent) -> String {
             "last sign of activity {} ago",
             ago(now.saturating_sub(last))
         ));
-        if let Some(usage) = daemon
-            .read(|store| store.last_agent_events(&agent.id, "agent.usage", 1))
-            .ok()
-            .and_then(|events| events.into_iter().next())
-            && let (Some(used), Some(size)) = (
-                usage.data["used"].as_u64(),
-                usage.data["size"].as_u64().filter(|s| *s > 0),
-            )
-        {
-            parts.push(format!("context {}% used", used * 100 / size));
+        if let Some(used) = context_used(daemon, agent) {
+            parts.push(format!("context {used}% used"));
         }
     }
     parts.join("; ")
+}
+
+/// How much of its context the agent used at its last report, in percent; `None` before one.
+pub fn context_used(daemon: &Daemon, agent: &Agent) -> Option<u64> {
+    let usage = daemon
+        .read(|store| store.last_agent_events(&agent.id, "agent.usage", 1))
+        .ok()?
+        .into_iter()
+        .next()?;
+    let used = usage.data["used"].as_u64()?;
+    let size = usage.data["size"].as_u64().filter(|s| *s > 0)?;
+    Some(used * 100 / size)
 }
 
 /// What the agent does now, in a few words.
@@ -1652,6 +1656,7 @@ pub fn tree(daemon: &Daemon, agent: &Agent) -> Result<Vec<Value>, Failure> {
             "doing": doing(daemon, &agent),
             "waiting_on": waiting_on,
             "needs_user": needs_user,
+            "context": context_used(daemon, &agent),
         }));
         let children = daemon.read(|store| store.children(&agent.id))?;
         stack.extend(children.into_iter().rev().map(|child| child.id));
