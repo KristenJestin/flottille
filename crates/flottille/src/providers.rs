@@ -141,6 +141,10 @@ impl Provider {
         }
         names.push("report");
         names.push(if root { "ask_user" } else { "ask_parent" });
+        // Only a root starts a session or is one: the sessions it writes to are those.
+        if root {
+            names.push("session_send");
+        }
         if !at_depth_limit {
             names.push("approval_answer");
         }
@@ -1321,6 +1325,7 @@ mod tests {
                 "project",
                 "report",
                 "ask_user",
+                "session_send",
                 "approval_answer",
             ]
         );
@@ -1367,7 +1372,7 @@ mod tests {
         assert_eq!(forge[10], "workspace", "after skill_read");
         assert!(!forge.contains(&"tickets".to_owned()));
         let both = short(claude::PROVIDER.tools(true, false, true, true));
-        assert_eq!(both.len(), 23);
+        assert_eq!(both.len(), 24);
         assert_eq!(both[10], "tickets", "after skill_read");
         assert_eq!(both[11], "workspace", "after tickets");
         assert_eq!(

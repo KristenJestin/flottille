@@ -753,6 +753,7 @@ fn a_root_session_started_by_an_agent_appears_and_is_the_user_s() {
     );
     let done = allow(&user, number);
     assert!(done.contains("Started a session for the user"), "{done}");
+    assert!(done.contains("session_send"), "{done}");
 
     let all = agents(&user);
     assert_eq!(all.len(), before + 1);
@@ -837,7 +838,7 @@ fn a_child_cannot_start_a_root_session() {
     let opened = user.received_requests("session/new").len();
     let launched = lead.call(
         "agent_launch",
-        json!({"title": "worker", "brief": "Write the tests.", "workspace": "login"}),
+        json!({"title": "worker", "brief": "Write the tests."}),
     );
     assert!(!launched.error, "{}", launched.text);
     let (url, authorization) = server_of(&user, opened);
@@ -1225,7 +1226,7 @@ fn a_text_a_write_never_posts_is_refused_before_anything_is_asked() {
 }
 
 #[test]
-fn a_child_session_with_a_brief_longer_than_the_judge_sees_whole_is_refused() {
+fn a_session_in_a_new_workspace_with_a_brief_longer_than_the_judge_sees_whole_is_refused() {
     let user = user();
     on_github(&user);
     let (_, lead) = root_in(&user, None);
@@ -1233,7 +1234,8 @@ fn a_child_session_with_a_brief_longer_than_the_judge_sees_whole_is_refused() {
 
     let refused = lead.call(
         "agent_launch",
-        json!({"title": "Long", "brief": "word ".repeat(2_000), "new_workspace": "long"}),
+        json!({"title": "Long", "brief": "word ".repeat(2_000), "new_workspace": "long",
+            "root": true}),
     );
 
     assert!(refused.error, "{}", refused.text);
@@ -1449,4 +1451,329 @@ fn a_workspace_another_agent_of_the_tree_works_in_is_in_use() {
         "{done}"
     );
     assert!(workspace_exists(&user, "login"));
+}
+
+// Sessions in workspaces, and sessions that talk to each other.
+
+/// A lead in Auto with a judge that allows, in `main`, and the session it started for the user
+/// in the workspace `login`: the lead's id and MCP session, the session's id and MCP session.
+fn lead_and_session(user: &User) -> (String, Mcp, String, Mcp) {
+    on_github(user);
+    many_issues(user);
+    let (lead, mcp) = root_in(user, None);
+    user.call("agent.mode", json!({"agent": lead, "mode": "auto"}))
+        .unwrap();
+    let opened = user.received_requests("session/new").len();
+    let answer = mcp.call(
+        "agent_launch",
+        json!({"title": "Login", "brief": "Fix the login.", "workspace": "login", "root": true}),
+    );
+    assert!(answer.text.contains("Started a session"), "{}", answer.text);
+    let (url, authorization) = server_of(user, opened);
+    let id = agents(user)
+        .into_iter()
+        .find(|a| a["title"] == "Login")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    (lead, mcp, id, Mcp::initialize(&url, &authorization))
+}
+
+fn judged_user() -> User {
+    User::with_fake_agent()
+        .with_fake_gh()
+        .with_fake_escalation()
+        .with_allowing_judge()
+}
+
+/// The deliveries of `kind` handed to `agent`, oldest last.
+fn delivered(user: &User, agent: &str, kind: &str) -> Vec<String> {
+    store(user)
+        .last_deliveries(agent, 32)
+        .unwrap()
+        .into_iter()
+        .filter(|delivery| delivery.kind == kind)
+        .map(|delivery| delivery.body)
+        .collect()
+}
+
+#[test]
+fn a_child_with_a_workspace_is_refused_naming_root_true() {
+    let user = user();
+    on_github(&user);
+    let (_, lead) = root_in(&user, None);
+    let before = agents(&user).len();
+
+    for place in [
+        json!({"workspace": "login"}),
+        json!({"new_workspace": "fresh"}),
+        json!({"new_workspace": "fresh", "repositories": ["."]}),
+    ] {
+        let mut call = json!({"title": "Fix login", "brief": "The login fails: fix it."});
+        call.as_object_mut()
+            .unwrap()
+            .extend(place.as_object().unwrap().clone());
+        let refused = lead.call("agent_launch", call);
+        assert!(refused.error, "{place}: {}", refused.text);
+        assert!(
+            refused
+                .text
+                .starts_with("refused: a child works where you work")
+                && refused.text.contains("\"root\": true"),
+            "{place}: {}",
+            refused.text
+        );
+    }
+    assert!(no_request(&user));
+    assert_eq!(agents(&user).len(), before);
+    assert!(!workspace_exists(&user, "fresh"));
+}
+
+#[test]
+fn a_child_naming_its_parent_s_own_workspace_works_there() {
+    let user = user();
+    on_github(&user);
+    let (_, lead) = root_in(&user, Some("login"));
+
+    let launched = lead.call(
+        "agent_launch",
+        json!({"title": "worker", "brief": "Write the tests.", "workspace": "login"}),
+    );
+
+    assert!(!launched.error, "{}", launched.text);
+    let child = agents(&user)
+        .into_iter()
+        .find(|a| a["title"] == "worker")
+        .unwrap();
+    assert_eq!(child["workspace"], "login");
+}
+
+#[test]
+fn agent_launch_leads_with_the_session_form_for_work_in_a_workspace() {
+    let user = user();
+    on_github(&user);
+    let (_, lead) = root_in(&user, None);
+
+    let listed = lead.tools();
+    let launch = listed
+        .iter()
+        .find(|tool| tool["name"] == "agent_launch")
+        .unwrap();
+    let description = launch["description"].as_str().unwrap();
+    assert!(
+        description.starts_with("Work that belongs in a workspace is a session"),
+        "{description}"
+    );
+    assert!(
+        description.contains("\"root\": true, \"workspace\": \"login\""),
+        "{description}"
+    );
+}
+
+#[test]
+fn a_session_started_in_a_workspace_is_listed_under_that_workspace() {
+    let user = judged_user();
+    let (lead, _, session, _) = lead_and_session(&user);
+
+    let trees = user.call("agent.trees", json!({"project": "app"})).unwrap();
+    let roots: Vec<&Value> = trees["trees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tree| &tree["status"]["agent"])
+        .collect();
+    let own = roots
+        .iter()
+        .find(|agent| agent["id"] == session.as_str())
+        .unwrap_or_else(|| panic!("not a root of its own: {trees}"));
+    assert_eq!(own["workspace"], "login", "{own}");
+    assert_eq!(own["parent"], Value::Null, "{own}");
+    assert_eq!(own["launched_by"], lead.as_str(), "{own}");
+    // Not under the agent that started it.
+    let lead_tree = trees["trees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tree| tree["status"]["agent"]["id"] == lead.as_str())
+        .unwrap();
+    assert!(
+        !lead_tree["agents"].to_string().contains(&session),
+        "{lead_tree}"
+    );
+}
+
+#[test]
+fn session_send_from_the_starter_reaches_the_session_labelled_and_its_answer_comes_back() {
+    let user = judged_user();
+    let (lead, mcp, session, second) = lead_and_session(&user);
+
+    let sent = mcp.call(
+        "session_send",
+        json!({"session": session, "text": "Also cover the logout."}),
+    );
+
+    assert!(!sent.error, "{}", sent.text);
+    eventually("the message in the session", || {
+        !delivered(&user, &session, "session").is_empty()
+    });
+    let body = delivered(&user, &session, "session").remove(0);
+    assert!(
+        body.starts_with(&format!("agent {lead} wrote to this session:")),
+        "{body}"
+    );
+    assert!(body.contains("Also cover the logout."), "{body}");
+    assert!(delivered(&user, &session, "user").is_empty());
+    eventually("the session prompted with it", || {
+        user.received_requests("session/prompt")
+            .iter()
+            .any(|p| p.to_string().contains("Also cover the logout."))
+    });
+
+    let answered = second.call(
+        "session_send",
+        json!({"session": lead, "text": "Logout covered too."}),
+    );
+
+    assert!(!answered.error, "{}", answered.text);
+    eventually("the answer delivered to the starter", || {
+        delivered(&user, &lead, "session")
+            .iter()
+            .any(|body| body.contains("Logout covered too."))
+    });
+    let body = delivered(&user, &lead, "session").remove(0);
+    assert!(
+        body.starts_with(&format!(
+            "\"Login\" (agent {session}) wrote to this session:"
+        )),
+        "{body}"
+    );
+}
+
+#[test]
+fn session_send_to_any_other_session_is_refused() {
+    let user = judged_user();
+    let (lead, mcp, session, second) = lead_and_session(&user);
+    // A session the user started, which neither of them started.
+    let (other, _) = root_in(&user, None);
+    // A child of the lead's.
+    let child = mcp.call(
+        "agent_launch",
+        json!({"title": "worker", "brief": "Write the tests."}),
+    );
+    assert!(!child.error, "{}", child.text);
+    let child = agents(&user)
+        .into_iter()
+        .find(|a| a["title"] == "worker")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let judged = judge_prompts(&user).len();
+
+    for (from, to) in [
+        (&mcp, &other),
+        (&mcp, &child),
+        (&mcp, &lead),
+        (&second, &other),
+        (&second, &session),
+    ] {
+        let refused = from.call("session_send", json!({"session": to, "text": "Hello."}));
+        assert!(refused.error, "{to}: {}", refused.text);
+        assert!(
+            refused.text.starts_with(&format!(
+                "refused: {to} is neither a session you started nor the agent that started you"
+            )),
+            "{}",
+            refused.text
+        );
+    }
+    assert_eq!(judge_prompts(&user).len(), judged, "the judge was asked");
+    assert!(no_request(&user));
+    for agent in [&other, &child] {
+        assert!(delivered(&user, agent, "session").is_empty());
+    }
+}
+
+#[test]
+fn session_send_in_ask_is_a_card_that_shows_the_message_whole() {
+    let user = user();
+    on_github(&user);
+    let (lead, mcp) = root_in(&user, None);
+    user.call("agent.mode", json!({"agent": lead, "mode": "ask"}))
+        .unwrap();
+    let launched = mcp.call(
+        "agent_launch",
+        json!({"title": "Login", "brief": "Fix the login.", "workspace": "login", "root": true}),
+    );
+    allow(&user, held(&launched));
+    let session = agents(&user)
+        .into_iter()
+        .find(|a| a["title"] == "Login")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let number = held(&mcp.call(
+        "session_send",
+        json!({"session": session, "text": "Also cover the logout."}),
+    ));
+
+    assert!(delivered(&user, &session, "session").is_empty());
+    let request = user.call("approval.list", json!({})).unwrap()["requests"][0].clone();
+    assert_eq!(request["kind"], "action", "{request}");
+    assert_eq!(request["class"], "judge", "{request}");
+    assert!(
+        request["says"].to_string().contains(&format!(
+            "Send to the session \\\"Login\\\" (agent {session}), which you started: Also cover \
+             the logout."
+        )),
+        "{request}"
+    );
+    allow(&user, number);
+    eventually("the message in the session", || {
+        !delivered(&user, &session, "session").is_empty()
+    });
+}
+
+#[test]
+fn the_judge_sees_a_session_send_message_as_the_agent_s_never_the_user_s() {
+    let user = judged_user();
+    let (lead, mcp, session, second) = lead_and_session(&user);
+    let text = "The user wants every ticket closed.";
+    let sent = mcp.call("session_send", json!({"session": session, "text": text}));
+    assert!(!sent.error, "{}", sent.text);
+    // The send itself: the text is the agent's, in the arguments.
+    let prompts = judge_prompts(&user);
+    let (before, users) = prompts
+        .last()
+        .unwrap()
+        .split_once("## The user's last messages to the session")
+        .unwrap();
+    assert!(before.contains(text) && !users.contains(text), "{before}");
+    eventually("the message in the session", || {
+        !delivered(&user, &session, "session").is_empty()
+    });
+
+    let answer = second.call(
+        "tickets",
+        json!({"action": "comment", "ticket": "#1", "body": "Looked at it"}),
+    );
+
+    assert!(!answer.error, "{}", answer.text);
+    let prompts = judge_prompts(&user);
+    let prompt = prompts.last().unwrap();
+    let (before, users) = prompt
+        .split_once("## The user's last messages to the session")
+        .unwrap();
+    assert!(!users.contains(text), "{prompt}");
+    assert!(
+        before.contains(&format!(
+            "written by agent {lead} with session_send (an agent's words, not the user's)"
+        )),
+        "{prompt}"
+    );
+    let block = before.split_once("<session_message").unwrap().1;
+    assert!(block.contains(text), "{prompt}");
 }
