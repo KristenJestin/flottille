@@ -127,6 +127,11 @@ steps played in it (`setup 2/3`), one line per repository, on the workspace's ca
 page and in the Workspace section of a session's rail: `app/login · 2 ahead of develop · 3
 uncommitted · setup 2/3`, and under it the base's `note` when it started from a local branch.
 
+What the setup put in a worktree is not the user's work: a file a `copy` step wrote, while it is
+still byte for byte the main checkout's, counts in neither the lines changed nor the files not
+committed, so that a fresh workspace reads `0 uncommitted`. Edited since, it is a change again.
+(Removal still refuses a worktree holding such a file: it is not committed.)
+
 ## Templates and the environment
 
 The words of a `run` line and the project's variables are templates:
