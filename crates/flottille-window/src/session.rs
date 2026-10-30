@@ -2917,6 +2917,7 @@ impl SessionRail {
                             .update(cx, |rail, cx| rail.link_ticket(None, cx))
                             .ok();
                     })),
+                    remove: None,
                 },
                 cx,
             )
@@ -3815,6 +3816,8 @@ pub struct WorkspaceActions {
     /// Shows where a ticket is typed; `None` where the workspace links none.
     pub link_ticket: Option<WorkspaceAction>,
     pub unlink_ticket: Option<WorkspaceAction>,
+    /// Asks before removing it; `None` where it is not removed from.
+    pub remove: Option<WorkspaceAction>,
 }
 
 pub type WorkspaceAction = Box<dyn Fn(&mut App)>;
@@ -3825,6 +3828,7 @@ pub fn workspace_menu(id: &str, actions: WorkspaceActions, cx: &mut Context<Menu
         open_in_editor,
         link_ticket,
         unlink_ticket,
+        remove,
     } = actions;
     let mut menu = Menu::new(
         ElementId::Name(id.to_owned().into()),
@@ -3852,6 +3856,11 @@ pub fn workspace_menu(id: &str, actions: WorkspaceActions, cx: &mut Context<Menu
             None,
             move |_, cx| unlink(cx),
         );
+    }
+    if let Some(remove) = remove {
+        menu = menu.danger("remove-workspace", "Remove workspace…", move |_, cx| {
+            remove(cx)
+        });
     }
     menu
 }

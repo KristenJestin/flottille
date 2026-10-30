@@ -9026,7 +9026,7 @@ fn remove_opens_a_confirmation_disabled_with_its_reason_when_work_would_be_lost(
 
     cx.update(|window, cx| window.click("workspace-menu-dirty", cx));
     settle(cx);
-    cx.update(|window, cx| window.click("remove-workspace-dirty", cx));
+    cx.update(|window, cx| window.click("remove-workspace", cx));
     settle(cx);
     assert!(cx.update(|window, _| window.find("workspace-removal-dirty").visible()));
     assert!(
@@ -9051,7 +9051,7 @@ fn remove_opens_a_confirmation_disabled_with_its_reason_when_work_would_be_lost(
 
     cx.update(|window, cx| window.click("workspace-menu-clean", cx));
     settle(cx);
-    cx.update(|window, cx| window.click("remove-workspace-clean", cx));
+    cx.update(|window, cx| window.click("remove-workspace", cx));
     settle(cx);
     assert!(text_of("workspace-removal-clean-refused", cx).is_none());
     cx.update(|window, cx| window.click("workspace-removal-clean-action", cx));

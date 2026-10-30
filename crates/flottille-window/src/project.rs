@@ -28,7 +28,7 @@ use crate::composer::{Choice, Composer, agents_label};
 use crate::model::{Place, Preparation, SetupLine, ago};
 use crate::project_settings::Reveal;
 use crate::repositories::ProjectRepositories;
-use crate::session::seconds;
+use crate::session::{WorkspaceActions, seconds, workspace_menu};
 use crate::session_link::{PullRequest, TicketFacts};
 use crate::shell::{Selection, Shell, now_ms};
 use crate::tasks::ProjectTasks;
@@ -573,44 +573,32 @@ impl PlaceCard {
             let this = cx.entity().downgrade();
             let (opening, linking, removing) = (this.clone(), this.clone(), this);
             cx.new(|cx| {
-                Menu::new(
-                    ElementId::Name(format!("workspace-menu-{name}").into()),
-                    "Workspace actions",
+                workspace_menu(
+                    &format!("workspace-menu-{name}"),
+                    WorkspaceActions {
+                        open_in_editor: Box::new(move |cx| {
+                            opening.update(cx, |card, cx| card.open_in_editor(cx)).ok();
+                        }),
+                        link_ticket: Some(Box::new(move |cx| {
+                            linking
+                                .update(cx, |card, cx| {
+                                    card.linking = true;
+                                    card.ticket_error = None;
+                                    cx.notify();
+                                })
+                                .ok();
+                        })),
+                        unlink_ticket: None,
+                        remove: Some(Box::new(move |cx| {
+                            removing
+                                .update(cx, |card, cx| {
+                                    card.confirming = true;
+                                    cx.notify();
+                                })
+                                .ok();
+                        })),
+                    },
                     cx,
-                )
-                .entry(
-                    ElementId::Name(format!("open-in-editor-{name}").into()),
-                    "Open in editor",
-                    Some(Icon::OpenInEditor),
-                    move |_, cx| {
-                        opening.update(cx, |card, cx| card.open_in_editor(cx)).ok();
-                    },
-                )
-                .entry(
-                    ElementId::Name(format!("link-ticket-{name}").into()),
-                    "Link a ticket",
-                    Some(Icon::Ticket),
-                    move |_, cx| {
-                        linking
-                            .update(cx, |card, cx| {
-                                card.linking = true;
-                                card.ticket_error = None;
-                                cx.notify();
-                            })
-                            .ok();
-                    },
-                )
-                .danger(
-                    ElementId::Name(format!("remove-workspace-{name}").into()),
-                    "Remove workspace…",
-                    move |_, cx| {
-                        removing
-                            .update(cx, |card, cx| {
-                                card.confirming = true;
-                                cx.notify();
-                            })
-                            .ok();
-                    },
                 )
             })
         });
