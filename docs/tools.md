@@ -287,7 +287,7 @@ pending requests.
 
 | Tool | |
 |---|---|
-| `forge {action, workspace?, repository?, number?, state?, branch?, detail?, title?, body?, draft?, waive?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
+| `forge {action, workspace?, repository?, number?, state?, branch?, detail?, title?, body?, draft?, waive?, method?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
 
 - **The repositories** are those of the agent's place: its workspace's, or the project's in
   `main`. One the place does not take is refused (`refused: X is not a repository of this
@@ -301,14 +301,17 @@ pending requests.
   of its repositories, or the one named (`workspace` names the workspace: the agent's own when
   left out, required in `main`, where `refused: this agent works in main, which has no workspace
   of its own: name the workspace forge acts on …` lists the project's; an agent in a workspace
-  that names another is refused): number, state, base, link, review, checks with their states,
-  and how many comments and reviews it has (`comments: 2, read them with forge {"action":
+  that names another is refused): number, state, its branch and base, link, whether it is
+  mergeable (`mergeable: yes, no conflict with main`, `no, it conflicts with main`, or `not known
+  yet` while the forge computes it), review (`none` when there is none), each check with its state
+  (`checks: none ran on this pull request` when none did), and how many comments and reviews it has (`comments: 2, read them with forge {"action":
   "show", "workspace": "login", "detail": "full"}`); `detail full` gives their texts, cut and
   under the result limit. **`show {number, repository?, detail?}`**: that pull request of a
   repository of the place, the same way; `repository` is needed when the place has several.
 - **`create`, `merge`, `checks` `{workspace?, repository, …}`**: opens the pull request of a
-  workspace's branch (`title`, `body`, `draft`, with the project's reviewers), merges it by squash
-  (refused while its checks fail or run or a review asks for changes, unless `waive` gives the
+  workspace's branch (`title`, `body`, `draft`, with the project's reviewers), merges it by
+  `method`, `squash` (the default), `merge` or `rebase` (refused when no check ran on it, while its
+  checks fail or run or a review asks for changes, unless `waive` gives the
   user's words, which holds the merge for their approval), or re-runs the failed jobs of its last
   commit's pipelines (`docs/commands.md`, "`forge`").
 - **`comment {number, repository?, body}`** posts a comment on a pull request of a repository of
