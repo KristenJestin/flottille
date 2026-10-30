@@ -3,7 +3,7 @@
 //! compositor.
 //!
 //! ```text
-//! cargo run -p flottille-window --example shell [--features frames] -- [--project <name>] [--add-project <folder>] [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace] [--add-command] [--edit-command <name>] [--add-skill] [--edit-skill <name>] [--edit-task <name>] [--edit-setup <number>] [--run-task <name>] [--slash <text>] [--attach <picture>] [--end] [--ended] [--open-run <text of its line>] [--open-ended] [--project-settings <project>] [--size <w>x<h>]
+//! cargo run -p flottille-window --example shell [--features frames] -- [--project <name>] [--add-project <folder>] [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace] [--add-command] [--edit-command <name>] [--add-skill] [--edit-skill <name>] [--edit-task <name>] [--edit-setup <number>] [--run-task <name>] [--slash <text>] [--attach <picture>] [--end] [--ended] [--open-run <text of its line>] [--open-ended] [--project-settings <project> [--repository <path>] [--tracker] [--section <n>] [--use-forge <path>] [--remove-repository <path>] [--remove-project]] [--how] [--size <w>x<h>]
 //! ```
 //!
 //! `--project` opens a project's page, `--add-project` the "Add a project" modal with the
@@ -15,7 +15,7 @@
 //! sections, `--edit-task` and `--edit-setup` those of the Tasks and Setup sections, `--run-task`
 //! runs a task of the open project's page and opens its output, `--slash` types a text in the open session's composer (its `/` list), `--attach` attaches a picture file to it, `--end` opens the open
 //! session's "End the session?" confirmation, `--ended` unfolds the "Ended" group at the bottom of the
-//! left tree, `--open-run` opens the output of the open session's first run whose line holds the text, in its panel, `--open-ended` the rail's "N ended" row, `--project-settings` a project's settings page, `--size` the window's size. The daemon is found on
+//! left tree, `--open-run` opens the output of the open session's first run whose line holds the text, in its panel, `--open-ended` the rail's "N ended" row, `--project-settings` a project's settings page (`--repository` and `--tracker` open its dialogs, `--section` scrolls to its n-th section, `--use-forge` uses the forge offered for a repository, `--remove-repository` and `--remove-project` ask their confirmation), `--how` opens "How Auto works" in the settings, `--size` the window's size. The daemon is found on
 //! `$XDG_RUNTIME_DIR/flottille/daemon.sock`; it is not started.
 
 use std::os::unix::net::UnixStream;
@@ -40,6 +40,8 @@ fn main() {
     let (mut end, mut ended) = (false, false);
     let (mut open_run, mut open_ended) = (None::<String>, false);
     let (mut edit_task, mut edit_setup, mut run_task) = (None, None, None);
+    let (mut repository, mut tracker, mut section, mut use_forge) = (None, false, None, None);
+    let (mut remove_repository, mut remove_project, mut how) = (None, false, false);
     let mut dimensions = (1280., 800.);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -63,6 +65,22 @@ fn main() {
                 edit_setup = Some(number.parse::<usize>().expect("a number"));
             }
             "--run-task" => run_task = Some(args.next().expect("a task")),
+            "--repository" => repository = Some(args.next().expect("a repository's path")),
+            "--tracker" => tracker = true,
+            "--section" => {
+                section = Some(
+                    args.next()
+                        .expect("a number")
+                        .parse::<usize>()
+                        .expect("a number"),
+                )
+            }
+            "--use-forge" => use_forge = Some(args.next().expect("a repository's path")),
+            "--remove-repository" => {
+                remove_repository = Some(args.next().expect("a repository's path"))
+            }
+            "--remove-project" => remove_project = true,
+            "--how" => how = true,
             "--slash" => slash = Some(args.next().expect("what the reply's field holds")),
             "--attach" => attach = Some(args.next().expect("a picture file")),
             "--end" => end = true,
@@ -214,6 +232,51 @@ fn main() {
                             let setup = page.read(cx).setup().clone();
                             setup.update(cx, |s, cx| s.open(Some(number), window, cx));
                         }
+                    })
+                    .ok();
+            }
+            // The project's settings or Settings in one of their states, once they are read.
+            if repository.is_some()
+                || tracker
+                || section.is_some()
+                || use_forge.is_some()
+                || remove_repository.is_some()
+                || remove_project
+                || how
+            {
+                cx.background_executor()
+                    .timer(Duration::from_millis(1000))
+                    .await;
+                window
+                    .update(cx, |_, window, cx| {
+                        let main = shell.read(cx).main().clone();
+                        if how && let Some(page) = main.read(cx).settings_page().cloned() {
+                            page.update(cx, |page, cx| page.toggle_how(cx));
+                        }
+                        let Some(page) = main.read(cx).project_settings_page().cloned() else {
+                            return;
+                        };
+                        page.update(cx, |page, cx| {
+                            if let Some(path) = &repository {
+                                page.open_repository(path, window, cx);
+                            }
+                            if tracker {
+                                page.open_tracker(window, cx);
+                            }
+                            if let Some(entry) = section {
+                                page.go_to(entry, cx);
+                            }
+                            if let Some(path) = &use_forge {
+                                page.use_proposal(path, cx);
+                            }
+                            if let Some(path) = &remove_repository {
+                                let repositories = page.repositories().clone();
+                                repositories.update(cx, |r, cx| r.remove(path, cx));
+                            }
+                            if remove_project {
+                                page.ask_removal(cx);
+                            }
+                        });
                     })
                     .ok();
             }
