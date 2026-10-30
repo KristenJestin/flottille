@@ -354,6 +354,7 @@ mod tests {
         assert!(worker.contains("# Your role: worker"));
         assert!(worker.contains("Your task: fix the login."));
         assert!(worker.contains("depth limit"));
+        assert!(worker.contains("[flottille:session]") && worker.contains("session_send"));
         // Same role, other session: the same text before the boundary.
         let other = instructions(
             role(WORKER).unwrap(),

@@ -181,11 +181,16 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
 
 Flottille's own tools:
 
-- `agent_launch {title, brief, model?, role?, workspace? | new_workspace? + repositories?, root?}`, the parent's place when neither:
-  starts a child, answers at once with its id. Refused (never queued) above the caps. With
-  `root`, a root only starts a session for the user instead, judged, in the tree's mode, its
-  first message the agent's and never the user's, base when that root was itself started by an
-  agent (`tools.md`, "Sessions for the user").
+- `agent_launch {title, brief, model?, role?, root?, workspace? | new_workspace? + repositories?}`:
+  with `root`, a root only starts a session for the user, in a workspace (existing or new) or its
+  own place, judged, in the tree's mode, its first message the agent's and never the user's, base
+  when that root was itself started by an agent (`tools.md`, "Sessions for the user"); work that
+  belongs in a workspace is a session, and the tool's description leads with that form. Without
+  it, starts a child in the caller's own place, never another (a workspace named is refused,
+  naming `root: true`), and answers at once with its id. Refused (never queued) above the caps.
+- `session_send {session, text}` (a root): a message to a session the caller started, or to the
+  agent that started it, judged as a write is; it arrives as a delivery labelled with its sender,
+  never as the user's, and the answer comes back the same way.
 - `agent_send {agent_id, message}`: a message to one of the caller's children.
 - `agent_status {agent_id?, action?, detail?, after?}`: for one child or all of them: state, what
   it is doing now (thinking, in a tool call, which command runs and for how long, waiting for
@@ -204,9 +209,9 @@ Flottille's own tools:
   when the caller is a root. There is no way to allow a request.
 
 The tool list of a session is fixed for its whole life (prompt cache, `reference/hemera.md` §7)
-and depends on what the agent can do, known when it starts: a root gets `ask_user`, `skills`,
+and depends on what the agent can do, known when it starts: a root gets `ask_user`, `session_send`, `skills`,
 `commands`, `setup` and `project`, a child `ask_parent`; an agent at the depth limit gets no `agent_*` tools
-and no `approval_answer`. A root lead has 21 tools, a leaf worker 12; one more each when the
+and no `approval_answer`. A root lead has 22 tools, a leaf worker 12; one more each when the
 project's repositories declare a forge (`forge`), one more when it declares a tracker
 (`tickets`), whatever the place (`reference/mcp.md` §4).
 

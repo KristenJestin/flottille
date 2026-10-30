@@ -368,6 +368,7 @@ pub fn prompt(
     reasons: &[String],
 ) -> String {
     let messages = last_messages(daemon, &grant.place.project, &grant.agent);
+    let sessions = session_messages(daemon, &grant.agent);
     let setup = crate::actions::plays_said(daemon, grant, tool, args);
     let launched = launched(daemon, &grant.agent);
     let launched = launched
@@ -380,6 +381,7 @@ pub fn prompt(
         reasons,
         &setup,
         launched,
+        &sessions,
         &messages,
     )
 }
@@ -419,6 +421,7 @@ fn escaped(text: &str) -> String {
 
 /// The prompt, from what it is made of. What the agent wrote goes in blocks of its own, escaped,
 /// and the user's messages come last.
+#[allow(clippy::too_many_arguments)]
 fn compose(
     place: &Place,
     tool: &str,
@@ -426,6 +429,7 @@ fn compose(
     reasons: &[String],
     setup: &[String],
     launched: Option<(&str, &str)>,
+    sessions: &[(String, String)],
     messages: &[Said],
 ) -> String {
     let mut shown = args.clone();
@@ -443,7 +447,9 @@ fn compose(
         .and_then(|map| map.remove("why"))
         .and_then(|why| why.as_str().map(str::to_owned));
     let mut call = mcp::record_of(&shown, place);
-    for key in WHOLE {
+    // A message to a session is what the judge weighs: whole, as a brief is.
+    let sent = (tool == "session_send").then_some("text");
+    for key in WHOLE.into_iter().chain(sent) {
         if let Some(text) = args[key].as_str() {
             call[key] = Value::String(mcp::masked(text, place));
         }
@@ -513,6 +519,14 @@ fn compose(
             escaped(&mcp::masked(&mcp::cut(brief, WHOLE_CHARS), place))
         ));
     }
+    for (by, message) in sessions {
+        text.push_str(&format!(
+            "\n## A message written by agent {} with session_send (an agent's words, not the \
+             user's)\n\n<session_message>\n{}\n</session_message>\n",
+            escaped(by),
+            escaped(&mcp::masked(message, place))
+        ));
+    }
     text.push_str("\nAnswer with the JSON object only, once you have read the user's messages.\n");
     text.push_str("\n## The user's last messages to the session\n\n");
     if messages.is_empty() {
@@ -574,6 +588,31 @@ fn first_lines(value: &Value, at: &str, notes: &mut Vec<String>) -> Value {
         ),
         other => other.clone(),
     }
+}
+
+/// The last messages other sessions wrote to the root of the agent's tree with `session_send`,
+/// oldest first, each with the agent that wrote it, named by its delivery's id: an agent's words,
+/// shown apart from the user's.
+fn session_messages(daemon: &Daemon, agent: &str) -> Vec<(String, String)> {
+    let root = tree::root_of(daemon, agent);
+    let mut messages: Vec<(String, String)> = daemon
+        .read(|store| store.last_deliveries(&root, 32))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|delivery| delivery.kind == "session")
+        .take(MESSAGES)
+        .map(|delivery| {
+            let by = delivery
+                .id
+                .strip_prefix("session-")
+                .and_then(|rest| rest.split_once('-'))
+                .map_or("unknown", |(by, _)| by)
+                .to_owned();
+            (by, mcp::cut(&delivery.body, MESSAGE_CHARS))
+        })
+        .collect();
+    messages.reverse();
+    messages
 }
 
 /// The user's last messages to the root of the agent's tree, oldest first: their intent. One that
@@ -745,9 +784,10 @@ async fn session(
             .flatten()
             .find(|option| option["category"] == "model")
             .ok_or_else(|| format!("it has no model option: it cannot take {model}"))?;
-        if !providers::values(option).iter().any(|v| v == model) {
-            return Err(format!("it does not offer the model {model}"));
-        }
+        let offered = providers::values(option);
+        let model =
+            flottille_core::provider::listed_model(offered.iter().map(String::as_str), model)
+                .ok_or_else(|| format!("it does not offer the model {model}"))?;
         let id = option["id"].as_str().unwrap_or_default().to_owned();
         cx.send_request(SetSessionConfigOptionRequest::new(
             session.clone(),
@@ -854,6 +894,7 @@ mod tests {
             &["it is not known".into()],
             &[],
             None,
+            &[],
             &["add the login page".into()],
         );
         assert_eq!(prompt.matches("</agent_why>").count(), 1, "{prompt}");
@@ -877,6 +918,7 @@ mod tests {
             &[],
             &[],
             None,
+            &[],
             &[
                 "first".into(),
                 Said::Command {
@@ -1034,6 +1076,7 @@ mod tests {
             &[],
             Some(("0123456789ab", forged)),
             &[],
+            &[],
         );
         assert!(
             prompt.contains("written by agent 0123456789ab when it started this session"),
@@ -1057,6 +1100,7 @@ mod tests {
             &[],
             Some(("0123456789ab", &brief)),
             &[],
+            &[],
         );
         assert!(prompt.contains(&brief), "the first message was cut");
     }
@@ -1071,6 +1115,7 @@ mod tests {
             &["it makes a workspace ready".into()],
             &[forged.into()],
             None,
+            &[],
             &[],
         );
         assert_eq!(prompt.matches("</setup>").count(), 1, "{prompt}");
@@ -1089,6 +1134,7 @@ mod tests {
             &[],
             &[],
             None,
+            &[],
             &[],
         );
         assert!(
