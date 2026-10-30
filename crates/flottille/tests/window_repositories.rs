@@ -611,3 +611,53 @@ fn a_repository_of_the_settings_says_what_it_depends_on(cx: &mut TestAppContext)
         assert_eq!(depends("api"), Some(Vec::new()));
     });
 }
+
+#[gpui_kit::test]
+fn the_project_settings_never_show_their_repositories_before_their_forms_are_read(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    trio(&user);
+    let listed = user
+        .call("project.repositories", json!({"name": "trio"}))
+        .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::ProjectSettings("trio".into()), window, cx)
+    });
+    let page = |cx: &mut VisualTestContext| {
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).project_settings_page().cloned()
+        })
+    };
+    until(&shell, cx, "the page is made", |cx| page(cx).is_some());
+    cx.run_until_parked();
+    let page = page(cx).unwrap();
+    // The window is not polled again: the daemon's answer to the settings read waits, and the
+    // repositories' answer comes first, as it can on a loaded machine.
+    let section = page.read_with(cx, |page, _| page.repositories().clone());
+    let serial = section.read_with(cx, |s, _| s.last_request());
+    section.update_in(cx, |s, window, cx| {
+        s.answered(serial, Ok(listed), window, cx)
+    });
+    settle(cx);
+
+    assert!(!page.read_with(cx, |page, _| page.is_loaded()));
+    assert!(
+        !has("repository-item-web", cx),
+        "a row is drawn with no forge to say"
+    );
+
+    until(&shell, cx, "the settings are read", |cx| {
+        page.read_with(cx, |page, cx| {
+            assert!(
+                !page.has_read(cx) || page.is_loaded(),
+                "the page says it has read before its forms exist"
+            );
+            page.has_read(cx)
+        })
+    });
+    settle(cx);
+    assert!(has("repository-item-web", cx));
+}

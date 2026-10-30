@@ -486,6 +486,12 @@ impl ProjectSettingsPage {
         &self.repositories
     }
 
+    /// Whether the daemon has answered the read of the settings themselves (the forms), with
+    /// them or with a problem.
+    fn has_read_settings(&self) -> bool {
+        self.loaded || self.error.is_some()
+    }
+
     /// Whether the daemon has answered the lists the page asks for as it opens, with a list or
     /// with a problem: an answer redraws the page, so the tests wait for it.
     pub fn has_read(&self, cx: &App) -> bool {
@@ -494,7 +500,8 @@ impl ProjectSettingsPage {
         let tasks = self.tasks.read(cx);
         let setup = self.setup.read(cx);
         let repositories = self.repositories.read(cx);
-        (commands.commands().is_some() || commands.problem().is_some())
+        self.has_read_settings()
+            && (commands.commands().is_some() || commands.problem().is_some())
             && (skills.skills().is_some() || skills.problem().is_some())
             && (tasks.tasks().is_some() || tasks.problem().is_some())
             && (setup.steps().is_some() || setup.problem().is_some())
@@ -1173,7 +1180,8 @@ impl ProjectSettingsPage {
 
     fn repositories_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let read = self.repositories.read(cx).repositories().cloned();
-        if let Some(read) = &read {
+        // A row says its forge, which only the settings' read knows: the list waits for it.
+        if let Some(read) = read.as_ref().filter(|_| self.has_read_settings()) {
             let now = cx.background_executor().now();
             let rows = read
                 .listed
