@@ -180,7 +180,9 @@ own while the judge thought), it is refused (`refused: X: the path changed since
 - **What `fs_read` holds for the user, a skill never serves**: a path in a sensitive place
   (The gate, 3: `.ssh`, `.netrc`, `.npmrc`, `.git-credentials`…), by the gate's own rule taken
   from the project folder, links followed, is refused with `refused: X is in a sensitive place
-  (…), which a skill never serves: read it with fs_read, which asks the user first`.
+  (…), which a skill never serves: read it with fs_read, which asks the user first`. The one
+  exception: what is below the project's own `.claude/skills` (where the skills imported from a
+  `.claude` folder live, `docs/skills.md`) is looked at from there, `.claude` itself not counting.
 - **The call goes through the gate** like every other and is allowed: it names a skill, not a path
   of the place, and reads from the project folder (or Flottille's data folder, for a text)
   whatever the agent's place. The result is
@@ -413,7 +415,7 @@ child none of them (it does its brief). Families with an `action`, as `agent_sta
 | Tool | |
 |---|---|
 | `skills {action: list \| show \| add \| edit \| remove, name?, description?, path?, text?}` | The project's skills (`docs/skills.md`). `add` takes `name`, `description` and one of `path` (a file or a folder of the project folder) and `text` (a text Flottille keeps); `edit` changes what it is given; `remove` removes it, and its text. As `flottille skill` does. |
-| `commands {action: list \| show \| add \| edit \| remove, name?, description?, instructions?, template?}` | The project's commands (`docs/commands.md`). `add` takes `name`, `description` and `instructions`, or a `template` (`open-prs`, `merge-stack`, `close`) added as it is; `edit` changes what it is given. A command is sent to a child by writing `/name` in `agent_send`'s message. |
+| `commands {action: list \| show \| add \| edit \| remove, name?, description?, instructions?, template?}` | The project's commands (`docs/commands.md`). `add` takes `name`, `description` and `instructions`, or a `template` (`open-prs`, `merge-stack`, `close`) added as it is; `edit` changes what it is given. A command is sent to a child by writing `/name` in `agent_send`'s message. A command imported from a `.claude` folder points at a file: `show` names it and gives its text as it is now, and an edit of its instructions is refused (the file's to edit). |
 | `setup {action: list \| add \| edit \| remove \| move, number?, to?, step?}` | The project's setup (`docs/projects.md`, "The setup"), its steps numbered from 1 in order. `add {step, number?}` adds one, the last when `number` is left out; `edit {number, step}` replaces one; `remove {number}`; `move {number, to}`. A `step` is whole, as the file has it: one of `copy` (globs), `link`, `root_entries`, `run` (a line) and `task`, with `repository` or `for_each_repository`, and `time_limit` (seconds) with `run` or `task`; it is checked as the file is. The workspaces made after play it; one already made keeps its own. |
 | `project {action: settings \| set_settings \| rules \| set_rules, …}` | `settings` reads each repository's forge (and what its remote proposes) and the tracker (`docs/projects.md`). `set_settings {repositories?: [{path, forge}], tracker?}` declares a repository's forge or the tracker (`null` removes it; a tracker left out is kept), checked as `project.set_settings` checks them. `rules` reads the rules the project's agents get from now on and where they come from (the project's own, the user's for all projects, or Flottille's default, `docs/projects.md`, "Rules"); `set_rules {text}` replaces the project's own rules by `text` (8,000 characters at most), for the agents created after: the one that asked keeps what it started with. |
 

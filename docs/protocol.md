@@ -328,6 +328,26 @@ is not valid. The result is the skill.
 `{"project", "name", "description"?, "path"?, "text"?}`: what is given replaces what the skill had
 (at most one of `path` and `text`); a text skill made a path loses its text. Answers the skill.
 
+#### `skill.detect`
+
+`{"project"}`: what the project folder's `.claude/skills` holds (`docs/skills.md`, "Importing a
+`.claude` folder"): `{"project", "folder": ".claude/skills", "found": [...]}`, by path. Each file is
+`{"name", "path", "state", "description"?, "problem"?}`: `name` is `null` when the file does not
+give a usable one, `path` is the `SKILL.md` relative to the project folder, `state` is `new` (it
+can be imported), `imported` (the project has a skill of that name pointing at that file), `taken`
+(the project has something else under that name) or `unusable`, and `problem` says why for the last
+two. Nothing is written.
+
+#### `skill.import`
+
+`{"project", "names"?}`: makes the skills detected `new` into entries of the project's file that
+point at their files, `[skills.<name>]` with `path`, the rest of the file left as written and
+`project.changed` announced. Without `names`, every file that can be; the answer is `{"project",
+"imported": [skill...], "skipped": [{"name", "path", "why"}]}`, `skipped` holding the files that
+cannot be (an `imported` one is neither). With `names`, those, and a name that cannot be imported
+(`imported`, `taken` or `unusable`) is `refused` with why and nothing is written; a name no file
+gives is `not-found`.
+
 #### `skill.remove`
 
 `{"project", "name"}`: `{"project", "removed": "<name>"}`, its text removed with it.
@@ -511,11 +531,14 @@ every one.
 
 ### The command methods
 
-A project's commands (`docs/commands.md`). A command in a result is `{"name", "description"}`;
-`command.show` and the edits add `instructions`. A command grants nothing: it is a message, sent
+A project's commands (`docs/commands.md`). A command in a result is `{"name", "description"}`,
+and `"path"` when it points at a file (relative to the project folder); `command.show` and the
+edits add `instructions`, those of a command that points at a file read from it now, or `"problem"`
+(the file and why) when they cannot be read. A command grants nothing: it is a message, sent
 as `/name` with `agent.start`, `agent.run` or `agent.send`, and each call the session makes goes
 through the gate's classes and the session's mode. `not-found` for a project or a command that
-does not exist, `refused` for an empty description or instructions, `invalid-config` when the
+does not exist, `refused` for an empty description or instructions (or instructions given to a
+command that points at a file), `invalid-config` when the
 project's file cannot be used. The `procedure.*` methods of earlier versions, the runs with them,
 are gone.
 
@@ -539,6 +562,17 @@ around it kept, and answers the command. `refused` when the project has one of t
 
 `{"project", "name", "description"?, "instructions"?}`: what is given replaces what the command
 had. Answers the command.
+
+#### `command.detect`
+
+`{"project"}`: what the project folder's `.claude/commands` holds, in the shape of `skill.detect`
+(`"folder": ".claude/commands"`, each `.md` file named after the file, its `description` the front
+matter's or the first line of its text).
+
+#### `command.import`
+
+`{"project", "names"?}`: as `skill.import`, into `[commands.<name>]` with `path`, answering
+`{"project", "imported": [command...], "skipped": [...]}`.
 
 #### `command.remove`
 

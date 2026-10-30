@@ -229,7 +229,10 @@ runs cannot be removed. The Tasks section of the project's Settings adds, edits 
 
 `[skills.<name>]` lists texts an agent reads with `skill_read` when its task needs them: a file or
 a folder of the project folder, or a text Flottille keeps in its data folder. What they hold and
-how they are read is in [`skills.md`](skills.md).
+how they are read is in [`skills.md`](skills.md). The skills and the commands of a `.claude` folder
+in the Anthropic layout are imported as entries that point at its files, with
+`flottille skill import` and `flottille command import` (`skills.md` and `commands.md`, "Importing
+a `.claude` folder"); nothing is written in the project's folder.
 
 ## The setup
 

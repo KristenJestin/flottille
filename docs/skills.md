@@ -44,6 +44,44 @@ frozen in an agent's instructions when the agent is created, so a skill added la
 agents started after it; `skill_read` itself follows the skill as it is now. A path skill is read
 from the project folder, whatever the agent's place: it is the project's, not the branch's.
 
+## Importing a `.claude` folder
+
+A project that already has skills in the Anthropic layout need not write them again. A skill is
+`.claude/skills/<name>/SKILL.md`, a Markdown file that starts with YAML front matter:
+
+```markdown
+---
+name: react
+description: How we write React components
+---
+Use hooks, never classes.
+```
+
+Flottille looks at the project folder's `.claude/skills` (its repositories' own `.claude` folders
+are not looked at) and offers each folder holding a `SKILL.md`. Importing one writes
+`[skills.react]` in the project's file with `description` from the front matter and
+`path = ".claude/skills/react/SKILL.md"`: a skill that **points at the file**, not a copy of it,
+so it is read as it is on disk at each use. The keys of the front matter other than `name` and
+`description` (`allowed-tools`, `model`…) belong to the other tool and are left alone. A
+description on several lines is made one. **Nothing is written in the project's folder.**
+
+A file that cannot be imported whole is shown with why and never imported half: no front matter,
+a front matter never closed or that is not YAML, no `name` or no `description`, a name that cannot
+be one (`docs/projects.md`), a name another file already has, a file that cannot be read (not
+UTF-8 text, larger than 1 MiB), a link that leads out of the project folder, a folder with no
+`SKILL.md`. A name the project already uses is not overwritten: the file is said `taken`. A file
+already imported is said `imported` and not offered again.
+
+An agent is served the skills of `.claude/skills` as any other path of the project, although the
+gate holds `.claude` wherever it sits, because an agent's own login folder is one
+(`docs/tools.md`, "`skill_read`"): the exception covers only what is below the project's
+`.claude/skills`, where a `.env`, a link out or a nested `.claude` are held as anywhere else.
+
+The methods are `skill.detect` and `skill.import` (`docs/protocol.md`), the command
+`flottille skill import` (`docs/cli.md`). The window's project page offers what is detected, each
+with Import and an Import all (not built yet: it waits for the layout validated in the window's
+review).
+
 ## Editing them
 
 - **The window**: the project's Settings, section Skills: add (a path picked in the project
