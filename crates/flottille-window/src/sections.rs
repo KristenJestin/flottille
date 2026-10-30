@@ -44,19 +44,24 @@ impl Sections {
             .unwrap_or(0)
     }
 
-    /// Scrolls the section of that index entry to the top, under the index.
-    pub fn go_to(&mut self, entry: usize, cx: &App) {
-        let (Some(section), Some(index)) = (
-            self.scroll.bounds_for_item(BEFORE_SECTIONS + entry),
-            self.scroll.bounds_for_item(1),
-        ) else {
-            return;
-        };
+    /// Where the scroll is, and where it goes for the section of that index entry to be at the
+    /// top, under the index: `None` before the page is laid out.
+    fn target(&self, entry: usize) -> Option<(f32, f32)> {
+        let section = self.scroll.bounds_for_item(BEFORE_SECTIONS + entry)?;
+        let index = self.scroll.bounds_for_item(1)?;
         let from = f32::from(self.scroll.offset().y);
         let top = f32::from(section.top() - self.scroll.bounds().top());
         let to = (f32::from(index.size.height) + 8. - top)
             .min(0.)
             .max(-f32::from(self.scroll.max_offset().y));
+        Some((from, to))
+    }
+
+    /// Scrolls the section of that index entry to the top, under the index.
+    pub fn go_to(&mut self, entry: usize, cx: &App) {
+        let Some((from, to)) = self.target(entry) else {
+            return;
+        };
         let mut motion = Motion::settled(0.);
         motion.animate(
             1.,
@@ -65,6 +70,22 @@ impl Sections {
             cx.reduce_motion(),
         );
         self.scrolling = Some((from, to, motion));
+    }
+
+    /// Whether the section of that index entry stands where [`Sections::go_to`] puts it, the
+    /// page laid out and no scroll on its way; if not, it goes there.
+    pub fn arrive_at(&mut self, entry: usize, cx: &App) -> bool {
+        if self.scrolling.is_some() {
+            return false;
+        }
+        match self.target(entry) {
+            Some((from, to)) if (from - to).abs() < 1. => true,
+            Some(_) => {
+                self.go_to(entry, cx);
+                false
+            }
+            None => false,
+        }
     }
 
     /// Whether a scroll to a section is on its way.

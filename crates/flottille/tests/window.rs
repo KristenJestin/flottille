@@ -23,7 +23,7 @@ use flottille_window::link::{self, Connect};
 use flottille_window::model::{Place, Preparation};
 use flottille_window::project::{NewWorkspace, PlaceCard, ProjectPage};
 use flottille_window::project_settings::{
-    Dialog, ForgeKind, ProjectSettingsPage, Reveal, TrackerKind,
+    Dialog, ForgeKind, ProjectSettingsPage, Reveal, SECTIONS, TrackerKind,
 };
 use flottille_window::session::{RailRow, Reply, SessionPage};
 use flottille_window::settings::SettingsPage;
@@ -8689,6 +8689,51 @@ fn the_repository_chips_are_read_only_and_open_their_row_in_the_project_settings
         settings.read_with(cx, |page, _| page.revealed().cloned()),
         Some(Reveal::Repository(".".into())),
         "at the chip's repository"
+    );
+}
+
+#[gpui_kit::test]
+fn edit_in_settings_opens_the_project_settings_scrolled_to_their_tasks(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    user.call(
+        "task.add",
+        json!({"project": "atlas", "name": "say", "line": "echo hi"}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    until(&shell, cx, "the task is listed", |cx| {
+        cx.update(|window, _| window.try_find("project-task-say").is_some())
+    });
+    settle(cx);
+
+    cx.update(|window, cx| window.click("edit-tasks-in-settings", cx));
+    until(&shell, cx, "the project's settings are open", |cx| {
+        settings_of(&shell, cx).is_some()
+    });
+    let settings = settings_of(&shell, cx).unwrap();
+    assert_eq!(
+        settings.read_with(cx, |page, _| page.revealed().cloned()),
+        Some(Reveal::Tasks)
+    );
+    until(&shell, cx, "every section is read", |cx| {
+        settings.read_with(cx, |page, cx| page.has_read(cx))
+    });
+    settle(cx);
+    let tasks = SECTIONS
+        .iter()
+        .position(|(key, _)| *key == "tasks")
+        .unwrap();
+    assert_eq!(
+        settings.read_with(cx, |page, _| page.current_section()),
+        tasks,
+        "the Tasks section is scrolled up under the index"
+    );
+    assert_eq!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)),
+        0,
+        "nothing moves once it is there"
     );
 }
 
