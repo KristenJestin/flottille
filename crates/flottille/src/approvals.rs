@@ -125,6 +125,9 @@ struct List {
 #[serde(deny_unknown_fields)]
 struct Approve {
     number: u64,
+    /// For a workspace's removal: removed even with what would be lost.
+    #[serde(default)]
+    discard: bool,
 }
 
 #[derive(Deserialize)]
@@ -153,11 +156,11 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         }
         "approval.approve" => {
             let asked: Approve = serde_json::from_value(params)?;
-            decide(&daemon, asked.number, Decision::Once)
+            decide(&daemon, asked.number, Decision::Once, asked.discard)
         }
         "approval.deny" => {
             let asked: Deny = serde_json::from_value(params)?;
-            decide(&daemon, asked.number, Decision::Deny)
+            decide(&daemon, asked.number, Decision::Deny, false)
         }
         method => Err(Failure::new(
             "unknown-method",
@@ -167,8 +170,9 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
 }
 
 /// The user's decision: refused for a request they do not hold, and one already decided. A denial is answered to the agent now; an allowed
-/// request is performed in the background, and the user is answered once it is decided.
-fn decide(daemon: &Arc<Daemon>, number: u64, decision: Decision) -> Answer {
+/// request is performed in the background, and the user is answered once it is decided. `discard`
+/// answers only a workspace's removal.
+fn decide(daemon: &Arc<Daemon>, number: u64, decision: Decision, discard: bool) -> Answer {
     let request = daemon
         .read(|store| store.request(number))?
         .ok_or_else(|| Failure::new("not-found", format!("there is no request #{number}")))?;
@@ -180,6 +184,13 @@ fn decide(daemon: &Arc<Daemon>, number: u64, decision: Decision) -> Answer {
     }
     if request.state != RequestState::Pending {
         return Err(already(&request));
+    }
+    if discard && !removes_a_workspace(&request) {
+        return Err(Failure::refused(format!(
+            "discard answers only a request that removes a workspace, and request #{number} \
+             ({}) removes none: approve it without discard",
+            request.tool
+        )));
     }
     let decided = daemon.write(|store| {
         Ok(match store.decide(number, decision, approval::USER)? {
@@ -201,9 +212,13 @@ fn decide(daemon: &Arc<Daemon>, number: u64, decision: Decision) -> Answer {
         );
         store_answer(daemon, &request, "refused", &body);
     } else {
-        tokio::spawn(settle(daemon.clone(), request.clone()));
+        tokio::spawn(settle(daemon.clone(), request.clone(), discard));
     }
     Ok(json!({"request": request.to_json()}))
+}
+
+fn removes_a_workspace(request: &Request) -> bool {
+    request.tool == "workspace" && request.arguments["action"] == "remove"
 }
 
 fn already(request: &Request) -> Failure {
@@ -215,13 +230,17 @@ fn already(request: &Request) -> Failure {
 }
 
 /// Checks an allowed request again, performs it, and stores its answer.
-async fn settle(daemon: Arc<Daemon>, request: Request) {
-    let (outcome, body) = performed(&daemon, &request).await;
+async fn settle(daemon: Arc<Daemon>, request: Request, discard: bool) {
+    let (outcome, body) = performed(&daemon, &request, discard).await;
     store_answer(&daemon, &request, outcome, &body);
 }
 
 /// What became of an allowed request: its outcome's word and the answer's text, masked.
-async fn performed(daemon: &Arc<Daemon>, request: &Request) -> (&'static str, String) {
+async fn performed(
+    daemon: &Arc<Daemon>,
+    request: &Request,
+    discard: bool,
+) -> (&'static str, String) {
     let (number, tool) = (request.number, request.tool.as_str());
     let not_executed = |why: String| {
         (
@@ -288,6 +307,19 @@ async fn performed(daemon: &Arc<Daemon>, request: &Request) -> (&'static str, St
             }
         }
     }
+    // The losses the user discards are the ones they read, up to the removal itself.
+    let discarding = match discard {
+        true => match actions::approved_losses(daemon, &grant, &request.arguments, &request.says)
+            .await
+        {
+            Ok(losses) => Some(losses),
+            Err(Outcome::Refused(why) | Outcome::Failed(why) | Outcome::Held(why)) => {
+                return not_executed(mcp::masked(&why, &grant.place));
+            }
+            Err(Outcome::Done(_)) => None,
+        },
+        false => None,
+    };
     let class = if request.base {
         gate::Class::Base
     } else {
@@ -300,6 +332,7 @@ async fn performed(daemon: &Arc<Daemon>, request: &Request) -> (&'static str, St
         request.arguments.clone(),
         number,
         class,
+        discarding,
     )
     .await;
     let approved = "was approved by the user";

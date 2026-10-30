@@ -1399,12 +1399,18 @@ pub fn resume_at_start(daemon: &Arc<Daemon>) {
 // Removal.
 
 async fn remove(daemon: Arc<Daemon>, asked: WorkspaceName) -> Answer {
+    removed(daemon, asked, None).await
+}
+
+/// Removes the workspace; with `approved`, the losses the user's answer to an agent's request
+/// said to discard, even what would be lost: as long as it is exactly what it finds.
+async fn removed(daemon: Arc<Daemon>, asked: WorkspaceName, approved: Option<&[String]>) -> Answer {
     let workspace = find(&daemon, &asked)?;
     // Held for the whole removal, so that no preparation starts meanwhile.
     if !daemon.preparing.lock().unwrap().insert(workspace.id) {
         return Err(being_prepared(&workspace));
     }
-    let removed = remove_held(&daemon, &workspace).await;
+    let removed = remove_held(&daemon, &workspace, approved).await;
     daemon.preparing.lock().unwrap().remove(&workspace.id);
     removed
 }
@@ -1444,7 +1450,26 @@ fn in_use(
     Ok(used)
 }
 
-async fn remove_held(daemon: &Daemon, workspace: &Workspace) -> Answer {
+/// What removing a workspace would find: its worktrees made, what would be lost, each as a
+/// sentence, and the links Flottille made that `git status` shows.
+struct Checked<'a> {
+    made: Vec<&'a Worktree>,
+    problems: Vec<String>,
+    ours: Vec<PathBuf>,
+}
+
+/// What removing the workspace `name` of the project would lose, each as a sentence: nothing when
+/// it loses nothing. For the request of an agent's removal, which says it.
+pub async fn losses(daemon: &Daemon, project: &str, name: &str) -> Result<Vec<String>, Failure> {
+    let asked = WorkspaceName {
+        project: project.to_owned(),
+        name: name.to_owned(),
+    };
+    let workspace = find(daemon, &asked)?;
+    Ok(checked(&workspace).await?.problems)
+}
+
+async fn checked(workspace: &Workspace) -> Result<Checked<'_>, Failure> {
     let made: Vec<&Worktree> = workspace
         .repositories
         .iter()
@@ -1522,12 +1547,40 @@ async fn remove_held(daemon: &Daemon, workspace: &Workspace) -> Answer {
             ));
         }
     }
-    if !problems.is_empty() {
+    Ok(Checked {
+        made,
+        problems,
+        ours,
+    })
+}
+
+async fn remove_held(
+    daemon: &Daemon,
+    workspace: &Workspace,
+    approved: Option<&[String]>,
+) -> Answer {
+    let Checked {
+        made,
+        problems,
+        ours,
+    } = checked(workspace).await?;
+    // The user discards what they were shown, not what appeared since.
+    let (allowed, changed) = match approved {
+        None => (problems.is_empty(), ""),
+        Some(approved) => (
+            approved == problems,
+            "what would be lost is not what the user answered to discard, it is now: ",
+        ),
+    };
+    if !allowed {
         return Err(Failure::refused(format!(
-            "workspace {} of project {} is not removed, nothing was touched: {}",
+            "workspace {} of project {} is not removed, nothing was touched: {changed}{}",
             workspace.name,
             workspace.project,
-            problems.join("; ")
+            match problems.is_empty() {
+                true => "nothing".to_owned(),
+                false => problems.join("; "),
+            }
         )));
     }
 
@@ -1542,23 +1595,26 @@ async fn remove_held(daemon: &Daemon, workspace: &Workspace) -> Answer {
     for worktree in &order {
         let main = main_checkout(&workspace.project_folder, &worktree.path);
         let dir = workspace.folder_of(&worktree.path);
-        git::output(
-            &main,
-            &[
-                "worktree",
-                "remove",
-                "--end-of-options",
-                &dir.to_string_lossy(),
-            ],
-            Class::Work,
-        )
-        .await
-        .map_err(|error| {
-            Failure::refused(format!(
-                "cannot remove the worktree of {}: {error}",
-                worktree.path
-            ))
-        })?;
+        let dir = dir.to_string_lossy();
+        let force: &[&str] = if approved.is_some() {
+            &["--force"]
+        } else {
+            &[]
+        };
+        let line = [
+            &["worktree", "remove"][..],
+            force,
+            &["--end-of-options", &dir],
+        ]
+        .concat();
+        git::output(&main, &line, Class::Work)
+            .await
+            .map_err(|error| {
+                Failure::refused(format!(
+                    "cannot remove the worktree of {}: {error}",
+                    worktree.path
+                ))
+            })?;
     }
     for worktree in &workspace.repositories {
         let main = main_checkout(&workspace.project_folder, &worktree.path);
@@ -1611,16 +1667,37 @@ async fn remove_held(daemon: &Daemon, workspace: &Workspace) -> Answer {
     Ok(json!({"removed": workspace.name, "project": workspace.project}))
 }
 
-/// `workspace` `remove`, once the gate let it through: the agent's own workspace (or, in
-/// `main`, the one named) removed as `workspace.remove` removes it, then the branches of it that
-/// hold no commit of their own deleted from their repositories (`docs/commands.md`).
+/// The workspace an agent's `workspace` `remove` names: one of the project's, never the one the
+/// agent works in, whose folder its removal would take from under it.
+pub fn removed_named(
+    daemon: &Daemon,
+    place: &Place,
+    named: Option<&str>,
+) -> Result<String, Outcome> {
+    if let Some(own) = &place.workspace
+        && named.is_none_or(|named| named == own)
+    {
+        return Err(Outcome::Refused(format!(
+            "refused: this agent works in the workspace {own}, and removing it would take the \
+             folder it works in from under it: finish your work and report; the user, or an \
+             agent working in main, removes it"
+        )));
+    }
+    workspace_named(daemon, place, named, "workspace remove")
+}
+
+/// `workspace` `remove`, once the user allowed it: the workspace named removed as
+/// `workspace.remove` removes it, even what would be lost when the user's answer said to discard
+/// it and `approved` is exactly what would be lost (the losses the answer covered), then the branches of it that hold no commit of their own deleted from their
+/// repositories (`docs/commands.md`).
 pub async fn workspace_remove(
     daemon: &Arc<Daemon>,
     agent: &str,
     place: &Place,
     named: Option<&str>,
+    approved: Option<&[String]>,
 ) -> Outcome {
-    let name = match workspace_named(daemon, place, named, "workspace remove") {
+    let name = match removed_named(daemon, place, named) {
         Ok(name) => name,
         Err(refusal) => return refusal,
     };
@@ -1645,8 +1722,21 @@ pub async fn workspace_remove(
             used.join("; ")
         ));
     }
-    if let Err(failure) = remove(daemon.clone(), asked).await {
+    if let Err(failure) = removed(daemon.clone(), asked, approved).await {
         return match failure.code {
+            // What would be lost, which the user's answer did not say to discard.
+            "refused"
+                if failure
+                    .message
+                    .starts_with(&format!("workspace {} of", workspace.name)) =>
+            {
+                Outcome::Refused(format!(
+                    "refused: {}; this request is decided: to remove it all the same, call \
+                     workspace remove again, and the user may answer that new request with \
+                     discard (flottille approve <n> --discard)",
+                    failure.message
+                ))
+            }
             "refused" => Outcome::Refused(format!("refused: {}", failure.message)),
             _ => Outcome::Failed(failure.message),
         };
@@ -1664,6 +1754,9 @@ pub async fn workspace_remove(
         "Workspace {} of project {} is removed: its worktrees and its folder are gone.",
         workspace.name, workspace.project
     );
+    if approved.is_some() {
+        said.push_str(" The user said to discard what would be lost: it was discarded.");
+    }
     if !deleted.is_empty() {
         said.push_str(&format!(
             " Its branch {}, empty, was deleted in {}.",
