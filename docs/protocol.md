@@ -952,7 +952,8 @@ the file is then left as it is.
 
 `{"provider", "model"?}`. Chooses the Auto judge (`docs/design.md` §7.1): the provider whose agent
 judges the calls to judge of sessions in Auto, and its model (the provider's default when left
-out or empty); `provider` `null` chooses none, and Auto then asks the user as Ask does. The daemon
+out or empty; once the provider's models are known, one given without its date suffix is written as the
+listed id, `docs/agents.md`, "Providers"); `provider` `null` chooses none, and Auto then asks the user as Ask does. The daemon
 writes `[judge]` in `providers.toml` (`provider`, `model`), or `judge = "none"` for none, so that
 no judge is ever picked for a user who chose none; the rest of the file is
 kept as `provider.enable` keeps it, and answers `{"judge"}`, as `provider.list` gives it. When this

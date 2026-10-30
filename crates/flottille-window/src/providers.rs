@@ -4,6 +4,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use flottille_core::provider;
 use serde_json::Value;
 
 /// The `provider.list` reads, numbered as they are asked, whoever asks: answers come back in any
@@ -162,8 +163,11 @@ impl Provider {
         self.models.as_ref()?.iter().find(|m| m.default)
     }
 
+    /// The model listed under that id, or that id without its date suffix (the daemon takes both).
     pub fn model(&self, id: &str) -> Option<&Model> {
-        self.models.as_ref()?.iter().find(|m| m.id == id)
+        let models = self.models.as_ref()?;
+        let listed = provider::listed_model(models.iter().map(|m| m.id.as_str()), id)?;
+        models.iter().find(|m| m.id == listed)
     }
 }
 
@@ -249,6 +253,19 @@ mod tests {
         let claude = providers.get("claude").unwrap();
         assert_eq!(claude.default_model().unwrap().id, "sonnet");
         assert_eq!(claude.model("opus").unwrap().efforts, None);
+    }
+
+    #[test]
+    fn a_model_id_without_its_date_suffix_is_the_listed_model() {
+        let mut dated = listed();
+        dated["providers"][0]["models"][0]["id"] = json!("sonnet-4-5-20250929");
+        let providers = Providers::of(Ok(&dated));
+        let claude = providers.get("claude").unwrap();
+        assert_eq!(
+            claude.model("sonnet-4-5").unwrap().id,
+            "sonnet-4-5-20250929"
+        );
+        assert!(claude.model("sonnet-4-6").is_none());
     }
 
     #[test]

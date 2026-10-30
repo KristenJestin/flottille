@@ -128,7 +128,10 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   No agent is ever run just to list them: until a first session said them, they are `null`, an
   agent may ask any model and effort, and one its session does not offer fails the agent
   ("The options", below). Once they are known, a model or an effort they do not hold is refused
-  at once, naming those the provider offers. The efforts of a model are `null` until a session
+  at once, naming those the provider offers. A model asked as a listed model's id without its
+  date suffix (`-YYYYMMDD`) is that model (`claude-haiku-4-5` for `claude-haiku-4-5-20251001`),
+  and its agent's choice, the Auto judge's (`provider.set_judge`) and the session's own check
+  hold the listed id. An id that two listed models answer to is taken for none. The efforts of a model are `null` until a session
   had that model. An effort asked without a model is checked against the default model's
   efforts, when they are known; until then it is taken, and a session that does not offer it
   fails the agent.

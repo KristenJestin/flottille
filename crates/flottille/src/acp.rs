@@ -284,12 +284,23 @@ async fn drive(
         let option = find_option(&options, category)
             .ok_or_else(|| format!("the agent has no {word} option: it cannot take {value}"))?;
         let offered = providers::values(&option);
-        if !offered.iter().any(|v| v == value) {
+        // A model may be asked without its date suffix: the session's own id is what is set.
+        let listed = match category {
+            "model" => {
+                flottille_core::provider::listed_model(offered.iter().map(String::as_str), value)
+            }
+            _ => offered
+                .iter()
+                .map(String::as_str)
+                .find(|v| *v == value.as_str()),
+        };
+        let Some(value) = listed.map(str::to_owned) else {
             return Err(format!(
                 "the agent does not offer the {word} {value}: it offers {}",
                 offered.join(", ")
             ));
-        }
+        };
+        let value = &value;
         let id = option["id"].as_str().unwrap_or_default().to_owned();
         let answer = cx
             .send_request(SetSessionConfigOptionRequest::new(
