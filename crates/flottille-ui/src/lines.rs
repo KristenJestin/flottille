@@ -10,8 +10,8 @@ use std::rc::Rc;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, ClickEvent, ElementId, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, RenderOnce, SharedString, StatefulInteractiveElement, Styled, TestSupportExt,
-    Window, div, px,
+    ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement, Styled,
+    TestSupportExt, Window, div, px,
 };
 
 use crate::color::mix;
@@ -264,13 +264,16 @@ impl RenderOnce for LabelledLine {
 }
 
 /// The frame of a card's labelled lines: 8 px above and below, 14 px on the sides.
+/// The gap between the lines of a [`lines_block`]: a line that folds away takes it with it.
+pub const LINE_GAP: Pixels = px(2.);
+
 pub fn lines_block(lines: impl IntoIterator<Item = AnyElement>) -> impl IntoElement {
     div()
         .py(px(8.))
         .px(px(14.))
         .flex()
         .flex_col()
-        .gap(px(2.))
+        .gap(LINE_GAP)
         .children(lines)
 }
 

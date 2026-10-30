@@ -58,6 +58,8 @@ pub struct Workspace {
 /// One step of a workspace's preparation, as its card lists it: "Run `pnpm install`".
 #[derive(Clone, Debug, PartialEq)]
 pub struct SetupLine {
+    /// Its place in the preparation: the same step keeps it while the list changes.
+    pub position: u32,
     pub verb: String,
     /// What it acts on, in the mono face.
     pub object: Option<String>,
@@ -81,6 +83,7 @@ impl SetupLine {
             Action::Run { line, .. } => ("Run", Some(line.clone())),
         };
         SetupLine {
+            position: step.position,
             verb: verb.to_owned(),
             object,
             state: step.state,

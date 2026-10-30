@@ -11,9 +11,9 @@ use flottille_core::workspace::StepState;
 use flottille_ui::color::mix;
 use flottille_ui::{
     AgentState, Block, Button, Card, CardHead, Chip, Confirm, Field, FlatRow, FooterAction, Icon,
-    LabelledLine, Menu, Modal, PageHeader, Section, StateIcon, Status, StepRow, StepTone, Toast,
-    Type, caption, enter, hoverable, icon, lines_block, palette, presence, selectable, space,
-    toast,
+    Item, LINE_GAP, LabelledLine, Listing, Menu, Modal, PageHeader, Section, StateIcon, Status,
+    StepRow, StepTone, Toast, Type, caption, enter, hoverable, icon, lines_block, palette,
+    presence, presence_of, selectable, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -512,6 +512,14 @@ fn step_word(state: StepState) -> &'static str {
     }
 }
 
+/// A labelled line of a place's card.
+#[derive(Clone)]
+enum Line {
+    Repository(RepositoryStatus),
+    Pull(PullRequest),
+    Ticket(TicketFacts),
+}
+
 /// How long a step took, or has been running.
 fn step_time(step: &SetupLine, now: u64) -> Option<String> {
     match (step.state, step.started_at, step.ended_at) {
@@ -536,8 +544,13 @@ pub struct PlaceCard {
     confirming: bool,
     busy: Option<Busy>,
     icons: HashMap<String, Entity<StateIcon>>,
-    /// Each step's mark: it turns to the step's new state when it changes.
-    marks: HashMap<usize, (Entity<Status>, Entity<StateIcon>)>,
+    /// Each step's mark, by its position: it turns to the step's new state when it changes.
+    marks: HashMap<u32, (Entity<Status>, Entity<StateIcon>)>,
+    /// The labelled lines, the setup's steps and the sessions as last drawn: a row that comes
+    /// unfolds, one that goes folds away.
+    line_rows: Listing<Line>,
+    step_rows: Listing<SetupLine>,
+    session_rows: Listing<SessionLine>,
     menu: Option<Entity<Menu>>,
     /// "Link a ticket" is open, its field made the first time.
     linking: bool,
@@ -612,6 +625,9 @@ impl PlaceCard {
             busy: None,
             icons: HashMap::new(),
             marks: HashMap::new(),
+            line_rows: Listing::default(),
+            step_rows: Listing::default(),
+            session_rows: Listing::default(),
             menu,
             linking: false,
             ticket_field: None,
@@ -670,9 +686,8 @@ impl PlaceCard {
                 .entry(session.id.clone())
                 .or_insert_with(|| cx.new(|cx| StateIcon::new(status, cx)));
         }
-        self.marks.retain(|at, _| *at < data.steps.len());
-        for (at, step) in data.steps.iter().enumerate() {
-            let state = step_state(step.state);
+        for step in &data.steps {
+            let (at, state) = (step.position, step_state(step.state));
             match self.marks.get(&at) {
                 Some((status, _)) => {
                     if status.read(cx).state() != state {
@@ -832,30 +847,65 @@ impl PlaceCard {
         )))
     }
 
-    fn lines(&self, name: &str, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let p = palette(cx);
-        let mut lines = Vec::new();
+    /// The labelled lines that have something to say, each in its frame: a line that comes
+    /// unfolds, one that goes folds away.
+    fn lines(&mut self, name: &str, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut found = Vec::new();
         for status in &self.facts.statuses {
             let quiet = status.ahead.unwrap_or(0) == 0
                 && status.uncommitted.unwrap_or(0) == 0
                 && status.note.is_none();
-            if quiet {
-                continue;
+            if !quiet {
+                let key = format!("repository-{}", status.path);
+                found.push((key, Line::Repository(status.clone())));
             }
-            let label = repository_label(&self.project, &status.path);
-            let mut parts = Vec::new();
-            if let Some(ahead) = status.ahead {
-                parts.push(format!("{ahead} ahead"));
-            }
-            match status.uncommitted {
-                Some(0) => parts.push("clean".into()),
-                Some(files) => parts.push(format!("{files} uncommitted")),
-                None => {}
-            }
-            // Why it started from its local branch, when it did.
-            parts.extend(status.note.clone());
-            let rest = parts.join(" · ");
-            lines.push(
+        }
+        for pull in &self.facts.pulls {
+            found.push((
+                format!("pull-{}", pull.repository),
+                Line::Pull(pull.clone()),
+            ));
+        }
+        if let Some(ticket) = &self.facts.ticket {
+            found.push(("ticket".to_owned(), Line::Ticket(ticket.clone())));
+        }
+        let (now, reduce) = (cx.background_executor().now(), cx.reduce_motion());
+        self.line_rows.sync(found, now, reduce);
+        let rows: Vec<_> = self
+            .line_rows
+            .rows()
+            .map(|row| (row.key.to_owned(), row.value.clone(), row.placement))
+            .collect();
+        rows.into_iter()
+            .map(|(key, line, placement)| {
+                Item::new(
+                    ElementId::Name(format!("line-item-{name}-{key}").into()),
+                    placement,
+                    self.line(name, &line, cx),
+                )
+                .gap(LINE_GAP)
+                .into_any_element()
+            })
+            .collect()
+    }
+
+    fn line(&self, name: &str, line: &Line, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette(cx);
+        match line {
+            Line::Repository(status) => {
+                let label = repository_label(&self.project, &status.path);
+                let mut parts = Vec::new();
+                if let Some(ahead) = status.ahead {
+                    parts.push(format!("{ahead} ahead"));
+                }
+                match status.uncommitted {
+                    Some(0) => parts.push("clean".into()),
+                    Some(files) => parts.push(format!("{files} uncommitted")),
+                    None => {}
+                }
+                // Why it started from its local branch, when it did.
+                parts.extend(status.note.clone());
+                let rest = parts.join(" · ");
                 LabelledLine::new(
                     ElementId::Name(format!("repository-line-{name}-{label}").into()),
                     Icon::Repository,
@@ -876,19 +926,17 @@ impl PlaceCard {
                         .text_color(p.mute)
                         .child(SharedString::from(rest)),
                 )
-                .into_any_element(),
-            );
-        }
-        for pull in &self.facts.pulls {
-            let label = repository_label(&self.project, &pull.repository);
-            let (shell, url) = (self.shell.clone(), pull.url.clone());
-            let (fill, ink) = match pull.state.as_str() {
-                "open" => (p.ok_bg, p.ok),
-                "merged" => (p.run_bg, p.run),
-                "draft" => (p.card2, p.faint),
-                _ => (p.fail_bg, p.fail),
-            };
-            lines.push(
+                .into_any_element()
+            }
+            Line::Pull(pull) => {
+                let label = repository_label(&self.project, &pull.repository);
+                let (shell, url) = (self.shell.clone(), pull.url.clone());
+                let (fill, ink) = match pull.state.as_str() {
+                    "open" => (p.ok_bg, p.ok),
+                    "merged" => (p.run_bg, p.run),
+                    "draft" => (p.card2, p.faint),
+                    _ => (p.fail_bg, p.fail),
+                };
                 LabelledLine::new(
                     ElementId::Name(format!("pull-{name}-{label}").into()),
                     Icon::PullRequest,
@@ -912,44 +960,52 @@ impl PlaceCard {
                         .medium()
                         .child(SharedString::from(pull.state.to_uppercase())),
                 )
-                .into_any_element(),
-            );
-        }
-        if let Some(ticket) = &self.facts.ticket {
-            let title = ticket
-                .title
-                .clone()
-                .or_else(|| ticket.problem.clone())
-                .unwrap_or_default();
-            let mut line = LabelledLine::new(
-                ElementId::Name(format!("ticket-{name}").into()),
-                Icon::Ticket,
-                "Ticket",
-                SharedString::from(format!("{} {title}", ticket.reference)),
-            )
-            .child(SharedString::from(ticket.reference.clone()))
-            .child(
-                div()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .ui_text()
-                    .text_size(px(12.5))
-                    .child(SharedString::from(title)),
-            );
-            if let Some(url) = ticket.url.clone() {
-                let shell = self.shell.clone();
-                line = line.on_click(move |_, _, cx| {
-                    shell.update(cx, |shell, _| shell.open_link(&url)).ok();
-                });
+                .into_any_element()
             }
-            lines.push(line.into_any_element());
+            Line::Ticket(ticket) => {
+                let title = ticket
+                    .title
+                    .clone()
+                    .or_else(|| ticket.problem.clone())
+                    .unwrap_or_default();
+                let mut line = LabelledLine::new(
+                    ElementId::Name(format!("ticket-{name}").into()),
+                    Icon::Ticket,
+                    "Ticket",
+                    SharedString::from(format!("{} {title}", ticket.reference)),
+                )
+                .child(SharedString::from(ticket.reference.clone()))
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .ui_text()
+                        .text_size(px(12.5))
+                        .child(SharedString::from(title)),
+                );
+                if let Some(url) = ticket.url.clone() {
+                    let shell = self.shell.clone();
+                    line = line.on_click(move |_, _, cx| {
+                        shell.update(cx, |shell, _| shell.open_link(&url)).ok();
+                    });
+                }
+                line.into_any_element()
+            }
         }
-        lines
     }
 
-    fn setup(&self, name: &str, now: u64, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if matches!(self.data.preparation, Preparation::Ready) || self.data.steps.is_empty() {
+    /// The setup's steps while it is prepared, and what failed: the block stays built once it
+    /// is ready, so that it folds away instead of vanishing.
+    fn setup(&mut self, name: &str, now: u64, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (at, reduce) = (cx.background_executor().now(), cx.reduce_motion());
+        let steps = self.data.steps.clone();
+        self.step_rows.sync(
+            steps.into_iter().map(|s| (s.position.to_string(), s)),
+            at,
+            reduce,
+        );
+        if self.step_rows.is_empty() {
             return None;
         }
         let p = palette(cx);
@@ -965,7 +1021,12 @@ impl PlaceCard {
             true => format!("failed at step {} of {total}", at + 1),
             false => format!("step {} of {total}", at + 1),
         };
-        let rows = self.data.steps.iter().enumerate().map(|(i, step)| {
+        let rows: Vec<_> = self
+            .step_rows
+            .rows()
+            .map(|row| (row.value.clone(), row.placement))
+            .collect();
+        let rows = rows.into_iter().enumerate().map(|(i, (step, placement))| {
             let tone = match step.state {
                 StepState::Done | StepState::Skipped => StepTone::Done,
                 StepState::Running => StepTone::Now,
@@ -975,7 +1036,7 @@ impl PlaceCard {
             let mark = div()
                 .id(ElementId::Name(format!("setup-mark-{name}-{i}").into()))
                 .aria_label(step_word(step.state))
-                .children(self.marks.get(&i).map(|(_, icon)| icon.clone()))
+                .children(self.marks.get(&step.position).map(|(_, icon)| icon.clone()))
                 .test_support();
             let mut row = StepRow::new(
                 ElementId::Name(format!("setup-step-{name}-{i}").into()),
@@ -987,53 +1048,69 @@ impl PlaceCard {
             if let Some(object) = &step.object {
                 row = row.object(SharedString::from(object.clone()));
             }
-            if let Some(time) = step_time(step, now) {
+            if let Some(time) = step_time(&step, now) {
                 row = row.time(SharedString::from(time));
             }
-            row.into_any_element()
+            Item::new(
+                ElementId::Name(format!("step-item-{name}-{}", step.position).into()),
+                placement,
+                row,
+            )
         });
-        let failure = match &self.data.preparation {
-            Preparation::Failed { output, .. } => Some(
-                div()
-                    .px(space::MD)
-                    .pt(space::XS)
-                    .flex()
-                    .flex_col()
-                    .gap(space::SM)
-                    .child(
-                        div()
-                            .id(ElementId::Name(format!("failure-output-{name}").into()))
-                            .max_h(px(160.))
-                            .overflow_y_scroll()
-                            .py(space::SM)
-                            .px(space::MD)
-                            .rounded(px(8.))
-                            .bg(p.field)
-                            .border_1()
-                            .border_color(p.fail_line)
-                            .mono(11.5)
-                            .text_color(p.mute)
-                            .child(SharedString::from(output.clone()))
-                            .test_support(),
-                    )
-                    .child(
-                        div().flex().justify_end().child(
-                            Button::secondary(
-                                ElementId::Name(format!("retry-{name}").into()),
-                                if self.busy == Some(Busy::Preparing) {
-                                    "Preparing again…"
-                                } else {
-                                    "Prepare again"
-                                },
-                            )
-                            .disabled(self.busy.is_some())
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.perform(Busy::Preparing, cx)),
-                            ),
-                        ),
-                    ),
-            ),
+        let output = match &self.data.preparation {
+            Preparation::Failed { output, .. } => Some(SharedString::from(output.clone())),
             _ => None,
+        };
+        let failure = {
+            let (name, again) = (
+                name.to_owned(),
+                cx.listener(|this: &mut Self, _, _, cx| this.perform(Busy::Preparing, cx)),
+            );
+            let busy = self.busy;
+            let (field, fail_line, mute) = (p.field, p.fail_line, p.mute);
+            presence_of(
+                ElementId::Name(format!("failure-{name}").into()),
+                output,
+                move |output| {
+                    div()
+                        .px(space::MD)
+                        .pt(space::XS)
+                        .flex()
+                        .flex_col()
+                        .gap(space::SM)
+                        .child(
+                            div()
+                                .id(ElementId::Name(format!("failure-output-{name}").into()))
+                                .max_h(px(160.))
+                                .overflow_y_scroll()
+                                .py(space::SM)
+                                .px(space::MD)
+                                .rounded(px(8.))
+                                .bg(field)
+                                .border_1()
+                                .border_color(fail_line)
+                                .mono(11.5)
+                                .text_color(mute)
+                                .child(output)
+                                .test_support(),
+                        )
+                        .child(
+                            div().flex().justify_end().child(
+                                Button::secondary(
+                                    ElementId::Name(format!("retry-{name}").into()),
+                                    if busy == Some(Busy::Preparing) {
+                                        "Preparing again…"
+                                    } else {
+                                        "Prepare again"
+                                    },
+                                )
+                                .disabled(busy.is_some())
+                                .on_click(again),
+                            ),
+                        )
+                        .into_any_element()
+                },
+            )
         };
         Some(
             div()
@@ -1048,7 +1125,7 @@ impl PlaceCard {
                     cx,
                 ))
                 .children(rows)
-                .children(failure)
+                .child(failure)
                 .into_any_element(),
         )
     }
@@ -1190,18 +1267,31 @@ impl Render for PlaceCard {
             None => head.trailing(div().w(px(8.))),
         };
 
-        let mut lines = Block::new();
+        // Each block comes and goes with its line; its rows come and go inside it.
         let found = self.lines(&name, cx);
+        let mut lines = Block::new().present(id("lines-block"), !self.line_rows.is_empty());
         if !found.is_empty() {
             lines = lines.child(lines_block(found));
         }
-        let mut setup = Block::new();
-        if let Some(steps) = self.setup(&name, now, cx) {
+        let steps = self.setup(&name, now, cx);
+        let mut setup =
+            Block::new().present(id("setup-block"), !ready && !self.data.steps.is_empty());
+        if let Some(steps) = steps {
             setup = setup.child(steps);
         }
-        let mut sessions = Block::new();
-        if !self.data.sessions.is_empty() {
-            let rows = self.data.sessions.iter().map(|session| {
+        let (at, reduce) = (cx.background_executor().now(), cx.reduce_motion());
+        let listed = self.data.sessions.clone();
+        self.session_rows
+            .sync(listed.into_iter().map(|s| (s.id.clone(), s)), at, reduce);
+        let mut sessions =
+            Block::new().present(id("sessions-block"), !self.session_rows.is_empty());
+        if self.session_rows.rows().next().is_some() {
+            let shown: Vec<_> = self
+                .session_rows
+                .rows()
+                .map(|row| (row.value.clone(), row.placement))
+                .collect();
+            let rows = shown.into_iter().map(|(session, placement)| {
                 let shell = self.shell.clone();
                 let open = session.id.clone();
                 let meta = match session.agents {
@@ -1219,7 +1309,7 @@ impl Render for PlaceCard {
                         .child(SharedString::from(agents_label(n)))
                         .into_any_element(),
                 };
-                FlatRow::new(
+                let row = FlatRow::new(
                     ElementId::Name(format!("card-session-{}", session.id).into()),
                     SharedString::from(session.title.clone()),
                 )
@@ -1234,7 +1324,12 @@ impl Render for PlaceCard {
                             shell.open(Selection::Session(session), window, cx)
                         })
                         .ok();
-                })
+                });
+                Item::new(
+                    ElementId::Name(format!("session-item-{}", session.id).into()),
+                    placement,
+                    row,
+                )
             });
             sessions = sessions.child(
                 div()

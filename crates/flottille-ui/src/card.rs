@@ -3,7 +3,8 @@
 //!
 //! A [`Block`] is a part of a card that may have nothing to show (a workspace's links, its setup
 //! steps): the line between two parts is drawn only between two that exist, never twice and
-//! never under nothing.
+//! never under nothing. A block that comes and goes ([`Block::present`]) unfolds and folds away
+//! with its line.
 
 use gpui_kit::prelude::FluentBuilder as _;
 use std::sync::Arc;
@@ -13,6 +14,7 @@ use gpui_kit::{
     RenderOnce, SharedString, Styled, TestSupportExt, Window, div, px,
 };
 
+use crate::reveal::presence;
 use crate::theme::{palette, radius};
 use crate::typography::Type;
 
@@ -21,11 +23,20 @@ use crate::typography::Type;
 #[derive(Default)]
 pub struct Block {
     children: Vec<AnyElement>,
+    presence: Option<(ElementId, bool)>,
 }
 
 impl Block {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A block that comes and goes: it unfolds and fades in with its line when `present` turns
+    /// true, and folds away with it when it turns false, its children still given while it
+    /// folds. Built on every frame, also while absent.
+    pub fn present(mut self, id: impl Into<ElementId>, present: bool) -> Self {
+        self.presence = Some((id.into(), present));
+        self
     }
 
     pub fn has_content(&self) -> bool {
@@ -171,17 +182,31 @@ impl RenderOnce for Card {
                     .into_any_element(),
             );
         }
-        for block in self.blocks.into_iter().filter(Block::has_content) {
-            if !parts.is_empty() {
-                parts.push(separator());
+        // Something is drawn above: a block that is absent is not.
+        let mut above = !parts.is_empty();
+        for block in self.blocks {
+            let empty = !block.has_content();
+            let content = div().flex().flex_col().children(block.children);
+            match block.presence {
+                None if empty => {}
+                None => {
+                    if above {
+                        parts.push(separator());
+                    }
+                    parts.push(content.into_any_element());
+                    above = true;
+                }
+                Some((id, present)) => {
+                    // Its line is numbered only while it is there; folding away, it has none.
+                    let line = above.then(|| match present {
+                        true => separator(),
+                        false => div().flex_none().h(px(1.)).bg(p.line).into_any_element(),
+                    });
+                    let block = div().flex().flex_col().children(line).child(content);
+                    parts.push(presence(id, present, block).into_any_element());
+                    above |= present;
+                }
             }
-            parts.push(
-                div()
-                    .flex()
-                    .flex_col()
-                    .children(block.children)
-                    .into_any_element(),
-            );
         }
         div()
             .flex()

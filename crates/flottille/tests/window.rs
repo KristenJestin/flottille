@@ -8415,6 +8415,8 @@ fn a_workspace_card_shows_the_three_labelled_lines_only_when_they_have_something
         assert!(window.try_find("place-fix-login-separator-3").is_none());
         assert!(window.try_find("sessions-caption-plain").is_none());
     });
+    // Its lines arrived: nothing is drawn at rest.
+    assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 0);
 }
 
 #[gpui_kit::test]
@@ -8512,6 +8514,17 @@ fn a_preparing_workspace_lists_its_steps_and_their_states_change_with_motion(
             card.read_with(cx, |c, _| c.data().preparation == Preparation::Ready)
         })
     });
+    // Ready, its setup folds away with its line instead of vanishing.
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    assert!(
+        cx.update(|window, _| window.try_find("setup-onboarding").is_some()),
+        "the setup is still there while it folds"
+    );
+    assert!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)) > 0,
+        "the setup folds away"
+    );
     run_for(Duration::from_secs(1), cx);
     assert!(
         cx.update(|window, _| window.try_find("setup-onboarding").is_none()),
@@ -8581,6 +8594,8 @@ fn a_run_row_opens_the_run_drawer_and_escape_closes_it(cx: &mut TestAppContext) 
     settle(cx);
     assert!(cx.update(|window, _| window.try_find("run-drawer-panel").is_none()));
     assert!(tasks.read_with(cx, |t, cx| t.panel().read(cx).run().is_none()));
+    // Gone, it asks for no frame: nothing is drawn at rest.
+    assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 0);
 }
 
 #[gpui_kit::test]
