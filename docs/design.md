@@ -507,7 +507,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   judge (Auto asks like Ask)" among its choices), the providers, then the Judge guidance and the
   Rules for every project, both edited the same way; a judge Flottille picked is said once in a
   notice, with Open Settings and Dismiss;
-- a session page: the root's conversation, live (messages, the user's own as selectable as the agent's, thoughts collapsed, tool calls with
+- a session page: the root's conversation, live (messages, the user's own as selectable as the agent's, thoughts collapsed (their head says how long the thinking lasted, from the event before it
+  to the one after it, and no time when it lasted less than a tenth of a second), tool calls with
   their result, the children launched, reports, diffs), one compact line for each command a
   tool call ran (an icon, the line, how it ended, how long: a click opens the output panel the
   rail opens, and the output itself is only there), one line for each request that reached the
