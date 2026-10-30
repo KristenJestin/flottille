@@ -8,8 +8,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use flottille_ui::motion::{ENTER, HOVER, Motion, RISE};
 use flottille_ui::{
-    AgentState, Badge, Button, Drawer, Icon, ListRow, Side, StateIcon, Status, Type,
-    dismiss_on_navigate, dismiss_top_overlay, forget_overlays, icon, open_overlay, palette,
+    AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Side, StateIcon, Status, Type,
+    dismiss_on_navigate, dismiss_top_overlay, enter, forget_overlays, icon, open_overlay, palette,
 };
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
@@ -127,6 +127,9 @@ pub struct Shell {
     settings: Entity<SettingsPage>,
     /// The editor of the user's rules, on the settings page.
     rules: Entity<RulesEditor>,
+    /// The notice of the Auto judge Flottille picked was dismissed here, before the daemon says
+    /// it was seen.
+    judge_noticed: bool,
     /// The open project's settings page; made again for another project.
     project_settings: Option<Entity<ProjectSettingsPage>>,
     /// The form that adds a project, one for the window's life.
@@ -189,7 +192,9 @@ impl Shell {
         let top = cx.new(|_| TopBar::new(this.clone()));
         let sidebar = cx.new(|_| Sidebar::new(this.clone()));
         let rules = cx.new(|_| RulesEditor::new(this.clone(), None));
-        let settings = cx.new(|_| SettingsPage::new(this.clone(), rules.clone()));
+        let judge_guidance = cx.new(|_| RulesEditor::judge(this.clone()));
+        let settings =
+            cx.new(|_| SettingsPage::new(this.clone(), rules.clone(), judge_guidance.clone()));
         let main = {
             let (this, settings) = (this.clone(), settings.clone());
             cx.new(|cx| MainArea::new(this, settings, cx))
@@ -241,6 +246,7 @@ impl Shell {
             last_pick: None,
             settings,
             rules,
+            judge_noticed: false,
             project_settings: None,
             add_project,
             updates: Some(updates),
@@ -550,6 +556,10 @@ impl Shell {
             }
             Update::Done(outcome) => self.done(outcome, window, cx),
             Update::Providers(read, providers) => self.set_providers(read, providers, cx),
+            Update::TextChanged { judge: true, .. } => self.actions.send(Command::JudgeRead),
+            Update::TextChanged { project, .. } => {
+                self.actions.send(Command::RulesRead { project })
+            }
             // Only the open page's link is listened to: what an older one sends is dropped.
             Update::Session { token, update } => {
                 if let Some(page) = self.session_page.clone() {
@@ -799,6 +809,10 @@ impl Shell {
                     let section = page.read(cx).commands().clone();
                     section.update(cx, |section, cx| section.written(refused, cx));
                 }
+            }
+            Outcome::JudgeGuidance { written, shown } => {
+                let editor = self.settings.read(cx).judge_guidance().clone();
+                editor.update(cx, |editor, cx| editor.answered(shown, written, window, cx));
             }
             Outcome::Rules {
                 project,
@@ -1083,7 +1097,12 @@ impl Shell {
                 composer.set_providers(&providers, default, last, cx)
             });
         }
+        // The notice of a judge Flottille picked comes and goes with them.
+        let notice = self.judge_notice();
         self.providers = providers;
+        if self.judge_notice() != notice {
+            cx.notify();
+        }
     }
 
     /// The providers as the daemon last listed them.
@@ -1310,6 +1329,83 @@ impl Shell {
         }
     }
 
+    /// The sentence of the notice that says which Auto judge Flottille picked, while the user
+    /// has not seen it.
+    pub fn judge_notice(&self) -> Option<String> {
+        if self.judge_noticed || !self.providers.judge_picked {
+            return None;
+        }
+        let (name, model) = self.providers.judge.as_ref()?;
+        let title = self
+            .providers
+            .get(name)
+            .map_or(name.as_str(), |p| p.title.as_str());
+        let model = model.as_deref().unwrap_or("default model");
+        Some(format!(
+            "Flottille chose {title} {model} as your Auto judge: {title} is installed and signed \
+             in here. In Auto, it decides the calls the rules do not know, on your quota. Change \
+             it, or choose no judge, in Settings."
+        ))
+    }
+
+    /// The notice was seen: it goes, and the daemon is told, so that it never comes back.
+    pub fn dismiss_judge_notice(&mut self, cx: &mut Context<Self>) {
+        if !self.judge_noticed {
+            self.judge_noticed = true;
+            self.actions.send(Command::JudgeNoticed);
+            cx.notify();
+        }
+    }
+
+    fn judge_notice_card(&self, text: String, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let buttons = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(div().flex_1())
+            .child(
+                Button::secondary("judge-notice-dismiss", "Dismiss")
+                    .on_click(cx.listener(|this, _, _, cx| this.dismiss_judge_notice(cx))),
+            )
+            .child(
+                Button::primary("judge-notice-open", "Open Settings").on_click(cx.listener(
+                    |this, _, window, cx| {
+                        this.dismiss_judge_notice(cx);
+                        this.open(Selection::Settings, window, cx);
+                    },
+                )),
+            );
+        let body = div()
+            .px(px(14.))
+            .py(px(12.))
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(
+                div()
+                    .id("judge-notice-text")
+                    .aria_label(SharedString::from(text.clone()))
+                    .text_size(px(12.5))
+                    .text_color(p.mute)
+                    .child(SharedString::from(text))
+                    .test_support(),
+            )
+            .child(buttons);
+        div()
+            .id("judge-notice")
+            .absolute()
+            .bottom(px(16.))
+            .right(px(16.))
+            .w(px(380.))
+            .child(enter(
+                "judge-notice-enter",
+                0,
+                Card::new().title("Auto judge chosen").child(body),
+            ))
+            .test_support()
+    }
+
     /// Opens a project's page or a session's: a choice made in a drawer closes it.
     pub fn open(&mut self, selection: Selection, window: &mut Window, cx: &mut Context<Self>) {
         self.select(selection, window, cx);
@@ -1363,6 +1459,7 @@ impl Shell {
         if selection == Selection::Settings && self.selected != Some(Selection::Settings) {
             self.actions.send(Command::ReadProviders);
             self.actions.send(Command::RulesRead { project: None });
+            self.actions.send(Command::JudgeRead);
         }
         let page = self.page_of(&selection, cx);
         self.selected = Some(selection);
@@ -1600,6 +1697,9 @@ impl Render for Shell {
             }))
             .child(self.top.clone())
             .child(body)
+            .when_some(self.judge_notice(), |d, text| {
+                d.child(self.judge_notice_card(text, cx))
+            })
             .child(self.add_project.clone())
             .when(bell_drawn, |d| {
                 let scrim = div()

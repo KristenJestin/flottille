@@ -23,6 +23,7 @@ mod inbox;
 mod inbox_command;
 mod judge;
 mod mcp;
+mod nofollow;
 mod opencode;
 mod pilot;
 mod place;
@@ -185,6 +186,11 @@ enum Command {
 
 #[derive(Subcommand)]
 enum ProviderAction {
+    /// Each provider, whether its agents can run, and the Auto judge
+    List {
+        #[arg(long)]
+        json: bool,
+    },
     /// Let agents run on it
     Enable { name: String },
     /// Start no more agents on it: those running now go on, and fail at their next start
@@ -254,6 +260,16 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Doctor { json } => return agent_command::doctor(&paths, json),
         Command::Provider { action } => {
             let (method, name) = match action {
+                ProviderAction::List { json } => {
+                    let answer = Client::connect_or_start(&paths)?
+                        .request("provider.list", serde_json::json!({}))?;
+                    if json {
+                        println!("{answer}");
+                    } else {
+                        print!("{}", providers::list_text(&answer));
+                    }
+                    return Ok(ExitCode::SUCCESS);
+                }
                 ProviderAction::Enable { name } => ("provider.enable", name),
                 ProviderAction::Disable { name } => ("provider.disable", name),
             };

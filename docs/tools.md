@@ -81,12 +81,47 @@ A path is resolved this way:
 - relative to the place's top, or to a repository's folder when the call names `repository`
   (one of the project's repositories by its path, else
   `refused: the project has no repository X: it has …`); `~` is the home folder;
-- `.` and `..` are taken on the text first: a path that is not under the place as written is
-  outside, and the disk is not looked at;
-- then the real path: every link is followed, at most 32; a missing file is its real folder and
-  its name, and a dangling link leads to its target. A link that leads out is outside; anything
-  that cannot be resolved is outside;
+- then the real path, on the disk, in the order the kernel takes it: every link is followed (at
+  most 40, as Linux does), and each `..` steps up from where the links before it led, so
+  `src/cfg/../x` is beside where `src/cfg` leads, never `src/x` when `src/cfg` is a link. A
+  missing file is its real folder and its name, and a dangling link leads to its target; a part
+  the kernel would not find (missing, a name too long, a name below a file) is taken as written
+  with what follows it. A `..` after such a part is refused by the file tools (`refused: X names
+  a folder that does not exist and then goes up out of it: …`): the kernel would fail it too. A
+  run's word holding one is often no path at all (`sed 's/a/../'`, a message, a URL), and makes
+  the run to judge; but a program may make the missing folder first (`install -D`), so a `..`
+  after a missing part cancels it and the word is followed on, on the disk, and checked where it
+  then leads like any other (`install -D f m/../../.ssh/x` is base). After a part that can never
+  be made (a name too long, below a file), nothing can be followed on the disk, but a program
+  that takes `..` on the text (`git restore`, `python3 -m zipfile`) still reaches the path as
+  written: the word is checked as written (`git restore -- <a long name>/../.env` is base).
+  Each part is looked at in the folder opened before
+  it, as the kernel walks, so a path whose links expand past the longest path the kernel takes at
+  once is still followed. Below `/proc`, links are not followed: `/proc/self` is the reading
+  program's own; a `..` below `/proc` goes where such a link leads (`/proc/net/..` is
+  `/proc/self`), so it is taken as going through a process's folder. A link that leads out is
+  outside, shown where it leads; a path that cannot be followed (more than 40 links, a folder
+  that cannot be read) is outside, and base (below);
 - containment is by segments: `..notes` is a name inside, `../x` a step out.
+
+**What the gate guarantees to the file tools.** They open the real path the gate checked, and
+nothing else: every open (`fs_read`, `fs_list`, `fs_write`, `fs_edit`, the freshness check before
+a write, `search`) goes by descriptors, without following any link (`openat2` with
+`RESOLVE_NO_SYMLINKS`, or, where the kernel lacks it, each folder opened in turn with
+`O_NOFOLLOW`). The real path holds no link, so a link met on the way means a folder changed since
+the check: the call is refused (`refused: X: the path changed since it was checked; nothing was
+done`), and nothing of where it now leads is read, shown or made. `search` opens each file below
+its top folder's descriptor, never out of it (`RESOLVE_BENEATH`); a write opens its folder (and
+makes the missing ones, a folder at a time, each in the one opened before), then makes its
+temporary file and renames it in that open folder. A path that goes through a process's folder in
+`/proc` is never opened, whoever allowed it, and neither is one through `/proc/self` under another
+name (`/proc/mounts`, `/proc/net/…`), which would be the daemon's own (`refused: X goes through …:
+Flottille's file tools never open a path through a process's folder in /proc`); one the gate could
+not follow for another reason, once the user allowed it, is opened as written, and refused if a
+link stands on its way.
+
+A run's program resolves its own paths: the gate's checks on the words of a run are a first
+filter, not a guarantee of what the program will open.
 
 Paths are shown relative to the place's top.
 
@@ -102,7 +137,9 @@ Paths are shown relative to the place's top.
 
 **Only regular files are read.** `fs_read` and `fs_edit` refuse a pipe, a socket or a device
 (`refused: X is not a regular file …`), which would hold the call forever; `search` skips them.
-Files are opened without waiting, so that even one swapped for a pipe meanwhile is refused.
+A file is looked at first (`O_PATH`), and opened to read only once it is known to be a regular
+file, and then must be the same file: a device or a pipe is never opened. A folder that is only
+gone through needs only the permission to search it, as for the kernel.
 
 **Optimistic writes, per session.** Reading a file (any page) or writing it keeps its SHA-256 for
 the agent, in the store (`session_files`), so it holds across restarts; the text of a file of
@@ -117,15 +154,14 @@ the agent, in the store (`session_files`), so it holds across restarts; the text
 - removed since: `refused: X was removed since this session read it; nothing was written`.
 
 A write goes to a temporary file `.<name>.<id>.flottille` beside the file, with the file's mode,
-renamed over it: a link is replaced, never written through. The file's folder is checked to be
-inside the place on the disk after it is made and again just before the rename, so that a folder
-swapped for a link to the outside meanwhile is refused (`refused: X: its folder is no longer
-inside this agent's place …`, nothing written). A check is not a lock: a swap between the last
-check and the rename is not seen. The file's folder is checked to be
-inside the place on the disk after it is made and again just before the rename, so that a folder
-swapped for a link to the outside meanwhile is refused
-(`refused: X: its folder is no longer inside this agent's place …`, nothing written). A check is
-not a lock: a swap between it and the rename is not seen.
+renamed over it: a link is replaced, never written through. Its folder is the one the gate
+checked, opened without following a link (above): a folder swapped for a link meanwhile is
+refused, and nothing is made or written where it leads.
+
+A path outside the place, which the judge allowed, is resolved again when the tool starts: when it
+now leads where the gate would hold the call as base (a folder swapped for a link to Flottille's
+own while the judge thought), it is refused (`refused: X: the path changed since it was allowed
+(…); nothing was done`). From there on, no link is followed.
 
 ## Skills
 
@@ -522,7 +558,27 @@ says who answers a call to judge (`docs/design.md` §7.1).
      `.pypirc`, `.git-credentials`, `.local/share/keyrings`, `Library/Keychains` and the agents'
      logins (`.claude`, `.claude.json`, `.codex`, `.local/share/opencode`) wherever they sit along
      the path, `/etc/shadow`, `/etc/sudoers`, `/etc/sudoers.d`, and Flottille's own folders (data,
-     configuration, state, runtime). Inside the place only what sits below it counts;
+     configuration, state, runtime). Inside the place only what sits below it counts. A path
+     outside is checked as written and where it leads (a link anyone made, a configuration
+     folder that is a link, a `..` after a link), against Flottille's folders as named and
+     resolved;
+   - a write, a move or a removal of a folder above Flottille's own (`mv ~/.config ~/c.bak`, `rm
+     -r` of it, `fs_write` over it), which would take its configuration or data away: by a file
+     tool that writes, or by a run that is not known to only read and names it as a word (the
+     folder a run starts in may hold Flottille's: a project in the home folder). What deletes the
+     untracked files without naming where counts the folder it takes them from: the folder it
+     runs in (after its `-C`s) for a `git clean`, the top of its worktree for a `git stash` with
+     `-u`, `--include-untracked`, `-a` or `--all`, and for a `git clean` of a pathspec from the
+     top (`:/`, `:(top)`, `:(top,…)`). That top is the `--work-tree` it names, else found on the
+     disk as git finds it: the nearest folder holding a `.git`, up from the one it runs in,
+     inside the place or not (a home folder that is a repository);
+   - a path in `/proc` through what of any process leads elsewhere on the disk: its `root`,
+     `cwd`, `fd`, `exe` or `map_files` (`/proc/self/root/…`, `/proc/<pid>/cwd/…`), under any
+     name it is reached by (`/dev/fd/3`, a link to `/proc/self/cwd`; `/dev/stdin` for a file
+     tool). The words of a run that name its own streams or nothing (`/dev/stdin`,
+     `/dev/stdout`, `/dev/stderr`, `/dev/null`, `/dev/fd/0` to `/dev/fd/2`) are harmless;
+   - a path that cannot be followed on the disk (more than 40 links, a folder that cannot be
+     read): where it leads is not known;
    - a recursive deletion that would take a repository: `rm` with `-r`, `-R` or `--recursive`,
      and `find` with `-delete` (or `-exec rm -r`), when a target, resolved from the folder the
      run starts in, is the place's folder, a repository's, or a folder above one (`rm -rf .`,
@@ -645,8 +701,9 @@ says who answers a call to judge (`docs/design.md` §7.1).
    (`alias.<name> = push`) is run by git itself, and the gate sees only the alias's name.
    Running a script the agent wrote is itself a line to judge.
 
-The words of a line that name paths (every word but the program, an option's value after `=`, a
-`NAME=value`'s value) are resolved from the folder the run starts in, as a file tool's path is.
+The words of a line that name paths (every word but the program, an option's value after `=`,
+what follows each letter of short options, whose value may be attached as in `-Dt<folder>` or
+`-o<file>`, a `NAME=value`'s value) are resolved from the folder the run starts in, as a file tool's path is.
 
 **In Auto**, a call to judge first goes to the judge, when one is chosen (`docs/design.md` §7.1):
 an `allow` performs it at once, recorded as an `agent.tool_served` whose `gate` is `judged` and

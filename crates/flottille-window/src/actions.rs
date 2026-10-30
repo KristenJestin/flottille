@@ -88,6 +88,16 @@ pub enum Command {
     },
     /// Reads the providers again: `providers.toml` is the user's to edit by hand too.
     ReadProviders,
+    /// The user saw the notice of the Auto judge Flottille picked (`provider.judge_noticed`);
+    /// the providers are read again.
+    JudgeNoticed,
+    /// The Auto judge's guidance (`judge.show`).
+    JudgeRead,
+    /// Saves the judge's guidance, or with no text resets it to the default (`judge.set`,
+    /// `judge.reset`).
+    JudgeWrite {
+        text: Option<String>,
+    },
     CreateWorkspace {
         project: String,
         name: String,
@@ -517,6 +527,12 @@ pub enum Outcome {
         name: String,
         read: Result<SkillInfo, String>,
     },
+    /// The judge's guidance as the daemon says it, after a read (`written` false) or a save or
+    /// a reset.
+    JudgeGuidance {
+        written: bool,
+        shown: Result<Shown, String>,
+    },
     /// The rules as the daemon says them, after a read (`written` false) or a save or a reset.
     Rules {
         project: Option<String>,
@@ -787,6 +803,29 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 Ok(Err(why)) | Err(why) => Some(why),
             };
             Outcome::JudgeSet { refused }
+        }
+        Command::JudgeNoticed => {
+            // Shown or not, the notice goes once it was seen: the providers say it.
+            let _ = ask_alone(connect, "provider.judge_noticed", json!({}), bounds.quick);
+            let read = crate::providers::next_read();
+            Outcome::Providers(read, read_providers(connect, bounds.quick))
+        }
+        Command::JudgeRead => {
+            let shown = ask_alone(connect, "judge.show", json!({}), bounds.quick);
+            Outcome::JudgeGuidance {
+                shown: shown.and_then(|shown| shown).map(|shown| Shown::of(&shown)),
+                written: false,
+            }
+        }
+        Command::JudgeWrite { text } => {
+            let shown = match &text {
+                Some(text) => ask_alone(connect, "judge.set", json!({"text": text}), bounds.quick),
+                None => ask_alone(connect, "judge.reset", json!({}), bounds.quick),
+            };
+            Outcome::JudgeGuidance {
+                shown: shown.and_then(|shown| shown).map(|shown| Shown::of(&shown)),
+                written: true,
+            }
         }
         Command::ReadProviders => {
             let read = crate::providers::next_read();

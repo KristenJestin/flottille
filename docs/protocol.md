@@ -273,6 +273,29 @@ own (the `rules` key of its file, where it stands, what is around it kept).
 A change to the user's rules emits `rules.changed {project: null}`; a project's emits
 `project.changed` like any edit of its file.
 
+### The judge methods
+
+`judge.show`, `judge.set` and `judge.reset` read, write and reset the Auto judge's guidance
+(`docs/design.md` §7.1): how it weighs a call, the part of its instructions the user edits. The
+user's is `judge.md` in Flottille's configuration folder, absent while Flottille's default
+(`crates/flottille/roles/judge.md`) holds. It is read at each judgement: a change reaches the next
+one. The guidance sits between two fixed parts of the judge's instructions
+(`crates/flottille/roles/judge-base.md`), and it changes nothing of what reaches the judge (base
+calls never do) nor of what its answer may be (`allow` or `ask`).
+
+- `judge.show` answers `{"text", "source", "error", "default"}`: the guidance the next judgement
+  follows, its `source` (`default`, or `global` for the user's), why the judge cannot follow the
+  user's (`null` when it can), and Flottille's default. `judge.md` that cannot be read, is not a
+  regular file, is not UTF-8 text or holds more than 4,000 characters is an `error`, `text` being
+  what of it could be read (no more than 4,000 characters can take is ever read): until it is
+  fixed, every judgement fails with that reason, and so asks. A `judge.md` of only spaces is the
+  default, as an empty `judge.set` is.
+- `judge.set {text}` writes the text and answers as `judge.show`. `refused` above 4,000
+  characters. An empty text, or only spaces, resets it as `judge.reset` does.
+- `judge.reset` removes the file and answers as `judge.show`.
+
+Each emits `judge.changed`. The user's door alone reaches them: no tool of an agent does.
+
 ### The skill methods
 
 A project's skills (`docs/skills.md`). The daemon edits the project's file in place, the rest of it
@@ -902,8 +925,9 @@ on the model a new session takes when none is asked, once one said it. `models_o
 when they were said by another version of the program or with other API keys set: they are listed
 as they were, but refuse no model and no effort until a session says them again. `project` is there only when one is named; its `provider` is `null` when
 none is enabled, its `model` `null` when the project names none. `judge` is the Auto judge the user
-chose (`provider.set_judge`), its `model` `null` for the provider's default, or `null` when none is
-chosen. `not-found` when the project
+chose (`provider.set_judge`) or Flottille picked, its `model` `null` for the provider's default,
+`"picked": true` while the user has not seen the notice of a judge Flottille picked, or `null` when
+there is none. `not-found` when the project
 does not exist; `invalid-config` when `providers.toml` cannot be read (the sentence names the key
 at fault).
 
@@ -929,12 +953,29 @@ the file is then left as it is.
 `{"provider", "model"?}`. Chooses the Auto judge (`docs/design.md` §7.1): the provider whose agent
 judges the calls to judge of sessions in Auto, and its model (the provider's default when left
 out or empty); `provider` `null` chooses none, and Auto then asks the user as Ask does. The daemon
-writes `[judge]` in `providers.toml` (`provider`, `model`), or removes it, the rest of the file
+writes `[judge]` in `providers.toml` (`provider`, `model`), or `judge = "none"` for none, so that
+no judge is ever picked for a user who chose none; the rest of the file is
 kept as `provider.enable` keeps it, and answers `{"judge"}`, as `provider.list` gives it. When this
 changes the file it emits `provider.judge_changed`. `not-found` when there is no provider of that
 name; `invalid-config` when `providers.toml` cannot be read. The provider is checked when it
 judges: one not enabled or not ready makes each judgement fail, which asks the user. The user's
 door alone reaches it: no tool of an agent chooses the judge.
+
+When `providers.toml` says nothing of the judge (no `[judge]`, no `judge = "none"`), the daemon
+picks one, at its start and at the first call to judge after a provider became ready: the
+smallest model of the first provider, in Flottille's order, that is enabled, installed (its program
+on `PATH`) and signed in where Flottille can see it, among those whose smallest model Flottille
+knows (`providers::SMALLEST`: Claude's `haiku`). It writes `[judge]` once, with `picked = true`
+and a comment that says so, and emits `provider.judge_changed`. Until `judge = "none"` existed,
+choosing no judge removed `[judge]`: when the last `provider.judge_changed` in the store names no
+judge, the daemon writes `judge = "none"` and picks nothing. When it names one (the user's, or one
+picked), a `[judge]` removed by hand is no choice of none: a judge is picked again.
+
+### `provider.judge_noticed`
+
+`{}`. The user saw the notice of the judge Flottille picked: the daemon removes `picked` from
+`[judge]`, which stays the user's judge, and emits `provider.judge_changed`. Answers `{}`; nothing
+changes when the judge was not picked.
 
 ### `inbox.list`
 

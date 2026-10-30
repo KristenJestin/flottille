@@ -35,6 +35,12 @@ pub enum Update {
     /// A fresh read of the providers (`provider.list`), with the read's number
     /// (`providers::next_read`).
     Providers(u64, crate::providers::Providers),
+    /// The user's rules (of a project, or theirs for every project when `None`) or the Auto
+    /// judge's guidance (`judge` true) changed, from any client: their editor reads them again.
+    TextChanged {
+        judge: bool,
+        project: Option<String>,
+    },
     /// What the open session page's link read or saw, with the link's token.
     Session {
         token: u64,
@@ -137,6 +143,9 @@ fn follow(
         if about_providers(event) {
             providers.get_or_insert_with(Instant::now);
         }
+        if let Some(changed) = text_changed(event) {
+            let _ = updates.unbounded_send(changed);
+        }
     };
     loop {
         // Everything that came already, then a short quiet (or a short while at most), before
@@ -167,6 +176,21 @@ fn follow(
 /// session opened, which says the models its provider offers.
 fn about_providers(event: &Event) -> bool {
     event.name.starts_with("provider.") || event.name == "agent.started"
+}
+
+/// What an event says of an edited text an editor shows (`Update::TextChanged`).
+fn text_changed(event: &Event) -> Option<Update> {
+    match event.name.as_str() {
+        "judge.changed" => Some(Update::TextChanged {
+            judge: true,
+            project: None,
+        }),
+        "rules.changed" => Some(Update::TextChanged {
+            judge: false,
+            project: event.data["project"].as_str().map(str::to_owned),
+        }),
+        _ => None,
+    }
 }
 
 /// The providers' reads, one at a time: they run on a thread and a connection of their own, with

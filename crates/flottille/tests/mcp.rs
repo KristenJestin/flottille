@@ -564,6 +564,7 @@ fn dot_dot_notes_is_inside_and_dot_dot_slash_x_is_outside() {
     std::fs::write(folder.join("..notes"), "inside\n").unwrap();
     std::fs::write(folder.parent().unwrap().join("x"), "outside\n").unwrap();
     std::os::unix::fs::symlink(folder.parent().unwrap().join("x"), folder.join("link")).unwrap();
+    std::fs::create_dir_all(folder.join("src")).unwrap();
 
     assert!(ok(mcp.call("fs_read", json!({"path": "..notes"}))).contains("inside"));
     for path in [
@@ -576,6 +577,12 @@ fn dot_dot_notes_is_inside_and_dot_dot_slash_x_is_outside() {
         let text = held(mcp.call("fs_read", json!({"path": path})));
         assert!(!text.contains("outside\n"), "never read: {text}");
     }
+    // Up out of a folder that is not there: the kernel would not find it either.
+    let text = refused(mcp.call("fs_read", json!({"path": "missing/../../x"})));
+    assert!(
+        text.contains("names a folder that does not exist and then goes up out of it"),
+        "{text}"
+    );
     held(mcp.call("fs_write", json!({"path": "../y", "content": "y"})));
     assert!(!folder.parent().unwrap().join("y").exists());
     let text = refused(mcp.call("fs_read", json!({"path": "README.md", "repository": "web"})));

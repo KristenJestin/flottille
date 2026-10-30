@@ -25,6 +25,7 @@ use crate::commands;
 use crate::deliveries;
 use crate::forge;
 use crate::inbox;
+use crate::judge;
 use crate::mcp;
 use crate::projects::{self, Projects};
 use crate::providers;
@@ -149,6 +150,9 @@ pub struct Daemon {
     pub notes: deliveries::Notes,
     /// The agents waiting on their provider (overloaded, rate-limited): not stuck.
     pub waiting_provider: Mutex<HashSet<String>>,
+    /// Whether the last `provider.judge_changed` chose no judge, once read from the store: kept
+    /// with each one said since (`providers::judge_changed`).
+    pub judge_chose_none: Mutex<Option<bool>>,
     /// The slots launches took in each project's children cap, before their child exists.
     pub launching: Mutex<HashMap<String, usize>>,
     /// What the forges said of each workspace, and who watches them.
@@ -292,6 +296,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         mcp: mcp::Server::new(tools.local_addr()?.port()),
         notes: deliveries::Notes::default(),
         waiting_provider: Mutex::new(HashSet::new()),
+        judge_chose_none: Mutex::new(None),
         launching: Mutex::new(HashMap::new()),
         forges: forge::Forges::default(),
         stopping: watch::Sender::new(false),
@@ -318,6 +323,9 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     runs::settle_at_start(&daemon);
     approvals::settle_at_start(&daemon);
     projects::migrate_files(&daemon);
+    let picking = daemon.clone();
+    // Files written: off the daemon's workers.
+    let _ = tokio::task::spawn_blocking(move || providers::pick_judge(&picking)).await;
     tokio::spawn(mcp::serve(
         daemon.clone(),
         tools,
@@ -658,6 +666,13 @@ fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) 
         }
         method if method.starts_with("inbox.") => (
             match inbox::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+            },
+            None,
+        ),
+        method if method.starts_with("judge.") => (
+            match judge::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => Message::error(Some(id), failure.code, failure.message),
             },

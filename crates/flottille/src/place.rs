@@ -1,18 +1,61 @@
 //! Where an agent works, and how the paths it names are resolved and contained
 //! (`docs/tools.md`, `docs/reference/hemera.md` §3 "Path resolution").
 //!
-//! "Outside" is decided on the text first: a path that is not under the place as written is never
-//! looked up. A path under it is then resolved on the disk, links followed (at most 32), and
-//! contained by its segments: `..notes` is a name inside, `../x` a step out.
+//! A path is resolved on the disk, links and `..` followed in the order the kernel follows them (at
+//! most 40 links), and contained by its segments: `..notes` is a name inside, `../x` a step out.
+//! `src/cfg/../x` is where `src/cfg` leads, then up: never `src/x` when `src/cfg` is a link.
 
 use std::collections::BTreeMap;
-use std::io::ErrorKind;
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Component, Path, PathBuf};
 
 use flottille_core::secrets;
+use rustix::fs::{AtFlags, FileType, Mode};
+use rustix::io::Errno;
 
-/// Links followed at most, resolving one path.
-const LINKS_MAX: usize = 32;
+use crate::nofollow;
+
+/// Links followed at most, resolving one path: Linux follows 40.
+const LINKS_MAX: usize = 40;
+
+/// The longest name of one part of a path Linux takes; a longer one is not there.
+const NAME_MAX: usize = 255;
+
+/// What a process's folder in `/proc` holds that leads elsewhere: its root, its working folder,
+/// its open files, its program, its mapped files.
+pub const LEADS_ELSEWHERE: [&str; 5] = ["root", "cwd", "fd", "exe", "map_files"];
+
+/// Why a path could not be followed to where it leads.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Unfollowed {
+    /// It goes through a process's folder in `/proc` that leads elsewhere (`LEADS_ELSEWHERE`),
+    /// under whatever name it was reached.
+    Through(PathBuf),
+    /// The disk would not let it be followed: more than `LINKS_MAX` links, a folder it may not
+    /// look into.
+    Failed(String),
+    /// It names what the kernel could never make, a name too long or a part below a file, then
+    /// goes up out of it: a malformed path, which the kernel refuses too, and whose later parts
+    /// the gate cannot follow.
+    UpFromMissing,
+}
+
+impl std::fmt::Display for Unfollowed {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Unfollowed::Through(process) => write!(
+                f,
+                "goes through {}, which leads anywhere on the disk",
+                process.display()
+            ),
+            Unfollowed::Failed(why) => write!(f, "could not be followed on the disk ({why})"),
+            Unfollowed::UpFromMissing => {
+                f.write_str("names a folder that does not exist and then goes up out of it")
+            }
+        }
+    }
+}
 
 /// The place of an agent: its folder, the project's repositories in it, and what a command run
 /// there is given.
@@ -38,9 +81,31 @@ pub struct Place {
 pub struct Resolved {
     /// As the place shows it: relative to its folder when inside, `~/…` or absolute when not.
     pub shown: String,
-    /// Absolute: the real path when inside, the path as written when outside.
+    /// Absolute: the real path, every link and `..` followed, which the tools open; the path as
+    /// written when it cannot be followed (`unfollowed`).
     pub path: PathBuf,
     pub inside: bool,
+    /// Absolute, as written: `.` and `..` taken on the text. Checked by its names too.
+    pub written: PathBuf,
+    /// Why where the path leads is not known.
+    pub unfollowed: Option<Unfollowed>,
+    /// It names a folder that does not exist, then goes up out of it: `path` is where it leads
+    /// once a program makes that folder (`install -D`), which the kernel alone would refuse.
+    pub up_from_missing: bool,
+}
+
+impl Resolved {
+    /// A path known to be inside, already real.
+    pub fn real_inside(shown: String, path: PathBuf) -> Resolved {
+        Resolved {
+            shown,
+            written: path.clone(),
+            path,
+            inside: true,
+            unfollowed: None,
+            up_from_missing: false,
+        }
+    }
 }
 
 impl Place {
@@ -94,41 +159,73 @@ impl Place {
             }
             _ => PathBuf::from(named),
         };
-        let written = lexical(&base.join(expanded));
-        let real_root = std::fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
-        if !written.starts_with(&self.root) && !written.starts_with(&real_root) {
-            return self.outside(written);
-        }
-        match real_path(&written) {
-            Ok(real) => match real.strip_prefix(&real_root) {
-                Ok(relative) => Resolved {
-                    shown: shown_inside(relative),
-                    path: real,
-                    inside: true,
-                },
-                // A link that leads out: outside, and shown where it leads.
-                Err(_) => self.outside(real),
-            },
-            // Anything that cannot be resolved is not taken for inside.
-            Err(_) => self.outside(written),
-        }
+        self.at(&base.join(expanded))
     }
 
-    fn outside(&self, path: PathBuf) -> Resolved {
-        Resolved {
-            shown: self.shown_outside(&path),
-            path,
+    /// An absolute path, resolved.
+    pub fn at(&self, joined: &Path) -> Resolved {
+        let written = lexical(joined);
+        let real_root = std::fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
+        let unfollowed = |why: Unfollowed| Resolved {
+            shown: self.shown_outside(&written),
+            path: written.clone(),
             inside: false,
+            written: written.clone(),
+            unfollowed: Some(why),
+            up_from_missing: false,
+        };
+        match follow(joined) {
+            Ok(Followed {
+                through: Some(process),
+                up_from_missing,
+                ..
+            }) => Resolved {
+                up_from_missing,
+                ..unfollowed(Unfollowed::Through(process))
+            },
+            Ok(Followed {
+                path: real,
+                up_from_missing,
+                ..
+            }) => match real.strip_prefix(&real_root) {
+                Ok(relative) => Resolved {
+                    shown: shown_inside(relative),
+                    path: real.clone(),
+                    inside: true,
+                    written,
+                    unfollowed: None,
+                    up_from_missing,
+                },
+                // A link that leads out: outside, and shown where it leads.
+                Err(_) => Resolved {
+                    shown: self.shown_outside(&real),
+                    path: real,
+                    inside: false,
+                    written,
+                    unfollowed: None,
+                    up_from_missing,
+                },
+            },
+            // Anything that cannot be resolved is neither inside nor known.
+            Err(why) => unfollowed(why),
         }
     }
 
     /// A path outside the place, with the home folder as `~`.
     fn shown_outside(&self, path: &Path) -> String {
-        match self.home.as_deref().map(|home| path.strip_prefix(home)) {
-            Some(Ok(rest)) if rest.as_os_str().is_empty() => "~".into(),
-            Some(Ok(rest)) => format!("~/{}", rest.display()),
-            _ => path.display().to_string(),
+        let homes = self
+            .home
+            .iter()
+            .flat_map(|home| [Some(home.clone()), std::fs::canonicalize(home).ok()])
+            .flatten();
+        for home in homes {
+            match path.strip_prefix(&home) {
+                Ok(rest) if rest.as_os_str().is_empty() => return "~".into(),
+                Ok(rest) => return format!("~/{}", rest.display()),
+                Err(_) => {}
+            }
         }
+        path.display().to_string()
     }
 
     /// The values of the files holding secrets (`.env`, `.env.*`) at the top of the place and of
@@ -152,13 +249,6 @@ impl Place {
             }
         }
         values
-    }
-
-    /// Whether `path` is inside the place on the disk now, every link followed: `resolve` decides
-    /// at a moment, and a folder can be swapped for a link after it.
-    pub fn holds(&self, path: &Path) -> bool {
-        let real_root = std::fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
-        std::fs::canonicalize(path).is_ok_and(|real| real.starts_with(&real_root))
     }
 
     /// How a path inside the place is shown.
@@ -194,59 +284,165 @@ fn lexical(path: &Path) -> PathBuf {
     out
 }
 
+/// A path followed on the disk.
+pub struct Followed {
+    /// The real path; below a process's folder in `/proc`, as written from there.
+    pub path: PathBuf,
+    /// The first of a process's folders in `/proc` that leads elsewhere (`LEADS_ELSEWHERE`) the
+    /// path went through, under whatever name it was reached (`/dev/fd`, a link).
+    pub through: Option<PathBuf>,
+    /// It went up out of a folder that does not exist (`Resolved::up_from_missing`).
+    pub up_from_missing: bool,
+}
+
 /// The real path, every link followed (at most `LINKS_MAX`); a missing part and what follows it
 /// are taken as written, so a file about to be made resolves to its real folder and its name. A
 /// dangling link resolves to its target.
-fn real_path(path: &Path) -> std::io::Result<PathBuf> {
+pub fn real_path(path: &Path) -> std::io::Result<PathBuf> {
+    follow(path)
+        .map(|followed| followed.path)
+        .map_err(|why| std::io::Error::other(why.to_string()))
+}
+
+/// `real_path`, saying which process's folder in `/proc` it went through. Below `/proc`, links
+/// are not followed: `/proc/self` is the reader's own, which is not Flottille's, and what a
+/// process's folder leads to is its own; a `..` there is where such a link leads, so the path
+/// goes through it. A missing part and its `..` cancel out, as when a program makes that folder
+/// first (`install -D`): the walk goes on from the folder before it, on the disk. A `..` after a
+/// part the kernel could never make (too long a name, below a file) is refused, since nothing
+/// after it can be followed.
+///
+/// Each part is looked at in the folder opened before it, as the kernel walks: the whole path,
+/// links expanded, may be longer than it takes in one name.
+pub fn follow(path: &Path) -> Result<Followed, Unfollowed> {
+    let failed = |error: Errno| Unfollowed::Failed(std::io::Error::from(error).to_string());
     let mut pending: Vec<PathBuf> = path
         .components()
         .rev()
         .map(|c| PathBuf::from(c.as_os_str()))
         .collect();
     let mut real = PathBuf::from("/");
+    // The open folders of `real`, `/` first; `file` when its last part is not a folder.
+    let root = rustix::fs::open("/", nofollow::THROUGH, Mode::empty()).map_err(failed)?;
+    let mut folders = vec![root];
+    let mut file = false;
     let mut links = 0;
-    let mut missing = false;
+    // The missing parts at the end of `real`, which have no open folder; `unmade` when one of
+    // them could never be made.
+    let mut missing = 0;
+    let mut unmade = false;
+    let mut up_from_missing = false;
+    let mut through = None;
     while let Some(part) = pending.pop() {
         match part.components().next() {
             Some(Component::RootDir) => {
                 real = PathBuf::from("/");
+                folders.truncate(1);
+                file = false;
+                missing = 0;
+                unmade = false;
                 continue;
             }
             Some(Component::CurDir) | None => continue,
+            Some(Component::ParentDir) if unmade => return Err(Unfollowed::UpFromMissing),
+            Some(Component::ParentDir) if missing > 0 => {
+                missing -= 1;
+                up_from_missing = true;
+                real.pop();
+                continue;
+            }
+            Some(Component::ParentDir)
+                if real.starts_with("/proc") && real != Path::new("/proc") =>
+            {
+                let process = through.unwrap_or_else(|| real.clone());
+                return Ok(Followed {
+                    path: real,
+                    through: Some(process),
+                    up_from_missing,
+                });
+            }
             Some(Component::ParentDir) => {
+                if file {
+                    file = false;
+                } else if folders.len() > 1 {
+                    folders.pop();
+                }
                 real.pop();
                 continue;
             }
             _ => {}
         }
         let next = real.join(&part);
-        if missing {
+        if missing == 0 && real.starts_with("/proc") {
+            real = next;
+            if through.is_none() && leads_elsewhere(&real) {
+                through = Some(real.clone());
+            }
+            continue;
+        }
+        let name = part.as_os_str();
+        if file || name.len() > NAME_MAX {
+            missing += 1;
+            unmade = true;
             real = next;
             continue;
         }
-        match std::fs::symlink_metadata(&next) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                links += 1;
-                if links > LINKS_MAX {
-                    return Err(std::io::Error::other("too many links"));
+        if missing > 0 {
+            missing += 1;
+            real = next;
+            continue;
+        }
+        let folder = folders.last().expect("`/` is never left");
+        match rustix::fs::statat(folder, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => match FileType::from_raw_mode(stat.st_mode) {
+                FileType::Symlink => {
+                    links += 1;
+                    if links > LINKS_MAX {
+                        return Err(Unfollowed::Failed(format!("more than {LINKS_MAX} links")));
+                    }
+                    let target =
+                        rustix::fs::readlinkat(folder, name, Vec::new()).map_err(failed)?;
+                    let target = PathBuf::from(OsString::from_vec(target.into_bytes()));
+                    pending.extend(
+                        target
+                            .components()
+                            .rev()
+                            .map(|c| PathBuf::from(c.as_os_str())),
+                    );
                 }
-                let target = std::fs::read_link(&next)?;
-                pending.extend(
-                    target
-                        .components()
-                        .rev()
-                        .map(|c| PathBuf::from(c.as_os_str())),
-                );
-            }
-            Ok(_) => real = next,
-            Err(error) if error.kind() == ErrorKind::NotFound => {
-                missing = true;
+                FileType::Directory => {
+                    let opened = rustix::fs::openat(folder, name, nofollow::THROUGH, Mode::empty())
+                        .map_err(failed)?;
+                    folders.push(opened);
+                    real = next;
+                }
+                _ => {
+                    file = true;
+                    real = next;
+                }
+            },
+            Err(Errno::NOENT) => {
+                missing = 1;
                 real = next;
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(failed(error)),
         }
     }
-    Ok(real)
+    Ok(Followed {
+        path: real,
+        through,
+        up_from_missing,
+    })
+}
+
+/// Whether a path is a process's folder in `/proc` that leads elsewhere, or below one.
+fn leads_elsewhere(path: &Path) -> bool {
+    let Ok(rest) = path.strip_prefix("/proc") else {
+        return false;
+    };
+    rest.components()
+        .skip(1)
+        .any(|part| LEADS_ELSEWHERE.contains(&part.as_os_str().to_string_lossy().as_ref()))
 }
 
 #[cfg(test)]
@@ -283,7 +479,22 @@ mod tests {
         }
         assert_eq!(place.resolve(&root, "~/x").shown, "~/x");
         assert_eq!(place.resolve(&root, ".").shown, ".");
+        std::fs::create_dir(root.join("a")).unwrap();
         assert!(place.resolve(&root, "a/../b").inside);
+        // Up out of a folder that is not there: where it leads once that folder is made.
+        let up = place.resolve(&root, "m/n/../../b");
+        assert!(up.up_from_missing && up.inside && up.unfollowed.is_none());
+        assert_eq!(up.shown, "b");
+        assert!(!place.resolve(&root, "a/../b").up_from_missing);
+        // Below a file, or too long a name: it can never be made.
+        std::fs::write(root.join("f"), "").unwrap();
+        for path in ["f/x/../b".to_owned(), format!("{}/../b", "n".repeat(300))] {
+            assert_eq!(
+                place.resolve(&root, &path).unfollowed,
+                Some(Unfollowed::UpFromMissing),
+                "{path}"
+            );
+        }
     }
 
     #[test]

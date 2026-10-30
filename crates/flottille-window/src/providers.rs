@@ -76,6 +76,8 @@ pub struct Providers {
     /// The Auto judge the user chose: its provider and its model (the provider's default when
     /// none).
     pub judge: Option<(String, Option<String>)>,
+    /// Flottille picked the judge, and the user has not seen the notice that says so yet.
+    pub judge_picked: bool,
 }
 
 fn text(value: &Value) -> Option<String> {
@@ -179,12 +181,14 @@ impl Providers {
                 known: true,
                 judge: text(&answer["judge"]["provider"])
                     .map(|provider| (provider, text(&answer["judge"]["model"]))),
+                judge_picked: answer["judge"]["picked"] == true,
             },
             Err(error) => Providers {
                 list: Vec::new(),
                 error: Some(error),
                 known: true,
                 judge: None,
+                judge_picked: false,
             },
         }
     }

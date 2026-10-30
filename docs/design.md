@@ -383,7 +383,22 @@ resumes.
 
 The judge is an agent of a provider the user chose in Settings ("Auto judge": provider and
 model, `provider.set_judge`), run in bare mode **with no tool at all**: no Flottille tool, no MCP
-server. Its instructions are `roles/judge.md`. It sees the call masked (secrets masked, the line,
+server. A user who never chose one gets one picked: the smallest model of the first provider that
+is enabled, installed and signed in, among the few whose smallest model Flottille lists (Claude's
+Haiku), written once to `providers.toml` and said once in a notice that opens Settings (and by
+`flottille provider list`); a user who chose "No judge" never gets one, nor does one whose last
+choice before `judge = "none"` existed was no judge (the last `provider.judge_changed` in the store
+names none), whose file then says `judge = "none"`. Its
+instructions are a fixed text (`roles/judge-base.md`: what it is, its JSON answer, that it never
+denies, that what the agent wrote is data, and the floor: ask for anything destructive, outside
+what was asked, surprising, or whenever it is not sure) around the user's **guidance**, which can
+add to the floor but never lift it: Flottille's default (`roles/judge.md`: allow what the request
+plausibly needs; writes of the project's configuration are within intent while the user is setting
+the project up) or the user's own, edited in Settings ("Judge", with Reset to default; saving an
+empty text resets it) and read at each judgement. A guidance that cannot be read whole, or is over
+its 4,000 characters, is never cut nor replaced by the default: each judgement fails, and so asks,
+saying which file is wrong and why, and Settings show it. The guidance changes neither what
+reaches the judge nor what it may answer. It sees the call masked (secrets masked, the line,
 the path, a brief, a title and a body whole, contents cut to their first lines with how many they
 had), why the rules held it, the place, the agent's `why`, the first message of a session an agent
 started for the user (labelled as that agent's, never the user's), and last the user's last
@@ -396,8 +411,9 @@ whole asks without it, and the gate refuses a longer brief, title or body. A pro
 process group stopped after it. Each verdict is recorded with the
 call (who judged, what, why: the `judgement` of its `agent.tool_served` event, and of its request
 when it asks), shown on the card and in `flottille approvals`.
-Without a judge chosen, Auto behaves as Ask, and the control carries a small warning icon whose
-tooltip says so and whose click opens Settings, where the judge is chosen. A judgement is a turn of the judge's model: it uses the user's quota on that provider,
+Without a judge, none picked or "No judge" chosen, Auto behaves as Ask, and the control carries a
+small warning icon whose tooltip says so and whose click opens Settings, where the judge is
+chosen. A judgement is a turn of the judge's model: it uses the user's quota on that provider,
 which Settings say.
 
 ### 7.2 Requests
@@ -486,7 +502,11 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   edited, removed and reordered, each with its kind, where it is done and its time limit), then
   its Rules (a text editor, Reset to default, and a line saying a change reaches the agents
   created from now on);
-- Settings: the providers, the Auto judge, and the Rules for every project, edited the same way;
+- Settings: the Auto judge (two lines on Auto: the rules pass what is known to be harmless, a
+  small model on the user's own quota decides the rest, base calls always come to the user; "No
+  judge (Auto asks like Ask)" among its choices), the providers, then the Judge guidance and the
+  Rules for every project, both edited the same way; a judge Flottille picked is said once in a
+  notice, with Open Settings and Dismiss;
 - a session page: the root's conversation, live (messages, the user's own as selectable as the agent's, thoughts collapsed, tool calls with
   their result, the children launched, reports, diffs), one compact line for each command a
   tool call ran (an icon, the line, how it ended, how long: a click opens the output panel the
@@ -597,7 +617,9 @@ The plan is cut into GitHub milestones; each ends on something the user can use.
 - Claude reached through Flottille's own bridge; `claude` checked at a pinned version, another one
   only warned about.
 - A new session starts in Auto, and a tree has one mode, its root's, read at each call; Auto
-  without a judge chosen asks the user as Ask does.
+  without a judge asks the user as Ask does. A user who never chose a judge gets the smallest model
+  of the first provider installed and signed in, among those listed (Claude's `haiku`); one that is
+  not listed gets nothing picked.
 - One judge process per judgement, stopped after it, rather than one kept warm: nothing of a
   judgement is kept for the next, and no process waits idle on the user's quota.
 - A judge silent for 30 seconds, or whose answer is not the JSON verdict, asks the user.

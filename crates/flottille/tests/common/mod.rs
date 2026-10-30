@@ -26,6 +26,17 @@ const GIT_ENV: [(&str, &str); 6] = [
     ("GIT_COMMITTER_EMAIL", "test@example.invalid"),
 ];
 
+/// The variables and folders the providers take a sign-in from.
+const SIGN_INS: [&str; 7] = [
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_ACCESS_TOKEN",
+    "CODEX_HOME",
+    "OPENAI_API_KEY",
+];
+
 /// A throwaway user: its own home and XDG folders, and the daemon it starts, stopped on drop.
 pub struct User {
     dir: TempDir,
@@ -641,7 +652,13 @@ fn command_for(program: &Path, dir: &Path, env: &[(String, String)], args: &[&st
         .env("XDG_CONFIG_HOME", dir.join("config"))
         .env("XDG_DATA_HOME", dir.join("data"))
         // Codex's machine settings are the test's own, not the machine's `/etc/codex`.
-        .env("FLOTTILLE_CODEX_MACHINE_SETTINGS", dir.join("etc-codex"))
+        .env("FLOTTILLE_CODEX_MACHINE_SETTINGS", dir.join("etc-codex"));
+    // No sign-in of the machine: a provider is signed in only where a test says so, and the
+    // daemon picks no Auto judge on the strength of the developer's own.
+    for name in SIGN_INS {
+        command.env_remove(name);
+    }
+    command
         .envs(env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::null());
     // The daemon runs git: never with the machine's settings.

@@ -82,6 +82,12 @@ impl Paths {
         self.config.join("rules.md")
     }
 
+    /// How the user wants the Auto judge to judge (`docs/design.md` §7.1); absent while they
+    /// keep Flottille's default.
+    pub fn judge(&self) -> PathBuf {
+        self.config.join("judge.md")
+    }
+
     /// The images the user sent to an agent, one folder per agent: never the project's.
     pub fn images(&self, agent: &str) -> PathBuf {
         self.data.join("images").join(agent)

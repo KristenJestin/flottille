@@ -1950,6 +1950,7 @@ dependencies = [
  "hyper-util",
  "libc",
  "rmcp",
+ "rustix",
  "rustls",
  "semver",
  "serde",

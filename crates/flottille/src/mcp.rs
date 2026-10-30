@@ -1263,14 +1263,16 @@ async fn played(
                 verdict = Some(decided.word());
                 match decided {
                     gate::Verdict::Allow => {
-                        perform(daemon, grant, tool, args, cancelled, false).await
+                        perform(daemon, grant, tool, args, cancelled, None).await
                     }
                     gate::Verdict::Deny(why) => Outcome::Refused(why),
                     gate::Verdict::Ask(ask) => {
                         // In Auto, the judge decides a call to judge; base never reaches it, and
                         // without a judge chosen Auto asks as Ask does.
                         let judged = match (ask.class, judge::mode(daemon, &grant.agent)) {
-                            (gate::Class::Judge, GateMode::Auto) => match judge::chosen(daemon) {
+                            (gate::Class::Judge, GateMode::Auto) => match judge::chosen(daemon)
+                                .await
+                            {
                                 Some(chosen) => Some(
                                     judge::judge(daemon, &chosen, grant, tool, &args, &ask.reasons)
                                         .await,
@@ -1283,7 +1285,8 @@ async fn played(
                         match judged {
                             Some(judged) if judged.verdict == "allow" => {
                                 verdict = Some("judged");
-                                perform(daemon, grant, tool, args, cancelled, true).await
+                                let approved = Some(gate::Class::Judge);
+                                perform(daemon, grant, tool, args, cancelled, approved).await
                             }
                             judged => {
                                 approvals::ask(daemon, grant, tool, &args, key, ask, says, judged)
@@ -1516,17 +1519,19 @@ fn pushed(place: &Place, folder: Option<&Resolved>) -> bool {
     }
 }
 
-/// Performs a call the user allowed, recorded as the agent's: the request's answer.
+/// Performs a call the user allowed, of its class, recorded as the agent's: the request's answer.
 pub async fn performed(
     daemon: &Arc<Daemon>,
     grant: &Arc<Grant>,
     tool: &str,
     args: Value,
     request: u64,
+    class: gate::Class,
 ) -> Outcome {
     let started = Instant::now();
     let recorded = record_of(&args, &grant.place);
-    let outcome = perform(daemon, grant, tool, args, CancellationToken::new(), true).await;
+    let cancelled = CancellationToken::new();
+    let outcome = perform(daemon, grant, tool, args, cancelled, Some(class)).await;
     let verdict = Some("allow");
     record(
         daemon,
@@ -1610,15 +1615,15 @@ fn reached(
     }
 }
 
-/// Performs a call the gate let through; `approved` when the user allowed it, which lets its
-/// paths be outside the place.
+/// Performs a call the gate let through; `approved` with its class when the user or the judge
+/// allowed it, which lets its paths be outside the place.
 async fn perform(
     daemon: &Arc<Daemon>,
     grant: &Arc<Grant>,
     tool: &str,
     args: Value,
     cancelled: CancellationToken,
-    approved: bool,
+    approved: Option<gate::Class>,
 ) -> Outcome {
     match tool {
         "run" => {
@@ -1627,7 +1632,7 @@ async fn perform(
                 &grant.agent,
                 &grant.place,
                 args,
-                approved,
+                approved.is_some(),
                 cancelled,
             )
             .await

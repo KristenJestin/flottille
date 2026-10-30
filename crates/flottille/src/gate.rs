@@ -13,7 +13,7 @@ use flottille_core::project::Task;
 use serde_json::Value;
 
 use crate::mcp::Grant;
-use crate::place::Resolved;
+use crate::place::{self, Resolved, Unfollowed};
 
 /// A call, as the gate sees it.
 pub struct Call<'a> {
@@ -297,6 +297,9 @@ pub fn decide(call: &Call) -> Verdict {
 
 /// A file tool: reading inside the place, and writing in a workspace, are harmless.
 fn files(call: &Call) -> Verdict {
+    if let Some(why) = malformed(call.paths) {
+        return Verdict::Deny(why);
+    }
     let write = WRITES.contains(&call.tool);
     let mut found = Found::default();
     for path in call.paths {
@@ -306,6 +309,9 @@ fn files(call: &Call) -> Verdict {
                  repository or run code at its next command",
                 path.shown
             ));
+        }
+        if write && let Some(why) = above_own(call.own, path) {
+            found.base(why);
         }
         if let Some(why) = process(call.groups, path) {
             found.base(why);
@@ -644,7 +650,7 @@ fn run(call: &Call) -> Verdict {
     let git_word = layers
         .iter()
         .flat_map(|layer| &layer[1..])
-        .filter_map(|word| named_paths(word))
+        .flat_map(|word| named_paths(word))
         .find(|named| {
             Path::new(named)
                 .components()
@@ -653,8 +659,44 @@ fn run(call: &Call) -> Verdict {
     if let Some(word) = git_word {
         found.base(format!("{word} reaches a .git folder, which git keeps"));
     }
-    let reached = reached(call, &layers);
+    let named = named(call, &layers);
+    let mut reached = call.paths.to_vec();
+    reached.extend(
+        named
+            .iter()
+            .map(|(_, path)| path)
+            .filter(|path| !call.paths.contains(path))
+            .cloned(),
+    );
     for path in &reached {
+        // A word that goes up out of a folder that is not there is often no path at all (a
+        // `sed` expression, a message, a URL), and the judge reads it as written. A program may
+        // make that folder first (`install -D`): it is checked where it then leads. One the
+        // kernel could never make, a program that takes `..` on the text still reaches
+        // (`git restore`, `python3 -m zipfile`): it is checked as written.
+        let unmade = path.unfollowed == Some(Unfollowed::UpFromMissing);
+        let written;
+        let path = if unmade {
+            written = as_written(path);
+            &written
+        } else {
+            path
+        };
+        if unmade || path.up_from_missing {
+            let word = named
+                .iter()
+                .find(|(_, named)| named == path)
+                .map_or(path.shown.as_str(), |(word, _)| word);
+            found.judge(format!(
+                "{word} {}{}",
+                Unfollowed::UpFromMissing,
+                if unmade {
+                    ": the gate cannot tell where it leads"
+                } else {
+                    ""
+                }
+            ));
+        }
         if in_git(path) {
             found.base(format!(
                 "{} is in a .git folder, which git keeps",
@@ -665,7 +707,7 @@ fn run(call: &Call) -> Verdict {
             found.base(why);
         } else if let Some(place) = sensitive(call.own, path) {
             found.base(format!("{} is a sensitive place ({place})", path.shown));
-        } else if !path.inside {
+        } else if !path.inside && !unmade {
             found.judge(format!("{} is outside this agent's place", path.shown));
         }
     }
@@ -728,7 +770,149 @@ fn run(call: &Call) -> Verdict {
             shown_words(call.words)
         ));
     }
+    // The words only: a run's own folder holding Flottille's (a project in the home folder) is
+    // where it works, not what it takes away.
+    if !reads {
+        for (_, path) in &named {
+            let written;
+            let path = if path.unfollowed == Some(Unfollowed::UpFromMissing) {
+                written = as_written(path);
+                &written
+            } else {
+                path
+            };
+            if let Some(why) = above_own(call.own, path) {
+                found.base(why);
+            }
+        }
+    }
+    // What deletes untracked files names none: the folder it runs in, or its whole worktree, is
+    // what it takes away.
+    if let Some(folder) = call.paths.first() {
+        let place = &call.grant.place;
+        let removals = layers
+            .iter()
+            .flat_map(|layer| suffixes(layer))
+            .filter_map(|(_, layer)| removes_untracked(layer));
+        for removal in removals {
+            let mut runs_in = folder.path.clone();
+            for chdir in &removal.chdirs {
+                runs_in = place.resolve(&runs_in, chdir).path;
+            }
+            let taken = match (removal.reach, removal.work_tree) {
+                (Untracked::Folder, _) => runs_in,
+                (Untracked::Worktree, Some(tree)) => place.resolve(&runs_in, tree).path,
+                (Untracked::Worktree, None) => top(&runs_in),
+            };
+            if let Some(why) = above_own(call.own, &place.at(&taken)) {
+                found.base(why);
+                break;
+            }
+        }
+    }
     found.verdict(Kind::Call)
+}
+
+/// A layer that deletes untracked files: where, the folders its `-C`s go to from the run's, and
+/// the worktree its `--work-tree` names.
+struct Removal<'a> {
+    reach: Untracked,
+    chdirs: Vec<&'a str>,
+    work_tree: Option<&'a str>,
+}
+
+/// Where a layer deletes untracked files.
+#[derive(Debug, PartialEq)]
+enum Untracked {
+    /// In the folder it runs in: `git clean`.
+    Folder,
+    /// In the whole worktree: a `git stash` that takes them (`-u`, `--include-untracked`, `-a`,
+    /// `--all`), a `git clean` of a pathspec from the top (`:/`, `:(top)`).
+    Worktree,
+}
+
+/// Whether a layer deletes untracked files, and where.
+fn removes_untracked(layer: &[String]) -> Option<Removal<'_>> {
+    if base(&layer[0]) != "git" {
+        return None;
+    }
+    let args = &layer[1..];
+    let (at, globals) = git_globals(args);
+    let rest = args.get(at + 1..).unwrap_or_default();
+    let reach = match args.get(at).map(String::as_str) {
+        Some("clean") if rest.iter().any(|word| from_top(word)) => Some(Untracked::Worktree),
+        Some("clean") => Some(Untracked::Folder),
+        Some("stash")
+            if rest.iter().take_while(|word| *word != "--").any(|word| {
+                abbreviates(word, "include-untracked", 1) || abbreviates(word, "all", 1)
+            }) || shorts(rest).any(|short| short.contains(['u', 'a'])) =>
+        {
+            Some(Untracked::Worktree)
+        }
+        _ => None,
+    }?;
+    let valued = |name: &'static str| {
+        globals
+            .iter()
+            .filter(move |(option, _)| *option == name)
+            .filter_map(|(_, value)| *value)
+    };
+    Some(Removal {
+        reach,
+        chdirs: valued("-C").collect(),
+        work_tree: valued("--work-tree").next_back(),
+    })
+}
+
+/// Whether a pathspec is taken from the top of the worktree: the magic `/` in its short form
+/// (`:/`, `:!/x`), `top` in its long one (`:(top,exclude)`).
+fn from_top(word: &str) -> bool {
+    let Some(magic) = word.strip_prefix(':') else {
+        return false;
+    };
+    match magic.strip_prefix('(') {
+        Some(long) => long
+            .split(')')
+            .next()
+            .is_some_and(|list| list.split(',').any(|word| word.trim() == "top")),
+        None => magic
+            .chars()
+            .take_while(|c| "/!^".contains(*c))
+            .any(|c| c == '/'),
+    }
+}
+
+/// The top of the worktree that holds `folder`, as git finds it on the disk: the deepest folder
+/// from `/` to it that holds a `.git` (a folder, or a linked worktree's file), each looked at in
+/// the folder opened before it; `folder` itself when none does, where git would find no
+/// repository.
+fn top(folder: &Path) -> PathBuf {
+    use rustix::fs::{AtFlags, Mode};
+    let Ok(root) = rustix::fs::open("/", crate::nofollow::THROUGH, Mode::empty()) else {
+        return folder.to_owned();
+    };
+    let mut opened = vec![(PathBuf::from("/"), root)];
+    for part in folder
+        .components()
+        .filter(|part| matches!(part, std::path::Component::Normal(_)))
+    {
+        let (path, at) = opened.last().expect("`/` is opened first");
+        let Ok(next) = rustix::fs::openat(
+            at,
+            part.as_os_str(),
+            crate::nofollow::THROUGH,
+            Mode::empty(),
+        ) else {
+            break;
+        };
+        let path = path.join(part);
+        opened.push((path, next));
+    }
+    opened
+        .iter()
+        .rev()
+        .find(|(_, at)| rustix::fs::statat(at, ".git", AtFlags::SYMLINK_NOFOLLOW).is_ok())
+        .map_or_else(|| folder.to_owned(), |(path, _)| path.clone())
 }
 
 /// What a layer of a line does, by its program.
@@ -1212,11 +1396,8 @@ fn holds_secret(own: &[PathBuf], root: &Path, folder: &Path) -> Option<String> {
             let Ok(relative) = path.strip_prefix(root) else {
                 continue;
             };
-            let resolved = Resolved {
-                shown: relative.to_string_lossy().into_owned(),
-                path: path.clone(),
-                inside: true,
-            };
+            let resolved =
+                Resolved::real_inside(relative.to_string_lossy().into_owned(), path.clone());
             if let Some(place) = sensitive(own, &resolved) {
                 return Some(format!(
                     "which holds a sensitive file: {} ({place})",
@@ -1232,9 +1413,15 @@ fn holds_secret(own: &[PathBuf], root: &Path, folder: &Path) -> Option<String> {
     None
 }
 
-/// Why a path in `/proc` is base: a process's environment, with its secrets, or anything of a
-/// process that is not one of the agent's runs. The reading program's own (`self`) is its own.
-fn process(groups: &[u32], path: &Resolved) -> Option<String> {
+/// Why a path in `/proc` is base: what leads elsewhere (`place::LEADS_ELSEWHERE`) of any process, a
+/// process's environment, with its secrets, or anything of a process that is not one of the
+/// agent's runs. The reading program's own (`self`) is its own.
+pub fn process(groups: &[u32], path: &Resolved) -> Option<String> {
+    // Where it leads is not known: through a process's folder under another name, or a path the
+    // disk would not let the gate follow.
+    if let Some(why) = &path.unfollowed {
+        return Some(format!("{} {why}", path.shown));
+    }
     if path.inside {
         return None;
     }
@@ -1244,6 +1431,16 @@ fn process(groups: &[u32], path: &Resolved) -> Option<String> {
         .map(|part| part.as_os_str().to_string_lossy().into_owned())
         .collect();
     let process = parts.first()?;
+    if let Some(part) = parts[1..]
+        .iter()
+        .find(|part| place::LEADS_ELSEWHERE.contains(&part.as_str()))
+    {
+        return Some(format!(
+            "{} goes through a process's {part}, which leads anywhere on the disk, Flottille's \
+             own folders included",
+            path.shown
+        ));
+    }
     let id = process.parse::<u32>().ok();
     if id.is_none() && process != "self" && process != "thread-self" {
         return None;
@@ -2122,41 +2319,86 @@ fn split(
     Ok(Some(words))
 }
 
-/// The paths a call reaches: those its tool resolved and, for a run, every word of every layer
-/// that can name one, resolved from the folder it runs in (its program is wherever it is
-/// installed).
-fn reached(call: &Call, layers: &[Vec<String>]) -> Vec<Resolved> {
-    let mut reached = call.paths.to_vec();
+/// The paths a run's words name: every word of every layer that can name one, resolved from the
+/// folder it runs in (its program is wherever it is installed), but the run's own streams; each
+/// with the word that names it.
+fn named<'a>(call: &Call, layers: &'a [Vec<String>]) -> Vec<(&'a str, Resolved)> {
+    let mut named = Vec::new();
     let Some(folder) = call.paths.first().filter(|_| call.tool == "run") else {
-        return reached;
+        return named;
     };
     for word in layers.iter().flat_map(|layer| &layer[1..]) {
-        if let Some(named) = named_paths(word) {
-            let path = call.grant.place.resolve(&folder.path, named);
-            if !reached.contains(&path) {
-                reached.push(path);
+        for word in named_paths(word)
+            .into_iter()
+            .filter(|word| !STREAMS.contains(word))
+        {
+            let path = call.grant.place.resolve(&folder.path, word);
+            if !named.iter().any(|(_, named)| *named == path) {
+                named.push((word, path));
             }
         }
     }
-    reached
+    named
+}
+
+/// A path that could not be followed, taken as written: `..` on the text, as a program that
+/// never asks the kernel reaches it.
+fn as_written(path: &Resolved) -> Resolved {
+    Resolved {
+        path: path.written.clone(),
+        unfollowed: None,
+        ..path.clone()
+    }
+}
+
+/// What names the run's own streams, or nothing: harmless words of a run. Another of its open
+/// files (`/dev/fd/3`) may be anything.
+const STREAMS: [&str; 7] = [
+    "/dev/stdin",
+    "/dev/stdout",
+    "/dev/stderr",
+    "/dev/null",
+    "/dev/fd/0",
+    "/dev/fd/1",
+    "/dev/fd/2",
+];
+
+/// The refusal of a call that names a folder that does not exist and then goes up out of it: the
+/// kernel would fail it (`ENOENT`), and what follows cannot be followed.
+pub fn malformed(paths: &[Resolved]) -> Option<String> {
+    let path = paths
+        .iter()
+        .find(|path| path.up_from_missing || path.unfollowed == Some(Unfollowed::UpFromMissing))?;
+    Some(format!(
+        "refused: {} {}: name the path without going through a folder that is not there",
+        path.shown,
+        Unfollowed::UpFromMissing
+    ))
 }
 
 /// What a word of a line can name as a path: itself, an option's value after `=`, an
-/// assignment's value.
-fn named_paths(word: &str) -> Option<&str> {
+/// assignment's value. Short options may hold their value attached (`-Dt<folder>`,
+/// `-o<file>`): what follows each of their letters may be one.
+fn named_paths(word: &str) -> Vec<&str> {
+    let value = word.split_once('=').map(|(_, value)| value);
     if word.starts_with('-') {
-        return word
-            .split_once('=')
-            .map(|(_, value)| value)
-            .filter(|v| !v.is_empty());
+        let mut named: Vec<&str> = value.into_iter().collect();
+        if let Some(shorts) = word.strip_prefix('-').filter(|w| !w.starts_with('-')) {
+            named.extend(
+                shorts
+                    .char_indices()
+                    .take_while(|(_, c)| c.is_ascii_alphanumeric())
+                    .map(|(at, c)| &shorts[at + c.len_utf8()..])
+                    .filter(|rest| !rest.is_empty()),
+            );
+        }
+        named.retain(|v| !v.is_empty());
+        return named;
     }
     if assignment(word) {
-        return word
-            .split_once('=')
-            .map(|(_, value)| value)
-            .filter(|v| !v.is_empty());
+        return value.into_iter().filter(|v| !v.is_empty()).collect();
     }
-    Some(word).filter(|w| !w.is_empty())
+    Some(word).into_iter().filter(|w| !w.is_empty()).collect()
 }
 
 /// Whether a path is in a `.git` folder, or is one: what sits below the place when it is
@@ -2480,20 +2722,53 @@ fn checks_out_paths(call: &Call, rest: &[String]) -> bool {
 /// The sensitive place a path is in, if it is in one: inside the place, only what sits below it
 /// counts.
 pub fn sensitive(own: &[PathBuf], path: &Resolved) -> Option<String> {
-    let parts: Vec<String> = if path.inside {
-        Path::new(&path.shown)
-    } else {
-        if own.iter().any(|own| path.path.starts_with(own)) {
+    if path.inside {
+        return sensitive_names(Path::new(&path.shown));
+    }
+    // A path outside is taken as written and where it leads (`path.path`, every link and `..`
+    // followed): a link anyone made, `/proc/self/root`, a configuration folder that is a link.
+    let own = own_folders(own);
+    for path in [&path.written, &path.path] {
+        if own.iter().any(|own| path.starts_with(own)) {
             return Some("Flottille's own folder".into());
         }
-        if let Some(system) = SYSTEM_SENSITIVE.iter().find(|s| path.path.starts_with(s)) {
+        if let Some(system) = SYSTEM_SENSITIVE.iter().find(|s| path.starts_with(s)) {
             return Some((*system).into());
         }
-        path.path.as_path()
     }
-    .components()
-    .map(|part| part.as_os_str().to_string_lossy().into_owned())
-    .collect();
+    sensitive_names(&path.written).or_else(|| sensitive_names(&path.path))
+}
+
+/// Flottille's own folders, as named and as they are on the disk.
+fn own_folders(own: &[PathBuf]) -> Vec<PathBuf> {
+    own.iter()
+        .flat_map(|own| [Some(own.clone()), place::real_path(own).ok()])
+        .flatten()
+        .collect()
+}
+
+/// Why writing over, moving or removing a path would take Flottille's own folders away: it is one
+/// of them, or a folder above one.
+fn above_own(own: &[PathBuf], path: &Resolved) -> Option<String> {
+    let own = own_folders(own);
+    [&path.written, &path.path]
+        .iter()
+        .any(|path| own.iter().any(|own| own.starts_with(path)))
+        .then(|| {
+            format!(
+                "{} holds Flottille's own folders (its configuration, its data): writing over, \
+                 moving or removing it takes them away",
+                path.shown
+            )
+        })
+}
+
+/// The sensitive place a path names along its parts, if any.
+fn sensitive_names(path: &Path) -> Option<String> {
+    let parts: Vec<String> = path
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect();
     for (at, part) in parts.iter().enumerate() {
         if part == ".env"
             || (part.starts_with(".env.") && !TEMPLATES.iter().any(|t| part.ends_with(t)))
@@ -2547,6 +2822,8 @@ mod tests {
         /// Where the system's programs are: a folder beside the project, every known program in it.
         search: std::ffi::OsString,
         groups: Vec<u32>,
+        /// Where a run runs, relative to the place.
+        folder: String,
     }
 
     impl Fixture {
@@ -2599,6 +2876,7 @@ mod tests {
                 pushed: false,
                 search: bin.into_os_string(),
                 groups: Vec::new(),
+                folder: ".".into(),
             }
         }
 
@@ -2642,7 +2920,11 @@ mod tests {
                         None => (args["line"].as_str().unwrap().to_owned(), None),
                     };
                     let words = flottille_core::command::split_line(&line).unwrap_or_default();
-                    (words, vec![place.resolve(&self.root, ".")], command)
+                    (
+                        words,
+                        vec![place.resolve(&self.root, &self.folder)],
+                        command,
+                    )
                 }
                 // As `mcp::classify` resolves what a write sets.
                 _ => match crate::actions::sets(&self.commands, tool, &args) {
@@ -3677,6 +3959,605 @@ mod tests {
         assert!(base_class(
             &fixture.file("fs_read", &format!("/proc/{me}/environ"))
         ));
+    }
+
+    #[test]
+    fn a_path_through_a_process_s_root_cwd_or_files_in_proc_is_base() {
+        let mut fixture = Fixture::workspace();
+        let own = fixture.own[0].clone();
+        std::fs::create_dir_all(&own).unwrap();
+        let me = std::process::id();
+        // Even the agent's own runs: their root leads anywhere on the disk.
+        fixture.groups = vec![unsafe { libc::getpgid(0) } as u32];
+        let judge = own.join("judge.md");
+        let judge = judge.display();
+        for path in [
+            format!("/proc/self/root{judge}"),
+            format!("/proc/thread-self/root{judge}"),
+            format!("/proc/{me}/root{judge}"),
+            format!("/proc/1/root{judge}"),
+            format!("/proc/{me}/cwd/judge.md"),
+            "/proc/self/fd/3".into(),
+            format!("/proc/self/task/{me}/root{judge}"),
+            format!("/proc/{me}/exe"),
+        ] {
+            for tool in ["fs_write", "fs_edit", "fs_read"] {
+                let verdict = fixture.file(tool, &path);
+                assert!(base_class(&verdict), "{tool} {path}: {verdict:?}");
+            }
+        }
+        let verdict = fixture.run(&format!("cat /proc/self/root{judge}"));
+        assert!(base_class(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn flottille_s_own_folder_reached_through_a_link_is_base() {
+        let mut fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        // `XDG_CONFIG_HOME` (or `~/.config`) is a link: Flottille names its folder through it.
+        std::fs::create_dir_all(base.join("real-config/flottille")).unwrap();
+        std::fs::create_dir_all(base.join("xdg")).unwrap();
+        std::os::unix::fs::symlink(base.join("real-config"), base.join("xdg/config")).unwrap();
+        fixture.own = vec![base.join("xdg/config/flottille")];
+        let real = base.join("real-config/flottille/judge.md");
+        // A link the agent made outside its place, and one inside it, to Flottille's folder.
+        std::fs::create_dir_all(base.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(base.join("xdg/config"), base.join("elsewhere/link")).unwrap();
+        std::os::unix::fs::symlink(base.join("real-config"), fixture.root.join("src/link"))
+            .unwrap();
+        for path in [
+            real.display().to_string(),
+            base.join("elsewhere/link/flottille/judge.md")
+                .display()
+                .to_string(),
+            base.join("elsewhere/link/flottille/new/judge.md")
+                .display()
+                .to_string(),
+            "src/link/flottille/judge.md".into(),
+        ] {
+            for tool in ["fs_write", "fs_edit", "fs_read"] {
+                let verdict = fixture.file(tool, &path);
+                assert!(base_class(&verdict), "{tool} {path}: {verdict:?}");
+                assert!(
+                    reasons(&verdict).contains("Flottille's own folder"),
+                    "{tool} {path}: {verdict:?}"
+                );
+            }
+        }
+        // A sensitive place of the home through a link the agent made is still that place.
+        std::fs::create_dir_all(base.join("home/.ssh")).unwrap();
+        std::os::unix::fs::symlink(base.join("home/.ssh"), base.join("elsewhere/keys")).unwrap();
+        let path = base.join("elsewhere/keys/id_ed25519").display().to_string();
+        assert!(base_class(&fixture.file("fs_read", &path)));
+    }
+
+    const FS_TOOLS: [&str; 4] = ["fs_read", "fs_list", "fs_write", "fs_edit"];
+
+    #[test]
+    fn dot_dot_after_a_link_is_taken_where_the_link_leads() {
+        let fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        let home = base.join("home");
+        std::fs::create_dir_all(home.join(".config/nvim")).unwrap();
+        std::fs::create_dir_all(home.join(".config/gh")).unwrap();
+        std::fs::write(home.join(".config/gh/hosts.yml"), "token").unwrap();
+        std::fs::create_dir_all(&fixture.own[0]).unwrap();
+        std::fs::create_dir_all(base.join("xdg/data/other")).unwrap();
+        // Links inside the place, and one outside it.
+        std::os::unix::fs::symlink(home.join(".config/nvim"), fixture.root.join("src/cfg"))
+            .unwrap();
+        std::os::unix::fs::symlink(base.join("xdg/data/other"), fixture.root.join("src/data"))
+            .unwrap();
+        std::fs::create_dir_all(base.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(home.join(".config/nvim"), base.join("elsewhere/cfg")).unwrap();
+        std::os::unix::fs::symlink(base.join("xdg/data/other"), base.join("elsewhere/data"))
+            .unwrap();
+        let outside = |path: &str| base.join("elsewhere").join(path).display().to_string();
+
+        for (path, place) in [
+            ("src/cfg/../gh/hosts.yml".to_owned(), "~/.config/gh"),
+            (outside("cfg/../gh/hosts.yml"), "~/.config/gh"),
+            (
+                "src/data/../flottille/judge.md".to_owned(),
+                "Flottille's own folder",
+            ),
+            (
+                outside("data/../flottille/judge.md"),
+                "Flottille's own folder",
+            ),
+        ] {
+            for tool in FS_TOOLS {
+                let verdict = fixture.file(tool, &path);
+                assert!(base_class(&verdict), "{tool} {path}: {verdict:?}");
+                assert!(
+                    reasons(&verdict).contains(place),
+                    "{tool} {path}: {verdict:?}"
+                );
+            }
+            let verdict = fixture.run(&format!("cat {path}"));
+            assert!(base_class(&verdict), "cat {path}: {verdict:?}");
+            assert!(reasons(&verdict).contains(place), "cat {path}: {verdict:?}");
+        }
+        // What the tools open is what the gate checked: where the link leads.
+        let resolved = fixture
+            .grant
+            .place
+            .resolve(&fixture.root, "src/cfg/../gh/hosts.yml");
+        assert!(!resolved.inside);
+        assert_eq!(resolved.path, home.join(".config/gh/hosts.yml"));
+        // A `..` that stays inside is still inside.
+        assert_eq!(fixture.file("fs_read", "src/../src/a.rs"), Verdict::Allow);
+    }
+
+    #[test]
+    fn a_path_that_cannot_be_followed_is_base() {
+        let fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        std::fs::create_dir_all(&fixture.own[0]).unwrap();
+        let chain = base.join("chain");
+        std::fs::create_dir_all(&chain).unwrap();
+        // 33 links, then 41 (Linux follows 40), ending in Flottille's own folder.
+        let link_chain = |name: &str, links: usize| {
+            let mut target = fixture.own[0].clone();
+            for n in (0..links).rev() {
+                let link = chain.join(format!("{name}{n}"));
+                std::os::unix::fs::symlink(&target, &link).unwrap();
+                target = link;
+            }
+            target.join("judge.md").display().to_string()
+        };
+        let long = link_chain("a", 33);
+        let longer = link_chain("b", 41);
+
+        for tool in FS_TOOLS {
+            let verdict = fixture.file(tool, &long);
+            assert!(base_class(&verdict), "{tool}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains("Flottille's own folder"),
+                "{tool}: {verdict:?}"
+            );
+            let verdict = fixture.file(tool, &longer);
+            assert!(base_class(&verdict), "{tool}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains("could not be followed"),
+                "{tool}: {verdict:?}"
+            );
+        }
+        for path in [&long, &longer] {
+            let verdict = fixture.run(&format!("cat {path}"));
+            assert!(base_class(&verdict), "{verdict:?}");
+        }
+    }
+
+    #[test]
+    fn a_link_into_proc_under_another_name_is_base() {
+        let fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        std::fs::create_dir_all(base.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink("/proc/self/cwd", base.join("elsewhere/here")).unwrap();
+        std::os::unix::fs::symlink("/proc/self/cwd", fixture.root.join("src/here")).unwrap();
+        let here = base.join("elsewhere/here/judge.md").display().to_string();
+        for path in ["/dev/fd/3", "/dev/stdin", &here, "src/here/judge.md"] {
+            for tool in FS_TOOLS {
+                let verdict = fixture.file(tool, path);
+                assert!(base_class(&verdict), "{tool} {path}: {verdict:?}");
+            }
+            // A run's own streams are its own (`the_run_s_own_streams_are_harmless_words`).
+            if path != "/dev/stdin" {
+                let verdict = fixture.run(&format!("cat {path}"));
+                assert!(base_class(&verdict), "cat {path}: {verdict:?}");
+            }
+        }
+        // The reading program's own status is still its own.
+        assert!(!base_class(&fixture.run("cat /proc/self/status")));
+    }
+
+    #[test]
+    fn moving_or_removing_a_folder_above_flottille_s_own_is_base() {
+        let mut fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        let config = base.join("home/.config");
+        fixture.own = vec![config.join("flottille")];
+        std::fs::create_dir_all(config.join("flottille")).unwrap();
+        let shown = config.display();
+
+        for line in [
+            format!("mv {shown} {shown}.bak"),
+            format!("rm -r {}", base.join("home").display()),
+            format!("rm -r {shown}/../.config"),
+        ] {
+            let verdict = fixture.run(&line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains("Flottille's own folders"),
+                "{line}: {verdict:?}"
+            );
+        }
+        for path in [config.display().to_string(), "~/.config".to_owned()] {
+            let verdict = fixture.file("fs_write", &path);
+            assert!(base_class(&verdict), "{path}: {verdict:?}");
+        }
+        // Reading it is not taking it away.
+        assert!(to_judge(&fixture.run(&format!("ls {shown}"))));
+        assert!(to_judge(&fixture.file("fs_list", "~/.config")));
+    }
+
+    #[test]
+    fn a_missing_folder_followed_by_dot_dot_is_refused() {
+        let fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        let home = base.join("home");
+        std::fs::create_dir_all(home.join(".config/nvim")).unwrap();
+        std::fs::create_dir_all(&fixture.own[0]).unwrap();
+        std::os::unix::fs::symlink(home.join(".config/nvim"), fixture.root.join("src/cfg"))
+            .unwrap();
+        // `src/up` leads to the folder holding the work, the home and Flottille's folders.
+        std::os::unix::fs::symlink("../../..", fixture.root.join("src/up")).unwrap();
+        // A link whose own target goes up out of a folder that does not exist.
+        std::os::unix::fs::symlink("zz/../cfg", fixture.root.join("src/via")).unwrap();
+
+        for path in [
+            "m/../src/cfg/init.lua",
+            "m/../src/up/xdg/data/flottille/judge.md",
+            "src/via/init.lua",
+        ] {
+            for tool in FS_TOOLS {
+                let verdict = fixture.file(tool, path);
+                assert!(denied(&verdict), "{tool} {path}: {verdict:?}");
+                assert!(
+                    reasons(&verdict).contains("does not exist and then goes up out of it"),
+                    "{tool} {path}: {verdict:?}"
+                );
+            }
+            // A run's word is checked where it leads once the folder is made instead
+            // (`a_word_going_up_out_of_a_folder_a_program_can_make_…`): Flottille's own is base.
+            let verdict = fixture.run(&format!("cat {path}"));
+            if path.contains("flottille") {
+                assert!(base_class(&verdict), "cat {path}: {verdict:?}");
+            } else {
+                assert!(to_judge(&verdict), "cat {path}: {verdict:?}");
+            }
+        }
+        // Deciding made nothing on the disk.
+        assert!(!fixture.root.join("m").exists());
+        assert!(!fixture.root.join("src/zz").exists());
+        // A `..` out of a folder that exists is still followed.
+        assert_eq!(fixture.file("fs_read", "src/../src/a.rs"), Verdict::Allow);
+    }
+
+    #[test]
+    fn a_name_too_long_or_below_a_file_is_taken_as_written_not_base() {
+        let fixture = Fixture::workspace();
+        std::fs::write(fixture.root.join("src/a.rs"), "fn main() {}\n").unwrap();
+        let long = "word ".repeat(60);
+        for line in [
+            format!("git commit -m '{long}'"),
+            format!("echo '{long}'"),
+            "cat src/a.rs/x".to_owned(),
+        ] {
+            let verdict = fixture.run(&line);
+            assert!(!base_class(&verdict), "{line}: {verdict:?}");
+            assert!(!denied(&verdict), "{line}: {verdict:?}");
+        }
+        assert!(!base_class(&fixture.file("fs_read", "src/a.rs/x")));
+    }
+
+    #[test]
+    fn a_run_s_own_folder_above_flottille_s_folders_is_not_base() {
+        let mut fixture = Fixture::workspace();
+        // A project whose folder holds Flottille's own folders: a dotfiles repository.
+        fixture.own = vec![fixture.root.join("sub/flottille")];
+        std::fs::create_dir_all(&fixture.own[0]).unwrap();
+
+        for line in ["git commit -m x", "git add notes.md"] {
+            let verdict = fixture.run(line);
+            assert!(!base_class(&verdict), "{line}: {verdict:?}");
+        }
+        for line in [
+            format!("rm -r {}", fixture.root.join("sub").display()),
+            "rm -r sub".to_owned(),
+            "rm -r .".to_owned(),
+        ] {
+            let verdict = fixture.run(&line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains("Flottille's own folders"),
+                "{line}: {verdict:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_run_s_own_streams_are_harmless_words() {
+        let fixture = Fixture::workspace();
+        for stream in [
+            "/dev/stdin",
+            "/dev/stdout",
+            "/dev/stderr",
+            "/dev/null",
+            "/dev/fd/0",
+            "/dev/fd/1",
+            "/dev/fd/2",
+        ] {
+            let line = format!("tee {stream}");
+            let verdict = fixture.run(&line);
+            assert!(!base_class(&verdict), "{line}: {verdict:?}");
+            assert!(!reasons(&verdict).contains(stream), "{line}: {verdict:?}");
+        }
+        assert!(base_class(&fixture.run("tee /dev/fd/3")));
+        assert!(base_class(&fixture.run("cat /dev/fd/3")));
+    }
+
+    /// Makes `parts` as folders below the open folder `at`, one at a time, so that their whole
+    /// path may be longer than the kernel takes at once; returns the deepest, open.
+    fn folders_below(at: std::os::fd::BorrowedFd, parts: &[String]) -> std::os::fd::OwnedFd {
+        use rustix::fs::{Mode, OFlags};
+        let mut deepest = rustix::fs::openat(at, ".", OFlags::PATH, Mode::empty()).unwrap();
+        for part in parts {
+            rustix::fs::mkdirat(&deepest, part.as_str(), Mode::from_raw_mode(0o755)).unwrap();
+            deepest = rustix::fs::openat(
+                &deepest,
+                part.as_str(),
+                OFlags::PATH | OFlags::DIRECTORY,
+                Mode::empty(),
+            )
+            .unwrap();
+        }
+        deepest
+    }
+
+    #[test]
+    fn a_path_too_long_once_its_links_are_expanded_still_has_them_followed() {
+        use std::os::fd::AsFd;
+        let fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        std::fs::create_dir_all(base.join("home/.ssh")).unwrap();
+        std::fs::write(base.join("home/.ssh/id"), "fake key").unwrap();
+        // `src/a`, then `b` and `c` where it leads, each seven folders of 200 characters
+        // deeper: their whole expanded path is longer than the kernel takes at once, a part at
+        // a time it is not. `x` leads to the home's `.ssh`.
+        let chain = |letter: char| -> Vec<String> {
+            (1..=7)
+                .map(|n| format!("{n}{}", letter.to_string().repeat(199)))
+                .collect()
+        };
+        let root = std::fs::File::open(&fixture.root).unwrap();
+        let mut at = folders_below(root.as_fd(), &chain('a'));
+        std::os::unix::fs::symlink(
+            format!("../{}", chain('a').join("/")),
+            fixture.root.join("src/a"),
+        )
+        .unwrap();
+        for (link, letter) in [("b", 'b'), ("c", 'c')] {
+            let next = folders_below(at.as_fd(), &chain(letter));
+            rustix::fs::symlinkat(chain(letter).join("/"), &at, link).unwrap();
+            at = next;
+        }
+        rustix::fs::symlinkat(base.join("home/.ssh"), &at, "x").unwrap();
+
+        let verdict = fixture.run("cat src/a/b/c/x/id");
+        assert!(base_class(&verdict), "{verdict:?}");
+        assert!(reasons(&verdict).contains(".ssh"), "{verdict:?}");
+        let verdict = fixture.file("fs_read", "src/a/b/c/x/id");
+        assert!(base_class(&verdict), "{verdict:?}");
+        // One name too long is still only a word.
+        let verdict = fixture.run(&format!("git commit -m '{}'", "w".repeat(300)));
+        assert!(!base_class(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn dot_dot_below_proc_is_base() {
+        let fixture = Fixture::workspace();
+        let own = fixture.own[0].clone();
+        std::fs::create_dir_all(&own).unwrap();
+        let judge = own.join("judge.md");
+        let judge = judge.display();
+        // `net` leads two folders down, `thread-self` three: the kernel stays in /proc.
+        for path in [
+            format!("/proc/net/../../self/root{judge}"),
+            format!("/proc/thread-self/../../../self/root{judge}"),
+        ] {
+            for line in [
+                format!("cat {path}"),
+                format!("tee {path}"),
+                format!("cp notes.md {path}"),
+            ] {
+                let verdict = fixture.run(&line);
+                assert!(base_class(&verdict), "{line}: {verdict:?}");
+            }
+            for tool in FS_TOOLS {
+                let verdict = fixture.file(tool, &path);
+                assert!(base_class(&verdict), "{tool} {path}: {verdict:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_run_s_word_going_up_out_of_a_missing_folder_is_judged_and_named_as_written() {
+        let fixture = Fixture::workspace();
+        for (line, word) in [
+            ("sed -i 's/a/../' src/a.rs", "s/a/../"),
+            ("echo 'x/../y'", "x/../y"),
+            ("git commit -m 'move foo/../bar'", "move foo/../bar"),
+            ("curl http://h/../x", "http://h/../x"),
+        ] {
+            let verdict = fixture.run(line);
+            assert!(to_judge(&verdict), "{line}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains(&format!("{word} names a folder")),
+                "{line}: {verdict:?}"
+            );
+        }
+        // The file tools still refuse it.
+        assert!(denied(&fixture.file("fs_read", "m/../x")));
+    }
+
+    #[test]
+    fn deleting_untracked_files_in_a_folder_above_flottille_s_is_base() {
+        let mut fixture = Fixture::workspace();
+        fixture.own = vec![fixture.root.join("sub/flottille")];
+        std::fs::create_dir_all(&fixture.own[0]).unwrap();
+        for line in [
+            "git clean -fdx",
+            "git clean -fd",
+            "git stash -u",
+            "git stash push --include-untracked",
+            "git stash -a",
+            "git stash --all",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains("Flottille's own folders"),
+                "{line}: {verdict:?}"
+            );
+        }
+        // Stashing tracked changes only takes nothing of Flottille's.
+        assert!(!base_class(&fixture.run("git stash")));
+    }
+
+    #[test]
+    fn a_word_going_up_out_of_a_folder_a_program_can_make_is_checked_where_it_leads() {
+        let fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        std::fs::create_dir_all(base.join("home/.ssh")).unwrap();
+        let own = fixture.own[0].clone();
+        std::fs::create_dir_all(&own).unwrap();
+        std::os::unix::fs::symlink(&base, fixture.root.join("src/h")).unwrap();
+        let judge = own.join("judge.md");
+        let judge = judge.display();
+        let own_word = format!(
+            "m/../../../{}/judge.md",
+            own.strip_prefix(&base).unwrap().display()
+        );
+        // `install -D` makes `m`, then writes through its `..`.
+        for line in [
+            "install -D notes.md m/../../../home/.ssh/authorized_keys".to_owned(),
+            format!("install -D notes.md {own_word}"),
+            "install -D notes.md src/h/m/../home/.ssh/authorized_keys".into(),
+            "install -D notes.md m/../src/h/home/.ssh/authorized_keys".into(),
+            format!("install -D notes.md /m/../proc/self/root{judge}"),
+            "install -D -t m/../../../home/.ssh notes.md".into(),
+            "install -D --target-directory=m/../../../home/.ssh notes.md".into(),
+        ] {
+            let verdict = fixture.run(&line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains("names a folder that does not exist"),
+                "{line}: {verdict:?}"
+            );
+        }
+        for line in [
+            "sed -i 's/a/../' src/a.rs",
+            "git commit -m 'move foo/../bar'",
+        ] {
+            assert!(to_judge(&fixture.run(line)), "{line}");
+        }
+        // The file tools still refuse it.
+        assert!(denied(&fixture.file("fs_write", "m/../notes.md")));
+    }
+
+    #[test]
+    fn deleting_the_untracked_files_of_the_whole_worktree_checks_its_top() {
+        let mut fixture = Fixture::workspace();
+        fixture.own = vec![fixture.root.join("sub/flottille")];
+        std::fs::create_dir_all(&fixture.own[0]).unwrap();
+        std::fs::write(fixture.root.join(".git"), "gitdir: elsewhere\n").unwrap();
+        fixture.folder = "src".into();
+        for line in [
+            "git stash -u",
+            "git stash push --all",
+            "git clean -fdx :/",
+            "git clean -fdx :(top)",
+            "git clean -fdx -- :(top,exclude)x",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains("Flottille's own folders"),
+                "{line}: {verdict:?}"
+            );
+        }
+        // Without a pathspec, `git clean` cleans the folder it runs in only.
+        let verdict = fixture.run("git clean -fdx");
+        assert!(!base_class(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_word_through_a_name_the_kernel_could_never_make_is_checked_as_written() {
+        let fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        std::fs::create_dir_all(base.join("home/.ssh")).unwrap();
+        std::fs::write(fixture.root.join("notes.md"), "n").unwrap();
+        let own = fixture.own[0].clone();
+        std::fs::create_dir_all(&own).unwrap();
+        let long = "n".repeat(300);
+        let own_word = own.strip_prefix(&base).unwrap().display().to_string();
+        // `git restore` and `python3 -m zipfile` take `..` on the text: they reach the path as
+        // written.
+        for line in [
+            format!("git restore -- {long}/../.env"),
+            format!("python3 -m zipfile -e a.zip {long}/../../../home/.ssh/z2"),
+            "python3 -m zipfile -e a.zip notes.md/x/../../../../home/.ssh".into(),
+            format!("python3 -m zipfile -e a.zip {long}/../../../{own_word}"),
+        ] {
+            let verdict = fixture.run(&line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains("names a folder that does not exist"),
+                "{line}: {verdict:?}"
+            );
+        }
+        let verdict = fixture.run("git commit -m 'fix foo/../bar'");
+        assert!(to_judge(&verdict), "{verdict:?}");
+        // The file tools still refuse it.
+        assert!(denied(
+            &fixture.file("fs_write", &format!("{long}/../.env"))
+        ));
+    }
+
+    #[test]
+    fn an_option_s_value_attached_without_equals_is_resolved() {
+        let fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        std::fs::create_dir_all(base.join("home/.ssh")).unwrap();
+        for line in [
+            "install -Dtm/../../../home/.ssh notes.md",
+            "install -Dt../../home/.ssh notes.md",
+            "curl -om/../../../home/.ssh/authorized_keys https://x",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+            assert!(reasons(&verdict).contains(".ssh"), "{line}: {verdict:?}");
+        }
+    }
+
+    #[test]
+    fn the_top_of_a_worktree_is_found_on_the_disk() {
+        let mut fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        let home = base.join("home");
+        // The home itself is a repository, Flottille's data in it, a project folder below.
+        std::fs::create_dir_all(home.join(".git")).unwrap();
+        fixture.own = vec![home.join(".local/share/flottille")];
+        std::fs::create_dir_all(&fixture.own[0]).unwrap();
+        std::fs::create_dir_all(home.join("outer/sub")).unwrap();
+        let sub = home.join("outer/sub");
+        for line in [
+            format!("git -C {} stash -u", sub.display()),
+            format!(
+                "git -C {} -C sub clean -fdx :/",
+                home.join("outer").display()
+            ),
+            format!("git --work-tree={} stash --all", home.display()),
+        ] {
+            let verdict = fixture.run(&line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains("Flottille's own folders"),
+                "{line}: {verdict:?}"
+            );
+        }
     }
 
     #[test]

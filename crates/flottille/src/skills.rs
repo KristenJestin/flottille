@@ -74,11 +74,20 @@ fn read(
                 "refused: the skill {name} is a text: it takes no path, read it with just its name"
             )));
         }
-        let file = Resolved {
-            shown: name.to_owned(),
-            path: Skill::text_file(data, &project.name, name),
-            inside: true,
+        // The user's own file, which may be a link: read where it leads, which the file tools
+        // open without following a link.
+        let file = Skill::text_file(data, &project.name, name);
+        let file = match file.canonicalize() {
+            Ok(real) => real,
+            Err(_) if file.is_symlink() => {
+                return Err(Outcome::Refused(format!(
+                    "refused: the text of the skill {name} cannot be read: the skill's file is a \
+                     link that leads nowhere; the user points it at the text or writes it again"
+                )));
+            }
+            Err(_) => file,
         };
+        let file = Resolved::real_inside(name.to_owned(), file);
         return files::read_page(None, &file, offset, length).or_else(|error| {
             Ok(match error.kind() {
                 std::io::ErrorKind::NotFound => Outcome::Refused(format!(
@@ -192,11 +201,7 @@ fn inside(name: &str, root: &Path, named: &str) -> Result<PathBuf, Outcome> {
 /// Whether `fs_read` would hold the real path `target` for the user, by the gate's own rule of
 /// sensitive places, taken from the project folder: a skill never serves it, asked or not.
 fn sensitive(folder: &Path, target: &Path) -> Option<String> {
-    let path = Resolved {
-        shown: relative(folder, target),
-        path: target.to_owned(),
-        inside: true,
-    };
+    let path = Resolved::real_inside(relative(folder, target), target.to_owned());
     gate::sensitive(&[], &path)
 }
 
@@ -224,11 +229,7 @@ fn read_file(
     offset: u64,
     length: u64,
 ) -> Result<Outcome, Outcome> {
-    let file = Resolved {
-        shown: shown.to_owned(),
-        path: path.to_owned(),
-        inside: true,
-    };
+    let file = Resolved::real_inside(shown.to_owned(), path.to_owned());
     if path
         .file_name()
         .is_some_and(|file| secrets::secret_file(&file.to_string_lossy()))

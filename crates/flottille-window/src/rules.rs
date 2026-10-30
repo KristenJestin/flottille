@@ -5,12 +5,16 @@
 //!
 //! The text is frozen in an agent when it is created, so a change reaches the agents created
 //! after it only: the editor says so.
+//!
+//! The same editor holds the Auto judge's guidance in Settings (`judge.show`, `judge.set`,
+//! `judge.reset`), read at each judgement: a change reaches the next one.
 
 use flottille_ui::{Button, Card, palette, presence_of};
 use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::{
     AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement,
-    Render, SharedString, Styled, Subscription, TestSupportExt as _, WeakEntity, Window, div, px,
+    Render, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
+    TestSupportExt as _, WeakEntity, Window, div, px,
 };
 use serde_json::Value;
 
@@ -21,6 +25,10 @@ use crate::shell::Shell;
 /// What the editor says of when a change takes effect.
 pub const REACH: &str = "A change reaches the agents created from now on; an agent already \
                          created keeps the rules it was created with.";
+
+/// What the judge's editor says of when a change takes effect.
+pub const JUDGE_REACH: &str = "A change reaches the next judgement. Calls that always come to you \
+                               never reach the judge, whatever this says.";
 
 /// Where the text the daemon last gave comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +48,9 @@ pub struct Shown {
     pub source: Source,
     /// Why the stored text was cut to the limit: edited by hand past it.
     pub cut: Option<String>,
+    /// Why the judge cannot follow the stored guidance (`judge.show`): every judgement fails,
+    /// and asks, until it is fixed.
+    pub error: Option<String>,
 }
 
 impl Shown {
@@ -52,6 +63,7 @@ impl Shown {
                 _ => Source::Default,
             },
             cut: value["cut"].as_str().map(str::to_owned),
+            error: value["error"].as_str().map(str::to_owned),
         }
     }
 }
@@ -60,6 +72,8 @@ pub struct RulesEditor {
     shell: WeakEntity<Shell>,
     /// The project it edits the rules of; the user's own for every project when none.
     project: Option<String>,
+    /// It edits the Auto judge's guidance, not the rules.
+    judge: bool,
     /// Made when first drawn, since a text field needs a window.
     field: Option<Entity<TextareaState>>,
     shown: Option<Shown>,
@@ -74,12 +88,25 @@ impl RulesEditor {
         Self {
             shell,
             project,
+            judge: false,
             field: None,
             shown: None,
             waiting: false,
             problem: None,
             _subscriptions: Vec::new(),
         }
+    }
+
+    /// The editor of the Auto judge's guidance.
+    pub fn judge(shell: WeakEntity<Shell>) -> Self {
+        Self {
+            judge: true,
+            ..Self::new(shell, None)
+        }
+    }
+
+    pub fn is_judge(&self) -> bool {
+        self.judge
     }
 
     pub fn project(&self) -> Option<&str> {
@@ -89,7 +116,23 @@ impl RulesEditor {
     /// Asks the daemon for the rules.
     pub fn read(&self, cx: &mut Context<Self>) {
         let project = self.project.clone();
-        perform_later(&self.shell, Command::RulesRead { project }, cx);
+        let command = if self.judge {
+            Command::JudgeRead
+        } else {
+            Command::RulesRead { project }
+        };
+        perform_later(&self.shell, command, cx);
+    }
+
+    /// Saves `text`, or with none resets to the default.
+    fn write(&self, text: Option<String>, cx: &mut Context<Self>) {
+        let project = self.project.clone();
+        let command = if self.judge {
+            Command::JudgeWrite { text }
+        } else {
+            Command::RulesWrite { project, text }
+        };
+        perform_later(&self.shell, command, cx);
     }
 
     pub fn shown(&self) -> Option<&Shown> {
@@ -126,7 +169,11 @@ impl RulesEditor {
         let Some(shown) = &self.shown else {
             return false;
         };
-        self.typed(cx).is_some() && (self.is_edited(cx) || !self.is_own() || shown.cut.is_some())
+        self.typed(cx).is_some()
+            && (self.is_edited(cx)
+                || !self.is_own()
+                || shown.cut.is_some()
+                || shown.error.is_some())
     }
 
     /// Whether Reset to default has something to remove: rules of its own at this level.
@@ -140,9 +187,14 @@ impl RulesEditor {
 
     fn make_field(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<TextareaState> {
         let field = cx.new(|cx| {
-            let mut field = TextareaState::new(window, cx)
-                .auto_grow(8, 18)
-                .placeholder("how your agents should work");
+            let mut field =
+                TextareaState::new(window, cx)
+                    .auto_grow(8, 18)
+                    .placeholder(if self.judge {
+                        "how the judge should weigh a call"
+                    } else {
+                        "how your agents should work"
+                    });
             field.set_editor_style(editor_style(cx));
             field
         });
@@ -193,15 +245,7 @@ impl RulesEditor {
         }
         self.waiting = true;
         self.problem = None;
-        let project = self.project.clone();
-        perform_later(
-            &self.shell,
-            Command::RulesWrite {
-                project,
-                text: Some(text),
-            },
-            cx,
-        );
+        self.write(Some(text), cx);
         cx.notify();
     }
 
@@ -211,20 +255,21 @@ impl RulesEditor {
         }
         self.waiting = true;
         self.problem = None;
-        let project = self.project.clone();
-        perform_later(
-            &self.shell,
-            Command::RulesWrite {
-                project,
-                text: None,
-            },
-            cx,
-        );
+        self.write(None, cx);
         cx.notify();
     }
 
     /// What the editor says of where the text comes from.
     fn origin(&self) -> &'static str {
+        if self.judge {
+            return match self.shown.as_ref().map(|shown| shown.source) {
+                None => "Asking the daemon…",
+                Some(Source::Global) => "Your own guidance for the judge.",
+                Some(_) => {
+                    "Flottille's default guidance for the judge: edit it to make it your own."
+                }
+            };
+        }
         match (&self.project, self.shown.as_ref().map(|shown| shown.source)) {
             (_, None) => "Asking the daemon…",
             (None, Some(Source::Global)) => "Your own rules, for every project.",
@@ -250,7 +295,17 @@ impl Render for RulesEditor {
             None => self.make_field(window, cx),
         };
         let scope = self.project.clone().unwrap_or_default();
-        let id = |part: &str| ElementId::Name(format!("rules-{part}-{scope}").into());
+        let judge = self.judge;
+        let id = |part: &str| {
+            ElementId::Name(
+                if judge {
+                    format!("judge-guidance-{part}")
+                } else {
+                    format!("rules-{part}-{scope}")
+                }
+                .into(),
+            )
+        };
         let savable = self.savable(cx);
         let buttons = div()
             .flex()
@@ -317,11 +372,38 @@ impl Render for RulesEditor {
                 .gap(px(8.)),
             )
             .child(
+                presence_of(
+                    id("error-block"),
+                    self.shown
+                        .as_ref()
+                        .and_then(|shown| shown.error.clone())
+                        .map(|error| {
+                            SharedString::from(format!(
+                                "The judge asks you about every call until this is fixed: {error}."
+                            ))
+                        }),
+                    {
+                        let error = id("error");
+                        move |said| {
+                            div()
+                                .id(error)
+                                .aria_label(said.clone())
+                                .text_size(px(12.5))
+                                .text_color(p.fail)
+                                .child(said)
+                                .test_support()
+                                .into_any_element()
+                        }
+                    },
+                )
+                .gap(px(8.)),
+            )
+            .child(
                 div()
                     .id(id("reach"))
                     .text_size(px(12.))
                     .text_color(p.faint)
-                    .child(REACH)
+                    .child(if self.judge { JUDGE_REACH } else { REACH })
                     .test_support(),
             )
             .child(
@@ -340,6 +422,8 @@ impl Render for RulesEditor {
                 .gap(px(8.)),
             )
             .child(buttons);
-        Card::new().title("Rules").child(body)
+        Card::new()
+            .title(if self.judge { "Judge" } else { "Rules" })
+            .child(body)
     }
 }

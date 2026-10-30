@@ -2,7 +2,7 @@
 //! in, and whether its agents can run here, as the daemon says it (`provider.list`). The window
 //! never writes `providers.toml` itself: a switch asks the daemon (`provider.enable`,
 //! `provider.disable`), and the page follows what the daemon lists next. The Auto judge is
-//! chosen here too (`provider.set_judge`).
+//! chosen here too (`provider.set_judge`), and its guidance edited (`judge.set`).
 
 use std::collections::HashMap;
 
@@ -31,6 +31,8 @@ pub struct SettingsPage {
     narrow: bool,
     /// The user's rules for every project, edited on this page.
     rules: Entity<RulesEditor>,
+    /// The Auto judge's guidance, edited on this page.
+    judge_guidance: Entity<RulesEditor>,
     /// The judge's picker whose list is open.
     judge_menu: Option<JudgeMenu>,
     /// A judge chosen, until the daemon lists it.
@@ -48,14 +50,29 @@ pub enum JudgeMenu {
 /// A judge as the daemon lists it: its provider and its model, the provider's default when none.
 pub type Judge = (String, Option<String>);
 
+/// Auto, in two lines, beside the judge's pickers.
+pub const AUTO: [&str; 2] = [
+    "In Auto, the rules pass what is known to be harmless, and a small model on your own quota \
+     decides the rest: it allows a call, or asks you.",
+    "Base calls always come to you, in Ask as in Auto: they never reach the judge.",
+];
+
+/// What the judge's picker calls no judge.
+pub const NO_JUDGE: &str = "No judge (Auto asks like Ask)";
+
 /// What the page says of the judge's cost, beside its pickers.
 pub const JUDGE_QUOTA: &str =
     "Each judgement is a turn of the judge's model: it uses your quota on that provider.";
 
 impl SettingsPage {
-    pub fn new(shell: WeakEntity<Shell>, rules: Entity<RulesEditor>) -> Self {
+    pub fn new(
+        shell: WeakEntity<Shell>,
+        rules: Entity<RulesEditor>,
+        judge_guidance: Entity<RulesEditor>,
+    ) -> Self {
         Self {
             rules,
+            judge_guidance,
             shell,
             providers: Providers::default(),
             pending: HashMap::new(),
@@ -69,6 +86,10 @@ impl SettingsPage {
 
     pub fn rules(&self) -> &Entity<RulesEditor> {
         &self.rules
+    }
+
+    pub fn judge_guidance(&self) -> &Entity<RulesEditor> {
+        &self.judge_guidance
     }
 
     pub fn providers(&self) -> &Providers {
@@ -159,7 +180,7 @@ impl SettingsPage {
     /// The judge as the page shows it: `None`, or a provider's title and the model.
     pub fn judge_shown(&self) -> (String, Option<String>) {
         match &self.providers.judge {
-            None => ("None".into(), None),
+            None => ("No judge".into(), None),
             Some((name, model)) => {
                 let title = self
                     .providers
@@ -180,7 +201,7 @@ impl SettingsPage {
             JudgeMenu::Provider => {
                 let mut entries = vec![(
                     "judge-choice-none".to_owned(),
-                    "None".to_owned(),
+                    NO_JUDGE.to_owned(),
                     judge.is_none(),
                     None,
                 )];
@@ -310,8 +331,6 @@ impl SettingsPage {
                 JudgeMenu::Model => picker.mono(),
             });
         }
-        let line =
-            |text: &'static str, color| div().text_size(px(12.5)).text_color(color).child(text);
         let mut body = div()
             .id("judge")
             .px(px(14.))
@@ -320,11 +339,15 @@ impl SettingsPage {
             .flex_col()
             .gap(px(6.))
             .child(pickers)
-            .child(line(
-                "In Auto, it decides the calls that are neither harmless nor base, and asks you \
-                 when it is not sure. Without a judge, Auto asks you like Ask.",
-                p.mute,
-            ))
+            .children(AUTO.iter().enumerate().map(|(n, text)| {
+                div()
+                    .id(ElementId::Name(format!("judge-auto-{n}").into()))
+                    .aria_label(*text)
+                    .text_size(px(12.5))
+                    .text_color(p.mute)
+                    .child(*text)
+                    .test_support()
+            }))
             .child(
                 div()
                     .id("judge-quota")
@@ -546,9 +569,15 @@ impl Render for SettingsPage {
                         div().text_color(p.faint).child("Asking the daemon…"),
                     ))
                     .children(cards)
+                    // The two long texts last, so that they push no provider out of sight.
+                    .child(enter(
+                        key("judge-guidance"),
+                        3 + count,
+                        div().mt(px(24.)).child(self.judge_guidance.clone()),
+                    ))
                     .child(enter(
                         key("rules"),
-                        3 + count,
+                        4 + count,
                         div().mt(px(24.)).child(self.rules.clone()),
                     )),
             )

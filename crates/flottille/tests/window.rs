@@ -2246,7 +2246,7 @@ fn the_auto_judge_is_chosen_in_settings_which_say_it_uses_the_quota(cx: &mut Tes
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     let page = open_settings(&shell, cx);
     until(&shell, cx, "the judge's picker shows none", |cx| {
-        page.read_with(cx, |page, _| page.judge_shown().0 == "None")
+        page.read_with(cx, |page, _| page.judge_shown().0 == "No judge")
     });
     cx.update(|window, _| assert!(window.find("judge-provider").visible()));
     assert_eq!(
@@ -2271,10 +2271,189 @@ fn the_auto_judge_is_chosen_in_settings_which_say_it_uses_the_quota(cx: &mut Tes
     cx.update(|window, cx| window.click("judge-provider", cx));
     cx.update(|window, cx| window.click("judge-choice-none", cx));
     until(&shell, cx, "the page shows no judge again", |cx| {
-        page.read_with(cx, |page, _| page.judge_shown().0 == "None")
+        page.read_with(cx, |page, _| page.judge_shown().0 == "No judge")
     });
+    // Chosen none, kept apart from never chosen: no judge is ever picked for this user.
     let file = std::fs::read_to_string(user.path("config/flottille/providers.toml")).unwrap();
-    assert!(!file.contains("[judge]"), "{file}");
+    assert!(
+        !file.contains("[judge]") && file.contains("judge = \"none\""),
+        "{file}"
+    );
+}
+
+#[gpui_kit::test]
+fn settings_explain_auto_in_two_lines_and_offer_no_judge(cx: &mut TestAppContext) {
+    let user = providers_user();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_settings(&shell, cx);
+    until(&shell, cx, "the judge's card is shown", |cx| {
+        page.read_with(cx, |page, _| page.providers().known)
+    });
+    settle(cx);
+    for (n, line) in flottille_window::settings::AUTO.iter().enumerate() {
+        let id = format!("judge-auto-{n}");
+        let found = id.clone();
+        cx.update(move |window, _| assert!(window.find(found).visible()));
+        assert_eq!(text_of(&id, cx).as_deref(), Some(*line));
+    }
+    let [rules, base] = flottille_window::settings::AUTO;
+    assert!(rules.contains("known to be harmless") && rules.contains("your own quota"));
+    assert!(base.contains("Base calls always come to you"));
+    let none = page.read_with(cx, |page, _| {
+        page.judge_entries(flottille_window::settings::JudgeMenu::Provider)[0].clone()
+    });
+    assert_eq!(none.1, "No judge (Auto asks like Ask)");
+    assert_eq!(none.3, None);
+}
+
+#[gpui_kit::test]
+fn the_judge_section_edits_the_judge_s_guidance_and_resets_it_to_the_default(
+    cx: &mut TestAppContext,
+) {
+    use flottille_window::rules::Source;
+    let user = user();
+    let default = user.call("judge.show", json!({})).unwrap()["default"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    // Tall enough to show the whole page: a click reaches only what is on screen.
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    let page = open_settings(&shell, cx);
+    let editor = page.read_with(cx, |page, _| page.judge_guidance().clone());
+    until(&shell, cx, "the default guidance is shown", |cx| {
+        editor.read_with(cx, |e, _| e.shown().is_some())
+    });
+    settle(cx);
+
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.typed(cx)),
+        Some(default.clone())
+    );
+    editor.read_with(cx, |e, _| {
+        assert!(e.is_judge());
+        assert_eq!(e.shown().unwrap().source, Source::Default);
+        assert!(!e.is_own());
+    });
+    cx.update(|window, _| {
+        for id in [
+            "judge-guidance-text",
+            "judge-guidance-reach",
+            "judge-guidance-save",
+            "judge-guidance-reset",
+        ] {
+            assert!(window.find(id).visible(), "{id}");
+        }
+    });
+    assert!(flottille_window::rules::JUDGE_REACH.contains("reaches the next judgement"));
+
+    type_rules(&editor, "Ask about every migration.", cx);
+    cx.update(|window, cx| window.click("judge-guidance-save", cx));
+    until(&shell, cx, "the guidance is saved", |cx| {
+        editor.read_with(cx, |e, _| e.is_own())
+    });
+    assert_eq!(
+        std::fs::read_to_string(user.path("config/flottille/judge.md")).unwrap(),
+        "Ask about every migration."
+    );
+    assert_eq!(
+        user.call("judge.show", json!({})).unwrap()["text"],
+        "Ask about every migration."
+    );
+    // The rules are another text, untouched.
+    assert!(!user.path("config/flottille/rules.md").exists());
+
+    cx.update(|window, cx| window.click("judge-guidance-reset", cx));
+    until(&shell, cx, "the guidance is reset", |cx| {
+        editor.read_with(cx, |e, _| !e.is_own())
+    });
+    assert_eq!(editor.read_with(cx, |e, cx| e.typed(cx)), Some(default));
+    assert!(!user.path("config/flottille/judge.md").exists());
+}
+
+#[gpui_kit::test]
+fn the_judge_section_shows_a_guidance_it_cannot_follow_and_follows_an_edit_made_elsewhere(
+    cx: &mut TestAppContext,
+) {
+    use flottille_window::rules::Source;
+    let user = user();
+    // Edited by hand past the limit: the judge cannot follow it, and the section says so.
+    std::fs::create_dir_all(user.path("config/flottille")).unwrap();
+    std::fs::write(user.path("config/flottille/judge.md"), "a".repeat(4_001)).unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    let page = open_settings(&shell, cx);
+    let editor = page.read_with(cx, |page, _| page.judge_guidance().clone());
+    let rules = page.read_with(cx, |page, _| page.rules().clone());
+    until(&shell, cx, "the error is shown", |cx| {
+        editor.read_with(cx, |e, _| {
+            e.shown().is_some_and(|shown| shown.error.is_some())
+        })
+    });
+    settle(cx);
+    cx.update(|window, _| assert!(window.find("judge-guidance-error").visible()));
+    let said = text_of("judge-guidance-error", cx).unwrap();
+    assert!(
+        said.contains("judge.md") && said.contains("4001 characters"),
+        "{said}"
+    );
+
+    // From the command line, while the page stays open.
+    user.call("judge.set", json!({"text": "Ask about every migration."}))
+        .unwrap();
+    user.call("rules.set", json!({"text": "Write tests first."}))
+        .unwrap();
+
+    until(&shell, cx, "the editors show the new texts", |cx| {
+        editor.read_with(cx, |e, cx| {
+            e.typed(cx).as_deref() == Some("Ask about every migration.")
+        }) && rules.read_with(cx, |e, cx| {
+            e.typed(cx).as_deref() == Some("Write tests first.")
+        })
+    });
+    editor.read_with(cx, |e, _| {
+        assert_eq!(e.shown().unwrap().source, Source::Global);
+        assert_eq!(e.shown().unwrap().error, None);
+    });
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find("judge-guidance-error").is_none()));
+}
+
+#[gpui_kit::test]
+fn a_judge_flottille_picked_is_said_once_in_a_notice_that_opens_settings(cx: &mut TestAppContext) {
+    // Claude installed (the fake `claude`) and signed in: the daemon picks its smallest model.
+    let user = User::with_fake_claude();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    until(&shell, cx, "the notice is shown", |cx| {
+        shell.read_with(cx, |s, _| s.judge_notice().is_some())
+    });
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(window.find("judge-notice").visible());
+        assert!(window.find("judge-notice-open").visible());
+        assert!(window.find("judge-notice-dismiss").visible());
+    });
+    let said = text_of("judge-notice-text", cx).unwrap();
+    assert!(said.contains("Flottille chose Claude haiku"), "{said}");
+
+    cx.update(|window, cx| window.click("judge-notice-open", cx));
+    until(&shell, cx, "the settings show the judge picked", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).settings_page().is_some_and(|page| {
+                page.read(cx).judge_shown() == ("Claude".into(), Some("haiku".into()))
+            })
+        })
+    });
+    until(&shell, cx, "the notice is gone", |cx| {
+        shell.read_with(cx, |s, _| s.judge_notice().is_none())
+    });
+    cx.update(|window, _| assert!(window.try_find("judge-notice").is_none()));
+    // Seen once, said no more: the daemon keeps the judge and drops the notice.
+    let listed = user.call("provider.list", json!({})).unwrap();
+    assert_eq!(
+        listed["judge"],
+        json!({"provider": "claude", "model": "haiku"})
+    );
 }
 
 #[gpui_kit::test]

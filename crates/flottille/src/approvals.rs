@@ -288,7 +288,20 @@ async fn performed(daemon: &Arc<Daemon>, request: &Request) -> (&'static str, St
             }
         }
     }
-    let outcome = mcp::performed(daemon, &grant, tool, request.arguments.clone(), number).await;
+    let class = if request.base {
+        gate::Class::Base
+    } else {
+        gate::Class::Judge
+    };
+    let outcome = mcp::performed(
+        daemon,
+        &grant,
+        tool,
+        request.arguments.clone(),
+        number,
+        class,
+    )
+    .await;
     let approved = "was approved by the user";
     let (word, body) = match outcome {
         Outcome::Done(text) => (

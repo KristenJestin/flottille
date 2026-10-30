@@ -8,7 +8,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::fd::{AsFd, BorrowedFd};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -18,9 +19,10 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::daemon::Daemon;
-use crate::gate::{self, Verdict};
+use crate::gate::{self, Class, Verdict};
 use crate::mcp::{Outcome, arguments};
-use crate::place::{Place, Resolved};
+use crate::nofollow::{self, Entry};
+use crate::place::{Place, Resolved, Unfollowed};
 
 /// A page of `fs_read`, at most.
 pub const READ_PAGE_BYTES: u64 = 32 * 1024;
@@ -76,8 +78,8 @@ pub struct Context<'a> {
     pub daemon: &'a Daemon,
     pub agent: &'a str,
     pub place: &'a Place,
-    /// The user allowed the call: its path may be outside the place.
-    pub approved: bool,
+    /// The user or the judge allowed the call, of this class: its path may be outside the place.
+    pub approved: Option<Class>,
 }
 
 impl Context<'_> {
@@ -85,13 +87,38 @@ impl Context<'_> {
     fn path(&self, repository: Option<&str>, named: &str) -> Result<Resolved, Outcome> {
         let (_, base) = self.place.base(repository).map_err(Outcome::Refused)?;
         let resolved = self.place.resolve(base, named);
-        if self.approved {
+        if let Some(refusal) = never_opened(&resolved) {
+            return Err(refusal);
+        }
+        if self.approved == Some(Class::Judge)
+            && !resolved.inside
+            && let Some(why) = self.base_now(&resolved)
+        {
+            return Err(changed(&resolved, &why));
+        }
+        if self.approved.is_some() {
             return Ok(resolved);
         }
         match gate::contained(std::slice::from_ref(&resolved)) {
             Verdict::Deny(why) => Err(Outcome::Refused(why)),
             _ => Ok(resolved),
         }
+    }
+
+    /// Why the gate would now hold a path outside the place for the user, if it would.
+    fn base_now(&self, path: &Resolved) -> Option<String> {
+        let paths = &self.daemon.paths;
+        let own = [
+            paths.data.clone(),
+            paths.config.clone(),
+            paths.state.clone(),
+            paths.runtime.clone(),
+        ];
+        let groups = crate::runs::groups_of(self.daemon, self.agent);
+        gate::process(&groups, path).or_else(|| {
+            gate::sensitive(&own, path)
+                .map(|place| format!("{} is a sensitive place ({place})", path.shown))
+        })
     }
 
     fn key(path: &Path) -> String {
@@ -142,6 +169,37 @@ pub fn reaches(place: &Place, tool: &str, args: &Value) -> Vec<Resolved> {
     }
 }
 
+/// The refusal of a path the file tools never open, whoever allowed it: one that goes up out of a
+/// folder that is not there, or through a process's folder in `/proc`, which leads anywhere. A
+/// path that could not be followed for another reason is opened as written, without following a
+/// link (`failed` says it).
+fn never_opened(path: &Resolved) -> Option<Outcome> {
+    if path.up_from_missing {
+        return Some(Outcome::Refused(gate::malformed(std::slice::from_ref(
+            path,
+        ))?));
+    }
+    match path.unfollowed.as_ref()? {
+        Unfollowed::UpFromMissing => Some(Outcome::Refused(gate::malformed(
+            std::slice::from_ref(path),
+        )?)),
+        through @ Unfollowed::Through(_) => Some(Outcome::Refused(format!(
+            "refused: {} {through}: Flottille's file tools never open a path through a \
+             process's folder in /proc; nothing was done",
+            path.shown
+        ))),
+        Unfollowed::Failed(_) => None,
+    }
+}
+
+/// The refusal of a path that changed between the moment it was allowed and its use.
+fn changed(path: &Resolved, why: &str) -> Outcome {
+    Outcome::Refused(format!(
+        "refused: {}: the path changed since it was allowed ({why}); nothing was done",
+        path.shown
+    ))
+}
+
 fn not_regular(path: &Resolved) -> Outcome {
     Outcome::Refused(format!(
         "refused: {} is not a regular file (a pipe, a socket or a device): this tool reads files",
@@ -149,19 +207,16 @@ fn not_regular(path: &Resolved) -> Outcome {
     ))
 }
 
-/// Opens a regular file to read. Opening a pipe waits until someone writes to it, which would hold
-/// the call's thread forever: it is opened without waiting, and refused (`InvalidInput`, which
-/// `failed` words).
+/// Opens a regular file to read. A pipe, a socket or a device is never opened, only looked at,
+/// and refused (`InvalidInput`, which `failed` words): opening one can wait for a writer or act
+/// on the device. The path is a real one: no link on its way is followed (`nofollow`).
 fn open_regular(path: &Path) -> std::io::Result<File> {
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(path)?;
-    if file.metadata()?.is_file() {
-        Ok(file)
-    } else {
-        Err(std::io::Error::from(ErrorKind::InvalidInput))
-    }
+    nofollow::open_file(path)
+}
+
+/// `relative` below the folder `folder`, opened as `open_regular` does.
+fn open_regular_beneath(folder: BorrowedFd, relative: &Path) -> std::io::Result<File> {
+    nofollow::open_file_beneath(folder, relative)
 }
 
 fn read_regular(path: &Path) -> std::io::Result<Vec<u8>> {
@@ -171,8 +226,29 @@ fn read_regular(path: &Path) -> std::io::Result<Vec<u8>> {
 }
 
 pub fn failed(path: &Resolved, error: std::io::Error) -> Outcome {
+    // A link met where the gate found none: a folder became one since the check.
+    if matches!(error.raw_os_error(), Some(libc::ELOOP | libc::EXDEV)) {
+        return Outcome::Refused(match &path.unfollowed {
+            Some(why) => format!(
+                "refused: {} {why}: the file tools follow no link the gate could not follow; \
+                 nothing was done",
+                path.shown
+            ),
+            // `/proc/self`, `/proc/mounts`, `/proc/net`: the reader's own, here the daemon's.
+            None if path.path.starts_with("/proc") => format!(
+                "refused: {} goes through /proc/self, which is the daemon's own: the file tools \
+                 do not follow it; nothing was done",
+                path.shown
+            ),
+            None => format!(
+                "refused: {}: the path changed since it was checked; nothing was done",
+                path.shown
+            ),
+        });
+    }
     match error.kind() {
         ErrorKind::InvalidInput => not_regular(path),
+        ErrorKind::IsADirectory => Outcome::Refused(format!("refused: {} is a folder", path.shown)),
         ErrorKind::NotFound => Outcome::Refused(format!("refused: {} does not exist", path.shown)),
         _ => Outcome::Failed(format!("{}: {error}", path.shown)),
     }
@@ -186,8 +262,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn sha256_file(path: &Path) -> std::io::Result<String> {
-    let mut file = open_regular(path)?;
+fn sha256_of(file: &mut File) -> std::io::Result<String> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0; CHUNK];
     loop {
@@ -262,17 +337,17 @@ pub fn read_page(
     offset: u64,
     length: u64,
 ) -> std::io::Result<Outcome> {
-    let metadata = std::fs::metadata(&path.path)?;
-    if metadata.is_dir() {
-        return Ok(Outcome::Refused(format!(
-            "refused: {} is a folder: list it with fs_list",
-            path.shown
-        )));
-    }
-    if !metadata.is_file() {
-        return Ok(not_regular(path));
-    }
-    let size = metadata.len();
+    let mut file = match open_regular(&path.path) {
+        Err(error) if error.kind() == ErrorKind::IsADirectory => {
+            return Ok(Outcome::Refused(format!(
+                "refused: {} is a folder: list it with fs_list",
+                path.shown
+            )));
+        }
+        Err(error) if error.kind() == ErrorKind::InvalidInput => return Ok(not_regular(path)),
+        opened => opened?,
+    };
+    let size = file.metadata()?.len();
     if offset > size {
         return Ok(Outcome::Refused(format!(
             "refused: offset {offset} is past the end of {} ({size} bytes)",
@@ -280,17 +355,18 @@ pub fn read_page(
         )));
     }
     if let Some(cx) = cx {
-        let sha = sha256_file(&path.path)?;
-        let kept = (size <= KEPT_BYTES)
-            .then(|| read_regular(&path.path).ok())
-            .flatten()
-            .and_then(|bytes| String::from_utf8(bytes).ok());
+        let (sha, kept) = if size <= KEPT_BYTES {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            (sha256(&bytes), String::from_utf8(bytes).ok())
+        } else {
+            (sha256_of(&mut file)?, None)
+        };
         if let Err(outcome) = cx.remember(&path.path, &sha, kept) {
             return Ok(outcome);
         }
     }
 
-    let mut file = open_regular(&path.path)?;
     // A few bytes more than the page: an offset inside a character skips its continuation bytes,
     // and a page that ends inside one ends before it.
     file.seek(SeekFrom::Start(offset))?;
@@ -397,21 +473,38 @@ pub fn fs_list(cx: &Context, args: Value) -> Outcome {
             "refused: depth must be 1 to {LIST_DEPTH_MAX}: list a folder below to go deeper"
         ));
     }
-    let path = match cx.path(args.repository.as_deref(), &args.path) {
-        Ok(path) => path,
-        Err(refusal) => return refusal,
+    match cx.path(args.repository.as_deref(), &args.path) {
+        Ok(path) => list_path(&path, depth),
+        Err(refusal) => refusal,
+    }
+}
+
+/// What `fs_list` says of a path it may list.
+fn list_path(path: &Resolved, depth: u8) -> Outcome {
+    let looked = match nofollow::open(&path.path, nofollow::LOOK) {
+        Ok(looked) => looked,
+        Err(error) => return failed(path, error),
     };
-    let metadata = match std::fs::symlink_metadata(&path.path) {
+    let metadata = match looked.metadata() {
         Ok(metadata) => metadata,
-        Err(error) => return failed(&path, error),
+        Err(error) => return failed(path, error),
+    };
+    if !metadata.is_dir() {
+        let entry = Entry {
+            name: path.shown.clone(),
+            kind: rustix::fs::FileType::from_raw_mode(metadata.mode()),
+            size: metadata.len(),
+            target: None,
+        };
+        return Outcome::Done(entry_line(&path.shown, &entry));
+    }
+    let folder = match nofollow::folder_beneath(looked.as_fd(), Path::new(".")) {
+        Ok(folder) => folder,
+        Err(error) => return failed(path, error),
     };
     let mut lines = Vec::new();
-    if !metadata.is_dir() {
-        lines.push(entry_line(&path.shown, &path.path, &metadata));
-        return Outcome::Done(lines.join("\n"));
-    }
     let mut size = 0;
-    let stopped = list(&path.path, Path::new(""), depth, &mut lines, &mut size);
+    let stopped = list(folder.as_fd(), Path::new(""), depth, &mut lines, &mut size);
     let mut text = if lines.is_empty() {
         format!("{} is empty", path.shown)
     } else {
@@ -437,68 +530,63 @@ enum Stop {
     Budget,
 }
 
-fn entry_line(shown: &str, path: &Path, metadata: &std::fs::Metadata) -> String {
-    if metadata.file_type().is_symlink() {
-        let target = std::fs::read_link(path)
-            .map(|t| t.display().to_string())
-            .unwrap_or_default();
-        format!("{shown}  link  -> {target}")
-    } else if metadata.is_dir() {
-        format!("{shown}/  folder")
-    } else {
-        format!("{shown}  file  {}", metadata.len())
+fn entry_line(shown: &str, entry: &Entry) -> String {
+    match entry.kind {
+        rustix::fs::FileType::Symlink => format!(
+            "{shown}  link  -> {}",
+            entry.target.as_deref().unwrap_or_default()
+        ),
+        rustix::fs::FileType::Directory => format!("{shown}/  folder"),
+        _ => format!("{shown}  file  {}", entry.size),
     }
 }
 
 /// The entries under `folder`, sorted, a folder's own after it, `.git` left out; why it stopped
 /// early, if it did.
+/// `folder` is open; `relative` is how its entries are shown. Each folder below is opened in the
+/// one above it, never through a link.
 fn list(
-    folder: &Path,
+    folder: BorrowedFd,
     relative: &Path,
     depth: u8,
     lines: &mut Vec<String>,
     size: &mut usize,
 ) -> Option<Stop> {
-    let entries = match sorted_entries(&folder.join(relative)) {
+    let entries = match nofollow::entries(folder) {
         Ok(entries) => entries,
         Err(error) => {
             lines.push(format!("{}/  unreadable: {error}", relative.display()));
             return None;
         }
     };
-    for name in entries {
-        if name == ".git" {
+    for entry in entries {
+        if entry.name == ".git" {
             continue;
         }
-        let path = relative.join(&name);
-        let Ok(metadata) = std::fs::symlink_metadata(folder.join(&path)) else {
-            continue;
-        };
+        let path = relative.join(&entry.name);
         if lines.len() == LIST_ENTRIES_MAX {
             return Some(Stop::Entries);
         }
-        let line = entry_line(&path.display().to_string(), &folder.join(&path), &metadata);
+        let line = entry_line(&path.display().to_string(), &entry);
         if *size + line.len() > BODY_BUDGET {
             return Some(Stop::Budget);
         }
         *size += line.len() + 1;
         lines.push(line);
-        if metadata.is_dir()
-            && depth > 1
-            && let Some(stop) = list(folder, &path, depth - 1, lines, size)
-        {
-            return Some(stop);
+        if entry.kind == rustix::fs::FileType::Directory && depth > 1 {
+            let stop = match nofollow::folder_beneath(folder, Path::new(&entry.name)) {
+                Ok(below) => list(below.as_fd(), &path, depth - 1, lines, size),
+                Err(error) => {
+                    lines.push(format!("{}/  unreadable: {error}", path.display()));
+                    None
+                }
+            };
+            if stop.is_some() {
+                return stop;
+            }
         }
     }
     None
-}
-
-fn sorted_entries(folder: &Path) -> std::io::Result<Vec<String>> {
-    let mut names: Vec<String> = std::fs::read_dir(folder)?
-        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
-        .collect();
-    names.sort();
-    Ok(names)
 }
 
 // Searching.
@@ -520,19 +608,31 @@ pub fn search(cx: &Context, args: Value) -> Outcome {
     if args.pattern.is_empty() {
         return Outcome::Refused("refused: the pattern is empty: name the text to find".into());
     }
-    let base = match cx.path(args.repository.as_deref(), ".") {
-        Ok(base) => base,
-        Err(refusal) => return refusal,
-    };
+    match cx.path(args.repository.as_deref(), ".") {
+        Ok(base) => search_in(cx.place, &base, &args),
+        Err(refusal) => refusal,
+    }
+}
+
+/// A search below `base`, whose files are each opened below its folder, never through a link.
+fn search_in(place: &Place, base: &Resolved, args: &SearchArguments) -> Outcome {
     let cursor = match args.cursor.as_deref().map(parse_cursor).transpose() {
         Ok(cursor) => cursor,
         Err(refusal) => return refusal,
     };
-    let ignored = std::fs::read_to_string(base.path.join(".gitignore"))
+    let root = match nofollow::open(&base.path, nofollow::LOOK) {
+        Ok(root) => root,
+        Err(error) => return failed(base, error),
+    };
+    let ignored = open_regular_beneath(root.as_fd(), Path::new(".gitignore"))
+        .and_then(std::io::read_to_string)
         .map(|text| ignore_patterns(&text))
         .unwrap_or_default();
     let mut files = Vec::new();
-    walk(&base.path, Path::new(""), &ignored, &mut files);
+    match nofollow::folder_beneath(root.as_fd(), Path::new(".")) {
+        Ok(folder) => walk(folder.as_fd(), Path::new(""), &ignored, &mut files),
+        Err(error) => return failed(base, error),
+    }
 
     let needle = args.pattern.to_lowercase();
     let mut hits = Vec::new();
@@ -541,7 +641,7 @@ pub fn search(cx: &Context, args: Value) -> Outcome {
     let mut skipped = Vec::new();
     let mut stop: Option<(String, String)> = None;
     'files: for relative in files {
-        let shown = cx.place.shown(&base.path.join(&relative));
+        let shown = place.shown(&base.path.join(&relative));
         let mut from_line = 1;
         if let Some((path, line)) = &cursor {
             match walk_order(&shown, path) {
@@ -556,7 +656,7 @@ pub fn search(cx: &Context, args: Value) -> Outcome {
             continue;
         }
         // Line by line: a file far larger than what one call scans is never read whole.
-        let Ok(file) = open_regular(&base.path.join(&relative)) else {
+        let Ok(file) = open_regular_beneath(root.as_fd(), &relative) else {
             continue;
         };
         let mut reader = BufReader::with_capacity(CHUNK, file);
@@ -722,26 +822,27 @@ fn path_matches(glob: &str, relative: &Path) -> bool {
     parts_match(&glob.split('/').collect::<Vec<_>>(), &parts)
 }
 
-/// The files under `base`, depth first and sorted, never in `.git` nor `node_modules`, nor what
-/// the `.gitignore` names; links are not followed, so that nothing outside is read.
-fn walk(base: &Path, relative: &Path, ignored: &[Ignore], files: &mut Vec<PathBuf>) {
-    let Ok(names) = sorted_entries(&base.join(relative)) else {
+/// The files below the open `folder`, depth first and sorted, never in `.git` nor
+/// `node_modules`, nor what the `.gitignore` names; links are not followed, so that nothing
+/// outside is read.
+fn walk(folder: BorrowedFd, relative: &Path, ignored: &[Ignore], files: &mut Vec<PathBuf>) {
+    let Ok(entries) = nofollow::entries(folder) else {
         return;
     };
-    for name in names {
-        if name == ".git" || name == "node_modules" {
+    for entry in entries {
+        if entry.name == ".git" || entry.name == "node_modules" {
             continue;
         }
-        let path = relative.join(&name);
-        let Ok(metadata) = std::fs::symlink_metadata(base.join(&path)) else {
-            continue;
-        };
-        if metadata.file_type().is_symlink() || is_ignored(ignored, &path, metadata.is_dir()) {
+        let path = relative.join(&entry.name);
+        let directory = entry.kind == rustix::fs::FileType::Directory;
+        if is_ignored(ignored, &path, directory) {
             continue;
         }
-        if metadata.is_dir() {
-            walk(base, &path, ignored, files);
-        } else if metadata.is_file() {
+        if directory {
+            if let Ok(below) = nofollow::folder_beneath(folder, Path::new(&entry.name)) {
+                walk(below.as_fd(), &path, ignored, files);
+            }
+        } else if entry.kind == rustix::fs::FileType::RegularFile {
             files.push(path);
         }
     }
@@ -819,29 +920,15 @@ pub fn fs_edit(cx: &Context, args: Value) -> Outcome {
         Ok(path) => path,
         Err(refusal) => return refusal,
     };
-    match std::fs::symlink_metadata(&path.path) {
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            return Outcome::Refused(format!(
-                "refused: {} does not exist: fs_edit changes a file that exists, fs_write makes \
-                 one",
-                path.shown
-            ));
-        }
-        Ok(metadata) if !metadata.is_file() && !metadata.is_dir() => return not_regular(&path),
-        _ => {}
+    if let Err(refusal) = exists(&path) {
+        return refusal;
     }
     if let Err(refusal) = fresh(cx, &path) {
         return refusal;
     }
-    let mut text = match read_regular(&path.path).map(String::from_utf8) {
-        Ok(Ok(text)) => text,
-        Ok(Err(_)) => {
-            return Outcome::Refused(format!(
-                "refused: {} is not UTF-8 text: fs_edit changes text, fs_write replaces a file",
-                path.shown
-            ));
-        }
-        Err(error) => return failed(&path, error),
+    let mut text = match text_of(&path) {
+        Ok(text) => text,
+        Err(refusal) => return refusal,
     };
     for (n, change) in args.edits.iter().enumerate() {
         let (count, at) = occurrences(&text, &change.old);
@@ -866,6 +953,31 @@ pub fn fs_edit(cx: &Context, args: Value) -> Outcome {
     }
 }
 
+/// Refuses a path `fs_edit` cannot change: missing, or neither a file nor a folder.
+fn exists(path: &Resolved) -> Result<(), Outcome> {
+    match nofollow::open(&path.path, nofollow::LOOK).and_then(|looked| looked.metadata()) {
+        Err(error) if error.kind() == ErrorKind::NotFound => Err(Outcome::Refused(format!(
+            "refused: {} does not exist: fs_edit changes a file that exists, fs_write makes one",
+            path.shown
+        ))),
+        Err(error) => Err(failed(path, error)),
+        Ok(metadata) if !metadata.is_file() && !metadata.is_dir() => Err(not_regular(path)),
+        Ok(_) => Ok(()),
+    }
+}
+
+/// The text `fs_edit` changes.
+fn text_of(path: &Resolved) -> Result<String, Outcome> {
+    match read_regular(&path.path).map(String::from_utf8) {
+        Ok(Ok(text)) => Ok(text),
+        Ok(Err(_)) => Err(Outcome::Refused(format!(
+            "refused: {} is not UTF-8 text: fs_edit changes text, fs_write replaces a file",
+            path.shown
+        ))),
+        Err(error) => Err(failed(path, error)),
+    }
+}
+
 /// How many times `anchor` appears in `text`, overlapping ones counted, and where it first does.
 fn occurrences(text: &str, anchor: &str) -> (usize, Option<usize>) {
     let mut count = 0;
@@ -884,38 +996,45 @@ fn occurrences(text: &str, anchor: &str) -> (usize, Option<usize>) {
 /// and it never read one. Whether the file exists.
 fn fresh(cx: &Context, path: &Resolved) -> Result<bool, Outcome> {
     let known = cx.fingerprint(&path.path)?;
-    let exists = match std::fs::metadata(&path.path) {
-        Ok(metadata) if metadata.is_dir() => {
-            return Err(Outcome::Refused(format!(
-                "refused: {} is a folder",
-                path.shown
-            )));
-        }
-        Ok(_) => true,
-        Err(error) if error.kind() == ErrorKind::NotFound => false,
+    let kept = cx.daemon.mcp.kept.text(cx.agent, &path.path);
+    fresh_against(cx.place, path, known, kept)
+}
+
+/// `fresh`, given what the session knows of the file: its fingerprint, and its text when kept.
+/// The file is opened once, without following a link, and what changed is read from it: a path
+/// that changed since the check shows nothing of where it now leads.
+fn fresh_against(
+    place: &Place,
+    path: &Resolved,
+    known: Option<String>,
+    kept: Option<String>,
+) -> Result<bool, Outcome> {
+    let file = match open_regular(&path.path) {
+        Ok(file) => Some(file),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
         Err(error) => return Err(failed(path, error)),
     };
-    match (exists, known) {
-        (false, None) => Ok(false),
-        (false, Some(_)) => Err(Outcome::Refused(format!(
+    match (file, known) {
+        (None, None) => Ok(false),
+        (None, Some(_)) => Err(Outcome::Refused(format!(
             "refused: {} was removed since this session read it; nothing was written",
             path.shown
         ))),
-        (true, None) => Err(Outcome::Refused(format!(
+        (Some(_), None) => Err(Outcome::Refused(format!(
             "refused: {} exists and this session has not read it: read it with fs_read first",
             path.shown
         ))),
-        (true, Some(known)) => {
-            let now = sha256_file(&path.path).map_err(|e| failed(path, e))?;
+        (Some(mut file), Some(known)) => {
+            let now = sha256_of(&mut file).map_err(|e| failed(path, e))?;
             if now == known {
                 return Ok(true);
             }
-            let what = match (
-                cx.daemon.mcp.kept.text(cx.agent, &path.path),
-                std::fs::read_to_string(&path.path),
-            ) {
+            let after = file
+                .seek(SeekFrom::Start(0))
+                .and_then(|_| std::io::read_to_string(&mut file));
+            let what = match (kept, after) {
                 (Some(before), Ok(after)) if sha256(before.as_bytes()) == known => {
-                    crate::mcp::masked(&diff(&before, &after), cx.place)
+                    crate::mcp::masked(&diff(&before, &after), place)
                 }
                 _ => "the version it read is no longer kept, so what changed cannot be shown"
                     .to_owned(),
@@ -959,48 +1078,9 @@ fn diff(before: &str, after: &str) -> String {
     format!("@@ line {} @@\n{shown}", start + 1)
 }
 
-/// Refuses unless the folder the file goes in is still inside the place on the disk: a folder
-/// swapped for a link since the path was resolved would take the write out of it.
-fn check_parent(place: &Place, parent: &Path, path: &Resolved) -> Result<(), Outcome> {
-    // Outside the place, the user allowed it.
-    if !path.inside || place.holds(parent) {
-        return Ok(());
-    }
-    Err(Outcome::Refused(format!(
-        "refused: {}: its folder is no longer inside this agent's place (it changed while the \
-         call ran); nothing was written",
-        path.shown
-    )))
-}
-
-/// Writes the file through a temporary file renamed over it (which replaces a link rather than
-/// writing through it), keeping its mode; then the session knows it as written. The folder is
-/// checked to be inside the place after it is made and again just before the rename.
+/// Writes the file, then the session knows it as written.
 fn write(cx: &Context, path: &Resolved, content: String) -> Result<usize, Outcome> {
-    let failed = |error: std::io::Error| Outcome::Failed(format!("{}: {error}", path.shown));
-    let parent = path.path.parent().unwrap_or(Path::new("/"));
-    std::fs::create_dir_all(parent).map_err(failed)?;
-    check_parent(cx.place, parent, path)?;
-    let name = path
-        .path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let id = flottille_core::agent::new_id().map_err(failed)?;
-    let temporary = parent.join(format!(".{name}.{id}.flottille"));
-    let mode = std::fs::metadata(&path.path).ok().map(|m| m.permissions());
-    let written = std::fs::write(&temporary, content.as_bytes())
-        .and_then(|()| match mode {
-            Some(mode) => std::fs::set_permissions(&temporary, mode),
-            None => std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o644)),
-        })
-        .map_err(failed)
-        .and_then(|()| check_parent(cx.place, parent, path))
-        .and_then(|()| std::fs::rename(&temporary, &path.path).map_err(failed));
-    if let Err(outcome) = written {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(outcome);
-    }
+    put(path, content.as_bytes())?;
     let size = content.len();
     let sha = sha256(content.as_bytes());
     let kept = (size as u64 <= KEPT_BYTES).then_some(content);
@@ -1008,41 +1088,397 @@ fn write(cx: &Context, path: &Resolved, content: String) -> Result<usize, Outcom
     Ok(size)
 }
 
+/// Writes the file through a temporary file renamed over it, keeping its mode. Its folder is
+/// opened (and the missing ones made) a folder at a time without following a link, and the
+/// temporary file is made and renamed in that open folder: what is written is where the gate
+/// checked, whatever became a link since.
+fn put(path: &Resolved, content: &[u8]) -> Result<(), Outcome> {
+    let failed = |error: std::io::Error| failed(path, error);
+    let parent = path.path.parent().unwrap_or(Path::new("/"));
+    let Some(name) = path.path.file_name() else {
+        return Err(Outcome::Refused(format!(
+            "refused: {} is a folder",
+            path.shown
+        )));
+    };
+    let folder = nofollow::folder_made(parent).map_err(failed)?;
+    let mode = rustix::fs::statat(&folder, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+        .ok()
+        .filter(|stat| {
+            rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::RegularFile
+        })
+        .map_or(0o644, |stat| stat.st_mode & 0o7777);
+    let id = flottille_core::agent::new_id().map_err(failed)?;
+    let temporary = format!(".{}.{id}.flottille", name.to_string_lossy());
+    let made = rustix::fs::openat(
+        &folder,
+        temporary.as_str(),
+        rustix::fs::OFlags::WRONLY
+            | rustix::fs::OFlags::CREATE
+            | rustix::fs::OFlags::EXCL
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::from_raw_mode(0o600),
+    )
+    .map_err(|e| failed(e.into()))?;
+    let mut file = File::from(made);
+    let written = std::io::Write::write_all(&mut file, content)
+        .and_then(|()| {
+            Ok(rustix::fs::fchmod(
+                &file,
+                rustix::fs::Mode::from_raw_mode(mode),
+            )?)
+        })
+        .and_then(|()| {
+            Ok(rustix::fs::renameat(
+                &folder,
+                temporary.as_str(),
+                &folder,
+                name,
+            )?)
+        });
+    if let Err(error) = written {
+        let _ = rustix::fs::unlinkat(&folder, temporary.as_str(), rustix::fs::AtFlags::empty());
+        return Err(failed(error));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
 
-    #[test]
-    fn a_folder_replaced_by_a_link_out_is_no_longer_inside() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("app");
-        std::fs::create_dir_all(root.join("sub")).unwrap();
-        std::fs::create_dir(dir.path().join("elsewhere")).unwrap();
-        let place = Place {
-            project: "app".into(),
-            workspace: None,
-            root: root.clone(),
-            repositories: vec![(".".into(), root.clone())],
-            branch: String::new(),
-            variables: Default::default(),
-            home: None,
-        };
-        let resolved = place.resolve(&root, "sub/new.txt");
-        let parent = resolved.path.parent().unwrap();
-        assert!(resolved.inside);
-        assert!(check_parent(&place, parent, &resolved).is_ok());
+    /// A place `app` with `sub/f.txt`, a folder outside it with the same, and a folder of secrets
+    /// the swapped folders lead to.
+    struct Scene {
+        _dir: tempfile::TempDir,
+        base: PathBuf,
+        root: PathBuf,
+        place: Place,
+    }
 
-        // Between the resolution and the write.
-        std::fs::remove_dir(root.join("sub")).unwrap();
-        std::os::unix::fs::symlink(dir.path().join("elsewhere"), root.join("sub")).unwrap();
+    impl Scene {
+        fn new() -> Scene {
+            let dir = tempfile::tempdir().unwrap();
+            let base = std::fs::canonicalize(dir.path()).unwrap();
+            let root = base.join("app");
+            for folder in [root.join("sub"), base.join("out/sub")] {
+                std::fs::create_dir_all(&folder).unwrap();
+                std::fs::write(folder.join("f.txt"), "plain text\n").unwrap();
+            }
+            std::fs::create_dir_all(base.join("secret")).unwrap();
+            std::fs::write(base.join("secret/f.txt"), "SECRET\n").unwrap();
+            std::fs::write(base.join("secret/hidden.txt"), "SECRET\n").unwrap();
+            let place = Place {
+                project: "app".into(),
+                workspace: None,
+                root: root.clone(),
+                repositories: vec![(".".into(), root.clone()), ("sub".into(), root.join("sub"))],
+                branch: String::new(),
+                variables: Default::default(),
+                home: None,
+            };
+            Scene {
+                _dir: dir,
+                base,
+                root,
+                place,
+            }
+        }
 
-        let Err(Outcome::Refused(refusal)) = check_parent(&place, parent, &resolved) else {
-            panic!("a folder swapped for a link out must be refused");
+        /// `sub` inside the place, or outside it.
+        fn sub(&self, inside: bool) -> PathBuf {
+            if inside {
+                self.root.join("sub")
+            } else {
+                self.base.join("out/sub")
+            }
+        }
+
+        fn resolve(&self, path: &Path) -> Resolved {
+            self.place.resolve(&self.root, &path.display().to_string())
+        }
+
+        /// The folder made a link to the secrets, after the check.
+        fn swap(&self, folder: &Path) {
+            std::fs::remove_dir_all(folder).unwrap();
+            std::os::unix::fs::symlink(self.base.join("secret"), folder).unwrap();
+        }
+
+        fn secrets_untouched(&self) {
+            let mut names: Vec<String> = std::fs::read_dir(self.base.join("secret"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            names.sort();
+            assert_eq!(names, ["f.txt", "hidden.txt"]);
+            assert_eq!(
+                std::fs::read_to_string(self.base.join("secret/f.txt")).unwrap(),
+                "SECRET\n"
+            );
+        }
+    }
+
+    fn said(outcome: &Outcome) -> &str {
+        match outcome {
+            Outcome::Done(text)
+            | Outcome::Refused(text)
+            | Outcome::Failed(text)
+            | Outcome::Held(text) => text,
+        }
+    }
+
+    fn changed_refusal(outcome: Outcome, what: &str) {
+        let Outcome::Refused(refusal) = outcome else {
+            panic!("{what}: not refused: {}", said(&outcome));
         };
         assert!(
-            refusal.starts_with("refused: sub/new.txt: its folder is no longer inside"),
+            refusal.contains("the path changed since it was checked; nothing was done"),
+            "{what}: {refusal}"
+        );
+        assert!(!refusal.contains("SECRET"), "{what}: {refusal}");
+        assert!(!refusal.contains("hidden"), "{what}: {refusal}");
+    }
+
+    #[test]
+    fn a_folder_swapped_for_a_link_between_the_check_and_the_use_is_refused() {
+        for inside in [true, false] {
+            let side = if inside { "inside" } else { "outside" };
+
+            let scene = Scene::new();
+            let path = scene.resolve(&scene.sub(inside).join("f.txt"));
+            assert_eq!(path.inside, inside);
+            scene.swap(&scene.sub(inside));
+            changed_refusal(
+                read_page(None, &path, 0, 100).unwrap_or_else(|e| failed(&path, e)),
+                &format!("fs_read {side}"),
+            );
+
+            let scene = Scene::new();
+            let path = scene.resolve(&scene.sub(inside));
+            scene.swap(&scene.sub(inside));
+            changed_refusal(list_path(&path, 2), &format!("fs_list {side}"));
+
+            let scene = Scene::new();
+            let path = scene.resolve(&scene.sub(inside).join("new/deeper.txt"));
+            scene.swap(&scene.sub(inside));
+            changed_refusal(
+                put(&path, b"written").unwrap_err(),
+                &format!("fs_write {side}"),
+            );
+            scene.secrets_untouched();
+
+            let scene = Scene::new();
+            let path = scene.resolve(&scene.sub(inside).join("f.txt"));
+            scene.swap(&scene.sub(inside));
+            changed_refusal(exists(&path).unwrap_err(), &format!("fs_edit {side}"));
+            changed_refusal(text_of(&path).unwrap_err(), &format!("fs_edit {side}"));
+            changed_refusal(
+                put(&path, b"edited").unwrap_err(),
+                &format!("fs_edit {side}"),
+            );
+            scene.secrets_untouched();
+
+            let scene = Scene::new();
+            let base = scene.resolve(&scene.sub(inside));
+            scene.swap(&scene.sub(inside));
+            let args = SearchArguments {
+                pattern: "SECRET".into(),
+                repository: None,
+                glob: None,
+                cursor: None,
+            };
+            changed_refusal(
+                search_in(&scene.place, &base, &args),
+                &format!("search {side}"),
+            );
+        }
+    }
+
+    #[test]
+    fn a_search_never_opens_a_folder_swapped_for_a_link_below_it() {
+        let scene = Scene::new();
+        let base = scene.resolve(&scene.root);
+        scene.swap(&scene.root.join("sub"));
+        let args = SearchArguments {
+            pattern: "SECRET".into(),
+            repository: None,
+            glob: None,
+            cursor: None,
+        };
+        let Outcome::Done(found) = search_in(&scene.place, &base, &args) else {
+            panic!("the search failed");
+        };
+        assert!(found.starts_with("0 match(es)"), "{found}");
+        assert!(!found.contains("f.txt"), "{found}");
+    }
+
+    #[test]
+    fn the_fresh_check_of_a_swapped_path_does_not_show_where_it_now_leads() {
+        let scene = Scene::new();
+        let path = scene.resolve(&scene.root.join("sub/f.txt"));
+        let read = "plain text\n".to_owned();
+        scene.swap(&scene.root.join("sub"));
+        let refusal = fresh_against(
+            &scene.place,
+            &path,
+            Some(sha256(read.as_bytes())),
+            Some(read),
+        )
+        .unwrap_err();
+        changed_refusal(refusal, "fresh");
+    }
+
+    #[test]
+    fn a_path_going_up_out_of_a_missing_folder_is_never_opened_and_makes_nothing() {
+        let scene = Scene::new();
+        std::fs::create_dir_all(scene.base.join("nvim")).unwrap();
+        std::os::unix::fs::symlink(scene.base.join("nvim"), scene.root.join("cfg")).unwrap();
+        let path = scene.place.resolve(&scene.root, "m/../cfg/new/init.lua");
+        assert!(path.up_from_missing);
+        let Some(Outcome::Refused(refusal)) = never_opened(&path) else {
+            panic!("a path up out of a missing folder must be refused");
+        };
+        assert!(
+            refusal.contains("names a folder that does not exist and then goes up out of it"),
             "{refusal}"
         );
+        // Deciding made nothing.
+        assert!(!scene.root.join("m").exists());
+        assert!(!scene.base.join("nvim/new").exists());
+    }
+
+    #[test]
+    fn an_approved_path_that_could_not_be_followed_is_refused_for_what_it_is() {
+        let scene = Scene::new();
+        // A process's folder in /proc under another name: never opened, and said so.
+        let path = scene.place.resolve(&scene.root, "/dev/fd/3");
+        let Some(Outcome::Refused(refusal)) = never_opened(&path) else {
+            panic!("/dev/fd/3 must never be opened: {path:?}");
+        };
+        assert!(
+            refusal.contains("never open a path through a process's folder in /proc"),
+            "{refusal}"
+        );
+
+        // More links than Linux follows: opened as written, which follows none.
+        let mut target = scene.base.join("out/sub");
+        for n in (0..41).rev() {
+            let link = scene.base.join(format!("l{n}"));
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            target = link;
+        }
+        let path = scene.resolve(&target.join("f.txt"));
+        assert!(
+            matches!(path.unfollowed, Some(Unfollowed::Failed(_))),
+            "{path:?}"
+        );
+        assert!(never_opened(&path).is_none());
+        let Outcome::Refused(refusal) =
+            read_page(None, &path, 0, 100).unwrap_or_else(|e| failed(&path, e))
+        else {
+            panic!("a path of 41 links must not be read");
+        };
+        assert!(refusal.contains("more than 40 links"), "{refusal}");
+        assert!(!refusal.contains("changed since"), "{refusal}");
+
+        // A folder it may not look into: opened, and the system says why it cannot be. Root
+        // looks into any folder.
+        let locked = scene.base.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("f.txt"), "x").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&locked).is_ok() {
+            return;
+        }
+        let path = scene.resolve(&locked.join("f.txt"));
+        let outcome = read_page(None, &path, 0, 100).unwrap_or_else(|e| failed(&path, e));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            matches!(path.unfollowed, Some(Unfollowed::Failed(_))),
+            "{path:?}"
+        );
+        assert!(never_opened(&path).is_none());
+        let Outcome::Failed(why) = outcome else {
+            panic!("{}", said(&outcome));
+        };
+        assert!(why.contains("ermission denied"), "{why}");
+    }
+
+    #[test]
+    fn a_pipe_or_a_device_is_refused_without_being_opened_for_reading() {
+        let scene = Scene::new();
+        let fifo = scene.root.join("sub/pipe");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o644) }, 0);
+        // Any open for reading or writing is an `IN_OPEN` event; a look (`O_PATH`) is none.
+        let watch = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        assert!(watch >= 0);
+        assert!(unsafe { libc::inotify_add_watch(watch, name.as_ptr(), libc::IN_OPEN) } >= 0);
+        let path = scene.resolve(Path::new("sub/pipe"));
+
+        let read = read_page(None, &path, 0, 100).unwrap_or_else(|e| failed(&path, e));
+        let fresh = fresh_against(&scene.place, &path, Some("sha".into()), None).unwrap_err();
+        let text = text_of(&path).unwrap_err();
+        let root = nofollow::open(&scene.root, nofollow::LOOK).unwrap();
+        let beneath = open_regular_beneath(root.as_fd(), Path::new("sub/pipe")).unwrap_err();
+        for outcome in [read, fresh, text, failed(&path, beneath)] {
+            assert!(
+                said(&outcome).contains("is not a regular file"),
+                "{}",
+                said(&outcome)
+            );
+        }
+        let mut event = [0u8; 256];
+        let got = unsafe { libc::read(watch, event.as_mut_ptr().cast(), event.len()) };
+        unsafe { libc::close(watch) };
+        assert_eq!(got, -1, "the pipe was opened");
+    }
+
+    #[test]
+    fn making_a_folder_needs_only_to_go_through_the_folders_above() {
+        let scene = Scene::new();
+        // A folder above the place that may be gone through but not read.
+        let locked = scene.base.join("locked");
+        std::fs::create_dir_all(locked.join("app")).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o311)).unwrap();
+        if std::fs::read_dir(&locked).is_ok() {
+            // Root reads any folder: nothing to show.
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+        let place = Place {
+            root: locked.join("app"),
+            ..scene.place.clone()
+        };
+        let path = place.resolve(&place.root, "newdir/f.txt");
+        let written = put(&path, b"x");
+        let read = read_page(None, &path, 0, 10).map_err(|e| failed(&path, e));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(written.is_ok(), "{}", said(&written.unwrap_err()));
+        assert!(read.is_ok());
+        assert_eq!(
+            std::fs::read_to_string(locked.join("app/newdir/f.txt")).unwrap(),
+            "x"
+        );
+    }
+
+    #[test]
+    fn a_link_of_proc_to_the_daemon_s_own_is_refused_as_such() {
+        let scene = Scene::new();
+        for named in ["/proc/mounts", "/proc/net/dev"] {
+            let path = scene.place.resolve(&scene.root, named);
+            let outcome = read_page(None, &path, 0, 100).unwrap_or_else(|e| failed(&path, e));
+            let Outcome::Refused(refusal) = outcome else {
+                panic!("{named}: {}", said(&outcome));
+            };
+            assert!(
+                refusal.contains("goes through /proc/self, which is the daemon's own"),
+                "{refusal}"
+            );
+        }
     }
 
     #[test]

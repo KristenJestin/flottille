@@ -22,9 +22,16 @@ pub const QUALIFIED_ONLY: [&str; 2] = ["opencode", "codex"];
 pub struct Settings {
     enabled: BTreeMap<&'static str, bool>,
     unqualified: Vec<&'static str>,
-    /// The Auto judge the user chose (`[judge]`): none until they choose one.
+    /// The Auto judge (`[judge]`): the one the user chose, or the one Flottille picked for them
+    /// (`picked`); none while neither, or when the user chose none.
     pub judge: Option<Judge>,
+    /// Whether the file says anything of the judge, a judge or `judge = "none"`: Flottille picks
+    /// one only while it does not, so that a user who chose none never gets one.
+    pub judge_set: bool,
 }
+
+/// What `judge = "none"` says: the user chose no judge, and Auto asks like Ask.
+pub const NO_JUDGE: &str = "none";
 
 /// The model that judges the calls to judge in Auto (`docs/design.md` §7), as `[judge]` holds it.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, serde::Serialize)]
@@ -34,6 +41,9 @@ pub struct Judge {
     /// The provider's default model when none is named.
     #[serde(default)]
     pub model: Option<String>,
+    /// Flottille picked it, and the user has not yet seen the notice that says so.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub picked: bool,
 }
 
 impl Judge {
@@ -62,6 +72,7 @@ impl Default for Settings {
                 .collect(),
             unqualified: Vec::new(),
             judge: None,
+            judge_set: false,
         }
     }
 }
@@ -96,8 +107,11 @@ impl Settings {
         let judge = table.remove("judge");
         let entries: BTreeMap<String, Entry> = serde_path_to_error::deserialize(table)
             .map_err(|error| refuse(format!("{}: {}", error.path(), error.inner().message())))?;
-        let mut settings = Settings::default();
-        if let Some(judge) = judge {
+        let mut settings = Settings {
+            judge_set: judge.is_some(),
+            ..Settings::default()
+        };
+        if let Some(judge) = judge.filter(|judge| judge.as_str() != Some(NO_JUDGE)) {
             let judge: Judge = serde_path_to_error::deserialize(judge).map_err(|error| {
                 refuse(format!(
                     "judge.{}: {}",
@@ -170,9 +184,12 @@ mod tests {
             settings.judge,
             Some(Judge {
                 provider: "claude".into(),
-                model: Some("haiku".into())
+                model: Some("haiku".into()),
+                picked: false,
             })
         );
+        assert!(settings.judge_set);
+        assert!(!Settings::default().judge_set);
         assert!(settings.enabled("claude"));
         let unknown = Settings::parse("[judge]\nprovider = \"gemini\"\n").unwrap_err();
         assert!(
@@ -181,6 +198,18 @@ mod tests {
         );
         let key = Settings::parse("[judge]\nprovider = \"claude\"\nwho = 1\n").unwrap_err();
         assert!(key.contains("judge"), "{key}");
+    }
+
+    #[test]
+    fn a_judge_chosen_none_is_told_apart_from_a_judge_never_chosen() {
+        let none = Settings::parse("judge = \"none\"\n").unwrap();
+        assert_eq!(none.judge, None);
+        assert!(none.judge_set);
+        let picked =
+            Settings::parse("[judge]\nprovider = \"claude\"\nmodel = \"haiku\"\npicked = true\n")
+                .unwrap();
+        assert!(picked.judge.unwrap().picked);
+        assert!(Settings::parse("judge = \"some\"\n").is_err());
     }
 
     #[test]
