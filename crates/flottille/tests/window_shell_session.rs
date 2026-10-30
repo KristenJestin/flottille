@@ -910,3 +910,23 @@ fn a_session_send_message_is_marked_with_its_sender_in_both_conversations(cx: &m
             })
     });
 }
+
+#[gpui_kit::test]
+fn the_session_page_with_its_rail_draws_nothing_at_rest(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, 1440., cx);
+    let number = hold(&shell, &mcp, cx);
+    until(&shell, cx, "the gauge on the lead's row", |cx| {
+        has(format!("rail-context-{lead}"), cx)
+    });
+    cx.update(|window, cx| window.click(format!("approval-details-{number}"), cx));
+    settle(cx);
+    cx.update(|window, cx| window.click(format!("approval-details-{number}"), cx));
+    settle(cx);
+    assert_eq!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)),
+        0,
+        "nothing moves once the card folded back"
+    );
+}
