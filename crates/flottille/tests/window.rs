@@ -166,6 +166,48 @@ fn mark_of(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> Optio
     })
 }
 
+#[test]
+fn a_session_whose_first_message_is_hello_is_not_titled_hello() {
+    let user = user();
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", None, "Hello");
+
+    let title = fresh(&user).session(&lead).unwrap().title.clone();
+
+    assert_ne!(title, "Hello");
+    assert_eq!(title, format!("agent {lead}"), "the neutral title");
+}
+
+#[test]
+fn the_title_of_a_session_that_began_with_a_greeting_follows_the_first_message_that_is_more_than_one()
+ {
+    let user = user();
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", None, "Hello");
+    send(&user, &lead, "thanks");
+    send(&user, &lead, "Fix the login form\nit loses its focus");
+    eventually("the turns end", || {
+        user.call("agent.list", json!({})).unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["id"] == lead.as_str() && a["state"] == "idle")
+            && user.call("agent.show", json!({"agent": lead})).unwrap()["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|e| e["name"] == "agent.turn_ended")
+                .count()
+                == 3
+    });
+
+    // Read from scratch, as a window just opened does.
+    assert_eq!(
+        fresh(&user).session(&lead).unwrap().title,
+        "Fix the login form"
+    );
+}
+
 #[gpui_kit::test]
 fn two_projects_main_and_a_workspace_with_sessions_under_each_appear_in_the_tree(
     cx: &mut TestAppContext,

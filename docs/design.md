@@ -479,7 +479,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
 
 - a top bar with search and a bell counting what waits for the user;
 - left: the tree project › place › session. `main` and the workspaces sit at the same level
-  under their project; sessions sit under their place, with a mark when running or when the
+  under their project; a session is titled by the first line of its first message that says what the
+  work is (a greeting or a single word does not: the session is `agent <id>` until a later message
+  of the user does); sessions sit under their place, with a mark when running or when the
   root needs the user. The mark is where the work is, once: on the session's own row while that row
   is in sight, and on a folded place or project, which shows the strongest mark of what it holds,
   only while it is folded (never on a row and on its parents together); a session whose agent

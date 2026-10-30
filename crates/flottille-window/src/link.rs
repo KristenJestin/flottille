@@ -16,6 +16,7 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use serde_json::{Value, json};
 
 use crate::actions::Outcome;
+use crate::conversation::sections;
 use crate::model::{self, Answers, Snapshot};
 
 type Result<T> = std::result::Result<T, String>;
@@ -93,7 +94,7 @@ pub fn spawn_into(connect: Connect, sender: UnboundedSender<Update>) -> Arc<Seen
 
 fn run(connect: Connect, updates: UnboundedSender<Update>, seen: Arc<Seen>) {
     let mut retry = FIRST_RETRY;
-    let mut briefs = HashMap::new();
+    let mut briefs = Briefs::default();
     let reads = ProviderReads::default();
     loop {
         let why = match connect() {
@@ -121,7 +122,7 @@ fn follow(
     connect: &Connect,
     updates: &UnboundedSender<Update>,
     seen: &Seen,
-    briefs: &mut HashMap<String, String>,
+    briefs: &mut Briefs,
     reads: &ProviderReads,
 ) -> Result<()> {
     let mut conn = Conn::new(stream).map_err(|e| e.to_string())?;
@@ -306,10 +307,49 @@ fn matters(event: &Event) -> bool {
 /// A fresh read of everything the shell shows, on any connection.
 pub fn read_once(stream: UnixStream) -> Result<Snapshot> {
     let mut conn = Conn::new(stream).map_err(|e| e.to_string())?;
-    read(&mut conn, &mut HashMap::new(), &Seen::default())
+    read(&mut conn, &mut Briefs::default(), &Seen::default())
 }
 
-fn read(conn: &mut Conn, briefs: &mut HashMap<String, String>, seen: &Seen) -> Result<Snapshot> {
+/// The message each root is titled by, and how far the search for it has gone.
+#[derive(Default)]
+struct Briefs {
+    texts: HashMap<String, String>,
+    /// For a root whose first message is a greeting: the last event read of its conversation, so
+    /// that each read goes on from there.
+    scanned: HashMap<String, u64>,
+}
+
+impl Briefs {
+    /// The title follows the first message of the user that is more than a greeting: the first
+    /// message is no title when it says no work, and the later ones are looked through, once.
+    fn follow(&mut self, conn: &mut Conn, id: &str) -> Result<()> {
+        let mut after = self.scanned.get(id).copied().unwrap_or(0);
+        loop {
+            let shown = conn.request("agent.show", json!({"agent": id, "after": after}))?;
+            for event in shown["events"].as_array().into_iter().flatten() {
+                after = event["seq"].as_u64().unwrap_or(after);
+                if event["name"] != "agent.prompted" {
+                    continue;
+                }
+                let text = event["data"]["text"].as_str().unwrap_or_default();
+                let said = sections(text)
+                    .into_iter()
+                    .filter(|(kind, _)| matches!(kind.as_str(), "" | "user"))
+                    .find(|(_, body)| !model::title_of(body).is_empty());
+                if let Some((_, body)) = said {
+                    self.texts.insert(id.to_owned(), body);
+                    return Ok(());
+                }
+            }
+            if shown["more"] != true {
+                self.scanned.insert(id.to_owned(), after);
+                return Ok(());
+            }
+        }
+    }
+}
+
+fn read(conn: &mut Conn, briefs: &mut Briefs, seen: &Seen) -> Result<Snapshot> {
     let projects = conn.request("project.list", json!({}))?;
     let workspaces = conn.request("workspace.list", json!({}))?;
     let agents = conn.request("agent.list", json!({}))?;
@@ -326,10 +366,13 @@ fn read(conn: &mut Conn, briefs: &mut HashMap<String, String>, seen: &Seen) -> R
     // A root's first message is its brief and never changes: read once.
     let now = seen.last_seq.load(Ordering::Relaxed);
     for id in roots {
-        if !briefs.contains_key(id) {
+        if !briefs.texts.contains_key(id) {
             let shown = conn.request("agent.show", json!({"agent": id, "after": now}))?;
             let brief = shown["agent"]["brief"].as_str().unwrap_or_default();
-            briefs.insert(id.to_owned(), brief.to_owned());
+            briefs.texts.insert(id.to_owned(), brief.to_owned());
+        }
+        if model::title_of(&briefs.texts[id]).is_empty() {
+            briefs.follow(conn, id)?;
         }
     }
     let questions = questions(conn, &agents)?;
@@ -339,7 +382,7 @@ fn read(conn: &mut Conn, briefs: &mut HashMap<String, String>, seen: &Seen) -> R
         agents: &agents,
         approvals: &approvals,
         needs_user: &needs_user,
-        briefs,
+        briefs: &briefs.texts,
         questions: &questions,
         commands: &commands,
     });
