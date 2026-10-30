@@ -36,6 +36,12 @@
 //! (numbered `created`, 1 by default), `pr merge` and `run rerun` print nothing, and `run list`
 //! prints `runs` of the repository (`{"runs": {"acme/app": [{"databaseId": 7, …}]}}`), `[]`
 //! without. `pr comment` and `pr edit` print the pull request's URL, of one the script holds.
+//! With `merge_methods` (`{"acme/app": ["merge", "rebase"]}`), `pr merge` fails for a method
+//! (`--squash`, `--merge`, `--rebase`) the repository does not allow, as GitHub refuses it, and
+//! `repo view <repository> --json …Allowed` says them (every one without). `pr view` gives a pull
+//! request its branch as `headRefName` when the script does not. `view_omits`
+//! (`{"acme/app": ["number"]}`) takes those fields out of what `pr view` answers, as a `gh` whose
+//! output lost them.
 //!
 //! `pr list` keeps, as `gh` does, the pull requests of `--state` (`open` by default: `OPEN`,
 //! drafts included; `closed`, `merged`, `all`) and of `--head` when given, newest first, at most
@@ -249,6 +255,39 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             println!("https://github.com/{repository}/pull/{number}");
             0
         }
+        ["repo", "view", asked, ..] => {
+            let repository = asked.strip_prefix("github.com/").unwrap_or(asked);
+            let methods = &script["merge_methods"][repository];
+            let allows = |method: &str| {
+                methods
+                    .as_array()
+                    .is_none_or(|methods| methods.iter().any(|m| m == method))
+            };
+            let all = json!({"mergeCommitAllowed": allows("merge"),
+                "rebaseMergeAllowed": allows("rebase"), "squashMergeAllowed": allows("squash")});
+            println!("{}", fields_of(&[&all], option("--json"), None)[0]);
+            0
+        }
+        ["pr", "merge", ..]
+            if script["merge_methods"][repository.unwrap_or_default()]
+                .as_array()
+                .is_some_and(|methods| {
+                    !["squash", "merge", "rebase"].iter().any(|method| {
+                        words.contains(&format!("--{method}").as_str())
+                            && methods.iter().any(|m| m == method)
+                    })
+                }) =>
+        {
+            let method = ["squash", "merge", "rebase"]
+                .into_iter()
+                .find(|method| words.contains(&format!("--{method}").as_str()))
+                .unwrap_or("squash");
+            eprintln!(
+                "GraphQL: Merge method {method} merging is not allowed on this repository \
+                 (mergePullRequest)"
+            );
+            1
+        }
         ["pr", "create" | "merge", ..] | ["run", "list" | "rerun", ..] => {
             let Some(repository) = repository else {
                 eprintln!("fake gh: no -R");
@@ -309,10 +348,23 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             let found = pulls
                 .as_object()
                 .into_iter()
-                .flat_map(|branches| branches.values())
-                .find(|pull| pull["number"] == number);
+                .flatten()
+                .find(|(_, pull)| pull["number"] == number);
             match found {
-                Some(pull) => {
+                Some((branch, pull)) => {
+                    let mut pull = pull.clone();
+                    if pull["headRefName"].is_null() {
+                        pull["headRefName"] = Value::from(branch.as_str());
+                    }
+                    for omitted in script["view_omits"][repository]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                    {
+                        if let Some(field) = omitted.as_str() {
+                            pull.as_object_mut().map(|fields| fields.remove(field));
+                        }
+                    }
                     println!("{pull}");
                     0
                 }

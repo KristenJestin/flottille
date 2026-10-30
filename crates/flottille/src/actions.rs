@@ -257,6 +257,9 @@ pub async fn prepared(
     if tool == "agent_launch" {
         return launch_says(daemon, grant, args);
     }
+    if tool == "session_send" {
+        return session_says(daemon, grant, args);
+    }
     if tool == "tickets" {
         let project = own(daemon, grant)?;
         return match crate::tickets::unwritable(&project, args) {
@@ -1526,6 +1529,7 @@ fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<Strin
     if root && !is_root(daemon, grant) {
         return Err(Outcome::Refused(CHILD_ROOTS.into()));
     }
+    crate::tree::launch_refusal(grant.place.workspace.as_deref(), args)?;
     let title = args["title"].as_str().unwrap_or_default();
     let mut says = match (args["new_workspace"].as_str(), args["workspace"].is_null()) {
         (Some(name), true) => {
@@ -1562,6 +1566,26 @@ fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<Strin
         ));
     }
     Ok(says)
+}
+
+/// What `session_send` does, in words: the session written to and the text whole, or the
+/// refusal of a session the caller may not write to, before anything is asked.
+fn session_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<String>, Outcome> {
+    let asked: crate::tree::SessionSend = arguments("session_send", args.clone())?;
+    let caller = daemon
+        .read(|store| store.agent(&grant.agent))
+        .map_err(|error| Outcome::Failed(error.to_string()))?
+        .ok_or_else(|| Outcome::Failed(format!("there is no agent {}", grant.agent)))?;
+    let (session, started) = crate::tree::session_of(daemon, &caller, &asked)?;
+    let whose = match started {
+        true => "which you started",
+        false => "the agent that started this session",
+    };
+    Ok(vec![format!(
+        "Send to the session {}, {whose}: {}",
+        crate::tree::named(&session),
+        asked.text
+    )])
 }
 
 /// The project's workspaces, a line each.

@@ -224,9 +224,18 @@ fn a_running_agent_is_an_icon_in_the_rail_and_no_text_badge_anywhere(cx: &mut Te
     let (shell, reply, cx) = open_session(&user, &lead, cx);
 
     send(&user, &lead, "think a while");
-    until(&shell, cx, "the turn runs", |cx| {
-        reply.read_with(cx, |r, _| r.is_running())
-    });
+    // The composer learns of the turn from the page's own read of the tree, the header from the
+    // shell's: the two reads land apart, so each is waited for.
+    let page = page_of(&shell, cx);
+    until(
+        &shell,
+        cx,
+        "the turn runs, in the composer and the header",
+        |cx| {
+            reply.read_with(cx, |r, _| r.is_running())
+                && page.read_with(cx, |p, cx| p.header_state(cx)) == AgentState::Running
+        },
+    );
     settle(cx);
 
     cx.update(|window, _| {
@@ -239,7 +248,6 @@ fn a_running_agent_is_an_icon_in_the_rail_and_no_text_badge_anywhere(cx: &mut Te
             "the icon stays"
         );
     });
-    let page = page_of(&shell, cx);
     assert_eq!(
         page.read_with(cx, |p, cx| p.header_state(cx)),
         AgentState::Running

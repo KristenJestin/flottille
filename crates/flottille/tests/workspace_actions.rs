@@ -389,12 +389,18 @@ fn agent_launch_with_new_workspace_is_judged_the_same() {
     let created = held(mcp.call("workspace", json!({"action": "create", "name": "a"})));
     let launched = held(mcp.call(
         "agent_launch",
-        json!({"title": "worker", "brief": "Write the tests.", "new_workspace": "a"}),
+        json!({"title": "worker", "brief": "Write the tests.", "new_workspace": "a",
+            "root": true}),
     ));
     let (created, launched) = (request(&user, created), request(&user, launched));
     assert_eq!(launched["class"], "base", "{launched}");
     assert_eq!(launched["kind"], "action", "{launched}");
-    assert_eq!(launched["reasons"], created["reasons"], "{launched}");
+    for reason in created["reasons"].as_array().unwrap() {
+        assert!(
+            launched["reasons"].as_array().unwrap().contains(reason),
+            "{launched}"
+        );
+    }
     assert!(
         launched["says"]
             .to_string()

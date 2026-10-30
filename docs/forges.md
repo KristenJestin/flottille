@@ -92,10 +92,14 @@ several (`gh pr list -R github.com/owner/name --head <branch> --state all --limi
 itself (`gh pr view <n> -R github.com/owner/name --json …`):
 
 - its number, title, state (`open`, `draft`, `merged`, `closed`), base branch and URL;
+- its head branch, and whether it is mergeable: `mergeable` says `MERGEABLE` or `CONFLICTING`
+  (anything else, `UNKNOWN` while GitHub computes it, is not known yet);
 - its review decision (`approved`, `changes requested`, `review required`, or none);
 - its checks, each with its name and its state: `passing`, `failing`, `pending` or `skipped`;
   and the checks as one mark: `failing` when one fails, else `pending` when one runs, else
-  `passing`; none when there are no checks;
+  `passing` (skipped ones count as passing in the mark, but a merge needs one that passed: a pull
+  request whose checks were all skipped is refused like one with none); none when there are no
+  checks;
 - its comments (their number; `forge` `show` gives their text, and the reviews').
 
 **`gh` missing or not signed in** is said once for the workspace, in `problem`, with what to do
@@ -141,7 +145,7 @@ open.
 Read and written through the user's own `bkt`
 (<https://github.com/avivsinai/bitbucket-cli>, Go), the same way, and shown the same way (CLI,
 window, `forge`): a pull request has its number, title, state, base, link, review, checks and
-comments, as above, and, for Bitbucket, its reviewers (`reviewers`: each name with `approved`,
+comments, as above, its head branch and whether it is mergeable, and, for Bitbucket, its reviewers (`reviewers`: each name with `approved`,
 `changes requested` or `pending`), which GitHub's reviews say otherwise.
 
 **The release read is v0.9.0**, commit `f70c9c50e4496f1fa2ae40ced62061eeb905a00a`. What follows is
@@ -155,7 +159,7 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
 | `bkt pr checks <id> --context C … --json` | `statuses[]`: `state`, `name`, `key` | `pkg/cmd/pr/pr.go:1754-1809` (flags), `:1998` (`statuses`), `:2198` (the states); `pkg/types/commit_status.go:5-11` |
 | `bkt api <path> --context C [--param k=v]` (GET) | the server's own JSON, unchanged | `pkg/cmd/api/api.go:23-48`, `:138-140` |
 | `bkt pr create --context C … --source <branch> --target <base> --title T --description D [--reviewer N]…` | `✓ Created pull request #<id>` | `pkg/cmd/pr/pr.go:597-615`, `:664`, `:696`; `--reviewer` at `:614`, sent as `{"username": N}` on Cloud (`pkg/bbcloud/pullrequests.go:232-237`) and `{"user": {"name": N}}` on Data Center (`pkg/bbdc/pullrequests.go:75-82`) |
-| `bkt pr merge <id> --context C … --strategy squash --close-source=false` | the exit code | `pkg/cmd/pr/pr.go:1314-1334`; `pkg/bbcloud/pullrequests.go:351-388` (`squash` is a Cloud strategy); `pkg/bbdc/pullrequests.go:108-132` (`mergeStrategyId`) |
+| `bkt pr merge <id> --context C … --strategy S --close-source=false` | the exit code | `pkg/cmd/pr/pr.go:1314-1334`; `pkg/bbcloud/pullrequests.go:351-388` (Cloud takes `merge_commit`, `squash` and `fast_forward` only, `:352-356`, `:363-365`); `pkg/bbdc/pullrequests.go:108-132` (`mergeStrategyId`, given as it is) |
 | `bkt pipeline list --context C --workspace W --repo R --limit 50 --json` | `pipelines[]`: `build_number`, `state.result.name`, `target.ref.name` | `pkg/cmd/pipeline/pipeline.go:177-210`; `pkg/bbcloud/client.go:100-120`, `:145` (newest first: `sort=-created_on`) |
 | `bkt pipeline run --context C --workspace W --repo R --ref <branch>` | the exit code | `pkg/cmd/pipeline/pipeline.go:60-91`, `:135-175`; `pkg/bbcloud/client.go:330-357` |
 
@@ -192,6 +196,11 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
   (`values[]` whose `action` is `COMMENTED`: `comment.text`, `comment.author.displayName`,
   replies in `comment.comments`). **These shapes are assumed, and the maintainer checks them**:
   nothing in `bkt`'s source prints them. Only the first 100 comments are read.
+- **Mergeable is read the same way, assumed too**: on Cloud, the pull request has a conflict when
+  a file of its `/diffstat?pagelen=500` (`values[].status`) is `merge conflict`, and when that
+  page has a `next` and no conflict, it is not known (only the first page is read); on Data
+  Center, when its `/rest/api/1.0/projects/{key}/repos/{repo}/pull-requests/{id}/merge` says
+  `conflicted`. When that read fails, it is not known, and the rest of the pull request is shown.
 - **The review is the reviewers' verdicts as one**: `changes requested` when one reviewer asks
   for it (Cloud `state: changes_requested`, Data Center `status: NEEDS_WORK`), else `review
   required` while one has not decided, else `approved`; none when nobody was asked. It is not
@@ -217,11 +226,21 @@ the base the repository started from):
   user's slug).
 - `merge`: the open pull request of the branch, not from a fork (Cloud: source and
   destination repositories are the same; Data Center: the same slug and project key), into the
-  base: `bkt pr merge <id> --strategy squash --close-source=false`. `--close-source=false` because
-  `bkt` closes the source branch by default (`pkg/cmd/pr/pr.go:1334`) and `gh pr merge --squash`
-  does not. A Data Center repository whose project does not allow squash answers with the
-  server's own refusal, which is the result. Before it, as for GitHub, it is refused while a check
-  of the pull request (`bkt pr checks`) fails or runs, or while the review is `changes requested`
+  base: `bkt pr merge <id> --strategy S --close-source=false`, `S` the method's strategy: `squash`
+  is `squash` on both; `merge` is `merge_commit` on Cloud and `no-ff` on Data Center; `rebase` is
+  `rebase-ff-only` on Data Center (rebased onto the base, no merge commit, as GitHub's), and is
+  refused on Cloud before anything is asked, since `bkt` takes no rebase strategy there.
+  `--close-source=false` because `bkt` closes the source branch by default
+  (`pkg/cmd/pr/pr.go:1334`) and `gh pr merge` does not. When the server refuses the merge, the
+  strategies the repository allows are read (Cloud: `destination.branch.merge_strategies` of the
+  pull request's own page; Data Center: the `enabled` ones of `mergeConfig.strategies[].id` in
+  `/rest/api/1.0/projects/{key}/repos/{repo}/settings/pull-requests`, both through `bkt api`,
+  **assumed shapes**) and, when the method is not among them, the refusal names the methods they
+  allow, then the strategies it allows that no method reaches (`ff`, `squash-ff-only`,
+  `fast_forward`…) as it names them; otherwise the server's own refusal is the result. Before it, as for GitHub, it is refused
+  when no check ran on the pull request (`bkt pr checks` lists none; an answer without `statuses`
+  is not that: the checks could not be read, and nothing is merged), while a check of the pull
+  request fails or runs, or while the review is `changes requested`
   (Data Center: a reviewer's `NEEDS_WORK` in the list; Cloud: a participant's `changes_requested`
   on the pull request's own page, read with `bkt api`), unless the user waives it.
 - `checks`: **Cloud only**; `bkt` has no re-run of one pipeline, only `pipeline run --ref

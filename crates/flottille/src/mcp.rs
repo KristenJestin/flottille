@@ -94,7 +94,7 @@ const REPLACED: &str = "refused: this session has been replaced: a new session o
 
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
 /// the order frozen in the agent.
-const SERVED: [Definition; 24] = [
+const SERVED: [Definition; 25] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -296,8 +296,8 @@ const SERVED: [Definition; 24] = [
             (open by default) and branch. show: a workspace's branch's (yours; in main, name \
             workspace), or number's, with checks, review and comment counts; detail full adds \
             texts. Writes, judged, answered at once, the result maybe later: create, merge \
-            (squash; refused while checks fail or a review asks for changes unless waive gives \
-            the user's words) and checks (re-run failed) act on a workspace's branch; comment \
+            (method, squash by default; refused with no check, while checks fail or a review \
+            asks for changes unless waive gives the user's words) and checks (re-run failed) act on a workspace's branch; comment \
             and edit on number. {\"action\": \"create\", \"repository\": \"api\", \"title\": \
             \"fix: ...\", \"body\": \"...\"}",
         read_only: false,
@@ -315,7 +315,8 @@ const SERVED: [Definition; 24] = [
                 "title": {"type": "string"},
                 "body": {"type": "string", "description": "create, edit: description; comment: the comment."},
                 "draft": {"type": "boolean"},
-                "waive": {"type": "string", "description": "merge: the user's words letting a blocked pull request be merged; held for them."}
+                "waive": {"type": "string", "description": "merge: the user's words letting a blocked pull request be merged; held for them."},
+                "method": {"type": "string", "enum": ["squash", "merge", "rebase"], "description": "merge: squash when left out."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -457,32 +458,35 @@ const SERVED: [Definition; 24] = [
     },
     Definition {
         name: "agent_launch",
-        title: "Launch a child agent",
-        description: "Starts a child agent on one precise task and answers at once with its \
-            agent_id. It works on its own: you are told when it reports, asks, fails, is stuck or \
-            idles, so never poll. The brief is all it knows: the task, what to read, the checks, \
-            the deliverable. workspace names an existing workspace, new_workspace makes one \
-            (repositories picks them); neither: your own place. provider: yours when left out; a \
-            refusal names the ready ones. Refused above the children cap or the depth limit. \
-            root (a root only, judged): a new session for the user instead, theirs, not your \
-            child, the brief its first message. {\"title\": \"Fix login\", \"brief\": \"...\", \
-            \"workspace\": \"login\"}; {\"title\": \"Add API\", \"brief\": \"...\", \
-            \"new_workspace\": \"api\", \"repositories\": [\"api\"]}",
+        title: "Start a session, or launch a child",
+        description: "Work that belongs in a workspace is a session for the user: root: true \
+            with workspace (an existing one) or new_workspace (made for it, repositories picks \
+            them), judged; theirs, not your child, the brief its first message; you write to it, \
+            and it answers you, with session_send. A root only. Without root: a child agent on \
+            one precise task, in your own place (workspace and new_workspace are refused), \
+            answered at once with its agent_id; it works on its own and you are told when it \
+            reports, asks, fails, is stuck or idles, so never poll. The brief is all it knows: \
+            the task, what to read, the checks, the deliverable. provider: yours when left out; \
+            a refusal names the ready ones. A child is refused above the children cap or the \
+            depth limit. {\"title\": \"Fix login\", \"brief\": \"...\", \"root\": true, \
+            \"workspace\": \"login\"}; {\"title\": \"Add API\", \"brief\": \"...\", \"root\": \
+            true, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}; {\"title\": \
+            \"Write the tests\", \"brief\": \"...\"}",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "title": {"type": "string", "description": "The task in a few words: how you and the user will name this child."},
-                "brief": {"type": "string", "description": "Everything the child needs to know."},
+                "title": {"type": "string", "description": "The task in a few words: how you and the user will name this session or child."},
+                "brief": {"type": "string", "description": "Everything the session or the child needs to know."},
                 "provider": {"type": "string", "description": "The provider it runs on: yours when left out."},
                 "model": {"type": "string", "description": "The model; the provider's default when left out."},
                 "effort": {"type": "string", "description": "The model's effort; its default when left out."},
                 "role": {"type": "string", "enum": ["worker", "lead"], "description": "worker by default."},
-                "workspace": {"type": "string", "description": "An existing workspace of the project, to work in."},
-                "new_workspace": {"type": "string", "description": "The name of a new workspace to make for it. Not with workspace."},
+                "workspace": {"type": "string", "description": "With root: an existing workspace of the project, for the session to work in. A child works in your place."},
+                "new_workspace": {"type": "string", "description": "With root: the name of a new workspace to make for the session. Not with workspace."},
                 "repositories": {"type": "array", "items": {"type": "string"}, "description": "With new_workspace: its repositories, by path; the project's when left out."},
-                "root": {"type": "boolean", "description": "A session for the user, not a child."}
+                "root": {"type": "boolean", "description": "A session for the user, in a workspace or your place, not a child."}
             }, "required": ["title", "brief"], "additionalProperties": false})
         },
     },
@@ -602,6 +606,23 @@ const SERVED: [Definition; 24] = [
                 "decision": {"type": "string", "enum": ["forward", "deny"]},
                 "why": {"type": "string", "description": "One sentence."}
             }, "required": ["request_id", "decision", "why"], "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "session_send",
+        title: "Write to a session",
+        description: "Writes to a session you started (agent_launch with root), or to the agent \
+            that started yours. It does not wait: it reaches it on its next tool result, or as \
+            a new turn, labelled with your name; its answer comes later as [flottille:session]. \
+            Judged, as a write is. Your children are written to with agent_send.",
+        read_only: false,
+        idempotent: false,
+        destructive: false,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "session": {"type": "string", "description": "The session's agent id: as agent_launch gave it, or as a [flottille:session] message names it."},
+                "text": {"type": "string", "description": "The message, at most 8000 characters."}
+            }, "required": ["session", "text"], "additionalProperties": false})
         },
     },
 ];
