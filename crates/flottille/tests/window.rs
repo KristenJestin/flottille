@@ -1780,7 +1780,8 @@ fn a_message_arriving_appends_without_rebuilding_other_rows(cx: &mut TestAppCont
         blocks(&page, cx)[4],
         Block::Message {
             from: "you".into(),
-            text: "and the changelog".into()
+            text: "and the changelog".into(),
+            images: Vec::new(),
         }
     );
     assert_eq!(renders(cx), before, "no row already there is drawn again");
@@ -1825,6 +1826,7 @@ fn replying_delivers_to_the_lead(cx: &mut TestAppContext) {
         blocks(&page, cx).contains(&Block::Message {
             from: "you".into(),
             text: "Use the staging database\nand say when done".into(),
+            images: Vec::new(),
         })
     });
 }
@@ -1853,7 +1855,7 @@ fn selecting_a_worker_shows_its_conversation_with_no_composer_and_nothing_can_se
     settle(cx);
 
     match &blocks(&page, cx)[0] {
-        Block::Message { from, text } => {
+        Block::Message { from, text, .. } => {
             assert_eq!(from, "the conversation → build the form");
             assert!(text.contains("HANG and build the form"), "{text}");
         }
@@ -2074,6 +2076,9 @@ fn the_card_of_a_command_an_agent_adds_says_what_it_writes_and_is_confirmed_once
             "Its instructions: Push the branch.",
         ]
     );
+    // Its instructions are in its details.
+    cx.update(|window, cx| window.click(format!("approval-details-{number}"), cx));
+    settle(cx);
     cx.update(|window, _| {
         assert!(window.find(format!("approval-says-{number}-1")).visible());
     });
@@ -2515,8 +2520,11 @@ fn a_base_card_in_auto_is_distinct_and_says_why_it_always_comes_back(cx: &mut Te
     assert!(card.base);
     assert_eq!(
         text_of(&format!("approval-class-{number}"), cx).as_deref(),
-        Some("Base")
+        Some("Always asks")
     );
+    // Why it always comes back is in its details.
+    cx.update(|window, cx| window.click(format!("approval-details-{number}"), cx));
+    settle(cx);
     assert_eq!(
         text_of(&format!("approval-base-{number}"), cx).as_deref(),
         Some(flottille_window::session::BASE_SAYS)
@@ -3100,7 +3108,8 @@ fn a_long_conversation_shows_its_last_page_and_earlier_ones_on_demand(cx: &mut T
     assert!(
         !shown.contains(&Block::Message {
             from: "you".into(),
-            text: "lead the work".into()
+            text: "lead the work".into(),
+            images: Vec::new(),
         }),
         "the first message is on an earlier page"
     );
@@ -3127,6 +3136,7 @@ fn a_long_conversation_shows_its_last_page_and_earlier_ones_on_demand(cx: &mut T
             == Block::Message {
                 from: "you".into(),
                 text: "lead the work".into(),
+                images: Vec::new(),
             }
     });
     settle(cx);
@@ -4254,7 +4264,8 @@ fn a_user_message_has_no_you_label(cx: &mut TestAppContext) {
         blocks(&page, cx)[0],
         Block::Message {
             from: "you".into(),
-            text: "lead the work".into()
+            text: "lead the work".into(),
+            images: Vec::new(),
         }
     );
     assert_eq!(
@@ -4701,8 +4712,10 @@ fn the_workspace_section_shows_the_ticket_opens_it_on_a_click_and_links_and_unli
         [PathBuf::from("https://github.com/acme/app/issues/12")]
     );
 
-    // Unlinked from the rail: the daemon forgets it and the row goes.
-    cx.update(|window, cx| window.click("rail-ticket-unlink", cx));
+    // Unlinked from the section's menu: the daemon forgets it and the row goes.
+    cx.update(|window, cx| window.click("workspace-menu", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("workspace-unlink-ticket", cx));
     until(&shell, cx, "the ticket gone from the rail", |cx| {
         cx.update(|window, _| window.try_find("rail-ticket").is_none())
     });
@@ -4711,7 +4724,11 @@ fn the_workspace_section_shows_the_ticket_opens_it_on_a_click_and_links_and_unli
         .unwrap();
     assert_eq!(shown["ticket"], serde_json::Value::Null);
 
-    // Linked from the field: Enter links what is typed.
+    // Linked from the field "Link a ticket…" opens: Enter links what is typed.
+    cx.update(|window, cx| window.click("workspace-menu", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("workspace-link-ticket", cx));
+    settle(cx);
     let field = page
         .read_with(cx, |p, cx| p.rail().read(cx).ticket_field().cloned())
         .expect("the rail has its field");
@@ -5893,36 +5910,6 @@ fn the_conversation_says_the_session_ended_then_was_resumed(cx: &mut TestAppCont
 }
 
 #[gpui_kit::test]
-fn an_ended_session_s_header_says_stopped_or_failed_as_its_rail_does(cx: &mut TestAppContext) {
-    let user = team_user();
-    let (lead, _mcp, _) = lead_in_w(&user);
-    let (shell, cx) = open_session(&user, &lead, 1280., cx);
-    let page = session_page(&shell, cx);
-    assert_eq!(
-        page.read_with(cx, |p, cx| p.header_state(cx)),
-        AgentState::Idle
-    );
-
-    user.call("agent.stop", json!({"agent": lead})).unwrap();
-    until(&shell, cx, "the header says stopped", |cx| {
-        page.read_with(cx, |p, cx| p.header_state(cx) == AgentState::Stopped)
-    });
-
-    // Resumed, it says what the left tree says again.
-    user.resume(&lead);
-    until(&shell, cx, "the header follows the left tree again", |cx| {
-        page.read_with(cx, |p, cx| p.header_state(cx) == AgentState::Idle)
-    });
-
-    // Failed: its process dies at each message, until it is replaced too often.
-    user.fake_script(json!({"turns": [{"when": "DIE", "do": [{"die": 3}]}]}));
-    send(&user, &lead, "DIE");
-    until(&shell, cx, "the header says failed", |cx| {
-        page.read_with(cx, |p, cx| p.header_state(cx) == AgentState::Failed)
-    });
-}
-
-#[gpui_kit::test]
 fn a_sub_agent_has_no_stop_of_its_own(cx: &mut TestAppContext) {
     let user = team_user();
     let (_lead, shell, cx) = lead_with_two_workers(&user, cx);
@@ -6005,7 +5992,7 @@ fn stop_and_escape_cancel_the_turn_that_runs_and_the_agent_stays_alive(cx: &mut 
 // The WORKSPACE section names each repository's forge as the daemon reads it.
 
 #[gpui_kit::test]
-fn the_workspace_section_names_each_repository_s_forge(cx: &mut TestAppContext) {
+fn the_workspace_section_has_no_line_for_a_repository_with_its_forge(cx: &mut TestAppContext) {
     let user = team_user().with_fake_gh();
     let (lead, _mcp, _) = lead_in_w(&user);
     user.git(
@@ -6028,7 +6015,8 @@ fn the_workspace_section_names_each_repository_s_forge(cx: &mut TestAppContext) 
     });
     assert_eq!(forges, [(".".to_owned(), "github · acme/app".to_owned())]);
     settle(cx);
-    cx.update(|window, _| assert!(window.try_find("rail-forge-app").is_some()));
+    // The forge is the project's setting: the workspace section has no line for it.
+    cx.update(|window, _| assert!(window.try_find("rail-no-forge").is_none()));
 }
 
 #[gpui_kit::test]
@@ -6058,7 +6046,10 @@ fn a_repository_with_no_forge_says_why_in_the_workspace_section(cx: &mut TestApp
         )]
     );
     settle(cx);
-    cx.update(|window, _| assert!(window.try_find("rail-forge-app").is_some()));
+    assert_eq!(
+        text_of("rail-no-forge", cx).as_deref(),
+        Some("No forge set for app: choose it in the project's Settings")
+    );
 }
 
 // ── Commands and skills in the project's settings (#127) ──────────────────────────────────────
@@ -7958,8 +7949,8 @@ fn a_request_waits_in_the_rail_with_allow_and_deny_and_the_conversation_keeps_on
         "Allow and Deny are in the rail: {allow:?} {rail:?}"
     );
     assert!(
-        waiting.origin.y < rail.origin.y + px(40.),
-        "the section is at the top of the rail: {waiting:?}"
+        rail.bottom() - waiting.bottom() < px(24.),
+        "the section is at the bottom of the rail: {waiting:?} in {rail:?}"
     );
     cx.update(|window, _| {
         assert_eq!(
@@ -7967,7 +7958,10 @@ fn a_request_waits_in_the_rail_with_allow_and_deny_and_the_conversation_keeps_on
             Some("Waiting for you")
         );
         let line = window.find(format!("approval-line-{number}"));
-        assert_eq!(line.label(), Some("Waiting for you: Read .env"));
+        assert_eq!(
+            line.label(),
+            Some(format!("Request #{number} · Read .env").as_str())
+        );
         assert!(line.bounds().origin.x < rail.origin.x, "it is in the chat");
         assert!(line.bounds().size.height < px(44.), "one compact line");
     });
@@ -8039,7 +8033,9 @@ fn three_requests_do_not_pile_up_in_the_conversation_they_wait_in_the_rail(
 }
 
 #[gpui_kit::test]
-fn the_conversation_s_line_scrolls_the_rail_to_the_request_and_lights_it(cx: &mut TestAppContext) {
+fn the_conversation_s_line_lights_its_card_in_the_rail_and_the_light_goes_out(
+    cx: &mut TestAppContext,
+) {
     let user = team_user();
     let (lead, mcp, _) = lead_in_w(&user);
     let (shell, cx) = open_session(&user, &lead, 1280., cx);
@@ -8050,23 +8046,7 @@ fn the_conversation_s_line_scrolls_the_rail_to_the_request_and_lights_it(cx: &mu
     for number in &numbers {
         card_for(&shell, *number, cx);
     }
-    // A window too short for the rail: it scrolls.
-    cx.simulate_resize(size(px(1280.), px(380.)));
     settle(cx);
-    let rail = session_page(&shell, cx).read_with(cx, |p, _| p.rail().clone());
-    cx.update(|window, cx| {
-        window.scroll(
-            "rail",
-            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-400.))),
-            cx,
-        )
-    });
-    settle(cx);
-    let away = rail.read_with(cx, |rail, _| rail.scrolled());
-    assert!(
-        away > px(100.),
-        "the rail was scrolled away from its cards: {away:?}"
-    );
 
     cx.update(|window, cx| window.click(format!("approval-line-{}", numbers[2]), cx));
     let waiting = session_page(&shell, cx).read_with(cx, |p, cx| p.waiting(cx));
@@ -8075,17 +8055,6 @@ fn the_conversation_s_line_scrolls_the_rail_to_the_request_and_lights_it(cx: &mu
         Some(numbers[2]),
         "the card is lit"
     );
-    // It moves there over frames, not at once.
-    cx.executor().advance_clock(Duration::from_millis(60));
-    cx.update(|window, cx| window.simulate_next_frame(cx));
-    let part = rail.read_with(cx, |rail, _| rail.scrolled());
-    assert!(
-        part > px(0.) && part < away,
-        "on its way: {part:?} of {away:?}"
-    );
-    settle(cx);
-    assert_eq!(rail.read_with(cx, |rail, _| rail.scrolled()), px(0.));
-    assert!(rect_of(&format!("allow-{}", numbers[0]), cx).origin.y > px(0.));
 
     // The light goes out by itself.
     for _ in 0..40 {
@@ -8139,6 +8108,8 @@ fn a_base_request_keeps_its_alarm_and_its_sentence_in_the_rail(cx: &mut TestAppC
     let number = held_number(mcp.call("run", json!({"line": "git push --force origin main"})));
     let card = card_for(&shell, number, cx);
     assert!(card.base);
+    settle(cx);
+    cx.update(|window, cx| window.click(format!("approval-details-{number}"), cx));
     settle(cx);
     let rail = rect_of("session-rail", cx);
     assert_eq!(

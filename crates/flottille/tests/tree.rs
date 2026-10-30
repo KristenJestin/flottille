@@ -26,7 +26,8 @@ fn script() -> Value {
         {"when": "die-once", "times": 1, "do": [{"die": 3}]},
         {"when": "die-always", "do": [{"die": 4}]},
         {"when": "FORGE", "do": [{"say": FORGED}, {"hang": true}]},
-        {"when": "LONG", "do": long_talk()}
+        {"when": "LONG", "do": long_talk()},
+        {"when": "USAGE", "do": [{"usage": {"used": 50_000, "size": 200_000}}]}
     ]})
 }
 
@@ -1289,4 +1290,31 @@ fn resuming_a_stopped_lead_restarts_it_alone_and_its_children_stay_ended() {
     let resumed = events(&user, &lead_id, "agent.resumed");
     assert_eq!(resumed.len(), 1);
     assert_eq!(resumed[0]["data"]["agent"], lead_id.as_str());
+}
+
+#[test]
+fn the_tree_says_how_much_of_its_context_each_agent_used() {
+    let user = user();
+    let (lead, mcp) = lead(&user);
+    let worker = launch(&mcp, "worker", "HANG");
+    let context = |agent: &str| {
+        let tree = user.call("agent.tree", json!({"agent": lead})).unwrap();
+        tree["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["agent"]["id"] == agent)
+            .unwrap()["context"]
+            .clone()
+    };
+    assert_eq!(context(&lead), Value::Null, "nothing reported yet");
+    user.call("agent.send", json!({"agent": lead, "message": "USAGE"}))
+        .unwrap();
+    eventually("the lead reported its context", || context(&lead) == 25);
+    assert_eq!(context(&worker), Value::Null, "each agent its own");
+    let trees = user.call("agent.trees", json!({})).unwrap();
+    assert_eq!(
+        trees["trees"][0]["agents"][0]["context"], 25,
+        "agent.trees too"
+    );
 }

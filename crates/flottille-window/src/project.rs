@@ -448,7 +448,9 @@ impl Render for ProjectPage {
                 .child(new_workspace)
                 .test_support()
         };
-        div()
+        // The detail of a run slides in over the page, which keeps its scroll beneath it.
+        let run_drawer = self.tasks.read(cx).drawer().clone();
+        let page = div()
             .id("project-page")
             .size_full()
             .overflow_y_scroll()
@@ -502,7 +504,8 @@ impl Render for ProjectPage {
                         6 + places,
                         div().child(self.tasks.clone()),
                     )),
-            )
+            );
+        div().size_full().relative().child(page).child(run_drawer)
     }
 }
 

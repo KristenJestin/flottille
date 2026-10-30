@@ -4,7 +4,7 @@
 //! A row's state mark is a [`StateIcon`](crate::StateIcon) or [`Pill`](crate::Pill) view handed in
 //! by the screen, so a state change or a spinner tick redraws that mark and not the row.
 
-use std::f32::consts::FRAC_PI_2;
+use std::f32::consts::{FRAC_PI_2, PI};
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -40,6 +40,8 @@ pub struct TreeRow {
     level: TreeLevel,
     title: SharedString,
     expanded: Option<bool>,
+    /// A chevron on a row that is no project's, which turns up as what it holds unfolds above it.
+    upward: bool,
     selected: bool,
     trailing: Option<AnyElement>,
     actions: Option<(AnyElement, bool)>,
@@ -59,6 +61,7 @@ impl TreeRow {
             level,
             title: title.into(),
             expanded: None,
+            upward: false,
             selected: false,
             trailing: None,
             actions: None,
@@ -70,6 +73,12 @@ impl TreeRow {
     /// Whether the level below is open; a project row turns its chevron with it.
     pub fn expanded(mut self, expanded: bool) -> Self {
         self.expanded = Some(expanded);
+        self
+    }
+
+    /// A row whose group unfolds above it: its chevron turns from right to up.
+    pub fn unfolds_upward(mut self) -> Self {
+        self.upward = true;
         self
     }
 
@@ -139,11 +148,16 @@ impl RenderOnce for TreeRow {
             .when(self.expanded.is_some(), |d| {
                 d.aria_expanded(self.expanded == Some(true))
             });
-        if let Some(turn) = chevron_turn.filter(|_| project) {
+        if let Some(turn) = chevron_turn.filter(|_| project || self.upward) {
+            let angle = match self.upward {
+                false => -FRAC_PI_2 * turn,
+                // Folded (1) points right as a project's does; open (0) points up.
+                true => -PI + FRAC_PI_2 * turn,
+            };
             let chevron = icon(Icon::Chevron)
                 .size(px(12.))
                 .text_color(p.faint)
-                .with_transformation(Transformation::rotate(radians(-FRAC_PI_2 * turn)));
+                .with_transformation(Transformation::rotate(radians(angle)));
             row = row.child(match self.on_toggle {
                 Some(on_toggle) => div()
                     .id(toggle_id(self.id.clone()))
