@@ -9,7 +9,7 @@
 //! The same editor holds the Auto judge's guidance in Settings (`judge.show`, `judge.set`,
 //! `judge.reset`), read at each judgement: a change reaches the next one.
 
-use flottille_ui::{Button, Card, palette, presence_of, space};
+use flottille_ui::{Button, Section, Toast, palette, presence_of, space, toast};
 use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::{
     AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement,
@@ -79,6 +79,8 @@ pub struct RulesEditor {
     shown: Option<Shown>,
     /// A save or a reset waits for the daemon.
     waiting: bool,
+    /// What waits is a reset.
+    resetting: bool,
     problem: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
 }
@@ -92,6 +94,7 @@ impl RulesEditor {
             field: None,
             shown: None,
             waiting: false,
+            resetting: false,
             problem: None,
             _subscriptions: Vec::new(),
         }
@@ -222,6 +225,32 @@ impl RulesEditor {
         cx: &mut Context<Self>,
     ) {
         self.waiting = false;
+        let what = if self.judge {
+            "Judge guidance"
+        } else {
+            "Rules"
+        };
+        let resetting = std::mem::take(&mut self.resetting);
+        if written {
+            let said = match &said {
+                Ok(_) if resetting => Toast::success(format!("{what} reset to the default")),
+                Ok(_) => Toast::success(format!("{what} saved")),
+                Err(why) => Toast::failure(format!("{what} not saved")).detail(why.clone()),
+            };
+            let reach = if self.judge {
+                "They reach the next judgement."
+            } else {
+                "The agents created from now on follow them."
+            };
+            toast(
+                if said.is_failure() {
+                    said
+                } else {
+                    said.detail(reach)
+                },
+                cx,
+            );
+        }
         match said {
             Ok(shown) => {
                 self.problem = None;
@@ -231,7 +260,8 @@ impl RulesEditor {
                 }
                 self.shown = Some(shown);
             }
-            Err(why) => self.problem = Some(why.into()),
+            Err(why) if !written => self.problem = Some(why.into()),
+            Err(_) => {}
         }
         cx.notify();
     }
@@ -254,35 +284,37 @@ impl RulesEditor {
             return;
         }
         self.waiting = true;
+        self.resetting = true;
         self.problem = None;
         self.write(None, cx);
         cx.notify();
     }
 
-    /// What the editor says of where the text comes from.
-    fn origin(&self) -> &'static str {
-        if self.judge {
-            return match self.shown.as_ref().map(|shown| shown.source) {
-                None => "Asking the daemon…",
-                Some(Source::Global) => "Your own guidance for the judge.",
-                Some(_) => {
-                    "Flottille's default guidance for the judge: edit it to make it your own."
-                }
-            };
+    /// Where the text comes from, in a few words: the section's tag.
+    pub fn origin(&self) -> &'static str {
+        match (
+            self.judge,
+            &self.project,
+            self.shown.as_ref().map(|shown| shown.source),
+        ) {
+            (_, _, None) => "asking the daemon",
+            (true, _, Some(Source::Global)) => "your own",
+            (true, _, Some(_)) => "Flottille's default",
+            (false, None, Some(Source::Global)) => "your own",
+            (false, None, Some(_)) => "Flottille's default",
+            (false, Some(_), Some(Source::Project)) => "this project's own",
+            (false, Some(_), Some(Source::Global)) => "your rules for every project",
+            (false, Some(_), Some(Source::Default)) => "Flottille's default",
         }
-        match (&self.project, self.shown.as_ref().map(|shown| shown.source)) {
-            (_, None) => "Asking the daemon…",
-            (None, Some(Source::Global)) => "Your own rules, for every project.",
-            (None, Some(_)) => "Flottille's default rules: edit them to make them your own.",
-            (Some(_), Some(Source::Project)) => "This project's own rules.",
-            (Some(_), Some(Source::Global)) => {
-                "This project follows your rules for every project. Edit and save to give it \
-                 rules of its own."
-            }
-            (Some(_), Some(Source::Default)) => {
-                "This project follows Flottille's default rules. Edit and save to give it rules \
-                 of its own."
-            }
+    }
+
+    /// What the line beside the buttons says: how to make the text one's own, or when a change
+    /// takes effect.
+    fn footer(&self) -> &'static str {
+        match (self.judge, &self.project, self.is_own()) {
+            (true, _, _) => JUDGE_REACH,
+            (false, Some(_), false) => "Edit the text to give the project rules of its own.",
+            (false, _, _) => REACH,
         }
     }
 }
@@ -307,48 +339,78 @@ impl Render for RulesEditor {
             )
         };
         let savable = self.savable(cx);
-        let buttons = div()
+        let footer = div()
+            .mt(space::XS)
             .flex()
             .items_center()
             .gap(space::SM)
             .child(
-                Button::secondary(id("reset"), "Reset to default")
+                div()
+                    .id(id("reach"))
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(12.))
+                    .text_color(p.faint)
+                    .child(self.footer())
+                    .test_support(),
+            )
+            .child(
+                Button::quiet(id("reset"), "Reset to default")
                     .disabled(!self.is_own() || self.waiting)
                     .on_click(cx.listener(|this, _, _, cx| this.reset(cx))),
             )
-            .child(div().flex_1())
             .child(
                 Button::primary(id("save"), "Save")
                     .disabled(!savable || self.waiting)
                     .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
             );
-        let body = div()
-            .px(space::LG)
+        let text = div()
+            .id(id("text"))
+            .min_h(px(150.))
+            .px(space::MD)
             .py(space::MD)
-            .flex()
-            .flex_col()
-            .gap(space::SM)
-            .child(
+            .rounded(px(10.))
+            .bg(p.field)
+            .border_1()
+            .border_color(p.line2)
+            .text_size(px(13.))
+            .line_height(px(20.))
+            .child(field)
+            .test_support();
+        let line = move |id: ElementId| {
+            move |said: SharedString| {
                 div()
-                    .id(id("origin"))
+                    .id(id.clone())
+                    .aria_label(said.clone())
                     .text_size(px(12.5))
-                    .text_color(p.mute)
-                    .child(self.origin())
-                    .test_support(),
-            )
-            .child(
-                div()
-                    .id(id("text"))
-                    .px(space::MD)
-                    .py(space::SM)
-                    .rounded(px(8.))
-                    .bg(p.field)
-                    .border_1()
-                    .border_color(p.line2)
-                    .text_size(px(12.5))
-                    .child(field)
-                    .test_support(),
-            )
+                    .text_color(p.fail)
+                    .child(said)
+                    .test_support()
+                    .into_any_element()
+            }
+        };
+        let (title, sentence, section) = match (judge, &self.project) {
+            (true, _) => (
+                "Judge guidance",
+                "What the judge is told to allow. It can add to the floor (ask for anything \
+                 destructive), never lift it.",
+                "guidance",
+            ),
+            (false, Some(_)) => (
+                "Rules",
+                "How the project's agents work. A change reaches the agents created from now on.",
+                "rules",
+            ),
+            (false, None) => (
+                "Rules",
+                "How every project's agents work, unless a project has rules of its own.",
+                "rules",
+            ),
+        };
+        Section::new(section, title)
+            .tag(self.origin())
+            .sentence(sentence)
+            .child(text)
             .child(
                 presence_of(
                     id("cut-block"),
@@ -356,20 +418,9 @@ impl Render for RulesEditor {
                         .as_ref()
                         .and_then(|shown| shown.cut.clone())
                         .map(|cut| SharedString::from(format!("Cut: {cut}."))),
-                    {
-                        let cut = id("cut");
-                        move |line| {
-                            div()
-                                .id(cut)
-                                .text_size(px(12.5))
-                                .text_color(p.fail)
-                                .child(line)
-                                .test_support()
-                                .into_any_element()
-                        }
-                    },
+                    line(id("cut")),
                 )
-                .gap(space::SM),
+                .gap(space::MD),
             )
             .child(
                 presence_of(
@@ -382,48 +433,18 @@ impl Render for RulesEditor {
                                 "The judge asks you about every call until this is fixed: {error}."
                             ))
                         }),
-                    {
-                        let error = id("error");
-                        move |said| {
-                            div()
-                                .id(error)
-                                .aria_label(said.clone())
-                                .text_size(px(12.5))
-                                .text_color(p.fail)
-                                .child(said)
-                                .test_support()
-                                .into_any_element()
-                        }
-                    },
+                    line(id("error")),
                 )
-                .gap(space::SM),
+                .gap(space::MD),
             )
             .child(
-                div()
-                    .id(id("reach"))
-                    .text_size(px(12.))
-                    .text_color(p.faint)
-                    .child(if self.judge { JUDGE_REACH } else { REACH })
-                    .test_support(),
+                presence_of(
+                    id("problem-block"),
+                    self.problem.clone(),
+                    line(id("problem")),
+                )
+                .gap(space::MD),
             )
-            .child(
-                presence_of(id("problem-block"), self.problem.clone(), {
-                    let problem = id("problem");
-                    move |line| {
-                        div()
-                            .id(problem)
-                            .text_size(px(12.5))
-                            .text_color(p.fail)
-                            .child(line)
-                            .test_support()
-                            .into_any_element()
-                    }
-                })
-                .gap(space::SM),
-            )
-            .child(buttons);
-        Card::new()
-            .title(if self.judge { "Judge" } else { "Rules" })
-            .child(body)
+            .child(footer)
     }
 }

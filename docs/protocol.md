@@ -230,8 +230,9 @@ or a setup step runs in it…), with the key at fault.
 #### `project.settings`
 
 `{"name"}`. The project's forges and tracker as its Settings show them (`docs/forges.md`, "The
-forge of a repository"): `{"name", "folder", "repositories": [{"path", "remote", "url", "forge",
-"proposal", "disagrees"}], "tracker", "obsolete"}`. `url` is the remote's address (credentials taken
+forge of a repository"): `{"name", "folder", "repositories": [{"path", "remote", "depends_on",
+"url", "forge", "proposal", "disagrees"}], "tracker", "obsolete"}`. `depends_on` lists the paths
+of the repositories it depends on (`[]` when none), `url` is the remote's address (credentials taken
 out, masked; `null` when it has none), `forge` the one declared (`null` when none), `proposal` what
 the address proposes (`null` when nothing), `disagrees` why the declared forge is not where the
 remote leads (`null` when it is). `obsolete` lists the keys of the file that are no longer read

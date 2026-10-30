@@ -241,6 +241,7 @@ async fn settings_of(project: &Project) -> Value {
         repositories.push(json!({
             "path": repository.path,
             "remote": repository.remote,
+            "depends_on": repository.depends_on,
             "url": url,
             "forge": repository.forge,
             "proposal": proposal,

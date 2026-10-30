@@ -6,8 +6,13 @@
 
 use std::time::Duration;
 
+use std::collections::HashMap;
+
 use flottille_ui::drawer::Closed;
-use flottille_ui::{Button, Confirm, Drawer, Item, Listing, Modal, Switch, Type, palette, space};
+use flottille_ui::{
+    Button, Confirm, Drawer, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal,
+    Section, Select, SelectOption, Switch, Toast, Type, palette, presence, space, toast,
+};
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -18,9 +23,8 @@ use gpui_kit::{
 use serde_json::{Value, json};
 
 use crate::actions::Command;
-use crate::commands::{
-    boxed, empty_note, heading, line_field, perform_later, problem_line, save_or_saving,
-};
+use crate::commands::{boxed, heading, line_field, menu_of, perform_later, problem_line};
+use crate::project::repository_label;
 use crate::runs::{CommandList, CommandOutput, CommandPanel, CommandRow};
 use crate::shell::Shell;
 
@@ -84,7 +88,7 @@ pub enum Flag {
 }
 
 impl Flag {
-    const ALL: [Flag; 4] = [
+    pub const ALL: [Flag; 4] = [
         Flag::Serve,
         Flag::Check,
         Flag::ReadOnly,
@@ -100,13 +104,36 @@ impl Flag {
         }
     }
 
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
-            Flag::Serve => "Keeps running (a server)",
-            Flag::Check => "A check (tests, lint)",
+            Flag::Serve => "Keeps running",
+            Flag::Check => "A check",
             Flag::ReadOnly => "Changes nothing",
-            Flag::AskBeforeRunning => "Judged each time an agent runs it",
+            Flag::AskBeforeRunning => "Ask before each run",
         }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Flag::Serve => "A server: it is listed under Runs until it is stopped.",
+            Flag::Check => "Tests or lint: its result is told to the agent that ran it.",
+            Flag::ReadOnly => "Agents run it without asking, even in main.",
+            Flag::AskBeforeRunning => "Held for you (or the judge) every time an agent runs it.",
+        }
+    }
+
+    /// The tag a row shows for it.
+    fn tag(self) -> &'static str {
+        match self {
+            Flag::Serve => "server",
+            Flag::Check => "check",
+            Flag::ReadOnly => "read-only",
+            Flag::AskBeforeRunning => "asks",
+        }
+    }
+
+    pub fn key_of(self) -> &'static str {
+        self.key()
     }
 
     fn of(self, info: &TaskInfo) -> bool {
@@ -122,7 +149,14 @@ impl Flag {
 struct Fields {
     name: Entity<InputState>,
     line: Entity<InputState>,
-    repository: Entity<InputState>,
+}
+
+/// What a write was, for the toast its answer says.
+#[derive(Clone, Debug, PartialEq)]
+enum Writing {
+    Added(String),
+    Saved(String),
+    Removed(String),
 }
 
 /// The "Tasks" section of the project's Settings.
@@ -132,14 +166,18 @@ pub struct TasksSection {
     listed: Option<Vec<TaskInfo>>,
     /// The rows as drawn: a removed task folds away before it is gone.
     rows: Listing<TaskInfo>,
-    /// What the daemon said when the list could not be read, or a removal was refused.
+    menus: HashMap<String, Entity<Menu>>,
+    /// The project's repositories, where a task may run.
+    repositories: Vec<String>,
+    /// Why the list cannot be read.
     problem: Option<SharedString>,
     /// The form is open: on a new task (`Some(None)`) or the one named.
     editing: Option<Option<String>>,
-    /// The flags the form shows.
+    /// The flags and the repository the form shows.
     flags: TaskInfo,
     fields: Option<Fields>,
     saving: bool,
+    writing: Option<Writing>,
     form_error: Option<SharedString>,
     confirming: Option<String>,
     /// What the confirmation names, kept while it fades away.
@@ -154,11 +192,14 @@ impl TasksSection {
             project,
             listed: None,
             rows: Listing::default(),
+            menus: HashMap::new(),
+            repositories: Vec::new(),
             problem: None,
             editing: None,
             flags: TaskInfo::default(),
             fields: None,
             saving: false,
+            writing: None,
             form_error: None,
             confirming: None,
             asked: String::new(),
@@ -191,8 +232,26 @@ impl TasksSection {
         self.fields.as_ref().map(|f| &f.line)
     }
 
-    pub fn repository_field(&self) -> Option<&Entity<InputState>> {
-        self.fields.as_ref().map(|f| &f.repository)
+    pub fn is_confirming(&self) -> bool {
+        self.confirming.is_some()
+    }
+
+    /// Where the form runs the task: a repository, or the place's folder.
+    pub fn repository(&self) -> Option<&str> {
+        self.flags.repository.as_deref()
+    }
+
+    pub fn set_repositories(&mut self, repositories: Vec<String>, cx: &mut Context<Self>) {
+        if self.repositories != repositories {
+            self.repositories = repositories;
+            cx.notify();
+        }
+    }
+
+    /// Runs the task in `repository`, or in the place's folder.
+    pub fn choose_repository(&mut self, repository: Option<String>, cx: &mut Context<Self>) {
+        self.flags.repository = repository;
+        cx.notify();
     }
 
     /// Asks the daemon for the list.
@@ -217,19 +276,10 @@ impl TasksSection {
 
     fn fields(&mut self, window: &mut Window, cx: &mut Context<Self>) -> &Fields {
         if self.fields.is_none() {
-            let name = line_field("name, as agents run it: test", window, cx);
-            let line = line_field(
-                "one command line, never run by a shell: cargo test",
-                window,
-                cx,
-            );
-            let repository = line_field(
-                "repository, for example api; the place's top when empty",
-                window,
-                cx,
-            );
+            let name = line_field("test", window, cx);
+            let line = line_field("pnpm test", window, cx);
             // Typing clears what a refusal said.
-            for input in [&name, &line, &repository] {
+            for input in [&name, &line] {
                 self._subscriptions
                     .push(cx.subscribe(input, |this, _, event, cx| {
                         if matches!(event, InputEvent::Change) && this.form_error.take().is_some() {
@@ -237,11 +287,7 @@ impl TasksSection {
                         }
                     }));
             }
-            self.fields = Some(Fields {
-                name,
-                line,
-                repository,
-            });
+            self.fields = Some(Fields { name, line });
         }
         self.fields.as_ref().expect("made above")
     }
@@ -249,17 +295,10 @@ impl TasksSection {
     /// "New task", or "Edit" on one: the form, filled with it.
     pub fn open(&mut self, info: Option<&TaskInfo>, window: &mut Window, cx: &mut Context<Self>) {
         let fields = self.fields(window, cx);
-        let (name, line, repository) = (
-            fields.name.clone(),
-            fields.line.clone(),
-            fields.repository.clone(),
-        );
+        let (name, line) = (fields.name.clone(), fields.line.clone());
         let shown = info.cloned().unwrap_or_default();
         name.update(cx, |f, cx| f.set_value(shown.name.clone(), window, cx));
         line.update(cx, |f, cx| f.set_value(shown.line.clone(), window, cx));
-        repository.update(cx, |f, cx| {
-            f.set_value(shown.repository.clone().unwrap_or_default(), window, cx)
-        });
         self.flags = shown;
         self.editing = Some(info.map(|info| info.name.clone()));
         self.form_error = None;
@@ -288,8 +327,15 @@ impl TasksSection {
         cx.notify();
     }
 
-    fn write(&mut self, method: &'static str, params: Value, cx: &mut Context<Self>) {
+    fn write(
+        &mut self,
+        method: &'static str,
+        params: Value,
+        writing: Writing,
+        cx: &mut Context<Self>,
+    ) {
         self.saving = true;
+        self.writing = Some(writing);
         self.form_error = None;
         self.problem = None;
         let command = Command::TaskWrite {
@@ -311,21 +357,20 @@ impl TasksSection {
         };
         let value = |field: &Entity<InputState>| field.read(cx).value().trim().to_owned();
         let name = original.clone().unwrap_or_else(|| value(&fields.name));
-        let repository = value(&fields.repository);
         let mut params = json!({
             "project": self.project,
             "name": name,
             "line": value(&fields.line),
-            "repository": if repository.is_empty() { Value::Null } else { repository.into() },
+            "repository": self.flags.repository,
         });
         for flag in Flag::ALL {
             params[flag.key()] = flag.of(&self.flags).into();
         }
-        let method = match original {
-            Some(_) => "task.edit",
-            None => "task.add",
+        let (method, writing) = match original {
+            Some(_) => ("task.edit", Writing::Saved(name)),
+            None => ("task.add", Writing::Added(name)),
         };
-        self.write(method, params, cx);
+        self.write(method, params, writing, cx);
     }
 
     /// Asks to remove, in a confirmation; called again from it, removes.
@@ -338,52 +383,90 @@ impl TasksSection {
         }
         self.confirming = None;
         let params = json!({"project": self.project, "name": name});
-        self.write("task.remove", params, cx);
+        let writing = Writing::Removed(name.to_owned());
+        self.write("task.remove", params, writing, cx);
     }
 
-    /// The daemon's answer to a write: done, and the list is read again; or refused, and why.
+    /// The daemon's answer to a write: a toast says it, and the list is read again; a refusal of
+    /// the dialog's stays in it.
     pub fn written(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
         self.saving = false;
+        let writing = self.writing.take();
         match refused {
             None => {
                 self.editing = None;
                 self.form_error = None;
+                let said = match writing {
+                    Some(Writing::Added(name)) => Toast::success(format!("Task {name} added"))
+                        .detail("Agents run it by its name; the project page has a Run for it."),
+                    Some(Writing::Saved(name)) => Toast::success(format!("Task {name} saved")),
+                    Some(Writing::Removed(name)) => Toast::success(format!("Task {name} removed")),
+                    None => Toast::success("Tasks saved"),
+                };
+                toast(said, cx);
                 self.read(cx);
             }
-            Some(why) if self.editing.is_none() => self.problem = Some(why.into()),
+            Some(why) if self.editing.is_none() => {
+                toast(Toast::failure("The task was not removed").detail(why), cx)
+            }
             Some(why) => self.form_error = Some(why.into()),
         }
         cx.notify();
     }
 
-    fn row(&self, info: &TaskInfo, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = palette(cx);
-        let id = |part: &str| ElementId::Name(format!("{part}-{}", info.name).into());
-        let name = info.name.clone();
-        div()
-            .id(id("task"))
-            .px(space::LG)
-            .py(space::MD)
-            .rounded(px(10.))
-            .border_1()
-            .border_color(p.line)
-            .bg(p.card)
-            .flex()
-            .items_start()
-            .gap(space::MD)
-            .child(task_text(info, &p))
-            .child({
-                let edit = info.clone();
-                Button::quiet(id("edit-task"), "Edit").on_click(
-                    cx.listener(move |this, _, window, cx| this.open(Some(&edit), window, cx)),
-                )
+    fn menu(&mut self, name: &str, cx: &mut Context<Self>) -> Entity<Menu> {
+        let this = cx.entity().downgrade();
+        menu_of(&mut self.menus, "task", name, cx, move |name, menu| {
+            let (edit, remove) = (this.clone(), this.clone());
+            let (to_edit, to_remove) = (name.to_owned(), name.to_owned());
+            menu.entry(
+                format!("edit-task-{name}"),
+                "Edit",
+                None,
+                move |window, cx| {
+                    edit.update(cx, |this, cx| {
+                        let info = this
+                            .listed
+                            .iter()
+                            .flatten()
+                            .find(|t| t.name == to_edit)
+                            .cloned();
+                        if let Some(info) = info {
+                            this.open(Some(&info), window, cx);
+                        }
+                    })
+                    .ok();
+                },
+            )
+            .danger(format!("remove-task-{name}"), "Remove…", move |_, cx| {
+                remove
+                    .update(cx, |this, cx| this.remove(&to_remove, cx))
+                    .ok();
             })
-            .child({
-                Button::quiet(id("remove-task"), "Remove")
-                    .on_click(cx.listener(move |this, _, _, cx| this.remove(&name, cx)))
-                    .into_any_element()
-            })
-            .test_support()
+        })
+    }
+
+    fn row(&mut self, info: &TaskInfo, cx: &mut Context<Self>) -> ListRow {
+        let menu = self.menu(&info.name, cx);
+        let mut row = ListRow::new(
+            ElementId::Name(format!("task-{}", info.name).into()),
+            SharedString::from(info.name.clone()),
+        )
+        .mono()
+        .line(SharedString::from(info.line.clone()))
+        .mono_line()
+        .more(menu);
+        for flag in Flag::ALL {
+            if flag.of(info) {
+                row = row.tag(flag.tag());
+            }
+        }
+        row = row.detail(SharedString::from(match &info.repository {
+            Some(repository) => format!("in {}", repository_label(&self.project, repository)),
+            None => "in each place's folder".to_owned(),
+        }));
+        let edit = info.clone();
+        row.on_click(cx.listener(move |this, _, window, cx| this.open(Some(&edit), window, cx)))
     }
 
     /// The confirmation of a removal.
@@ -411,11 +494,11 @@ impl TasksSection {
     fn modal(&mut self, cx: &mut Context<Self>) -> Modal {
         let this = cx.entity().downgrade();
         let title = match &self.editing {
-            Some(Some(_)) => "Edit task",
-            _ => "New task",
+            Some(Some(name)) => format!("Task {name}"),
+            _ => "New task".to_owned(),
         };
         let modal = Modal::new("task-modal", title)
-            .wide()
+            .sentence("A command line the project runs, by name. Never through a shell.")
             .open(self.editing.is_some())
             .on_close(move |_, cx| {
                 this.update(cx, |this, cx| this.close(cx)).ok();
@@ -423,46 +506,106 @@ impl TasksSection {
         let (Some(original), Some(fields)) = (self.editing.clone(), self.fields.as_ref()) else {
             return modal;
         };
+        let p = palette(cx);
         let switches = Flag::ALL.into_iter().map(|flag| {
             Switch::new(
                 ElementId::Name(format!("task-flag-{}", flag.key()).into()),
                 flag.of(&self.flags),
                 flag.label(),
             )
+            .hint(flag.hint())
             .on_click(cx.listener(move |this, _, _, cx| this.toggle(flag, cx)))
         });
+        let mut places = vec![
+            SelectOption::new("place", "The place's folder")
+                .line("The project folder, or the workspace's"),
+        ];
+        places.extend(self.repositories.iter().map(|path| {
+            SelectOption::new(
+                SharedString::from(format!("repository-{path}")),
+                SharedString::from(repository_label(&self.project, path)),
+            )
+            .line("Its folder in the place")
+        }));
+        let chosen = self
+            .flags
+            .repository
+            .as_ref()
+            .and_then(|r| self.repositories.iter().position(|p| p == r))
+            .map_or(0, |at| at + 1);
+        let repositories = self.repositories.clone();
+        let this = cx.entity().downgrade();
+        let place = Select::new("task-place", places, chosen).on_choose(move |index, _, cx| {
+            let repository = index
+                .checked_sub(1)
+                .and_then(|at| repositories.get(at).cloned());
+            this.update(cx, |this, cx| this.choose_repository(repository, cx))
+                .ok();
+        });
+        let name = match &original {
+            Some(name) => div()
+                .id("task-name")
+                .h(px(32.))
+                .flex()
+                .items_center()
+                .mono(12.5)
+                .text_color(p.mute)
+                .child(SharedString::from(name.clone()))
+                .test_support()
+                .into_any_element(),
+            None => boxed("task-name", Input::new(&fields.name), cx).into_any_element(),
+        };
         let body = div()
             .id("task-form")
             .flex()
             .flex_col()
-            .gap(space::MD)
-            .child(match &original {
-                Some(name) => div()
-                    .mono(12.5)
-                    .semibold()
-                    .child(SharedString::from(name.clone()))
-                    .into_any_element(),
-                None => boxed("task-name", Input::new(&fields.name), cx).into_any_element(),
-            })
-            .child(boxed("task-line", Input::new(&fields.line), cx))
-            .child(boxed("task-repository", Input::new(&fields.repository), cx))
-            .child(div().flex().flex_col().gap(space::SM).children(switches))
+            .gap(space::LG)
+            .child(
+                div()
+                    .flex()
+                    .gap(space::MD)
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            Field::new("task-name-field", "Name", name)
+                                .hint("Agents run it by this name."),
+                        ),
+                    )
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            Field::new("task-place-field", "Runs in", place)
+                                .hint("Or one repository of the place."),
+                        ),
+                    ),
+            )
+            .child(Field::new(
+                "task-line-field",
+                "Command line",
+                boxed("task-line", Input::new(&fields.line), cx),
+            ))
+            .child(Field::new(
+                "task-kind",
+                "What it is",
+                div().flex().flex_col().gap(space::MD).children(switches),
+            ))
             .child(problem_line(
                 "task-error",
                 self.form_error.clone(),
-                space::MD,
+                space::LG,
                 cx,
             ))
             .test_support();
-        modal.child(body).action(save_or_saving(
-            "task",
-            self.saving,
-            || {
-                Button::primary("save-task", "Save")
-                    .on_click(cx.listener(|this, _, _, cx| this.save(cx)))
-            },
-            cx,
-        ))
+        modal.child(body).action(
+            Button::primary(
+                "save-task",
+                if original.is_some() {
+                    "Save"
+                } else {
+                    "Add task"
+                },
+            )
+            .disabled(self.saving)
+            .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
+        )
     }
 }
 
@@ -506,57 +649,64 @@ fn task_text(info: &TaskInfo, p: &flottille_ui::Palette) -> impl IntoElement {
 
 impl Render for TasksSection {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
         if let Some(listed) = self.listed.clone() {
             let now = cx.background_executor().now();
             let reduce = cx.reduce_motion();
             self.rows
                 .sync(listed.into_iter().map(|t| (t.name.clone(), t)), now, reduce);
         }
-        let rows: Vec<_> = self
+        let drawn: Vec<_> = self
             .rows
             .rows()
-            .map(|row| {
-                Item::new(
-                    ElementId::Name(format!("task-item-{}", row.key).into()),
-                    row.placement,
-                    self.row(row.value, cx),
-                )
-                .gap(space::SM)
-            })
+            .map(|row| (row.key.to_owned(), row.placement, row.value.clone()))
             .collect();
+        let mut list = ListCard::new("task-list");
+        for (key, placement, info) in drawn {
+            let row = self.row(&info, cx);
+            list = list.item(
+                ElementId::Name(format!("task-item-{key}").into()),
+                placement,
+                row,
+            );
+        }
         let count = self.rows.len();
         let empty = self.listed.as_ref().is_some_and(Vec::is_empty);
         let modal = self.modal(cx);
-        div()
-            .id("tasks")
-            .child(heading(
-                "Tasks",
-                count,
-                Button::secondary("add-task", "New task")
-                    .leading(flottille_ui::Icon::Plus)
-                    .on_click(cx.listener(|this, _, window, cx| this.open(None, window, cx))),
-                cx,
-            ))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(space::SM)
-                    .children(rows)
-                    .child(empty_note(
-                        "no-tasks",
-                        empty,
-                        "No task yet: name the lines the project runs (tests, lint, a server). \
-                         Agents run them by name, and the project page has a Run button for each.",
-                        cx,
-                    ))
-                    .child(problem_line(
-                        "tasks-problem",
-                        self.problem.clone(),
-                        space::SM,
-                        cx,
-                    )),
+        let section = Section::new("tasks", "Tasks")
+            .count(count.to_string())
+            .sentence(
+                "The command lines the project runs. Agents run them by name; the project page \
+                 has a Run for each.",
             )
+            .action(
+                Button::secondary("add-task", "New task")
+                    .leading(Icon::Plus)
+                    .on_click(cx.listener(|this, _, window, cx| this.open(None, window, cx))),
+            )
+            .child(presence("task-list-block", count > 0, list).gap(space::MD))
+            .child(
+                presence(
+                    "no-tasks-block",
+                    empty,
+                    EmptyLine::new(
+                        "no-tasks",
+                        Icon::Play,
+                        "No task yet: name the lines the project runs (tests, lint, a server). \
+                         Agents run them by name, and the project page has a Run for each.",
+                    ),
+                )
+                .gap(space::MD),
+            )
+            .child(problem_line(
+                "tasks-problem",
+                self.problem.clone(),
+                space::MD,
+                cx,
+            ));
+        div()
+            .text_color(p.text)
+            .child(section)
             .child(modal)
             .child(self.confirm(cx))
     }

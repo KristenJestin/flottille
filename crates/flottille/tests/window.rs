@@ -21,7 +21,7 @@ use flottille_window::conversation::Block;
 use flottille_window::link::{self, Connect};
 use flottille_window::model::{Place, Preparation};
 use flottille_window::project::{NewWorkspace, PlaceCard, ProjectPage};
-use flottille_window::project_settings::{ForgeKind, ProjectSettingsPage, Said};
+use flottille_window::project_settings::{Dialog, ForgeKind, ProjectSettingsPage, TrackerKind};
 use flottille_window::session::{RailRow, Reply, SessionPage};
 use flottille_window::settings::SettingsPage;
 use flottille_window::shell::{Layout, Selection};
@@ -2298,13 +2298,17 @@ fn the_auto_judge_is_chosen_in_settings_which_say_it_uses_the_quota(cx: &mut Tes
         page.read_with(cx, |page, _| page.judge_shown().0 == "No judge")
     });
     cx.update(|window, _| assert!(window.find("judge-provider").visible()));
+    // What Auto does, and that it uses the quota, is one click away: "How Auto works".
+    cx.update(|window, cx| window.click("judge-how", cx));
+    settle(cx);
     assert_eq!(
         text_of("judge-quota", cx).as_deref(),
         Some(flottille_window::settings::JUDGE_QUOTA)
     );
 
     cx.update(|window, cx| window.click("judge-provider", cx));
-    cx.update(|window, cx| window.click("judge-choice-opencode", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("judge-provider-choice-opencode", cx));
     until(&shell, cx, "the page shows the judge chosen", |cx| {
         page.read_with(cx, |page, _| {
             page.judge_shown() == ("OpenCode".into(), Some("default model".into()))
@@ -2315,10 +2319,13 @@ fn the_auto_judge_is_chosen_in_settings_which_say_it_uses_the_quota(cx: &mut Tes
         file.contains("[judge]") && file.contains("provider = \"opencode\""),
         "{file}"
     );
+    // The model's select unfolds once a judge is chosen.
+    settle(cx);
     cx.update(|window, _| assert!(window.find("judge-model").visible()));
 
     cx.update(|window, cx| window.click("judge-provider", cx));
-    cx.update(|window, cx| window.click("judge-choice-none", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("judge-provider-choice-none", cx));
     until(&shell, cx, "the page shows no judge again", |cx| {
         page.read_with(cx, |page, _| page.judge_shown().0 == "No judge")
     });
@@ -2338,6 +2345,9 @@ fn settings_explain_auto_in_two_lines_and_offer_no_judge(cx: &mut TestAppContext
     until(&shell, cx, "the judge's card is shown", |cx| {
         page.read_with(cx, |page, _| page.providers().known)
     });
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find("judge-auto-0").is_none(), "folded"));
+    cx.update(|window, cx| window.click("judge-how", cx));
     settle(cx);
     for (n, line) in flottille_window::settings::AUTO.iter().enumerate() {
         let id = format!("judge-auto-{n}");
@@ -3248,6 +3258,8 @@ fn composer_offers(composer: &Entity<Composer>, cx: &mut VisualTestContext) -> V
 }
 
 fn open_settings(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<SettingsPage> {
+    // Tall enough for every section to be in sight.
+    cx.simulate_resize(size(px(1280.), px(2400.)));
     cx.update(|window, cx| window.click("settings", cx));
     until(shell, cx, "the settings page is shown", |cx| {
         shell.read_with(cx, |s, cx| s.main().read(cx).settings_page().is_some())
@@ -3844,6 +3856,7 @@ fn a_switch_the_daemon_refuses_goes_back_and_shows_the_daemon_s_sentence(cx: &mu
     let config = user.path("config/flottille");
     let mode = |mode| std::os::unix::fs::PermissionsExt::from_mode(mode);
     std::fs::set_permissions(&config, mode(0o500)).unwrap();
+    settle(cx);
 
     cx.update(|window, cx| window.click("provider-switch-opencode", cx));
     until(&shell, cx, "the daemon's sentence is shown", |cx| {
@@ -3866,6 +3879,7 @@ fn a_switch_to_what_the_file_already_says_ends_without_an_event_and_without_a_pe
     until(&shell, cx, "opencode is shown on", |cx| {
         switch_on(&page, "opencode", cx)
     });
+    settle(cx);
     // Disabled by hand: the page does not know yet.
     user.write_providers("[opencode]\nenabled = false\n");
 
@@ -6057,7 +6071,7 @@ fn a_repository_with_no_forge_says_why_in_the_workspace_section(cx: &mut TestApp
 /// The project's settings open in a window tall enough to show its Skills and Commands, which
 /// come after its forges, tracker and rules.
 fn sections_of(shell: &Entity<Shell>, project: &str, cx: &mut VisualTestContext) {
-    cx.simulate_resize(size(px(1280.), px(2400.)));
+    cx.simulate_resize(size(px(1280.), px(3200.)));
     open_project_settings(shell, project, cx);
 }
 
@@ -6142,7 +6156,7 @@ fn a_command_added_from_a_template_appears_in_the_project_s_settings(cx: &mut Te
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].name, "open-prs");
     assert!(
-        text_of("command-description-open-prs", cx)
+        text_of("command-open-prs-line", cx)
             .unwrap()
             .contains("pull requests")
     );
@@ -6214,6 +6228,9 @@ fn editing_a_command_in_the_modal_writes_the_project_s_file_and_a_removal_asks_t
     });
     settle(cx);
 
+    // The row's "⋯" holds Edit.
+    cx.update(|window, cx| window.click("command-more-close", cx));
+    settle(cx);
     cx.update(|window, cx| window.click("edit-command-close", cx));
     let section = commands_section(&shell, cx);
     until(&shell, cx, "the form is open on it", |cx| {
@@ -6236,6 +6253,8 @@ fn editing_a_command_in_the_modal_writes_the_project_s_file_and_a_removal_asks_t
     settle(cx);
 
     // A removal needs a second click.
+    cx.update(|window, cx| window.click("command-more-close", cx));
+    settle(cx);
     cx.update(|window, cx| window.click("remove-command-close", cx));
     settle(cx);
     assert!(
@@ -6611,12 +6630,7 @@ fn a_skill_is_added_with_a_path_picked_in_the_project_folder_and_removed(cx: &mu
         ("react", Some("docs/react.md"))
     );
     assert!(
-        text_of("skill-path-react", cx)
-            .unwrap()
-            .contains("docs/react.md")
-    );
-    assert!(
-        text_of("skill-description-react", cx)
+        text_of("skill-react-line", cx)
             .unwrap()
             .contains("components")
     );
@@ -6627,6 +6641,8 @@ fn a_skill_is_added_with_a_path_picked_in_the_project_folder_and_removed(cx: &mu
             .contains("[skills.react]")
     );
 
+    cx.update(|window, cx| window.click("skill-more-react", cx));
+    settle(cx);
     cx.update(|window, cx| window.click("remove-skill-react", cx));
     settle(cx);
     assert_eq!(skills_listed(&shell, cx).len(), 1, "the first click asks");
@@ -6652,12 +6668,12 @@ fn a_text_skill_is_written_in_the_settings_and_read_back_to_edit(cx: &mut TestAp
     cx.update(|window, cx| window.click("add-skill", cx));
     settle(cx);
     assert_eq!(
-        text_of("skill-as-text-label", cx).as_deref(),
-        Some("A text Flottille keeps, rather than a file of the project"),
-        "the switch says what it switches"
+        text_of("skill-kind-text", cx).as_deref(),
+        Some("A text Flottille keeps"),
+        "the choice says what it is"
     );
     cx.simulate_input("style");
-    cx.update(|window, cx| window.click("skill-as-text", cx));
+    cx.update(|window, cx| window.click("skill-kind-text", cx));
     settle(cx);
     assert!(section.read_with(cx, |s, _| s.is_text()));
     let description = section.read_with(cx, |s, _| s.description_field().unwrap().clone());
@@ -6682,7 +6698,8 @@ fn a_text_skill_is_written_in_the_settings_and_read_back_to_edit(cx: &mut TestAp
         "the text is not in the project's file"
     );
 
-    cx.update(|window, cx| window.click("edit-skill-style", cx));
+    // A click on the row edits it.
+    cx.update(|window, cx| window.click("skill-style", cx));
     until(&shell, cx, "the text is read back", |cx| {
         section.read_with(cx, |s, cx| {
             s.is_open()
@@ -6771,12 +6788,34 @@ fn open_project_settings(
     settings_of(shell, cx).unwrap()
 }
 
-#[gpui_kit::test]
-fn the_settings_page_proposes_the_remote_s_forge_and_nothing_is_read_until_it_is_saved(
-    cx: &mut TestAppContext,
+/// The titles of the toasts the window shows, newest first.
+fn toasts(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
+    shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .map(|toast| toast.title().to_owned())
+            .collect()
+    })
+}
+
+/// Waits for a toast whose title holds `what`.
+fn toast_said(shell: &Entity<Shell>, what: &str, cx: &mut VisualTestContext) {
+    until(shell, cx, &format!("a toast says {what}"), |cx| {
+        toasts(shell, cx).iter().any(|title| title.contains(what))
+    });
+}
+
+/// A project `atlas` whose remote is a GitHub address, its settings open in a tall window.
+fn atlas_on_github<'a>(
+    user: &User,
+    cx: &'a mut TestAppContext,
+) -> (
+    Entity<Shell>,
+    &'a mut VisualTestContext,
+    Entity<ProjectSettingsPage>,
 ) {
-    let user = user().with_fake_gh();
-    let folder = project(&user, "atlas");
+    let folder = project(user, "atlas");
     user.git(
         &folder,
         &[
@@ -6786,34 +6825,47 @@ fn the_settings_page_proposes_the_remote_s_forge_and_nothing_is_read_until_it_is
             "git@github.com:acme/atlas.git",
         ],
     );
-    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let (shell, cx) = window(user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(3200.)));
     let page = open_project_settings(&shell, "atlas", cx);
+    until(&shell, cx, "every section is read", |cx| {
+        page.read_with(cx, |page, cx| page.has_read(cx))
+    });
+    settle(cx);
+    (shell, cx, page)
+}
+
+#[gpui_kit::test]
+fn the_forge_is_suggested_from_a_github_remote_and_filled_by_use(cx: &mut TestAppContext) {
+    let user = user().with_fake_gh();
+    let (shell, cx, page) = atlas_on_github(&user, cx);
 
     page.read_with(cx, |page, _| {
-        let row = &page.repositories()[0];
-        assert_eq!(row.kind, ForgeKind::Github);
-        assert!(row.proposed(), "pre-filled from the remote, not declared");
-        assert_eq!(row.declared, None);
+        let form = &page.forms()[0];
+        assert!(form.proposed(), "offered from the remote, not declared");
+        assert_eq!(form.declared, None);
     });
-    cx.update(|window, _| {
-        assert!(window.find("forge-kind-.").visible());
-        assert!(window.find("save-project-settings").visible());
-    });
-    let before = user
-        .call("project.settings", json!({"name": "atlas"}))
-        .unwrap();
-    assert_eq!(before["repositories"][0]["forge"], serde_json::Value::Null);
+    // The row says what is what, labelled: the remote in its short form, the forge offered.
+    assert_eq!(
+        text_of("repository-remote-.", cx).as_deref(),
+        Some("origin · github.com/acme/atlas")
+    );
+    assert_eq!(
+        text_of("repository-forge-.", cx).as_deref(),
+        Some("acme/atlas on GitHub?")
+    );
+    assert!(cx.update(|window, _| window.find("repository-use-.").visible()));
     assert!(
         !std::fs::read_to_string(user.project_file("atlas"))
             .unwrap()
             .contains("forge"),
-        "nothing is active before the user saves"
+        "nothing is declared before the user says so"
     );
     assert!(user.gh_received().is_empty(), "nothing was asked of GitHub");
 
-    cx.update(|window, cx| window.click("save-project-settings", cx));
-    until(&shell, cx, "the settings are saved", |cx| {
-        page.read_with(cx, |page, _| matches!(page.saved(), Some(Said::Fine(_))))
+    cx.update(|window, cx| window.click("repository-use-.", cx));
+    until(&shell, cx, "the forge is declared", |cx| {
+        page.read_with(cx, |page, _| page.forms()[0].declared.is_some())
     });
     let after = user
         .call("project.settings", json!({"name": "atlas"}))
@@ -6823,15 +6875,343 @@ fn the_settings_page_proposes_the_remote_s_forge_and_nothing_is_read_until_it_is
         json!({"kind": "github", "repository": "acme/atlas"}),
         "{after}"
     );
+    toast_said(&shell, "Forge of atlas saved", cx);
+    settle(cx);
+    assert_eq!(
+        text_of("repository-forge-.", cx).as_deref(),
+        Some("GitHub · acme/atlas")
+    );
+    assert!(cx.update(|window, _| window.try_find("repository-use-.").is_none()));
+}
+
+#[gpui_kit::test]
+fn a_repository_s_dialog_offers_the_remote_s_forge_and_saves_it_with_a_toast(
+    cx: &mut TestAppContext,
+) {
+    let user = user().with_fake_gh();
+    let (shell, cx, page) = atlas_on_github(&user, cx);
+
+    cx.update(|window, cx| window.click("repository-atlas", cx));
+    settle(cx);
+    page.read_with(cx, |page, cx| {
+        assert_eq!(page.dialog(), Some(&Dialog::Repository(".".into())));
+        assert_eq!(page.forge_choice(), ForgeKind::Github);
+        let field = page.forge_repository_field().unwrap();
+        assert_eq!(field.read(cx).value().to_string(), "acme/atlas");
+    });
+    cx.update(|window, _| {
+        assert!(window.find("forge-kind").visible());
+        assert!(window.find("forge-repository-field-label").visible());
+    });
+    cx.update(|window, cx| window.click("save-settings-modal", cx));
+    until(&shell, cx, "the dialog closes", |cx| {
+        page.read_with(cx, |page, _| page.dialog().is_none())
+    });
+    toast_said(&shell, "Repository atlas saved", cx);
+    assert!(
+        std::fs::read_to_string(user.project_file("atlas"))
+            .unwrap()
+            .contains("forge = {")
+    );
+}
+
+#[gpui_kit::test]
+fn the_tracker_select_unfolds_jira_s_fields(cx: &mut TestAppContext) {
+    let user = user().with_fake_gh();
+    let (shell, cx, page) = atlas_on_github(&user, cx);
+
+    assert_eq!(text_of("tracker-row", cx).as_deref(), Some("None"));
+    cx.update(|window, cx| window.click("tracker-row", cx));
+    settle(cx);
+    assert_eq!(
+        page.read_with(cx, |page, _| page.dialog().cloned()),
+        Some(Dialog::Tracker)
+    );
+    cx.update(|window, _| {
+        assert!(window.find("tracker-kind").visible());
+        assert!(window.try_find("tracker-site-field").is_none(), "folded");
+    });
+    cx.update(|window, cx| window.click("tracker-kind", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("tracker-kind-jira", cx));
+    settle(cx);
+    assert_eq!(
+        page.read_with(cx, |p, _| p.tracker_choice()),
+        TrackerKind::Jira
+    );
+    cx.update(|window, _| {
+        assert!(window.find("tracker-site-field-label").visible());
+        assert!(window.find("tracker-keys-field-label").visible());
+    });
+    let site = page.read_with(cx, |p, _| p.site_field().unwrap().clone());
+    cx.update(|window, cx| site.update(cx, |f, cx| f.set_value("acme.atlassian.net", window, cx)));
+    let keys = page.read_with(cx, |p, _| p.keys_field().unwrap().clone());
+    cx.update(|window, cx| keys.update(cx, |f, cx| f.set_value("ABC", window, cx)));
+    cx.update(|window, cx| window.click("save-settings-modal", cx));
+    toast_said(&shell, "Tracker saved", cx);
+    assert_eq!(page.read_with(cx, |p, _| p.tracker()), TrackerKind::Jira);
     let file = std::fs::read_to_string(user.project_file("atlas")).unwrap();
-    assert!(file.contains("forge = {"), "{file}");
-    page.read_with(cx, |page, _| {
-        assert!(!page.repositories()[0].proposed(), "now declared");
+    assert!(file.contains("acme.atlassian.net"), "{file}");
+}
+
+#[gpui_kit::test]
+fn add_skill_offers_two_radio_choices_each_with_its_line(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", cx);
+    let section = skills_section(&shell, cx);
+
+    cx.update(|window, cx| window.click("add-skill", cx));
+    settle(cx);
+    cx.update(|window, _| {
+        for id in ["skill-kind-file", "skill-kind-text"] {
+            assert!(window.find(id).visible(), "{id}");
+            assert!(window.find(format!("{id}-line")).visible(), "{id}'s line");
+        }
+        assert!(
+            window.find("skill-file-label").visible(),
+            "the file field is unfolded"
+        );
+        assert!(window.try_find("skill-text-field").is_none());
+    });
+    assert!(!section.read_with(cx, |s, _| s.is_text()));
+    cx.update(|window, cx| window.click("skill-kind-text", cx));
+    settle(cx);
+    assert!(section.read_with(cx, |s, _| s.is_text()));
+    cx.update(|window, _| {
+        assert!(window.find("skill-text-field-label").visible());
+        assert!(
+            window.try_find("skill-file").is_none(),
+            "the file field folded away"
+        );
     });
 }
 
 #[gpui_kit::test]
-fn a_project_is_added_from_the_window_checked_again_and_removed(cx: &mut TestAppContext) {
+fn every_switch_of_the_task_dialog_draws_its_label_and_its_hint(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", cx);
+
+    cx.update(|window, cx| window.click("add-task", cx));
+    settle(cx);
+    for flag in flottille_window::tasks::Flag::ALL {
+        let id = format!("task-flag-{}", flag.key_of());
+        assert_eq!(
+            text_of(&format!("{id}-label"), cx).as_deref(),
+            Some(flag.label()),
+            "{id}"
+        );
+        assert_eq!(
+            text_of(&format!("{id}-hint"), cx).as_deref(),
+            Some(flag.hint()),
+            "{id}"
+        );
+    }
+    cx.update(|window, _| assert!(window.find("task-place").visible(), "the place is a select"));
+}
+
+#[gpui_kit::test]
+fn a_removal_goes_through_a_confirmation_and_says_it_in_a_toast(cx: &mut TestAppContext) {
+    let user = user_with_commands();
+    user.call(
+        "command.add",
+        json!({"project": "atlas", "name": "review", "description": "Review the change",
+               "instructions": "Read the diff."}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", cx);
+    let listed = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
+        commands_listed(shell, cx)
+            .iter()
+            .any(|command| command.name == "review")
+    };
+    until(&shell, cx, "the command is listed", |cx| listed(&shell, cx));
+    settle(cx);
+    let section = commands_section(&shell, cx);
+
+    // The row's "⋯" holds Remove…, which asks first: nothing is removed yet.
+    cx.update(|window, cx| window.click("command-more-review", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("remove-command-review", cx));
+    settle(cx);
+    assert!(section.read_with(cx, |s, _| s.is_confirming()));
+    cx.update(|window, _| {
+        assert!(window.find("command-removal").visible());
+        assert!(window.find("command-removal-action").visible());
+    });
+    assert!(
+        listed(&shell, cx),
+        "nothing is removed before it is confirmed"
+    );
+    cx.update(|window, cx| window.click("command-removal-action", cx));
+    until(&shell, cx, "the command is removed", |cx| {
+        !listed(&shell, cx)
+    });
+    toast_said(&shell, "Command review removed", cx);
+}
+
+#[gpui_kit::test]
+fn a_claude_skill_and_command_are_offered_and_imported_and_a_broken_one_shown_with_its_reason(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let folder = project(&user, "atlas");
+    let write = |relative: &str, text: &str| {
+        let file = folder.join(relative);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, text).unwrap();
+    };
+    write(
+        ".claude/skills/react/SKILL.md",
+        "---\nname: react\ndescription: How we write React components\n---\n# React\n",
+    );
+    write(
+        ".claude/skills/broken/SKILL.md",
+        "---\nname: [unclosed\ndescription: d\n---\nText.\n",
+    );
+    write(
+        ".claude/commands/review.md",
+        "---\ndescription: Review the current change\n---\nRead the diff.\n",
+    );
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", cx);
+    let skills = skills_section(&shell, cx);
+    let commands = commands_section(&shell, cx);
+    until(&shell, cx, "the .claude folder is read", |cx| {
+        skills.read_with(cx, |s, _| s.found().is_some_and(|f| f.len() == 2))
+            && commands.read_with(cx, |s, _| s.found().is_some_and(|f| f.len() == 1))
+    });
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(window.find("skill-import-react").visible());
+        assert!(window.find("command-import-review").visible());
+        assert!(
+            window.try_find("skill-import-broken").is_none(),
+            "it cannot be imported"
+        );
+        assert!(
+            window.find("skill-found-problem-broken").visible(),
+            "its reason is shown"
+        );
+    });
+    assert!(
+        !text_of("skill-found-problem-broken", cx)
+            .unwrap()
+            .is_empty()
+    );
+
+    cx.update(|window, cx| window.click("skill-import-react", cx));
+    until(&shell, cx, "the skill is imported", |cx| {
+        skills_listed(&shell, cx).iter().any(|s| s.name == "react")
+    });
+    toast_said(&shell, "Skill react imported", cx);
+    cx.update(|window, cx| window.click("command-import-all", cx));
+    until(&shell, cx, "the command is imported", |cx| {
+        commands_listed(&shell, cx)
+            .iter()
+            .any(|c| c.name == "review")
+    });
+    toast_said(&shell, "Command review imported", cx);
+}
+
+#[gpui_kit::test]
+fn every_setting_of_a_project_is_edited_in_its_settings_and_the_project_page_has_no_editor(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(3200.)));
+    open_project(&shell, "atlas", cx);
+    // The project page shows and runs: none of the settings' editors is on it.
+    cx.update(|window, _| {
+        for id in [
+            "detect-repositories",
+            "repository-list",
+            "tracker-row",
+            "add-skill",
+            "add-command",
+            "add-task",
+            "add-setup",
+            "rules-save-atlas",
+        ] {
+            assert!(window.try_find(id).is_none(), "{id} is on the project page");
+        }
+    });
+    let page = open_project_settings(&shell, "atlas", cx);
+    until(&shell, cx, "every section is read", |cx| {
+        page.read_with(cx, |page, cx| page.has_read(cx))
+    });
+    settle(cx);
+    cx.update(|window, _| {
+        for (key, _) in flottille_window::project_settings::SECTIONS {
+            assert!(
+                window
+                    .find(format!("project-settings-page-index-{key}"))
+                    .visible(),
+                "the index has {key}"
+            );
+            assert!(
+                window.find(format!("{key}-title")).visible(),
+                "the page has {key}"
+            );
+        }
+        for id in [
+            "detect-repositories",
+            "tracker-row",
+            "add-skill",
+            "add-command",
+            "add-task",
+            "add-setup",
+            "rules-save-atlas",
+        ] {
+            assert!(window.find(id).visible(), "{id}");
+        }
+    });
+}
+
+#[gpui_kit::test]
+fn the_index_stays_at_the_top_once_the_page_scrolls_past_it_and_lights_the_section_in_sight(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_project_settings(&shell, "atlas", cx);
+    until(&shell, cx, "every section is read", |cx| {
+        page.read_with(cx, |page, cx| page.has_read(cx))
+    });
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(
+            window
+                .try_find("project-settings-page-index-stuck-tasks")
+                .is_none()
+        );
+    });
+    assert_eq!(page.read_with(cx, |p, _| p.current_section()), 0);
+
+    // A click on Tasks scrolls to it; the index follows the page down, Tasks lit.
+    cx.update(|window, cx| window.click("project-settings-page-index-tasks", cx));
+    settle(cx);
+    cx.update(|window, _| {
+        let stuck = window.find("project-settings-page-index-stuck-tasks");
+        assert!(stuck.visible());
+        assert!(
+            f32::from(stuck.bounds().origin.y) < 120.0,
+            "{:?}",
+            stuck.bounds()
+        );
+    });
+    assert_eq!(page.read_with(cx, |p, _| p.current_section()), 4);
+}
+
+#[gpui_kit::test]
+fn a_project_is_added_from_the_window_detected_again_and_removed(cx: &mut TestAppContext) {
     let user = user();
     let folder = user.path("work/beta");
     user.git_init(&folder);
@@ -6877,23 +7257,20 @@ fn a_project_is_added_from_the_window_checked_again_and_removed(cx: &mut TestApp
         Some(Selection::ProjectSettings("beta".into()))
     );
     let page = settings_of(&shell, cx).unwrap();
+    until(&shell, cx, "every section is read", |cx| {
+        page.read_with(cx, |page, cx| page.has_read(cx))
+    });
     settle(cx);
 
-    cx.update(|window, cx| window.click("check-project", cx));
-    until(&shell, cx, "the project is checked", |cx| {
-        page.read_with(cx, |page, _| page.checked().is_some())
-    });
-    assert!(
-        matches!(
-            page.read_with(cx, |p, _| p.checked().cloned()),
-            Some(Said::Fine(_))
-        ),
-        "the folder holds the project's repositories"
-    );
+    cx.update(|window, cx| window.click("detect-repositories", cx));
+    toast_said(&shell, "Detected again", cx);
 
+    settle(cx);
+    cx.update(|window, cx| window.click("project-more", cx));
     settle(cx);
     cx.update(|window, cx| window.click("remove-project", cx));
     settle(cx);
+    assert!(page.read_with(cx, |p, _| p.is_confirming_removal()));
     cx.update(|window, cx| window.click("project-removal-action", cx));
     until(&shell, cx, "the project is gone", |cx| {
         shell.read_with(cx, |s, _| {
@@ -7586,7 +7963,8 @@ fn a_task_is_added_edited_and_removed_from_the_tasks_section(cx: &mut TestAppCon
     assert!(file().contains("[tasks.test]"), "{}", file());
     settle(cx);
 
-    cx.update(|window, cx| window.click("edit-task-test", cx));
+    // A click on the row edits it.
+    cx.update(|window, cx| window.click("task-test", cx));
     until(&shell, cx, "the form is open on it", |cx| {
         section.read_with(cx, |s, _| s.is_open())
     });
@@ -7603,8 +7981,11 @@ fn a_task_is_added_edited_and_removed_from_the_tasks_section(cx: &mut TestAppCon
     });
     settle(cx);
 
+    cx.update(|window, cx| window.click("task-more-test", cx));
+    settle(cx);
     cx.update(|window, cx| window.click("remove-task-test", cx));
     settle(cx);
+
     assert!(
         file().contains("[tasks.test]"),
         "a removal needs a second click"
@@ -7629,7 +8010,10 @@ fn setup_steps_are_added_reordered_and_removed_in_the_setup_section(cx: &mut Tes
     settle(cx);
     let value = section.read_with(cx, |s, _| s.value_field().unwrap().clone());
     cx.update(|window, cx| value.update(cx, |f, cx| f.set_value(".env .env.*", window, cx)));
+    cx.update(|window, cx| window.click("setup-where", cx));
+    settle(cx);
     cx.update(|window, cx| window.click("setup-where-each", cx));
+    settle(cx);
     cx.update(|window, cx| window.click("save-setup", cx));
     until(&shell, cx, "the step is listed", |cx| {
         steps_listed(&shell, cx).len() == 1
@@ -7638,6 +8022,8 @@ fn setup_steps_are_added_reordered_and_removed_in_the_setup_section(cx: &mut Tes
 
     // Then a run, with its time limit; a shell line is refused first.
     cx.update(|window, cx| window.click("add-setup", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("setup-kind", cx));
     settle(cx);
     cx.update(|window, cx| window.click("setup-kind-run", cx));
     settle(cx);
@@ -7663,12 +8049,15 @@ fn setup_steps_are_added_reordered_and_removed_in_the_setup_section(cx: &mut Tes
         (steps[1].run.as_deref(), steps[1].time_limit),
         (Some("npm ci"), Some(120))
     );
+    assert_eq!(text_of("setup-step-2", cx).as_deref(), Some("Run npm ci"));
     assert_eq!(
-        text_of("setup-step-said-2", cx).as_deref(),
-        Some("Run npm ci · in the workspace folder · stopped after 120 s")
+        text_of("setup-step-2-line", cx).as_deref(),
+        Some("in the workspace folder · stopped after 120 s")
     );
 
-    // Up moves the run first, in the file too.
+    // Move up, in the row's "⋯", moves the run first, in the file too.
+    cx.update(|window, cx| window.click("setup-more-2", cx));
+    settle(cx);
     cx.update(|window, cx| window.click("setup-up-2", cx));
     until(&shell, cx, "the run is first", |cx| {
         steps_listed(&shell, cx)
@@ -7683,6 +8072,8 @@ fn setup_steps_are_added_reordered_and_removed_in_the_setup_section(cx: &mut Tes
     );
     settle(cx);
 
+    cx.update(|window, cx| window.click("setup-more-1", cx));
+    settle(cx);
     cx.update(|window, cx| window.click("remove-setup-1", cx));
     settle(cx);
     cx.update(|window, cx| window.click("setup-removal-action", cx));
@@ -7769,39 +8160,47 @@ fn seed_skills(user: &User, names: &[&str]) {
 }
 
 #[gpui_kit::test]
-fn the_sections_of_a_project_s_settings_below_the_forges_enter_as_the_forges_do(
-    cx: &mut TestAppContext,
-) {
+fn the_sections_of_a_project_s_settings_enter_one_after_the_other(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     cx.simulate_resize(size(px(1280.), px(2400.)));
     open_project(&shell, "atlas", cx);
     cx.update(|window, cx| window.click("project-settings", cx));
-    until(&shell, cx, "the settings are read", |cx| {
-        settings_of(&shell, cx).is_some_and(|page| {
-            page.read_with(cx, |page, _| page.name() == "atlas" && page.is_loaded())
-        })
-    });
     let ids = [
-        "forges", "tracker", "save", "skills", "commands", "tasks", "setup", "rules",
+        "header",
+        "index",
+        "repositories",
+        "tracker",
+        "skills",
+        "commands",
+        "tasks",
+        "setup",
+        "rules",
     ]
     .map(|part| format!("enter-settings-atlas-{part}"));
-    // Every section sits in an entrance, and the last ones are still waiting for theirs while
-    // the first are done: they come one after the other, as the forges do.
-    run_for(Duration::from_millis(420), cx);
+    // Every part of the page sits in an entrance, and on the page's first frames the later ones
+    // have risen less than the earlier: they come one after the other.
+    run_for(Duration::from_millis(120), cx);
     let waiting: Vec<f32> = ids.iter().map(|id| y_of(id, cx)).collect();
     run_for(Duration::from_millis(1500), cx);
     let arrived: Vec<f32> = ids.iter().map(|id| y_of(id, cx)).collect();
     let rise = |at: usize| waiting[at] - arrived[at];
-    assert!(rise(0).abs() < 0.5, "the forges are in place: {}", rise(0));
-    for (at, id) in ids.iter().enumerate().skip(3) {
+    assert!(rise(0) < 6.0, "the header is on its way: {}", rise(0));
+    for (at, id) in ids.iter().enumerate().skip(1) {
         assert!(
-            (rise(at) - 6.0).abs() < 0.5,
-            "{id} was still to rise {}px (it rises 6px)",
-            rise(at)
+            rise(at) >= rise(at - 1) - 0.01,
+            "{id} had less to rise ({}) than the part before it ({})",
+            rise(at),
+            rise(at - 1)
         );
     }
+    let last = ids.len() - 1;
+    assert!(
+        (rise(last) - 6.0).abs() < 0.5,
+        "the rules wait for their turn: {}",
+        rise(last)
+    );
 }
 
 #[gpui_kit::test]
@@ -7817,8 +8216,10 @@ fn a_skill_that_is_removed_folds_away_before_it_is_gone_and_the_empty_line_unfol
         !skills_listed(&shell, cx).is_empty()
     });
     settle(cx);
-    assert!(text_of("skill-description-alpha", cx).is_some());
+    assert!(text_of("skill-alpha-line", cx).is_some());
 
+    cx.update(|window, cx| window.click("skill-more-alpha", cx));
+    settle(cx);
     cx.update(|window, cx| window.click("remove-skill-alpha", cx));
     settle(cx);
     cx.update(|window, cx| window.click("skill-removal-action", cx));
@@ -7861,6 +8262,8 @@ fn a_setup_step_moved_down_slides_instead_of_jumping(cx: &mut TestAppContext) {
     let (first, second) = (y_of("setup-step-1", cx), y_of("setup-step-2", cx));
     assert!(first < second);
 
+    cx.update(|window, cx| window.click("setup-more-1", cx));
+    settle(cx);
     cx.update(|window, cx| window.click("setup-down-1", cx));
     until(&shell, cx, "the list is read in its new order", |cx| {
         steps_listed(&shell, cx)
@@ -8206,7 +8609,7 @@ fn the_status_sits_in_the_composer_s_bar_under_the_field_not_above_it(cx: &mut T
 }
 
 #[gpui_kit::test]
-fn the_setup_s_up_and_down_are_chevron_icon_buttons_that_do_nothing_at_the_ends(
+fn the_setup_s_move_up_and_down_are_in_the_row_s_menu_and_do_nothing_at_the_ends(
     cx: &mut TestAppContext,
 ) {
     let user = user();
@@ -8222,32 +8625,23 @@ fn the_setup_s_up_and_down_are_chevron_icon_buttons_that_do_nothing_at_the_ends(
     });
     settle(cx);
 
-    // Icons with a tooltip for their name, not the words Up and Down.
-    for number in [1, 2] {
-        cx.update(|window, _| {
-            assert_eq!(
-                window.find(format!("setup-up-{number}")).label(),
-                Some("Move up")
-            );
-            assert_eq!(
-                window.find(format!("setup-down-{number}")).label(),
-                Some("Move down")
-            );
-            assert!(
-                window
-                    .find(format!("setup-up-{number}"))
-                    .bounds()
-                    .size
-                    .width
-                    <= px(30.)
-            );
-        });
-    }
-    // Disabled at the ends: the first cannot go up, the last cannot go down.
+    // No button of its own on the row: the moves are words in its "⋯", beside the grip.
+    cx.update(|window, _| {
+        assert!(window.try_find("setup-up-1").is_none());
+        assert!(window.find("setup-grip-1").visible());
+    });
     let before = steps_listed(&shell, cx);
-    cx.update(|window, cx| window.click("setup-up-1", cx));
-    cx.update(|window, cx| window.click("setup-down-2", cx));
-    settle(cx);
+    for (number, entry) in [(1, "setup-up-1"), (2, "setup-down-2")] {
+        cx.update(|window, cx| window.click(format!("setup-more-{number}"), cx));
+        settle(cx);
+        cx.update(|window, _| {
+            assert!(window.find(format!("setup-up-{number}")).visible());
+            assert!(window.find(format!("setup-down-{number}")).visible());
+        });
+        // At the ends: the first cannot go up, the last cannot go down.
+        cx.update(|window, cx| window.click(entry, cx));
+        settle(cx);
+    }
     run_for(Duration::from_millis(500), cx);
     assert_eq!(steps_listed(&shell, cx), before, "nothing moved");
 }
