@@ -166,6 +166,48 @@ fn mark_of(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> Optio
     })
 }
 
+#[test]
+fn a_session_whose_first_message_is_hello_is_not_titled_hello() {
+    let user = user();
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", None, "Hello");
+
+    let title = fresh(&user).session(&lead).unwrap().title.clone();
+
+    assert_ne!(title, "Hello");
+    assert_eq!(title, format!("agent {lead}"), "the neutral title");
+}
+
+#[test]
+fn the_title_of_a_session_that_began_with_a_greeting_follows_the_first_message_that_is_more_than_one()
+ {
+    let user = user();
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", None, "Hello");
+    send(&user, &lead, "thanks");
+    send(&user, &lead, "Fix the login form\nit loses its focus");
+    eventually("the turns end", || {
+        user.call("agent.list", json!({})).unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["id"] == lead.as_str() && a["state"] == "idle")
+            && user.call("agent.show", json!({"agent": lead})).unwrap()["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|e| e["name"] == "agent.turn_ended")
+                .count()
+                == 3
+    });
+
+    // Read from scratch, as a window just opened does.
+    assert_eq!(
+        fresh(&user).session(&lead).unwrap().title,
+        "Fix the login form"
+    );
+}
+
 #[gpui_kit::test]
 fn two_projects_main_and_a_workspace_with_sessions_under_each_appear_in_the_tree(
     cx: &mut TestAppContext,
@@ -4377,6 +4419,87 @@ fn a_thought_with_no_text_shows_its_duration_and_opens_on_nothing(cx: &mut TestA
             "nothing to open"
         );
     });
+}
+
+/// What the head of the thought row at `at` says: its label, then its time when it has one.
+fn thought_head(page: &Entity<SessionPage>, at: usize, cx: &mut VisualTestContext) -> String {
+    page.read_with(cx, |p, cx| {
+        p.conversation().read(cx).rows()[at]
+            .read(cx)
+            .thought_head(cx)
+            .expect("a thought")
+    })
+}
+
+#[gpui_kit::test]
+fn a_turn_that_thinks_for_a_scripted_time_shows_that_time(cx: &mut TestAppContext) {
+    let user = User::with_fake_claude();
+    // As Claude does, the summary of the thought comes whole once the thinking is over.
+    user.claude_script(json!({"turns": [{"when": "ponder", "do": [
+        {"wait": 700},
+        {"think": "weighing two options"},
+        {"say": "Done."}
+    ]}]}));
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    project(&user, "app");
+    let lead = start(&user, "app", None, "ponder it over");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the reply is shown", |cx| {
+        blocks(&page, cx).iter().any(|b| {
+            *b == Block::Text {
+                text: "Done.".into(),
+            }
+        })
+    });
+    settle(cx);
+
+    let (at, since, until) = blocks(&page, cx)
+        .into_iter()
+        .enumerate()
+        .find_map(|(at, block)| match block {
+            Block::Thought { since, until, .. } => Some((at, since, until.expect("it ended"))),
+            _ => None,
+        })
+        .expect("a thought");
+    assert!(
+        until - since >= 600,
+        "{since}..{until}: the thinking lasted 700 ms"
+    );
+    assert_eq!(
+        thought_head(&page, at, cx),
+        format!(
+            "Thought for {}",
+            flottille_window::session::seconds(until - since)
+        )
+    );
+}
+
+#[gpui_kit::test]
+fn a_thought_whose_duration_is_not_known_shows_none(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    settle(cx);
+    let at = |seq: u64, name: &str, data: serde_json::Value| flottille_core::protocol::Event {
+        seq,
+        at: 5_000,
+        name: name.into(),
+        data,
+    };
+
+    read_events(
+        &page,
+        vec![
+            at(1, "agent.thought", json!({"text": "Hm."})),
+            at(2, "agent.message", json!({"text": "ok"})),
+        ],
+        cx,
+    );
+    frame(cx);
+
+    assert_eq!(thought_head(&page, 0, cx), "Thought");
 }
 
 #[gpui_kit::test]

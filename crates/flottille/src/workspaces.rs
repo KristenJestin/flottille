@@ -5,7 +5,7 @@
 //! Git and the steps never run inside a store transaction nor on the daemon's thread: git and the
 //! run steps are child processes awaited by tokio, copies and links run on the blocking pool.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -89,7 +89,8 @@ async fn show(daemon: &Daemon, asked: WorkspaceName) -> Answer {
     if let Some(repositories) = shown["repositories"].as_array_mut() {
         for (repository, worktree) in repositories.iter_mut().zip(&workspace.repositories) {
             let folder = workspace.folder_of(&worktree.path);
-            repository["changes"] = changes(&folder, &worktree.base.commit)
+            let setup = copied_by_setup(&workspace, &worktree.path).await;
+            repository["changes"] = changes(&folder, &worktree.base.commit, &setup)
                 .await
                 .unwrap_or(Value::Null);
             // Read only where the worktree is made: git would answer for the one around it.
@@ -115,7 +116,7 @@ async fn show(daemon: &Daemon, asked: WorkspaceName) -> Answer {
                 "--untracked-files=all",
             ];
             repository["uncommitted"] = read(&status).await.map_or(Value::Null, |status| {
-                uncommitted(&workspace, &folder, &status).into()
+                uncommitted(&workspace, &folder, &status, &setup).into()
             });
         }
     }
@@ -128,9 +129,14 @@ async fn show(daemon: &Daemon, asked: WorkspaceName) -> Answer {
     Ok(shown)
 }
 
-/// How many files of a worktree's `git status` hold work: the links Flottille made and the
-/// worktrees standing inside this one are not work.
-fn uncommitted(workspace: &Workspace, folder: &Path, status: &str) -> usize {
+/// How many files of a worktree's `git status` hold work: the links Flottille made, the files
+/// its setup copied and the worktrees standing inside this one are not work.
+fn uncommitted(
+    workspace: &Workspace,
+    folder: &Path,
+    status: &str,
+    setup: &HashSet<PathBuf>,
+) -> usize {
     let mut entries = status.split('\0').filter(|entry| !entry.is_empty());
     let mut count = 0;
     while let Some(entry) = entries.next() {
@@ -142,6 +148,7 @@ fn uncommitted(workspace: &Workspace, folder: &Path, status: &str) -> usize {
         let file = folder.join(path).components().collect::<PathBuf>();
         let ours = code == "?? "
             && (made_link(workspace, &file)
+                || setup.contains(&file)
                 || workspace
                     .repositories
                     .iter()
@@ -149,6 +156,48 @@ fn uncommitted(workspace: &Workspace, folder: &Path, status: &str) -> usize {
         count += usize::from(!ours);
     }
     count
+}
+
+/// The files the setup's `copy` steps wrote in the worktree of `place` that are as they were
+/// copied: what the setup put there is not the user's work, but a copy that was edited since is.
+async fn copied_by_setup(workspace: &Workspace, place: &str) -> HashSet<PathBuf> {
+    let copies: Vec<Vec<String>> = workspace
+        .steps
+        .iter()
+        .filter(|step| step.state == StepState::Done)
+        .filter(|step| step.repository.as_deref().unwrap_or(".") == place)
+        .filter_map(|step| match &step.action {
+            Action::Copy { globs } => Some(globs.clone()),
+            _ => None,
+        })
+        .collect();
+    let source = main_checkout(&workspace.project_folder, place);
+    let target = workspace.folder_of(place);
+    tokio::task::spawn_blocking(move || {
+        let mut same = HashSet::new();
+        for globs in copies {
+            for relative in copy_sources(&source, &globs).unwrap_or_default() {
+                let (from, to) = (source.join(&relative), target.join(&relative));
+                if same_file(&from, &to) {
+                    same.insert(to.components().collect());
+                }
+            }
+        }
+        same
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// Whether two regular files, neither a link, hold the same bytes (at most [`COUNTED_FILE`]).
+fn same_file(a: &Path, b: &Path) -> bool {
+    let read = |path: &Path| {
+        let metadata = std::fs::symlink_metadata(path).ok()?;
+        (metadata.is_file() && metadata.len() <= COUNTED_FILE)
+            .then(|| std::fs::read(path).ok())
+            .flatten()
+    };
+    matches!((read(a), read(b)), (Some(a), Some(b)) if a == b)
 }
 
 /// A new file larger than this is not read to count its lines.
@@ -159,9 +208,10 @@ const COUNTED_FILES: usize = 1000;
 const COUNTED_BYTES: u64 = 16 * 1024 * 1024;
 
 /// The lines added and removed in a worktree since its base commit: what its branch committed,
-/// what is changed and not committed, and the new files git does not ignore. A binary file counts
-/// no line. `None` when git cannot read the worktree (it is not made yet, or gone).
-async fn changes(folder: &Path, base: &str) -> Option<Value> {
+/// what is changed and not committed, and the new files git does not ignore but those the setup
+/// copied. A binary file counts no line. `None` when git cannot read the worktree (it is not made
+/// yet, or gone).
+async fn changes(folder: &Path, base: &str, setup: &HashSet<PathBuf>) -> Option<Value> {
     // `diff-index`, not `diff`: `diff` refreshes the index and writes it, under the feet of an
     // agent's own `git add` or `commit` in the same worktree.
     let diff = git::run(
@@ -201,6 +251,9 @@ async fn changes(folder: &Path, base: &str) -> Option<Value> {
     .filter(|output| output.success)?;
     let (mut files, mut bytes, mut capped) = (0usize, 0u64, false);
     for path in new.stdout.split('\0').filter(|path| !path.is_empty()) {
+        if setup.contains(&folder.join(path).components().collect::<PathBuf>()) {
+            continue;
+        }
         if files == COUNTED_FILES {
             capped = true;
             break;
@@ -955,16 +1008,11 @@ async fn make_worktree(workspace: &Workspace, repository: &str) -> Result<(), St
     Ok(())
 }
 
-/// What the globs match in `source`, file by file, with where each goes in `target`, leaving out
-/// what is there already: what a copy step has left to do.
-fn copy_plan(
-    source: &Path,
-    target: &Path,
-    globs: &[String],
-) -> Result<Vec<(PathBuf, PathBuf)>, String> {
+/// What the globs match in `source`, file by file, relative to it.
+fn copy_sources(source: &Path, globs: &[String]) -> Result<Vec<PathBuf>, String> {
     let cannot =
         |path: &Path, error: std::io::Error| format!("cannot read {}: {error}", path.display());
-    let mut plan = Vec::new();
+    let mut found = Vec::new();
     let mut pending: Vec<PathBuf> = Vec::new();
     for pattern in globs {
         pending.extend(glob::expand(source, pattern).map_err(|e| cannot(source, e))?);
@@ -977,13 +1025,27 @@ fn copy_plan(
                 let entry = entry.map_err(|e| cannot(&from, e))?;
                 pending.push(relative.join(entry.file_name()));
             }
-        } else if std::fs::symlink_metadata(target.join(&relative)).is_err() {
-            plan.push((from, target.join(&relative)));
+        } else {
+            found.push(relative);
         }
     }
-    plan.sort();
-    plan.dedup();
-    Ok(plan)
+    found.sort();
+    found.dedup();
+    Ok(found)
+}
+
+/// What the globs match in `source`, file by file, with where each goes in `target`, leaving out
+/// what is there already: what a copy step has left to do.
+fn copy_plan(
+    source: &Path,
+    target: &Path,
+    globs: &[String],
+) -> Result<Vec<(PathBuf, PathBuf)>, String> {
+    Ok(copy_sources(source, globs)?
+        .into_iter()
+        .filter(|relative| std::fs::symlink_metadata(target.join(relative)).is_err())
+        .map(|relative| (source.join(&relative), target.join(&relative)))
+        .collect())
 }
 
 /// Copies from the main checkout, never over anything already there.

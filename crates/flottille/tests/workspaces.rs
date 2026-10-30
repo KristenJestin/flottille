@@ -607,6 +607,47 @@ fn the_uncommitted_count_looks_inside_untracked_folders_and_skips_the_links_flot
     assert_eq!(shown["repositories"][0]["uncommitted"], 3);
 }
 
+/// A main checkout whose `api` holds two local files git does not know, copied by the setup.
+fn fixture_copying_two_files() -> Fixture {
+    let fixture = Fixture::new(false);
+    let api = fixture.folder.join("api");
+    std::fs::write(api.join("local-a.cfg"), "a=1\nb=2\nc=3\n").unwrap();
+    std::fs::write(api.join("local-b.cfg"), "d=4\ne=5\n").unwrap();
+    fixture
+        .configure("[[setup]]\ncopy = [\"local-a.cfg\", \"local-b.cfg\"]\nrepository = \"api\"\n");
+    fixture.create(json!({})).unwrap();
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    fixture
+}
+
+#[test]
+fn the_files_a_setup_copy_wrote_are_not_changes_of_the_workspace() {
+    let fixture = fixture_copying_two_files();
+    let api = fixture.workspace("login").join("api");
+    assert!(api.join("local-a.cfg").is_file(), "the copy was made");
+
+    let shown = fixture.show("login").unwrap();
+
+    let api = &shown["repositories"][1];
+    assert_eq!(api["path"], "api");
+    assert_eq!(api["uncommitted"], 0, "{api}");
+    assert_eq!(api["changes"]["added"], 0, "{api}");
+}
+
+#[test]
+fn a_file_the_setup_copied_and_the_user_edited_is_a_change_again_and_so_is_a_file_of_their_own() {
+    let fixture = fixture_copying_two_files();
+    let api = fixture.workspace("login").join("api");
+    std::fs::write(api.join("local-a.cfg"), "a=1\nb=2\nc=3\nf=6\n").unwrap();
+    std::fs::write(api.join("draft.md"), "mine\n").unwrap();
+
+    let shown = fixture.show("login").unwrap();
+
+    let api = &shown["repositories"][1];
+    assert_eq!(api["uncommitted"], 2, "{api}");
+    assert_eq!(api["changes"]["added"], 5, "{api}");
+}
+
 #[test]
 fn a_workspace_of_a_repository_with_no_remote_is_removed_unless_it_holds_commits_of_its_own() {
     let fixture = Fixture::new(false);

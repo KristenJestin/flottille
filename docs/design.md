@@ -486,7 +486,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
 
 - a top bar with search and a bell counting what waits for the user;
 - left: the tree project › place › session. `main` and the workspaces sit at the same level
-  under their project; sessions sit under their place, with a mark when running or when the
+  under their project; a session is titled by the first line of its first message that says what the
+  work is (a greeting or a single word does not: the session is `agent <id>` until a later message
+  of the user does); sessions sit under their place, with a mark when running or when the
   root needs the user. The mark is where the work is, once: on the session's own row while that row
   is in sight, and on a folded place or project, which shows the strongest mark of what it holds,
   only while it is folded (never on a row and on its parents together); a session whose agent
@@ -514,7 +516,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   judge (Auto asks like Ask)" among its choices), the providers, then the Judge guidance and the
   Rules for every project, both edited the same way; a judge Flottille picked is said once in a
   notice, with Open Settings and Dismiss;
-- a session page: the root's conversation, live (messages, the user's own as selectable as the agent's, thoughts collapsed, tool calls with
+- a session page: the root's conversation, live (messages, the user's own as selectable as the agent's, thoughts collapsed (their head says how long the thinking lasted, from the event before it
+  to the one after it, and no time when it lasted less than a tenth of a second), tool calls with
   their result, the children launched, reports, diffs), one compact line for each command a
   tool call ran (an icon, the line, how it ended, how long: a click opens the output panel the
   rail opens, and the output itself is only there), one line for each request that reached the

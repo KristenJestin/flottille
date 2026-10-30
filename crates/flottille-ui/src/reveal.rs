@@ -394,6 +394,10 @@ impl PulsingLabel {
         cx.notify();
     }
 
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
         self.active = active;
         self.since = cx.background_executor().now();
