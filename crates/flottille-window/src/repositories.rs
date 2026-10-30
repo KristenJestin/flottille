@@ -1,23 +1,20 @@
-//! A project's repositories on its page (`docs/projects.md`): each with the branch its checkout
-//! is on, where its remote leads (or "local only") and its forge; the ones the folder holds that
-//! the project does not name, detected again, each with Add; a field that adds one by its path;
-//! and Remove, which only forgets a repository: its folder, its branches and the worktrees of the
-//! workspaces that took it stay. The window writes nothing itself: the daemon writes the project's
-//! file, its comments kept (`project.repositories`, `project.add_repository`,
-//! `project.remove_repository`).
+//! A project's repositories as the daemon reads their checkouts (`docs/projects.md`): each with
+//! the branch its checkout is on, its base rule, where its remote leads (or "local only") and its
+//! forge, and the ones the folder holds that the project does not name, detected again. The
+//! project settings list them (Add, Detect again, Remove…); the project page reads them. Remove
+//! only forgets a repository: its folder, its branches and the worktrees of the workspaces that
+//! took it stay. The window writes nothing itself: the daemon writes the project's file, its
+//! comments kept (`project.repositories`, `project.add_repository`,
+//! `project.remove_repository`). The view of this model is the confirmation of a removal; the
+//! rows are the settings page's.
 
 use flottille_core::declared::RepositoryForge;
-use flottille_ui::{Button, Confirm, Icon, Item, Listing, Type, icon, palette, space};
-use gpui_kit::base::input::{Input, InputEvent, InputState};
-use gpui_kit::{
-    App, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, Render,
-    SharedString, StatefulInteractiveElement, Styled, Subscription, TestSupportExt as _,
-    WeakEntity, Window, div, px,
-};
+use flottille_ui::{Confirm, Toast, toast};
+use gpui_kit::{App, Context, IntoElement, Render, SharedString, WeakEntity, Window};
 use serde_json::{Value, json};
 
 use crate::actions::Command;
-use crate::commands::{line_field, perform_later, problem_line};
+use crate::commands::perform_later;
 use crate::project::repository_label;
 use crate::shell::Shell;
 
@@ -31,8 +28,8 @@ pub struct RepositoryInfo {
     pub remote: String,
     /// Where its remote leads, masked; none when it has no such remote: local only.
     pub url: Option<String>,
-    /// Its forge in words (`GitHub acme/api`); none when none is set.
-    pub forge: Option<String>,
+    /// Its forge; none when none is set.
+    pub forge: Option<RepositoryForge>,
     /// Its base rule.
     pub base: Vec<String>,
     /// Its local branches.
@@ -56,9 +53,7 @@ impl RepositoryInfo {
             branch: value["branch"].as_str().map(str::to_owned),
             remote: value["remote"].as_str().unwrap_or("origin").to_owned(),
             url: value["url"].as_str().map(str::to_owned),
-            forge: serde_json::from_value::<RepositoryForge>(value["forge"].clone())
-                .ok()
-                .map(|forge| forge.said()),
+            forge: serde_json::from_value::<RepositoryForge>(value["forge"].clone()).ok(),
             base: words("base"),
             branches: words("branches"),
         }
@@ -76,7 +71,11 @@ impl RepositoryInfo {
             Some(url) => format!("{} {url}", self.remote),
             None => "local only".to_owned(),
         });
-        parts.push(self.forge.clone().unwrap_or_else(|| "no forge".to_owned()));
+        parts.push(
+            self.forge
+                .as_ref()
+                .map_or_else(|| "no forge".to_owned(), RepositoryForge::said),
+        );
         parts.join(" · ")
     }
 }
@@ -109,13 +108,6 @@ impl Repositories {
     }
 }
 
-/// A row of the section: a repository of the project, or one found in its folder.
-#[derive(Clone, Debug, PartialEq)]
-enum Row {
-    Known(RepositoryInfo),
-    Found(String),
-}
-
 /// What the daemon is doing for the section.
 #[derive(Clone, Debug, PartialEq)]
 enum Busy {
@@ -128,7 +120,6 @@ pub struct ProjectRepositories {
     shell: WeakEntity<Shell>,
     project: String,
     read: Option<Repositories>,
-    rows: Listing<Row>,
     /// The repository whose Remove waits for its confirmation.
     confirming: Option<String>,
     /// The repository the confirmation names, kept while it fades away.
@@ -137,9 +128,6 @@ pub struct ProjectRepositories {
     /// How many requests were made: an answer to an older one never replaces a newer one's.
     requests: u64,
     problem: Option<SharedString>,
-    /// Where a repository's path is typed to add it, made at the first draw.
-    field: Option<Entity<InputState>>,
-    _subscription: Option<Subscription>,
 }
 
 impl ProjectRepositories {
@@ -148,14 +136,11 @@ impl ProjectRepositories {
             shell,
             project,
             read: None,
-            rows: Listing::default(),
             confirming: None,
             asked: String::new(),
             busy: None,
             requests: 0,
             problem: None,
-            field: None,
-            _subscription: None,
         }
     }
 
@@ -171,8 +156,13 @@ impl ProjectRepositories {
         self.busy.is_some()
     }
 
-    pub fn field(&self) -> Option<&Entity<InputState>> {
-        self.field.as_ref()
+    /// Whether the user's request is this one.
+    pub fn is_adding(&self, path: &str) -> bool {
+        matches!(&self.busy, Some(Busy::Adding(adding)) if adding == path)
+    }
+
+    pub fn is_confirming(&self) -> bool {
+        self.confirming.is_some()
     }
 
     /// The number of the last request: its answer is the one that counts.
@@ -257,48 +247,63 @@ impl ProjectRepositories {
         &mut self,
         serial: u64,
         read: Result<Value, String>,
-        window: &mut Window,
+        _: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if !self.is_latest(serial) {
             return;
         }
-        let added = matches!(self.busy.take(), Some(Busy::Adding(_)));
+        let busy = self.busy.take();
+        let project = self.project.clone();
+        let label = |path: &str| repository_label(&project, path);
         match read {
             Ok(value) => {
                 self.problem = None;
-                self.read = Some(Repositories::of(&value));
-                if added && let Some(field) = &self.field {
-                    field.update(cx, |field, cx| field.set_value("", window, cx));
+                let read = Repositories::of(&value);
+                let said = match &busy {
+                    None => None,
+                    Some(Busy::Adding(path)) => Some(
+                        Toast::success(format!("{} added to {project}", label(path)))
+                            .detail("New workspaces take a worktree of it."),
+                    ),
+                    Some(Busy::Removing(path)) => Some(
+                        Toast::success(format!("{} removed from {project}", label(path)))
+                            .detail("Detect again finds it."),
+                    ),
+                    Some(Busy::Detecting) => Some(Toast::success("Detected again").detail(
+                        match read.new.as_slice() {
+                            [] => format!(
+                                "The folder holds the project's {} repositories, and no other.",
+                                read.listed.len()
+                            ),
+                            new => format!(
+                                "Found in the folder, not in the project: {}.",
+                                new.join(", ")
+                            ),
+                        },
+                    )),
+                };
+                if let Some(said) = said {
+                    toast(said, cx);
                 }
+                self.read = Some(read);
             }
-            Err(why) => self.problem = Some(why.into()),
+            Err(why) => match &busy {
+                None => self.problem = Some(why.into()),
+                Some(Busy::Adding(path)) => toast(
+                    Toast::failure(format!("{} was not added", label(path))).detail(why),
+                    cx,
+                ),
+                Some(Busy::Removing(path)) => toast(
+                    Toast::failure(format!("{} was not removed", label(path))).detail(why),
+                    cx,
+                ),
+                Some(Busy::Detecting) => {
+                    toast(Toast::failure("Not detected again").detail(why), cx)
+                }
+            },
         }
         cx.notify();
-    }
-
-    fn field_of(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
-        if let Some(field) = &self.field {
-            return field.clone();
-        }
-        let field = line_field(
-            "add a repository of the folder by its path, for example libs/core",
-            window,
-            cx,
-        );
-        self._subscription = Some(cx.subscribe(&field, |this, field, event, cx| {
-            match event {
-                InputEvent::PressEnter { .. } => {
-                    let typed = field.read(cx).value().to_string();
-                    this.add(&typed, cx);
-                }
-                // Typing clears what a refusal said.
-                InputEvent::Change if this.problem.take().is_some() => cx.notify(),
-                _ => {}
-            }
-        }));
-        self.field = Some(field.clone());
-        field
     }
 
     /// The confirmation of forgetting a repository.
@@ -308,13 +313,13 @@ impl ProjectRepositories {
         let (this, again) = (cx.entity().downgrade(), cx.entity().downgrade());
         Confirm::new(
             "repository-removal",
-            format!("Forget the repository {label}?"),
+            format!("Remove {label} from the project?"),
         )
         .sentence(
-            "Flottille forgets it: its folder, its branches and the worktrees of its \
-                 workspaces stay as they are.",
+            "New workspaces no longer take it. The repository itself is not touched, nor the \
+             worktrees of the workspaces that took it; Detect again finds it.",
         )
-        .action("Forget repository")
+        .action("Remove repository")
         .open(self.confirming.is_some())
         .on_confirm(move |_, cx| {
             let path = path.clone();
@@ -329,251 +334,11 @@ impl ProjectRepositories {
                 .ok();
         })
     }
-
-    fn known_row(&self, info: &RepositoryInfo, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = palette(cx);
-        let path = info.path.clone();
-        let id = |part: &str| ElementId::Name(format!("{part}-{path}").into());
-        let label = repository_label(&self.project, &info.path);
-        let removing = self.busy == Some(Busy::Removing(info.path.clone()));
-        let action = if removing {
-            div()
-                .mono(11.5)
-                .text_color(p.faint)
-                .child("Removing…")
-                .into_any_element()
-        } else {
-            let remove = path.clone();
-            Button::quiet(id("remove-repository"), "Remove")
-                .disabled(
-                    self.busy.is_some() || self.read.as_ref().is_some_and(|r| r.listed.len() < 2),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.remove(&remove, cx)))
-                .into_any_element()
-        };
-        div()
-            .id(id("repository-row"))
-            .px(space::LG)
-            .py(space::MD)
-            .rounded(px(10.))
-            .border_1()
-            .border_color(p.line)
-            .bg(p.card)
-            .flex()
-            .items_start()
-            .gap(space::MD)
-            .child(
-                div()
-                    .pt(space::XS)
-                    .child(icon(Icon::Repository).size(px(14.)).text_color(p.faint)),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(space::XS)
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .medium()
-                            .child(SharedString::from(label)),
-                    )
-                    .child(
-                        div()
-                            .id(id("repository-meta"))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .mono(11.5)
-                            .text_color(if info.found { p.faint } else { p.fail })
-                            .aria_label(SharedString::from(info.line()))
-                            .child(SharedString::from(info.line()))
-                            .test_support(),
-                    ),
-            )
-            .child(action)
-            .test_support()
-    }
-
-    fn found_row(&self, path: &str, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = palette(cx);
-        let id = |part: &str| ElementId::Name(format!("{part}-{path}").into());
-        let adding = self.busy == Some(Busy::Adding(path.to_owned()));
-        let added = path.to_owned();
-        div()
-            .id(id("found-repository"))
-            .px(space::LG)
-            .py(space::MD)
-            .rounded(px(10.))
-            .border_1()
-            .border_dashed()
-            .border_color(p.line2)
-            .flex()
-            .items_center()
-            .gap(space::MD)
-            .child(icon(Icon::Repository).size(px(14.)).text_color(p.faint))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .items_center()
-                    .gap(space::SM)
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(p.mute)
-                            .child(SharedString::from(path.to_owned())),
-                    )
-                    .child(
-                        div()
-                            .mono(11.5)
-                            .text_color(p.faint)
-                            .child("found in the folder, not in the project"),
-                    ),
-            )
-            .child(
-                Button::secondary(
-                    id("add-found-repository"),
-                    if adding { "Adding…" } else { "Add" },
-                )
-                .disabled(self.busy.is_some())
-                .on_click(cx.listener(move |this, _, _, cx| this.add(&added, cx))),
-            )
-            .test_support()
-    }
 }
 
 impl Render for ProjectRepositories {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = palette(cx);
-        if let Some(read) = &self.read {
-            let rows = read
-                .listed
-                .iter()
-                .map(|info| (format!("known-{}", info.path), Row::Known(info.clone())))
-                .chain(
-                    read.new
-                        .iter()
-                        .map(|path| (format!("found-{path}"), Row::Found(path.clone()))),
-                );
-            let now = cx.background_executor().now();
-            let reduce = cx.reduce_motion();
-            self.rows.sync(rows, now, reduce);
-        }
-        let rows: Vec<_> = self
-            .rows
-            .rows()
-            .map(|row| {
-                let content = match row.value {
-                    Row::Known(info) => self.known_row(info, cx).into_any_element(),
-                    Row::Found(path) => self.found_row(path, cx).into_any_element(),
-                };
-                Item::new(
-                    ElementId::Name(format!("repository-item-{}", row.key).into()),
-                    row.placement,
-                    content,
-                )
-                .gap(space::SM)
-            })
-            .collect();
-        let count = self.read.as_ref().map_or(0, |r| r.listed.len());
-        let detecting = self.busy == Some(Busy::Detecting);
-        let field = self.field_of(window, cx);
-        let typed = !field.read(cx).value().trim().is_empty();
-        let adding_typed = matches!(&self.busy, Some(Busy::Adding(path))
-            if self.read.as_ref().is_none_or(|r| !r.new.contains(path)));
-        div()
-            .id("project-repositories")
-            .mb(px(30.))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(space::SM)
-                    .mb(px(12.))
-                    .text_size(px(13.))
-                    .semibold()
-                    .child("Repositories")
-                    .child(
-                        div()
-                            .mono(11.)
-                            .font_weight(gpui_kit::FontWeight::NORMAL)
-                            .text_color(p.faint)
-                            .child(count.to_string()),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        Button::quiet(
-                            "detect-repositories",
-                            if detecting {
-                                "Detecting…"
-                            } else {
-                                "Detect again"
-                            },
-                        )
-                        .leading(Icon::Search)
-                        .disabled(self.busy.is_some())
-                        .on_click(cx.listener(|this, _, _, cx| this.detect(cx))),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(space::SM)
-                    .children(rows)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(space::SM)
-                            .child(
-                                div()
-                                    .id("repository-path-field")
-                                    .flex_1()
-                                    .h(px(32.))
-                                    .px(space::MD)
-                                    .rounded(px(8.))
-                                    .bg(p.field)
-                                    .border_1()
-                                    .border_color(p.line2)
-                                    .flex()
-                                    .items_center()
-                                    .mono(12.5)
-                                    .child(Input::new(&field))
-                                    .test_support(),
-                            )
-                            .child(
-                                Button::secondary(
-                                    "add-repository",
-                                    if adding_typed { "Adding…" } else { "Add" },
-                                )
-                                .leading(Icon::Plus)
-                                .disabled(!typed || self.busy.is_some())
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        let typed = this
-                                            .field
-                                            .as_ref()
-                                            .map(|f| f.read(cx).value().to_string())
-                                            .unwrap_or_default();
-                                        this.add(&typed, cx);
-                                    },
-                                )),
-                            ),
-                    )
-                    .child(problem_line(
-                        "repositories-problem",
-                        self.problem.clone(),
-                        space::SM,
-                        cx,
-                    )),
-            )
-            .child(self.confirm(cx))
-            .test_support()
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.confirm(cx)
     }
 }
 

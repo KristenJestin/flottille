@@ -7,19 +7,29 @@
 use std::collections::HashMap;
 
 use flottille_ui::{
-    Align, Card, Dropdown, MenuItem, Switch, Type, enter, palette, presence, presence_of, space,
+    Field, Icon, ListCard, ListRow, PageHeader, PageIndex, Section, Select, SelectOption, Switch,
+    Toast, hoverable, icon, palette, presence, presence_of, space, toast, turning,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, Render,
-    SharedString, StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, Window, div,
-    px,
+    AnyElement, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, Render,
+    SharedString, StatefulInteractiveElement, Styled, TestSupportExt as _, Transformation,
+    WeakEntity, Window, div, px, radians,
 };
 
 use crate::actions::Command;
 use crate::providers::{Provider, Providers};
 use crate::rules::RulesEditor;
+use crate::sections::Sections;
 use crate::shell::Shell;
+
+/// The sections of the page, in order: each index entry's key and label.
+pub const SECTIONS: [(&str, &str); 4] = [
+    ("judge", "Auto judge"),
+    ("providers", "Providers"),
+    ("guidance", "Judge guidance"),
+    ("rules", "Rules"),
+];
 
 pub struct SettingsPage {
     shell: WeakEntity<Shell>,
@@ -39,6 +49,9 @@ pub struct SettingsPage {
     judge_pending: bool,
     /// The daemon's refusal of the last judge chosen.
     judge_refused: Option<String>,
+    /// "How Auto works" is unfolded.
+    how: bool,
+    sections: Sections,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,6 +94,8 @@ impl SettingsPage {
             judge_menu: None,
             judge_pending: false,
             judge_refused: None,
+            how: false,
+            sections: Sections::default(),
         }
     }
 
@@ -143,11 +158,19 @@ impl SettingsPage {
         }
     }
 
-    /// The daemon's answer to a switch: on a refusal the switch goes back, and the sentence shows.
+    /// The daemon's answer to a switch: on a refusal the switch goes back, and a toast says why.
     pub fn answered(&mut self, name: &str, refused: Option<String>, cx: &mut Context<Self>) {
         match refused {
             Some(why) => {
                 self.pending.remove(name);
+                let title = self
+                    .providers
+                    .get(name)
+                    .map_or_else(|| name.to_owned(), |p| p.title.clone());
+                toast(
+                    Toast::failure(format!("{title} was not switched")).detail(why.clone()),
+                    cx,
+                );
                 self.refused.insert(name.to_owned(), why);
             }
             None => {
@@ -281,64 +304,77 @@ impl SettingsPage {
         cx.notify();
     }
 
-    /// The daemon's answer to a judge chosen: its refusal shows under the pickers.
+    /// The daemon's answer to a judge chosen: a toast says it.
     pub fn judge_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
         self.judge_pending = false;
+        match &refused {
+            Some(why) => toast(
+                Toast::failure("The judge was not changed").detail(why.clone()),
+                cx,
+            ),
+            None => toast(
+                Toast::success("Auto judge saved").detail("It decides the next judgement."),
+                cx,
+            ),
+        }
         self.judge_refused = refused;
         cx.notify();
     }
 
-    fn judge_handler(
-        cx: &Context<Self>,
-        f: impl Fn(&mut Self, &mut Context<Self>) + 'static,
-    ) -> impl Fn(&mut Window, &mut App) + 'static {
-        let this = cx.entity().downgrade();
-        move |_, cx| {
-            this.update(cx, |this, cx| f(this, cx)).ok();
-        }
+    /// Whether "How Auto works" is unfolded.
+    pub fn is_how_open(&self) -> bool {
+        self.how
     }
 
-    fn judge_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub fn toggle_how(&mut self, cx: &mut Context<Self>) {
+        self.how = !self.how;
+        cx.notify();
+    }
+
+    fn judge_section(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let (provider, model) = self.judge_shown();
-        let mut pickers = div().flex().items_center().gap(space::XS);
-        let menus = [
-            Some((JudgeMenu::Provider, "judge-provider", provider)),
-            model.map(|m| (JudgeMenu::Model, "judge-model", m)),
-        ];
-        for (menu, id, label) in menus.into_iter().flatten() {
-            let items: Vec<MenuItem> = self
-                .judge_entries(menu)
-                .into_iter()
-                .map(|(id, label, chosen, judge)| {
-                    MenuItem::new(SharedString::from(id), label)
-                        .selected(chosen)
-                        .on_click(Self::judge_handler(cx, move |this, cx| {
-                            this.choose_judge(judge.clone(), cx)
-                        }))
-                })
-                .collect();
-            let picker = Dropdown::new(id, label)
-                .align(Align::Start)
-                .width(px(260.))
-                .open(self.judge_menu == Some(menu))
-                .on_toggle(Self::judge_handler(cx, move |this, cx| {
-                    this.toggle_judge_menu(menu, cx)
-                }))
-                .items(items);
-            pickers = pickers.child(match menu {
-                JudgeMenu::Provider => picker.strong(),
-                JudgeMenu::Model => picker.mono(),
+        let select = |menu: JudgeMenu, id: &'static str, cx: &mut Context<Self>| {
+            let entries = self.judge_entries(menu);
+            let chosen = entries.iter().position(|e| e.2).unwrap_or(0);
+            let judges: Vec<Option<Judge>> = entries.iter().map(|e| e.3.clone()).collect();
+            let options = entries.into_iter().map(|(key, label, _, _)| {
+                let key = key.trim_start_matches("judge-").to_owned();
+                SelectOption::new(SharedString::from(key), SharedString::from(label))
             });
-        }
-        let mut body = div()
-            .id("judge")
-            .px(space::LG)
-            .py(space::MD)
+            let this = cx.entity().downgrade();
+            Select::new(id, options, chosen)
+                .disabled(self.judge_pending)
+                .on_choose(move |index, _, cx| {
+                    let judge = judges[index].clone();
+                    this.update(cx, |this, cx| this.choose_judge(judge, cx))
+                        .ok();
+                })
+        };
+        let provider = select(JudgeMenu::Provider, "judge-provider", cx);
+        let has_model = self.providers.judge.is_some();
+        let model = select(JudgeMenu::Model, "judge-model", cx);
+        let turned = turning("judge-how-chevron", self.how, window, cx);
+        let how = hoverable(
+            div()
+                .id("judge-how")
+                .aria_label("How Auto works")
+                .flex()
+                .items_center()
+                .gap(space::XS)
+                .cursor_pointer()
+                .text_size(px(12.5))
+                .child(icon(Icon::Chevron).size(px(12.)).with_transformation(
+                    Transformation::rotate(radians(-std::f32::consts::FRAC_PI_2 * turned)),
+                ))
+                .child("How Auto works")
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_how(cx))),
+            move |d, t| d.text_color(flottille_ui::color::mix(p.faint, p.text, t)),
+        );
+        let lines = div()
             .flex()
             .flex_col()
-            .gap(space::SM)
-            .child(pickers)
+            .gap(space::XS)
+            .pl(space::LG)
             .children(AUTO.iter().enumerate().map(|(n, text)| {
                 div()
                     .id(ElementId::Name(format!("judge-auto-{n}").into()))
@@ -353,23 +389,47 @@ impl SettingsPage {
                     .id("judge-quota")
                     .aria_label(JUDGE_QUOTA)
                     .text_size(px(12.5))
-                    .text_color(p.faint)
+                    .text_color(p.mute)
                     .child(JUDGE_QUOTA)
                     .test_support(),
-            )
-            .test_support();
-        if let Some(why) = &self.judge_refused {
-            body = body.child(
-                div()
-                    .text_size(px(12.5))
-                    .text_color(p.fail)
-                    .child(SharedString::from(why.clone())),
             );
-        }
-        Card::new().title(div().child("Auto judge")).child(body)
+        let card = div()
+            .id("judge")
+            .p(space::LG)
+            .flex()
+            .flex_col()
+            .gap(space::MD)
+            .rounded(px(12.))
+            .bg(p.card)
+            .border_1()
+            .border_color(p.line)
+            .child(
+                div()
+                    .flex()
+                    .gap(space::MD)
+                    .child(div().flex_1().min_w_0().child(Field::new(
+                        "judge-provider-field",
+                        "Provider",
+                        provider,
+                    )))
+                    .child(div().flex_1().min_w_0().child(presence(
+                        "judge-model-block",
+                        has_model,
+                        Field::new("judge-model-field", "Model", model),
+                    ))),
+            )
+            .child(how)
+            .child(presence("judge-how-block", self.how, lines).gap(space::MD))
+            .test_support();
+        Section::new("judge", "Auto judge")
+            .sentence(
+                "In Auto, a small model decides the calls the rules do not know to be harmless. \
+                 It never denies: it allows, or asks you.",
+            )
+            .child(card)
     }
 
-    fn card(&self, provider: &Provider, cx: &mut Context<Self>) -> impl IntoElement {
+    fn provider_row(&self, provider: &Provider, cx: &mut Context<Self>) -> ListRow {
         let p = palette(cx);
         let name = provider.name.clone();
         let on = self.switch_on(&name);
@@ -379,61 +439,49 @@ impl SettingsPage {
             "Enabled",
         )
         .disabled(self.pending.contains_key(&name))
-        .on_click(cx.listener(move |this, _, _, cx| this.flip(&name, cx)));
-        let title = div()
-            .flex_1()
-            .flex()
-            .items_center()
-            .gap(space::SM)
-            .child(SharedString::from(provider.title.clone()))
-            .child(
-                div()
-                    .mono(11.)
-                    .text_color(p.faint)
-                    .child(SharedString::from(provider.name.clone())),
-            )
-            .child(div().flex_1())
-            .child(switch);
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
+            this.flip(&name, cx)
+        }));
+        // By shape as well as colour: a filled dot when its agents can run, a ring otherwise.
+        let state_color = if provider.offered() {
+            p.ok
+        } else if provider.enabled {
+            p.wait
+        } else {
+            p.faint
+        };
+        let mark = div()
+            .flex_none()
+            .size(px(7.))
+            .rounded_full()
+            .when(provider.offered(), |d| d.bg(state_color))
+            .when(!provider.offered(), |d| {
+                d.border_1().border_color(state_color)
+            });
         let line = |text: String, color| {
             div()
                 .text_size(px(12.5))
                 .text_color(color)
                 .child(SharedString::from(text))
         };
-        // By shape as well as colour: a filled dot when its agents can run, a ring otherwise.
-        let state_color = if provider.offered() {
-            p.ok
-        } else if provider.enabled {
-            p.fail
-        } else {
-            p.faint
-        };
-        let mark = div()
-            .flex_none()
-            .mt(px(6.))
-            .size(px(8.))
-            .rounded_full()
-            .when(provider.offered(), |d| d.bg(state_color))
-            .when(!provider.offered(), |d| {
-                d.border_1().border_color(state_color)
-            });
-        let mut body = div()
+        let below = div()
             .id(ElementId::Name(
                 format!("provider-{}", provider.name).into(),
             ))
-            .px(space::LG)
-            .py(space::MD)
+            .mt(px(2.))
             .flex()
             .flex_col()
-            .gap(space::SM)
+            .gap(space::XS)
             .child(
                 div()
                     .flex()
+                    .items_center()
                     .gap(space::SM)
-                    .text_size(px(13.))
+                    .text_size(px(12.5))
                     .text_color(state_color)
                     .child(mark)
-                    // The daemon's sentence wraps rather than run past the card.
+                    // The daemon's sentence wraps rather than run past the row.
                     .child(
                         div()
                             .flex_1()
@@ -441,13 +489,7 @@ impl SettingsPage {
                             .child(SharedString::from(provider.state())),
                     ),
             )
-            .child(line(provider.sign_in(), p.mute))
-            .child(
-                div()
-                    .mono(11.5)
-                    .text_color(p.faint)
-                    .child(SharedString::from(provider.program_line())),
-            )
+            .child(line(provider.sign_in(), p.faint))
             .children(
                 provider
                     .warnings
@@ -455,126 +497,103 @@ impl SettingsPage {
                     .map(|warning| line(format!("Warning: {warning}"), p.mute)),
             )
             .test_support();
-        if let Some(why) = self.refused.get(&provider.name) {
-            body = body.child(line(why.clone(), p.fail));
-        }
-        Card::new().title(title).child(body)
+        let detail = match &provider.version {
+            Some(version) => format!("{} {version}", provider.program),
+            None => provider.program_line(),
+        };
+        ListRow::new(
+            ElementId::Name(format!("provider-row-{}", provider.name).into()),
+            SharedString::from(provider.title.clone()),
+        )
+        .detail(SharedString::from(detail))
+        .below(below)
+        .trailing(switch)
     }
 }
 
 impl Render for SettingsPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let pad = if self.narrow { space::LG } else { space::XXL };
-        let key = |part: &str| ElementId::Name(format!("enter-settings-{part}").into());
-        let header = div()
-            .flex()
-            .flex_col()
-            .gap(space::SM)
-            .mb(px(24.))
-            .child(
-                div()
-                    .text_size(px(24.))
-                    .line_height(px(29.))
-                    .semibold()
-                    .child("Settings"),
-            )
-            .child(
-                div()
-                    .text_color(p.mute)
-                    .child("The providers your agents run on, as this machine has them."),
-            );
-        let label = div()
-            .flex()
-            .items_center()
-            .gap(space::SM)
-            .mb(px(6.))
-            .text_size(px(13.))
-            .semibold()
-            .child("Providers")
-            .child(
-                div()
-                    .mono(11.)
-                    .font_weight(gpui_kit::FontWeight::NORMAL)
-                    .text_color(p.faint)
-                    .child(self.providers.list.len().to_string()),
-            );
-        let note = div()
-            .mb(px(14.))
-            .text_size(px(12.5))
-            .text_color(p.faint)
-            .child(
-                "Disabling a provider stops no agent: those running on it go on, and fail at \
-                 their next start, saying why. Flottille never shows a key: it says whether one \
-                 is set.",
-            );
-        let judge = enter(
-            key("judge"),
-            3,
-            div().mb(px(24.)).child(self.judge_card(cx)),
-        );
-        let cards: Vec<_> = self
+        let header = PageHeader::new("settings-header", "Settings");
+        let judge = self.judge_section(window, cx).into_any_element();
+        let rows: Vec<ListRow> = self
             .providers
             .list
             .clone()
             .iter()
-            .enumerate()
-            .map(|(i, provider)| {
-                enter(
-                    key(&provider.name),
-                    4 + i,
-                    div().mb(px(12.)).child(self.card(provider, cx)),
-                )
-            })
+            .map(|provider| self.provider_row(provider, cx))
             .collect();
-        let count = cards.len();
-        div()
-            .id("settings-page")
-            .size_full()
-            .overflow_y_scroll()
-            .child(
-                div()
-                    .max_w(px(980.) + pad * 2.)
-                    .w_full()
-                    .mx_auto()
-                    .px(pad)
-                    .pt(space::XXL)
-                    .pb(space::XXXL)
-                    .flex()
-                    .flex_col()
-                    .child(enter(key("header"), 0, header))
-                    .when(self.providers.known, |d| d.child(judge))
-                    .child(enter(key("label"), 1, label))
-                    .child(enter(key("note"), 2, note))
-                    .child(presence_of(
-                        "providers-error-line",
-                        self.providers.error.clone().map(SharedString::from),
-                        move |error| {
-                            div()
-                                .id("providers-error")
-                                .pb(space::MD)
-                                .text_color(p.fail)
-                                .child(error)
-                                .into_any_element()
-                        },
-                    ))
-                    .child(presence(
-                        "providers-asking",
-                        !self.providers.known,
-                        div().text_color(p.faint).child("Asking the daemon…"),
-                    ))
-                    .children(cards)
-                    // The two long texts last, so that they push no provider out of sight.
-                    .child(enter(
-                        key("judge-guidance"),
-                        3 + count,
-                        div().mt(px(24.)).child(self.judge_guidance.clone()),
-                    ))
-                    .child(enter(
-                        key("rules"),
-                        4 + count,
-                        div().mt(px(24.)).child(self.rules.clone()),
-                    )),
+        let count = rows.len();
+        let providers = Section::new("providers", "Providers")
+            .count(count.to_string())
+            .sentence(
+                "The agent programs installed on this machine and signed in. Disabling one stops \
+                 no agent that runs; Flottille never shows a key, only whether one is set.",
             )
+            .child(presence_of(
+                "providers-error-line",
+                self.providers.error.clone().map(SharedString::from),
+                move |error| {
+                    div()
+                        .id("providers-error")
+                        .text_size(px(12.5))
+                        .text_color(p.fail)
+                        .child(error)
+                        .test_support()
+                        .into_any_element()
+                },
+            ))
+            .child(presence(
+                "providers-asking",
+                !self.providers.known,
+                div()
+                    .text_size(px(12.5))
+                    .text_color(p.faint)
+                    .child("Asking the daemon…"),
+            ))
+            .child(presence(
+                "provider-list-block",
+                count > 0,
+                ListCard::new("provider-list").rows(rows),
+            ))
+            .into_any_element();
+        let sections: Vec<(&'static str, AnyElement)> = vec![
+            (
+                "judge",
+                if self.providers.known {
+                    judge
+                } else {
+                    div().into_any_element()
+                },
+            ),
+            ("providers", providers),
+            ("guidance", self.judge_guidance.clone().into_any_element()),
+            ("rules", self.rules.clone().into_any_element()),
+        ];
+        let this = cx.entity().downgrade();
+        let index = move |id: ElementId, current: usize| {
+            let this = this.clone();
+            PageIndex::new(id, SECTIONS)
+                .current(current)
+                .on_pick(move |entry, _, cx| {
+                    this.update(cx, |this, cx| {
+                        this.sections.go_to(entry, cx);
+                        cx.notify();
+                    })
+                    .ok();
+                })
+        };
+        let page = self.sections.page(
+            "settings-page",
+            "settings",
+            pad,
+            header.into_any_element(),
+            index,
+            sections,
+            window,
+            cx,
+        );
+        div().size_full().text_color(p.text).child(page)
     }
 }

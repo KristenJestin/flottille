@@ -3,7 +3,7 @@
 //! compositor.
 //!
 //! ```text
-//! cargo run -p flottille-window --example shell [--features frames] -- [--project <name>] [--add-project <folder>] [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace] [--add-command] [--edit-command <name>] [--add-skill] [--edit-skill <name>] [--edit-task <name>] [--edit-setup <number>] [--run-task <name>] [--workspace-menu <workspace>] [--remove <workspace>] [--slash <text>] [--attach <picture>] [--end] [--ended] [--open-run <text of its line>] [--open-ended] [--project-settings <project>] [--size <w>x<h>]
+//! cargo run -p flottille-window --example shell [--features frames] -- [--project <name>] [--add-project <folder>] [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace] [--add-command] [--edit-command <name>] [--add-skill] [--edit-skill <name>] [--edit-task <name>] [--edit-setup <number>] [--run-task <name>] [--card-menu <workspace>] [--remove <workspace>] [--slash <text>] [--attach <picture>] [--end] [--ended] [--open-run <text of its line>] [--details] [--workspace-menu] [--project-settings <project> [--repository <path>] [--tracker] [--section <n>] [--use-forge <path>] [--remove-repository <path>] [--remove-project]] [--how] [--size <w>x<h>]
 //! ```
 //!
 //! `--project` opens a project's page, `--add-project` the "Add a project" modal with the
@@ -13,9 +13,11 @@
 //! pickers, `--new-workspace` the project page's new-workspace modal, `--add-command`,
 //! `--edit-command`, `--add-skill` and `--edit-skill` the modals of the Commands and Skills
 //! sections, `--edit-task` and `--edit-setup` those of the Tasks and Setup sections, `--run-task`
-//! runs a task of the open project's page and opens its output, `--workspace-menu` opens a workspace card's "⋯" menu and `--remove` its removal confirmation, `--slash` types a text in the open session's composer (its `/` list), `--attach` attaches a picture file to it, `--end` opens the open
+//! runs a task of the open project's page and opens its output, `--card-menu` opens a workspace card's "⋯" menu and `--remove` its removal confirmation, `--slash` types a text in the open session's composer (its `/` list), `--attach` attaches a picture file to it, `--end` opens the open
 //! session's "End the session?" confirmation, `--ended` unfolds the "Ended" group at the bottom of the
-//! left tree, `--open-run` opens the output of the open session's first run whose line holds the text, in its panel, `--open-ended` the rail's "N ended" row, `--project-settings` a project's settings page, `--size` the window's size. The daemon is found on
+//! left tree, `--open-run` opens the detail of the open session's first run whose line holds the text, in its drawer,
+//! `--details` unfolds the details of the first request waiting in the rail, `--workspace-menu` opens the
+//! rail's Workspace "⋯" menu, `--project-settings` a project's settings page (`--repository` and `--tracker` open its dialogs, `--section` scrolls to its n-th section, `--use-forge` uses the forge offered for a repository, `--remove-repository` and `--remove-project` ask their confirmation), `--how` opens "How Auto works" in the settings, `--size` the window's size. The daemon is found on
 //! `$XDG_RUNTIME_DIR/flottille/daemon.sock`; it is not started.
 
 use std::os::unix::net::UnixStream;
@@ -38,9 +40,12 @@ fn main() {
     let (mut add_command, mut add_skill) = (false, false);
     let (mut edit_command, mut edit_skill, mut slash, mut attach) = (None, None, None, None);
     let (mut end, mut ended) = (false, false);
-    let (mut open_run, mut open_ended) = (None::<String>, false);
+    let (mut details, mut workspace_menu) = (false, false);
+    let mut open_run = None::<String>;
     let (mut edit_task, mut edit_setup, mut run_task) = (None, None, None);
-    let (mut workspace_menu, mut remove) = (None::<String>, None::<String>);
+    let (mut card_menu, mut remove) = (None::<String>, None::<String>);
+    let (mut repository, mut tracker, mut section, mut use_forge) = (None, false, None, None);
+    let (mut remove_repository, mut remove_project, mut how) = (None, false, false);
     let mut dimensions = (1280., 800.);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -63,15 +68,32 @@ fn main() {
                 let number = args.next().expect("a step's number");
                 edit_setup = Some(number.parse::<usize>().expect("a number"));
             }
-            "--workspace-menu" => workspace_menu = Some(args.next().expect("a workspace")),
+            "--card-menu" => card_menu = Some(args.next().expect("a workspace")),
             "--remove" => remove = Some(args.next().expect("a workspace")),
             "--run-task" => run_task = Some(args.next().expect("a task")),
+            "--repository" => repository = Some(args.next().expect("a repository's path")),
+            "--tracker" => tracker = true,
+            "--section" => {
+                section = Some(
+                    args.next()
+                        .expect("a number")
+                        .parse::<usize>()
+                        .expect("a number"),
+                )
+            }
+            "--use-forge" => use_forge = Some(args.next().expect("a repository's path")),
+            "--remove-repository" => {
+                remove_repository = Some(args.next().expect("a repository's path"))
+            }
+            "--remove-project" => remove_project = true,
+            "--how" => how = true,
             "--slash" => slash = Some(args.next().expect("what the reply's field holds")),
             "--attach" => attach = Some(args.next().expect("a picture file")),
             "--end" => end = true,
             "--ended" => ended = true,
+            "--details" => details = true,
+            "--workspace-menu" => workspace_menu = true,
             "--open-run" => open_run = Some(args.next().expect("the text of a run's line")),
-            "--open-ended" => open_ended = true,
             "--size" => {
                 let size = args.next().expect("a size like 1280x1400");
                 let (w, h) = size.split_once('x').expect("WxH");
@@ -221,7 +243,7 @@ fn main() {
                     .ok();
             }
             // A workspace card's menu or removal confirmation, once its card is drawn.
-            if workspace_menu.is_some() || remove.is_some() {
+            if card_menu.is_some() || remove.is_some() {
                 cx.background_executor()
                     .timer(Duration::from_millis(2500))
                     .await;
@@ -232,7 +254,7 @@ fn main() {
                             return;
                         };
                         let place = |name: &str| Some(name.to_owned());
-                        if let Some(name) = &workspace_menu
+                        if let Some(name) = &card_menu
                             && let Some(card) = page.read(cx).card(&place(name), cx)
                         {
                             card.update(cx, |c, cx| c.open_menu(window, cx));
@@ -242,6 +264,51 @@ fn main() {
                         {
                             card.update(cx, |c, cx| c.ask_removal(cx));
                         }
+                    })
+                    .ok();
+            }
+            // The project's settings or Settings in one of their states, once they are read.
+            if repository.is_some()
+                || tracker
+                || section.is_some()
+                || use_forge.is_some()
+                || remove_repository.is_some()
+                || remove_project
+                || how
+            {
+                cx.background_executor()
+                    .timer(Duration::from_millis(1000))
+                    .await;
+                window
+                    .update(cx, |_, window, cx| {
+                        let main = shell.read(cx).main().clone();
+                        if how && let Some(page) = main.read(cx).settings_page().cloned() {
+                            page.update(cx, |page, cx| page.toggle_how(cx));
+                        }
+                        let Some(page) = main.read(cx).project_settings_page().cloned() else {
+                            return;
+                        };
+                        page.update(cx, |page, cx| {
+                            if let Some(path) = &repository {
+                                page.open_repository(path, window, cx);
+                            }
+                            if tracker {
+                                page.open_tracker(window, cx);
+                            }
+                            if let Some(entry) = section {
+                                page.go_to(entry, cx);
+                            }
+                            if let Some(path) = &use_forge {
+                                page.use_proposal(path, cx);
+                            }
+                            if let Some(path) = &remove_repository {
+                                let repositories = page.repositories().clone();
+                                repositories.update(cx, |r, cx| r.remove(path, cx));
+                            }
+                            if remove_project {
+                                page.ask_removal(cx);
+                            }
+                        });
                     })
                     .ok();
             }
@@ -278,8 +345,8 @@ fn main() {
                         .ok();
                 }
             }
-            // A run's output, or the folded runs, once the rail has listed them.
-            if open_run.is_some() || open_ended {
+            // A run's detail, once the rail has listed it.
+            if open_run.is_some() {
                 cx.background_executor()
                     .timer(Duration::from_millis(2500))
                     .await;
@@ -288,9 +355,6 @@ fn main() {
                         let page = shell.read(cx).main().read(cx).session_page().cloned();
                         if let Some(page) = page {
                             let runs = page.read(cx).commands(cx);
-                            if open_ended {
-                                runs.update(cx, |runs, cx| runs.toggle_ended(cx));
-                            }
                             let found = open_run.as_ref().and_then(|text| {
                                 let list = runs.read(cx);
                                 list.rows()
@@ -306,13 +370,24 @@ fn main() {
                     .ok();
             }
             // A sub-agent read, or the end asked, once the page knows its tree.
-            if agent.is_some() || end || ended {
+            if agent.is_some() || end || ended || details || workspace_menu {
                 cx.background_executor()
                     .timer(Duration::from_millis(1500))
                     .await;
                 window
-                    .update(cx, |_, _, cx| {
+                    .update(cx, |_, window, cx| {
                         let page = shell.read(cx).main().read(cx).session_page().cloned();
+                        if let Some(page) = &page {
+                            let waiting = page.read(cx).waiting(cx);
+                            let first = waiting.read(cx).cards().first().map(|c| c.number);
+                            if let (true, Some(number)) = (details, first) {
+                                waiting.update(cx, |w, cx| w.toggle_details(number, cx));
+                            }
+                            if workspace_menu {
+                                let menu = page.read(cx).rail().read(cx).menu().clone();
+                                menu.update(cx, |m, cx| m.open(window, cx));
+                            }
+                        }
                         if let Some(page) = page {
                             page.update(cx, |page, cx| {
                                 if let Some(agent) = &agent {

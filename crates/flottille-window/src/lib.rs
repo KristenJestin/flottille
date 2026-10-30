@@ -4,6 +4,7 @@
 
 pub mod actions;
 pub mod add_project;
+pub mod claude;
 pub mod commands;
 pub mod composer;
 pub mod conversation;
@@ -19,6 +20,7 @@ pub mod providers;
 pub mod repositories;
 pub mod rules;
 pub mod runs;
+pub mod sections;
 pub mod session;
 pub mod session_link;
 pub mod settings;

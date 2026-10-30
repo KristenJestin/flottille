@@ -4,21 +4,23 @@
 //! "Commands" section has the modal that adds one (from the list of templates, or blank) or edits
 //! one.
 
+use std::collections::HashMap;
+
 use flottille_core::commands::TEMPLATES;
 use flottille_ui::{
-    Button, Confirm, Icon, Item, ListRow, Listing, Modal, Type, enter, icon, palette, presence,
-    presence_of, space,
+    Button, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, Section,
+    Toast, Type, icon, palette, presence, presence_of, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEditorStyle, InputEvent, InputState, TextareaState};
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, ElementId, Entity, Focusable as _,
-    InteractiveElement, IntoElement, ParentElement, Pixels, Render, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, TestSupportExt as _, WeakEntity, Window, div,
-    px,
+    App, AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement,
+    IntoElement, ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement, Styled,
+    Subscription, TestSupportExt as _, WeakEntity, Window, div, px,
 };
 use serde_json::Value;
 
-use crate::actions::{Command, CommandWrite};
+use crate::actions::{ClaudeKind, Command, CommandWrite};
+use crate::claude::{Found, found_block};
 use crate::shell::Shell;
 
 /// A command as the daemon shows it (`docs/protocol.md`, "The command methods").
@@ -93,28 +95,6 @@ pub(crate) fn boxed(id: &'static str, field: impl IntoElement, cx: &App) -> impl
         .test_support()
 }
 
-/// A section's line saying there is nothing yet: it unfolds when the list empties and folds away
-/// when a row comes. `id` is the line's, for the tests.
-pub(crate) fn empty_note(
-    id: &'static str,
-    empty: bool,
-    text: &'static str,
-    cx: &App,
-) -> impl IntoElement {
-    let p = palette(cx);
-    presence(
-        format!("{id}-block"),
-        empty,
-        div()
-            .id(id)
-            .text_size(px(12.5))
-            .text_color(p.faint)
-            .child(text)
-            .test_support(),
-    )
-    .gap(space::SM)
-}
-
 /// A line that says what went wrong, in the alarm colour: it unfolds when there is one and folds
 /// away when it is cleared. `id` is the line's; `gap` is what the parent puts between its children.
 pub(crate) fn problem_line(
@@ -136,57 +116,36 @@ pub(crate) fn problem_line(
     .gap(gap)
 }
 
-/// What a modal's action holds: "Saving…" while the daemon works, else `save`.
-pub(crate) fn save_or_saving(
-    id: &'static str,
-    saving: bool,
-    save: impl FnOnce() -> Button,
-    cx: &App,
-) -> AnyElement {
-    let p = palette(cx);
-    if saving {
-        enter(
-            format!("{id}-saving"),
-            0,
-            div().mono(11.5).text_color(p.faint).child("Saving…"),
-        )
-        .into_any_element()
-    } else {
-        save().into_any_element()
+/// The "⋯" menu of a row of a list, made once per row and kept: its button is
+/// `<prefix>-more-<key>`. `make` gets the key and the empty menu.
+pub(crate) fn menu_of<V: 'static>(
+    menus: &mut HashMap<String, Entity<Menu>>,
+    prefix: &str,
+    key: &str,
+    cx: &mut Context<V>,
+    make: impl FnOnce(&str, Menu) -> Menu,
+) -> Entity<Menu> {
+    if let Some(menu) = menus.get(key) {
+        return menu.clone();
     }
-}
-
-/// The heading of a section of a project's pages.
-pub(crate) fn heading(
-    title: &'static str,
-    count: usize,
-    action: impl IntoElement,
-    cx: &App,
-) -> impl IntoElement {
-    let p = palette(cx);
-    div()
-        .flex()
-        .items_center()
-        .gap(space::SM)
-        .mt(px(34.))
-        .mb(px(12.))
-        .text_size(px(13.))
-        .semibold()
-        .child(title)
-        .child(
-            div()
-                .mono(11.)
-                .font_weight(gpui_kit::FontWeight::NORMAL)
-                .text_color(p.faint)
-                .child(count.to_string()),
-        )
-        .child(div().flex_1())
-        .child(action)
+    let id = ElementId::Name(format!("{prefix}-more-{key}").into());
+    let menu = cx.new(|cx| make(key, Menu::new(id, "More", cx)));
+    menus.insert(key.to_owned(), menu.clone());
+    menu
 }
 
 // ── The section ────────────────────────────────────────────────────────────────────────────────
 
-/// What the modal is doing.
+/// What the section says a command is.
+pub const SENTENCE: &str = "Instructions you send to a session by typing /name in its composer, \
+                            so you never type them again.";
+
+/// What the dialog says a command is, before its templates.
+pub const EXPLAINED: &str = "A command is instructions you send to a session by typing /name in \
+                             its composer. Start from one of these, or from nothing; you can edit \
+                             it before saving.";
+
+/// What the dialog is doing.
 #[derive(Clone, Debug, PartialEq)]
 enum Form {
     Closed,
@@ -202,24 +161,38 @@ struct Fields {
     instructions: Entity<TextareaState>,
 }
 
+/// What a write was, for the toast its answer says.
+#[derive(Clone, Debug, PartialEq)]
+enum Writing {
+    Added(String),
+    Saved(String),
+    Removed(String),
+}
+
 pub struct CommandsSection {
     shell: WeakEntity<Shell>,
     project: String,
     listed: Option<Vec<CommandInfo>>,
     /// The rows as drawn: a removed command folds away before it is gone.
     rows: Listing<CommandInfo>,
-    /// What the daemon said when the list could not be read, or a removal was refused.
+    menus: HashMap<String, Entity<Menu>>,
+    /// Why the list cannot be read.
     problem: Option<SharedString>,
     form: Form,
-    /// Made when the modal first opens, which is when a window is at hand.
+    /// Made when the dialog first opens, which is when a window is at hand.
     fields: Option<Fields>,
     saving: bool,
+    writing: Option<Writing>,
     form_error: Option<SharedString>,
     /// The command being read to be edited.
     reading: Option<String>,
     confirming: Option<String>,
     /// The command the confirmation names, kept while it fades away.
     asked: String,
+    /// What the project's `.claude/commands` holds, as the daemon last found it.
+    found: Option<Vec<Found>>,
+    found_rows: Listing<Found>,
+    importing: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -230,14 +203,19 @@ impl CommandsSection {
             project,
             listed: None,
             rows: Listing::default(),
+            menus: HashMap::new(),
             problem: None,
             form: Form::Closed,
             fields: None,
             saving: false,
+            writing: None,
             form_error: None,
             reading: None,
             confirming: None,
             asked: String::new(),
+            found: None,
+            found_rows: Listing::default(),
+            importing: false,
             _subscriptions: Vec::new(),
         }
     }
@@ -247,8 +225,17 @@ impl CommandsSection {
         self.listed.as_deref()
     }
 
+    /// What `.claude/commands` holds, as the daemon last found it.
+    pub fn found(&self) -> Option<&[Found]> {
+        self.found.as_deref()
+    }
+
     pub fn is_open(&self) -> bool {
         self.form != Form::Closed
+    }
+
+    pub fn is_confirming(&self) -> bool {
+        self.confirming.is_some()
     }
 
     pub fn form_error(&self) -> Option<&str> {
@@ -271,10 +258,18 @@ impl CommandsSection {
         self.fields.as_ref().map(|f| &f.instructions)
     }
 
-    /// Asks the daemon for the list.
+    /// Asks the daemon for the list, and for what `.claude/commands` holds.
     pub fn read(&self, cx: &mut Context<Self>) {
         let project = self.project.clone();
-        perform_later(&self.shell, Command::Commands { project }, cx);
+        perform_later(
+            &self.shell,
+            Command::Commands {
+                project: project.clone(),
+            },
+            cx,
+        );
+        let kind = ClaudeKind::Command;
+        perform_later(&self.shell, Command::ClaudeFound { project, kind }, cx);
     }
 
     /// The daemon's list.
@@ -291,14 +286,49 @@ impl CommandsSection {
         cx.notify();
     }
 
+    /// What the daemon found in `.claude/commands`. A folder that cannot be read offers nothing.
+    pub fn found_listed(&mut self, found: Result<Vec<Found>, String>, cx: &mut Context<Self>) {
+        let found = found.unwrap_or_default();
+        if self.found.as_ref() != Some(&found) {
+            self.found = Some(found);
+            cx.notify();
+        }
+    }
+
+    /// Imports `name` from `.claude/commands`, or all that can be.
+    pub fn import(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        if self.importing {
+            return;
+        }
+        self.importing = true;
+        let command = Command::ClaudeImport {
+            project: self.project.clone(),
+            kind: ClaudeKind::Command,
+            names: name.map(|name| vec![name]),
+        };
+        perform_later(&self.shell, command, cx);
+        cx.notify();
+    }
+
+    /// The daemon's answer to an import: a toast says it, and the lists are read again.
+    pub fn imported(&mut self, read: Result<Value, String>, cx: &mut Context<Self>) {
+        self.importing = false;
+        toast(
+            crate::claude::imported_toast(ClaudeKind::Command, &read),
+            cx,
+        );
+        self.read(cx);
+        cx.notify();
+    }
+
     fn fields(&mut self, window: &mut Window, cx: &mut Context<Self>) -> &Fields {
         if self.fields.is_none() {
-            let name = line_field("name, typed after / to send it: open-prs", window, cx);
-            let description = line_field("one line: what it does", window, cx);
+            let name = line_field("open-prs", window, cx);
+            let description = line_field("Open the workspace's pull requests", window, cx);
             let instructions = cx.new(|cx| {
                 let mut field = TextareaState::new(window, cx)
                     .auto_grow(4, 10)
-                    .placeholder("what the agent is sent");
+                    .placeholder("What the agent is sent");
                 field.set_editor_style(editor_style(cx));
                 field
             });
@@ -320,7 +350,7 @@ impl CommandsSection {
         self.fields.as_ref().expect("made above")
     }
 
-    /// "New command": the list of the templates, and a blank one.
+    /// "New command": what a command is, the templates, and a blank one.
     pub fn add(&mut self, cx: &mut Context<Self>) {
         self.form = Form::Choosing;
         self.form_error = None;
@@ -387,7 +417,10 @@ impl CommandsSection {
         match read {
             Ok(info) => self.fill(Some(&info), window, cx),
             Err(why) => {
-                self.problem = Some(why.into());
+                toast(
+                    Toast::failure(format!("The command {name} cannot be read")).detail(why),
+                    cx,
+                );
                 cx.notify();
             }
         }
@@ -399,8 +432,9 @@ impl CommandsSection {
         cx.notify();
     }
 
-    fn write(&mut self, write: CommandWrite, cx: &mut Context<Self>) {
+    fn write(&mut self, write: CommandWrite, writing: Writing, cx: &mut Context<Self>) {
         self.saving = true;
+        self.writing = Some(writing);
         self.form_error = None;
         self.problem = None;
         let command = Command::CommandWrite {
@@ -416,6 +450,7 @@ impl CommandsSection {
             CommandWrite::Template {
                 template: template.to_owned(),
             },
+            Writing::Added(template.to_owned()),
             cx,
         );
     }
@@ -436,19 +471,25 @@ impl CommandsSection {
             fields.description.read(cx).value().trim().to_owned(),
             fields.instructions.read(cx).value().trim().to_owned(),
         );
-        let write = match original {
-            Some(_) => CommandWrite::Edit {
-                name,
-                description,
-                instructions,
-            },
-            None => CommandWrite::Add {
-                name,
-                description,
-                instructions,
-            },
+        let (write, writing) = match original {
+            Some(_) => (
+                CommandWrite::Edit {
+                    name: name.clone(),
+                    description,
+                    instructions,
+                },
+                Writing::Saved(name),
+            ),
+            None => (
+                CommandWrite::Add {
+                    name: name.clone(),
+                    description,
+                    instructions,
+                },
+                Writing::Added(name),
+            ),
         };
-        self.write(write, cx);
+        self.write(write, writing, cx);
     }
 
     /// Asks to remove, in a confirmation; called again from it, removes.
@@ -464,75 +505,83 @@ impl CommandsSection {
             CommandWrite::Remove {
                 name: name.to_owned(),
             },
+            Writing::Removed(name.to_owned()),
             cx,
         );
     }
 
-    /// The daemon's answer to a write: done, and the list is read again; or refused, and why.
+    /// The daemon's answer to a write: a toast says it, and the list is read again; a refusal of
+    /// the dialog's stays in it.
     pub fn written(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
         self.saving = false;
+        let writing = self.writing.take();
         match refused {
             None => {
                 self.form = Form::Closed;
                 self.form_error = None;
+                let said = match writing {
+                    Some(Writing::Added(name)) => Toast::success(format!("Command {name} added"))
+                        .detail(format!("Type /{name} in a session's composer to send it.")),
+                    Some(Writing::Saved(name)) => Toast::success(format!("Command {name} saved")),
+                    Some(Writing::Removed(name)) => {
+                        Toast::success(format!("Command {name} removed"))
+                    }
+                    None => Toast::success("Commands saved"),
+                };
+                toast(said, cx);
                 self.read(cx);
             }
-            Some(why) if self.form == Form::Closed => self.problem = Some(why.into()),
+            Some(why) if self.form == Form::Closed => toast(
+                Toast::failure("The command was not removed").detail(why),
+                cx,
+            ),
             Some(why) => self.form_error = Some(why.into()),
         }
         cx.notify();
     }
 
-    fn row(&self, info: &CommandInfo, cx: &mut Context<Self>) -> impl IntoElement {
+    fn menu(&mut self, name: &str, cx: &mut Context<Self>) -> Entity<Menu> {
+        let this = cx.entity().downgrade();
+        menu_of(&mut self.menus, "command", name, cx, move |name, menu| {
+            let (edit, remove) = (this.clone(), this.clone());
+            let (to_edit, to_remove) = (name.to_owned(), name.to_owned());
+            menu.entry(
+                format!("edit-command-{name}"),
+                "Edit",
+                None,
+                move |_, cx| {
+                    edit.update(cx, |this, cx| this.edit(&to_edit, cx)).ok();
+                },
+            )
+            .danger(
+                format!("remove-command-{name}"),
+                "Remove…",
+                move |_, cx| {
+                    remove
+                        .update(cx, |this, cx| this.remove(&to_remove, cx))
+                        .ok();
+                },
+            )
+        })
+    }
+
+    fn row(&mut self, info: &CommandInfo, cx: &mut Context<Self>) -> ListRow {
         let p = palette(cx);
         let name = info.name.clone();
-        let id = |part: &str| ElementId::Name(format!("{part}-{}", info.name).into());
-        div()
-            .id(id("command"))
-            .px(space::LG)
-            .py(space::MD)
-            .rounded(px(10.))
-            .border_1()
-            .border_color(p.line)
-            .bg(p.card)
-            .flex()
-            .items_start()
-            .gap(space::MD)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(space::XS)
-                    .child(
-                        div()
-                            .mono(12.5)
-                            .semibold()
-                            .child(SharedString::from(name.clone())),
-                    )
-                    .child(
-                        div()
-                            .id(id("command-description"))
-                            .text_size(px(12.5))
-                            .text_color(p.mute)
-                            .aria_label(SharedString::from(info.description.clone()))
-                            .child(SharedString::from(info.description.clone()))
-                            .test_support(),
-                    ),
-            )
-            .child({
-                let edit = name.clone();
-                Button::quiet(id("edit-command"), "Edit")
-                    .disabled(self.reading.is_some())
-                    .on_click(cx.listener(move |this, _, _, cx| this.edit(&edit, cx)))
-            })
-            .child({
-                let remove = name.clone();
-                Button::quiet(id("remove-command"), "Remove")
-                    .on_click(cx.listener(move |this, _, _, cx| this.remove(&remove, cx)))
-            })
-            .test_support()
+        let menu = self.menu(&name, cx);
+        ListRow::new(
+            ElementId::Name(format!("command-{name}").into()),
+            SharedString::from(format!("/{name}")),
+        )
+        .mono()
+        .leading(icon(Icon::Slash).size(px(14.)).text_color(p.faint))
+        .line(SharedString::from(info.description.clone()))
+        .more(menu)
+        .on_click(cx.listener(move |this, _, _, cx| {
+            if this.reading.is_none() {
+                this.edit(&name, cx)
+            }
+        }))
     }
 
     /// The confirmation of a removal.
@@ -564,11 +613,10 @@ impl CommandsSection {
         let this = cx.entity().downgrade();
         let open = self.form != Form::Closed;
         let title = match &self.form {
-            Form::Editing(Some(_)) => "Edit command",
-            _ => "New command",
+            Form::Editing(Some(name)) => format!("Command /{name}"),
+            _ => "New command".to_owned(),
         };
         let modal = Modal::new("command-modal", title)
-            .wide()
             .open(open)
             .on_close(move |_, cx| {
                 this.update(cx, |this, cx| this.close(cx)).ok();
@@ -578,13 +626,16 @@ impl CommandsSection {
             Form::Closed => modal,
             Form::Choosing => {
                 let templates = TEMPLATES.into_iter().map(|template| {
-                    let description = flottille_core::commands::template(template)
-                        .map(|t| t.description)
+                    let shown = flottille_core::commands::template(template);
+                    let description = shown
+                        .as_ref()
+                        .map(|t| t.description.clone())
                         .unwrap_or_default();
                     ListRow::new(
                         ElementId::Name(format!("template-{template}").into()),
-                        template,
+                        format!("/{template}"),
                     )
+                    .mono()
                     .leading(icon(Icon::Branch).size(px(14.)).text_color(p.faint))
                     .line(description)
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -595,9 +646,12 @@ impl CommandsSection {
                 });
                 let blank = ListRow::new("blank-command", "Blank command")
                     .leading(icon(Icon::Plus).size(px(14.)).text_color(p.faint))
-                    .line("Write your own: a name, what it does, and what the agent is sent")
+                    .line(
+                        "A name, one line on what it does, and the instructions the agent is sent.",
+                    )
                     .on_click(cx.listener(|this, _, window, cx| this.blank(window, cx)));
                 modal
+                    .sentence(EXPLAINED)
                     .child(
                         div()
                             .id("command-templates")
@@ -612,31 +666,45 @@ impl CommandsSection {
             }
             Form::Editing(original) => {
                 let fields = self.fields.as_ref().expect("made when the form opens");
+                let name = match &original {
+                    Some(name) => div()
+                        .id("command-name")
+                        .h(px(32.))
+                        .flex()
+                        .items_center()
+                        .mono(12.5)
+                        .text_color(p.mute)
+                        .child(SharedString::from(format!("/{name}")))
+                        .test_support()
+                        .into_any_element(),
+                    None => boxed("command-name", Input::new(&fields.name), cx).into_any_element(),
+                };
                 let body = div()
                     .id("command-form")
-                    .max_h(window.viewport_size().height - px(200.))
+                    .max_h(window.viewport_size().height - px(240.))
                     .overflow_y_scroll()
                     .flex()
                     .flex_col()
-                    .gap(space::MD)
-                    .child(match &original {
-                        Some(name) => div()
-                            .mono(12.5)
-                            .semibold()
-                            .child(SharedString::from(name.clone()))
-                            .into_any_element(),
-                        None => {
-                            boxed("command-name", Input::new(&fields.name), cx).into_any_element()
-                        }
-                    })
-                    .child(boxed(
-                        "command-description-field",
-                        Input::new(&fields.description),
-                        cx,
-                    ))
+                    .gap(space::LG)
                     .child(
+                        Field::new("command-name-field", "Name", name)
+                            .hint("Typed after / in a session's composer."),
+                    )
+                    .child(Field::new(
+                        "command-description",
+                        "What it does",
+                        boxed(
+                            "command-description-field",
+                            Input::new(&fields.description),
+                            cx,
+                        ),
+                    ))
+                    .child(Field::new(
+                        "command-instructions-field",
+                        "Instructions",
                         div()
                             .id("command-instructions")
+                            .min_h(px(96.))
                             .px(space::MD)
                             .py(space::SM)
                             .rounded(px(8.))
@@ -646,17 +714,24 @@ impl CommandsSection {
                             .text_size(px(12.5))
                             .child(fields.instructions.clone())
                             .test_support(),
-                    )
+                    ))
                     .test_support();
-                modal.child(body).child(error).action(save_or_saving(
-                    "command",
-                    self.saving,
-                    || {
-                        Button::primary("save-command", "Save")
-                            .on_click(cx.listener(|this, _, _, cx| this.save(cx)))
-                    },
-                    cx,
-                ))
+                modal
+                    .sentence("Instructions you send to a session by typing /name in its composer.")
+                    .child(body)
+                    .child(error)
+                    .action(
+                        Button::primary(
+                            "save-command",
+                            if original.is_some() {
+                                "Save"
+                            } else {
+                                "Add command"
+                            },
+                        )
+                        .disabled(self.saving)
+                        .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
+                    )
             }
         }
     }
@@ -664,58 +739,74 @@ impl CommandsSection {
 
 impl Render for CommandsSection {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
         if let Some(listed) = self.listed.clone() {
             let now = cx.background_executor().now();
             let reduce = cx.reduce_motion();
             self.rows
                 .sync(listed.into_iter().map(|c| (c.name.clone(), c)), now, reduce);
         }
-        let rows: Vec<_> = self
+        crate::claude::sync(&mut self.found_rows, self.found.as_deref(), cx);
+        let drawn: Vec<_> = self
             .rows
             .rows()
-            .map(|row| {
-                Item::new(
-                    ElementId::Name(format!("command-item-{}", row.key).into()),
-                    row.placement,
-                    self.row(row.value, cx),
-                )
-                .gap(space::SM)
-            })
+            .map(|row| (row.key.to_owned(), row.placement, row.value.clone()))
             .collect();
+        let mut list = ListCard::new("command-list");
+        for (key, placement, info) in drawn {
+            let row = self.row(&info, cx);
+            list = list.item(
+                ElementId::Name(format!("command-item-{key}").into()),
+                placement,
+                row,
+            );
+        }
         let count = self.rows.len();
         let empty = self.listed.as_ref().is_some_and(Vec::is_empty);
         let modal = self.modal(window, cx);
-        div()
-            .id("commands")
-            .child(heading(
-                "Commands",
-                count,
+        let this = cx.entity().downgrade();
+        let found = found_block(
+            "command",
+            "commands",
+            &self.found_rows,
+            self.importing,
+            move |name, _, cx| {
+                this.update(cx, |this, cx| this.import(name, cx)).ok();
+            },
+            cx,
+        );
+        let section = Section::new("commands", "Commands")
+            .count(count.to_string())
+            .sentence(SENTENCE)
+            .action(
                 Button::secondary("add-command", "New command")
-                    .leading(flottille_ui::Icon::Plus)
+                    .leading(Icon::Plus)
                     .on_click(cx.listener(|this, _, _, cx| this.add(cx))),
-                cx,
-            ))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(space::SM)
-                    .children(rows)
-                    .child(empty_note(
-                        "no-commands",
-                        empty,
-                        "No command yet: add one from a template to open the pull requests of \
-                         a workspace, merge a stack or close it. /name in a session's composer \
-                         sends it to the agent.",
-                        cx,
-                    ))
-                    .child(problem_line(
-                        "commands-problem",
-                        self.problem.clone(),
-                        space::SM,
-                        cx,
-                    )),
             )
+            .child(presence("command-list-block", count > 0, list).gap(space::MD))
+            .child(
+                presence(
+                    "no-commands-block",
+                    empty,
+                    EmptyLine::new(
+                        "no-commands",
+                        Icon::Slash,
+                        "No command yet. Start from a template (open the pull requests, merge a \
+                         stack, close a workspace) or write your own.",
+                    ),
+                )
+                .gap(space::MD),
+            )
+            .child(found)
+            .child(problem_line(
+                "commands-problem",
+                self.problem.clone(),
+                space::MD,
+                cx,
+            ));
+        div()
+            .text_color(p.text)
+            .child(section)
             .child(modal)
             .child(self.confirm(cx))
     }

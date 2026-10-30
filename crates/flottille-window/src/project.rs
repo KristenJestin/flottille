@@ -470,7 +470,8 @@ impl Render for ProjectPage {
                     .overflow_y_scroll()
                     .child(column),
             )
-            .child(self.tasks.read(cx).panel().clone())
+            // The detail of a run slides in over the page, which keeps its scroll beneath it.
+            .child(self.tasks.read(cx).drawer().clone())
     }
 }
 

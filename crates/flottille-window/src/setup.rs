@@ -5,20 +5,23 @@
 //! or a task. The window writes nothing itself: every change is the daemon's (`setup.*`), which
 //! checks the step as the file is checked, and the section shows the list the daemon gives next.
 
+use std::collections::HashMap;
+
 use flottille_core::project::SetupStep;
-use flottille_ui::{Button, Confirm, Icon, Item, Listing, Modal, Type, palette, presence, space};
+use flottille_ui::{
+    Button, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, Section,
+    Select, SelectOption, Toast, Type, icon, palette, presence, space, toast,
+};
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
-    Context, ElementId, Entity, Focusable as _, InteractiveElement, IntoElement, ParentElement,
-    Render, SharedString, StatefulInteractiveElement, Styled, Subscription, TestSupportExt as _,
-    WeakEntity, Window, div, px,
+    AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement, IntoElement,
+    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription,
+    TestSupportExt as _, WeakEntity, Window, div, px,
 };
 use serde_json::{Value, json};
 
 use crate::actions::Command;
-use crate::commands::{
-    boxed, empty_note, heading, line_field, perform_later, problem_line, save_or_saving,
-};
+use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line};
 use crate::project::repository_label;
 use crate::shell::Shell;
 
@@ -56,6 +59,59 @@ pub fn said(step: &SetupStep) -> String {
     format!("{what}{place}{limit}")
 }
 
+/// What a step does, in words: the row's title.
+pub fn what(step: &SetupStep) -> String {
+    match kind_of(step) {
+        None => "A step this window cannot show".to_owned(),
+        Some(Kind::Copy) => format!("Copy {}", step.copy.clone().unwrap_or_default().join(" ")),
+        Some(Kind::Link) => format!("Link {}", step.link.clone().unwrap_or_default()),
+        Some(Kind::RootEntries) => "Link the folder's other entries".to_owned(),
+        Some(Kind::Run) => format!("Run {}", step.run.clone().unwrap_or_default()),
+        Some(Kind::Task) => format!("Run the task {}", step.task.clone().unwrap_or_default()),
+    }
+}
+
+/// Where a step is done and its time limit, in words: the row's line.
+pub fn where_said(step: &SetupStep) -> String {
+    let Some(kind) = kind_of(step) else {
+        return "Edit the project's file to change it.".to_owned();
+    };
+    let mut parts = vec![match (&step.repository, step.for_each_repository, kind) {
+        (_, _, Kind::RootEntries) => "in the workspace folder".to_owned(),
+        (Some(repository), _, _) => format!("in {repository}"),
+        (None, true, _) => "in each repository, leaves first".to_owned(),
+        (None, false, Kind::Task) => "where the task says".to_owned(),
+        (None, false, _) => "in the workspace folder".to_owned(),
+    }];
+    if let Some(limit) = step.time_limit {
+        parts.push(format!("stopped after {limit} s"));
+    }
+    parts.join(" · ")
+}
+
+/// A step being dragged by its grip: its number, and what it shows under the pointer.
+#[derive(Clone)]
+pub struct Dragged {
+    pub number: usize,
+    words: SharedString,
+}
+
+impl Render for Dragged {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        div()
+            .px(space::MD)
+            .py(space::SM)
+            .rounded(px(8.))
+            .bg(p.card2)
+            .border_1()
+            .border_color(p.line2)
+            .text_size(px(12.5))
+            .text_color(p.text)
+            .child(self.words.clone())
+    }
+}
+
 /// What a step does, as the form chooses it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -87,23 +143,45 @@ impl Kind {
 
     fn label(self) -> &'static str {
         match self {
-            Kind::Copy => "Copy",
-            Kind::Link => "Link",
-            Kind::RootEntries => "Root entries",
-            Kind::Run => "Run",
-            Kind::Task => "Task",
+            Kind::Copy => "Copy files",
+            Kind::Link => "Link files",
+            Kind::RootEntries => "Link the folder's entries",
+            Kind::Run => "Run a command",
+            Kind::Task => "Run a task",
         }
     }
 
-    /// What its field holds.
-    fn placeholder(self) -> &'static str {
+    fn line(self) -> &'static str {
         match self {
-            Kind::Copy => "files from the main checkout, never over one: .env .env.*",
-            Kind::Link => "an entry of the main checkout: node_modules",
-            Kind::RootEntries => "",
-            Kind::Run => "one command line, never run by a shell: npm install",
-            Kind::Task => "a task's name: build",
+            Kind::Copy => "From the project folder into the workspace",
+            Kind::Link => "A link to the project folder's file, shared",
+            Kind::RootEntries => "Every entry of the project folder that is not a repository",
+            Kind::Run => "A command line, never through a shell",
+            Kind::Task => "One of the project's tasks, by its name",
         }
+    }
+
+    /// What its field is called, and what it holds.
+    fn field(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Kind::Copy => (
+                "Files to copy",
+                ".env .env.*",
+                "Globs, copied from the project folder; a file already there is never replaced.",
+            ),
+            Kind::Link => (
+                "Entry to link",
+                "node_modules",
+                "An entry of the project folder, linked into the workspace.",
+            ),
+            Kind::RootEntries => ("", "", ""),
+            Kind::Run => ("Command line", "pnpm install", "Never run by a shell."),
+            Kind::Task => ("Task", "build", "A task of the project, by its name."),
+        }
+    }
+
+    fn placeholder(self) -> &'static str {
+        self.field().1
     }
 
     /// Whether it takes a time limit.
@@ -202,6 +280,7 @@ pub struct SetupSection {
     listed: Option<Vec<SetupStep>>,
     /// The rows as drawn: a removed step folds away and a moved one slides before it settles.
     rows: Listing<(usize, SetupStep)>,
+    menus: HashMap<String, Entity<Menu>>,
     /// The project's repositories, for where a step is done.
     repositories: Vec<String>,
     /// What the daemon said when the list could not be read, or a change was refused.
@@ -209,6 +288,8 @@ pub struct SetupSection {
     form: Option<Form>,
     fields: Option<Fields>,
     saving: bool,
+    /// What the write on its way says once done.
+    writing: Option<Toast>,
     form_error: Option<SharedString>,
     confirming: Option<usize>,
     /// What the confirmation names, kept while it fades away.
@@ -223,11 +304,13 @@ impl SetupSection {
             project,
             listed: None,
             rows: Listing::default(),
+            menus: HashMap::new(),
             repositories: Vec::new(),
             problem: None,
             form: None,
             fields: None,
             saving: false,
+            writing: None,
             form_error: None,
             confirming: None,
             asked: 0,
@@ -260,6 +343,17 @@ impl SetupSection {
         self.fields.as_ref().map(|f| &f.limit)
     }
 
+    pub fn is_confirming(&self) -> bool {
+        self.confirming.is_some()
+    }
+
+    /// What the form says the step does, and where.
+    pub fn form_kind(&self) -> Option<(Kind, Where)> {
+        self.form
+            .as_ref()
+            .map(|form| (form.kind, form.place.clone()))
+    }
+
     pub fn set_repositories(&mut self, repositories: Vec<String>, cx: &mut Context<Self>) {
         if self.repositories != repositories {
             self.repositories = repositories;
@@ -289,11 +383,7 @@ impl SetupSection {
     fn fields(&mut self, window: &mut Window, cx: &mut Context<Self>) -> &Fields {
         if self.fields.is_none() {
             let value = line_field("", window, cx);
-            let limit = line_field(
-                "time limit in seconds; the project's when empty",
-                window,
-                cx,
-            );
+            let limit = line_field("1800", window, cx);
             for input in [&value, &limit] {
                 self._subscriptions
                     .push(cx.subscribe(input, |this, _, event, cx| {
@@ -369,8 +459,15 @@ impl SetupSection {
         cx.notify();
     }
 
-    fn write(&mut self, method: &'static str, mut params: Value, cx: &mut Context<Self>) {
+    fn write(
+        &mut self,
+        method: &'static str,
+        mut params: Value,
+        said: Toast,
+        cx: &mut Context<Self>,
+    ) {
         self.saving = true;
+        self.writing = Some(said);
         self.form_error = None;
         self.problem = None;
         params["project"] = self.project.clone().into();
@@ -398,15 +495,39 @@ impl SetupSection {
                 return;
             }
         };
+        let words = what(&step);
         match form.number {
-            Some(number) => self.write("setup.edit", json!({"number": number, "step": step}), cx),
-            None => self.write("setup.add", json!({"step": step}), cx),
+            Some(number) => self.write(
+                "setup.edit",
+                json!({"number": number, "step": step}),
+                Toast::success(format!("Step {number} saved")).detail(words),
+                cx,
+            ),
+            None => {
+                let number = self.listed.as_ref().map_or(0, Vec::len) + 1;
+                self.write(
+                    "setup.add",
+                    json!({"step": step}),
+                    Toast::success(format!("Step {number} added"))
+                        .detail(format!("New workspaces: {}", words.to_lowercase())),
+                    cx,
+                )
+            }
         }
     }
 
-    /// Moves the step of that number to another.
+    /// Moves the step of that number to another, when there is one.
     pub fn move_step(&mut self, number: usize, to: usize, cx: &mut Context<Self>) {
-        self.write("setup.move", json!({"number": number, "to": to}), cx);
+        let count = self.listed.as_ref().map_or(0, Vec::len);
+        if to == 0 || to > count || to == number || self.saving {
+            return;
+        }
+        self.write(
+            "setup.move",
+            json!({"number": number, "to": to}),
+            Toast::success(format!("Step {number} moved to {to}")),
+            cx,
+        );
     }
 
     /// Asks to remove, in a confirmation; called again from it, removes.
@@ -418,86 +539,124 @@ impl SetupSection {
             return;
         }
         self.confirming = None;
-        self.write("setup.remove", json!({"number": number}), cx);
+        let said = Toast::success(format!("Step {number} removed"))
+            .detail("New workspaces skip it from now on.");
+        self.write("setup.remove", json!({"number": number}), said, cx);
     }
 
-    /// The daemon's answer to a change: done, and the list is read again; or refused, and why.
+    /// The daemon's answer to a change: a toast says it, and the list is read again; a refusal
+    /// of the dialog's stays in it.
     pub fn written(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
         self.saving = false;
+        let said = self.writing.take();
         match refused {
             None => {
                 self.form = None;
                 self.form_error = None;
+                toast(said.unwrap_or_else(|| Toast::success("Setup saved")), cx);
                 self.read(cx);
             }
-            Some(why) if self.form.is_none() => self.problem = Some(why.into()),
+            Some(why) if self.form.is_none() => {
+                toast(Toast::failure("The setup was not changed").detail(why), cx)
+            }
             Some(why) => self.form_error = Some(why.into()),
         }
         cx.notify();
     }
 
-    fn row(
-        &self,
-        number: usize,
-        step: &SetupStep,
-        count: usize,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn menu(&mut self, number: usize, cx: &mut Context<Self>) -> Entity<Menu> {
+        let this = cx.entity().downgrade();
+        // A step has no name: its menu is the menu of its place in the list.
+        menu_of(
+            &mut self.menus,
+            "setup",
+            &number.to_string(),
+            cx,
+            move |_, menu| {
+                let (edit, up, down, remove) =
+                    (this.clone(), this.clone(), this.clone(), this.clone());
+                menu.entry(
+                    format!("edit-setup-{number}"),
+                    "Edit",
+                    None,
+                    move |window, cx| {
+                        edit.update(cx, |this, cx| this.open(Some(number), window, cx))
+                            .ok();
+                    },
+                )
+                .entry(
+                    format!("setup-up-{number}"),
+                    "Move up",
+                    None,
+                    move |_, cx| {
+                        up.update(cx, |this, cx| {
+                            this.move_step(number, number.saturating_sub(1), cx)
+                        })
+                        .ok();
+                    },
+                )
+                .entry(
+                    format!("setup-down-{number}"),
+                    "Move down",
+                    None,
+                    move |_, cx| {
+                        down.update(cx, |this, cx| this.move_step(number, number + 1, cx))
+                            .ok();
+                    },
+                )
+                .danger(
+                    format!("remove-setup-{number}"),
+                    "Remove…",
+                    move |_, cx| {
+                        remove.update(cx, |this, cx| this.remove(number, cx)).ok();
+                    },
+                )
+            },
+        )
+    }
+
+    fn row(&mut self, number: usize, step: &SetupStep, cx: &mut Context<Self>) -> ListRow {
         let p = palette(cx);
-        let id = |part: &str| ElementId::Name(format!("{part}-{number}").into());
-        let text = said(step);
-        div()
-            .id(id("setup-step"))
-            .px(space::LG)
-            .py(space::MD)
-            .rounded(px(10.))
-            .border_1()
-            .border_color(p.line)
-            .bg(p.card)
+        let menu = self.menu(number, cx);
+        let words = SharedString::from(what(step));
+        let dragged = Dragged {
+            number,
+            words: words.clone(),
+        };
+        let grip = div()
+            .id(ElementId::Name(format!("setup-grip-{number}").into()))
+            .cursor_grab()
+            .child(icon(Icon::Grip).size(px(14.)).text_color(p.faint))
+            .on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
+            .test_support();
+        let lead = div()
             .flex()
             .items_center()
-            .gap(space::MD)
+            .gap(space::SM)
+            .child(grip)
             .child(
                 div()
-                    .flex_none()
-                    .w(px(22.))
-                    .mono(12.)
+                    .w(px(16.))
+                    .mono(11.5)
                     .text_color(p.faint)
-                    .child(SharedString::from(format!("{number}."))),
-            )
-            .child(
-                div()
-                    .id(id("setup-step-said"))
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(px(12.5))
-                    .aria_label(SharedString::from(text.clone()))
-                    .child(SharedString::from(text))
-                    .test_support(),
-            )
-            .child(
-                Button::icon(id("setup-up"), Icon::ChevronUp, "Move up")
-                    .disabled(number == 1 || self.saving)
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.move_step(number, number - 1, cx)),
-                    ),
-            )
-            .child(
-                Button::icon(id("setup-down"), Icon::Chevron, "Move down")
-                    .disabled(number == count || self.saving)
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.move_step(number, number + 1, cx)),
-                    ),
-            )
-            .child(Button::quiet(id("edit-setup"), "Edit").on_click(
-                cx.listener(move |this, _, window, cx| this.open(Some(number), window, cx)),
-            ))
-            .child({
-                Button::quiet(id("remove-setup"), "Remove")
-                    .on_click(cx.listener(move |this, _, _, cx| this.remove(number, cx)))
-                    .into_any_element()
+                    .child(SharedString::from(number.to_string())),
+            );
+        let this = cx.entity().downgrade();
+        ListRow::new(
+            ElementId::Name(format!("setup-step-{number}").into()),
+            words,
+        )
+        .leading_wide(lead)
+        .line(SharedString::from(where_said(step)))
+        .more(menu)
+        .decorate(move |row| {
+            row.on_drop(move |dragged: &Dragged, _, cx| {
+                let from = dragged.number;
+                this.update(cx, |this, cx| this.move_step(from, number, cx))
+                    .ok();
             })
-            .test_support()
+        })
+        .on_click(cx.listener(move |this, _, window, cx| this.open(Some(number), window, cx)))
     }
 
     /// The confirmation of a removal.
@@ -525,11 +684,11 @@ impl SetupSection {
         let p = palette(cx);
         let this = cx.entity().downgrade();
         let title = match self.form.as_ref().and_then(|f| f.number) {
-            Some(_) => "Edit setup step",
-            None => "New setup step",
+            Some(number) => format!("Setup step {number}"),
+            None => "New setup step".to_owned(),
         };
         let modal = Modal::new("setup-modal", title)
-            .wide()
+            .sentence("Done for each new workspace, after the ones before it.")
             .open(self.form.is_some())
             .on_close(move |_, cx| {
                 this.update(cx, |this, cx| this.close(cx)).ok();
@@ -537,66 +696,88 @@ impl SetupSection {
         let (Some(form), Some(fields)) = (self.form.clone(), self.fields.as_ref()) else {
             return modal;
         };
-        let choice = |id: String, label: String, chosen: bool| {
-            Button::choice(ElementId::Name(id.into()), label, chosen)
-        };
-        let kinds = Kind::ALL.into_iter().map(|kind| {
-            choice(
-                format!("setup-kind-{}", kind.word()),
-                kind.label().to_owned(),
-                form.kind == kind,
-            )
-            .on_click(cx.listener(move |this, _, window, cx| this.choose_kind(kind, window, cx)))
-        });
-        let mut places = vec![
-            (
-                Where::Workspace,
-                "setup-where-workspace".to_owned(),
+        let kinds = Kind::ALL
+            .into_iter()
+            .map(|kind| SelectOption::new(kind.word(), kind.label()).line(kind.line()));
+        let chosen_kind = Kind::ALL.iter().position(|k| *k == form.kind).unwrap_or(0);
+        let this = cx.entity().downgrade();
+        let kind =
+            Select::new("setup-kind", kinds, chosen_kind).on_choose(move |index, window, cx| {
+                this.update(cx, |this, cx| {
+                    this.choose_kind(Kind::ALL[index], window, cx)
+                })
+                .ok();
+            });
+        let places = [
+            SelectOption::new(
+                "workspace",
                 match form.kind {
-                    Kind::Task => "Where the task says".to_owned(),
-                    _ => "Workspace folder".to_owned(),
+                    Kind::Task => "Where the task says",
+                    _ => "The workspace folder",
                 },
             ),
-            (
-                Where::EachRepository,
-                "setup-where-each".to_owned(),
-                "Each repository".to_owned(),
-            ),
+            SelectOption::new("each", "Each repository").line("Leaves first"),
+            SelectOption::new("one", "One repository"),
         ];
-        places.extend(self.repositories.iter().map(|path| {
-            (
-                Where::Repository(path.clone()),
-                format!("setup-where-{path}"),
-                repository_label(&self.project, path),
-            )
-        }));
-        let places = places.into_iter().map(|(place, id, label)| {
-            let chosen = form.place == place;
-            choice(id, label, chosen)
-                .on_click(cx.listener(move |this, _, _, cx| this.choose_place(place.clone(), cx)))
+        let chosen_place = match &form.place {
+            Where::Workspace => 0,
+            Where::EachRepository => 1,
+            Where::Repository(_) => 2,
+        };
+        let first = self.repositories.first().cloned().unwrap_or_default();
+        let this = cx.entity().downgrade();
+        let place =
+            Select::new("setup-where", places, chosen_place).on_choose(move |index, _, cx| {
+                let place = match index {
+                    0 => Where::Workspace,
+                    1 => Where::EachRepository,
+                    _ => Where::Repository(first.clone()),
+                };
+                this.update(cx, |this, cx| this.choose_place(place, cx))
+                    .ok();
+            });
+        let repositories = self.repositories.clone();
+        let chosen_repository = match &form.place {
+            Where::Repository(path) => repositories.iter().position(|r| r == path).unwrap_or(0),
+            _ => 0,
+        };
+        let this = cx.entity().downgrade();
+        let repository = Select::new(
+            "setup-repository",
+            repositories.iter().map(|path| {
+                SelectOption::new(
+                    SharedString::from(path.clone()),
+                    SharedString::from(repository_label(&self.project, path)),
+                )
+            }),
+            chosen_repository,
+        )
+        .on_choose(move |index, _, cx| {
+            let place = Where::Repository(repositories[index].clone());
+            this.update(cx, |this, cx| this.choose_place(place, cx))
+                .ok();
         });
-        let label = |text: &'static str| div().text_size(px(12.)).text_color(p.faint).child(text);
+        let (label, _, hint) = form.kind.field();
+        let one = matches!(form.place, Where::Repository(_));
         let body = div()
             .id("setup-form")
             .flex()
             .flex_col()
-            .gap(space::MD)
-            .child(label("What it does"))
-            .child(div().flex().flex_wrap().gap(space::XS).children(kinds))
+            .gap(space::LG)
+            .child(Field::new("setup-kind-field", "What it does", kind))
             // What the kind needs unfolds as it is chosen and the rest folds away.
             .child(
                 presence(
                     "setup-value-block",
                     form.kind != Kind::RootEntries,
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(space::MD)
-                        .child(boxed("setup-value", Input::new(&fields.value), cx))
-                        .child(label("Where"))
-                        .child(div().flex().flex_wrap().gap(space::XS).children(places)),
+                    Field::new(
+                        "setup-value-field",
+                        label,
+                        boxed("setup-value", Input::new(&fields.value), cx),
+                    )
+                    .hint(hint),
                 )
-                .gap(space::MD),
+                .gap(space::LG),
             )
             .child(
                 presence(
@@ -607,37 +788,61 @@ impl SetupSection {
                          folder that is not a repository, .git or .gitignore.",
                     ),
                 )
-                .gap(space::MD),
+                .gap(space::LG),
+            )
+            .child(
+                presence(
+                    "setup-where-block",
+                    form.kind != Kind::RootEntries,
+                    div()
+                        .flex()
+                        .gap(space::MD)
+                        .child(div().flex_1().min_w_0().child(Field::new(
+                            "setup-where-field",
+                            "Where",
+                            place,
+                        )))
+                        .child(div().flex_1().min_w_0().child(presence(
+                            "setup-repository-block",
+                            one,
+                            Field::new("setup-repository-field", "Repository", repository),
+                        ))),
+                )
+                .gap(space::LG),
             )
             .child(
                 presence(
                     "setup-limit-block",
                     form.kind.runs(),
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(space::MD)
-                        .child(label("Time limit, in seconds"))
-                        .child(boxed("setup-limit", Input::new(&fields.limit), cx)),
+                    Field::new(
+                        "setup-limit-field",
+                        "Time limit, in seconds",
+                        boxed("setup-limit", Input::new(&fields.limit), cx),
+                    )
+                    .optional()
+                    .hint("The project's limit when empty."),
                 )
-                .gap(space::MD),
+                .gap(space::LG),
             )
             .child(problem_line(
                 "setup-error",
                 self.form_error.clone(),
-                space::MD,
+                space::LG,
                 cx,
             ))
             .test_support();
-        modal.child(body).action(save_or_saving(
-            "setup",
-            self.saving,
-            || {
-                Button::primary("save-setup", "Save")
-                    .on_click(cx.listener(|this, _, _, cx| this.save(cx)))
-            },
-            cx,
-        ))
+        modal.child(body).action(
+            Button::primary(
+                "save-setup",
+                if form.number.is_some() {
+                    "Save"
+                } else {
+                    "Add step"
+                },
+            )
+            .disabled(self.saving)
+            .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
+        )
     }
 }
 
@@ -648,7 +853,7 @@ impl Render for SetupSection {
             let now = cx.background_executor().now();
             let reduce = cx.reduce_motion();
             // A step has no name: its words tell it from the others, and a repeat is numbered.
-            let mut seen: std::collections::HashMap<String, usize> = Default::default();
+            let mut seen: HashMap<String, usize> = Default::default();
             let keyed = listed.into_iter().enumerate().map(|(index, step)| {
                 let words = said(&step);
                 let again = seen.entry(words.clone()).or_default();
@@ -658,61 +863,56 @@ impl Render for SetupSection {
             self.rows.sync(keyed, now, reduce);
         }
         let count = self.rows.len();
-        let rows: Vec<_> = self
+        let drawn: Vec<_> = self
             .rows
             .rows()
-            .map(|row| {
-                let (number, step) = row.value;
-                Item::new(
-                    ElementId::Name(format!("setup-item-{}", row.key).into()),
-                    row.placement,
-                    self.row(*number, step, count, cx),
-                )
-                .gap(space::SM)
-            })
+            .map(|row| (row.key.to_owned(), row.placement, row.value.clone()))
             .collect();
+        let mut list = ListCard::new("setup-list");
+        for (key, placement, (number, step)) in drawn {
+            let row = self.row(number, &step, cx);
+            list = list.item(
+                ElementId::Name(format!("setup-item-{key}").into()),
+                placement,
+                row,
+            );
+        }
         let empty = self.listed.as_ref().is_some_and(Vec::is_empty);
         let modal = self.modal(cx);
-        div()
-            .id("setup")
-            .child(heading(
-                "Setup",
-                count,
+        let section = Section::new("setup", "Setup")
+            .count(count.to_string())
+            .sentence(
+                "Done in order for each new workspace. Drag a step to move it. A workspace keeps \
+                 the setup it was made with.",
+            )
+            .action(
                 Button::secondary("add-setup", "New step")
                     .leading(Icon::Plus)
                     .on_click(cx.listener(|this, _, window, cx| this.open(None, window, cx))),
-                cx,
-            ))
-            .child(
-                div()
-                    .mb(px(10.))
-                    .text_size(px(12.5))
-                    .text_color(p.faint)
-                    .child(
-                        "Done in order for each new workspace. A workspace keeps the setup it was \
-                         made with.",
-                    ),
             )
+            .child(presence("setup-list-block", count > 0, list).gap(space::MD))
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(space::SM)
-                    .children(rows)
-                    .child(empty_note(
+                presence(
+                    "no-setup-block",
+                    empty,
+                    EmptyLine::new(
                         "no-setup",
-                        empty,
+                        Icon::Folder,
                         "No step yet: a new workspace is its worktrees alone. Copy the .env \
                          files, link what is shared, run the install.",
-                        cx,
-                    ))
-                    .child(problem_line(
-                        "setup-problem",
-                        self.problem.clone(),
-                        space::SM,
-                        cx,
-                    )),
+                    ),
+                )
+                .gap(space::MD),
             )
+            .child(problem_line(
+                "setup-problem",
+                self.problem.clone(),
+                space::MD,
+                cx,
+            ));
+        div()
+            .text_color(p.text)
+            .child(section)
             .child(modal)
             .child(self.confirm(cx))
     }

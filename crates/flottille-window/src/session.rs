@@ -1,8 +1,10 @@
-//! A session's page: a header on one line (title, place, state pill), the
-//! shown agent's conversation, live, the composer that writes to the root agent (or, reading a
-//! sub-agent, a line saying it belongs to its parent; once the session ended, a line saying why,
-//! with Resume when it can be), and a rail with the session's tree of
-//! agents, its workspace and its facts, which becomes a drawer in a narrower window.
+//! A session's page: a header on one line (its title and its place, no state: the state is drawn
+//! once, by the icons of the tree and the rail), the shown agent's conversation, live, the
+//! composer that writes to the root agent (or, reading a sub-agent, a line saying it belongs to
+//! its parent; once the session ended, a line saying why, with Resume when it can be), and a rail
+//! with, from its top, the session's agents, its workspace, its runs, and what waits for the user
+//! pinned at its bottom; the rail becomes a drawer in a narrower window. A run opens its detail in
+//! a drawer that slides in from the right.
 //!
 //! Every row of the conversation is its own view: a message arriving adds a row or draws one row
 //! again, never the others. What an agent, a file or a command said is shown as the daemon gave
@@ -48,7 +50,7 @@ use crate::link::{Connect, Update};
 use crate::mode::ModeSwitch;
 use crate::model::Place;
 use crate::open::Opener;
-use crate::runs::{self, CommandList, CommandPanel};
+use crate::runs::{self, CommandList, CommandPanel, rail_label};
 use crate::session_link::{
     self, PlaceFacts, PullRequest, RepositoryFacts, Request, SessionLink, SessionUpdate, TreeAgent,
     Where,
@@ -56,6 +58,7 @@ use crate::session_link::{
 use crate::shell::{Layout, Shell, now_ms};
 use crate::tree::place_name;
 use crate::waiting::{Waiting, sentences};
+use flottille_ui::drawer::Closed;
 
 /// Width of the session page's right rail.
 pub const RAIL: f32 = 290.;
@@ -154,9 +157,6 @@ pub struct SessionPage {
     layout: Layout,
     /// The session's state, as the shell's tree draws it.
     status: Entity<Status>,
-    pill: Entity<Pill>,
-    /// What the header's pill shows: the left tree's state, or the root's once it ended.
-    pill_status: Entity<Status>,
     /// The agent whose conversation is shown: the root, or a sub-agent read.
     shown: String,
     link: Option<SessionLink>,
@@ -169,8 +169,10 @@ pub struct SessionPage {
     rail: Entity<SessionRail>,
     drawer: Entity<Drawer>,
     reply: Entity<Reply>,
-    /// The panel that follows one command's output.
+    /// The detail of one run, which follows its output.
     command_panel: Entity<CommandPanel>,
+    /// The drawer the detail of a run slides in with.
+    run_drawer: Entity<Drawer>,
     /// The command whose output the link reads, when its panel is open.
     watching: Option<String>,
     requests: HashMap<u64, Request>,
@@ -186,9 +188,6 @@ pub struct SessionPage {
     pictures: HashMap<String, Arc<gpui_kit::Image>>,
     asked_pictures: HashSet<String>,
     needs_you: bool,
-    /// When the user's last message began a turn of the root: an ended run from before it folds
-    /// away in the rail.
-    turn_at: Option<u64>,
     /// The confirmation of ending the session is open.
     ending: bool,
     /// What the daemon said when it refused to end the session.
@@ -199,6 +198,7 @@ pub struct SessionPage {
     resume_error: Option<SharedString>,
     renders: usize,
     _status: Subscription,
+    _run_drawer: Subscription,
 }
 
 /// Emitted when the user chooses the conversation of an agent of the session.
@@ -218,13 +218,13 @@ impl SessionPage {
     ) -> Self {
         let page = cx.entity().downgrade();
         let rail = cx.new(|cx| SessionRail::new(page.clone(), opened.id.clone(), &opened, cx));
-        let command_panel = cx.new(|cx| CommandPanel::new(page.clone(), cx));
-        let drawer = cx.new(|_| Drawer::new("rail-drawer", Side::Right, px(RAIL), rail.clone()));
-        let pill = cx.new(|cx| {
-            Pill::new(status.clone(), cx)
-                .quiet_running()
-                .quiet_needs_you()
+        let command_panel = cx.new(|_| CommandPanel::new(page.clone()));
+        let run_drawer = cx.new(|cx| Drawer::detail("run-drawer", command_panel.clone(), cx));
+        // Escape, or a page left, closes the drawer: the output is read no more.
+        let _run_drawer = cx.subscribe(&run_drawer, |this, _, _: &Closed, cx| {
+            this.close_command(cx);
         });
+        let drawer = cx.new(|_| Drawer::new("rail-drawer", Side::Right, px(RAIL), rail.clone()));
         let shown = opened.id.clone();
         let conversation =
             cx.new(|_| ConversationView::new(page, &shown, THE_CONVERSATION.into(), None));
@@ -240,9 +240,7 @@ impl SessionPage {
             shell,
             follow,
             layout,
-            pill_status: status.clone(),
             status,
-            pill,
             shown,
             link: None,
             tree: Vec::new(),
@@ -253,6 +251,7 @@ impl SessionPage {
             drawer,
             reply,
             command_panel,
+            run_drawer,
             watching: None,
             requests: HashMap::new(),
             decisions: HashMap::new(),
@@ -262,13 +261,13 @@ impl SessionPage {
             pictures: HashMap::new(),
             asked_pictures: HashSet::new(),
             needs_you,
-            turn_at: None,
             ending: false,
             end_error: None,
             resuming: false,
             resume_error: None,
             renders: 0,
             _status,
+            _run_drawer,
             opened,
         };
         page.relink();
@@ -284,12 +283,6 @@ impl SessionPage {
         &self.status
     }
 
-    /// The state the header's pill shows.
-    pub fn header_state(&self, cx: &gpui_kit::App) -> AgentState {
-        self.pill_status.read(cx).state()
-    }
-
-    /// The agent whose conversation is shown.
     pub fn shown(&self) -> &str {
         &self.shown
     }
@@ -336,6 +329,23 @@ impl SessionPage {
     /// The panel that follows a command's output.
     pub fn command_panel(&self) -> &Entity<CommandPanel> {
         &self.command_panel
+    }
+
+    /// The drawer a run's detail slides in with.
+    /// The name of a session a message was relayed from or to, as the sidebar says it: the
+    /// daemon names a session that has no title of its own by its agent (`agent <id>`).
+    fn peer_named(&self, peer: &str, cx: &App) -> String {
+        peer.strip_prefix("agent ")
+            .and_then(|id| {
+                let shell = self.shell.upgrade()?;
+                let row = shell.read(cx).session(id)?;
+                Some(row.read(cx).title().to_owned())
+            })
+            .unwrap_or_else(|| peer.to_owned())
+    }
+
+    pub fn run_drawer(&self) -> &Entity<Drawer> {
+        &self.run_drawer
     }
 
     pub fn drawer(&self) -> &Entity<Drawer> {
@@ -534,43 +544,46 @@ impl SessionPage {
         }
     }
 
-    /// Opens a command's output in its panel, followed live.
+    /// Opens a run's detail in its drawer, its output followed live.
     pub fn open_command(&mut self, run: &str, cx: &mut Context<Self>) {
         self.watching = Some(run.to_owned());
         if let Some(link) = &self.link {
             link.watch(Some(run.to_owned()));
         }
-        self.command_panel
-            .update(cx, |panel, cx| panel.open(run, cx));
+        let rows = self.commands(cx).read(cx).rows().to_vec();
+        self.command_panel.update(cx, |panel, cx| {
+            panel.open(run, cx);
+            panel.set_rows(&rows, cx);
+        });
+        self.run_drawer.update(cx, |drawer, cx| drawer.open(cx));
     }
 
-    /// Closes the panel: the output is read no more.
+    /// Closes the drawer: the output is read no more.
     pub fn close_command(&mut self, cx: &mut Context<Self>) {
         self.watching = None;
         if let Some(link) = &self.link {
             link.watch(None);
         }
         self.command_panel.update(cx, |panel, cx| panel.close(cx));
+        self.run_drawer.update(cx, |drawer, cx| drawer.close(cx));
+    }
+
+    /// The agent that started a run, from its drawer: its conversation is shown.
+    pub fn show_agent(&mut self, agent: &str, _: &mut Window, cx: &mut Context<Self>) {
+        if self.tree.iter().any(|a| a.id == agent) {
+            self.select(agent, cx);
+        }
     }
 
     /// The user stops a command: its whole group, and the agent that started it is told.
     pub fn stop_command(&mut self, run: &str, cx: &mut Context<Self>) {
-        self.run_command(run, false, cx);
-    }
-
-    /// The user dismisses a command that ended.
-    pub fn dismiss_command(&mut self, run: &str, cx: &mut Context<Self>) {
-        self.run_command(run, true, cx);
-    }
-
-    fn run_command(&mut self, run: &str, dismiss: bool, cx: &mut Context<Self>) {
         let list = self.commands(cx);
         list.update(cx, |list, cx| list.failed(None, cx));
         self.perform(
             Command::Run {
                 session: self.opened.id.clone(),
                 run: run.to_owned(),
-                dismiss,
+                dismiss: false,
             },
             cx,
         );
@@ -671,9 +684,7 @@ impl SessionPage {
                 self.histories += 1;
                 self.read = true;
                 for event in &events {
-                    self.note_usage(event, cx);
                     self.note_decision(event);
-                    self.note_turn(event, cx);
                 }
                 let root = self.shown == self.opened.id;
                 // The requests another agent of the tree asked are not in this one's events:
@@ -706,9 +717,7 @@ impl SessionPage {
             }
             // One row added or drawn again: nothing else is looked at.
             SessionUpdate::Live(event) => {
-                self.note_usage(&event, cx);
                 self.note_decision(&event);
-                self.note_turn(&event, cx);
                 let (conversation, this) = (self.conversation.clone(), &*self);
                 conversation.update(cx, |view, cx| {
                     let changes = view.model.apply(&event);
@@ -736,6 +745,8 @@ impl SessionPage {
                     .update(cx, |rail, cx| rail.set_place(facts.map(|facts| *facts), cx));
             }
             SessionUpdate::Commands(rows) => {
+                self.command_panel
+                    .update(cx, |panel, cx| panel.set_rows(&rows, cx));
                 let list = self.commands(cx);
                 list.update(cx, |list, cx| list.set(rows, cx));
                 self.sync_command_cards(cx);
@@ -794,21 +805,6 @@ impl SessionPage {
         }
     }
 
-    /// The user's message began a turn of the root: the Runs section folds what ended before it.
-    /// A turn a delivery began (a command that ended, a child's report) is not the session's turn:
-    /// the run that woke the agent keeps its row.
-    fn note_turn(&mut self, event: &flottille_core::protocol::Event, cx: &mut Context<Self>) {
-        if !crate::conversation::is_user_turn(event) || self.shown != self.opened.id {
-            return;
-        }
-        if self.turn_at.is_some_and(|at| at >= event.at) {
-            return;
-        }
-        self.turn_at = Some(event.at);
-        let list = self.commands(cx);
-        list.update(cx, |list, cx| list.set_turn(Some(event.at), cx));
-    }
-
     fn has_children(&self) -> bool {
         self.tree
             .iter()
@@ -834,7 +830,7 @@ impl SessionPage {
             .blocks()
             .iter()
             .filter_map(|block| match block {
-                Block::Images { names } => Some(names.clone()),
+                Block::Message { images, .. } => Some(images.clone()),
                 _ => None,
             })
             .flatten()
@@ -865,7 +861,8 @@ impl SessionPage {
         );
         let rows = self.conversation.read(cx).rows.clone();
         for row in rows {
-            if matches!(&*row.read(cx).block, Block::Images { names } if names.contains(&name)) {
+            if matches!(&*row.read(cx).block, Block::Message { images, .. } if images.contains(&name))
+            {
                 row.update(cx, |_, cx| cx.notify());
             }
         }
@@ -874,18 +871,6 @@ impl SessionPage {
     /// How many pictures of the shown conversation are read.
     pub fn pictures_read(&self) -> usize {
         self.pictures.len()
-    }
-
-    fn note_usage(&self, event: &flottille_core::protocol::Event, cx: &mut Context<Self>) {
-        if event.name != "agent.usage" || self.shown != self.opened.id {
-            return;
-        }
-        let (used, size) = (event.data["used"].as_u64(), event.data["size"].as_u64());
-        if let (Some(used), Some(size)) = (used, size.filter(|s| *s > 0)) {
-            let context = used * 100 / size;
-            let facts = self.reply.read(cx).facts.clone();
-            facts.update(cx, |facts, cx| facts.set_context(Some(context), cx));
-        }
     }
 
     fn set_tree(&mut self, tree: Vec<TreeAgent>, cx: &mut Context<Self>) {
@@ -931,13 +916,27 @@ impl SessionPage {
                     depth: agent.depth,
                     parent: agent.parent.clone(),
                     ended: matches!(state_of(agent), AgentState::Completed | AgentState::Stopped),
+                    context: agent.context,
+                    doing: agent.doing.clone(),
                     status,
                 })
             })
             .collect();
         self.rail.update(cx, |rail, cx| rail.set_agents(rows, cx));
+        // The runs and their drawer say who started each as the rail does: the root is the
+        // conversation.
+        let said: HashMap<String, String> = tree
+            .iter()
+            .map(|a| match a.parent {
+                None => (a.id.clone(), THE_CONVERSATION.to_owned()),
+                Some(_) => (a.id.clone(), name_of(a)),
+            })
+            .collect();
         let list = self.commands(cx);
-        list.update(cx, |list, cx| list.set_names(names.clone(), cx));
+        list.update(cx, |list, cx| list.set_names(said.clone(), cx));
+        let session = Some(self.opened.title.clone());
+        self.command_panel
+            .update(cx, |panel, cx| panel.set_names(said, session, cx));
         let changed = self.tree != tree;
         let ended = |tree: &[TreeAgent]| {
             tree.iter()
@@ -955,17 +954,6 @@ impl SessionPage {
             if !now_ended {
                 self.resuming = false;
             }
-            // Ended, the header says how, as the rail does; else what the left tree shows.
-            let status = match now_ended {
-                true => self
-                    .root()
-                    .and_then(|root| self.statuses.get(&root.id))
-                    .cloned(),
-                false => None,
-            }
-            .unwrap_or_else(|| self.status.clone());
-            self.pill_status = status.clone();
-            self.pill = cx.new(|cx| Pill::new(status, cx).quiet_running().quiet_needs_you());
             cx.notify();
         }
         if std::mem::take(&mut self.unchecked) && !self.tree.iter().any(|a| a.id == self.shown) {
@@ -1096,6 +1084,7 @@ impl SessionPage {
             kind: request.map_or_else(|| "call".to_owned(), |r| r.kind.clone()),
             says: request.map(|r| r.says.clone()).unwrap_or_default(),
             asked: request.map(Request::asked),
+            call: request.map(Request::call_line),
             why: request.map(|r| {
                 let forwards: Vec<String> = r
                     .forwards
@@ -1143,36 +1132,41 @@ impl Render for SessionPage {
             .border_color(p.line)
             .child(
                 div()
+                    .id("session-title")
                     .min_w_0()
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .text_size(px(14.))
                     .semibold()
-                    .child(SharedString::from(self.opened.title.clone())),
+                    .aria_label(SharedString::from(self.opened.title.clone()))
+                    .child(SharedString::from(self.opened.title.clone()))
+                    .test_support(),
             )
             .child(
                 div()
+                    .id("session-place")
                     .flex_none()
                     .flex()
                     .items_center()
                     .gap(space::SM)
                     .text_color(p.faint)
+                    .aria_label(SharedString::from(place_name(&place).to_owned()))
                     .child(
                         icon(match place {
                             None => Icon::Folder,
                             Some(_) => Icon::Branch,
                         })
-                        .size(px(13.))
+                        .size(px(12.))
                         .text_color(p.faint),
                     )
                     .child(
                         div()
                             .mono(12.)
                             .child(SharedString::from(place_name(&place).to_owned())),
-                    ),
+                    )
+                    .test_support(),
             )
-            .child(self.pill.clone())
             .child(div().flex_1())
             .children(self.end_error.clone().map(|error| {
                 div()
@@ -1232,8 +1226,8 @@ impl Render for SessionPage {
                 )
             }))
             .when(!wide, |d| d.child(self.drawer.clone()))
+            .child(self.run_drawer.clone())
             .child(self.end_modal(cx))
-            .child(self.command_panel.clone())
     }
 }
 
@@ -1294,6 +1288,7 @@ impl SessionPage {
                     .py(space::MD)
                     .text_size(px(13.))
                     .text_color(p.mute)
+                    .aria_label(said.clone())
                     .child(div().flex_1().min_w_0().child(SharedString::from(said)))
                     .when(resumable, |d| {
                         d.child(
@@ -1672,6 +1667,8 @@ pub struct ApprovalCard {
     /// What it changes, in words, one line each.
     pub says: Vec<String>,
     pub asked: Option<String>,
+    /// The call itself, on one line: a command's line, else the tool and its arguments.
+    pub call: Option<String>,
     pub why: Option<String>,
     pub source: Option<String>,
     pub asker: Option<String>,
@@ -1774,6 +1771,10 @@ impl Row {
     pub fn label(&self) -> Option<String> {
         match &*self.block {
             Block::Message { from, .. } if from != USER => Some(from.clone()),
+            Block::Relayed { peer, sent, .. } => Some(match sent {
+                true => format!("to {peer}"),
+                false => format!("from {peer}"),
+            }),
             Block::Text { .. } => self.author().map(str::to_owned),
             Block::Report { from, .. } => Some(format!("Report from {from}")),
             Block::SubAgents => Some(format!("launched by {}", self.me)),
@@ -1807,7 +1808,10 @@ impl Row {
         let rendered = pieces.map(|state| state.rendered_text().as_str().to_owned());
         matches!(
             *self.block,
-            Block::Text { .. } | Block::Thought { .. } | Block::Message { .. }
+            Block::Text { .. }
+                | Block::Thought { .. }
+                | Block::Message { .. }
+                | Block::Relayed { .. }
         )
         .then(|| rendered.collect())
     }
@@ -1887,7 +1891,7 @@ impl Row {
             self.set_markdown(text, muted, cx);
         }
         // The user's own message is selectable like a reply: the same view, fed what was typed.
-        if let Block::Message { text, .. } = &block {
+        if let Block::Message { text, .. } | Block::Relayed { text, .. } = &block {
             self.set_markdown(&as_typed(text), false, cx);
         }
         match &block {
@@ -2085,68 +2089,141 @@ impl Render for Row {
         // The row's own block, not a copy of it.
         let block = self.block.clone();
         match &*block {
-            Block::Message { .. } => div()
-                .id(id("message"))
-                .flex()
-                .flex_col()
-                .items_end()
-                .child(
-                    div()
-                        .max_w(px(540.))
-                        .bg(p.card2)
-                        .rounded_tl(px(14.))
-                        .rounded_tr(px(14.))
-                        .rounded_bl(px(14.))
-                        .rounded_br(px(4.))
-                        .px(space::LG)
-                        .py(space::MD)
-                        .when_some(self.label(), |d, from| {
-                            d.child(
-                                div()
-                                    .id(id("message-from"))
-                                    .flex()
-                                    .justify_end()
-                                    .mono(11.5)
-                                    .text_color(p.faint)
-                                    .mb(px(5.))
-                                    .child(SharedString::from(from))
-                                    .test_support(),
-                            )
-                        })
-                        .child(markdown_view(&self.markdown)),
-                )
-                .test_support()
-                .into_any_element(),
-            Block::Images { names } => {
+            Block::Message { text, images, .. } => {
                 let page = self.page.upgrade();
-                let pictures: Vec<Option<Arc<gpui_kit::Image>>> = names
+                let pictures: Vec<Option<Arc<gpui_kit::Image>>> = images
                     .iter()
                     .map(|name| page.as_ref()?.read(cx).pictures.get(name).cloned())
                     .collect();
-                div()
-                    .id(id("images"))
-                    .flex()
-                    .flex_wrap()
-                    .justify_end()
-                    .gap(space::SM)
-                    .children(pictures.into_iter().enumerate().map(|(n, picture)| {
-                        let thumb = div()
-                            .id(id(&format!("image-{n}")))
-                            .flex_none()
-                            .size(px(96.))
-                            .rounded(px(10.))
-                            .bg(p.card2)
-                            .overflow_hidden();
-                        match picture {
-                            Some(picture) => thumb.child(
-                                gpui_kit::img(picture)
-                                    .size_full()
-                                    .object_fit(gpui_kit::ObjectFit::Cover),
-                            ),
-                            None => thumb,
-                        }
+                let worded = !text.trim().is_empty();
+                // The pictures sit inside the bubble, above its text.
+                let thumbs = (!pictures.is_empty()).then(|| {
+                    div()
+                        .id(id("images"))
+                        .flex()
+                        .flex_wrap()
+                        .gap(space::SM)
+                        .children(pictures.into_iter().enumerate().map(|(n, picture)| {
+                            let thumb = div()
+                                .id(id(&format!("image-{n}")))
+                                .flex_none()
+                                .w(px(220.))
+                                .h(px(132.))
+                                .rounded(px(9.))
+                                .border_1()
+                                .border_color(p.line2)
+                                .bg(p.card)
+                                .overflow_hidden();
+                            match picture {
+                                Some(picture) => thumb.child(
+                                    gpui_kit::img(picture)
+                                        .size_full()
+                                        .rounded(px(9.))
+                                        .object_fit(gpui_kit::ObjectFit::Cover),
+                                ),
+                                None => thumb,
+                            }
+                            .test_support()
+                        }))
                         .test_support()
-                    }))
+                });
+                div()
+                    .id(id("message"))
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .child(
+                        div()
+                            .id(id("bubble"))
+                            .max_w(px(540.))
+                            .flex()
+                            .flex_col()
+                            .gap(space::SM)
+                            .bg(p.card2)
+                            .rounded_tl(px(14.))
+                            .rounded_tr(px(14.))
+                            .rounded_bl(px(14.))
+                            .rounded_br(px(4.))
+                            .p(space::SM)
+                            .when_some(self.label(), |d, from| {
+                                d.child(
+                                    div()
+                                        .id(id("message-from"))
+                                        .flex()
+                                        .justify_end()
+                                        .px(space::SM)
+                                        .mono(11.5)
+                                        .text_color(p.faint)
+                                        .child(SharedString::from(from))
+                                        .test_support(),
+                                )
+                            })
+                            .children(thumbs)
+                            .when(worded, |d| {
+                                d.child(
+                                    div()
+                                        .id(id("message-text"))
+                                        .px(space::SM)
+                                        .py(space::XS)
+                                        .child(markdown_view(&self.markdown))
+                                        .test_support(),
+                                )
+                            })
+                            .test_support(),
+                    )
+                    .test_support()
+                    .into_any_element()
+            }
+            // Another session's words, or what this one sent it: the agent's side, marked with
+            // who it is from or to, never drawn as the user's.
+            Block::Relayed { peer, sent, .. } => {
+                let named = self
+                    .page
+                    .upgrade()
+                    .map(|page| page.read(cx).peer_named(peer, cx))
+                    .unwrap_or_else(|| peer.clone());
+                let said = SharedString::from(match sent {
+                    true => format!("to {named}"),
+                    false => format!("from {named}"),
+                });
+                div()
+                    .id(id("relayed"))
+                    .flex()
+                    .flex_col()
+                    .items_start()
+                    .child(
+                        div()
+                            .max_w(px(540.))
+                            .flex()
+                            .flex_col()
+                            .gap(space::XS)
+                            .border_1()
+                            .border_color(p.line2)
+                            .rounded_tl(px(14.))
+                            .rounded_tr(px(14.))
+                            .rounded_br(px(14.))
+                            .rounded_bl(px(4.))
+                            .px(space::LG)
+                            .py(space::MD)
+                            .child(
+                                div()
+                                    .id(id("relayed-from"))
+                                    .flex()
+                                    .items_center()
+                                    .gap(space::SM)
+                                    .mono(11.5)
+                                    .text_color(p.faint)
+                                    .aria_label(said.clone())
+                                    .child(
+                                        icon(if *sent { Icon::Send } else { Icon::Agents })
+                                            .size(px(12.))
+                                            .text_color(p.faint),
+                                    )
+                                    .child(said)
+                                    .test_support(),
+                            )
+                            .child(markdown_view(&self.markdown)),
+                    )
                     .test_support()
                     .into_any_element()
             }
@@ -2374,7 +2451,8 @@ impl Render for Row {
                     if !self.icons.contains_key(&agent.id) {
                         let status = agent.status.clone();
                         let icon = cx.new(|cx| StateIcon::new(status.clone(), cx));
-                        let pill = cx.new(|cx| Pill::new(status, cx).quiet_running());
+                        let pill =
+                            cx.new(|cx| Pill::new(status, cx).quiet_running().quiet_needs_you());
                         self.icons.insert(agent.id.clone(), icon);
                         self.pills.insert(agent.id.clone(), pill);
                     }
@@ -2523,9 +2601,10 @@ impl Render for Row {
 }
 
 impl Row {
-    /// A request in the conversation is one compact line: while it waits, "Waiting for you:" and
-    /// what it asks, which scrolls the rail to its card; once answered, the record of the outcome.
-    /// The card, with Allow and Deny, is in the rail.
+    /// A request in the conversation is one neutral line where it happened, "Request #1 · Read
+    /// .env", which lights its card in the rail; once answered, the record of the outcome. The
+    /// card, with Allow and Deny, is in the rail: the page says that the user is needed there,
+    /// once.
     fn render_card(&mut self, number: u64, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let Some(card) = self.card.clone() else {
@@ -2534,24 +2613,21 @@ impl Row {
                 .into_any_element();
         };
         let record = card.record();
-        let said = format!(
-            "Waiting for you: {}",
-            card.asked
-                .clone()
-                .unwrap_or_else(|| format!("request #{number}"))
-        );
+        let said = match &card.asked {
+            Some(asked) => format!("Request #{number} · {asked}"),
+            None => format!("Request #{number}"),
+        };
         let page = self.page.clone();
         let ink = if card.base { p.fail } else { p.wait };
         let line = div()
             .id(ElementId::Name(format!("approval-line-{number}").into()))
+            .h(px(34.))
             .flex()
             .items_center()
             .gap(space::SM)
             .px(space::MD)
-            .py(space::SM)
-            .rounded(px(8.))
+            .rounded(px(9.))
             .border_1()
-            .border_color(if card.base { p.fail } else { p.wait_line })
             .cursor_pointer()
             .text_size(px(13.))
             .aria_label(SharedString::from(said.clone()))
@@ -2565,11 +2641,23 @@ impl Row {
                     .text_ellipsis()
                     .child(SharedString::from(said)),
             )
+            .child(
+                div()
+                    .flex_none()
+                    .mono(11.)
+                    .text_color(p.faint)
+                    .child("in the rail →"),
+            )
             .on_click(move |_, _, cx| {
                 page.update(cx, |page, cx| page.reveal_waiting(number, cx))
                     .ok();
             });
-        let waiting = hoverable(line, move |d, t| d.bg(p.hover.opacity(t)));
+        let edge = if card.base { p.fail } else { p.wait_line };
+        let waiting = hoverable(line, move |d, t| {
+            d.bg(p.hover.opacity(t))
+                .border_color(mix(p.line, edge, t))
+                .text_color(mix(p.mute, p.text, t))
+        });
         let outcome = div()
             .id(ElementId::Name(format!("approval-record-{number}").into()))
             .aria_label(SharedString::from(record.clone().unwrap_or_default()))
@@ -2671,6 +2759,10 @@ pub struct RailAgent {
     pub parent: Option<String>,
     /// A child that completed or was stopped: the rail gathers those under one folded row.
     pub ended: bool,
+    /// How much of its context it used, in percent.
+    pub context: Option<u64>,
+    /// What it does, in a few words.
+    pub doing: String,
     pub status: Entity<Status>,
 }
 
@@ -2760,7 +2852,7 @@ struct EndedFold {
 pub struct SessionRail {
     page: WeakEntity<SessionPage>,
     agents: Vec<RailAgent>,
-    marks: HashMap<String, (Entity<StateIcon>, Entity<Pill>)>,
+    marks: HashMap<String, Entity<StateIcon>>,
     /// The parents whose "ended" row is open: kept while the window shows the session.
     open_ended: HashSet<String>,
     /// How far each "ended" row's children are unfolded: they stay drawn until a fold ends.
@@ -2775,15 +2867,14 @@ pub struct SessionRail {
     agent_menu: Entity<Menu>,
     /// The commands of the session's tree.
     commands: Entity<CommandList>,
-    /// The requests that wait for the user, above everything else.
+    /// The requests that wait for the user, pinned at the rail's bottom.
     waiting: Entity<Waiting>,
-    /// The rail's scroll, which a click on a request's line in the conversation brings back to
-    /// the top, where the cards are.
+    /// The scroll of the sections above what waits.
     scroll: ScrollHandle,
-    /// The scroll on its way to the top: where it started and how far it is.
-    scrolling: Option<(Pixels, Motion)>,
     /// Where a ticket is typed to link it, made when the section first shows a workspace.
     ticket_field: Option<Entity<InputState>>,
+    /// The user chose "Link a ticket…": the field shows under the Ticket line.
+    linking: bool,
     /// What the daemon said of the ticket typed.
     ticket_error: Option<SharedString>,
     _ticket_subscription: Option<Subscription>,
@@ -2809,24 +2900,34 @@ impl SessionRail {
                 },
             )
         });
+        let rail = cx.entity().downgrade();
+        let unlinks = rail.clone();
         let menu = cx.new(|cx| {
-            Menu::new("workspace-menu", "Workspace actions", cx).entry(
-                "open-in-editor",
-                "Open in editor",
-                Some(Icon::OpenInEditor),
-                move |_, cx| {
-                    editor.update(cx, |page, _| page.open_in_editor()).ok();
+            workspace_menu(
+                "workspace-menu",
+                WorkspaceActions {
+                    open_in_editor: Box::new(move |cx| {
+                        editor.update(cx, |page, _| page.open_in_editor()).ok();
+                    }),
+                    link_ticket: Some(Box::new(move |cx| {
+                        rail.update(cx, |rail, cx| rail.start_linking(cx)).ok();
+                    })),
+                    unlink_ticket: Some(Box::new(move |cx| {
+                        unlinks
+                            .update(cx, |rail, cx| rail.link_ticket(None, cx))
+                            .ok();
+                    })),
                 },
+                cx,
             )
         });
         let commands = cx.new(|_| CommandList::new(page.clone()));
-        let waiting = cx.new(|_| Waiting::new(page.clone()));
+        let waiting = cx.new(|cx| Waiting::new(page.clone(), cx));
         Self {
             page,
             commands,
             waiting,
             scroll: ScrollHandle::new(),
-            scrolling: None,
             agents: Vec::new(),
             marks: HashMap::new(),
             open_ended: HashSet::new(),
@@ -2838,6 +2939,7 @@ impl SessionRail {
             project: opened.project.clone(),
             place: None,
             ticket_field: None,
+            linking: false,
             ticket_error: None,
             _ticket_subscription: None,
             renders: 0,
@@ -2851,6 +2953,12 @@ impl SessionRail {
 
     pub fn ticket_error(&self) -> Option<&str> {
         self.ticket_error.as_deref()
+    }
+
+    /// The user chose "Link a ticket…": the field shows, for the ticket to be typed.
+    fn start_linking(&mut self, cx: &mut Context<Self>) {
+        self.linking = true;
+        cx.notify();
     }
 
     /// Links the workspace to the ticket typed, or to none (`None`).
@@ -2880,6 +2988,7 @@ impl SessionRail {
         match refused {
             None => {
                 self.ticket_error = None;
+                self.linking = false;
                 if let Some(field) = self.ticket_field.clone() {
                     field.update(cx, |field, cx| field.set_value("", window, cx));
                 }
@@ -2933,6 +3042,11 @@ impl SessionRail {
         cx.notify();
     }
 
+    /// The Workspace section's "⋯" menu.
+    pub fn menu(&self) -> &Entity<Menu> {
+        &self.menu
+    }
+
     pub fn place(&self) -> Option<&PlaceFacts> {
         self.place.as_ref()
     }
@@ -2942,18 +3056,10 @@ impl SessionRail {
         -self.scroll.offset().y
     }
 
-    /// Scrolls the rail to its top, over [`PANEL`], and lights the card of request `number`.
+    /// Lights the card of request `number`, in sight at the rail's bottom.
     pub fn reveal(&mut self, number: u64, cx: &mut Context<Self>) {
-        let from = self.scroll.offset().y;
-        if from != px(0.) {
-            let now = cx.background_executor().now();
-            let mut motion = Motion::settled(0.0);
-            motion.play(1.0, 0.0, Duration::ZERO, PANEL, now, cx.reduce_motion());
-            self.scrolling = Some((from, motion));
-        }
         self.waiting
             .update(cx, |waiting, cx| waiting.point_at(number, cx));
-        cx.notify();
     }
 
     pub fn renders(&self) -> usize {
@@ -2967,10 +3073,7 @@ impl SessionRail {
         for agent in &agents {
             self.marks.entry(agent.id.clone()).or_insert_with(|| {
                 let status = agent.status.clone();
-                (
-                    cx.new(|cx| StateIcon::new(status.clone(), cx)),
-                    cx.new(|cx| Pill::new(status, cx).quiet_running().quiet_needs_you()),
-                )
+                cx.new(|cx| StateIcon::new(status, cx))
             });
         }
         self.agents = agents;
@@ -2999,14 +3102,6 @@ impl Render for SessionRail {
         let p = palette(cx);
         // A folding "ended" row still has its children until the fold ends.
         let now = cx.background_executor().now();
-        if let Some((from, motion)) = self.scrolling {
-            let offset = point(self.scroll.offset().x, from * motion.value(now));
-            self.scroll.set_offset(offset);
-            match motion.is_running(now) {
-                true => window.request_animation_frame(),
-                false => self.scrolling = None,
-            }
-        }
         let mut drawn_open = self.open_ended.clone();
         for (parent, fold) in &mut self.ended_folds {
             if fold.motion.is_running(now) {
@@ -3039,12 +3134,132 @@ impl Render for SessionRail {
             })
             .collect();
         let agent_menu = self.agent_menu.clone();
+        let count = self.agents.len();
         let agent_row = |agent: &RailAgent| {
-            let (mark, pill) = self.marks[&agent.id].clone();
+            let mark = self.marks[&agent.id].clone();
             let page = self.page.clone();
             let target = agent.id.clone();
             let kid = agent.depth > 0;
             let indent = space::LG * agent.depth as f32;
+            let runs = runs_on(&agent.provider, agent.model.as_deref());
+            // The root has no name on screen: what it runs on says it, over what it is.
+            let (top_id, sub_id) = match kid {
+                false => (
+                    format!("rail-runs-on-{}", agent.id),
+                    format!("rail-role-{}", agent.id),
+                ),
+                true => (
+                    format!("rail-name-{}", agent.id),
+                    format!("rail-runs-on-{}", agent.id),
+                ),
+            };
+            let (name, said) = match kid {
+                false => (
+                    runs,
+                    match count {
+                        1 => THE_CONVERSATION.to_owned(),
+                        n => format!("{THE_CONVERSATION} · {n} agents"),
+                    },
+                ),
+                true => (
+                    agent.name.clone(),
+                    match agent.doing.as_str() {
+                        "" => agent.model.clone().unwrap_or(agent.provider.clone()),
+                        doing => format!(
+                            "{} · {doing}",
+                            agent.model.clone().unwrap_or(agent.provider.clone())
+                        ),
+                    },
+                ),
+            };
+            let gauge = agent.context.map(|used| {
+                let used = used.min(100);
+                div()
+                    .id(ElementId::Name(format!("rail-context-{}", agent.id).into()))
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap(space::XS)
+                    .mono(10.5)
+                    .text_color(p.faint)
+                    .aria_label(SharedString::from(format!("{used}% of the context used")))
+                    .child(SharedString::from(format!("{used}%")))
+                    .child(
+                        div()
+                            .w(px(40.))
+                            .h(px(3.))
+                            .rounded(px(2.))
+                            .bg(p.line2)
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .h_full()
+                                    .w(px(40. * used as f32 / 100.))
+                                    .rounded(px(2.))
+                                    .bg(p.mute),
+                            ),
+                    )
+                    .test_support()
+            });
+            let row = div()
+                .id(ElementId::Name(format!("rail-row-{}", agent.id).into()))
+                .flex_1()
+                .min_w_0()
+                .h(px(44.))
+                .flex()
+                .items_center()
+                .gap(space::SM)
+                .pl(space::SM)
+                .pr(space::XS)
+                .rounded(px(8.))
+                .cursor_pointer()
+                .child(
+                    div()
+                        .w(px(16.))
+                        .flex_none()
+                        .flex()
+                        .justify_center()
+                        .child(mark),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .child(
+                            div()
+                                .id(ElementId::Name(top_id.into()))
+                                .medium()
+                                .text_size(px(13.))
+                                .text_ellipsis()
+                                .overflow_hidden()
+                                .aria_label(SharedString::from(name.clone()))
+                                .child(SharedString::from(name))
+                                .test_support(),
+                        )
+                        .child(
+                            div()
+                                .id(ElementId::Name(sub_id.into()))
+                                .mono(11.)
+                                .text_color(p.faint)
+                                .text_ellipsis()
+                                .overflow_hidden()
+                                .aria_label(SharedString::from(said.clone()))
+                                .child(SharedString::from(said))
+                                .test_support(),
+                        ),
+                )
+                .child(div().w(px(40.)).flex_none().children(gauge))
+                .map(|d| match !kid && endable {
+                    true => d.child(agent_menu.clone()),
+                    false => d.child(div().w(px(28.)).flex_none()),
+                })
+                .on_click(move |_, _, cx| {
+                    if let Some(page) = page.upgrade() {
+                        page.update(cx, |page, cx| page.select(&target, cx));
+                    }
+                });
             div()
                 .id(ElementId::Name(format!("rail-agent-{}", agent.id).into()))
                 .relative()
@@ -3057,82 +3272,17 @@ impl Render for SessionRail {
                         0,
                         elbow(p.line2)
                             .absolute()
-                            .left(indent - px(5.))
-                            .top(px(-12.))
-                            .w(px(10.))
-                            .h(px(32.)),
+                            .left(indent - px(10.))
+                            .top(px(-6.))
+                            .w(px(9.))
+                            .h(px(28.)),
                     ))
                 })
-                .child({
-                    // The name over the provider and model: a rail is too narrow for both on one
-                    // line.
-                    let row = div()
-                        .id(ElementId::Name(format!("rail-row-{}", agent.id).into()))
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .items_center()
-                        .gap(space::MD)
-                        .px(space::MD)
-                        .py(space::SM)
-                        .rounded(px(8.))
-                        .cursor_pointer()
-                        .child(
-                            div()
-                                .w(px(16.))
-                                .flex_none()
-                                .flex()
-                                .justify_center()
-                                .child(mark),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                // The root has no name on screen: what it runs on says it.
-                                .when(kid, |d| {
-                                    d.child(
-                                        div()
-                                            .id(ElementId::Name(
-                                                format!("rail-name-{}", agent.id).into(),
-                                            ))
-                                            .medium()
-                                            .text_size(px(13.))
-                                            .text_ellipsis()
-                                            .overflow_hidden()
-                                            .child(SharedString::from(agent.name.clone()))
-                                            .test_support(),
-                                    )
-                                })
-                                .child(
-                                    div()
-                                        .id(ElementId::Name(
-                                            format!("rail-runs-on-{}", agent.id).into(),
-                                        ))
-                                        .when(kid, |d| d.mono(11.).text_color(p.faint))
-                                        .when(!kid, |d| d.mono(12.).text_color(p.text))
-                                        .text_ellipsis()
-                                        .overflow_hidden()
-                                        .child(SharedString::from(runs_on(
-                                            &agent.provider,
-                                            agent.model.as_deref(),
-                                        )))
-                                        .test_support(),
-                                ),
-                        )
-                        .child(div().flex_none().child(pill))
-                        .on_click(move |_, _, cx| {
-                            if let Some(page) = page.upgrade() {
-                                page.update(cx, |page, cx| page.select(&target, cx));
-                            }
-                        });
-                    selectable(row, agent.id == self.selected, move |d, hover, chosen| {
-                        d.bg(mix(p.hover.opacity(hover), p.card2, chosen))
-                    })
-                })
-                .when(!kid && endable, |d| d.child(agent_menu.clone()))
+                .child(selectable(
+                    row,
+                    agent.id == self.selected,
+                    move |d, hover, chosen| d.bg(mix(p.hover.opacity(hover), p.card2, chosen)),
+                ))
                 .test_support()
         };
         let ended_row = |parent: &str, count: usize, open: bool, turn: f32| {
@@ -3143,49 +3293,30 @@ impl Render for SessionRail {
                 .map_or(1, |a| a.depth + 1);
             let indent = space::LG * depth as f32;
             let target = parent.to_owned();
-            div()
-                .relative()
-                .pl(indent)
-                .child(enter(
-                    ElementId::Name(format!("elbow-ended-{parent}").into()),
-                    0,
-                    elbow(p.line2)
-                        .absolute()
-                        .left(indent - px(5.))
-                        .top(px(-12.))
-                        .w(px(10.))
-                        .h(px(32.)),
-                ))
-                .child({
-                    let row = div()
-                        .id(ElementId::Name(format!("rail-ended-{parent}").into()))
-                        .aria_expanded(open)
-                        .flex()
-                        .items_center()
-                        .gap(space::MD)
-                        .px(space::MD)
-                        .py(space::SM)
-                        .rounded(px(8.))
-                        .cursor_pointer()
-                        .text_size(px(12.5))
-                        .child(
-                            div().w(px(16.)).flex_none().flex().justify_center().child(
-                                icon(Icon::Chevron)
-                                    .size(px(12.))
-                                    .text_color(p.faint)
-                                    .with_transformation(Transformation::rotate(radians(
-                                        -FRAC_PI_2 * turn,
-                                    ))),
-                            ),
-                        )
-                        .child(SharedString::from(format!("{count} ended")))
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.toggle_ended(&target, cx)),
-                        );
-                    hoverable(row, move |d, t| {
-                        d.bg(p.hover.opacity(t)).text_color(mix(p.faint, p.text, t))
-                    })
-                })
+            let row = div()
+                .id(ElementId::Name(format!("rail-ended-{parent}").into()))
+                .aria_expanded(open)
+                .h(px(28.))
+                .flex()
+                .items_center()
+                .gap(space::SM)
+                .px(space::SM)
+                .rounded(px(7.))
+                .cursor_pointer()
+                .text_size(px(12.))
+                .child(
+                    icon(Icon::Chevron)
+                        .size(px(11.))
+                        .text_color(p.faint)
+                        .with_transformation(Transformation::rotate(radians(
+                            -FRAC_PI_2 * (1.0 - turn),
+                        ))),
+                )
+                .child(SharedString::from(format!("{count} ended")))
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_ended(&target, cx)));
+            div().pl(indent).child(hoverable(row, move |d, t| {
+                d.bg(p.hover.opacity(t)).text_color(mix(p.faint, p.text, t))
+            }))
         };
         let mut rows: Vec<AnyElement> = Vec::new();
         let mut listed = listed.into_iter();
@@ -3245,38 +3376,22 @@ impl Render for SessionRail {
                 }
             }
         }
+        let agents = div()
+            .id("rail-agents")
+            .flex()
+            .flex_col()
+            .pb(space::MD)
+            .child(rail_label("Agents", None, cx))
+            .children(rows)
+            .test_support();
+
+        // The workspace: one labelled line each, as its card on the project page.
         let pull_of = |path: &str| {
             self.place
                 .iter()
                 .flat_map(|place| place.pulls.iter())
                 .find(|pull| pull.repository == path)
                 .cloned()
-        };
-        let forge_of = |path: &str| {
-            self.place
-                .iter()
-                .flat_map(|place| place.forges.iter())
-                .find(|(repository, _)| repository == path)
-                .map(|(_, line)| line.clone())
-        };
-        // Several repositories with no forge: said once under the section, not under each.
-        let no_forge: Vec<String> = self
-            .place
-            .iter()
-            .flat_map(|place| place.forges.iter())
-            .filter(|(_, line)| line.starts_with(flottille_core::declared::NO_FORGE))
-            .map(|(path, _)| crate::project::repository_label(&self.project, path))
-            .collect();
-        let once = no_forge.len() > 1;
-        let said = once.then(|| {
-            SharedString::from(format!(
-                "No forge set for {}: choose it in the project's Settings",
-                no_forge.join(", ")
-            ))
-        });
-        let forge_of = |path: &str| {
-            forge_of(path)
-                .filter(|line| !(once && line.starts_with(flottille_core::declared::NO_FORGE)))
         };
         let status_of = |path: &str| {
             self.place
@@ -3285,46 +3400,155 @@ impl Render for SessionRail {
                 .find(|status| status.path == path)
                 .cloned()
         };
-        #[allow(clippy::type_complexity)]
-        let repositories: Vec<(
-            String,
-            String,
-            Option<PullRequest>,
-            Option<String>,
-            Option<RepositoryStatus>,
-        )> = self
+        let repositories: Vec<(String, String, RepositoryFacts, Option<RepositoryStatus>)> = self
             .place
             .iter()
             .flat_map(|place| place.repositories.iter())
             .map(|(path, facts)| {
-                let said = match facts {
-                    RepositoryFacts::Changes(Some(c)) if c.added == 0 && c.removed == 0 => {
-                        "clean".to_owned()
-                    }
-                    RepositoryFacts::Changes(Some(c)) => format!(
-                        "{}+{} −{}",
-                        if c.capped { "≥" } else { "" },
-                        c.added,
-                        c.removed
-                    ),
-                    RepositoryFacts::Changes(None) => "unreadable".to_owned(),
-                    RepositoryFacts::Branch(Some(branch)) => branch.clone(),
-                    RepositoryFacts::Branch(None) => "no branch".to_owned(),
-                };
                 (
+                    path.clone(),
                     crate::project::repository_label(&self.project, path),
-                    said,
-                    pull_of(path),
-                    forge_of(path),
+                    facts.clone(),
                     status_of(path),
                 )
             })
             .collect();
+        let several = repositories.len() > 1;
+        let mut lines: Vec<AnyElement> = Vec::new();
+        for (path, name, facts, status) in repositories {
+            let changes = match facts {
+                RepositoryFacts::Changes(Some(c)) if c.added == 0 && c.removed == 0 => {
+                    div().text_color(p.faint).child("clean").into_any_element()
+                }
+                RepositoryFacts::Changes(Some(c)) => div()
+                    .flex()
+                    .gap(space::XS)
+                    .child(div().text_color(p.ok).child(SharedString::from(format!(
+                        "{}+{}",
+                        if c.capped { "≥" } else { "" },
+                        c.added
+                    ))))
+                    .child(
+                        div()
+                            .text_color(p.fail)
+                            .child(SharedString::from(format!("−{}", c.removed))),
+                    )
+                    .into_any_element(),
+                RepositoryFacts::Changes(None) => div()
+                    .text_color(p.faint)
+                    .child("unreadable")
+                    .into_any_element(),
+                RepositoryFacts::Branch(branch) => div()
+                    .text_color(p.faint)
+                    .child(SharedString::from(
+                        branch.unwrap_or_else(|| "no branch".to_owned()),
+                    ))
+                    .into_any_element(),
+            };
+            lines.push(
+                div()
+                    .id(ElementId::Name(
+                        format!("rail-line-repository-{name}").into(),
+                    ))
+                    .flex()
+                    .flex_col()
+                    .gap(space::XS)
+                    .px(space::XS)
+                    .py(space::XS)
+                    .aria_label(SharedString::from(format!("Repository {name}")))
+                    .child(
+                        div()
+                            .id(ElementId::Name(format!("rail-repository-{name}").into()))
+                            .flex()
+                            .items_center()
+                            .gap(space::SM)
+                            .text_size(px(13.))
+                            .medium()
+                            .child(icon(Icon::Repository).size(px(14.)).text_color(p.faint))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(SharedString::from(name.clone())),
+                            )
+                            .child(div().flex_none().mono(11.5).child(changes))
+                            .test_support(),
+                    )
+                    // Its branch, commits ahead, files not committed and setup played; it
+                    // unfolds once the daemon said.
+                    .child(presence(
+                        ElementId::Name(format!("rail-status-{name}-block").into()),
+                        status.is_some(),
+                        div()
+                            .id(ElementId::Name(format!("rail-status-{name}").into()))
+                            .pl(space::XL)
+                            .mono(11.5)
+                            .text_color(p.faint)
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .aria_label(SharedString::from(status.as_ref().map_or(
+                                String::new(),
+                                |s| match &s.note {
+                                    Some(note) => format!("{} · {note}", s.line()),
+                                    None => s.line(),
+                                },
+                            )))
+                            .children(status.as_ref().map(|s| SharedString::from(s.line())))
+                            .test_support(),
+                    ))
+                    .test_support()
+                    .into_any_element(),
+            );
+            if let Some(pull) = pull_of(&path) {
+                let page = self.page.clone();
+                let url = pull.url.clone();
+                let row = pull_row(
+                    ElementId::Name(format!("rail-pull-{name}").into()),
+                    &pull,
+                    cx,
+                )
+                .on_click(move |_, _, cx| {
+                    page.update(cx, |page, _| page.open_link(&url)).ok();
+                });
+                let key = match several {
+                    true => format!(
+                        "Pull request · {}",
+                        crate::project::repository_label(&self.project, &path)
+                    ),
+                    false => "Pull request".to_owned(),
+                };
+                lines.push(
+                    labelled_line(
+                        ElementId::Name(format!("rail-line-pull-{name}").into()),
+                        Icon::PullRequest,
+                        key,
+                        pull_hover(row, cx).into_any_element(),
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+            }
+        }
         let forge_problem = self.place.as_ref().and_then(|p| p.forge_problem.clone());
+        // The forge is the project's setting, not a line of the workspace: the section only says
+        // which repositories have none, once, since their pull requests cannot show.
+        let no_forge: Vec<String> = self
+            .place
+            .iter()
+            .flat_map(|place| place.forges.iter())
+            .filter(|(_, line)| line.starts_with(flottille_core::declared::NO_FORGE))
+            .map(|(path, _)| crate::project::repository_label(&self.project, path))
+            .collect();
+        let no_forge = (!no_forge.is_empty()).then(|| {
+            SharedString::from(format!(
+                "No forge set for {}: choose it in the project's Settings",
+                no_forge.join(", ")
+            ))
+        });
         if self.workspace.is_some() && self.ticket_field.is_none() {
             let field = cx.new(|cx| {
-                let mut field =
-                    InputState::new(window, cx).placeholder("link a ticket: #123 or ABC-123");
+                let mut field = InputState::new(window, cx).placeholder("#123 or ABC-123");
                 field.set_editor_style(InputEditorStyle {
                     foreground: p.text,
                     muted_foreground: p.faint,
@@ -3348,63 +3572,62 @@ impl Render for SessionRail {
             self.ticket_field = Some(field);
         }
         let ticket = self.place.as_ref().and_then(|p| p.ticket.clone());
-        let ticket_row = ticket.map(|ticket| {
+        if let Some(ticket) = ticket {
             let page = self.page.clone();
-            let rail = cx.entity().downgrade();
-            let said = match (&ticket.state, &ticket.title, &ticket.problem) {
-                (_, _, Some(problem)) => problem.clone(),
-                (state, title, None) => format!(
-                    "{} {}",
-                    state.clone().unwrap_or_default(),
-                    title.clone().unwrap_or_default()
-                )
-                .trim()
-                .to_owned(),
+            let said = match (&ticket.title, &ticket.problem) {
+                (_, Some(problem)) => problem.clone(),
+                (title, None) => title.clone().unwrap_or_default(),
             };
             let url = ticket.url.clone();
-            div()
+            let row = div()
+                .id("rail-ticket")
+                .min_w_0()
                 .flex()
-                .items_start()
-                .child({
-                    let row = div()
-                        .id("rail-ticket")
-                        .flex_1()
-                        .flex()
-                        .flex_col()
-                        .px(space::SM)
-                        .py(space::XS)
-                        .rounded(px(6.))
-                        .when(url.is_some(), |d| d.cursor_pointer())
-                        .aria_label(SharedString::from(format!("{} {said}", ticket.reference)))
-                        .child(
-                            div()
-                                .mono(11.5)
-                                .text_color(p.mute)
-                                .child(SharedString::from(ticket.reference.clone())),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.5))
-                                .text_color(if ticket.problem.is_some() {
-                                    p.faint
-                                } else {
-                                    p.text
-                                })
-                                .child(SharedString::from(said)),
-                        )
-                        .on_click(move |_, _, cx| {
-                            if let Some(url) = &url {
-                                page.update(cx, |page, _| page.open_link(url)).ok();
-                            }
-                        });
-                    hoverable(row, move |d, t| d.bg(p.hover.opacity(t)))
-                })
+                .items_center()
+                .gap(space::XS)
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .when(url.is_some(), |d| d.cursor_pointer())
+                .aria_label(SharedString::from(
+                    format!(
+                        "{} {} {said}",
+                        ticket.reference,
+                        ticket.state.clone().unwrap_or_default()
+                    )
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                ))
                 .child(
-                    Button::quiet("rail-ticket-unlink", "Unlink").on_click(move |_, _, cx| {
-                        rail.update(cx, |rail, cx| rail.link_ticket(None, cx)).ok();
-                    }),
+                    div()
+                        .flex_none()
+                        .mono(11.5)
+                        .child(SharedString::from(ticket.reference.clone())),
                 )
-        });
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_ellipsis()
+                        .overflow_hidden()
+                        .child(SharedString::from(said)),
+                )
+                .on_click(move |_, _, cx| {
+                    if let Some(url) = &url {
+                        page.update(cx, |page, _| page.open_link(url)).ok();
+                    }
+                });
+            let row = hoverable(row, move |d, t| d.text_color(mix(p.mute, p.text, t)));
+            lines.push(
+                labelled_line(
+                    "rail-line-ticket".into(),
+                    Icon::Ticket,
+                    "Ticket".to_owned(),
+                    row.into_any_element(),
+                    cx,
+                )
+                .into_any_element(),
+            );
+        }
         let ticket_field = self
             .ticket_field
             .clone()
@@ -3413,7 +3636,6 @@ impl Render for SessionRail {
         let mut facts: Vec<(&str, String)> = Vec::new();
         match (&self.workspace, &self.place) {
             (Some(_), Some(place)) => {
-                facts.extend(place.branch.clone().map(|b| ("Branch", b)));
                 if !place.bases.is_empty() {
                     facts.push(("From", place.bases.join(", ")));
                 }
@@ -3426,177 +3648,212 @@ impl Render for SessionRail {
             _ => {}
         }
         facts.push(("Machine", "this PC".into()));
-        div()
-            .id("rail")
-            .size_full()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
-            .px(space::MD)
-            .py(space::LG)
+        let workspace = div()
+            .id("rail-workspace")
             .flex()
             .flex_col()
-            .child(self.waiting.clone())
-            .child(section_label("Agents", cx))
-            .children(rows)
-            .child(self.commands.clone())
-            .child(div().h(px(1.)).bg(p.line).mx(px(6.)).my(px(16.)))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .child(div().flex_1().child(section_label("Workspace", cx)))
-                    .child(self.menu.clone()),
-            )
-            .children(
-                repositories
-                    .into_iter()
-                    .map(|(path, said, pull, forge, status)| {
-                        let row = div()
-                            .id(ElementId::Name(format!("rail-repository-{path}").into()))
-                            .flex()
-                            .items_center()
-                            .gap(space::SM)
-                            .px(space::SM)
-                            .py(space::SM)
-                            .text_size(px(12.5))
-                            .child(icon(Icon::Repository).size(px(13.)).text_color(p.faint))
-                            .child(SharedString::from(path.clone()))
-                            .child(
-                                div()
-                                    .ml_auto()
-                                    .mono(11.)
-                                    .text_color(p.faint)
-                                    .child(SharedString::from(said)),
-                            )
-                            .test_support();
-                        let pull = pull.map(|pull| {
-                            let page = self.page.clone();
-                            let url = pull.url.clone();
-                            let row = pull_row(
-                                ElementId::Name(format!("rail-pull-{path}").into()),
-                                &pull,
-                                cx,
-                            )
-                            .pl(space::XXL)
-                            .on_click(move |_, _, cx| {
-                                page.update(cx, |page, _| page.open_link(&url)).ok();
-                            });
-                            pull_hover(row, cx)
-                        });
-                        // Its branch, commits ahead, files not committed and setup played; it unfolds
-                        // once the daemon said.
-                        let status = presence(
-                            ElementId::Name(format!("rail-status-{path}-block").into()),
-                            status.is_some(),
-                            div()
-                                .id(ElementId::Name(format!("rail-status-{path}").into()))
-                                .pl(space::XXL)
-                                .pb(space::XS)
-                                .flex()
-                                .flex_col()
-                                .mono(11.)
-                                .text_color(p.faint)
-                                .children(status.as_ref().map(|s| SharedString::from(s.line())))
-                                .children(status.as_ref().and_then(|s| s.note.clone()).map(
-                                    |note| div().text_color(p.mute).child(SharedString::from(note)),
-                                ))
-                                .aria_label(SharedString::from(status.as_ref().map_or(
-                                    String::new(),
-                                    |s| match &s.note {
-                                        Some(note) => format!("{} · {note}", s.line()),
-                                        None => s.line(),
-                                    },
-                                )))
-                                .test_support(),
-                        );
-                        let forge = forge.map(|line| {
-                            div()
-                                .id(ElementId::Name(format!("rail-forge-{path}").into()))
-                                .pl(space::XXL)
-                                .pb(space::XS)
-                                .mono(11.)
-                                .text_color(p.faint)
-                                .child(SharedString::from(line))
-                                .test_support()
-                        });
-                        div()
-                            .child(row)
-                            .child(status)
-                            .children(forge)
-                            .children(pull)
-                    }),
-            )
+            .border_t_1()
+            .border_color(p.line)
+            .pt(space::SM)
+            .pb(space::MD)
+            .child(rail_label(
+                "Workspace",
+                Some(self.menu.clone().into_any_element()),
+                cx,
+            ))
+            .children(lines)
             .child(presence(
-                ElementId::Name("rail-no-forge-block".into()),
-                once,
+                "rail-no-forge-block",
+                no_forge.is_some(),
                 div()
                     .id("rail-no-forge")
-                    .px(space::SM)
-                    .pb(space::XS)
+                    .px(space::XS)
+                    .py(space::XS)
                     .text_size(px(11.5))
                     .text_color(p.faint)
-                    .children(said.clone())
-                    .aria_label(said.unwrap_or_default())
+                    .children(no_forge.clone())
+                    .aria_label(no_forge.unwrap_or_default())
                     .test_support(),
             ))
             .children(forge_problem.map(|problem| {
                 div()
                     .id("rail-forge-problem")
-                    .px(space::SM)
+                    .px(space::XS)
                     .py(space::XS)
                     .text_size(px(11.5))
                     .text_color(p.faint)
                     .child(SharedString::from(problem))
                     .test_support()
             }))
-            .children(ticket_row)
-            .children(ticket_field.map(|field| {
+            .child(presence(
+                "rail-ticket-field-block",
+                self.linking && ticket_field.is_some(),
                 div()
                     .id("rail-ticket-field")
-                    .mx(px(8.))
-                    .my(px(4.))
-                    .h(px(28.))
+                    .h(px(30.))
+                    .mx(space::XS)
+                    .my(space::XS)
                     .px(space::SM)
-                    .rounded(px(8.))
+                    .rounded(px(7.))
                     .bg(p.field)
                     .border_1()
                     .border_color(p.line2)
                     .flex()
                     .items_center()
                     .mono(11.5)
-                    .child(Input::new(&field))
-                    .test_support()
-            }))
-            .children(ticket_error.map(|error| {
-                div()
-                    .id("rail-ticket-error")
-                    .px(space::SM)
-                    .py(space::XS)
-                    .text_size(px(11.5))
-                    .text_color(p.fail)
-                    .child(error)
-                    .test_support()
-            }))
-            .child(div().h(px(1.)).bg(p.line).mx(px(6.)).my(px(16.)))
+                    .children(ticket_field.map(|field| Input::new(&field)))
+                    .test_support(),
+            ))
+            .child(presence_of(
+                "rail-ticket-error-block",
+                ticket_error,
+                move |error| {
+                    div()
+                        .id("rail-ticket-error")
+                        .px(space::XS)
+                        .py(space::XS)
+                        .text_size(px(11.5))
+                        .text_color(p.fail)
+                        .child(error)
+                        .test_support()
+                        .into_any_element()
+                },
+            ))
             .child(
                 div()
                     .id("rail-facts")
-                    .px(space::SM)
+                    .pt(space::SM)
+                    .px(space::XS)
                     .flex()
                     .flex_col()
-                    .gap(space::SM)
+                    .gap(space::XS)
                     .text_size(px(12.5))
                     .children(facts.into_iter().map(|(key, value)| {
                         div()
+                            .id(ElementId::Name(format!("rail-fact-{key}").into()))
                             .flex()
-                            .gap(space::MD)
+                            .gap(space::LG)
+                            .aria_label(SharedString::from(format!("{key} {value}")))
                             .child(div().text_color(p.faint).child(key))
                             .child(div().ml_auto().mono(12.).child(SharedString::from(value)))
+                            .test_support()
                     }))
                     .test_support(),
             )
+            .test_support();
+        div()
+            .id("rail")
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .id("rail-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .px(space::MD)
+                    .pt(space::SM)
+                    .pb(space::LG)
+                    .flex()
+                    .flex_col()
+                    .child(agents)
+                    .child(workspace)
+                    .child(self.commands.clone()),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .px(space::MD)
+                    .pb(space::MD)
+                    .child(self.waiting.clone()),
+            )
             .test_support()
     }
+}
+
+/// A labelled line of the workspace (Pull request, Ticket): its icon and its label in a fixed
+/// column, then what it is.
+fn labelled_line(
+    id: ElementId,
+    glyph: Icon,
+    key: String,
+    value: AnyElement,
+    cx: &App,
+) -> impl IntoElement + use<> {
+    let p = palette(cx);
+    div()
+        .id(id)
+        .h(px(30.))
+        .flex()
+        .items_center()
+        .gap(space::SM)
+        .px(space::XS)
+        .text_size(px(12.5))
+        .text_color(p.mute)
+        .aria_label(SharedString::from(key.clone()))
+        .child(
+            div()
+                .w(px(104.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(space::SM)
+                .text_color(p.faint)
+                .child(icon(glyph).size(px(12.)).text_color(p.faint))
+                .child(SharedString::from(key)),
+        )
+        .child(div().flex_1().min_w_0().child(value))
+        .test_support()
+}
+
+/// What a workspace's "⋯" offers, wherever it is drawn: the rail's Workspace and the workspace's
+/// card on the project page build it with this, so that both say the same.
+pub struct WorkspaceActions {
+    pub open_in_editor: WorkspaceAction,
+    /// Shows where a ticket is typed; `None` where the workspace links none.
+    pub link_ticket: Option<WorkspaceAction>,
+    pub unlink_ticket: Option<WorkspaceAction>,
+}
+
+pub type WorkspaceAction = Box<dyn Fn(&mut App)>;
+
+/// A workspace's "⋯" menu.
+pub fn workspace_menu(id: &str, actions: WorkspaceActions, cx: &mut Context<Menu>) -> Menu {
+    let WorkspaceActions {
+        open_in_editor,
+        link_ticket,
+        unlink_ticket,
+    } = actions;
+    let mut menu = Menu::new(
+        ElementId::Name(id.to_owned().into()),
+        "Workspace actions",
+        cx,
+    )
+    .entry(
+        "open-in-editor",
+        "Open in editor",
+        Some(Icon::OpenInEditor),
+        move |_, cx| open_in_editor(cx),
+    );
+    if let Some(link) = link_ticket {
+        menu = menu.entry(
+            "workspace-link-ticket",
+            "Link a ticket…",
+            Some(Icon::Ticket),
+            move |_, cx| link(cx),
+        );
+    }
+    if let Some(unlink) = unlink_ticket {
+        menu = menu.entry(
+            "workspace-unlink-ticket",
+            "Unlink the ticket",
+            None,
+            move |_, cx| unlink(cx),
+        );
+    }
+    menu
 }
 
 /// A pull request's row: its number and state, and its checks' mark, drawn by shape as well as
@@ -3756,7 +4013,6 @@ impl Reply {
             facts: cx.new(|_| ReplyFacts {
                 provider: None,
                 model: None,
-                context: None,
             }),
             status_line: cx.new(|_| StatusLine::new()),
             mode,
@@ -4538,11 +4794,11 @@ pub fn runs_on(provider: &str, model: Option<&str>) -> String {
     format!("{provider} · {model}")
 }
 
-/// The root's provider and model and the context it used, below the field.
+/// The root's provider and model, below the field. The context it used is on its row in the
+/// rail, as each agent's is.
 pub struct ReplyFacts {
     provider: Option<String>,
     model: Option<String>,
-    context: Option<u64>,
 }
 
 impl ReplyFacts {
@@ -4558,22 +4814,11 @@ impl ReplyFacts {
         }
     }
 
-    pub fn context(&self) -> Option<u64> {
-        self.context
-    }
-
     fn set_model(&mut self, (provider, model): (String, Option<String>), cx: &mut Context<Self>) {
         let provider = Some(provider).filter(|p| !p.is_empty());
         if self.model != model || self.provider != provider {
             self.model = model;
             self.provider = provider;
-            cx.notify();
-        }
-    }
-
-    fn set_context(&mut self, context: Option<u64>, cx: &mut Context<Self>) {
-        if self.context != context {
-            self.context = context;
             cx.notify();
         }
     }
@@ -4591,15 +4836,8 @@ impl Render for ReplyFacts {
             .gap(space::SM)
             .text_size(px(12.5))
             .text_color(p.mute)
+            .aria_label(SharedString::from(self.shown()))
             .child(SharedString::from(self.shown()))
-            .when_some(self.context, |d, used| {
-                d.child(
-                    div()
-                        .mono(11.5)
-                        .text_color(p.faint)
-                        .child(SharedString::from(format!("· context {used}%"))),
-                )
-            })
             .test_support()
     }
 }
@@ -4657,6 +4895,7 @@ mod tests {
             stopping: false,
             images: None,
             gate_mode: Some("auto".into()),
+            context: None,
         }
     }
 
@@ -4775,6 +5014,7 @@ mod tests {
             kind: "call".into(),
             says: Vec::new(),
             asked: Some("Read .env".into()),
+            call: None,
             why: None,
             source: None,
             asker: Some("lead".into()),

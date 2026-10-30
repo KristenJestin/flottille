@@ -230,8 +230,9 @@ or a setup step runs in it…), with the key at fault.
 #### `project.settings`
 
 `{"name"}`. The project's forges and tracker as its Settings show them (`docs/forges.md`, "The
-forge of a repository"): `{"name", "folder", "repositories": [{"path", "remote", "url", "forge",
-"proposal", "disagrees"}], "tracker", "obsolete"}`. `url` is the remote's address (credentials taken
+forge of a repository"): `{"name", "folder", "repositories": [{"path", "remote", "depends_on",
+"url", "forge", "proposal", "disagrees"}], "tracker", "obsolete"}`. `depends_on` lists the paths
+of the repositories it depends on (`[]` when none), `url` is the remote's address (credentials taken
 out, masked; `null` when it has none), `forge` the one declared (`null` when none), `proposal` what
 the address proposes (`null` when nothing), `disagrees` why the declared forge is not where the
 remote leads (`null` when it is). `obsolete` lists the keys of the file that are no longer read
@@ -803,7 +804,7 @@ alone reaches it: no tool of an agent changes a mode.
 #### `agent.tree`
 
 `{"agent"}`. The whole tree of the agent's root, each agent before its children:
-`{"agents": [{"agent", "doing", "waiting_on", "needs_user"}]}`. `agent` is the agent in short
+`{"agents": [{"agent", "doing", "waiting_on", "needs_user", "context"}]}`. `agent` is the agent in short
 (`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `launched_by`, `depth`, `epoch`, `state`,
 `state_reason`, `created_at`, `active_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
 took at the last start of its process, else the one asked, `null` for the agent's default before it
@@ -813,7 +814,8 @@ form); `doing` a sentence of what it does
 (`working`, `idle`, `running \`cargo test\` for 12 min`, `waiting for approval #3`, `failed: …`);
 `waiting_on` `parent` for a child whose request or question waits for its parent, `user` for a
 root whose own does, else `null`; `needs_user`, for the root, whether a request of its tree or its
-own question waits for the user.
+own question waits for the user; `context`, how much of its context the agent used at its last
+report (`agent.usage`), in percent, `null` before one.
 
 #### `agent.read`
 

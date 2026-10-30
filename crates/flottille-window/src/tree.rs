@@ -14,7 +14,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement,
     ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
-    TestSupportExt as _, WeakEntity, Window, div, px,
+    TestSupportExt as _, WeakEntity, Window, div, px, relative,
 };
 
 use crate::actions::Command;
@@ -170,8 +170,9 @@ impl Mark {
     }
 }
 
-/// The side panel: the primary button, the `PROJECTS` label, the projects and, below them all,
-/// the "Ended" group.
+/// The side panel: the primary button, the `PROJECTS` label, the projects and, pinned at the
+/// panel's bottom under a line whatever the tree's length, the "Ended" group, which unfolds upward
+/// over the tree.
 pub struct Sidebar {
     shell: WeakEntity<Shell>,
     projects: Vec<Entity<ProjectNode>>,
@@ -313,8 +314,25 @@ impl Render for Sidebar {
         let shell = self.shell.clone();
         let adds = self.shell.clone();
         let ended = self.ended.clone().map(|(group, present)| {
-            // Below every project, a little apart; it folds away when its last session leaves.
-            presence("sidebar-ended", present, div().pt(space::MD).child(group))
+            // At the panel's bottom, under a line; it takes half the panel at most, and folds
+            // away when its last session leaves.
+            presence(
+                "sidebar-ended",
+                present,
+                div()
+                    .id("ended-footer")
+                    .flex_none()
+                    .max_h(relative(0.5))
+                    .overflow_y_scroll()
+                    .border_t_1()
+                    .border_color(p.line)
+                    .bg(p.side)
+                    .px(space::SM)
+                    .pt(space::XS)
+                    .pb(space::SM)
+                    .child(group)
+                    .test_support(),
+            )
         });
         let count = self.ending.as_ref().map_or(self.said, |(_, count)| *count);
         let this = cx.entity().downgrade();
@@ -342,6 +360,7 @@ impl Render for Sidebar {
                 .on_click(cx.listener(|this, _, _, cx| this.confirm_end(cx))),
             );
         div()
+            .id("sidebar")
             .size_full()
             .bg(p.side)
             .flex()
@@ -390,9 +409,9 @@ impl Render for Sidebar {
                                 ),
                             ),
                     )
-                    .children(projects)
-                    .children(ended),
+                    .children(projects),
             )
+            .children(ended)
             .child(presence_of(
                 "sidebar-refused-line",
                 self.refused.clone(),
@@ -410,6 +429,7 @@ impl Render for Sidebar {
                 },
             ))
             .child(modal)
+            .test_support()
     }
 }
 
@@ -693,6 +713,7 @@ impl Render for PlaceNode {
             (true, _) => {
                 let count = self.sessions.read(cx).rows.len();
                 TreeRow::new(ended_id(), TreeLevel::Session, "Ended")
+                    .unfolds_upward()
                     .trailing(meta(count.to_string(), cx))
             }
             (false, place) => {
@@ -979,29 +1000,23 @@ impl Render for SessionRow {
                 meta(when, cx),
             ))
             .into_any_element();
-        // A session an agent started says so, small, before its mark or its time ago, and
-        // comes in like the rest of the tree's rows.
-        let last = match &self.started_by {
-            Some(by) => {
-                let said = SharedString::from(format!("started by {by}"));
-                let text = div()
-                    .id(session_started_by_id(&self.id))
-                    .flex_none()
-                    .max_w(px(120.))
-                    .overflow_hidden()
-                    .aria_label(said.clone())
-                    .child(meta(said, cx))
-                    .test_support();
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(space::SM)
-                    .child(enter(format!("started-by-enter-{}", self.id), 0, text))
-                    .child(last)
-                    .into_any_element()
-            }
-            None => last,
-        };
-        row.trailing(trailing(id, self.commands, last, cx))
+        let row = row.trailing(trailing(id, self.commands, last, cx));
+        // A session an agent started says so, small, on a line under its title, which keeps the
+        // row's width; it comes in like the rest of the tree's rows.
+        let by = self.started_by.as_ref().map(|by| {
+            let said = SharedString::from(format!("started by {by}"));
+            let text = div()
+                .id(session_started_by_id(&self.id))
+                .pl(space::SM)
+                .pb(space::XS)
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .aria_label(said.clone())
+                .child(meta(said, cx))
+                .test_support();
+            enter(format!("started-by-enter-{}", self.id), 0, text)
+        });
+        div().flex().flex_col().child(row).children(by)
     }
 }
