@@ -116,34 +116,6 @@ pub(crate) fn problem_line(
     .gap(gap)
 }
 
-/// The heading of a section of the project page.
-pub(crate) fn heading(
-    title: &'static str,
-    count: usize,
-    action: impl IntoElement,
-    cx: &App,
-) -> impl IntoElement {
-    let p = palette(cx);
-    div()
-        .flex()
-        .items_center()
-        .gap(space::SM)
-        .mt(px(34.))
-        .mb(px(12.))
-        .text_size(px(13.))
-        .semibold()
-        .child(title)
-        .child(
-            div()
-                .mono(11.)
-                .font_weight(gpui_kit::FontWeight::NORMAL)
-                .text_color(p.faint)
-                .child(count.to_string()),
-        )
-        .child(div().flex_1())
-        .child(action)
-}
-
 /// The "⋯" menu of a row of a list, made once per row and kept: its button is
 /// `<prefix>-more-<key>`. `make` gets the key and the empty menu.
 pub(crate) fn menu_of<V: 'static>(

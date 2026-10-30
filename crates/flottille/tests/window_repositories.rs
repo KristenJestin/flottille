@@ -446,15 +446,12 @@ fn a_workspace_s_card_and_the_rail_show_where_each_repository_stands(cx: &mut Te
     settle(cx);
 
     assert_eq!(
-        label_of("repository-status-login-api", cx).as_deref(),
-        Some("api trio/login · 1 ahead of develop · 1 uncommitted")
+        label_of("repository-line-login-api", cx).as_deref(),
+        Some("Repository api 1 ahead · 1 uncommitted")
     );
     assert_eq!(
-        label_of("repository-status-login-lib", cx).as_deref(),
-        Some(
-            "lib trio/login · 0 ahead of main · clean · no remote origin: started from the \
-             local main"
-        )
+        label_of("repository-line-login-lib", cx).as_deref(),
+        Some("Repository lib 0 ahead · clean · no remote origin: started from the local main")
     );
     assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
 

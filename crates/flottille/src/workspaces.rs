@@ -747,6 +747,8 @@ fn snapshot(project: &Project, taken: &[String]) -> Vec<Step> {
             action,
             state: StepState::Pending,
             failure: None,
+            started_at: None,
+            ended_at: None,
         })
         .collect()
 }

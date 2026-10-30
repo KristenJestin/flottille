@@ -99,17 +99,21 @@ impl RenderOnce for Confirm {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let p = palette(cx);
         let refused_id = part(&self.id, "refused");
-        let refused = presence_of(refused_id.clone(), self.refused.clone(), move |why| {
-            div()
-                .id(refused_id)
-                .aria_label(why.clone())
-                .text_size(px(13.))
-                .line_height(px(20.))
-                .text_color(p.fail)
-                .child(why)
-                .test_support()
-                .into_any_element()
-        });
+        let refused = presence_of(
+            part(&self.id, "refused-block"),
+            self.refused.clone(),
+            move |why| {
+                div()
+                    .id(refused_id)
+                    .aria_label(why.clone())
+                    .text_size(px(13.))
+                    .line_height(px(20.))
+                    .text_color(p.fail)
+                    .child(why)
+                    .test_support()
+                    .into_any_element()
+            },
+        );
         let cancel = self.on_cancel.clone();
         let confirm = self.on_confirm.clone();
         let action = Button::danger(part(&self.id, "action"), self.action)

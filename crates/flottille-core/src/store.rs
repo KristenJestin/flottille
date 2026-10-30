@@ -448,6 +448,12 @@ const MIGRATIONS: &[&str] = &[
     -- turn without the user (`docs/tools.md`, \"The tree's tools\").
     ALTER TABLE agents ADD COLUMN launched_by TEXT REFERENCES agents (id);
 ",
+    "
+    -- When each step of a workspace's preparation last started and ended: the window says how
+    -- long a step took, or how long it has been running.
+    ALTER TABLE workspace_steps ADD COLUMN started_at INTEGER;
+    ALTER TABLE workspace_steps ADD COLUMN ended_at INTEGER;
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -621,8 +627,8 @@ impl Store {
             },
         )?;
         let mut statement = self.connection.prepare_cached(
-            "SELECT position, repository, action, state, failed_doing, failed_output \
-             FROM workspace_steps WHERE workspace = ?1 ORDER BY position",
+            "SELECT position, repository, action, state, failed_doing, failed_output, \
+             started_at, ended_at FROM workspace_steps WHERE workspace = ?1 ORDER BY position",
         )?;
         let rows = statement.query_map(params![id], |row| {
             Ok((
@@ -632,11 +638,13 @@ impl Store {
                 row.get::<_, String>(3)?,
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<u64>>(6)?,
+                row.get::<_, Option<u64>>(7)?,
             ))
         })?;
         let mut steps = Vec::new();
         for row in rows {
-            let (position, repository, action, state, doing, output) = row?;
+            let (position, repository, action, state, doing, output, started_at, ended_at) = row?;
             steps.push(Step {
                 position,
                 repository,
@@ -650,6 +658,8 @@ impl Store {
                     doing,
                     output: output.unwrap_or_default(),
                 }),
+                started_at,
+                ended_at,
             });
         }
         Ok(Workspace {
@@ -678,18 +688,22 @@ impl Store {
         event: (&str, Value),
     ) -> Result<Event> {
         let transaction = self.connection.transaction()?;
+        let event = append_event(&transaction, event.0, event.1)?;
+        // A step that starts forgets when it last ended; one that ends keeps when it started.
         transaction.execute(
-            "UPDATE workspace_steps SET state = ?3, failed_doing = ?4, failed_output = ?5 \
+            "UPDATE workspace_steps SET state = ?3, failed_doing = ?4, failed_output = ?5, \
+             started_at = CASE WHEN ?3 = 'running' THEN ?6 ELSE started_at END, \
+             ended_at = CASE WHEN ?3 = 'running' THEN NULL ELSE ?6 END \
              WHERE workspace = ?1 AND position = ?2",
             params![
                 workspace,
                 position,
                 state.as_str(),
                 failure.map(|f| &f.doing),
-                failure.map(|f| &f.output)
+                failure.map(|f| &f.output),
+                event.at
             ],
         )?;
-        let event = append_event(&transaction, event.0, event.1)?;
         transaction.commit()?;
         Ok(event)
     }
@@ -706,7 +720,8 @@ impl Store {
         for position in positions {
             transaction.execute(
                 "UPDATE workspace_steps SET state = 'pending', failed_doing = NULL, \
-                 failed_output = NULL WHERE workspace = ?1 AND position = ?2",
+                 failed_output = NULL, started_at = NULL, ended_at = NULL \
+                 WHERE workspace = ?1 AND position = ?2",
                 params![workspace, position],
             )?;
         }
@@ -2217,6 +2232,8 @@ mod tests {
                     action: Action::Worktree,
                     state: StepState::Pending,
                     failure: None,
+                    started_at: None,
+                    ended_at: None,
                 },
                 Step {
                     position: 1,
@@ -2228,6 +2245,8 @@ mod tests {
                     },
                     state: StepState::Pending,
                     failure: None,
+                    started_at: None,
+                    ended_at: None,
                 },
             ],
             ticket: None,
@@ -2521,6 +2540,51 @@ mod tests {
             "project app already has a workspace named login"
         );
         assert_eq!(store.last_seq().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_step_keeps_when_it_started_and_ended_and_forgets_it_when_it_goes_back_to_pending() {
+        let mut store = Store::open_in_memory().unwrap();
+        let (id, _) = store
+            .create_workspace(&a_workspace(), ("workspace.created", json!({})))
+            .unwrap();
+        let started = store
+            .set_step(
+                id,
+                0,
+                StepState::Running,
+                None,
+                ("workspace.step_started", json!({})),
+            )
+            .unwrap();
+        let running = store.workspace_by_id(id).unwrap();
+        let done = store
+            .set_step(
+                id,
+                0,
+                StepState::Done,
+                None,
+                ("workspace.step_done", json!({})),
+            )
+            .unwrap();
+        let ended = store.workspace_by_id(id).unwrap();
+        store
+            .reset_steps(id, &[0], ("workspace.resumed", json!({})))
+            .unwrap();
+        let reset = store.workspace_by_id(id).unwrap();
+
+        assert_eq!(running.steps[0].started_at, Some(started.at));
+        assert_eq!(running.steps[0].ended_at, None);
+        assert_eq!(ended.steps[0].started_at, Some(started.at));
+        assert_eq!(ended.steps[0].ended_at, Some(done.at));
+        assert_eq!(
+            ended.steps[1].started_at, None,
+            "a step not started has no time"
+        );
+        assert_eq!(
+            (reset.steps[0].started_at, reset.steps[0].ended_at),
+            (None, None)
+        );
     }
 
     #[test]

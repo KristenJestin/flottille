@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use common::User;
 use common::mcp::Mcp;
+use flottille_core::workspace::StepState;
 use flottille_ui::AgentState;
 use flottille_ui::omarchy::Environment;
 use flottille_ui::state::icon_id;
@@ -21,7 +22,9 @@ use flottille_window::conversation::Block;
 use flottille_window::link::{self, Connect};
 use flottille_window::model::{Place, Preparation};
 use flottille_window::project::{NewWorkspace, PlaceCard, ProjectPage};
-use flottille_window::project_settings::{Dialog, ForgeKind, ProjectSettingsPage, TrackerKind};
+use flottille_window::project_settings::{
+    Dialog, ForgeKind, ProjectSettingsPage, Reveal, SECTIONS, TrackerKind,
+};
 use flottille_window::session::{RailRow, Reply, SessionPage};
 use flottille_window::settings::SettingsPage;
 use flottille_window::shell::{Layout, Selection};
@@ -675,7 +678,7 @@ fn the_page_lists_main_and_two_workspaces_with_their_sessions(cx: &mut TestAppCo
     );
     assert_eq!(
         cards[1].read_with(cx, |c, _| c.data().meta.clone()),
-        Some("from main · atlas".to_owned())
+        Some("from main".to_owned())
     );
     assert_eq!(cards[0].read_with(cx, |c, _| c.data().meta.clone()), None);
     assert_eq!(
@@ -890,14 +893,16 @@ fn the_main_card_has_no_second_header_and_a_workspace_card_keeps_where_it_comes_
     });
     settle(cx);
 
-    cx.update(|window, _| {
-        assert!(window.try_find("place-card-main").is_some());
-        assert!(
-            window.try_find("meta-main").is_none(),
-            "the project folder's card repeats its title in a second line"
-        );
-        assert!(window.find("meta-login").visible());
-    });
+    cx.update(|window, _| assert!(window.try_find("place-card-main").is_some()));
+    // The project folder's card says what it is beside its name, not in a second line.
+    assert_eq!(
+        text_of("place-head-main-meta", cx).as_deref(),
+        Some("the project folder")
+    );
+    assert_eq!(
+        text_of("place-head-login-meta", cx).as_deref(),
+        Some("from main")
+    );
 }
 
 #[gpui_kit::test]
@@ -7371,9 +7376,7 @@ fn the_new_workspace_modal_previews_the_ticket_as_it_is_typed(cx: &mut TestAppCo
 }
 
 #[gpui_kit::test]
-fn the_new_workspace_modal_takes_the_chosen_repositories_branch_and_offline(
-    cx: &mut TestAppContext,
-) {
+fn the_new_workspace_modal_takes_the_chosen_repositories_and_branch(cx: &mut TestAppContext) {
     let user = user();
     let folder = user.path("work/duo");
     for repository in ["api", "web"] {
@@ -7409,12 +7412,10 @@ fn the_new_workspace_modal_takes_the_chosen_repositories_branch_and_offline(
     cx.update(|window, cx| window.click("new-workspace-take-web", cx));
     cx.update(|window, cx| window.click("new-workspace-modal-branch", cx));
     cx.simulate_input("feature/sign-in");
-    cx.update(|window, cx| window.click("new-workspace-offline", cx));
     assert_eq!(
         form.read_with(cx, |f, _| f.chosen().to_vec()),
         vec!["api".to_owned()]
     );
-    assert!(form.read_with(cx, |f, _| f.offline()));
 
     cx.update(|window, cx| window.click("create-workspace", cx));
     until(&shell, cx, "the workspace is made", |cx| {
@@ -7431,10 +7432,6 @@ fn the_new_workspace_modal_takes_the_chosen_repositories_branch_and_offline(
         .map(|r| r.as_str().or(r["path"].as_str()).unwrap())
         .collect();
     assert_eq!(taken, ["api"], "{shown}");
-    assert!(
-        !form.read_with(cx, |f, _| f.offline()),
-        "the form starts afresh"
-    );
 }
 
 #[gpui_kit::test]
@@ -8126,8 +8123,6 @@ fn run_on_a_task_of_the_project_page_lists_its_run_and_opens_its_output(cx: &mut
     assert_eq!(row.agent, "", "no agent ran it");
     assert_eq!(row.last_line, "second");
     settle(cx);
-    let who = format!("command-who-{}", row.run);
-    assert!(text_of(&who, cx).unwrap_or_default().contains("you"));
 
     cx.update(|window, cx| window.click(format!("command-{}", row.run), cx));
     until(&shell, cx, "its output is open", |cx| {
@@ -8138,6 +8133,10 @@ fn run_on_a_task_of_the_project_page_lists_its_run_and_opens_its_output(cx: &mut
                 .is_some_and(|o| o.lines == ["first", "second"])
         })
     });
+    settle(cx);
+    // The same drawer as the session's: the user started it, in the project folder.
+    assert_eq!(text_of("run-fact-by", cx).as_deref(), Some("you"));
+    assert_eq!(text_of("run-fact-where", cx).as_deref(), Some("main"));
     assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
 }
 
@@ -8644,4 +8643,469 @@ fn the_setup_s_move_up_and_down_are_in_the_row_s_menu_and_do_nothing_at_the_ends
     }
     run_for(Duration::from_millis(500), cx);
     assert_eq!(steps_listed(&shell, cx), before, "nothing moved");
+}
+
+// ── The project page (#166): it shows and runs, the settings configure ───────────────────────
+
+/// The label of the toast on top of the stack, once one is said.
+fn last_toast(cx: &mut VisualTestContext) -> Option<String> {
+    (1..20)
+        .rev()
+        .find_map(|n| text_of(&format!("toast-{n}"), cx))
+}
+
+#[gpui_kit::test]
+fn the_repository_chips_are_read_only_and_open_their_row_in_the_project_settings(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    until(&shell, cx, "the chip says its branch", |cx| {
+        page_of(&shell, cx).read_with(cx, |page, _| page.chips() == ["atlas · main"])
+    });
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(window.find("repository-chip-.").visible());
+        for gone in ["project-repositories", "repository-path-field"] {
+            assert!(
+                window.try_find(gone).is_none(),
+                "{gone}: the page configures nothing, the settings do"
+            );
+        }
+    });
+
+    cx.update(|window, cx| window.click("repository-chip-.", cx));
+    until(&shell, cx, "the project's settings are open", |cx| {
+        settings_of(&shell, cx).is_some()
+    });
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(Selection::ProjectSettings("atlas".into()))
+    );
+    let settings = settings_of(&shell, cx).unwrap();
+    assert_eq!(
+        settings.read_with(cx, |page, _| page.revealed().cloned()),
+        Some(Reveal::Repository(".".into())),
+        "at the chip's repository"
+    );
+}
+
+#[gpui_kit::test]
+fn edit_in_settings_opens_the_project_settings_scrolled_to_their_tasks(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    user.call(
+        "task.add",
+        json!({"project": "atlas", "name": "say", "line": "echo hi"}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    until(&shell, cx, "the task is listed", |cx| {
+        cx.update(|window, _| window.try_find("project-task-say").is_some())
+    });
+    settle(cx);
+
+    cx.update(|window, cx| window.click("edit-tasks-in-settings", cx));
+    until(&shell, cx, "the project's settings are open", |cx| {
+        settings_of(&shell, cx).is_some()
+    });
+    let settings = settings_of(&shell, cx).unwrap();
+    assert_eq!(
+        settings.read_with(cx, |page, _| page.revealed().cloned()),
+        Some(Reveal::Tasks)
+    );
+    until(&shell, cx, "every section is read", |cx| {
+        settings.read_with(cx, |page, cx| page.has_read(cx))
+    });
+    settle(cx);
+    let tasks = SECTIONS
+        .iter()
+        .position(|(key, _)| *key == "tasks")
+        .unwrap();
+    assert_eq!(
+        settings.read_with(cx, |page, _| page.current_section()),
+        tasks,
+        "the Tasks section is scrolled up under the index"
+    );
+    assert_eq!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)),
+        0,
+        "nothing moves once it is there"
+    );
+}
+
+#[gpui_kit::test]
+fn a_workspace_card_shows_the_three_labelled_lines_only_when_they_have_something(
+    cx: &mut TestAppContext,
+) {
+    let user = user().with_fake_gh();
+    let folder = project(&user, "app");
+    workspace(&user, "app", "fix-login");
+    workspace(&user, "app", "plain");
+    let fixing = PathBuf::from(
+        user.call(
+            "workspace.show",
+            json!({"project": "app", "name": "fix-login"}),
+        )
+        .unwrap()["folder"]
+            .as_str()
+            .unwrap(),
+    );
+    std::fs::write(fixing.join("NOTES.md"), "not committed\n").unwrap();
+    // Declared on GitHub once the workspaces are made: no fetch ever goes to it.
+    user.git(
+        &folder,
+        &["remote", "set-url", "origin", "git@github.com:acme/app.git"],
+    );
+    declare_on_github(&user);
+    user.gh_script(json!({
+        "issues": {"acme/app": {"12": {"number": 12, "title": "Login form submits twice",
+            "state": "OPEN", "body": "", "comments": [],
+            "url": "https://github.com/acme/app/issues/12"}}},
+        "pulls": {"acme/app": {"app/fix-login": {
+            "number": 17, "title": "Fix the login", "state": "OPEN", "isDraft": false,
+            "baseRefName": "main", "url": "https://github.com/acme/app/pull/17",
+            "reviewDecision": null, "statusCheckRollup": [], "comments": [], "reviews": []}}}
+    }));
+    user.call(
+        "workspace.link_ticket",
+        json!({"project": "app", "name": "fix-login", "ticket": "#12"}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(1400.)));
+    open_project(&shell, "app", cx);
+    until(
+        &shell,
+        cx,
+        "the card has its pull request and its ticket",
+        |cx| {
+            card_of(&shell, Some("fix-login"), cx).is_some_and(|card| {
+                card.read_with(cx, |c, _| {
+                    !c.pulls().is_empty()
+                        && c.ticket().is_some()
+                        && c.statuses().iter().any(|s| s.uncommitted == Some(1))
+                })
+            }) && card_of(&shell, Some("plain"), cx)
+                .is_some_and(|card| card.read_with(cx, |c, _| !c.statuses().is_empty()))
+        },
+    );
+    settle(cx);
+
+    assert!(
+        text_of("repository-line-fix-login-app", cx)
+            .is_some_and(|line| line.starts_with("Repository app")),
+        "{:?}",
+        text_of("repository-line-fix-login-app", cx)
+    );
+    assert_eq!(
+        text_of("pull-fix-login-app", cx).as_deref(),
+        Some("Pull request #17 open")
+    );
+    assert_eq!(
+        text_of("ticket-fix-login", cx).as_deref(),
+        Some("Ticket #12 Login form submits twice")
+    );
+    cx.update(|window, _| {
+        for gone in [
+            // Nothing ahead, nothing to commit: its repository has nothing to say.
+            "repository-line-plain-app",
+            "pull-plain-app",
+            "ticket-plain",
+            "ticket-main",
+            "repository-line-main-app",
+        ] {
+            assert!(window.try_find(gone).is_none(), "{gone} has nothing to say");
+        }
+        // A line between two blocks that exist, never twice: the header, the lines, the
+        // sessions caption is not drawn without sessions, the footer.
+        assert!(window.try_find("place-fix-login-separator-2").is_some());
+        assert!(window.try_find("place-fix-login-separator-3").is_none());
+        assert!(window.try_find("sessions-caption-plain").is_none());
+    });
+    // Its lines arrived: nothing is drawn at rest.
+    assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 0);
+}
+
+#[gpui_kit::test]
+fn a_preparing_workspace_lists_its_steps_and_their_states_change_with_motion(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    let (go, then) = (user.path("go"), user.path("then"));
+    let wait = |file: &PathBuf| format!("while [ ! -e {} ]; do sleep 0.05; done\n", file.display());
+    recipe(&user, "atlas", &wait(&go));
+    // The second waits in a script of its own.
+    let second = user.path("tools/second.sh");
+    std::fs::write(&second, wait(&then)).unwrap();
+    let file = user.project_file("atlas");
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    text.push_str(&format!(
+        "\n[[recipe]]\nrun = \"sh {}\"\n",
+        second.display()
+    ));
+    std::fs::write(file, text).unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(1400.)));
+    open_project(&shell, "atlas", cx);
+    user.call(
+        "workspace.create",
+        json!({"project": "atlas", "name": "onboarding"}),
+    )
+    .unwrap();
+    let running = |cx: &mut VisualTestContext| {
+        card_of(&shell, Some("onboarding"), cx).and_then(|card| {
+            card.read_with(cx, |c, _| {
+                c.data()
+                    .steps
+                    .iter()
+                    .position(|s| s.verb == "Run" && s.state == StepState::Running)
+            })
+        })
+    };
+    until(&shell, cx, "the recipe's step runs", |cx| {
+        running(cx).is_some()
+    });
+    let at = running(cx).unwrap();
+    let total = card_of(&shell, Some("onboarding"), cx)
+        .unwrap()
+        .read_with(cx, |c, _| c.data().steps.len());
+    run_for(Duration::from_millis(1500), cx);
+
+    assert_eq!(
+        text_of("setup-onboarding", cx).as_deref(),
+        Some(format!("Setup · step {} of {total}", at + 1).as_str())
+    );
+    assert!(
+        text_of(&format!("setup-time-onboarding-{at}"), cx).is_some_and(|t| t.ends_with('s')),
+        "the time so far"
+    );
+    assert!(
+        text_of("setup-time-onboarding-0", cx).is_some_and(|t| t.ends_with('s')),
+        "a step done says how long it took"
+    );
+    assert_eq!(
+        text_of(&format!("setup-mark-onboarding-{at}"), cx).as_deref(),
+        Some("running")
+    );
+    assert!(
+        cx.update(|window, _| window.try_find("preparing-onboarding").is_none()),
+        "no progress bar"
+    );
+
+    std::fs::write(&go, "").unwrap();
+    until(&shell, cx, "the step is done", |cx| {
+        card_of(&shell, Some("onboarding"), cx).is_some_and(|card| {
+            card.read_with(cx, |c, _| c.data().steps[at].state == StepState::Done)
+        })
+    });
+    assert_eq!(
+        text_of(&format!("setup-mark-onboarding-{at}"), cx).as_deref(),
+        Some("done"),
+        "the same mark, now done"
+    );
+    // The mark swaps to its new shape over a moment, then nothing moves.
+    assert!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)) > 0,
+        "the mark moves to its new state"
+    );
+    run_for(Duration::from_secs(2), cx);
+    assert_eq!(
+        text_of(&format!("setup-mark-onboarding-{}", at + 1), cx).as_deref(),
+        Some("running")
+    );
+
+    std::fs::write(&then, "").unwrap();
+    until(&shell, cx, "the workspace is ready", |cx| {
+        card_of(&shell, Some("onboarding"), cx).is_some_and(|card| {
+            card.read_with(cx, |c, _| c.data().preparation == Preparation::Ready)
+        })
+    });
+    // Ready, its setup folds away with its line instead of vanishing.
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    assert!(
+        cx.update(|window, _| window.try_find("setup-onboarding").is_some()),
+        "the setup is still there while it folds"
+    );
+    assert!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)) > 0,
+        "the setup folds away"
+    );
+    run_for(Duration::from_secs(1), cx);
+    assert!(
+        cx.update(|window, _| window.try_find("setup-onboarding").is_none()),
+        "a ready workspace lists no setup"
+    );
+}
+
+#[gpui_kit::test]
+fn a_run_row_opens_the_run_drawer_and_escape_closes_it(cx: &mut TestAppContext) {
+    let user = user().with_fake_escalation();
+    let folder = project(&user, "atlas");
+    let say = folder.join("say.sh");
+    std::fs::write(&say, "#!/bin/sh\necho first\necho second\n").unwrap();
+    std::fs::set_permissions(&say, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    user.call(
+        "task.add",
+        json!({"project": "atlas", "name": "say", "line": "./say.sh"}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    open_project(&shell, "atlas", cx);
+    let tasks = page_of(&shell, cx).read_with(cx, |page, _| page.tasks().clone());
+    until(&shell, cx, "the task is shown", |cx| {
+        tasks.read_with(cx, |t, _| t.tasks().is_some_and(|t| !t.is_empty()))
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("run-task-say", cx));
+    until(&shell, cx, "its run ended and is listed", |cx| {
+        tasks.read_with(cx, |t, cx| {
+            t.commands()
+                .read(cx)
+                .rows()
+                .iter()
+                .any(|row| !row.running())
+        })
+    });
+    assert!(
+        last_toast(cx).is_some_and(|t| t.starts_with("say started")),
+        "{:?}",
+        last_toast(cx)
+    );
+    let run = tasks.read_with(cx, |t, cx| t.commands().read(cx).rows()[0].run.clone());
+    settle(cx);
+
+    cx.update(|window, cx| window.click(format!("command-{run}"), cx));
+    until(&shell, cx, "the drawer shows its output", |cx| {
+        tasks.read_with(cx, |t, cx| {
+            t.panel()
+                .read(cx)
+                .shown()
+                .is_some_and(|o| o.lines == ["first", "second"])
+        })
+    });
+    settle(cx);
+    cx.update(|window, _| {
+        let drawer = window.find("run-drawer-panel").bounds();
+        let viewport = window.viewport_size();
+        assert_eq!(drawer.size.width, px(520.));
+        assert!(
+            (drawer.right() - viewport.width).abs() < px(1.),
+            "against the right edge"
+        );
+        assert!(window.try_find("command-panel-scrim").is_none(), "no scrim");
+    });
+    cx.simulate_keystrokes("escape");
+    settle(cx);
+    assert!(cx.update(|window, _| window.try_find("run-drawer-panel").is_none()));
+    assert!(tasks.read_with(cx, |t, cx| t.panel().read(cx).run().is_none()));
+    // Gone, it asks for no frame: nothing is drawn at rest.
+    assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 0);
+}
+
+#[gpui_kit::test]
+fn the_new_workspace_form_labels_its_fields_and_has_no_offline(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    cx.update(|window, cx| window.click("new-workspace", cx));
+    settle(cx);
+    for (field, label) in [
+        ("new-workspace-name", "Name"),
+        ("new-workspace-ticket", "Ticket"),
+        ("new-workspace-branch", "Branch"),
+    ] {
+        assert_eq!(
+            text_of(&format!("{field}-label"), cx).as_deref(),
+            Some(label),
+            "{field}"
+        );
+    }
+    cx.update(|window, _| {
+        assert!(window.try_find("new-workspace-offline").is_none());
+    });
+}
+
+#[gpui_kit::test]
+fn remove_opens_a_confirmation_disabled_with_its_reason_when_work_would_be_lost(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    workspace(&user, "atlas", "dirty");
+    workspace(&user, "atlas", "clean");
+    let dirty = PathBuf::from(
+        user.call(
+            "workspace.show",
+            json!({"project": "atlas", "name": "dirty"}),
+        )
+        .unwrap()["folder"]
+            .as_str()
+            .unwrap(),
+    );
+    std::fs::write(dirty.join("NOTES.md"), "not committed\n").unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(1400.)));
+    open_project(&shell, "atlas", cx);
+    until(&shell, cx, "the card knows what is not committed", |cx| {
+        card_of(&shell, Some("dirty"), cx).is_some_and(|card| {
+            card.read_with(cx, |c, _| {
+                c.statuses().iter().any(|s| s.uncommitted == Some(1))
+            })
+        })
+    });
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(
+            window.try_find("remove-dirty").is_none(),
+            "no visible Remove button"
+        );
+    });
+
+    cx.update(|window, cx| window.click("workspace-menu-dirty", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("remove-workspace", cx));
+    settle(cx);
+    assert!(cx.update(|window, _| window.find("workspace-removal-dirty").visible()));
+    assert!(
+        text_of("workspace-removal-dirty-refused", cx)
+            .is_some_and(|why| why.contains("1 file is not committed in atlas")),
+        "{:?}",
+        text_of("workspace-removal-dirty-refused", cx)
+    );
+    cx.update(|window, cx| window.click("workspace-removal-dirty-action", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("workspace-removal-dirty-cancel", cx));
+    settle(cx);
+    assert_eq!(
+        user.call("workspace.list", json!({"project": "atlas"}))
+            .unwrap()["workspaces"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "nothing was removed"
+    );
+
+    cx.update(|window, cx| window.click("workspace-menu-clean", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("remove-workspace", cx));
+    settle(cx);
+    assert!(text_of("workspace-removal-clean-refused", cx).is_none());
+    cx.update(|window, cx| window.click("workspace-removal-clean-action", cx));
+    until(&shell, cx, "the card is gone", |cx| {
+        card_of(&shell, Some("clean"), cx).is_none()
+    });
+    assert!(
+        last_toast(cx).is_some_and(|t| t.starts_with("Workspace clean removed")),
+        "{:?}",
+        last_toast(cx)
+    );
 }

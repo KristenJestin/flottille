@@ -24,9 +24,9 @@ use std::time::Duration;
 use flottille_ui::color::mix;
 use flottille_ui::motion::{HOVER, Motion, PANEL};
 use flottille_ui::{
-    AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Menu, Modal, Palette, Pill,
-    PulsingLabel, Side, StateIcon, Status, Type, enter, fade, fold_frame, hoverable, icon, palette,
-    presence, presence_of, section_label, selectable, space, turning,
+    AgentState, Badge, Button, Card, Drawer, Icon, LabelledLine, ListRow, Menu, Modal, Palette,
+    Pill, PulsingLabel, Side, StateIcon, Status, Type, enter, fade, fold_frame, hoverable, icon,
+    palette, presence, presence_of, section_label, selectable, space, turning,
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{
@@ -2917,6 +2917,7 @@ impl SessionRail {
                             .update(cx, |rail, cx| rail.link_ticket(None, cx))
                             .ok();
                     })),
+                    remove: None,
                 },
                 cx,
             )
@@ -3519,13 +3520,13 @@ impl Render for SessionRail {
                     false => "Pull request".to_owned(),
                 };
                 lines.push(
-                    labelled_line(
+                    LabelledLine::new(
                         ElementId::Name(format!("rail-line-pull-{name}").into()),
                         Icon::PullRequest,
                         key,
-                        pull_hover(row, cx).into_any_element(),
-                        cx,
+                        pull.label(),
                     )
+                    .child(pull_hover(row, cx))
                     .into_any_element(),
                 );
             }
@@ -3618,13 +3619,13 @@ impl Render for SessionRail {
                 });
             let row = hoverable(row, move |d, t| d.text_color(mix(p.mute, p.text, t)));
             lines.push(
-                labelled_line(
-                    "rail-line-ticket".into(),
+                LabelledLine::new(
+                    "rail-line-ticket",
                     Icon::Ticket,
-                    "Ticket".to_owned(),
-                    row.into_any_element(),
-                    cx,
+                    "Ticket",
+                    ticket.reference.clone(),
                 )
+                .child(row)
                 .into_any_element(),
             );
         }
@@ -3773,41 +3774,6 @@ impl Render for SessionRail {
     }
 }
 
-/// A labelled line of the workspace (Pull request, Ticket): its icon and its label in a fixed
-/// column, then what it is.
-fn labelled_line(
-    id: ElementId,
-    glyph: Icon,
-    key: String,
-    value: AnyElement,
-    cx: &App,
-) -> impl IntoElement + use<> {
-    let p = palette(cx);
-    div()
-        .id(id)
-        .h(px(30.))
-        .flex()
-        .items_center()
-        .gap(space::SM)
-        .px(space::XS)
-        .text_size(px(12.5))
-        .text_color(p.mute)
-        .aria_label(SharedString::from(key.clone()))
-        .child(
-            div()
-                .w(px(104.))
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(space::SM)
-                .text_color(p.faint)
-                .child(icon(glyph).size(px(12.)).text_color(p.faint))
-                .child(SharedString::from(key)),
-        )
-        .child(div().flex_1().min_w_0().child(value))
-        .test_support()
-}
-
 /// What a workspace's "⋯" offers, wherever it is drawn: the rail's Workspace and the workspace's
 /// card on the project page build it with this, so that both say the same.
 pub struct WorkspaceActions {
@@ -3815,6 +3781,8 @@ pub struct WorkspaceActions {
     /// Shows where a ticket is typed; `None` where the workspace links none.
     pub link_ticket: Option<WorkspaceAction>,
     pub unlink_ticket: Option<WorkspaceAction>,
+    /// Asks before removing it; `None` where it is not removed from.
+    pub remove: Option<WorkspaceAction>,
 }
 
 pub type WorkspaceAction = Box<dyn Fn(&mut App)>;
@@ -3825,6 +3793,7 @@ pub fn workspace_menu(id: &str, actions: WorkspaceActions, cx: &mut Context<Menu
         open_in_editor,
         link_ticket,
         unlink_ticket,
+        remove,
     } = actions;
     let mut menu = Menu::new(
         ElementId::Name(id.to_owned().into()),
@@ -3852,6 +3821,11 @@ pub fn workspace_menu(id: &str, actions: WorkspaceActions, cx: &mut Context<Menu
             None,
             move |_, cx| unlink(cx),
         );
+    }
+    if let Some(remove) = remove {
+        menu = menu.danger("remove-workspace", "Remove workspace…", move |_, cx| {
+            remove(cx)
+        });
     }
     menu
 }

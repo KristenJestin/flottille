@@ -102,7 +102,15 @@ pub fn fold_frame(
     let outer = div().id(id.into()).aria_expanded(open).w_full().relative();
     if !running && open {
         return outer
-            .child(div().relative().child(content).child(measure))
+            .child(
+                div()
+                    .w_full()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .child(content)
+                    .child(measure),
+            )
             .test_support();
     }
     outer

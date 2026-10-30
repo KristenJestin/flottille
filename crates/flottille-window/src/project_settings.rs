@@ -319,8 +319,34 @@ enum RepositoryRow {
     Found(String),
 }
 
+/// Where the settings were opened at, from the project page: a repository's row (its chip) or
+/// the tasks ("Edit in Settings").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Reveal {
+    Repository(String),
+    Tasks,
+}
+
+impl Reveal {
+    /// The index entry of its section.
+    fn entry(&self) -> usize {
+        let key = match self {
+            Reveal::Repository(_) => "repositories",
+            Reveal::Tasks => "tasks",
+        };
+        SECTIONS
+            .iter()
+            .position(|(k, _)| *k == key)
+            .expect("a section of the page")
+    }
+}
+
 pub struct ProjectSettingsPage {
     shell: WeakEntity<Shell>,
+    /// Where it was opened at, when it was.
+    revealed: Option<Reveal>,
+    /// On its way to the section it was opened at.
+    revealing: bool,
     name: String,
     folder: String,
     /// The daemon answered once.
@@ -401,6 +427,8 @@ impl ProjectSettingsPage {
         let observed = cx.observe(&repositories, |_, _, cx| cx.notify());
         Self {
             shell,
+            revealed: None,
+            revealing: false,
             name,
             folder: String::new(),
             loaded: false,
@@ -1508,6 +1536,18 @@ impl ProjectSettingsPage {
         })
     }
 
+    /// Where it was opened at, from the project page.
+    pub fn revealed(&self) -> Option<&Reveal> {
+        self.revealed.as_ref()
+    }
+
+    /// Opened at a repository or at the tasks: their section scrolls up under the index.
+    pub fn reveal(&mut self, at: Reveal, cx: &mut Context<Self>) {
+        self.revealed = Some(at);
+        self.revealing = true;
+        cx.notify();
+    }
+
     /// The index entry of the section in sight.
     pub fn current_section(&self) -> usize {
         self.sections.current(SECTIONS.len())
@@ -1543,6 +1583,15 @@ fn shown_folder(folder: &str) -> String {
 
 impl Render for ProjectSettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Opened at a section: once what is above it is read, it scrolls up to it, and again
+        // while what is above still unfolds.
+        if self.revealing && self.has_read(cx) {
+            let entry = self.revealed.as_ref().map_or(0, Reveal::entry);
+            self.revealing = !self.sections.arrive_at(entry, cx);
+        }
+        if self.revealing {
+            window.request_animation_frame();
+        }
         let p = palette(cx);
         let pad = if self.narrow { space::LG } else { space::XXL };
         let crumb = {

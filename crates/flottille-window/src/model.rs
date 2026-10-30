@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use flottille_core::workspace::{StepState, Workspace as Record};
+use flottille_core::workspace::{Action, Step, StepState, Workspace as Record};
 use flottille_ui::AgentState;
 use serde_json::Value;
 
@@ -51,6 +51,46 @@ pub struct Workspace {
     pub bases: Vec<String>,
     pub repositories: Vec<String>,
     pub preparation: Preparation,
+    /// Each step of its preparation, in order.
+    pub steps: Vec<SetupLine>,
+}
+
+/// One step of a workspace's preparation, as its card lists it: "Run `pnpm install`".
+#[derive(Clone, Debug, PartialEq)]
+pub struct SetupLine {
+    /// Its place in the preparation: the same step keeps it while the list changes.
+    pub position: u32,
+    pub verb: String,
+    /// What it acts on, in the mono face.
+    pub object: Option<String>,
+    pub state: StepState,
+    /// Milliseconds since the Unix epoch.
+    pub started_at: Option<u64>,
+    pub ended_at: Option<u64>,
+}
+
+impl SetupLine {
+    fn of(step: &Step) -> SetupLine {
+        let place = step.repository.clone().unwrap_or_else(|| ".".into());
+        let (verb, object) = match &step.action {
+            Action::Worktree => ("Check out", Some(place)),
+            Action::Copy { globs } => ("Copy", Some(globs.join(" "))),
+            Action::Link { path } => ("Link", Some(path.clone())),
+            Action::RootEntries { .. } => ("Link the project folder's entries", None),
+            Action::Run {
+                task: Some(task), ..
+            } => ("Run task", Some(task.clone())),
+            Action::Run { line, .. } => ("Run", Some(line.clone())),
+        };
+        SetupLine {
+            position: step.position,
+            verb: verb.to_owned(),
+            object,
+            state: step.state,
+            started_at: step.started_at,
+            ended_at: step.ended_at,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -120,6 +160,16 @@ impl Workspace {
                 .map(|worktree| worktree.path.clone())
                 .collect(),
             preparation,
+            // A checkout done is not part of the setup the project declares: it leaves the list.
+            steps: record
+                .steps
+                .iter()
+                .filter(|step| {
+                    !matches!(step.action, Action::Worktree)
+                        || !matches!(step.state, StepState::Done | StepState::Skipped)
+                })
+                .map(SetupLine::of)
+                .collect(),
         }
     }
 }
@@ -731,6 +781,39 @@ mod tests {
                 output: "npm ERR! made up".into()
             }
         );
+    }
+
+    #[test]
+    fn a_workspace_lists_its_setup_steps_with_their_states_and_times() {
+        let workspace = preparation_of(json!([
+            {"position": 0, "repository": "api", "kind": "worktree", "state": "done",
+                "started_at": 1_000, "ended_at": 1_400},
+            {"position": 1, "kind": "copy", "globs": [".env", ".env.*"], "state": "done",
+                "started_at": 1_400, "ended_at": 1_500},
+            {"position": 2, "repository": "api", "kind": "run", "line": "pnpm install",
+                "time_limit": 60, "state": "running", "started_at": 1_500},
+            {"position": 3, "repository": "api", "kind": "run", "line": "pnpm build",
+                "task": "build", "time_limit": 60, "state": "pending"}]));
+        let said: Vec<_> = workspace
+            .steps
+            .iter()
+            .map(|step| (step.verb.as_str(), step.object.as_deref(), step.state))
+            .collect();
+        assert_eq!(
+            said,
+            // The checkouts, once done, are not the setup the project declares.
+            [
+                ("Copy", Some(".env .env.*"), StepState::Done),
+                ("Run", Some("pnpm install"), StepState::Running),
+                ("Run task", Some("build"), StepState::Pending),
+            ]
+        );
+        assert_eq!(
+            (workspace.steps[0].started_at, workspace.steps[0].ended_at),
+            (Some(1_400), Some(1_500))
+        );
+        assert_eq!(workspace.steps[1].ended_at, None);
+        assert_eq!(workspace.steps[2].started_at, None);
     }
 
     #[test]

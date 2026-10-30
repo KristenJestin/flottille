@@ -80,6 +80,12 @@ pub struct Step {
     /// What it was doing when it failed, and the last lines it wrote, masked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<Failure>,
+    /// When it last started and ended, in milliseconds since the Unix epoch: the window says how
+    /// long it took, or how long it has been running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<u64>,
 }
 
 /// What a step does, snapshotted from the setup when the workspace was created.
