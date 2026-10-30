@@ -1779,6 +1779,19 @@ impl Row {
         }
     }
 
+    /// The head of a thought: what its label says, then the time it took when one is shown.
+    pub fn thought_head(&self, cx: &gpui_kit::App) -> Option<String> {
+        let Block::Thought { since, until, .. } = &*self.block else {
+            return None;
+        };
+        let (label, timer) = self.thinking.as_ref()?;
+        let label = label.read(cx).text();
+        Some(match until.is_none() || timed(*since, *until) {
+            true => format!("{label} {}", timer.read(cx).time()),
+            false => label.to_owned(),
+        })
+    }
+
     /// The text a reply or a thought shows, its Markdown drawn: as of the last parse that landed.
     pub fn rendered(&self, cx: &gpui_kit::App) -> Option<String> {
         let pieces = self
@@ -1874,15 +1887,16 @@ impl Row {
         match &block {
             Block::Thought { since, until, .. } => {
                 let (since, until) = (*since, *until);
+                let ended = if timed(since, until) {
+                    "Thought for"
+                } else {
+                    "Thought"
+                };
                 match &self.thinking {
                     None => {
                         let label = cx.new(|cx| {
                             PulsingLabel::new(
-                                if until.is_none() {
-                                    "Thinking"
-                                } else {
-                                    "Thought for"
-                                },
+                                if until.is_none() { "Thinking" } else { ended },
                                 until.is_none(),
                                 cx,
                             )
@@ -1893,7 +1907,7 @@ impl Row {
                     Some((label, timer)) if until.is_some() => {
                         label.update(cx, |label, cx| {
                             label.set_active(false, cx);
-                            label.set_text("Thought for", cx);
+                            label.set_text(ended, cx);
                         });
                         timer.update(cx, |timer, cx| timer.end(until, cx));
                     }
@@ -2130,8 +2144,9 @@ impl Render for Row {
                     .test_support()
                     .into_any_element()
             }
-            Block::Thought { text, .. } => {
+            Block::Thought { text, since, until } => {
                 let (label, timer) = self.thinking.clone().expect("a thought has its timer");
+                let timed = until.is_none() || timed(*since, *until);
                 // A thought the provider sent no text of says how long it took, and opens on
                 // nothing.
                 let said = !text.trim().is_empty();
@@ -2142,7 +2157,7 @@ impl Render for Row {
                     .text_size(px(13.))
                     .text_color(p.faint)
                     .child(label)
-                    .child(timer);
+                    .children(timed.then_some(timer));
                 let turn = turning(id("thought-toggle"), self.open, window, cx);
                 let head = match said {
                     true => hoverable(
@@ -2589,6 +2604,14 @@ pub struct ThinkingTimer {
     _ticker: Option<Task<()>>,
 }
 
+/// A thought shorter than this has no measure worth showing (`0.0s`): it says no time.
+const SHORTEST_THOUGHT: u64 = 100;
+
+/// Whether a thought that ran from `since` to `until` (still running when `None`) says its time.
+fn timed(since: u64, until: Option<u64>) -> bool {
+    until.is_none_or(|until| until.saturating_sub(since) >= SHORTEST_THOUGHT)
+}
+
 /// How often a running thought's time is drawn again.
 const TICK: Duration = Duration::from_millis(100);
 
@@ -2621,14 +2644,17 @@ impl ThinkingTimer {
     pub fn is_ticking(&self) -> bool {
         self._ticker.is_some()
     }
+
+    /// The time the thought took, or has taken so far.
+    pub fn time(&self) -> String {
+        let until = self.until.unwrap_or_else(now_ms);
+        seconds(until.saturating_sub(self.since))
+    }
 }
 
 impl Render for ThinkingTimer {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let until = self.until.unwrap_or_else(now_ms);
-        div().mono(12.).child(SharedString::from(seconds(
-            until.saturating_sub(self.since),
-        )))
+        div().mono(12.).child(SharedString::from(self.time()))
     }
 }
 

@@ -199,14 +199,58 @@ fn list<'a>(value: &'a Value, key: &str) -> &'a [Value] {
     value[key].as_array().map(Vec::as_slice).unwrap_or_default()
 }
 
-/// The title a session is shown with: the first line of its first message.
+/// What a line of greeting is made of: a line of these words alone says no work.
+const GREETING: [&str; 17] = [
+    "hello",
+    "hi",
+    "hey",
+    "hiya",
+    "howdy",
+    "yo",
+    "good",
+    "morning",
+    "afternoon",
+    "evening",
+    "there",
+    "everyone",
+    "all",
+    "bonjour",
+    "salut",
+    "hola",
+    "greetings",
+];
+
+/// Whether a line says what the work is: not a greeting, not a single word.
+fn names_work(line: &str) -> bool {
+    let words: Vec<String> = line
+        .split_whitespace()
+        .map(|word| {
+            word.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
+        .filter(|word| !word.is_empty())
+        .collect();
+    words.len() > 1 && !words.iter().all(|word| GREETING.contains(&word.as_str()))
+}
+
+/// The title a session is shown with: the first line of its first message that says what the work
+/// is. A greeting or a very short message gives none (`""`).
 pub fn title_of(brief: &str) -> String {
     brief
         .lines()
         .map(str::trim)
-        .find(|line| !line.is_empty())
+        .find(|line| names_work(line))
         .unwrap_or_default()
         .to_owned()
+}
+
+/// The title of the session of root `id`, from its first message; the neutral `agent <id>` while
+/// none says what the work is.
+fn session_title(id: &str, brief: Option<&String>) -> String {
+    brief
+        .map(|brief| title_of(brief))
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| format!("agent {id}"))
 }
 
 /// A root of `agent.list` whose question waits for the user's answer, as the daemon keeps it.
@@ -287,7 +331,7 @@ impl Snapshot {
         for root in agents.iter().filter(|agent| asks_the_user(agent)) {
             let id = text(root, "id");
             let (question, at) = answers.questions.get(&id).cloned().unwrap_or_default();
-            let title = title_of(answers.briefs.get(&id).map_or("", String::as_str));
+            let title = session_title(&id, answers.briefs.get(&id));
             bell.push(BellItem {
                 key: format!("question-{id}"),
                 label: format!("Question · {title}"),
@@ -353,12 +397,7 @@ impl Snapshot {
                     None
                 };
                 Session {
-                    title: answers
-                        .briefs
-                        .get(&id)
-                        .map(|brief| title_of(brief))
-                        .filter(|title| !title.is_empty())
-                        .unwrap_or_else(|| format!("agent {id}")),
+                    title: session_title(&id, answers.briefs.get(&id)),
                     project: text(agent, "project"),
                     place: agent["workspace"].as_str().map(str::to_owned),
                     mark,
@@ -559,6 +598,43 @@ mod tests {
         assert!(said.bell.is_empty(), "the bell lists the requests only");
         let not_said = build(agents, json!({"requests": []}), &[]);
         assert_eq!(not_said.sessions[0].mark, None);
+    }
+
+    #[test]
+    fn a_greeting_or_a_very_short_message_is_no_title() {
+        for brief in [
+            "Hello",
+            "hello!",
+            "Hi there,",
+            "Hey",
+            "Good morning",
+            "ok",
+            "  \n",
+            "",
+        ] {
+            assert_eq!(title_of(brief), "", "{brief:?}");
+        }
+        assert_eq!(
+            title_of("Hello\n\nFix the login form"),
+            "Fix the login form"
+        );
+        assert_eq!(title_of("Fix the login form"), "Fix the login form");
+        assert_eq!(title_of("Hello world app"), "Hello world app");
+    }
+
+    #[test]
+    fn a_root_started_with_a_greeting_is_named_by_its_id_as_one_without_a_brief_is() {
+        let snapshot = Snapshot::build(Answers {
+            projects: &json!({"projects": []}),
+            workspaces: &json!({"workspaces": []}),
+            agents: &json!({"agents": [agent("r2", None, "idle", None)]}),
+            approvals: &json!({"requests": []}),
+            needs_user: &HashSet::new(),
+            questions: &HashMap::new(),
+            briefs: &HashMap::from([("r2".into(), "Hello".into())]),
+            commands: &json!({"commands": []}),
+        });
+        assert_eq!(snapshot.sessions[0].title, "agent r2");
     }
 
     #[test]

@@ -410,13 +410,15 @@ workspace is answered `failed`, with the step's failure.
 `{"project", "name"}`. The workspace, each repository with `changes`: `{"added", "removed",
 "capped"}`, the lines added and removed in its worktree since its base commit, whether its branch
 committed them or they are not committed yet, new files git does not ignore counted whole (a
-binary file, a link, anything but a regular file, or a file over 8 MiB counts no line). At most
+binary file, a link, anything but a regular file, or a file over 8 MiB counts no line; the files a
+setup `copy` step wrote and that are still as it copied them are not changes, and are left out). At most
 1000 new files and 16 MiB of them are read: past that the count stops and `capped` is `true`, the
 real count being higher. It writes nothing, not even git's index. `changes` is `null` when git
 cannot read the worktree (not made yet, or gone). `workspace.list` leaves it out: it runs no git.
 Each repository also has `branch`, the branch its worktree is on (`null` when on none), `ahead`,
 its commits since its base commit, and `uncommitted`, how many files `git status` shows (the links
-Flottille made and the worktrees inside it left out), each `null` when its worktree is not there.
+Flottille made, the files a setup `copy` step wrote and that are still as it copied them, and the
+worktrees inside it left out), each `null` when its worktree is not there.
 `ready_at` is when its last preparation ended, the time of its newest `workspace.ready` event
 (`docs/events.md`), kept with the workspace; `null` while it is not `ready`. `workspace.list`
 leaves it out too.

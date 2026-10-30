@@ -185,6 +185,9 @@ pub struct Conversation {
     /// The number of the last event applied: an event read twice (history, then live) is applied
     /// once.
     last_seq: u64,
+    /// When the last event applied came: a thought's summary arrives whole once the thinking is
+    /// over, so the thinking began when the event before it did.
+    last_at: Option<u64>,
     /// The agent shown, as the page names it.
     me: String,
     /// Its parent's name; `None` for the root.
@@ -222,6 +225,7 @@ impl Conversation {
         Self {
             blocks: Vec::new(),
             last_seq: 0,
+            last_at: None,
             me,
             parent,
             names: HashMap::new(),
@@ -344,6 +348,7 @@ impl Conversation {
             changes.extend(self.add_approval(number));
         }
         changes.extend(self.fold(event));
+        self.last_at = Some(event.at);
         changes
     }
 
@@ -364,9 +369,10 @@ impl Conversation {
                 }
                 _ => {
                     let mut changes = self.close(Some(event.at));
+                    let since = self.last_at.filter(|&at| at <= event.at);
                     changes.extend(self.push(Block::Thought {
                         text: text("text"),
-                        since: event.at,
+                        since: since.unwrap_or(event.at),
                         until: None,
                     }));
                     changes
@@ -1094,6 +1100,76 @@ mod tests {
     }
 
     #[test]
+    fn a_thought_that_comes_in_one_piece_began_when_the_event_before_it_did() {
+        let mut c = root();
+        c.apply(&event(
+            1,
+            "agent.prompted",
+            json!({"text": "[flottille:user]\nFix it"}),
+        ));
+        // The agent thought from 100 to 800, and its summary arrives whole at the end.
+        c.apply(&Event {
+            seq: 2,
+            at: 790,
+            name: "agent.thought".into(),
+            data: json!({"text": "A plan."}),
+        });
+        c.apply(&Event {
+            seq: 3,
+            at: 800,
+            name: "agent.message".into(),
+            data: json!({"text": "Done"}),
+        });
+        assert_eq!(
+            c.blocks()[1],
+            Block::Thought {
+                text: "A plan.".into(),
+                since: 100,
+                until: Some(800)
+            }
+        );
+    }
+
+    #[test]
+    fn a_thought_after_a_tool_call_began_when_its_result_came() {
+        let mut c = root();
+        c.apply(&event(
+            1,
+            "agent.tool_call",
+            json!({"id": "a", "title": "fs_read", "status": "in_progress"}),
+        ));
+        c.apply(&event(
+            2,
+            "agent.tool_call",
+            json!({"id": "a", "update": true, "status": "completed"}),
+        ));
+        c.apply(&Event {
+            seq: 3,
+            at: 900,
+            name: "agent.thought".into(),
+            data: json!({"text": "Hm."}),
+        });
+        c.apply(&Event {
+            seq: 4,
+            at: 950,
+            name: "agent.message".into(),
+            data: json!({"text": "Done"}),
+        });
+        assert!(
+            matches!(
+                c.blocks()[1],
+                Block::Thought {
+                    since: 200,
+                    until: Some(950),
+                    ..
+                }
+            ),
+            "{:?}",
+            c.blocks()
+        );
+    }
+
+    #[test]
     fn tool_calls_are_steps_and_launches_list_the_sub_agents_after_them() {
         let mut c = root();
         for (seq, id) in [(1, "a"), (3, "b")] {
@@ -1375,7 +1451,7 @@ mod tests {
                 Block::Approval { number: 7 },
                 Block::Thought {
                     text: "Next".into(),
-                    since: 900,
+                    since: 400,
                     until: None
                 },
             ]
