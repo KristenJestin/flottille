@@ -425,12 +425,31 @@ fn untexted(tool: &str, action: &str, args: &Value, keys: &[&str]) -> Result<(),
 /// review block is base, since it is the user's own decision; the other writes are to judge.
 fn forge(call: &Call) -> Verdict {
     let action = call.args["action"].as_str().unwrap_or_default();
+    let method = call.args.get("method").filter(|m| !m.is_null());
+    let methods = crate::forge::MERGE_METHODS;
+    let by = match method.map(Value::as_str) {
+        None => methods[0],
+        Some(_) if action != "merge" => {
+            return Verdict::Deny(format!(
+                "refused: forge {action} takes no method: method is for merge"
+            ));
+        }
+        Some(Some(method)) if methods.contains(&method) => method,
+        Some(_) => {
+            return Verdict::Deny(format!(
+                "refused: forge merge has no method {}: its methods are squash (the default), \
+                 merge and rebase",
+                method.unwrap()
+            ));
+        }
+    };
+    let merged = format!("it merges a pull request on the forge, by {by}");
     let said = match action {
         "list" | "show" => return Verdict::Allow,
         "create" => "it opens a pull request on the forge",
         "comment" => "it comments on a pull request on the forge",
         "edit" => "it changes the title or the description of a pull request on the forge",
-        "merge" => "it merges a pull request on the forge, by squash",
+        "merge" => merged.as_str(),
         "checks" => "it re-runs the failed jobs of a pipeline on the forge",
         _ => {
             return Verdict::Deny(format!(
