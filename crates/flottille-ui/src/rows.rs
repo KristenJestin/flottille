@@ -8,20 +8,22 @@ use std::f32::consts::FRAC_PI_2;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, ClickEvent, ElementId, Entity, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, RenderOnce, SharedString, StatefulInteractiveElement, Styled, TestSupportExt,
-    Transformation, Window, div, px, radians,
+    AnyElement, App, ClickEvent, Div, ElementId, Entity, FontWeight, InteractiveElement,
+    IntoElement, ParentElement, RenderOnce, SharedString, Stateful, StatefulInteractiveElement,
+    Styled, TestSupportExt, Transformation, Window, div, px, radians,
 };
 
 use crate::color::mix;
 use crate::icons::{Icon, icon};
 use crate::interact::{choose, feel, wire};
+use crate::listing::{Item, Placement};
 use crate::menu::Menu;
 use crate::motion::{Motion, PANEL};
 use crate::theme::{palette, radius};
 use crate::typography::Type;
 
 type OnClick = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
+type Decorate = Box<dyn FnOnce(Stateful<Div>) -> Stateful<Div> + 'static>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TreeLevel {
@@ -277,6 +279,10 @@ pub struct ListRow {
     meta: Option<SharedString>,
     trailing: Option<AnyElement>,
     more: Option<Entity<Menu>>,
+    below: Option<AnyElement>,
+    mono_line: bool,
+    leading_wide: bool,
+    decorate: Option<Decorate>,
     in_card: bool,
     /// Rounded at the top, at the bottom: the first and the last row of a card.
     corners: (bool, bool),
@@ -297,6 +303,10 @@ impl ListRow {
             meta: None,
             trailing: None,
             more: None,
+            below: None,
+            mono_line: false,
+            leading_wide: false,
+            decorate: None,
             in_card: false,
             corners: (false, false),
             selected: false,
@@ -332,6 +342,32 @@ impl ListRow {
     /// The state icon (or another 16 px mark) on the left.
     pub fn leading(mut self, element: impl IntoElement) -> Self {
         self.leading = Some(element.into_any_element());
+        self
+    }
+
+    /// A mark wider than 16 px on the left: a setup step's grip and number.
+    pub fn leading_wide(mut self, element: impl IntoElement) -> Self {
+        self.leading = Some(element.into_any_element());
+        self.leading_wide = true;
+        self
+    }
+
+    /// The line under the title in the mono face: a command line.
+    pub fn mono_line(mut self) -> Self {
+        self.mono_line = true;
+        self
+    }
+
+    /// Under the title and its line: labelled values (a repository's base branch, remote and
+    /// forge), a state with its mark.
+    pub fn below(mut self, element: impl IntoElement) -> Self {
+        self.below = Some(element.into_any_element());
+        self
+    }
+
+    /// What the row's own element gets besides: where a dragged row is dropped (a setup step).
+    pub fn decorate(mut self, f: impl FnOnce(Stateful<Div>) -> Stateful<Div> + 'static) -> Self {
+        self.decorate = Some(Box::new(f));
         self
     }
 
@@ -390,6 +426,8 @@ impl RenderOnce for ListRow {
                 .id(ElementId::Name(format!("{}-actions", self.id).into()))
                 .flex_none()
                 .opacity(shown)
+                // The menu's clicks are its own, not the row's (which edits it).
+                .on_click(|_, _, cx| cx.stop_propagation())
                 .child(menu)
                 .test_support()
         });
@@ -434,10 +472,10 @@ impl RenderOnce for ListRow {
         let mut row = row
             .child(
                 div()
-                    .w(px(16.))
+                    .when(!self.leading_wide, |d| d.w(px(16.)).justify_center())
                     .flex_none()
                     .flex()
-                    .justify_center()
+                    .items_center()
                     .children(self.leading),
             )
             .child({
@@ -458,11 +496,13 @@ impl RenderOnce for ListRow {
                     .when_some(self.detail, |d, detail| {
                         d.child(div().mono(11.5).text_color(p.faint).child(detail))
                     });
+                let mono_line = self.mono_line;
                 let line = self.line.map(|line| {
                     div()
                         .id(ElementId::Name(format!("{}-line", self.id).into()))
                         .aria_label(line.clone())
                         .text_size(px(12.5))
+                        .when(mono_line, |d| d.mono(12.))
                         .text_color(p.mute)
                         .overflow_hidden()
                         .whitespace_nowrap()
@@ -478,6 +518,7 @@ impl RenderOnce for ListRow {
                     .gap(px(1.))
                     .child(title)
                     .children(line)
+                    .children(self.below)
             })
             .when_some(self.meta, |d, text| {
                 d.child(
@@ -496,6 +537,9 @@ impl RenderOnce for ListRow {
         if let Some(on_click) = self.on_click {
             row = row.cursor_pointer().on_click(on_click);
         }
+        if let Some(decorate) = self.decorate {
+            row = decorate(row);
+        }
         wire(row, state, false).test_support()
     }
 }
@@ -506,7 +550,7 @@ impl RenderOnce for ListRow {
 #[derive(IntoElement)]
 pub struct ListCard {
     id: ElementId,
-    rows: Vec<ListRow>,
+    rows: Vec<(ListRow, Option<(ElementId, Placement)>)>,
 }
 
 impl ListCard {
@@ -518,12 +562,21 @@ impl ListCard {
     }
 
     pub fn row(mut self, row: ListRow) -> Self {
-        self.rows.push(row.in_card());
+        self.rows.push((row.in_card(), None));
         self
     }
 
     pub fn rows(mut self, rows: impl IntoIterator<Item = ListRow>) -> Self {
-        self.rows.extend(rows.into_iter().map(ListRow::in_card));
+        self.rows
+            .extend(rows.into_iter().map(|row| (row.in_card(), None)));
+        self
+    }
+
+    /// A row of a [`Listing`](crate::Listing): it unfolds when it arrives, folds away when it
+    /// leaves and slides when it moves, the line above it going with it. `id` is its [`Item`]'s.
+    pub fn item(mut self, id: impl Into<ElementId>, placement: Placement, row: ListRow) -> Self {
+        self.rows
+            .push((row.in_card(), Some((id.into(), placement))));
         self
     }
 }
@@ -533,12 +586,14 @@ impl RenderOnce for ListCard {
         let p = palette(cx);
         let mut children: Vec<AnyElement> = Vec::new();
         let last = self.rows.len().saturating_sub(1);
-        for (index, mut row) in self.rows.into_iter().enumerate() {
+        for (index, (mut row, item)) in self.rows.into_iter().enumerate() {
             row.corners = (index == 0, index == last);
-            if index > 0 {
-                children.push(div().flex_none().h(px(1.)).bg(p.line).into_any_element());
-            }
-            children.push(row.into_any_element());
+            let line = (index > 0).then(|| div().flex_none().h(px(1.)).bg(p.line));
+            let content = div().flex().flex_col().children(line).child(row);
+            children.push(match item {
+                Some((id, placement)) => Item::new(id, placement, content).into_any_element(),
+                None => content.into_any_element(),
+            });
         }
         div()
             .id(self.id)

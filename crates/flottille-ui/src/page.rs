@@ -207,6 +207,7 @@ pub struct Section {
     id: ElementId,
     title: SharedString,
     count: Option<SharedString>,
+    tag: Option<SharedString>,
     sentence: Option<SharedString>,
     actions: Vec<AnyElement>,
     content: Vec<AnyElement>,
@@ -219,6 +220,7 @@ impl Section {
             id: id.into(),
             title: title.into(),
             count: None,
+            tag: None,
             sentence: None,
             actions: Vec::new(),
             content: Vec::new(),
@@ -228,6 +230,13 @@ impl Section {
     /// How many it lists (or "1 running"), mono and faint after the title.
     pub fn count(mut self, count: impl Into<SharedString>) -> Self {
         self.count = Some(count.into());
+        self
+    }
+
+    /// A small bordered mono tag after the title: where a text comes from ("Flottille's
+    /// default"). It is the element `<id>-tag`.
+    pub fn tag(mut self, tag: impl Into<SharedString>) -> Self {
+        self.tag = Some(tag.into());
         self
     }
 
@@ -270,6 +279,22 @@ impl RenderOnce for Section {
             .when_some(self.count, |d, count| {
                 d.child(div().mono(11.).text_color(p.faint).child(count))
             })
+            .when_some(self.tag, |d, tag| {
+                d.child(
+                    div()
+                        .id(part(&self.id, "tag"))
+                        .aria_label(tag.clone())
+                        .mono(11.)
+                        .text_color(p.faint)
+                        .px(px(6.))
+                        .py(px(1.))
+                        .rounded(px(5.))
+                        .border_1()
+                        .border_color(p.line)
+                        .child(tag)
+                        .test_support(),
+                )
+            })
             .child(div().flex_1())
             .children(self.actions);
         let sentence = self.sentence.map(|sentence| {
@@ -293,6 +318,100 @@ impl RenderOnce for Section {
             .child(head)
             .children(sentence)
             .children(self.content)
+    }
+}
+
+type OnPick = Rc<dyn Fn(usize, &mut Window, &mut App) + 'static>;
+
+/// The index of a page made of sections (a settings page): one entry per section, the one in
+/// sight lit. A click on an entry scrolls its section into sight; the page keeps it at the top of
+/// its column while the column scrolls past it. The lit entry's fill and ink move over `PANEL`,
+/// each entry fades its hover.
+#[derive(IntoElement)]
+pub struct PageIndex {
+    id: ElementId,
+    entries: Vec<(SharedString, SharedString)>,
+    current: usize,
+    on_pick: Option<OnPick>,
+}
+
+impl PageIndex {
+    /// The index `id`, each entry `<id>-<key>`.
+    pub fn new(
+        id: impl Into<ElementId>,
+        entries: impl IntoIterator<Item = (impl Into<SharedString>, impl Into<SharedString>)>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            entries: entries
+                .into_iter()
+                .map(|(key, label)| (key.into(), label.into()))
+                .collect(),
+            current: 0,
+            on_pick: None,
+        }
+    }
+
+    /// The entry of the section in sight.
+    pub fn current(mut self, index: usize) -> Self {
+        self.current = index;
+        self
+    }
+
+    pub fn on_pick(mut self, f: impl Fn(usize, &mut Window, &mut App) + 'static) -> Self {
+        self.on_pick = Some(Rc::new(f));
+        self
+    }
+}
+
+impl RenderOnce for PageIndex {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let p = palette(cx);
+        let id = self.id.clone();
+        let entries = self
+            .entries
+            .into_iter()
+            .enumerate()
+            .map(|(index, (key, label))| {
+                let entry_id = ElementId::Name(format!("{id}-{key}").into());
+                let on_pick = self.on_pick.clone();
+                let entry = div()
+                    .id(entry_id)
+                    .aria_label(label.clone())
+                    .h(px(28.))
+                    .px(px(10.))
+                    .rounded(px(7.))
+                    .flex()
+                    .items_center()
+                    .text_size(px(12.5))
+                    .cursor_pointer()
+                    .child(label)
+                    .on_click(move |_, window, cx| {
+                        if let Some(on_pick) = &on_pick {
+                            on_pick(index, window, cx);
+                        }
+                    });
+                crate::interact::selectable(entry, index == self.current, move |d, hover, lit| {
+                    d.bg(crate::color::mix(p.hover.opacity(hover), p.sel, lit))
+                        .text_color(crate::color::mix(
+                            crate::color::mix(p.faint, p.text, hover),
+                            p.text,
+                            lit,
+                        ))
+                })
+            });
+        div()
+            .id(self.id)
+            .flex()
+            .items_center()
+            .gap(px(2.))
+            .py(px(8.))
+            .bg(p.bg)
+            .border_b_1()
+            .border_color(p.line)
+            .ui_text()
+            .children(entries)
+            .test_support()
     }
 }
 

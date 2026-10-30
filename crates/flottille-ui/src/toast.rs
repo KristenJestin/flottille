@@ -69,6 +69,22 @@ impl Toast {
         self.detail = Some(detail.into());
         self
     }
+
+    pub fn kind(&self) -> ToastKind {
+        self.kind
+    }
+
+    pub fn is_failure(&self) -> bool {
+        self.kind == ToastKind::Failure
+    }
+
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    pub fn second_line(&self) -> Option<&str> {
+        self.detail.as_deref()
+    }
 }
 
 /// The stack the shell owns, reached by [`toast`].

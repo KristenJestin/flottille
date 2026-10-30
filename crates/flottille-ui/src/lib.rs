@@ -47,7 +47,7 @@ pub use listing::{Item, Listing, Placement};
 pub use menu::Menu;
 pub use modal::Modal;
 pub use omarchy::Environment;
-pub use page::{EmptyLine, PageHeader, Section};
+pub use page::{EmptyLine, PageHeader, PageIndex, Section};
 pub use radio::RadioChoices;
 pub use reveal::{
     Fold, Presence, PresenceOf, PulsingLabel, enter, fold_frame, presence, presence_of,

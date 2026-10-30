@@ -3,7 +3,7 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::{SharedString, Styled, Svg, px, svg};
 
-gpui_kit::assets::icon_assets!(pub Icons, [Folder, GitBranch, Book, ChevronDown, Plus, Search, Bell, ExternalLink, Network, Menu, ArrowUp, ChevronsUpDown, Settings, Ellipsis, CircleStop, Terminal, ChevronUp, TriangleAlert, Check, X, File, FileText, Slash, Play, GitPullRequest, Ticket]);
+gpui_kit::assets::icon_assets!(pub Icons, [Folder, GitBranch, Book, ChevronDown, Plus, Search, Bell, ExternalLink, Network, Menu, ArrowUp, ChevronsUpDown, Settings, Ellipsis, CircleStop, Terminal, ChevronUp, TriangleAlert, Check, X, File, FileText, Slash, Play, GitPullRequest, Ticket, GripVertical]);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
@@ -49,10 +49,12 @@ pub enum Icon {
     PullRequest,
     /// A ticket of the tracker.
     Ticket,
+    /// Drag to move.
+    Grip,
 }
 
 impl Icon {
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 27] = [
         Self::Folder,
         Self::Branch,
         Self::Repository,
@@ -79,6 +81,7 @@ impl Icon {
         Self::Play,
         Self::PullRequest,
         Self::Ticket,
+        Self::Grip,
     ];
 
     pub fn path(self) -> SharedString {
@@ -109,6 +112,7 @@ impl Icon {
             Self::Play => IconName::Play,
             Self::PullRequest => IconName::GitPullRequest,
             Self::Ticket => IconName::Ticket,
+            Self::Grip => IconName::GripVertical,
         }
         .path()
     }
