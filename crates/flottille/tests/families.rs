@@ -7,7 +7,8 @@
 
 mod common;
 
-use std::path::PathBuf;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use common::User;
@@ -1556,6 +1557,75 @@ fn workspace_remove_on_a_workspace_with_an_unpushed_commit_names_it_and_is_refus
     assert!(done.contains("discarded"), "{done}");
     assert!(!workspace_exists(&user, "login"));
     assert!(!folder.exists());
+}
+
+/// This user with a `git` first in its `PATH` that, before the `look`th `git status` of the
+/// workspace `login`, writes an uncommitted file in it: work that appears while a removal is
+/// under way. Everything else is the real `git`.
+fn with_work_appearing_before_the_look(user: User, look: u32) -> User {
+    let real = std::env::var("PATH")
+        .unwrap()
+        .split(':')
+        .map(|folder| Path::new(folder).join("git"))
+        .find(|candidate| candidate.is_file())
+        .unwrap();
+    let folder = user.path("data/flottille/workspaces/app/login");
+    let bin = user.path("late-git-bin");
+    std::fs::create_dir(&bin).unwrap();
+    let counter = user.path("looks");
+    let program = bin.join("git");
+    std::fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\ncase \"$*\" in *'-C {folder} '*' status '*)\n  n=$(cat '{counter}' 2>/dev/null || echo 0)\n  n=$((n + 1))\n  echo $n > '{counter}'\n  [ \"$n\" = {look} ] && echo late > '{folder}/late.txt'\n  ;;\nesac\nexec '{real}' \"$@\"\n",
+            folder = folder.display(),
+            counter = counter.display(),
+            real = real.display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    user.with_env("PATH", &path)
+}
+
+#[test]
+fn work_appearing_after_the_user_s_answer_is_checked_is_not_discarded_by_the_removal() {
+    // The work appears just before the fifth look at the workspace, the removal's own: the four
+    // before are the card's and the answer's checks of it.
+    let user = with_work_appearing_before_the_look(user(), 5);
+    on_github(&user);
+    let folder = workspace_folder(&user);
+    std::fs::write(folder.join("login.ts"), "login\n").unwrap();
+    user.git(&folder, &["add", "."]);
+    user.git(&folder, &["commit", "--quiet", "-m", "add the login"]);
+    let (_, mcp) = root_in(&user, None);
+    let number = held(&mcp.call("workspace", json!({"action": "remove", "name": "login"})));
+
+    let approved = user.run(&["approve", &number.to_string(), "--discard"]);
+    assert!(
+        approved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&approved.stderr)
+    );
+    let id = format!("approval-{number}");
+    eventually("the answer", || {
+        store(&user).delivery(&id).unwrap().is_some()
+    });
+    let answer = store(&user).delivery(&id).unwrap().unwrap().body;
+
+    assert!(answer.contains("was not executed"), "{answer}");
+    assert!(
+        answer.contains("late.txt holds work that is not committed"),
+        "{answer}"
+    );
+    assert!(
+        answer.contains("is not what the user answered to discard"),
+        "{answer}"
+    );
+    assert!(workspace_exists(&user, "login"));
+    assert!(folder.join("late.txt").exists());
+    assert!(folder.join("login.ts").exists());
 }
 
 #[test]

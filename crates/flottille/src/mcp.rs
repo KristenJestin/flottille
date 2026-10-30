@@ -1520,7 +1520,8 @@ fn pushed(place: &Place, folder: Option<&Resolved>) -> bool {
 }
 
 /// Performs a call the user allowed, of its class, recorded as the agent's: the request's answer.
-/// `discard`, a workspace's removal the user said to make even with what would be lost.
+/// `discarding`, the losses of a workspace's removal the user said to make even with what would
+/// be lost.
 pub async fn performed(
     daemon: &Arc<Daemon>,
     grant: &Arc<Grant>,
@@ -1528,14 +1529,14 @@ pub async fn performed(
     args: Value,
     request: u64,
     class: gate::Class,
-    discard: bool,
+    discarding: Option<Vec<String>>,
 ) -> Outcome {
     let started = Instant::now();
     let recorded = record_of(&args, &grant.place);
     let cancelled = CancellationToken::new();
-    let outcome = match discard {
-        true => crate::actions::remove_discarding(daemon, grant, args).await,
-        false => perform(daemon, grant, tool, args, cancelled, Some(class)).await,
+    let outcome = match discarding {
+        Some(losses) => crate::actions::remove_discarding(daemon, grant, args, &losses).await,
+        None => perform(daemon, grant, tool, args, cancelled, Some(class)).await,
     };
     let verdict = Some("allow");
     record(

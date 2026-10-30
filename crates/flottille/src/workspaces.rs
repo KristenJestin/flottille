@@ -1337,18 +1337,18 @@ pub fn resume_at_start(daemon: &Arc<Daemon>) {
 // Removal.
 
 async fn remove(daemon: Arc<Daemon>, asked: WorkspaceName) -> Answer {
-    removed(daemon, asked, false).await
+    removed(daemon, asked, None).await
 }
 
-/// Removes the workspace; with `discard`, the user's answer to an agent's request, even what
-/// would be lost.
-async fn removed(daemon: Arc<Daemon>, asked: WorkspaceName, discard: bool) -> Answer {
+/// Removes the workspace; with `approved`, the losses the user's answer to an agent's request
+/// said to discard, even what would be lost: as long as it is exactly what it finds.
+async fn removed(daemon: Arc<Daemon>, asked: WorkspaceName, approved: Option<&[String]>) -> Answer {
     let workspace = find(&daemon, &asked)?;
     // Held for the whole removal, so that no preparation starts meanwhile.
     if !daemon.preparing.lock().unwrap().insert(workspace.id) {
         return Err(being_prepared(&workspace));
     }
-    let removed = remove_held(&daemon, &workspace, discard).await;
+    let removed = remove_held(&daemon, &workspace, approved).await;
     daemon.preparing.lock().unwrap().remove(&workspace.id);
     removed
 }
@@ -1492,18 +1492,33 @@ async fn checked(workspace: &Workspace) -> Result<Checked<'_>, Failure> {
     })
 }
 
-async fn remove_held(daemon: &Daemon, workspace: &Workspace, discard: bool) -> Answer {
+async fn remove_held(
+    daemon: &Daemon,
+    workspace: &Workspace,
+    approved: Option<&[String]>,
+) -> Answer {
     let Checked {
         made,
         problems,
         ours,
     } = checked(workspace).await?;
-    if !problems.is_empty() && !discard {
+    // The user discards what they were shown, not what appeared since.
+    let (allowed, changed) = match approved {
+        None => (problems.is_empty(), ""),
+        Some(approved) => (
+            approved == problems,
+            "what would be lost is not what the user answered to discard, it is now: ",
+        ),
+    };
+    if !allowed {
         return Err(Failure::refused(format!(
-            "workspace {} of project {} is not removed, nothing was touched: {}",
+            "workspace {} of project {} is not removed, nothing was touched: {changed}{}",
             workspace.name,
             workspace.project,
-            problems.join("; ")
+            match problems.is_empty() {
+                true => "nothing".to_owned(),
+                false => problems.join("; "),
+            }
         )));
     }
 
@@ -1519,7 +1534,11 @@ async fn remove_held(daemon: &Daemon, workspace: &Workspace, discard: bool) -> A
         let main = main_checkout(&workspace.project_folder, &worktree.path);
         let dir = workspace.folder_of(&worktree.path);
         let dir = dir.to_string_lossy();
-        let force: &[&str] = if discard { &["--force"] } else { &[] };
+        let force: &[&str] = if approved.is_some() {
+            &["--force"]
+        } else {
+            &[]
+        };
         let line = [
             &["worktree", "remove"][..],
             force,
@@ -1606,15 +1625,15 @@ pub fn removed_named(
 }
 
 /// `workspace` `remove`, once the user allowed it: the workspace named removed as
-/// `workspace.remove` removes it, even what would be lost when the user's answer said to
-/// `discard` it, then the branches of it that hold no commit of their own deleted from their
+/// `workspace.remove` removes it, even what would be lost when the user's answer said to discard
+/// it and `approved` is exactly what would be lost (the losses the answer covered), then the branches of it that hold no commit of their own deleted from their
 /// repositories (`docs/commands.md`).
 pub async fn workspace_remove(
     daemon: &Arc<Daemon>,
     agent: &str,
     place: &Place,
     named: Option<&str>,
-    discard: bool,
+    approved: Option<&[String]>,
 ) -> Outcome {
     let name = match removed_named(daemon, place, named) {
         Ok(name) => name,
@@ -1641,7 +1660,7 @@ pub async fn workspace_remove(
             used.join("; ")
         ));
     }
-    if let Err(failure) = removed(daemon.clone(), asked, discard).await {
+    if let Err(failure) = removed(daemon.clone(), asked, approved).await {
         return match failure.code {
             // What would be lost, which the user's answer did not say to discard.
             "refused"
@@ -1673,7 +1692,7 @@ pub async fn workspace_remove(
         "Workspace {} of project {} is removed: its worktrees and its folder are gone.",
         workspace.name, workspace.project
     );
-    if discard {
+    if approved.is_some() {
         said.push_str(" The user said to discard what would be lost: it was discarded.");
     }
     if !deleted.is_empty() {

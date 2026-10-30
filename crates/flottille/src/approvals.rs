@@ -307,6 +307,19 @@ async fn performed(
             }
         }
     }
+    // The losses the user discards are the ones they read, up to the removal itself.
+    let discarding = match discard {
+        true => match actions::approved_losses(daemon, &grant, &request.arguments, &request.says)
+            .await
+        {
+            Ok(losses) => Some(losses),
+            Err(Outcome::Refused(why) | Outcome::Failed(why) | Outcome::Held(why)) => {
+                return not_executed(mcp::masked(&why, &grant.place));
+            }
+            Err(Outcome::Done(_)) => None,
+        },
+        false => None,
+    };
     let class = if request.base {
         gate::Class::Base
     } else {
@@ -319,7 +332,7 @@ async fn performed(
         request.arguments.clone(),
         number,
         class,
-        discard,
+        discarding,
     )
     .await;
     let approved = "was approved by the user";

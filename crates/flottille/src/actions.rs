@@ -310,6 +310,19 @@ pub async fn prepared(
     }
 }
 
+/// The workspace a removal names and what removing it would lose.
+async fn removal_losses(
+    daemon: &Daemon,
+    grant: &Grant,
+    call: &WorkspaceCall,
+) -> Result<(String, Vec<String>), Outcome> {
+    let name = crate::workspaces::removed_named(daemon, &grant.place, call.name.as_deref())?;
+    let losses = crate::workspaces::losses(daemon, &grant.place.project, &name)
+        .await
+        .map_err(refusal)?;
+    Ok((name, losses))
+}
+
 /// What removing a workspace does, in words: what would be lost, which the user's answer says to
 /// discard or not, or that nothing would be.
 async fn removal_says(
@@ -317,10 +330,11 @@ async fn removal_says(
     grant: &Grant,
     call: &WorkspaceCall,
 ) -> Result<Vec<String>, Outcome> {
-    let name = crate::workspaces::removed_named(daemon, &grant.place, call.name.as_deref())?;
-    let losses = crate::workspaces::losses(daemon, &grant.place.project, &name)
-        .await
-        .map_err(refusal)?;
+    let (name, losses) = removal_losses(daemon, grant, call).await?;
+    Ok(removal_words(&name, losses))
+}
+
+fn removal_words(name: &str, losses: Vec<String>) -> Vec<String> {
     let mut says = vec![format!(
         "Remove the workspace {name}: its worktrees and its folder, and its branch in each \
          repository where it holds no commit of its own"
@@ -335,7 +349,31 @@ async fn removal_says(
         );
         says.extend(losses);
     }
-    Ok(says)
+    says
+}
+
+/// The losses the user's answer to discard covers: what removing the workspace loses now, once
+/// that is what the `card` the user read said. The removal is done only while it still finds
+/// these.
+pub async fn approved_losses(
+    daemon: &Daemon,
+    grant: &Grant,
+    args: &Value,
+    card: &[String],
+) -> Result<Vec<String>, Outcome> {
+    let call: WorkspaceCall = arguments("workspace", args.clone())?;
+    let (name, losses) = removal_losses(daemon, grant, &call).await?;
+    let says: Vec<String> = removal_words(&name, losses.clone())
+        .iter()
+        .map(|said| crate::mcp::masked(said, &grant.place))
+        .collect();
+    match says == card {
+        true => Ok(losses),
+        false => Err(Outcome::Refused(format!(
+            "what it does changed since the user allowed it; it would now: {}",
+            says.join("; ")
+        ))),
+    }
 }
 
 /// What a write of `forge` or `tickets` posts, whole: the user reads on the card what the forge
@@ -880,9 +918,14 @@ fn command_of(call: &CommandsCall) -> Result<(String, Command), Outcome> {
     Ok((name, command))
 }
 
-/// Performs a call the gate let through: on the agent's own project, always.
-/// `workspace` `remove` allowed by the user with the answer to discard what would be lost.
-pub async fn remove_discarding(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcome {
+/// `workspace` `remove` allowed by the user with the answer to discard what would be lost, which
+/// is `approved`: the removal is refused if it finds anything else.
+pub async fn remove_discarding(
+    daemon: &Arc<Daemon>,
+    grant: &Grant,
+    args: Value,
+    approved: &[String],
+) -> Outcome {
     let call: WorkspaceCall = match arguments("workspace", args) {
         Ok(call) => call,
         Err(refused) => return refused,
@@ -892,11 +935,12 @@ pub async fn remove_discarding(daemon: &Arc<Daemon>, grant: &Grant, args: Value)
         &grant.agent,
         &grant.place,
         call.name.as_deref(),
-        true,
+        Some(approved),
     )
     .await
 }
 
+/// Performs a call the gate let through: on the agent's own project, always.
 pub async fn perform(daemon: &Arc<Daemon>, grant: &Grant, tool: &str, args: Value) -> Outcome {
     match performed(daemon, grant, tool, args).await {
         Ok(text) => Outcome::Done(text),
@@ -1160,7 +1204,7 @@ async fn performed(
                         &grant.agent,
                         &grant.place,
                         call.name.as_deref(),
-                        false,
+                        None,
                     )
                     .await;
                     match removed {

@@ -737,7 +737,8 @@ depend on it`.
 
 **The user answers** a request they hold: allow it once, or deny it. A workspace's removal is
 also allowed with the answer to discard what would be lost (`flottille approve <n> --discard`),
-refused for any other request. Nothing they answer allows
+refused for any other request. That answer covers exactly what the card listed: work that appeared
+since is not discarded, the removal is refused and the agent calls again for a new card. Nothing they answer allows
 a later call: the next one goes through the gate again. A request held by an agent is not listed
 for the user and cannot be answered by them.
 
