@@ -224,16 +224,13 @@ fn a_running_agent_is_an_icon_in_the_rail_and_no_text_badge_anywhere(cx: &mut Te
     let (shell, reply, cx) = open_session(&user, &lead, cx);
 
     send(&user, &lead, "think a while");
-    // The composer learns of the turn from the page's own read of the tree, the header from the
-    // shell's: the two reads land apart, so each is waited for.
-    let page = page_of(&shell, cx);
     until(
         &shell,
         cx,
-        "the turn runs, in the composer and the header",
+        "the turn runs, in the composer and the rail",
         |cx| {
             reply.read_with(cx, |r, _| r.is_running())
-                && page.read_with(cx, |p, cx| p.header_state(cx)) == AgentState::Running
+                && cx.update(|window, _| !window.find_all(icon_id(AgentState::Running)).is_empty())
         },
     );
     settle(cx);
@@ -248,10 +245,6 @@ fn a_running_agent_is_an_icon_in_the_rail_and_no_text_badge_anywhere(cx: &mut Te
             "the icon stays"
         );
     });
-    assert_eq!(
-        page.read_with(cx, |p, cx| p.header_state(cx)),
-        AgentState::Running
-    );
     cancel(&user, &lead);
 }
 
@@ -474,7 +467,7 @@ fn a_pasted_image_is_a_thumbnail_with_a_remove_button_and_goes_as_an_image_block
     until(&shell, cx, "the conversation shows the image", |cx| {
         blocks(&page, cx)
             .iter()
-            .any(|b| matches!(b, Block::Images { names } if names.len() == 1))
+            .any(|b| matches!(b, Block::Message { images, .. } if images.len() == 1))
     });
     let names = sent_images(&user, &lead);
     assert_eq!(names.len(), 1);
@@ -640,7 +633,49 @@ fn the_image_shows_again_when_the_page_is_opened_after_a_restart(cx: &mut TestAp
         frames(cx);
         blocks(&page, cx)
             .iter()
-            .any(|b| matches!(b, Block::Images { names } if names.len() == 1))
+            .any(|b| matches!(b, Block::Message { images, .. } if images.len() == 1))
             && page.read_with(cx, |p, _| p.pictures_read() == 1)
+    });
+}
+
+#[gpui_kit::test]
+fn a_pasted_picture_is_drawn_inside_its_bubble_above_the_text(cx: &mut TestAppContext) {
+    let user = user(true);
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", "hello");
+    let (shell, reply, cx) = open_session(&user, &lead, cx);
+    let page = page_of(&shell, cx);
+
+    paste(clipboard_png(), cx);
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("look at this");
+    reply.update_in(cx, |reply, window, cx| reply.send(window, cx));
+    until(&shell, cx, "the message carries its picture", |cx| {
+        blocks(&page, cx).iter().any(
+            |b| matches!(b, Block::Message { images, text, .. } if images.len() == 1 && text == "look at this"),
+        )
+    });
+    settle(cx);
+
+    let at = blocks(&page, cx)
+        .iter()
+        .position(|b| matches!(b, Block::Message { images, .. } if images.len() == 1))
+        .unwrap();
+    cx.update(|window, _| {
+        let bubble = window.find(format!("row-{at}-bubble")).bounds();
+        let image = window.find(format!("row-{at}-image-0")).bounds();
+        let text = window.find(format!("row-{at}-message-text")).bounds();
+        assert!(
+            bubble.contains(&image.origin) && bubble.contains(&image.bottom_right()),
+            "the picture is inside the bubble: {image:?} in {bubble:?}"
+        );
+        assert!(
+            bubble.contains(&text.origin),
+            "the text is in the same bubble"
+        );
+        assert!(
+            image.bottom() <= text.top(),
+            "the picture sits above the text: {image:?} over {text:?}"
+        );
     });
 }

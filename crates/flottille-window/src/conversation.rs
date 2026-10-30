@@ -22,9 +22,18 @@ pub const JUDGE: &str = "the judge";
 #[derive(Clone, Debug, PartialEq)]
 pub enum Block {
     /// A message the agent was sent: the user's (`from` is [`USER`]), or its parent's
-    /// (`the conversation → web-form`), its brief first.
+    /// (`the conversation → web-form`), its brief first. `images` are the pictures that went with
+    /// it, names the daemon gives back as pictures: its bubble draws them above its text.
     Message {
         from: String,
+        text: String,
+        images: Vec<String>,
+    },
+    /// A message between two sessions (`session_send`): one `peer` wrote to this agent, or one
+    /// this agent `sent` to `peer`. An agent's words, never the user's.
+    Relayed {
+        peer: String,
+        sent: bool,
         text: String,
     },
     /// Its reasoning: running while `until` is `None`.
@@ -36,10 +45,6 @@ pub enum Block {
     /// What it said.
     Text {
         text: String,
-    },
-    /// The images that went with the message before it: names the daemon gives back as pictures.
-    Images {
-        names: Vec<String>,
     },
     /// Its tool calls, one after the other.
     Steps {
@@ -212,6 +217,9 @@ pub struct Conversation {
     pending_approvals: VecDeque<(u64, u64)>,
     /// The calls the Auto judge let through, by their id.
     judged: HashSet<String>,
+    /// The text of each `session_send` call, by its id, then, once held, by its request.
+    sends: HashMap<String, String>,
+    held_sends: HashMap<u64, String>,
     /// The commands whose end was told by a line, for a delivery pinned and then sent to say it
     /// once.
     ended_lines: HashSet<String>,
@@ -237,6 +245,8 @@ impl Conversation {
             approvals: HashSet::new(),
             pending_approvals: VecDeque::new(),
             judged: HashSet::new(),
+            sends: HashMap::new(),
+            held_sends: HashMap::new(),
             ended_lines: HashSet::new(),
             open_text: None,
         }
@@ -408,6 +418,11 @@ impl Conversation {
                 if name == "fs_edit" && !data["raw_input"].is_null() {
                     self.edits.insert(text("id"), data["raw_input"].clone());
                 }
+                if name == "session_send"
+                    && let Some(said) = data["raw_input"]["text"].as_str()
+                {
+                    self.sends.insert(text("id"), said.to_owned());
+                }
                 let call = Call {
                     id: text("id"),
                     name,
@@ -454,7 +469,19 @@ impl Conversation {
                     changes.extend(self.deliver(&kind, body));
                 }
                 if !names.is_empty() {
-                    changes.extend(self.push(Block::Images { names }));
+                    // The pictures go inside the bubble of the user's message they came with.
+                    match self.blocks.last_mut() {
+                        Some(Block::Message { from, images, .. })
+                            if from == USER && images.is_empty() && !changes.is_empty() =>
+                        {
+                            *images = names;
+                        }
+                        _ => changes.extend(self.push(Block::Message {
+                            from: USER.into(),
+                            text: String::new(),
+                            images: names,
+                        })),
+                    }
                 }
                 changes
             }
@@ -559,6 +586,11 @@ impl Conversation {
         if let Some(title) = data["title"].as_str() {
             call.name = title.strip_prefix(PREFIX).unwrap_or(title).to_owned();
         }
+        if call.name == "session_send"
+            && let Some(said) = data["raw_input"]["text"].as_str()
+        {
+            self.sends.insert(call.id.clone(), said.to_owned());
+        }
         if !data["raw_input"].is_null() {
             call.args = shown_args(&data["raw_input"]);
             if call.name == "fs_edit" {
@@ -604,6 +636,24 @@ impl Conversation {
                 changes.extend(self.push(Block::Command(card)));
             }
         }
+        // A message to another session: shown once it was sent, which a held one is only once
+        // the user allowed it.
+        if ended
+            && call.name == "session_send"
+            && let Some(said) = self.sends.remove(&call.id)
+        {
+            let mut texts = Vec::new();
+            strings(&data["raw_output"], &mut texts);
+            if let Some(peer) = texts.iter().find_map(|text| sent_to(text)) {
+                changes.extend(self.push(Block::Relayed {
+                    peer,
+                    sent: true,
+                    text: said,
+                }));
+            } else if let Some(number) = texts.iter().find_map(|text| held_request(text)) {
+                self.held_sends.insert(number, said);
+            }
+        }
         // A report, or the end of a command, delivered as a note on the result.
         for (kind, body) in notes(&data["raw_output"]) {
             if matches!(kind.as_str(), "child-report" | "command-ended") {
@@ -623,6 +673,15 @@ impl Conversation {
                 }
             }
             "approval" => {
+                if let Some((number, peer)) = sent_after_approval(&body)
+                    && let Some(said) = self.held_sends.remove(&number)
+                {
+                    return self.push(Block::Relayed {
+                        peer,
+                        sent: true,
+                        text: said,
+                    });
+                }
                 let (block, answered) = approved(&body);
                 let mut changes = Vec::new();
                 if let Some(number) = answered {
@@ -709,7 +768,23 @@ impl Conversation {
             ("" | "user" | "brief", None) => Block::Message {
                 from: USER.into(),
                 text: body,
+                images: Vec::new(),
             },
+            // Another session wrote to this one: that agent's words, never the user's.
+            ("session", _) => {
+                let said = body.split_once('\n').and_then(|(first, rest)| {
+                    Some((
+                        first.strip_suffix(SESSION_WROTE)?,
+                        rest.trim_start_matches('\n'),
+                    ))
+                });
+                let (who, text) = said.unwrap_or(("an agent", &body));
+                Block::Relayed {
+                    peer: peer_name(who),
+                    sent: false,
+                    text: text.to_owned(),
+                }
+            }
             // A session an agent started for the user: that agent's words, never the user's.
             ("launched", _) => {
                 let said = body.split_once('\n').and_then(|(first, rest)| {
@@ -719,11 +794,13 @@ impl Conversation {
                 Block::Message {
                     from: format!("started by {who}"),
                     text: text.to_owned(),
+                    images: Vec::new(),
                 }
             }
             ("brief" | "parent", Some(parent)) => Block::Message {
                 from: format!("{parent} → {}", self.me),
                 text: body,
+                images: Vec::new(),
             },
             ("child-report", _) => Block::Report {
                 from: self.child_named_in(&body),
@@ -745,6 +822,44 @@ impl Conversation {
             .next()
             .unwrap_or_else(|| "a sub-agent".into())
     }
+}
+
+/// What follows the sender's name on the first line of a `session` delivery (the daemon's
+/// `tree::SESSION_WROTE`).
+const SESSION_WROTE: &str = " wrote to this session:";
+
+/// An agent as the daemon names it to another (`"Docs" (agent 0123…)`, or `agent 0123…`), as the
+/// conversation says it: its title, else its id.
+fn peer_name(named: &str) -> String {
+    named
+        .strip_prefix('"')
+        .and_then(|rest| rest.split_once("\" (agent "))
+        .map(|(title, _)| title.to_owned())
+        .unwrap_or_else(|| named.to_owned())
+}
+
+/// The session a `session_send` result says the message went to (`Sent to <named>: …`).
+fn sent_to(text: &str) -> Option<String> {
+    let rest = text.trim().strip_prefix("Sent to ")?;
+    let (named, _) = rest.split_once(": it reaches")?;
+    Some(peer_name(named))
+}
+
+/// The request a held call's answer names (`… request #4 …`).
+fn held_request(text: &str) -> Option<u64> {
+    let (_, rest) = text.split_once("request #")?;
+    rest.split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// A `session_send` the user allowed and the daemon performed: its request and where it went.
+fn sent_after_approval(body: &str) -> Option<(u64, String)> {
+    let rest = body.strip_prefix("Request #")?;
+    let (number, rest) = rest.split_once(" (session_send) ")?;
+    let (_, result) = rest.split_once("has now done it. Its result:\n\n")?;
+    Some((number.parse().ok()?, sent_to(result)?))
 }
 
 /// The card of a command's answer (`runs.rs`: `run <id>: <line> <how it is> after <s> s`, then
@@ -1066,7 +1181,8 @@ mod tests {
             [
                 Block::Message {
                     from: "you".into(),
-                    text: "Fix it".into()
+                    text: "Fix it".into(),
+                    images: Vec::new()
                 },
                 Block::Text {
                     text: "On it.".into()
@@ -1211,11 +1327,13 @@ mod tests {
             [
                 Block::Message {
                     from: "lead → web-form".into(),
-                    text: "Fix the timer".into()
+                    text: "Fix the timer".into(),
+                    images: Vec::new()
                 },
                 Block::Message {
                     from: "lead → web-form".into(),
-                    text: "Also the docs".into()
+                    text: "Also the docs".into(),
+                    images: Vec::new()
                 }
             ]
         );
@@ -1234,7 +1352,8 @@ mod tests {
             c.blocks(),
             [Block::Message {
                 from: "started by agent 0123456789ab".into(),
-                text: "Fix the timer".into()
+                text: "Fix the timer".into(),
+                images: Vec::new()
             }]
         );
     }
@@ -1353,7 +1472,7 @@ mod tests {
     }
 
     #[test]
-    fn a_picture_sent_alone_is_its_thumbnails_and_no_empty_bubble() {
+    fn a_picture_sent_alone_is_a_message_of_its_thumbnails_and_no_words() {
         let mut c = Conversation::new("lead".into(), None);
         c.apply(&event(
             1,
@@ -1362,17 +1481,105 @@ mod tests {
         ));
         assert_eq!(
             c.blocks(),
-            [Block::Images {
-                names: vec!["a-0.png".into()]
+            [Block::Message {
+                from: USER.into(),
+                text: String::new(),
+                images: vec!["a-0.png".into()]
             }]
         );
+    }
+
+    #[test]
+    fn a_picture_sent_with_a_message_is_inside_its_block() {
+        let mut c = Conversation::new("lead".into(), None);
         c.apply(&event(
-            2,
+            1,
             "agent.prompted",
             json!({"text": "[flottille:user]\nlook", "images": ["b-0.png"]}),
         ));
-        assert!(matches!(&c.blocks()[1], Block::Message { text, .. } if text == "look"));
-        assert!(matches!(&c.blocks()[2], Block::Images { .. }));
+        assert_eq!(
+            c.blocks(),
+            [Block::Message {
+                from: USER.into(),
+                text: "look".into(),
+                images: vec!["b-0.png".into()]
+            }],
+            "one block: the bubble draws the picture above its text"
+        );
+    }
+
+    #[test]
+    fn a_session_message_is_another_agent_s_marked_with_its_sender_never_the_user_s() {
+        let mut c = root();
+        c.apply(&event(
+            1,
+            "agent.prompted",
+            json!({"text": "[flottille:session]\n\"Lead\" (agent 0123456789ab) wrote to this session:\n\nThe tests pass now."}),
+        ));
+        assert_eq!(
+            c.blocks(),
+            [Block::Relayed {
+                peer: "Lead".into(),
+                sent: false,
+                text: "The tests pass now.".into()
+            }]
+        );
+    }
+
+    fn send_call(seq: u64, status: &str, output: Value) -> Event {
+        event(
+            seq,
+            "agent.tool_call",
+            json!({"id": "s1", "title": "mcp__flottille__session_send", "update": seq > 1,
+                "status": status,
+                "raw_input": {"session": "0123456789ab", "text": "Over to you."},
+                "raw_output": output}),
+        )
+    }
+
+    #[test]
+    fn a_session_send_done_at_once_shows_what_was_sent_to_whom() {
+        let mut c = root();
+        c.apply(&send_call(1, "in_progress", Value::Null));
+        c.apply(&send_call(
+            2,
+            "completed",
+            json!({"result": {"content": [{"type": "text", "text":
+                "Sent to \"Docs\" (agent 0123456789ab): it reaches it on its next tool result, or as a new turn."}]}}),
+        ));
+        assert!(c.blocks().contains(&Block::Relayed {
+            peer: "Docs".into(),
+            sent: true,
+            text: "Over to you.".into()
+        }));
+    }
+
+    #[test]
+    fn a_held_session_send_shows_what_was_sent_once_the_user_allowed_it() {
+        let mut c = root();
+        c.apply(&send_call(1, "in_progress", Value::Null));
+        c.apply(&send_call(
+            2,
+            "completed",
+            json!({"result": {"content": [{"type": "text", "text":
+                "held: request #4 waits for the user"}]}}),
+        ));
+        assert!(
+            !c.blocks()
+                .iter()
+                .any(|b| matches!(b, Block::Relayed { .. })),
+            "nothing was sent yet"
+        );
+        c.apply(&event(
+            3,
+            "agent.prompted",
+            json!({"text": "[flottille:approval]\nRequest #4 (session_send) has now done it. Its result:\n\nSent to \"Docs\" (agent 0123456789ab): it reaches it on its next tool result, or as a new turn."}),
+        ));
+        assert!(c.blocks().contains(&Block::Relayed {
+            peer: "Docs".into(),
+            sent: true,
+            text: "Over to you.".into()
+        }));
     }
 
     fn running_call(seq: u64, id: &str) -> Event {
@@ -1818,6 +2025,7 @@ mod tests {
 
     fn row(state: &str, exit_code: Option<i32>, tail: &[&str]) -> CommandRow {
         CommandRow {
+            workspace: None,
             run: "r1".into(),
             agent: "a".into(),
             name: None,
