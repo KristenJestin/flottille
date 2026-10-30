@@ -1014,3 +1014,37 @@ fn the_judge_sees_a_command_s_text_labelled_in_a_block_of_its_own_not_as_the_use
     assert_eq!(users.matches("<user_message>").count(), 0, "{prompt}");
     assert_eq!(prompt.matches("</command_text>").count(), 1, "{prompt}");
 }
+
+#[test]
+fn the_images_of_a_command_whose_file_cannot_be_read_are_not_kept() {
+    use base64::Engine as _;
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"images": true}));
+    let folder = project(&user);
+    user.call("command.import", json!({"project": "app"}))
+        .unwrap();
+    let answer = user
+        .call("agent.start", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+    eventually("the first turn ends", || {
+        user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["state"] == "idle"
+    });
+    std::fs::remove_file(folder.join(".claude/commands/review.md")).unwrap();
+
+    let image = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\nnot real");
+    let (code, message) = user
+        .call(
+            "agent.send",
+            json!({"agent": id, "message": "/review",
+                   "images": [{"mime": "image/png", "data": image}]}),
+        )
+        .unwrap_err();
+    assert_eq!(code, "refused", "{message}");
+    assert!(message.contains("nothing was sent"), "{message}");
+    let images = user.path(&format!("data/flottille/images/{id}"));
+    let kept: Vec<_> = std::fs::read_dir(&images)
+        .map(|entries| entries.map(|entry| entry.unwrap().file_name()).collect())
+        .unwrap_or_default();
+    assert!(kept.is_empty(), "{kept:?}");
+}

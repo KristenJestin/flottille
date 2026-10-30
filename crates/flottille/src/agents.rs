@@ -107,15 +107,16 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             if asked.images.is_empty() {
                 refuse_empty(&asked.message)?;
             }
-            let images = keep_images(daemon, &agent, &asked.images)?;
             let after = daemon.read(Store::last_seq)?;
-            // `/name` sends the project's command of that name.
+            // `/name` sends the project's command of that name. Its images are kept only once
+            // it can be sent: a command whose file cannot be read leaves none behind.
             let message = crate::commands::message_for(
                 daemon,
                 &agent.project,
                 agent.workspace.as_deref(),
                 &asked.message,
             )?;
+            let images = keep_images(daemon, &agent, &asked.images)?;
             let delivery = deliveries::deliver_with_images(
                 daemon,
                 &agent.id,
