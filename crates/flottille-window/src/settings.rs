@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use flottille_ui::{
-    Align, Card, Dropdown, MenuItem, Switch, Type, enter, palette, presence, presence_of,
+    Align, Card, Dropdown, MenuItem, Switch, Type, enter, palette, presence, presence_of, space,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -301,7 +301,7 @@ impl SettingsPage {
     fn judge_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let (provider, model) = self.judge_shown();
-        let mut pickers = div().flex().items_center().gap(px(4.));
+        let mut pickers = div().flex().items_center().gap(space::XS);
         let menus = [
             Some((JudgeMenu::Provider, "judge-provider", provider)),
             model.map(|m| (JudgeMenu::Model, "judge-model", m)),
@@ -333,11 +333,11 @@ impl SettingsPage {
         }
         let mut body = div()
             .id("judge")
-            .px(px(14.))
-            .py(px(12.))
+            .px(space::LG)
+            .py(space::MD)
             .flex()
             .flex_col()
-            .gap(px(6.))
+            .gap(space::SM)
             .child(pickers)
             .children(AUTO.iter().enumerate().map(|(n, text)| {
                 div()
@@ -376,7 +376,7 @@ impl SettingsPage {
         let switch = Switch::new(
             ElementId::Name(format!("provider-switch-{name}").into()),
             on,
-            format!("Enable {}", provider.title),
+            "Enabled",
         )
         .disabled(self.pending.contains_key(&name))
         .on_click(cx.listener(move |this, _, _, cx| this.flip(&name, cx)));
@@ -384,7 +384,7 @@ impl SettingsPage {
             .flex_1()
             .flex()
             .items_center()
-            .gap(px(8.))
+            .gap(space::SM)
             .child(SharedString::from(provider.title.clone()))
             .child(
                 div()
@@ -393,11 +393,6 @@ impl SettingsPage {
                     .child(SharedString::from(provider.name.clone())),
             )
             .child(div().flex_1())
-            .child(div().mono(11.).text_color(p.faint).child(if on {
-                "enabled"
-            } else {
-                "disabled"
-            }))
             .child(switch);
         let line = |text: String, color| {
             div()
@@ -426,15 +421,15 @@ impl SettingsPage {
             .id(ElementId::Name(
                 format!("provider-{}", provider.name).into(),
             ))
-            .px(px(14.))
-            .py(px(12.))
+            .px(space::LG)
+            .py(space::MD)
             .flex()
             .flex_col()
-            .gap(px(6.))
+            .gap(space::SM)
             .child(
                 div()
                     .flex()
-                    .gap(px(8.))
+                    .gap(space::SM)
                     .text_size(px(13.))
                     .text_color(state_color)
                     .child(mark)
@@ -470,12 +465,12 @@ impl SettingsPage {
 impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let pad = if self.narrow { 16. } else { 28. };
+        let pad = if self.narrow { space::LG } else { space::XXL };
         let key = |part: &str| ElementId::Name(format!("enter-settings-{part}").into());
         let header = div()
             .flex()
             .flex_col()
-            .gap(px(6.))
+            .gap(space::SM)
             .mb(px(24.))
             .child(
                 div()
@@ -492,7 +487,7 @@ impl Render for SettingsPage {
         let label = div()
             .flex()
             .items_center()
-            .gap(px(8.))
+            .gap(space::SM)
             .mb(px(6.))
             .text_size(px(13.))
             .semibold()
@@ -539,12 +534,12 @@ impl Render for SettingsPage {
             .overflow_y_scroll()
             .child(
                 div()
-                    .max_w(px(980. + 2. * pad))
+                    .max_w(px(980.) + pad * 2.)
                     .w_full()
                     .mx_auto()
-                    .px(px(pad))
-                    .pt(px(36.))
-                    .pb(px(56.))
+                    .px(pad)
+                    .pt(space::XXL)
+                    .pb(space::XXXL)
                     .flex()
                     .flex_col()
                     .child(enter(key("header"), 0, header))
@@ -557,7 +552,7 @@ impl Render for SettingsPage {
                         move |error| {
                             div()
                                 .id("providers-error")
-                                .pb(px(12.))
+                                .pb(space::MD)
                                 .text_color(p.fail)
                                 .child(error)
                                 .into_any_element()

@@ -3,7 +3,7 @@
 //! Ask: a warning icon beside the control says so in a tooltip and leads to Settings.
 
 use flottille_ui::motion::PANEL;
-use flottille_ui::{Button, Icon, Segmented, enter, fade, palette};
+use flottille_ui::{Button, Icon, Segmented, enter, fade, palette, space};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Context, InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled,
@@ -134,7 +134,7 @@ impl Render for ModeSwitch {
         div()
             .id("reply-mode-bar")
             .h(px(28.))
-            .px(px(9.))
+            .px(space::SM)
             .flex()
             .items_center()
             .text_size(px(12.5))

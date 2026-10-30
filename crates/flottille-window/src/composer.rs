@@ -5,6 +5,7 @@ use flottille_ui::color::mix;
 use flottille_ui::motion::HOVER;
 use flottille_ui::{
     Align, Button, Dropdown, Icon, MenuItem, Type, enter, fade, hoverable, palette, presence_of,
+    space,
 };
 use gpui_kit::base::input::{InputEditorStyle, InputEvent, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -575,9 +576,9 @@ impl Composer {
             .relative()
             .flex()
             .items_center()
-            .gap(px(2.))
-            .pt(px(6.))
-            .px(px(2.))
+            .gap(space::XS)
+            .pt(space::SM)
+            .px(space::XS)
             .child(
                 Dropdown::new("place-picker", label)
                     .leading(glyph)
@@ -779,12 +780,12 @@ impl Composer {
         Some(
             div()
                 .id("composer-not-ready")
-                .px(px(10.))
-                .pt(px(6.))
-                .pb(px(2.))
+                .px(space::MD)
+                .pt(space::SM)
+                .pb(space::XS)
                 .flex()
                 .flex_col()
-                .gap(px(2.))
+                .gap(space::XS)
                 .text_size(px(12.5))
                 .text_color(p.faint)
                 .child(
@@ -895,8 +896,8 @@ impl Render for Composer {
         let focus = fade("composer-focus", self.focused, HOVER, window, cx);
         let body = div()
             .id("composer-field")
-            .px(px(14.))
-            .py(px(12.))
+            .px(space::LG)
+            .py(space::MD)
             .text_size(px(14.))
             .line_height(px(21.))
             .cursor_text()
@@ -910,7 +911,7 @@ impl Render for Composer {
             .id("composer")
             .relative()
             .w_full()
-            .p(px(6.))
+            .p(space::SM)
             .rounded(px(16.))
             .bg(p.shell)
             .border_1()
@@ -945,9 +946,9 @@ impl Render for Composer {
                 move |why| {
                     div()
                         .id("composer-model-refused")
-                        .px(px(10.))
-                        .pt(px(6.))
-                        .pb(px(2.))
+                        .px(space::MD)
+                        .pt(space::SM)
+                        .pb(space::XS)
                         .text_size(px(12.5))
                         .text_color(p.faint)
                         .child(why)
@@ -958,9 +959,9 @@ impl Render for Composer {
                 d.child(
                     div()
                         .id("composer-blocked")
-                        .px(px(10.))
-                        .pt(px(6.))
-                        .pb(px(2.))
+                        .px(space::MD)
+                        .pt(space::SM)
+                        .pb(space::XS)
                         .text_size(px(12.5))
                         .text_color(p.faint)
                         .child(SharedString::from(why)),
@@ -972,9 +973,9 @@ impl Render for Composer {
                 move |error| {
                     div()
                         .id("composer-error")
-                        .px(px(10.))
-                        .pt(px(6.))
-                        .pb(px(2.))
+                        .px(space::MD)
+                        .pt(space::SM)
+                        .pb(space::XS)
                         .text_size(px(12.5))
                         .text_color(p.fail)
                         .child(error)
@@ -986,9 +987,9 @@ impl Render for Composer {
                     "composer-starting",
                     0,
                     div()
-                        .px(px(10.))
-                        .pt(px(6.))
-                        .pb(px(2.))
+                        .px(space::MD)
+                        .pt(space::SM)
+                        .pb(space::XS)
                         .mono(11.5)
                         .text_color(p.faint)
                         .child("Starting…"),

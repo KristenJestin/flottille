@@ -11,6 +11,7 @@ use std::time::Duration;
 use flottille_ui::motion::PANEL;
 use flottille_ui::{
     Button, Card, Item, Listing, Palette, Placement, Type, fade, palette, presence, section_label,
+    space,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -166,11 +167,11 @@ impl Waiting {
         };
         let class = if card.base { "Base" } else { "To judge" };
         let body = div()
-            .px(px(12.))
-            .pt(px(12.))
+            .px(space::MD)
+            .pt(space::MD)
             .flex()
             .flex_col()
-            .gap(px(4.))
+            .gap(space::XS)
             .child(
                 div()
                     .id(id("approval-title"))
@@ -256,7 +257,7 @@ impl Waiting {
         // A glow round the card the user was sent to, which fades in and out.
         div()
             .id(id("approval"))
-            .p(px(2.))
+            .p(space::XS)
             .rounded(px(14.))
             .bg(p.wait.opacity(0.28 * lit))
             .child(
@@ -297,7 +298,7 @@ impl Render for Waiting {
                     placement,
                     content,
                 )
-                .gap(px(8.))
+                .gap(space::SM)
                 .into_any_element()
             })
             .collect();
@@ -305,7 +306,7 @@ impl Render for Waiting {
             .id("rail-waiting")
             .flex()
             .flex_col()
-            .gap(px(8.))
+            .gap(space::SM)
             .child(
                 div()
                     .id("rail-waiting-title")

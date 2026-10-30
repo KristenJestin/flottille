@@ -7,8 +7,8 @@ use std::collections::HashMap;
 
 use flottille_ui::color::mix;
 use flottille_ui::{
-    AgentState, Button, Card, Icon, ListRow, Modal, Pill, StateIcon, Status, Switch, Type, enter,
-    hoverable, icon, palette, presence, presence_of, selectable,
+    AgentState, Button, Card, Confirm, Icon, ListRow, Modal, Pill, StateIcon, Status, Switch, Type,
+    enter, hoverable, icon, palette, presence, presence_of, selectable, space,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -295,13 +295,13 @@ impl Render for ProjectPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
         let p = palette(cx);
-        let pad = if self.narrow { 16. } else { 28. };
+        let pad = if self.narrow { space::LG } else { space::XXL };
         let key = |part: &str| ElementId::Name(format!("enter-{}-{part}", self.name).into());
         let new_workspace = self.new_workspace.clone();
         let header = div()
             .flex()
             .items_end()
-            .gap(px(14.))
+            .gap(space::LG)
             .child(
                 div()
                     .flex_none()
@@ -314,7 +314,7 @@ impl Render for ProjectPage {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .pb(px(3.))
+                    .pb(space::XS)
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
@@ -344,7 +344,7 @@ impl Render for ProjectPage {
             .id("repositories")
             .flex()
             .flex_wrap()
-            .gap(px(6.))
+            .gap(space::SM)
             .mt(px(10.))
             .mb(px(22.))
             .children(self.chips().into_iter().enumerate().map(|(i, chip)| {
@@ -355,14 +355,14 @@ impl Render for ProjectPage {
                 div()
                     .id(ElementId::Name(format!("repository-{i}").into()))
                     .h(px(24.))
-                    .px(px(8.))
+                    .px(space::SM)
                     .rounded(px(6.))
                     .bg(p.card)
                     .border_1()
                     .border_color(p.line)
                     .flex()
                     .items_center()
-                    .gap(px(6.))
+                    .gap(space::SM)
                     .mono(11.5)
                     .text_color(p.mute)
                     .child(icon(Icon::Repository).size(px(12.)).text_color(p.faint))
@@ -378,7 +378,7 @@ impl Render for ProjectPage {
             div()
                 .grid()
                 .grid_cols(columns)
-                .gap(px(12.))
+                .gap(space::MD)
                 .children(self.cards.iter().zip(&self.places).enumerate().map(
                     |(i, (card, place))| {
                         enter(
@@ -405,8 +405,8 @@ impl Render for ProjectPage {
                 .flex()
                 .flex_col()
                 .items_center()
-                .gap(px(14.))
-                .py(px(28.))
+                .gap(space::LG)
+                .py(space::XXL)
                 .child(
                     div()
                         .max_w(px(440.))
@@ -423,7 +423,7 @@ impl Render for ProjectPage {
                         .flex()
                         .flex_wrap()
                         .justify_center()
-                        .gap(px(8.))
+                        .gap(space::SM)
                         .child(
                             Button::primary("empty-new-session", "New session in main")
                                 .leading(Icon::Plus)
@@ -454,12 +454,12 @@ impl Render for ProjectPage {
             .overflow_y_scroll()
             .child(
                 div()
-                    .max_w(px(980. + 2. * pad))
+                    .max_w(px(980.) + pad * 2.)
                     .w_full()
                     .mx_auto()
-                    .px(px(pad))
-                    .pt(px(36.))
-                    .pb(px(56.))
+                    .px(pad)
+                    .pt(space::XXL)
+                    .pb(space::XXXL)
                     .flex()
                     .flex_col()
                     .child(enter(key("header"), 0, header))
@@ -477,7 +477,7 @@ impl Render for ProjectPage {
                             div()
                                 .flex()
                                 .items_center()
-                                .gap(px(8.))
+                                .gap(space::SM)
                                 .mb(px(12.))
                                 .text_size(px(13.))
                                 .semibold()
@@ -659,7 +659,7 @@ impl Render for PlaceCard {
             .flex_1()
             .flex()
             .items_center()
-            .gap(px(8.))
+            .gap(space::SM)
             .child(
                 icon(if place.is_none() {
                     Icon::Folder
@@ -686,7 +686,7 @@ impl Render for PlaceCard {
                     .border_1()
                     .border_color(p.line2)
                     .rounded(px(5.))
-                    .px(px(5.))
+                    .px(space::XS)
                     .child("PROJECT FOLDER"),
             );
         }
@@ -704,7 +704,7 @@ impl Render for PlaceCard {
                     .id(id("changes"))
                     .flex_none()
                     .flex()
-                    .gap(px(6.))
+                    .gap(space::SM)
                     .mono(11.5)
                     .font_weight(gpui_kit::FontWeight::NORMAL)
                     .child(div().text_color(p.ok).child(format!("{at_least}+{added}")))
@@ -712,38 +712,21 @@ impl Render for PlaceCard {
             );
         }
         if place.is_some() && self.busy.is_none() {
-            title = if self.confirming {
-                title
-                    .child(
-                        Button::quiet(id("cancel-remove"), "Cancel").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.confirming = false;
-                                cx.notify();
-                            },
-                        )),
-                    )
-                    .child(
-                        Button::secondary(id("confirm-remove"), format!("Remove {name}")).on_click(
-                            cx.listener(|this, _, _, cx| this.perform(Busy::Removing, cx)),
-                        ),
-                    )
-            } else {
-                title.child(Button::quiet(id("remove"), "Remove").on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.confirming = true;
-                        this.error = None;
-                        cx.notify();
-                    },
-                )))
-            };
+            title = title.child(Button::quiet(id("remove"), "Remove").on_click(cx.listener(
+                |this, _, _, cx| {
+                    this.confirming = true;
+                    this.error = None;
+                    cx.notify();
+                },
+            )));
         }
 
         let meta = self.data.meta.clone().map(|meta| {
             div()
                 .id(id("meta"))
-                .px(px(14.))
-                .pl(px(36.))
-                .pb(px(10.))
+                .px(space::LG)
+                .pl(space::XXL)
+                .pb(space::MD)
                 .mono(11.5)
                 .text_color(p.faint)
                 .overflow_hidden()
@@ -759,12 +742,12 @@ impl Render for PlaceCard {
                 id("repositories-status"),
                 !self.statuses.is_empty(),
                 div()
-                    .px(px(14.))
-                    .pl(px(36.))
-                    .pb(px(10.))
+                    .px(space::LG)
+                    .pl(space::XXL)
+                    .pb(space::MD)
                     .flex()
                     .flex_col()
-                    .gap(px(3.))
+                    .gap(space::XS)
                     .children(self.statuses.iter().map(|status| {
                         let label = repository_label(&self.project, &status.path);
                         div()
@@ -777,7 +760,7 @@ impl Render for PlaceCard {
                             .child(
                                 div()
                                     .flex()
-                                    .gap(px(8.))
+                                    .gap(space::SM)
                                     .child(
                                         div()
                                             .flex_none()
@@ -809,12 +792,12 @@ impl Render for PlaceCard {
         let pulls = (!self.pulls.is_empty()).then(|| {
             let project = self.project.clone();
             div()
-                .px(px(14.))
-                .pl(px(30.))
-                .pb(px(10.))
+                .px(space::LG)
+                .pl(space::XXL)
+                .pb(space::MD)
                 .flex()
                 .flex_wrap()
-                .gap(px(4.))
+                .gap(space::XS)
                 .children(self.pulls.iter().map(|pull| {
                     let (shell, url) = (self.shell.clone(), pull.url.clone());
                     let label = repository_label(&project, &pull.repository);
@@ -835,11 +818,11 @@ impl Render for PlaceCard {
             Preparation::Preparing { done, total, doing } => Some(
                 div()
                     .id(id("preparing"))
-                    .px(px(14.))
-                    .pb(px(10.))
+                    .px(space::LG)
+                    .pb(space::MD)
                     .flex()
                     .items_center()
-                    .gap(px(8.))
+                    .gap(space::SM)
                     .mono(11.5)
                     .text_color(p.mute)
                     .child(self.preparing.clone())
@@ -859,16 +842,16 @@ impl Render for PlaceCard {
             Preparation::Failed { doing, output } => Some(
                 div()
                     .id(id("failure"))
-                    .px(px(14.))
-                    .pb(px(10.))
+                    .px(space::LG)
+                    .pb(space::MD)
                     .flex()
                     .flex_col()
-                    .gap(px(8.))
+                    .gap(space::SM)
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(8.))
+                            .gap(space::SM)
                             .child(self.failed.clone())
                             .child(
                                 div()
@@ -883,7 +866,7 @@ impl Render for PlaceCard {
                             .id(id("failure-output"))
                             .max_h(px(180.))
                             .overflow_y_scroll()
-                            .p(px(10.))
+                            .p(space::MD)
                             .rounded(px(8.))
                             .bg(p.del)
                             .mono(11.5)
@@ -903,8 +886,8 @@ impl Render for PlaceCard {
 
         let busy = self.busy.map(|busy| {
             div()
-                .px(px(14.))
-                .pb(px(10.))
+                .px(space::LG)
+                .pb(space::MD)
                 .mono(11.5)
                 .text_color(p.faint)
                 .child(match busy {
@@ -915,8 +898,8 @@ impl Render for PlaceCard {
         let error = self.error.clone().map(|error| {
             div()
                 .id(id("card-error"))
-                .px(px(14.))
-                .pb(px(10.))
+                .px(space::LG)
+                .pb(space::MD)
                 .text_size(px(12.5))
                 .text_color(p.fail)
                 .child(error)
@@ -963,9 +946,9 @@ impl Render for PlaceCard {
             .w_full()
             .flex()
             .items_center()
-            .gap(px(8.))
-            .px(px(14.))
-            .py(px(9.))
+            .gap(space::SM)
+            .px(space::LG)
+            .py(space::SM)
             .border_t_1()
             .border_color(p.line)
             .rounded_b(px(12.))
@@ -988,13 +971,39 @@ impl Render for PlaceCard {
             d.bg(p.hover.opacity(t)).text_color(mix(p.faint, p.text, t))
         });
 
+        let confirm = {
+            let (this, again) = (cx.entity().downgrade(), cx.entity().downgrade());
+            Confirm::new(
+                id("workspace-removal"),
+                format!("Remove the workspace {name}?"),
+            )
+            .sentence(
+                "Its folder goes, and each repository's branch that holds no commit of its \
+                     own. Flottille removes it only once all its work is committed and pushed.",
+            )
+            .action("Remove workspace")
+            .open(self.confirming)
+            .on_confirm(move |_, cx| {
+                this.update(cx, |this, cx| this.perform(Busy::Removing, cx))
+                    .ok();
+            })
+            .on_cancel(move |_, cx| {
+                again
+                    .update(cx, |this, cx| {
+                        this.confirming = false;
+                        cx.notify();
+                    })
+                    .ok();
+            })
+        };
         div()
             .id(card_id(&place))
             .h_full()
+            .child(confirm)
             .child(
                 Card::new()
                     .title(title)
-                    .children_opt(meta.map(|meta| div().pt(px(10.)).child(meta)))
+                    .children_opt(meta.map(|meta| div().pt(space::MD).child(meta)))
                     .child(statuses)
                     .children_opt(pulls)
                     .children_opt(status)
@@ -1004,8 +1013,8 @@ impl Render for PlaceCard {
                         div()
                             .border_t_1()
                             .border_color(p.line)
-                            .px(px(6.))
-                            .py(px(4.))
+                            .px(space::SM)
+                            .py(space::XS)
                             .flex()
                             .flex_col()
                             .children(rows),
@@ -1476,7 +1485,7 @@ impl Render for NewWorkspace {
             .id("new-workspace-card")
             .min_h(px(150.))
             .h_full()
-            .p(px(22.))
+            .p(space::XL)
             .rounded(px(12.))
             .border_1()
             .border_dashed()
@@ -1514,7 +1523,7 @@ impl Render for NewWorkspace {
                 div()
                     .id("new-workspace-modal-name")
                     .h(px(32.))
-                    .px(px(10.))
+                    .px(space::MD)
                     .rounded(px(8.))
                     .bg(p.field)
                     .border_1()
@@ -1529,7 +1538,7 @@ impl Render for NewWorkspace {
                 div()
                     .id("new-workspace-modal-ticket")
                     .h(px(32.))
-                    .px(px(10.))
+                    .px(space::MD)
                     .rounded(px(8.))
                     .bg(p.field)
                     .border_1()
@@ -1557,12 +1566,12 @@ impl Render for NewWorkspace {
                             .flex_none()
                             .w(px(130.))
                             .h(px(28.))
-                            .px(px(8.))
+                            .px(space::SM)
                             .rounded(px(6.))
                             .border_1()
                             .flex()
                             .items_center()
-                            .gap(px(6.))
+                            .gap(space::SM)
                             .mono(11.5)
                             // By shape as well as colour: a tick when it is taken.
                             .child(if taken { "✓" } else { "·" })
@@ -1590,7 +1599,7 @@ impl Render for NewWorkspace {
                         let field = div()
                             .id(ElementId::Name(format!("new-workspace-base-{path}").into()))
                             .h(px(28.))
-                            .px(px(10.))
+                            .px(space::MD)
                             .rounded(px(8.))
                             .bg(p.field)
                             .border_1()
@@ -1600,7 +1609,7 @@ impl Render for NewWorkspace {
                             .mono(12.)
                             .child(Input::new(&base))
                             .test_support();
-                        div().flex().items_start().gap(px(8.)).child(chip).child(
+                        div().flex().items_start().gap(space::SM).child(chip).child(
                             div().flex_1().min_w_0().child(presence(
                                 ElementId::Name(format!("new-workspace-base-{path}-block").into()),
                                 taken,
@@ -1613,14 +1622,14 @@ impl Render for NewWorkspace {
                     .id("new-workspace-repositories")
                     .flex()
                     .flex_col()
-                    .gap(px(6.))
+                    .gap(space::SM)
                     .children(rows)
             })
             .child(
                 div()
                     .id("new-workspace-modal-branch")
                     .h(px(32.))
-                    .px(px(10.))
+                    .px(space::MD)
                     .rounded(px(8.))
                     .bg(p.field)
                     .border_1()
@@ -1635,14 +1644,13 @@ impl Render for NewWorkspace {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(8.))
+                    .gap(space::SM)
                     .text_size(px(12.5))
                     .text_color(p.mute)
                     .child(
                         Switch::new("new-workspace-offline", self.offline, OFFLINE)
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_offline(cx))),
-                    )
-                    .child(OFFLINE),
+                    ),
             )
             .child(presence_of(
                 "new-workspace-error-block",

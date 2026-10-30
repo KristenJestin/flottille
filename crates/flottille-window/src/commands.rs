@@ -6,12 +6,13 @@
 
 use flottille_core::commands::TEMPLATES;
 use flottille_ui::{
-    Button, Icon, Item, ListRow, Listing, Modal, Type, enter, icon, palette, presence, presence_of,
+    Button, Confirm, Icon, Item, ListRow, Listing, Modal, Type, enter, icon, palette, presence,
+    presence_of, space,
 };
 use gpui_kit::base::input::{Input, InputEditorStyle, InputEvent, InputState, TextareaState};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, Focusable as _,
-    InteractiveElement, IntoElement, ParentElement, Render, SharedString,
+    InteractiveElement, IntoElement, ParentElement, Pixels, Render, SharedString,
     StatefulInteractiveElement, Styled, Subscription, TestSupportExt as _, WeakEntity, Window, div,
     px,
 };
@@ -79,8 +80,8 @@ pub(crate) fn boxed(id: &'static str, field: impl IntoElement, cx: &App) -> impl
     div()
         .id(id)
         .min_h(px(32.))
-        .px(px(10.))
-        .py(px(5.))
+        .px(space::MD)
+        .py(space::XS)
         .rounded(px(8.))
         .bg(p.field)
         .border_1()
@@ -111,7 +112,7 @@ pub(crate) fn empty_note(
             .child(text)
             .test_support(),
     )
-    .gap(px(8.))
+    .gap(space::SM)
 }
 
 /// A line that says what went wrong, in the alarm colour: it unfolds when there is one and folds
@@ -119,7 +120,7 @@ pub(crate) fn empty_note(
 pub(crate) fn problem_line(
     id: &'static str,
     problem: Option<SharedString>,
-    gap: f32,
+    gap: Pixels,
     cx: &App,
 ) -> impl IntoElement {
     let p = palette(cx);
@@ -132,7 +133,7 @@ pub(crate) fn problem_line(
             .test_support()
             .into_any_element()
     })
-    .gap(px(gap))
+    .gap(gap)
 }
 
 /// What a modal's action holds: "Saving…" while the daemon works, else `save`.
@@ -166,7 +167,7 @@ pub(crate) fn heading(
     div()
         .flex()
         .items_center()
-        .gap(px(8.))
+        .gap(space::SM)
         .mt(px(34.))
         .mb(px(12.))
         .text_size(px(13.))
@@ -217,6 +218,8 @@ pub struct CommandsSection {
     /// The command being read to be edited.
     reading: Option<String>,
     confirming: Option<String>,
+    /// The command the confirmation names, kept while it fades away.
+    asked: String,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -234,6 +237,7 @@ impl CommandsSection {
             form_error: None,
             reading: None,
             confirming: None,
+            asked: String::new(),
             _subscriptions: Vec::new(),
         }
     }
@@ -447,10 +451,11 @@ impl CommandsSection {
         self.write(write, cx);
     }
 
-    /// Asks to remove; the second click confirms.
+    /// Asks to remove, in a confirmation; called again from it, removes.
     pub fn remove(&mut self, name: &str, cx: &mut Context<Self>) {
         if self.confirming.as_deref() != Some(name) {
             self.confirming = Some(name.to_owned());
+            self.asked = name.to_owned();
             cx.notify();
             return;
         }
@@ -482,25 +487,24 @@ impl CommandsSection {
         let p = palette(cx);
         let name = info.name.clone();
         let id = |part: &str| ElementId::Name(format!("{part}-{}", info.name).into());
-        let confirming = self.confirming.as_deref() == Some(&info.name);
         div()
             .id(id("command"))
-            .px(px(14.))
-            .py(px(10.))
+            .px(space::LG)
+            .py(space::MD)
             .rounded(px(10.))
             .border_1()
             .border_color(p.line)
             .bg(p.card)
             .flex()
             .items_start()
-            .gap(px(10.))
+            .gap(space::MD)
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .gap(px(3.))
+                    .gap(space::XS)
                     .child(
                         div()
                             .mono(12.5)
@@ -523,33 +527,36 @@ impl CommandsSection {
                     .disabled(self.reading.is_some())
                     .on_click(cx.listener(move |this, _, _, cx| this.edit(&edit, cx)))
             })
-            .child(if confirming {
-                let (cancel, remove) = (name.clone(), name.clone());
-                let group = div()
-                    .flex()
-                    .gap(px(4.))
-                    .child(
-                        Button::quiet(id("cancel-remove-command"), "Cancel").on_click(cx.listener(
-                            move |this, _, _, cx| {
-                                if this.confirming.as_deref() == Some(&cancel) {
-                                    this.confirming = None;
-                                    cx.notify();
-                                }
-                            },
-                        )),
-                    )
-                    .child(
-                        Button::secondary(id("confirm-remove-command"), format!("Remove {name}"))
-                            .on_click(cx.listener(move |this, _, _, cx| this.remove(&remove, cx))),
-                    );
-                enter(id("confirm-command"), 0, group).into_any_element()
-            } else {
+            .child({
                 let remove = name.clone();
                 Button::quiet(id("remove-command"), "Remove")
                     .on_click(cx.listener(move |this, _, _, cx| this.remove(&remove, cx)))
-                    .into_any_element()
             })
             .test_support()
+    }
+
+    /// The confirmation of a removal.
+    fn confirm(&self, cx: &mut Context<Self>) -> Confirm {
+        let name = self.asked.clone();
+        let (this, again) = (cx.entity().downgrade(), cx.entity().downgrade());
+        Confirm::new("command-removal", format!("Remove the command {name}?"))
+            .sentence(format!(
+                "Typing /{name} in a composer sends it as text from now on."
+            ))
+            .action("Remove command")
+            .open(self.confirming.is_some())
+            .on_confirm(move |_, cx| {
+                let name = name.clone();
+                this.update(cx, |this, cx| this.remove(&name, cx)).ok();
+            })
+            .on_cancel(move |_, cx| {
+                again
+                    .update(cx, |this, cx| {
+                        this.confirming = None;
+                        cx.notify();
+                    })
+                    .ok();
+            })
     }
 
     fn modal(&mut self, window: &Window, cx: &mut Context<Self>) -> Modal {
@@ -561,12 +568,12 @@ impl CommandsSection {
             _ => "New command",
         };
         let modal = Modal::new("command-modal", title)
-            .width(px(600.))
+            .wide()
             .open(open)
             .on_close(move |_, cx| {
                 this.update(cx, |this, cx| this.close(cx)).ok();
             });
-        let error = problem_line("command-error", self.form_error.clone(), 14., cx);
+        let error = problem_line("command-error", self.form_error.clone(), space::LG, cx);
         match self.form.clone() {
             Form::Closed => modal,
             Form::Choosing => {
@@ -596,7 +603,7 @@ impl CommandsSection {
                             .id("command-templates")
                             .flex()
                             .flex_col()
-                            .gap(px(2.))
+                            .gap(space::XS)
                             .children(templates)
                             .child(blank)
                             .test_support(),
@@ -611,7 +618,7 @@ impl CommandsSection {
                     .overflow_y_scroll()
                     .flex()
                     .flex_col()
-                    .gap(px(10.))
+                    .gap(space::MD)
                     .child(match &original {
                         Some(name) => div()
                             .mono(12.5)
@@ -630,8 +637,8 @@ impl CommandsSection {
                     .child(
                         div()
                             .id("command-instructions")
-                            .px(px(10.))
-                            .py(px(8.))
+                            .px(space::MD)
+                            .py(space::SM)
                             .rounded(px(8.))
                             .bg(p.field)
                             .border_1()
@@ -672,7 +679,7 @@ impl Render for CommandsSection {
                     row.placement,
                     self.row(row.value, cx),
                 )
-                .gap(px(8.))
+                .gap(space::SM)
             })
             .collect();
         let count = self.rows.len();
@@ -692,7 +699,7 @@ impl Render for CommandsSection {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(8.))
+                    .gap(space::SM)
                     .children(rows)
                     .child(empty_note(
                         "no-commands",
@@ -705,10 +712,11 @@ impl Render for CommandsSection {
                     .child(problem_line(
                         "commands-problem",
                         self.problem.clone(),
-                        8.,
+                        space::SM,
                         cx,
                     )),
             )
             .child(modal)
+            .child(self.confirm(cx))
     }
 }

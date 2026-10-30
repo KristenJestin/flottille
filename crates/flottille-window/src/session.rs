@@ -24,7 +24,7 @@ use flottille_ui::motion::{HOVER, Motion, PANEL};
 use flottille_ui::{
     AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Menu, Modal, Palette, Pill,
     PulsingLabel, Side, StateIcon, Status, Type, enter, fade, fold_frame, hoverable, icon, palette,
-    presence, presence_of, section_label, selectable, turning,
+    presence, presence_of, section_label, selectable, space, turning,
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{
@@ -220,7 +220,11 @@ impl SessionPage {
         let rail = cx.new(|cx| SessionRail::new(page.clone(), opened.id.clone(), &opened, cx));
         let command_panel = cx.new(|_| CommandPanel::new(page.clone()));
         let drawer = cx.new(|_| Drawer::new("rail-drawer", Side::Right, px(RAIL), rail.clone()));
-        let pill = cx.new(|cx| Pill::new(status.clone(), cx).quiet_running());
+        let pill = cx.new(|cx| {
+            Pill::new(status.clone(), cx)
+                .quiet_running()
+                .quiet_needs_you()
+        });
         let shown = opened.id.clone();
         let conversation =
             cx.new(|_| ConversationView::new(page, &shown, THE_CONVERSATION.into(), None));
@@ -961,7 +965,7 @@ impl SessionPage {
             }
             .unwrap_or_else(|| self.status.clone());
             self.pill_status = status.clone();
-            self.pill = cx.new(|cx| Pill::new(status, cx).quiet_running());
+            self.pill = cx.new(|cx| Pill::new(status, cx).quiet_running().quiet_needs_you());
             cx.notify();
         }
         if std::mem::take(&mut self.unchecked) && !self.tree.iter().any(|a| a.id == self.shown) {
@@ -1130,11 +1134,11 @@ impl Render for SessionPage {
             .id("session-header")
             .flex_none()
             .h(px(44.))
-            .pl(px(if narrow { 10. } else { 24. }))
-            .pr(px(12.))
+            .pl(if narrow { space::MD } else { space::XL })
+            .pr(space::MD)
             .flex()
             .items_center()
-            .gap(px(10.))
+            .gap(space::MD)
             .border_b_1()
             .border_color(p.line)
             .child(
@@ -1152,7 +1156,7 @@ impl Render for SessionPage {
                     .flex_none()
                     .flex()
                     .items_center()
-                    .gap(px(6.))
+                    .gap(space::SM)
                     .text_color(p.faint)
                     .child(
                         icon(match place {
@@ -1193,8 +1197,8 @@ impl Render for SessionPage {
             .w_full()
             .max_w(px(780.))
             .mx_auto()
-            .px(px(if narrow { 12. } else { 28. }))
-            .pb(px(if narrow { 12. } else { 20. }))
+            .px(if narrow { space::MD } else { space::XXL })
+            .pb(if narrow { space::MD } else { space::XL })
             .map(|d| match (root, self.ended_line()) {
                 (true, None) => d.child(self.reply.clone()),
                 (true, Some(ended)) => d.child(self.ended_bar(ended, cx)),
@@ -1256,7 +1260,7 @@ impl SessionPage {
                     .test_support(),
             )
             .action(
-                Button::primary(
+                Button::danger(
                     "session-end-confirm",
                     match count {
                         0 | 1 => "End session".to_owned(),
@@ -1274,20 +1278,20 @@ impl SessionPage {
         div()
             .flex()
             .flex_col()
-            .gap(px(6.))
+            .gap(space::SM)
             .child(
                 div()
                     .id("session-ended")
                     .flex()
                     .items_center()
-                    .gap(px(10.))
+                    .gap(space::MD)
                     .border_1()
                     .border_dashed()
                     .border_color(p.line2)
                     .rounded(px(12.))
-                    .pl(px(14.))
-                    .pr(px(12.))
-                    .py(px(10.))
+                    .pl(space::LG)
+                    .pr(space::MD)
+                    .py(space::MD)
                     .text_size(px(13.))
                     .text_color(p.mute)
                     .child(div().flex_1().min_w_0().child(SharedString::from(said)))
@@ -1303,7 +1307,7 @@ impl SessionPage {
             .children(self.resume_error.clone().map(|error| {
                 div()
                     .id("session-resume-error")
-                    .px(px(10.))
+                    .px(space::MD)
                     .text_size(px(12.5))
                     .text_color(p.fail)
                     .child(error)
@@ -1336,14 +1340,14 @@ impl SessionPage {
             .id("read-only")
             .flex()
             .items_center()
-            .gap(px(10.))
+            .gap(space::MD)
             .border_1()
             .border_dashed()
             .border_color(p.line2)
             .rounded(px(12.))
-            .pl(px(14.))
-            .pr(px(12.))
-            .py(px(10.))
+            .pl(space::LG)
+            .pr(space::MD)
+            .py(space::MD)
             .text_size(px(13.))
             .text_color(p.mute)
             .child(div().flex_1().min_w_0().child(SharedString::from(said)))
@@ -1573,8 +1577,10 @@ impl ConversationView {
             .max_w(px(780.))
             .w_full()
             .mx_auto()
-            .px(px(if narrow { 16. } else { 28. }))
-            .when(ix == 0, |d| d.pt(px(if narrow { 20. } else { 28. })))
+            .px(if narrow { space::LG } else { space::XXL })
+            .when(ix == 0, |d| {
+                d.pt(if narrow { space::XL } else { space::XXL })
+            })
             .pb(below);
         // A list's item is not stretched to its width: the column is centred in a full one.
         let centred = |column| div().w_full().child(column).into_any_element();
@@ -1620,8 +1626,8 @@ impl Render for ConversationView {
                         .max_w(px(780.))
                         .w_full()
                         .mx_auto()
-                        .px(px(if narrow { 16. } else { 28. }))
-                        .pt(px(if narrow { 20. } else { 28. }))
+                        .px(if narrow { space::LG } else { space::XXL })
+                        .pt(if narrow { space::XL } else { space::XXL })
                         .text_color(p.faint)
                         .child("Nothing said yet."),
                 )
@@ -2092,8 +2098,8 @@ impl Render for Row {
                         .rounded_tr(px(14.))
                         .rounded_bl(px(14.))
                         .rounded_br(px(4.))
-                        .px(px(14.))
-                        .py(px(10.))
+                        .px(space::LG)
+                        .py(space::MD)
                         .when_some(self.label(), |d, from| {
                             d.child(
                                 div()
@@ -2122,7 +2128,7 @@ impl Render for Row {
                     .flex()
                     .flex_wrap()
                     .justify_end()
-                    .gap(px(8.))
+                    .gap(space::SM)
                     .children(pictures.into_iter().enumerate().map(|(n, picture)| {
                         let thumb = div()
                             .id(id(&format!("image-{n}")))
@@ -2153,7 +2159,7 @@ impl Render for Row {
                 let head = div()
                     .flex()
                     .items_center()
-                    .gap(px(7.))
+                    .gap(space::SM)
                     .text_size(px(13.))
                     .text_color(p.faint)
                     .child(label)
@@ -2192,7 +2198,7 @@ impl Render for Row {
                             .id(id("thought-text"))
                             .mt(px(8.))
                             .ml(px(6.))
-                            .pl(px(14.))
+                            .pl(space::LG)
                             .border_l_1()
                             .border_color(p.line)
                             .text_size(px(13.))
@@ -2219,7 +2225,7 @@ impl Render for Row {
                             div()
                                 .flex()
                                 .items_center()
-                                .gap(px(8.))
+                                .gap(space::SM)
                                 .mb(px(5.))
                                 .mono(11.5)
                                 .text_color(p.faint)
@@ -2262,9 +2268,9 @@ impl Render for Row {
                             div()
                                 .id(ElementId::Name(format!("step-{}-{at}", self.at).into()))
                                 .flex()
-                                .gap(px(10.))
-                                .px(px(4.))
-                                .py(px(7.))
+                                .gap(space::MD)
+                                .px(space::XS)
+                                .py(space::SM)
                                 .child(mark.clone())
                                 .child(
                                     div()
@@ -2274,7 +2280,7 @@ impl Render for Row {
                                             div()
                                                 .flex()
                                                 .items_center()
-                                                .gap(px(8.))
+                                                .gap(space::SM)
                                                 .mono(12.5)
                                                 .child(SharedString::from(call.name.clone()))
                                                 .when(call.state == CallState::Interrupted, |d| {
@@ -2330,8 +2336,8 @@ impl Render for Row {
                         .id(id("steps-toggle"))
                         .flex()
                         .items_center()
-                        .gap(px(7.))
-                        .py(px(2.))
+                        .gap(space::SM)
+                        .py(space::XS)
                         .cursor_pointer()
                         .mono(12.)
                         .child(chevron(1.))
@@ -2346,7 +2352,7 @@ impl Render for Row {
                             .id(id("steps-toggle"))
                             .flex()
                             .items_center()
-                            .gap(px(7.))
+                            .gap(space::SM)
                             .cursor_pointer()
                             .child("Agent steps")
                             .child(chevron(0.))
@@ -2354,7 +2360,7 @@ impl Render for Row {
                         move |d, t| d.text_color(mix(p.mute, p.text, t)),
                     ))
                     .meta(meta)
-                    .child(div().px(px(12.)).py(px(6.)).children(rows));
+                    .child(div().px(space::MD).py(space::SM).children(rows));
                 div()
                     .id(id("steps"))
                     .child(presence(id("steps-folded"), !self.open, folded))
@@ -2399,7 +2405,7 @@ impl Render for Row {
                         Card::new()
                             .title("Sub-agents")
                             .meta(by)
-                            .child(div().p(px(4.)).children(rows)),
+                            .child(div().p(space::XS).children(rows)),
                     )
                     .test_support()
                     .into_any_element()
@@ -2416,7 +2422,7 @@ impl Render for Row {
                                     .id(id("report-toggle"))
                                     .flex()
                                     .items_center()
-                                    .gap(px(7.))
+                                    .gap(space::SM)
                                     .cursor_pointer()
                                     .child(SharedString::from(self.label().unwrap_or_default()))
                                     .child(
@@ -2438,9 +2444,9 @@ impl Render for Row {
                                 self.open,
                                 div()
                                     .id(id("report-text"))
-                                    .px(px(14.))
-                                    .pt(px(10.))
-                                    .pb(px(12.))
+                                    .px(space::LG)
+                                    .pt(space::MD)
+                                    .pb(space::MD)
                                     .child(
                                         TextView::markdown(id("report-markdown"), text.clone())
                                             .image_source(no_image),
@@ -2454,7 +2460,7 @@ impl Render for Row {
             Block::Notice { kind, text } => div()
                 .id(id("notice"))
                 .flex()
-                .gap(px(8.))
+                .gap(space::SM)
                 .mono(12.)
                 .text_color(p.faint)
                 .child(div().flex_none().child(SharedString::from(kind.clone())))
@@ -2475,34 +2481,29 @@ impl Render for Row {
                                 div()
                                     .flex()
                                     .items_center()
-                                    .gap(px(8.))
+                                    .gap(space::SM)
                                     .child(icon(Icon::Repository).text_color(p.faint))
                                     .child(
                                         div().mono(12.5).child(SharedString::from(path.clone())),
                                     ),
                             )
                             .meta(format!("+{added} −{removed}"))
-                            .child(
-                                div()
-                                    .py(px(6.))
-                                    .mono(12.)
-                                    .children(lines.iter().map(|line| {
-                                        let (text, bg, ink) = match line {
-                                            DiffLine::Removed(text) => {
-                                                (format!("- {text}"), p.del, p.fail)
-                                            }
-                                            DiffLine::Added(text) => {
-                                                (format!("+ {text}"), p.add, p.ok)
-                                            }
-                                        };
-                                        div()
-                                            .px(px(14.))
-                                            .bg(bg)
-                                            .text_color(ink)
-                                            .whitespace_nowrap()
-                                            .child(SharedString::from(text))
-                                    })),
-                            ),
+                            .child(div().py(space::SM).mono(12.).children(lines.iter().map(
+                                |line| {
+                                    let (text, bg, ink) = match line {
+                                        DiffLine::Removed(text) => {
+                                            (format!("- {text}"), p.del, p.fail)
+                                        }
+                                        DiffLine::Added(text) => (format!("+ {text}"), p.add, p.ok),
+                                    };
+                                    div()
+                                        .px(space::LG)
+                                        .bg(bg)
+                                        .text_color(ink)
+                                        .whitespace_nowrap()
+                                        .child(SharedString::from(text))
+                                },
+                            ))),
                     )
                     .test_support()
                     .into_any_element()
@@ -2545,9 +2546,9 @@ impl Row {
             .id(ElementId::Name(format!("approval-line-{number}").into()))
             .flex()
             .items_center()
-            .gap(px(9.))
-            .px(px(12.))
-            .py(px(7.))
+            .gap(space::SM)
+            .px(space::MD)
+            .py(space::SM)
             .rounded(px(8.))
             .border_1()
             .border_color(if card.base { p.fail } else { p.wait_line })
@@ -2968,7 +2969,7 @@ impl SessionRail {
                 let status = agent.status.clone();
                 (
                     cx.new(|cx| StateIcon::new(status.clone(), cx)),
-                    cx.new(|cx| Pill::new(status, cx).quiet_running()),
+                    cx.new(|cx| Pill::new(status, cx).quiet_running().quiet_needs_you()),
                 )
             });
         }
@@ -3043,20 +3044,20 @@ impl Render for SessionRail {
             let page = self.page.clone();
             let target = agent.id.clone();
             let kid = agent.depth > 0;
-            let indent = 20. * agent.depth as f32;
+            let indent = space::LG * agent.depth as f32;
             div()
                 .id(ElementId::Name(format!("rail-agent-{}", agent.id).into()))
                 .relative()
                 .flex()
                 .items_center()
-                .pl(px(indent))
+                .pl(indent)
                 .when(kid, |d| {
                     d.child(enter(
                         ElementId::Name(format!("elbow-{}", agent.id).into()),
                         0,
                         elbow(p.line2)
                             .absolute()
-                            .left(px(indent - 5.))
+                            .left(indent - px(5.))
                             .top(px(-12.))
                             .w(px(10.))
                             .h(px(32.)),
@@ -3071,9 +3072,9 @@ impl Render for SessionRail {
                         .min_w_0()
                         .flex()
                         .items_center()
-                        .gap(px(10.))
-                        .px(px(10.))
-                        .py(px(6.))
+                        .gap(space::MD)
+                        .px(space::MD)
+                        .py(space::SM)
                         .rounded(px(8.))
                         .cursor_pointer()
                         .child(
@@ -3140,17 +3141,17 @@ impl Render for SessionRail {
                 .iter()
                 .find(|a| a.id == parent)
                 .map_or(1, |a| a.depth + 1);
-            let indent = 20. * depth as f32;
+            let indent = space::LG * depth as f32;
             let target = parent.to_owned();
             div()
                 .relative()
-                .pl(px(indent))
+                .pl(indent)
                 .child(enter(
                     ElementId::Name(format!("elbow-ended-{parent}").into()),
                     0,
                     elbow(p.line2)
                         .absolute()
-                        .left(px(indent - 5.))
+                        .left(indent - px(5.))
                         .top(px(-12.))
                         .w(px(10.))
                         .h(px(32.)),
@@ -3161,9 +3162,9 @@ impl Render for SessionRail {
                         .aria_expanded(open)
                         .flex()
                         .items_center()
-                        .gap(px(10.))
-                        .px(px(10.))
-                        .py(px(6.))
+                        .gap(space::MD)
+                        .px(space::MD)
+                        .py(space::SM)
                         .rounded(px(8.))
                         .cursor_pointer()
                         .text_size(px(12.5))
@@ -3370,8 +3371,8 @@ impl Render for SessionRail {
                         .flex_1()
                         .flex()
                         .flex_col()
-                        .px(px(8.))
-                        .py(px(4.))
+                        .px(space::SM)
+                        .py(space::XS)
                         .rounded(px(6.))
                         .when(url.is_some(), |d| d.cursor_pointer())
                         .aria_label(SharedString::from(format!("{} {said}", ticket.reference)))
@@ -3430,8 +3431,8 @@ impl Render for SessionRail {
             .size_full()
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
-            .px(px(12.))
-            .py(px(14.))
+            .px(space::MD)
+            .py(space::LG)
             .flex()
             .flex_col()
             .child(self.waiting.clone())
@@ -3454,9 +3455,9 @@ impl Render for SessionRail {
                             .id(ElementId::Name(format!("rail-repository-{path}").into()))
                             .flex()
                             .items_center()
-                            .gap(px(8.))
-                            .px(px(8.))
-                            .py(px(6.))
+                            .gap(space::SM)
+                            .px(space::SM)
+                            .py(space::SM)
                             .text_size(px(12.5))
                             .child(icon(Icon::Repository).size(px(13.)).text_color(p.faint))
                             .child(SharedString::from(path.clone()))
@@ -3476,7 +3477,7 @@ impl Render for SessionRail {
                                 &pull,
                                 cx,
                             )
-                            .pl(px(29.))
+                            .pl(space::XXL)
                             .on_click(move |_, _, cx| {
                                 page.update(cx, |page, _| page.open_link(&url)).ok();
                             });
@@ -3489,8 +3490,8 @@ impl Render for SessionRail {
                             status.is_some(),
                             div()
                                 .id(ElementId::Name(format!("rail-status-{path}").into()))
-                                .pl(px(29.))
-                                .pb(px(4.))
+                                .pl(space::XXL)
+                                .pb(space::XS)
                                 .flex()
                                 .flex_col()
                                 .mono(11.)
@@ -3511,8 +3512,8 @@ impl Render for SessionRail {
                         let forge = forge.map(|line| {
                             div()
                                 .id(ElementId::Name(format!("rail-forge-{path}").into()))
-                                .pl(px(29.))
-                                .pb(px(4.))
+                                .pl(space::XXL)
+                                .pb(space::XS)
                                 .mono(11.)
                                 .text_color(p.faint)
                                 .child(SharedString::from(line))
@@ -3530,8 +3531,8 @@ impl Render for SessionRail {
                 once,
                 div()
                     .id("rail-no-forge")
-                    .px(px(8.))
-                    .pb(px(4.))
+                    .px(space::SM)
+                    .pb(space::XS)
                     .text_size(px(11.5))
                     .text_color(p.faint)
                     .children(said.clone())
@@ -3541,8 +3542,8 @@ impl Render for SessionRail {
             .children(forge_problem.map(|problem| {
                 div()
                     .id("rail-forge-problem")
-                    .px(px(8.))
-                    .py(px(4.))
+                    .px(space::SM)
+                    .py(space::XS)
                     .text_size(px(11.5))
                     .text_color(p.faint)
                     .child(SharedString::from(problem))
@@ -3555,7 +3556,7 @@ impl Render for SessionRail {
                     .mx(px(8.))
                     .my(px(4.))
                     .h(px(28.))
-                    .px(px(8.))
+                    .px(space::SM)
                     .rounded(px(8.))
                     .bg(p.field)
                     .border_1()
@@ -3569,8 +3570,8 @@ impl Render for SessionRail {
             .children(ticket_error.map(|error| {
                 div()
                     .id("rail-ticket-error")
-                    .px(px(8.))
-                    .py(px(4.))
+                    .px(space::SM)
+                    .py(space::XS)
                     .text_size(px(11.5))
                     .text_color(p.fail)
                     .child(error)
@@ -3580,15 +3581,15 @@ impl Render for SessionRail {
             .child(
                 div()
                     .id("rail-facts")
-                    .px(px(8.))
+                    .px(space::SM)
                     .flex()
                     .flex_col()
-                    .gap(px(6.))
+                    .gap(space::SM)
                     .text_size(px(12.5))
                     .children(facts.into_iter().map(|(key, value)| {
                         div()
                             .flex()
-                            .gap(px(12.))
+                            .gap(space::MD)
                             .child(div().text_color(p.faint).child(key))
                             .child(div().ml_auto().mono(12.).child(SharedString::from(value)))
                     }))
@@ -3612,9 +3613,9 @@ pub(crate) fn pull_row(id: ElementId, pull: &PullRequest, cx: &App) -> Stateful<
         .id(id)
         .flex()
         .items_center()
-        .gap(px(6.))
-        .px(px(8.))
-        .py(px(3.))
+        .gap(space::SM)
+        .px(space::SM)
+        .py(space::XS)
         .rounded(px(6.))
         .cursor_pointer()
         .mono(11.)
@@ -4099,8 +4100,8 @@ impl Reply {
             div()
                 .id(id)
                 .aria_label(text)
-                .px(px(10.))
-                .py(px(8.))
+                .px(space::MD)
+                .py(space::SM)
                 .text_size(px(12.5))
                 .text_color(p.faint)
                 .child(text)
@@ -4146,12 +4147,12 @@ impl Reply {
                 .left_0()
                 .right_0()
                 .bottom(gpui_kit::relative(1.))
-                .pb(px(6.))
+                .pb(space::SM)
                 .child(
                     div()
                         .id("slash-list")
                         .occlude()
-                        .p(px(6.))
+                        .p(space::SM)
                         .rounded(px(12.))
                         .bg(p.card)
                         .border_1()
@@ -4159,7 +4160,7 @@ impl Reply {
                         .shadow_lg()
                         .flex()
                         .flex_col()
-                        .gap(px(1.))
+                        .gap(space::XS)
                         .children(body)
                         .test_support(),
                 )
@@ -4331,7 +4332,7 @@ impl Render for Reply {
                     this.interrupt(cx);
                 }
             }))
-            .p(px(6.))
+            .p(space::SM)
             .rounded(px(16.))
             .bg(p.shell)
             .border_1()
@@ -4344,10 +4345,10 @@ impl Render for Reply {
                     div()
                         .id("reply-attachments")
                         .flex()
-                        .gap(px(10.))
-                        .px(px(6.))
-                        .pt(px(6.))
-                        .pb(px(10.))
+                        .gap(space::MD)
+                        .px(space::SM)
+                        .pt(space::SM)
+                        .pb(space::MD)
                         .children(thumbs)
                         .test_support(),
                 )
@@ -4360,8 +4361,8 @@ impl Render for Reply {
                     .border_1()
                     .border_color(mix(p.field_line, p.focus_line, focus))
                     .min_h(px(60.))
-                    .px(px(14.))
-                    .py(px(12.))
+                    .px(space::LG)
+                    .py(space::MD)
                     .text_size(px(14.))
                     .line_height(px(21.))
                     .cursor_text()
@@ -4376,9 +4377,9 @@ impl Render for Reply {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(2.))
-                    .pt(px(6.))
-                    .px(px(2.))
+                    .gap(space::XS)
+                    .pt(space::SM)
+                    .px(space::XS)
                     .child(self.facts.clone())
                     .child(self.mode.clone())
                     .child(
@@ -4395,7 +4396,7 @@ impl Render for Reply {
                             .min_w_0()
                             .flex()
                             .justify_end()
-                            .pr(px(10.))
+                            .pr(space::MD)
                             .child(self.status_line.clone()),
                     )
                     .child(
@@ -4438,8 +4439,8 @@ impl Render for Reply {
                     div()
                         .id("reply-error")
                         .aria_label(error.clone())
-                        .px(px(10.))
-                        .pt(px(6.))
+                        .px(space::MD)
+                        .pt(space::SM)
                         .text_size(px(12.5))
                         .text_color(p.fail)
                         .child(error)
@@ -4584,10 +4585,10 @@ impl Render for ReplyFacts {
         div()
             .id("reply-model")
             .h(px(28.))
-            .px(px(9.))
+            .px(space::SM)
             .flex()
             .items_center()
-            .gap(px(6.))
+            .gap(space::SM)
             .text_size(px(12.5))
             .text_color(p.mute)
             .child(SharedString::from(self.shown()))

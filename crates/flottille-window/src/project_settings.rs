@@ -8,7 +8,10 @@
 //! its remote and keeps the file's comments.
 
 use flottille_core::declared::{ProjectTracker, RepositoryForge};
-use flottille_ui::{Button, Card, Dropdown, MenuItem, Type, enter, palette, presence, presence_of};
+use flottille_ui::{
+    Button, Card, Confirm, Dropdown, MenuItem, Toast, Type, enter, palette, presence, presence_of,
+    space, toast,
+};
 use gpui_kit::base::input::{Input, InputEditorStyle, InputState};
 use gpui_kit::{
     App, AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement,
@@ -54,7 +57,7 @@ pub fn field_frame(
     div()
         .id(id.into())
         .h(px(32.))
-        .px(px(10.))
+        .px(space::MD)
         .rounded(px(8.))
         .bg(p.field)
         .border_1()
@@ -375,13 +378,21 @@ impl ProjectSettingsPage {
     ) {
         if saved {
             self.saving = false;
-            self.saved = Some(match &read {
-                Ok(_) => Said::Fine(
-                    "Saved: Flottille reads and writes these forges and this tracker from now on."
-                        .into(),
+            // The result of the save is a toast, never a line under the form.
+            let (said, result) = match &read {
+                Ok(_) => (
+                    Said::Fine("Forges and tracker saved".into()),
+                    Toast::success("Forges and tracker saved").detail(
+                        "Flottille reads and writes these forges and this tracker from now on.",
+                    ),
                 ),
-                Err(why) => Said::Refused(why.clone()),
-            });
+                Err(why) => (
+                    Said::Refused(why.clone()),
+                    Toast::failure("The forges and the tracker were not saved").detail(why.clone()),
+                ),
+            };
+            toast(result, cx);
+            self.saved = Some(said);
         }
         let settings = match read {
             Ok(settings) => settings,
@@ -633,7 +644,7 @@ impl ProjectSettingsPage {
             .flex_1()
             .flex()
             .items_center()
-            .gap(px(8.))
+            .gap(space::SM)
             .child(SharedString::from(repository_label(&self.name, &row.path)))
             .child(
                 div()
@@ -650,7 +661,7 @@ impl ProjectSettingsPage {
                     })),
             )
             .child(picker);
-        let mut fields = div().flex().gap(px(8.));
+        let mut fields = div().flex().gap(space::SM);
         if row.kind == ForgeKind::BitbucketDataCenter {
             fields = fields.child(enter(
                 id("forge-host-enter"),
@@ -697,13 +708,14 @@ impl ProjectSettingsPage {
         Card::new().title(title).child(
             div()
                 .id(id("forge"))
-                .px(px(14.))
-                .py(px(12.))
+                .px(space::LG)
+                .py(space::MD)
                 .flex()
                 .flex_col()
-                .gap(px(8.))
+                .gap(space::SM)
                 .child(
-                    presence(id("forge-fields"), row.kind != ForgeKind::None, fields).gap(px(8.)),
+                    presence(id("forge-fields"), row.kind != ForgeKind::None, fields)
+                        .gap(space::SM),
                 )
                 .child(said)
                 .test_support(),
@@ -729,7 +741,7 @@ impl ProjectSettingsPage {
             .flex_1()
             .flex()
             .items_center()
-            .gap(px(8.))
+            .gap(space::SM)
             .child("Tickets")
             .child(div().flex_1())
             .child(
@@ -743,11 +755,11 @@ impl ProjectSettingsPage {
             );
         let body = div()
             .id("tracker")
-            .px(px(14.))
-            .py(px(12.))
+            .px(space::LG)
+            .py(space::MD)
             .flex()
             .flex_col()
-            .gap(px(8.))
+            .gap(space::SM)
             .test_support();
         let line = |text: String, color| {
             div()
@@ -798,7 +810,7 @@ impl ProjectSettingsPage {
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(8.))
+                            .gap(space::SM)
                             .child(line("The issues of".into(), p.mute))
                             .child(
                                 Dropdown::new("tracker-repository", label)
@@ -840,12 +852,12 @@ fn strings(value: &Value) -> Vec<String> {
 impl Render for ProjectSettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let pad = if self.narrow { 16. } else { 28. };
+        let pad = if self.narrow { space::LG } else { space::XXL };
         let key =
             |part: &str| ElementId::Name(format!("enter-settings-{}-{part}", self.name).into());
         let shell = self.shell.clone();
         let back_to = self.name.clone();
-        let mut actions = div().flex().items_center().gap(px(8.)).child(
+        let mut actions = div().flex().items_center().gap(space::SM).child(
             Button::quiet("project-page", "Back to the project").on_click(move |_, window, cx| {
                 let selection = crate::shell::Selection::Project(back_to.clone());
                 shell
@@ -868,27 +880,6 @@ impl Render for ProjectSettingsPage {
         actions =
             if self.removing {
                 actions.child(div().mono(11.5).text_color(p.faint).child("Removing…"))
-            } else if self.confirming_remove {
-                actions.child(enter(
-                    "confirm-remove-project-group",
-                    0,
-                    div()
-                        .flex()
-                        .gap(px(8.))
-                        .child(Button::quiet("cancel-remove-project", "Cancel").on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.confirming_remove = false;
-                                cx.notify();
-                            }),
-                        ))
-                        .child(
-                            Button::secondary(
-                                "confirm-remove-project",
-                                format!("Forget {}", self.name),
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| this.remove(cx))),
-                        ),
-                ))
             } else {
                 actions.child(Button::quiet("remove-project", "Remove project").on_click(
                     cx.listener(|this, _, _, cx| {
@@ -897,16 +888,41 @@ impl Render for ProjectSettingsPage {
                     }),
                 ))
             };
+        let confirm = {
+            let (this, again) = (cx.entity().downgrade(), cx.entity().downgrade());
+            Confirm::new(
+                "project-removal",
+                format!("Remove the project {}?", self.name),
+            )
+            .sentence(
+                "Flottille forgets the project and its file; its folder and repositories \
+                     stay as they are.",
+            )
+            .action("Remove project")
+            .open(self.confirming_remove)
+            .on_confirm(move |_, cx| {
+                this.update(cx, |this, cx| this.remove(cx)).ok();
+            })
+            .on_cancel(move |_, cx| {
+                again
+                    .update(cx, |this, cx| {
+                        this.confirming_remove = false;
+                        cx.notify();
+                    })
+                    .ok();
+            })
+        };
         let header = div()
             .flex()
             .flex_col()
-            .gap(px(6.))
+            .gap(space::SM)
             .mb(px(20.))
+            .child(confirm)
             .child(
                 div()
                     .flex()
                     .items_end()
-                    .gap(px(14.))
+                    .gap(space::LG)
                     .child(
                         div()
                             .flex_none()
@@ -923,17 +939,6 @@ impl Render for ProjectSettingsPage {
                     .mono(12.)
                     .text_color(p.faint)
                     .child(SharedString::from(self.folder.clone())),
-            )
-            .child(
-                presence(
-                    "confirm-remove-note",
-                    self.confirming_remove,
-                    div().text_size(px(12.5)).text_color(p.mute).child(
-                        "Flottille forgets the project and its file; its folder and \
-                         repositories stay as they are.",
-                    ),
-                )
-                .gap(px(6.)),
             );
         // A line the page says, in the colour of what it says; it folds away when it is cleared.
         let said = |id: &'static str, said: Option<Said>| {
@@ -946,7 +951,7 @@ impl Render for ProjectSettingsPage {
                 move |text: SharedString| {
                     div()
                         .id(id)
-                        .pb(px(12.))
+                        .pb(space::MD)
                         .text_size(px(12.5))
                         .text_color(color)
                         .child(text)
@@ -989,7 +994,7 @@ impl Render for ProjectSettingsPage {
             .mt(px(8.))
             .flex()
             .items_center()
-            .gap(px(12.))
+            .gap(space::MD)
             .child(div().flex_1())
             .child(if self.saving {
                 div()
@@ -1010,12 +1015,12 @@ impl Render for ProjectSettingsPage {
             .overflow_y_scroll()
             .child(
                 div()
-                    .max_w(px(980. + 2. * pad))
+                    .max_w(px(980.) + pad * 2.)
                     .w_full()
                     .mx_auto()
-                    .px(px(pad))
-                    .pt(px(36.))
-                    .pb(px(56.))
+                    .px(pad)
+                    .pt(space::XXL)
+                    .pb(space::XXXL)
                     .flex()
                     .flex_col()
                     .child(enter(key("header"), 0, header))
@@ -1057,7 +1062,6 @@ impl Render for ProjectSettingsPage {
                         5 + count,
                         div().mb(px(12.)).child(tracker),
                     ))
-                    .child(said("project-settings-saved", self.saved.clone()))
                     .child(enter(key("save"), 6 + count, footer))
                     .child(enter(key("skills"), 7 + count, self.skills.clone()))
                     .child(enter(key("commands"), 8 + count, self.commands.clone()))

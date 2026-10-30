@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use flottille_ui::{
-    Button, Icon, Item, Listing, Modal, Switch, Type, enter, hoverable, palette, presence,
+    Button, Confirm, Icon, Item, Listing, Modal, Switch, Type, hoverable, palette, presence, space,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -116,6 +116,8 @@ pub struct SkillsSection {
     saving: bool,
     form_error: Option<SharedString>,
     confirming: Option<String>,
+    /// What the confirmation names, kept while it fades away.
+    asked: String,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -137,6 +139,7 @@ impl SkillsSection {
             saving: false,
             form_error: None,
             confirming: None,
+            asked: String::new(),
             _subscriptions: Vec::new(),
         }
     }
@@ -396,10 +399,11 @@ impl SkillsSection {
         cx.notify();
     }
 
-    /// Asks to remove; the second click confirms.
+    /// Asks to remove, in a confirmation; called again from it, removes.
     pub fn remove(&mut self, name: &str, cx: &mut Context<Self>) {
         if self.confirming.as_deref() != Some(name) {
             self.confirming = Some(name.to_owned());
+            self.asked = name.to_owned();
             cx.notify();
             return;
         }
@@ -434,30 +438,29 @@ impl SkillsSection {
         let p = palette(cx);
         let name = skill.name.clone();
         let id = |part: &str| ElementId::Name(format!("{part}-{}", skill.name).into());
-        let confirming = self.confirming.as_deref() == Some(&skill.name);
         let place = skill.place();
         div()
             .id(id("skill"))
-            .px(px(14.))
-            .py(px(10.))
+            .px(space::LG)
+            .py(space::MD)
             .rounded(px(10.))
             .border_1()
             .border_color(p.line)
             .bg(p.card)
             .flex()
             .items_start()
-            .gap(px(10.))
+            .gap(space::MD)
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .gap(px(3.))
+                    .gap(space::XS)
                     .child(
                         div()
                             .flex()
-                            .gap(px(10.))
+                            .gap(space::MD)
                             .items_baseline()
                             .child(
                                 div()
@@ -491,31 +494,35 @@ impl SkillsSection {
                     .disabled(self.reading.is_some())
                     .on_click(cx.listener(move |this, _, _, cx| this.edit(&edit, cx)))
             })
-            .child(if confirming {
-                let (cancel, remove) = (name.clone(), name.clone());
-                let group = div()
-                    .flex()
-                    .gap(px(4.))
-                    .child(Button::quiet(id("cancel-remove-skill"), "Cancel").on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            if this.confirming.as_deref() == Some(&cancel) {
-                                this.confirming = None;
-                                cx.notify();
-                            }
-                        }),
-                    ))
-                    .child(
-                        Button::secondary(id("confirm-remove-skill"), format!("Remove {name}"))
-                            .on_click(cx.listener(move |this, _, _, cx| this.remove(&remove, cx))),
-                    );
-                enter(id("confirm-skill"), 0, group).into_any_element()
-            } else {
+            .child({
                 let remove = name.clone();
                 Button::quiet(id("remove-skill"), "Remove")
                     .on_click(cx.listener(move |this, _, _, cx| this.remove(&remove, cx)))
                     .into_any_element()
             })
             .test_support()
+    }
+
+    /// The confirmation of a removal.
+    fn confirm(&self, cx: &mut Context<Self>) -> Confirm {
+        let name = self.asked.clone();
+        let (this, again) = (cx.entity().downgrade(), cx.entity().downgrade());
+        Confirm::new("skill-removal", format!("Remove the skill {name}?"))
+            .sentence("Agents created from now on no longer see it; a file it names stays.")
+            .action("Remove skill")
+            .open(self.confirming.is_some())
+            .on_confirm(move |_, cx| {
+                let name = name.clone();
+                this.update(cx, |this, cx| this.remove(&name, cx)).ok();
+            })
+            .on_cancel(move |_, cx| {
+                again
+                    .update(cx, |this, cx| {
+                        this.confirming = None;
+                        cx.notify();
+                    })
+                    .ok();
+            })
     }
 
     fn modal(&mut self, cx: &mut Context<Self>) -> Modal {
@@ -527,7 +534,7 @@ impl SkillsSection {
             "Add a skill"
         };
         let modal = Modal::new("skill-modal", title)
-            .width(px(560.))
+            .wide()
             .open(self.open)
             .on_close(move |_, cx| {
                 this.update(cx, |this, cx| this.close(cx)).ok();
@@ -554,8 +561,8 @@ impl SkillsSection {
             .child(
                 div()
                     .id("skill-location")
-                    .px(px(10.))
-                    .py(px(5.))
+                    .px(space::MD)
+                    .py(space::XS)
                     .mono(11.)
                     .text_color(p.faint)
                     .child(SharedString::from(location))
@@ -565,8 +572,8 @@ impl SkillsSection {
                 d.child(hoverable(
                     div()
                         .id("skill-up")
-                        .px(px(10.))
-                        .py(px(4.))
+                        .px(space::MD)
+                        .py(space::XS)
                         .mono(12.)
                         .text_color(p.mute)
                         .child("..")
@@ -580,11 +587,11 @@ impl SkillsSection {
                     .id(ElementId::Name(
                         format!("skill-entry-{}", entry.name).into(),
                     ))
-                    .px(px(10.))
-                    .py(px(4.))
+                    .px(space::MD)
+                    .py(space::XS)
                     .flex()
                     .items_center()
-                    .gap(px(6.))
+                    .gap(space::SM)
                     .mono(12.)
                     .child(
                         flottille_ui::icon(if entry.folder {
@@ -608,7 +615,7 @@ impl SkillsSection {
         let kind = div()
             .flex()
             .items_center()
-            .gap(px(8.))
+            .gap(space::SM)
             .text_size(px(12.5))
             .text_color(p.mute)
             .child(
@@ -618,18 +625,11 @@ impl SkillsSection {
                         this.set_text(as_text, cx)
                     },
                 )),
-            )
-            .child(
-                div()
-                    .id("skill-as-text-label")
-                    .aria_label(AS_TEXT)
-                    .child(AS_TEXT)
-                    .test_support(),
             );
         let text = div()
             .id("skill-text")
-            .px(px(10.))
-            .py(px(8.))
+            .px(space::MD)
+            .py(space::SM)
             .rounded(px(8.))
             .bg(p.field)
             .border_1()
@@ -653,7 +653,7 @@ impl SkillsSection {
             ))
             .child(kind)
             // The text and the path with its picker fold into each other with the switch.
-            .child(presence("skill-text-block", self.as_text, text).gap(px(14.)))
+            .child(presence("skill-text-block", self.as_text, text).gap(space::LG))
             .child(
                 presence(
                     "skill-path-block",
@@ -661,16 +661,16 @@ impl SkillsSection {
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(14.))
+                        .gap(space::LG)
                         .child(boxed("skill-path-field", Input::new(&fields.path), cx))
                         .child(picker),
                 )
-                .gap(px(14.)),
+                .gap(space::LG),
             )
             .child(problem_line(
                 "skill-error",
                 self.form_error.clone(),
-                14.,
+                space::LG,
                 cx,
             ))
             .action(save_or_saving(
@@ -709,7 +709,7 @@ impl Render for SkillsSection {
                     row.placement,
                     self.row(row.value, cx),
                 )
-                .gap(px(8.))
+                .gap(space::SM)
             })
             .collect();
         let count = self.rows.len();
@@ -729,7 +729,7 @@ impl Render for SkillsSection {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(8.))
+                    .gap(space::SM)
                     .children(rows)
                     .child(empty_note(
                         "no-skills",
@@ -738,8 +738,14 @@ impl Render for SkillsSection {
                          read when their task needs it.",
                         cx,
                     ))
-                    .child(problem_line("skills-problem", self.problem.clone(), 8., cx)),
+                    .child(problem_line(
+                        "skills-problem",
+                        self.problem.clone(),
+                        space::SM,
+                        cx,
+                    )),
             )
             .child(modal)
+            .child(self.confirm(cx))
     }
 }

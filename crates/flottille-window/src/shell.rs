@@ -8,8 +8,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use flottille_ui::motion::{ENTER, HOVER, Motion, RISE};
 use flottille_ui::{
-    AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Side, StateIcon, Status, Type,
-    dismiss_on_navigate, dismiss_top_overlay, enter, forget_overlays, icon, open_overlay, palette,
+    AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Side, StateIcon, Status, ToastStack,
+    Type, dismiss_on_navigate, dismiss_top_overlay, enter, forget_overlays, icon, open_overlay,
+    palette, space,
 };
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
@@ -93,6 +94,8 @@ pub struct Shell {
     main: Entity<MainArea>,
     left: Entity<Drawer>,
     bell: Entity<BellList>,
+    /// The results of the user's actions, at the bottom right, above everything.
+    toasts: Entity<ToastStack>,
     bell_open: bool,
     /// How far the bell's list is in view: it rises in and fades out, and stays drawn until then.
     bell_shown: Motion,
@@ -201,6 +204,7 @@ impl Shell {
         };
         let left = cx.new(|_| Drawer::new("tree-drawer", Side::Left, px(SIDEBAR), sidebar.clone()));
         let bell = cx.new(|_| BellList::new(this.clone()));
+        let toasts = cx.new(ToastStack::new);
         let add_project = {
             let this = this.clone();
             cx.new(|cx| AddProject::new(this, window, cx))
@@ -227,6 +231,7 @@ impl Shell {
             main,
             left,
             bell,
+            toasts,
             bell_open: false,
             bell_shown: Motion::settled(0.0),
             projects: HashMap::new(),
@@ -1362,7 +1367,7 @@ impl Shell {
         let buttons = div()
             .flex()
             .items_center()
-            .gap(px(8.))
+            .gap(space::SM)
             .child(div().flex_1())
             .child(
                 Button::secondary("judge-notice-dismiss", "Dismiss")
@@ -1377,11 +1382,11 @@ impl Shell {
                 )),
             );
         let body = div()
-            .px(px(14.))
-            .py(px(12.))
+            .px(space::LG)
+            .py(space::MD)
             .flex()
             .flex_col()
-            .gap(px(10.))
+            .gap(space::MD)
             .child(
                 div()
                     .id("judge-notice-text")
@@ -1721,6 +1726,7 @@ impl Render for Shell {
                         .child(self.bell.clone()),
                 )
             })
+            .child(self.toasts.clone())
     }
 }
 
@@ -1790,10 +1796,10 @@ impl Render for TopBar {
             .flex_none()
             .h(px(40.))
             .w_full()
-            .px(px(12.))
+            .px(space::MD)
             .flex()
             .items_center()
-            .gap(px(10.))
+            .gap(space::MD)
             .bg(p.rail)
             .border_b_1()
             .border_color(p.line)
@@ -1808,8 +1814,8 @@ impl Render for TopBar {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(8.))
-                    .px(px(6.))
+                    .gap(space::SM)
+                    .px(space::SM)
                     .child(
                         div()
                             .size(px(20.))
@@ -1835,11 +1841,11 @@ impl Render for TopBar {
             .child(
                 div()
                     .h(px(26.))
-                    .px(px(10.))
+                    .px(space::MD)
                     .rounded(px(7.))
                     .flex()
                     .items_center()
-                    .gap(px(8.))
+                    .gap(space::SM)
                     .text_color(p.faint)
                     .text_size(px(12.5))
                     .child(icon(Icon::Search).size(px(13.)).text_color(p.faint))
@@ -1911,7 +1917,7 @@ impl Render for BellList {
             .w(px(340.))
             .max_h(px(420.))
             .overflow_y_scroll()
-            .p(px(6.))
+            .p(space::SM)
             .rounded(px(12.))
             .bg(p.card)
             .border_1()
@@ -1926,7 +1932,7 @@ impl Render for BellList {
             return list
                 .child(
                     div()
-                        .p(px(10.))
+                        .p(space::MD)
                         .text_color(p.faint)
                         .child("Nothing waits for you."),
                 )

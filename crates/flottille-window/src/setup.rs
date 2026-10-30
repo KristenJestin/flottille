@@ -6,7 +6,7 @@
 //! checks the step as the file is checked, and the section shows the list the daemon gives next.
 
 use flottille_core::project::SetupStep;
-use flottille_ui::{Button, Icon, Item, Listing, Modal, Type, enter, palette, presence};
+use flottille_ui::{Button, Confirm, Icon, Item, Listing, Modal, Type, palette, presence, space};
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
     Context, ElementId, Entity, Focusable as _, InteractiveElement, IntoElement, ParentElement,
@@ -211,6 +211,8 @@ pub struct SetupSection {
     saving: bool,
     form_error: Option<SharedString>,
     confirming: Option<usize>,
+    /// What the confirmation names, kept while it fades away.
+    asked: usize,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -228,6 +230,7 @@ impl SetupSection {
             saving: false,
             form_error: None,
             confirming: None,
+            asked: 0,
             _subscriptions: Vec::new(),
         }
     }
@@ -406,10 +409,11 @@ impl SetupSection {
         self.write("setup.move", json!({"number": number, "to": to}), cx);
     }
 
-    /// Asks to remove; the second click confirms.
+    /// Asks to remove, in a confirmation; called again from it, removes.
     pub fn remove(&mut self, number: usize, cx: &mut Context<Self>) {
         if self.confirming != Some(number) {
             self.confirming = Some(number);
+            self.asked = number;
             cx.notify();
             return;
         }
@@ -441,19 +445,18 @@ impl SetupSection {
     ) -> impl IntoElement {
         let p = palette(cx);
         let id = |part: &str| ElementId::Name(format!("{part}-{number}").into());
-        let confirming = self.confirming == Some(number);
         let text = said(step);
         div()
             .id(id("setup-step"))
-            .px(px(14.))
-            .py(px(10.))
+            .px(space::LG)
+            .py(space::MD)
             .rounded(px(10.))
             .border_1()
             .border_color(p.line)
             .bg(p.card)
             .flex()
             .items_center()
-            .gap(px(10.))
+            .gap(space::MD)
             .child(
                 div()
                     .flex_none()
@@ -489,30 +492,33 @@ impl SetupSection {
             .child(Button::quiet(id("edit-setup"), "Edit").on_click(
                 cx.listener(move |this, _, window, cx| this.open(Some(number), window, cx)),
             ))
-            .child(if confirming {
-                let group = div()
-                    .flex()
-                    .gap(px(4.))
-                    .child(Button::quiet(id("cancel-remove-setup"), "Cancel").on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            this.confirming = None;
-                            cx.notify();
-                        }),
-                    ))
-                    .child(
-                        Button::secondary(
-                            id("confirm-remove-setup"),
-                            format!("Remove step {number}"),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| this.remove(number, cx))),
-                    );
-                enter(id("confirm-setup"), 0, group).into_any_element()
-            } else {
+            .child({
                 Button::quiet(id("remove-setup"), "Remove")
                     .on_click(cx.listener(move |this, _, _, cx| this.remove(number, cx)))
                     .into_any_element()
             })
             .test_support()
+    }
+
+    /// The confirmation of a removal.
+    fn confirm(&self, cx: &mut Context<Self>) -> Confirm {
+        let number = self.asked;
+        let (this, again) = (cx.entity().downgrade(), cx.entity().downgrade());
+        Confirm::new("setup-removal", format!("Remove setup step {number}?"))
+            .sentence("New workspaces skip it from now on; the ones made already keep what it did.")
+            .action("Remove step")
+            .open(self.confirming.is_some())
+            .on_confirm(move |_, cx| {
+                this.update(cx, |this, cx| this.remove(number, cx)).ok();
+            })
+            .on_cancel(move |_, cx| {
+                again
+                    .update(cx, |this, cx| {
+                        this.confirming = None;
+                        cx.notify();
+                    })
+                    .ok();
+            })
     }
 
     fn modal(&mut self, cx: &mut Context<Self>) -> Modal {
@@ -523,7 +529,7 @@ impl SetupSection {
             None => "New setup step",
         };
         let modal = Modal::new("setup-modal", title)
-            .width(px(640.))
+            .wide()
             .open(self.form.is_some())
             .on_close(move |_, cx| {
                 this.update(cx, |this, cx| this.close(cx)).ok();
@@ -574,9 +580,9 @@ impl SetupSection {
             .id("setup-form")
             .flex()
             .flex_col()
-            .gap(px(10.))
+            .gap(space::MD)
             .child(label("What it does"))
-            .child(div().flex().flex_wrap().gap(px(4.)).children(kinds))
+            .child(div().flex().flex_wrap().gap(space::XS).children(kinds))
             // What the kind needs unfolds as it is chosen and the rest folds away.
             .child(
                 presence(
@@ -585,12 +591,12 @@ impl SetupSection {
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(10.))
+                        .gap(space::MD)
                         .child(boxed("setup-value", Input::new(&fields.value), cx))
                         .child(label("Where"))
-                        .child(div().flex().flex_wrap().gap(px(4.)).children(places)),
+                        .child(div().flex().flex_wrap().gap(space::XS).children(places)),
                 )
-                .gap(px(10.)),
+                .gap(space::MD),
             )
             .child(
                 presence(
@@ -601,7 +607,7 @@ impl SetupSection {
                          folder that is not a repository, .git or .gitignore.",
                     ),
                 )
-                .gap(px(10.)),
+                .gap(space::MD),
             )
             .child(
                 presence(
@@ -610,16 +616,16 @@ impl SetupSection {
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(10.))
+                        .gap(space::MD)
                         .child(label("Time limit, in seconds"))
                         .child(boxed("setup-limit", Input::new(&fields.limit), cx)),
                 )
-                .gap(px(10.)),
+                .gap(space::MD),
             )
             .child(problem_line(
                 "setup-error",
                 self.form_error.clone(),
-                10.,
+                space::MD,
                 cx,
             ))
             .test_support();
@@ -662,7 +668,7 @@ impl Render for SetupSection {
                     row.placement,
                     self.row(*number, step, count, cx),
                 )
-                .gap(px(8.))
+                .gap(space::SM)
             })
             .collect();
         let empty = self.listed.as_ref().is_some_and(Vec::is_empty);
@@ -691,7 +697,7 @@ impl Render for SetupSection {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(8.))
+                    .gap(space::SM)
                     .children(rows)
                     .child(empty_note(
                         "no-setup",
@@ -700,9 +706,15 @@ impl Render for SetupSection {
                          files, link what is shared, run the install.",
                         cx,
                     ))
-                    .child(problem_line("setup-problem", self.problem.clone(), 8., cx)),
+                    .child(problem_line(
+                        "setup-problem",
+                        self.problem.clone(),
+                        space::SM,
+                        cx,
+                    )),
             )
             .child(modal)
+            .child(self.confirm(cx))
     }
 }
 

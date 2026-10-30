@@ -16,7 +16,7 @@ use flottille_ui::color::mix;
 use flottille_ui::motion::PANEL;
 use flottille_ui::{
     Button, Icon, Item, Listing, Modal, Palette, Type, fade, hoverable, icon, palette, presence,
-    section_label, turning,
+    section_label, space, turning,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -247,9 +247,9 @@ pub fn card(
         .id(id("card"))
         .flex()
         .items_center()
-        .gap(px(8.))
-        .px(px(12.))
-        .py(px(7.))
+        .gap(space::SM)
+        .px(space::MD)
+        .py(space::SM)
         .rounded(px(8.))
         .border_1()
         .border_color(p.line)
@@ -353,8 +353,8 @@ fn text_action(
     let button = div()
         .id(id)
         .flex_none()
-        .px(px(6.))
-        .py(px(1.))
+        .px(space::SM)
+        .py(space::XS)
         .rounded(px(5.))
         .text_size(px(11.5))
         .cursor_pointer()
@@ -531,9 +531,9 @@ impl CommandList {
             .id(ElementId::Name(format!("command-{}", row.run).into()))
             .flex()
             .flex_col()
-            .gap(px(2.))
-            .px(px(8.))
-            .py(px(6.))
+            .gap(space::XS)
+            .px(space::SM)
+            .py(space::SM)
             .rounded(px(8.))
             .cursor_pointer()
             .opacity(1.0 - 0.4 * grey)
@@ -542,7 +542,7 @@ impl CommandList {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(8.))
+                    .gap(space::SM)
                     .child(
                         div()
                             .id(id("mark"))
@@ -580,8 +580,8 @@ impl CommandList {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(6.))
-                    .pl(px(20.))
+                    .gap(space::SM)
+                    .pl(space::XL)
                     .when(ended, |d| {
                         d.child(
                             div()
@@ -615,7 +615,7 @@ impl CommandList {
                 d.child(
                     div()
                         .id(id("last"))
-                        .pl(px(20.))
+                        .pl(space::XL)
                         .mono(11.)
                         .text_color(p.faint)
                         .overflow_hidden()
@@ -646,9 +646,9 @@ impl CommandList {
             .aria_label(said.clone())
             .flex()
             .items_center()
-            .gap(px(8.))
-            .px(px(8.))
-            .py(px(6.))
+            .gap(space::SM)
+            .px(space::SM)
+            .py(space::SM)
             .rounded(px(8.))
             .cursor_pointer()
             .text_size(px(12.5))
@@ -742,8 +742,8 @@ impl Render for CommandList {
             .children(self.error.clone().map(|error| {
                 div()
                     .id("rail-runs-error")
-                    .px(px(8.))
-                    .py(px(4.))
+                    .px(space::SM)
+                    .py(space::XS)
                     .text_size(px(11.5))
                     .text_color(p.fail)
                     .child(error)
@@ -836,10 +836,10 @@ impl Render for CommandPanel {
             .id("command-panel-body")
             .flex()
             .flex_col()
-            .gap(px(14.))
+            .gap(space::LG)
             .track_focus(&focus);
         let mut modal = Modal::new("command-panel", "Output")
-            .width(px(720.))
+            .wide()
             .cancel_label("Close")
             .open(self.run.is_some())
             .on_close(move |_, cx| page.close(cx));
@@ -858,7 +858,7 @@ impl Render for CommandPanel {
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(8.))
+                        .gap(space::SM)
                         .child(
                             div()
                                 .id("command-panel-line")
@@ -887,7 +887,7 @@ impl Render for CommandPanel {
                     div()
                         .id("command-panel-output")
                         .h(px(340.))
-                        .p(px(10.))
+                        .p(space::MD)
                         .rounded(px(8.))
                         .bg(p.field)
                         .border_1()

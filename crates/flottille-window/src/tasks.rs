@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use flottille_ui::{Button, Item, Listing, Modal, Switch, Type, enter, palette};
+use flottille_ui::{Button, Confirm, Item, Listing, Modal, Switch, Type, palette, space};
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -141,6 +141,8 @@ pub struct TasksSection {
     saving: bool,
     form_error: Option<SharedString>,
     confirming: Option<String>,
+    /// What the confirmation names, kept while it fades away.
+    asked: String,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -158,6 +160,7 @@ impl TasksSection {
             saving: false,
             form_error: None,
             confirming: None,
+            asked: String::new(),
             _subscriptions: Vec::new(),
         }
     }
@@ -324,10 +327,11 @@ impl TasksSection {
         self.write(method, params, cx);
     }
 
-    /// Asks to remove; the second click confirms.
+    /// Asks to remove, in a confirmation; called again from it, removes.
     pub fn remove(&mut self, name: &str, cx: &mut Context<Self>) {
         if self.confirming.as_deref() != Some(name) {
             self.confirming = Some(name.to_owned());
+            self.asked = name.to_owned();
             cx.notify();
             return;
         }
@@ -354,19 +358,18 @@ impl TasksSection {
     fn row(&self, info: &TaskInfo, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let id = |part: &str| ElementId::Name(format!("{part}-{}", info.name).into());
-        let confirming = self.confirming.as_deref() == Some(&info.name);
         let name = info.name.clone();
         div()
             .id(id("task"))
-            .px(px(14.))
-            .py(px(10.))
+            .px(space::LG)
+            .py(space::MD)
             .rounded(px(10.))
             .border_1()
             .border_color(p.line)
             .bg(p.card)
             .flex()
             .items_start()
-            .gap(px(10.))
+            .gap(space::MD)
             .child(task_text(info, &p))
             .child({
                 let edit = info.clone();
@@ -374,32 +377,34 @@ impl TasksSection {
                     cx.listener(move |this, _, window, cx| this.open(Some(&edit), window, cx)),
                 )
             })
-            .child(if confirming {
-                let (cancel, remove) = (name.clone(), name.clone());
-                let group = div()
-                    .flex()
-                    .gap(px(4.))
-                    .child(
-                        Button::quiet(id("cancel-remove-task"), "Cancel").on_click(cx.listener(
-                            move |this, _, _, cx| {
-                                if this.confirming.as_deref() == Some(&cancel) {
-                                    this.confirming = None;
-                                    cx.notify();
-                                }
-                            },
-                        )),
-                    )
-                    .child(
-                        Button::secondary(id("confirm-remove-task"), format!("Remove {name}"))
-                            .on_click(cx.listener(move |this, _, _, cx| this.remove(&remove, cx))),
-                    );
-                enter(id("confirm-task"), 0, group).into_any_element()
-            } else {
+            .child({
                 Button::quiet(id("remove-task"), "Remove")
                     .on_click(cx.listener(move |this, _, _, cx| this.remove(&name, cx)))
                     .into_any_element()
             })
             .test_support()
+    }
+
+    /// The confirmation of a removal.
+    fn confirm(&self, cx: &mut Context<Self>) -> Confirm {
+        let name = self.asked.clone();
+        let (this, again) = (cx.entity().downgrade(), cx.entity().downgrade());
+        Confirm::new("task-removal", format!("Remove the task {name}?"))
+            .sentence("Agents can no longer run it, and it leaves the project's page.")
+            .action("Remove task")
+            .open(self.confirming.is_some())
+            .on_confirm(move |_, cx| {
+                let name = name.clone();
+                this.update(cx, |this, cx| this.remove(&name, cx)).ok();
+            })
+            .on_cancel(move |_, cx| {
+                again
+                    .update(cx, |this, cx| {
+                        this.confirming = None;
+                        cx.notify();
+                    })
+                    .ok();
+            })
     }
 
     fn modal(&mut self, cx: &mut Context<Self>) -> Modal {
@@ -409,7 +414,7 @@ impl TasksSection {
             _ => "New task",
         };
         let modal = Modal::new("task-modal", title)
-            .width(px(600.))
+            .wide()
             .open(self.editing.is_some())
             .on_close(move |_, cx| {
                 this.update(cx, |this, cx| this.close(cx)).ok();
@@ -429,7 +434,7 @@ impl TasksSection {
             .id("task-form")
             .flex()
             .flex_col()
-            .gap(px(10.))
+            .gap(space::MD)
             .child(match &original {
                 Some(name) => div()
                     .mono(12.5)
@@ -440,8 +445,13 @@ impl TasksSection {
             })
             .child(boxed("task-line", Input::new(&fields.line), cx))
             .child(boxed("task-repository", Input::new(&fields.repository), cx))
-            .child(div().flex().flex_col().gap(px(6.)).children(switches))
-            .child(problem_line("task-error", self.form_error.clone(), 10., cx))
+            .child(div().flex().flex_col().gap(space::SM).children(switches))
+            .child(problem_line(
+                "task-error",
+                self.form_error.clone(),
+                space::MD,
+                cx,
+            ))
             .test_support();
         modal.child(body).action(save_or_saving(
             "task",
@@ -464,7 +474,7 @@ fn task_text(info: &TaskInfo, p: &flottille_ui::Palette) -> impl IntoElement {
         .min_w_0()
         .flex()
         .flex_col()
-        .gap(px(3.))
+        .gap(space::XS)
         .child(
             div()
                 .mono(12.5)
@@ -510,7 +520,7 @@ impl Render for TasksSection {
                     row.placement,
                     self.row(row.value, cx),
                 )
-                .gap(px(8.))
+                .gap(space::SM)
             })
             .collect();
         let count = self.rows.len();
@@ -530,7 +540,7 @@ impl Render for TasksSection {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(8.))
+                    .gap(space::SM)
                     .children(rows)
                     .child(empty_note(
                         "no-tasks",
@@ -539,9 +549,15 @@ impl Render for TasksSection {
                          Agents run them by name, and the project page has a Run button for each.",
                         cx,
                     ))
-                    .child(problem_line("tasks-problem", self.problem.clone(), 8., cx)),
+                    .child(problem_line(
+                        "tasks-problem",
+                        self.problem.clone(),
+                        space::SM,
+                        cx,
+                    )),
             )
             .child(modal)
+            .child(self.confirm(cx))
     }
 }
 
@@ -754,15 +770,15 @@ impl Render for ProjectTasks {
                 .id(ElementId::Name(
                     format!("project-task-{}", info.name).into(),
                 ))
-                .px(px(14.))
-                .py(px(10.))
+                .px(space::LG)
+                .py(space::MD)
                 .rounded(px(10.))
                 .border_1()
                 .border_color(p.line)
                 .bg(p.card)
                 .flex()
                 .items_center()
-                .gap(px(10.))
+                .gap(space::MD)
                 .child(task_text(info, &p))
                 .child(
                     Button::secondary(
@@ -782,7 +798,7 @@ impl Render for ProjectTasks {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(8.))
+                    .gap(space::SM)
                     .children(rows)
                     .when_some(self.problem.clone(), |d, problem| {
                         d.child(
