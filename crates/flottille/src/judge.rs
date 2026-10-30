@@ -695,9 +695,10 @@ async fn session(
             .flatten()
             .find(|option| option["category"] == "model")
             .ok_or_else(|| format!("it has no model option: it cannot take {model}"))?;
-        if !providers::values(option).iter().any(|v| v == model) {
-            return Err(format!("it does not offer the model {model}"));
-        }
+        let offered = providers::values(option);
+        let model =
+            flottille_core::provider::listed_model(offered.iter().map(String::as_str), model)
+                .ok_or_else(|| format!("it does not offer the model {model}"))?;
         let id = option["id"].as_str().unwrap_or_default().to_owned();
         cx.send_request(SetSessionConfigOptionRequest::new(
             session.clone(),

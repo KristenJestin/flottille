@@ -716,8 +716,16 @@ pub fn choose(
     // an effort it does not offer fails the agent when its session opens. Without a model, an
     // effort is the default model's, once a new session said which it is.
     let check = Check::of(provider, &settings, Version::Skip);
+    let mut model = model;
     if let Some(models) = known_models(daemon, &check) {
         let offered: Vec<&str> = models.iter().filter_map(|m| m["id"].as_str()).collect();
+        // The id the provider lists, whichever way the user spelled it (`listed_model`).
+        if let Some(listed) = model
+            .as_deref()
+            .and_then(|asked| provider::listed_model(offered.iter().copied(), asked))
+        {
+            model = Some(listed.to_owned());
+        }
         let target = match &model {
             Some(model) => match models.iter().find(|m| m["id"] == model.as_str()) {
                 Some(known) => Some((known, format!("model {model}"))),
@@ -841,9 +849,12 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
                             ),
                         )
                     })?;
+                    let model = model
+                        .filter(|m| !m.trim().is_empty())
+                        .map(|asked| listed_or_asked(&daemon, provider, asked));
                     Some(Judge {
                         provider: provider.name.to_owned(),
-                        model: model.filter(|m| !m.trim().is_empty()),
+                        model,
                         picked: false,
                     })
                 }
@@ -869,6 +880,19 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
             format!("unknown method `{method}`"),
         )),
     }
+}
+
+/// The id the provider lists for the model `asked` (`provider::listed_model`), once its models are
+/// known; the model as asked until then, which its session checks.
+fn listed_or_asked(daemon: &Daemon, provider: &'static Provider, asked: String) -> String {
+    let settings = Settings::load(&daemon.paths).unwrap_or_default();
+    let check = Check::of(provider, &settings, Version::Skip);
+    known_models(daemon, &check)
+        .and_then(|models| {
+            let offered = models.iter().filter_map(|m| m["id"].as_str());
+            provider::listed_model(offered, &asked).map(str::to_owned)
+        })
+        .unwrap_or(asked)
 }
 
 /// One change of `providers.toml` at a time: each reads what the one before wrote.
