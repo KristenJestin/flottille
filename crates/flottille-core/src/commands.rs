@@ -11,8 +11,14 @@ use serde::{Deserialize, Serialize};
 pub struct Command {
     /// One line: what it does.
     pub description: String,
-    /// What the agent is sent.
+    /// What the agent is sent; empty for a command that points at a file (`path`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub instructions: String,
+    /// A file of the project folder whose text, after its front matter, is what the agent is
+    /// sent, read each time the command is used (`docs/commands.md`, "Importing a `.claude`
+    /// folder"). It takes the place of `instructions`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     /// Obsolete since the gate's classes: read, said, never followed, and dropped from the file
     /// by the daemon's migration (`OBSOLETE_GRANTS`).
     #[serde(default, skip_serializing)]
@@ -32,8 +38,17 @@ impl Command {
         Command {
             description: description.into(),
             instructions: instructions.into(),
+            path: None,
             grants: None,
             children: None,
+        }
+    }
+
+    /// A command whose instructions are the file `path` of the project folder.
+    pub fn file(description: impl Into<String>, path: impl Into<String>) -> Command {
+        Command {
+            path: Some(path.into()),
+            ..Command::new(description, "")
         }
     }
 
@@ -52,8 +67,20 @@ impl Command {
         if self.description.trim().chars().any(char::is_control) {
             return Err(format!("{key}.description: must be one line"));
         }
-        if self.instructions.trim().is_empty() {
-            return Err(format!("{key}.instructions: must not be empty"));
+        match &self.path {
+            Some(path) => {
+                if !self.instructions.trim().is_empty() {
+                    return Err(format!(
+                        "{key}.instructions: a command that points at a file takes none of its \
+                         own: edit the file, or give a path or instructions, not both"
+                    ));
+                }
+                crate::project::check_path(path).map_err(|error| format!("{key}{error}"))?;
+            }
+            None if self.instructions.trim().is_empty() => {
+                return Err(format!("{key}.instructions: must not be empty"));
+            }
+            None => {}
         }
         Ok(())
     }
@@ -61,22 +88,28 @@ impl Command {
 
 /// The message `/name rest` stands for, when `text` starts with the name of one of `commands`:
 /// its instructions, then the rest of the text after a blank line. `None` for any other text,
-/// which is sent as it is.
+/// which is sent as it is. The instructions of a command are given by `instructions`, which reads
+/// the file of one that points at a file; the reason it cannot is the error.
 pub fn expanded<'a>(
     text: &str,
     commands: impl IntoIterator<Item = (&'a String, &'a Command)>,
-) -> Option<(String, String)> {
-    let rest = text.trim_start().strip_prefix('/')?;
+    instructions: impl FnOnce(&str, &Command) -> Result<String, String>,
+) -> Result<Option<(String, String)>, String> {
+    let Some(rest) = text.trim_start().strip_prefix('/') else {
+        return Ok(None);
+    };
     let (name, after) = rest
         .split_once(char::is_whitespace)
         .map_or((rest, ""), |(name, after)| (name, after.trim()));
-    let (name, command) = commands.into_iter().find(|(known, _)| *known == name)?;
-    let mut message = command.instructions.trim().to_owned();
+    let Some((name, command)) = commands.into_iter().find(|(known, _)| *known == name) else {
+        return Ok(None);
+    };
+    let mut message = instructions(name, command)?.trim().to_owned();
     if !after.is_empty() {
         message.push_str("\n\n");
         message.push_str(after);
     }
-    Some((name.clone(), message))
+    Ok(Some((name.clone(), message)))
 }
 
 /// The commands Flottille ships, which a project adopts with `flottille command add --template
@@ -207,19 +240,25 @@ mod tests {
             Command::new("Ship it", "Push, then open the PR.\n"),
         )];
         let each = || commands.iter().map(|(name, command)| (name, command));
+        let own = |_: &str, command: &Command| Ok(command.instructions.clone());
         assert_eq!(
-            expanded("/ship only the api, please", each()),
-            Some((
+            expanded("/ship only the api, please", each(), own),
+            Ok(Some((
                 "ship".into(),
                 "Push, then open the PR.\n\nonly the api, please".into()
-            ))
+            )))
         );
         assert_eq!(
-            expanded("  /ship", each()),
-            Some(("ship".into(), "Push, then open the PR.".into()))
+            expanded("  /ship", each(), own),
+            Ok(Some(("ship".into(), "Push, then open the PR.".into())))
         );
-        assert_eq!(expanded("/shipping now", each()), None);
-        assert_eq!(expanded("ship it /ship", each()), None);
-        assert_eq!(expanded("/", each()), None);
+        assert_eq!(expanded("/shipping now", each(), own), Ok(None));
+        // A command whose file cannot be read sends nothing: the reason is the answer.
+        assert_eq!(
+            expanded("/ship", each(), |_, _| Err("it is not there".into())),
+            Err("it is not there".into())
+        );
+        assert_eq!(expanded("ship it /ship", each(), own), Ok(None));
+        assert_eq!(expanded("/", each(), own), Ok(None));
     }
 }

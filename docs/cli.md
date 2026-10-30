@@ -262,6 +262,25 @@ Added skill review to shop: a text Flottille keeps.
 Changes what is given (`--description`, and one of `--path`, `--text`, `--text-file`). A text
 skill made a path leaves no text behind.
 
+### `flottille skill import <project> [<name>...]`
+
+The skills of the project folder's `.claude/skills` (`docs/skills.md`, "Importing a `.claude`
+folder"). Alone it only lists what is there, each file with its state and its description, or why
+it cannot be imported; `<name>...` imports those, `--all` every one that can be (the others are
+said, and that is not a failure). An imported skill points at its `SKILL.md`, nothing is copied and
+nothing is written in the project's folder. A name that cannot be imported, or that is already
+imported, is refused and nothing is imported. `--json` prints `skill.detect` or `skill.import`.
+
+```
+$ flottille skill import shop
+STATE     NAME   FILE                           DESCRIPTION OR WHY NOT
+new       react  .claude/skills/react/SKILL.md  How we write React components
+unusable  -      .claude/skills/old/SKILL.md    it has no front matter: a skill file starts with --- lines giving its name and description
+Import one with `flottille skill import shop <name>`, or every one that can be with --all.
+$ flottille skill import shop react
+Imported skill react into shop: it reads .claude/skills/react/SKILL.md each time it is used.
+```
+
 ### `flottille skill remove <project> <name>`
 
 Removes the skill, and the text Flottille kept for it; the project's files are never touched.
@@ -411,6 +430,18 @@ own name unless one is given: `open-prs`, `merge-stack` or `close` (`docs/comman
 ### `flottille command edit <project> <name>`
 
 Changes what is given (`--description`, `--instructions`, `--instructions-file`).
+
+### `flottille command import <project> [<name>...]`
+
+The commands of the project folder's `.claude/commands`, the same way as `flottille skill import`
+(`docs/commands.md`, "Importing a `.claude` folder"): alone it lists, `<name>...` or `--all`
+imports. An imported command points at its file and reads it each time it is used; `command show`
+names the file.
+
+```
+$ flottille command import shop --all
+Imported command review into shop: it reads .claude/commands/review.md each time it is used.
+```
 
 ### `flottille command remove <project> <name>`
 

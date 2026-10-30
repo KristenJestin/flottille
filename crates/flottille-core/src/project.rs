@@ -823,9 +823,15 @@ pub fn check_skill(name: &str, skill: &Skill) -> Result<(), String> {
     if description.chars().any(char::is_control) {
         return Err(".description: must be one line".into());
     }
-    let Some(path) = &skill.path else {
-        return Ok(());
-    };
+    match &skill.path {
+        Some(path) => check_path(path),
+        None => Ok(()),
+    }
+}
+
+/// What is wrong with the path of a skill or of a command, as `.path: <what>`: a file or a folder
+/// inside the project folder, not through a `.git`.
+pub fn check_path(path: &str) -> Result<(), String> {
     if !valid_repository_path(path) {
         return Err(format!(
             ".path: must be a path inside the project folder like \"docs/react\", not \"{path}\""

@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod ansi;
 pub mod approval;
+pub mod claude_folder;
 pub mod command;
 pub mod commands;
 pub mod declared;

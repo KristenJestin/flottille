@@ -8,11 +8,13 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use flottille_core::claude_folder;
 use flottille_core::project::{Project, Skill, check_skill};
 use flottille_core::secrets;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::claude_import::Kind;
 use crate::daemon::Daemon;
 use crate::files::{self, Context, Range};
 use crate::gate;
@@ -201,8 +203,15 @@ fn inside(name: &str, root: &Path, named: &str) -> Result<PathBuf, Outcome> {
 /// Whether `fs_read` would hold the real path `target` for the user, by the gate's own rule of
 /// sensitive places, taken from the project folder: a skill never serves it, asked or not.
 fn sensitive(folder: &Path, target: &Path) -> Option<String> {
-    let path = Resolved::real_inside(relative(folder, target), target.to_owned());
-    gate::sensitive(&[], &path)
+    let shown = relative(folder, target);
+    // `.claude/skills` of the project is where the skills it imports live (`docs/skills.md`): the
+    // gate holds `.claude` wherever it sits because an agent's login does, and a project's own
+    // folder of skills is not that. What is below it is still looked at, so a `.env` or a nested
+    // `.claude` in a skill is held as anywhere else.
+    let below = Path::new(&shown)
+        .strip_prefix(claude_folder::SKILLS)
+        .map_or(shown.clone(), |below| below.display().to_string());
+    gate::sensitive(&[], &Resolved::real_inside(below, target.to_owned()))
 }
 
 fn held_for_the_user(folder: &Path, target: &Path, named: &str) -> Result<(), Outcome> {
@@ -384,6 +393,8 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
             }
             Ok(to_json(&name, &skill))
         }
+        "skill.detect" => crate::claude_import::detect(daemon, Kind::Skill, params),
+        "skill.import" => crate::claude_import::import(daemon, Kind::Skill, params),
         "skill.remove" => {
             let asked: Named = serde_json::from_value(params)?;
             let name = asked.name.clone();
@@ -476,35 +487,7 @@ fn write_skill(
             crate::providers::write_in_place(&file, text).map_err(unavailable)?;
             written_text = true;
         }
-        let mut entry = toml_edit::Table::new();
-        entry.insert("description", toml_edit::value(&skill.description));
-        if let Some(path) = &skill.path {
-            entry.insert("path", toml_edit::value(path));
-        }
-        let skills = document.entry("skills").or_insert_with(|| {
-            let mut skills = toml_edit::Table::new();
-            // `[skills.<name>]` alone, without an empty `[skills]` above it.
-            skills.set_implicit(true);
-            toml_edit::Item::Table(skills)
-        });
-        let skills = skills
-            .as_table_like_mut()
-            .ok_or_else(|| not_a_table(&project.name))?;
-        // An entry edited keeps the comments the user wrote above it, and its form, inline or not.
-        match skills
-            .get_mut(name)
-            .and_then(toml_edit::Item::as_table_like_mut)
-        {
-            Some(known) => {
-                known.remove("path");
-                for (key, value) in entry.iter() {
-                    known.insert(key, value.clone());
-                }
-            }
-            None => {
-                skills.insert(name, toml_edit::Item::Table(entry));
-            }
-        }
+        put(document, &project.name, name, skill)?;
         Ok(())
     });
     // A text written for a skill the file then refused is not left behind, nor in place of the
@@ -520,6 +503,45 @@ fn write_skill(
         }
     }
     written.map(|_| ())
+}
+
+/// Writes the skill under `[skills.<name>]`, in place of what was there.
+pub(crate) fn put(
+    document: &mut toml_edit::DocumentMut,
+    project: &str,
+    name: &str,
+    skill: &Skill,
+) -> Result<(), Failure> {
+    let mut entry = toml_edit::Table::new();
+    entry.insert("description", toml_edit::value(&skill.description));
+    if let Some(path) = &skill.path {
+        entry.insert("path", toml_edit::value(path));
+    }
+    let skills = document.entry("skills").or_insert_with(|| {
+        let mut skills = toml_edit::Table::new();
+        // `[skills.<name>]` alone, without an empty `[skills]` above it.
+        skills.set_implicit(true);
+        toml_edit::Item::Table(skills)
+    });
+    let skills = skills
+        .as_table_like_mut()
+        .ok_or_else(|| not_a_table(project))?;
+    // An entry edited keeps the comments the user wrote above it, and its form, inline or not.
+    match skills
+        .get_mut(name)
+        .and_then(toml_edit::Item::as_table_like_mut)
+    {
+        Some(known) => {
+            known.remove("path");
+            for (key, value) in entry.iter() {
+                known.insert(key, value.clone());
+            }
+        }
+        None => {
+            skills.insert(name, toml_edit::Item::Table(entry));
+        }
+    }
+    Ok(())
 }
 
 /// A path skill is a file or a folder that is there now, and that stays in the project folder
@@ -564,7 +586,7 @@ fn not_a_table(project: &str) -> Failure {
 }
 
 /// A skill as the protocol shows it: its path, or `text` for one Flottille keeps.
-fn to_json(name: &str, skill: &Skill) -> Value {
+pub(crate) fn to_json(name: &str, skill: &Skill) -> Value {
     let kind = if skill.path.is_some() { "path" } else { "text" };
     let mut shown = json!({"name": name, "description": skill.description, "kind": kind});
     if let Some(path) = &skill.path {

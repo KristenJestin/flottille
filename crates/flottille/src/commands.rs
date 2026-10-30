@@ -3,12 +3,17 @@
 //! parent's to its child) sends the command's instructions in its place. A command grants
 //! nothing: what its agent does goes through the gate's classes like any call.
 
+use std::path::Path;
+
+use flottille_core::claude_folder;
 use flottille_core::commands::{self, Command};
 use flottille_core::project::Project;
+use flottille_core::secrets;
 use flottille_core::workspace::Workspace;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::claude_import::Kind;
 use crate::daemon::Daemon;
 use crate::projects::{self, Failure};
 
@@ -88,14 +93,19 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Answer {
             let project = projects::load_project(daemon, &asked.project)?;
             Ok(
                 json!({"project": project.name, "commands": project.commands.iter()
-                .map(|(name, command)| to_json(name, command, false))
+                .map(|(name, command)| to_json(&project.folder, name, command, false))
                 .collect::<Vec<_>>()}),
             )
         }
         "command.show" => {
             let asked: Named = serde_json::from_value(params)?;
             let project = projects::load_project(daemon, &asked.project)?;
-            Ok(to_json(&asked.name, find(&project, &asked.name)?, true))
+            Ok(to_json(
+                &project.folder,
+                &asked.name,
+                find(&project, &asked.name)?,
+                true,
+            ))
         }
         "command.add" => {
             let asked: Add = serde_json::from_value(params)?;
@@ -110,9 +120,14 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Answer {
                         project.name
                     )));
                 }
-                write(document, &project.name, &name, &command)
+                put(document, &project.name, &name, &command)
             })?;
-            Ok(to_json(&name, find(&project, &name)?, true))
+            Ok(to_json(
+                &project.folder,
+                &name,
+                find(&project, &name)?,
+                true,
+            ))
         }
         "command.edit" => {
             let asked: Edit = serde_json::from_value(params)?;
@@ -126,10 +141,17 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Answer {
                     command.instructions = instructions;
                 }
                 command.check(&name).map_err(Failure::refused)?;
-                write(document, &project.name, &name, &command)
+                put(document, &project.name, &name, &command)
             })?;
-            Ok(to_json(&asked.name, find(&project, &asked.name)?, true))
+            Ok(to_json(
+                &project.folder,
+                &asked.name,
+                find(&project, &asked.name)?,
+                true,
+            ))
         }
+        "command.detect" => crate::claude_import::detect(daemon, Kind::Command, params),
+        "command.import" => crate::claude_import::import(daemon, Kind::Command, params),
         "command.remove" => {
             let asked: Named = serde_json::from_value(params)?;
             let name = asked.name.clone();
@@ -171,7 +193,7 @@ fn not_a_table(project: &str) -> Failure {
 }
 
 /// Writes the command under `[commands.<name>]`, in place of what was there.
-fn write(
+pub(crate) fn put(
     document: &mut toml_edit::DocumentMut,
     project: &str,
     name: &str,
@@ -179,7 +201,12 @@ fn write(
 ) -> Result<(), Failure> {
     let mut table = toml_edit::Table::new();
     table.insert("description", toml_edit::value(&command.description));
-    table.insert("instructions", toml_edit::value(&command.instructions));
+    // Either its own instructions or the file they are read from, never both.
+    if let Some(path) = &command.path {
+        table.insert("path", toml_edit::value(path));
+    } else {
+        table.insert("instructions", toml_edit::value(&command.instructions));
+    }
     let commands = document.entry("commands").or_insert_with(|| {
         let mut commands = toml_edit::Table::new();
         // `[commands.<name>]` alone, without an empty `[commands]` above it.
@@ -195,6 +222,11 @@ fn write(
         .and_then(toml_edit::Item::as_table_like_mut)
     {
         Some(entry) => {
+            if command.path.is_some() {
+                entry.remove("instructions");
+            } else {
+                entry.remove("path");
+            }
             for (key, value) in table.iter() {
                 entry.insert(key, value.clone());
             }
@@ -206,14 +238,30 @@ fn write(
     Ok(())
 }
 
-/// A command as the protocol shows it; with its instructions when `whole`.
-fn to_json(name: &str, command: &Command, whole: bool) -> Value {
+/// A command as the protocol shows it; with its instructions when `whole`, those of a command
+/// that points at a file read from it now, or why they cannot be (`problem`).
+pub(crate) fn to_json(folder: &Path, name: &str, command: &Command, whole: bool) -> Value {
     let mut shown = json!({
         "name": name,
         "description": command.description,
     });
+    if let Some(path) = &command.path {
+        shown["path"] = path.clone().into();
+    }
     if whole {
-        shown["instructions"] = command.instructions.clone().into();
+        match &command.path {
+            None => shown["instructions"] = command.instructions.clone().into(),
+            Some(path) => {
+                match claude_folder::command_text(folder, path, &crate::claude_import::guard) {
+                    // A file of the project may hold what the project's file would not.
+                    Ok(text) => {
+                        shown["instructions"] =
+                            secrets::mask(&text, &std::env::vars_os().collect()).into()
+                    }
+                    Err(why) => shown["problem"] = format!("{path}: {why}").into(),
+                }
+            }
+        }
     }
     shown
 }
@@ -223,16 +271,40 @@ fn to_json(name: &str, command: &Command, whole: bool) -> Value {
 /// the rest after them, preceded by what the command is and, in a workspace, by its repositories,
 /// the project's pull requests and the ticket, which the commands Flottille ships read. Any other
 /// text is sent as it is.
-pub fn message_for(daemon: &Daemon, project: &str, workspace: Option<&str>, text: &str) -> String {
+pub fn message_for(
+    daemon: &Daemon,
+    project: &str,
+    workspace: Option<&str>,
+    text: &str,
+) -> Result<String, Failure> {
     let Ok(project) = projects::load_project(daemon, project) else {
-        return text.to_owned();
+        return Ok(text.to_owned());
     };
-    let Some((name, instructions)) = commands::expanded(text, &project.commands) else {
-        return text.to_owned();
+    // A command that points at a file reads it now: a file changed is read changed. One that
+    // cannot be read sends nothing, rather than the bare `/name` as text.
+    let expanded = commands::expanded(text, &project.commands, |name, command| {
+        match &command.path {
+            None => Ok(command.instructions.clone()),
+            Some(path) => claude_folder::command_text(
+                &project.folder,
+                path,
+                &crate::claude_import::guard,
+            )
+            .map_err(|why| {
+                format!(
+                    "the command {name} reads {path} each time it is used, and {why}; nothing \
+                     was sent"
+                )
+            }),
+        }
+    })
+    .map_err(Failure::refused)?;
+    let Some((name, instructions)) = expanded else {
+        return Ok(text.to_owned());
     };
     let mut message = format!(
-        "The command {name} of project {}: {}\n",
-        project.name,
+        "{}{}\n",
+        header(&name, &project.name),
         project.commands[&name].description.trim()
     );
     let workspace = workspace.and_then(|workspace| {
@@ -254,9 +326,29 @@ pub fn message_for(daemon: &Daemon, project: &str, workspace: Option<&str>, text
             ));
         }
     }
-    message.push_str("\n---\n\n");
+    message.push_str(TEXT_FOLLOWS);
     message.push_str(&instructions);
-    message
+    Ok(message)
+}
+
+/// How a message `message_for` made from a command starts, its description after it.
+fn header(name: &str, project: &str) -> String {
+    format!("The command {name} of project {project}: ")
+}
+
+/// What ends the header of a command's message: its text follows.
+const TEXT_FOLLOWS: &str = "\n---\n\n";
+
+/// The command of `project` a message stands for, when `message_for` made it from one: its name,
+/// the command, and its text as it was sent (the file's text then, which the file may no longer
+/// hold), with what was written after `/name` at its end.
+pub fn ran<'a>(project: &'a Project, message: &'a str) -> Option<(&'a str, &'a Command, &'a str)> {
+    let (name, command) = project
+        .commands
+        .iter()
+        .find(|(name, _)| message.starts_with(&header(name, &project.name)))?;
+    let (_, text) = message.split_once(TEXT_FOLLOWS)?;
+    Some((name, command, text))
 }
 
 /// The workspace's repositories by dependency level, as the project declares them

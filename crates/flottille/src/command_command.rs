@@ -9,6 +9,7 @@ use flottille_core::paths::Paths;
 use serde_json::{Value, json};
 
 use crate::client::Client;
+use crate::import_command::{self, Import};
 use crate::project_command::in_full;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -66,6 +67,9 @@ pub enum CommandAction {
         #[arg(long)]
         json: bool,
     },
+    /// List the commands of the project's .claude folder, or import them: each reads its file
+    /// every time it is used, nothing is copied nor written in the project
+    Import(Import),
     /// Remove a command from the project's configuration
     Remove {
         project: String,
@@ -77,12 +81,21 @@ pub enum CommandAction {
 
 pub fn run(paths: &Paths, action: CommandAction) -> Result<ExitCode> {
     let mut client = Client::connect_or_start(paths)?;
+    if let CommandAction::Import(import) = action {
+        return import_command::run(
+            &mut client,
+            "command",
+            |error| in_full(paths, error),
+            import,
+        );
+    }
     let mut ask = |method: &str, params: Value| {
         client
             .request(method, params)
             .map_err(|error| Box::<dyn std::error::Error>::from(in_full(paths, &error.to_string())))
     };
     match action {
+        CommandAction::Import(_) => unreachable!("imports return above"),
         CommandAction::List { project, json } => {
             let list = ask("command.list", json!({"project": project}))?;
             if json {
@@ -207,13 +220,22 @@ fn list_text(list: &Value) -> String {
 }
 
 fn show_text(project: &str, command: &Value) -> String {
+    let head = format!(
+        "Command {} of project {project}: {}\n",
+        text(&command["name"]),
+        text(&command["description"]),
+    );
+    // A command that points at a file says which, and why its text is missing when it is.
+    let origin = match command["path"].as_str() {
+        Some(path) => format!("It reads {path} each time it is used.\n"),
+        None => String::new(),
+    };
+    if let Some(why) = command["problem"].as_str() {
+        return format!("{head}{origin}Its instructions cannot be read: {why}\n");
+    }
     let instructions: String = text(&command["instructions"])
         .lines()
         .map(|line| format!("  {line}\n"))
         .collect();
-    format!(
-        "Command {} of project {project}: {}\nInstructions:\n{instructions}",
-        text(&command["name"]),
-        text(&command["description"]),
-    )
+    format!("{head}{origin}Instructions:\n{instructions}")
 }

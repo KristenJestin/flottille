@@ -39,6 +39,50 @@ and removed at the same start, as `[agent_actions]` is. A procedure an agent ask
 the user had not answered yet is refused at the daemon's first start of this version, and the agent
 told: "procedures were replaced by commands; start it again with /name".
 
+A command may point at a file in place of holding its instructions:
+
+```toml
+[commands.review]
+description = "Review the current change"
+path = ".claude/commands/review.md"       # relative to the project folder; no instructions
+```
+
+Its instructions are then the file's text after its front matter, **read each time the command is
+used**: a file changed is sent changed. A file that cannot be read when the command is sent (gone,
+out of the project folder by a link, not text, or where it really is a sensitive place or a file
+of secrets) sends nothing, and the sender is told why, never its content. A command
+has `instructions` or `path`, never both: `command.edit` refuses instructions for one that points
+at a file, whose text is the file's to edit.
+
+## Importing a `.claude` folder
+
+A project that already has commands in the Anthropic layout need not write them again. A command is
+`.claude/commands/<name>.md`, named after the file, whose optional front matter may give a
+`description`:
+
+```markdown
+---
+description: Review the current change
+---
+Read the diff, then list what is wrong.
+```
+
+Flottille looks at the project folder's `.claude/commands` (its repositories' own `.claude`
+folders, and the folders inside that one, are not looked at) and offers each `.md` file. Importing
+one writes `[commands.review]` with its `description` and `path`: a command that **points at the
+file** (above), not a copy. A file with no `description` has its first line, a heading's marks
+dropped and cut at 100 characters, as its description. **Nothing is written in the project's
+folder.**
+
+As for skills (`docs/skills.md`, "Importing a `.claude` folder"), a file that cannot be imported
+whole is shown with why and never imported half (a file name that cannot be a command name,
+nothing after the front matter, a front matter that is not YAML or never closed, a file that cannot
+be read, a link out of the project folder, or to a place the gate holds as sensitive or a file of
+secrets, such as `.env` or `.claude/settings.local.json`, whose content is never read); what is
+shown of a file is masked; a name the project already uses is `taken` and never
+overwritten, and a file already imported is `imported`. The methods are `command.detect` and
+`command.import` (`docs/protocol.md`), the command `flottille command import` (`docs/cli.md`).
+
 ## Sending one
 
 `/name` at the start of a message sends the command: the session's agent gets a short header,
