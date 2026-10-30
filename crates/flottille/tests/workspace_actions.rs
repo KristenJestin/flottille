@@ -365,11 +365,11 @@ fn a_child_reads_the_workspaces_and_is_refused_the_root_s_writes() {
     let (url, authorization) = server_of(&user, opened);
     let child = Mcp::initialize(&url, &authorization);
 
-    // Since #141 every agent has the family: a child reads it and removes its own workspace.
+    // Since #141 every agent has the family: a child reads it, and its writes are refused.
     assert!(child.names().contains(&"workspace".to_owned()));
     let listed = child.call("workspace", json!({"action": "list"}));
     assert!(!listed.error, "{}", listed.text);
-    for action in ["create", "prepare", "link_ticket"] {
+    for action in ["create", "prepare", "link_ticket", "remove"] {
         let text = refused(child.call(
             "workspace",
             json!({"action": action, "name": "x", "ticket": "#1"}),

@@ -167,9 +167,9 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
   workspace): `forge`, which lists and reads the pull requests of the place's repositories and
   their checks (`forges.md`), and opens, comments, edits or merges them or re-runs a failed
   pipeline, each write a call to judge (§7); in `main` it names the workspace;
-- the workspace (every agent): `workspace`, which lists and reads the workspaces, removes one
-  once nothing in it would be lost, the agent's own or, in `main`, the one it names, a call to
-  judge, and, for a root, creates and prepares them;
+- the workspace (every agent): `workspace`, which lists and reads the workspaces, and, for a root,
+  creates and prepares them, and removes one it does not work in, always held for the user, its
+  card saying what would be lost;
 - skills: `skill_read`, one of the project's skills, texts read when relevant (`skills.md`);
 - tickets (every agent of a project that declares a tracker, in `main` as in a workspace):
   `tickets`, which lists, searches and reads the tracker's tickets, and writes GitHub issues,

@@ -1039,7 +1039,9 @@ there is no such agent).
 
 #### `approval.approve`
 
-`{"number"}`. Allows the request, once: nothing it answers allows a later call. Answered `{"request"}` once it
+`{"number", "discard"?}`. Allows the request, once: nothing it answers allows a later call.
+`discard`, `true` for a workspace's removal only (`refused` for any other request), removes it
+even with what would be lost (`docs/workspaces.md`, "Removal"). Answered `{"request"}` once it
 is decided; the call is then checked again, performed in the background, and its answer stored for
 the agent (`approval.settled`). An `action` is done only while what it `says` still holds (a
 command edited meanwhile is not written). `not-found` when there is no such request; `refused` when it is held by an agent, or already

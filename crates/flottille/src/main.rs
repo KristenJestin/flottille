@@ -123,7 +123,12 @@ enum Command {
         action: RunsAction,
     },
     /// Allow a request: its call is checked again, performed, and its result handed to the agent
-    Approve { number: u64 },
+    Approve {
+        number: u64,
+        /// For a workspace's removal: remove it even with work that would be lost
+        #[arg(long)]
+        discard: bool,
+    },
     /// Deny a request: the agent is told nothing was done
     Deny { number: u64 },
     /// Whether Claude agents can run here: claude, its version and its login
@@ -289,7 +294,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         }
         Command::Runs { action } => runs_command::run(&paths, action)?,
         Command::Approvals { json } => approval_command::approvals(&paths, json)?,
-        Command::Approve { number } => approval_command::approve(&paths, number)?,
+        Command::Approve { number, discard } => approval_command::approve(&paths, number, discard)?,
         Command::Deny { number } => approval_command::deny(&paths, number)?,
         Command::Inbox { after, limit, json } => inbox_command::inbox(&paths, after, limit, json)?,
         Command::Mcp => pilot::run(&paths)?,

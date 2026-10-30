@@ -1411,7 +1411,7 @@ fn a_child_in_main_cannot_remove_a_workspace() {
     assert!(
         refused
             .text
-            .starts_with("refused: a child removes only its own workspace"),
+            .starts_with("refused: the agent the user talks to manages the project's workspaces"),
         "{}",
         refused.text
     );
@@ -1423,11 +1423,11 @@ fn a_child_in_main_cannot_remove_a_workspace() {
 fn a_workspace_another_agent_of_the_tree_works_in_is_in_use() {
     let user = user();
     on_github(&user);
-    let (_, root) = root_in(&user, Some("login"));
+    let (_, root) = root_in(&user, None);
     let opened = user.received_requests("session/new").len();
     let launched = root.call(
         "agent_launch",
-        json!({"title": "worker", "brief": "Write the tests."}),
+        json!({"title": "worker", "brief": "Write the tests.", "workspace": "login"}),
     );
     assert!(!launched.error, "{}", launched.text);
     server_of(&user, opened);
@@ -1439,7 +1439,7 @@ fn a_workspace_another_agent_of_the_tree_works_in_is_in_use() {
         .unwrap()
         .to_owned();
 
-    let answer = root.call("workspace", json!({"action": "remove"}));
+    let answer = root.call("workspace", json!({"action": "remove", "name": "login"}));
     let done = allow(&user, held(&answer));
 
     assert!(
@@ -1449,4 +1449,160 @@ fn a_workspace_another_agent_of_the_tree_works_in_is_in_use() {
         "{done}"
     );
     assert!(workspace_exists(&user, "login"));
+}
+
+/// The request the user holds, the only one.
+fn the_request(user: &User) -> Value {
+    let requests = user.call("approval.list", json!({})).unwrap()["requests"].clone();
+    assert_eq!(requests.as_array().unwrap().len(), 1, "{requests}");
+    requests[0].clone()
+}
+
+#[test]
+fn workspace_remove_is_held_for_the_user_in_ask_and_in_auto_never_judged() {
+    let user = User::with_fake_agent()
+        .with_fake_gh()
+        .with_fake_escalation()
+        .with_allowing_judge();
+    on_github(&user);
+    let (lead, mcp) = root_in(&user, None);
+
+    let asked = held(&mcp.call("workspace", json!({"action": "remove", "name": "login"})));
+    assert_eq!(the_request(&user)["class"], "base");
+    user.call("approval.deny", json!({"number": asked}))
+        .unwrap();
+
+    user.call("agent.mode", json!({"agent": lead, "mode": "auto"}))
+        .unwrap();
+    let answer = mcp.call("workspace", json!({"action": "remove", "name": "login"}));
+
+    held(&answer);
+    let request = the_request(&user);
+    assert_eq!(request["class"], "base", "{request}");
+    assert_eq!(request["judgement"], Value::Null, "{request}");
+    assert!(
+        judge_prompts(&user).is_empty(),
+        "{:?}",
+        judge_prompts(&user)
+    );
+    assert!(workspace_exists(&user, "login"));
+}
+
+#[test]
+fn workspace_remove_allowed_on_a_clean_workspace_removes_it() {
+    let user = user();
+    on_github(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    let number = held(&mcp.call("workspace", json!({"action": "remove", "name": "login"})));
+    let says = the_request(&user)["says"].to_string();
+    assert!(says.contains("Remove the workspace login"), "{says}");
+    assert!(says.contains("Nothing would be lost"), "{says}");
+    let done = allow(&user, number);
+
+    assert!(done.contains("and Flottille has now done it"), "{done}");
+    assert!(
+        done.contains("Workspace login of project app is removed"),
+        "{done}"
+    );
+    assert!(!workspace_exists(&user, "login"));
+    assert!(!user.path("work/app/.flottille/workspaces/login").exists());
+}
+
+#[test]
+fn workspace_remove_on_a_workspace_with_an_unpushed_commit_names_it_and_is_refused_without_the_discard_answer()
+ {
+    let user = user();
+    on_github(&user);
+    let folder = workspace_folder(&user);
+    std::fs::write(folder.join("login.ts"), "login\n").unwrap();
+    user.git(&folder, &["add", "."]);
+    user.git(&folder, &["commit", "--quiet", "-m", "add the login"]);
+    let (_, mcp) = root_in(&user, None);
+
+    let number = held(&mcp.call("workspace", json!({"action": "remove", "name": "login"})));
+    let says = the_request(&user)["says"].to_string();
+    assert!(says.contains("has commits on no remote"), "{says}");
+    assert!(says.contains("add the login"), "{says}");
+    assert!(!says.contains("Nothing would be lost"), "{says}");
+    let answer = allow(&user, number);
+
+    assert!(answer.contains("was not executed"), "{answer}");
+    assert!(answer.contains("add the login"), "{answer}");
+    assert!(answer.contains("--discard"), "{answer}");
+    assert!(workspace_exists(&user, "login"));
+    assert!(folder.join("login.ts").exists());
+
+    let number = held(&mcp.call("workspace", json!({"action": "remove", "name": "login"})));
+    let approved = user.run(&["approve", &number.to_string(), "--discard"]);
+    assert!(
+        approved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&approved.stderr)
+    );
+    let id = format!("approval-{number}");
+    eventually("the answer", || {
+        store(&user).delivery(&id).unwrap().is_some()
+    });
+    let done = store(&user).delivery(&id).unwrap().unwrap().body;
+
+    assert!(done.contains("and Flottille has now done it"), "{done}");
+    assert!(done.contains("discarded"), "{done}");
+    assert!(!workspace_exists(&user, "login"));
+    assert!(!folder.exists());
+}
+
+#[test]
+fn the_discard_answer_is_refused_for_a_request_that_removes_no_workspace() {
+    let user = user();
+    on_github(&user);
+    let (_, mcp) = root_in(&user, None);
+    let number = held(&mcp.call(
+        "tickets",
+        json!({"action": "comment", "ticket": "#1", "body": "Done."}),
+    ));
+
+    let refused = user.call(
+        "approval.approve",
+        json!({"number": number, "discard": true}),
+    );
+
+    let (code, message) = refused.unwrap_err();
+    assert_eq!(code, "refused", "{message}");
+    assert!(message.contains("discard"), "{message}");
+    assert_eq!(the_request(&user)["state"], "pending");
+}
+
+#[test]
+fn workspace_remove_called_from_inside_the_workspace_is_refused() {
+    let user = user();
+    on_github(&user);
+    let (_, mcp) = root_in(&user, Some("login"));
+
+    for args in [
+        json!({"action": "remove"}),
+        json!({"action": "remove", "name": "login"}),
+    ] {
+        let refused = mcp.call("workspace", args);
+        assert!(refused.error, "{}", refused.text);
+        assert!(
+            refused
+                .text
+                .starts_with("refused: this agent works in the workspace login"),
+            "{}",
+            refused.text
+        );
+    }
+    assert!(no_request(&user));
+    assert!(workspace_exists(&user, "login"));
+}
+
+/// The folder of the workspace `login`.
+fn workspace_folder(user: &User) -> PathBuf {
+    PathBuf::from(
+        user.call("workspace.show", json!({"project": "app", "name": "login"}))
+            .unwrap()["folder"]
+            .as_str()
+            .unwrap(),
+    )
 }

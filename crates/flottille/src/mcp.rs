@@ -439,9 +439,9 @@ const SERVED: [Definition; 24] = [
         title: "The project's workspaces",
         description: "The project's workspaces. list and show read them. A root's writes, \
             judged: create makes one (worktrees, then setup, judged as a run of each step), \
-            prepare resumes a failed setup, link_ticket links a ticket (null unlinks). remove, \
-            judged, for any agent of its own workspace: refused while work is uncommitted or \
-            unpushed. name: yours when left out, but for create. {\"action\": \"create\", \
+            prepare resumes a failed setup, link_ticket links a ticket (null unlinks); remove, \
+            always held for the user, its request saying what would be lost, never the \
+            workspace you work in. name: yours when left out, but for create and remove. {\"action\": \"create\", \
             \"name\": \"login\"}",
         read_only: false,
         idempotent: false,
@@ -1520,6 +1520,7 @@ fn pushed(place: &Place, folder: Option<&Resolved>) -> bool {
 }
 
 /// Performs a call the user allowed, of its class, recorded as the agent's: the request's answer.
+/// `discard`, a workspace's removal the user said to make even with what would be lost.
 pub async fn performed(
     daemon: &Arc<Daemon>,
     grant: &Arc<Grant>,
@@ -1527,11 +1528,15 @@ pub async fn performed(
     args: Value,
     request: u64,
     class: gate::Class,
+    discard: bool,
 ) -> Outcome {
     let started = Instant::now();
     let recorded = record_of(&args, &grant.place);
     let cancelled = CancellationToken::new();
-    let outcome = perform(daemon, grant, tool, args, cancelled, Some(class)).await;
+    let outcome = match discard {
+        true => crate::actions::remove_discarding(daemon, grant, args).await,
+        false => perform(daemon, grant, tool, args, cancelled, Some(class)).await,
+    };
     let verdict = Some("allow");
     record(
         daemon,

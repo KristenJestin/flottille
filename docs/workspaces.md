@@ -15,7 +15,7 @@ multi-repository case (`docs/reference/multi-repo-case.md`) needs.
 | `flottille workspace show <project> <name>` | Its repositories, their bases, and each step with its state; a failure with its last lines. |
 | `flottille workspace ticket <project> <name> <ticket>` | Links it to a ticket (`#123` or a Jira key), or to none with `--clear` (`docs/tickets.md`). `create` takes `--ticket` too. |
 | `flottille workspace prepare <project> <name>` | Resumes a preparation, from the step that failed. |
-| `flottille workspace remove <project> <name>` | Removes it when all its work is committed and pushed. Never forced. |
+| `flottille workspace remove <project> <name>` | Removes it when all its work is committed and pushed. Never forced: only the user's answer to an agent's request discards work ("Removal"). |
 
 All of them take `--json` and print what the daemon answered (`docs/protocol.md`).
 
@@ -182,8 +182,11 @@ worktree, the deepest first, with `git worktree remove` (never `--force`), then 
 prune`; the folder is removed (links as links, never followed); Flottille checks the folder is gone
 and that `git worktree list` no longer lists it, then forgets the workspace. Its branches are kept.
 
-An agent in a workspace removes its own workspace the same way, with `workspace` `remove`
-(a call to judge), and then deletes, in each repository, the workspace's branch when
+A root agent removes a workspace the same way, with `workspace` `remove`, always held for the
+user, its card saying what would be lost (`docs/tools.md`, "The workspace"); never the one it
+works in. What would be lost refuses it unless the user's answer said to discard it: then nothing
+is checked for loss, each worktree is removed with `git worktree remove --force`, and the folder
+with what it held. It then deletes, in each repository, the workspace's branch when
 it holds no commit of its own (every commit of it is in its base's tracking ref): an empty branch.
 A branch with commits is kept (`docs/commands.md`). It is refused, nothing touched, while the
 workspace is in use outside the agent's tree (`docs/design.md` §5.1): an agent of another tree not

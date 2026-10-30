@@ -147,7 +147,7 @@ and the 2026 practice around it:
    - only a root gets `skills`, `commands`, `setup` and `project`, the project's skills,
      commands, setup and settings, writes its tasks and its workspaces, and starts sessions for
      the user (`agent_launch` with `root`) (`docs/tools.md`, "The project", "The workspace",
-     "Sessions for the user"): a child does its brief, reads the workspaces and removes its own.
+     "Sessions for the user"): a child does its brief and reads the workspaces.
      Every agent gets `tasks`, `run` and `run_status`, the names `commands_list`,
      `commands_run` and `commands_status` had until #131, and `forge`, `tickets` and
      `workspace` `remove`, the names `forge_read`, `forge_write`, `ticket_read` and
