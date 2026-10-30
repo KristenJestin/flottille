@@ -9,7 +9,7 @@ use flottille_core::declared::RepositoryForge;
 use flottille_core::detect;
 use flottille_core::paths::Paths;
 use flottille_core::project::{Project, slug, valid_name};
-use flottille_core::protocol::{ProjectFolder, ProjectName, ProjectSettings};
+use flottille_core::protocol::{ProjectFolder, ProjectName, ProjectRepository, ProjectSettings};
 use flottille_core::registry::Registry;
 use flottille_core::{Error, Result};
 use serde_json::{Value, json};
@@ -202,10 +202,14 @@ fn checkout_of(project: &Project, path: &str) -> Option<PathBuf> {
 /// has no such remote. It is shown, never checked: the check reads the remote itself.
 async fn remote_url(project: &Project, path: &str, remote: &str) -> Option<String> {
     let folder = checkout_of(project, path)?;
-    git::output(&folder, &["remote", "get-url", remote], Class::Read)
-        .await
-        .ok()
-        .map(|url| crate::forge::masked(&crate::forge::without_credentials(url.trim())))
+    git::output(
+        &folder,
+        &["remote", "get-url", "--end-of-options", remote],
+        Class::Read,
+    )
+    .await
+    .ok()
+    .map(|url| crate::forge::masked(&crate::forge::without_credentials(url.trim())))
 }
 
 /// Why `forge` is not where the repository's remote leads (`forge::disagreement`), masked; none
@@ -337,6 +341,199 @@ pub async fn set_settings(
         Ok(())
     })?;
     Ok(settings_of(&saved).await)
+}
+
+/// `project.repositories`: each repository of the project as its checkout stands (found or not,
+/// the branch it is on, where its remote leads, none when it is local only, its forge, its base
+/// rule and its local branches), and `new`, the repositories the folder holds that the file does
+/// not name, detected again.
+pub async fn repositories(
+    daemon: Arc<Daemon>,
+    params: Value,
+) -> std::result::Result<Value, Failure> {
+    let ProjectName { name } = serde_json::from_value(params)?;
+    let project = load_project(&daemon, &name)?;
+    Ok(repositories_of(&project).await)
+}
+
+async fn repositories_of(project: &Project) -> Value {
+    let mut listed = Vec::new();
+    for repository in &project.repositories {
+        let checkout = checkout_of(project, &repository.path);
+        let (branch, branches) = match &checkout {
+            None => (None, Vec::new()),
+            Some(folder) => {
+                let branch = git::output(
+                    folder,
+                    &["symbolic-ref", "--quiet", "--short", "HEAD"],
+                    Class::Read,
+                )
+                .await
+                .ok()
+                .map(|branch| branch.trim().to_owned());
+                let branches: Vec<String> = git::output(
+                    folder,
+                    &["for-each-ref", "--format=%(refname:short)", "refs/heads/"],
+                    Class::Read,
+                )
+                .await
+                .map(|listed| listed.lines().map(str::to_owned).collect())
+                .unwrap_or_default();
+                (branch, branches)
+            }
+        };
+        listed.push(json!({
+            "path": repository.path,
+            "found": checkout.is_some(),
+            "branch": branch,
+            "remote": repository.remote,
+            "url": remote_url(project, &repository.path, &repository.remote).await,
+            "forge": repository.forge,
+            "base": repository.base,
+            "branches": branches,
+        }));
+    }
+    // A folder that cannot be read offers nothing new; its repositories say they are not found.
+    let new: Vec<String> = detect::repositories(&project.folder)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|path| !project.repositories.iter().any(|r| &r.path == path))
+        .collect();
+    json!({
+        "name": project.name,
+        "folder": project.folder,
+        "repositories": listed,
+        "new": new,
+    })
+}
+
+/// A path typed for a repository, as the file writes it: relative, `/`-separated, `.` for the
+/// folder itself; none when it leads out of the folder.
+fn repository_path(typed: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    for part in Path::new(typed.trim()).components() {
+        match part {
+            std::path::Component::Normal(part) => parts.push(part.to_str()?.to_owned()),
+            std::path::Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    Some(match parts.is_empty() {
+        true => ".".to_owned(),
+        false => parts.join("/"),
+    })
+}
+
+/// `project.add_repository`: a repository of the project's folder, written in the file where it
+/// stands, its comments kept, with the defaults (`origin`, base `main`).
+pub async fn add_repository(
+    daemon: Arc<Daemon>,
+    params: Value,
+) -> std::result::Result<Value, Failure> {
+    let asked: ProjectRepository = serde_json::from_value(params)?;
+    let project = load_project(&daemon, &asked.name)?;
+    let Some(path) = repository_path(&asked.path) else {
+        return Err(Failure::refused(format!(
+            "{} is not a folder of {}",
+            asked.path, asked.name
+        )));
+    };
+    if project.repositories.iter().any(|r| r.path == path) {
+        return Err(Failure::refused(format!(
+            "{path} is already a repository of {}",
+            asked.name
+        )));
+    }
+    if checkout_of(&project, &path).is_none() {
+        return Err(Failure::refused(format!(
+            "{path} is not a Git repository: {} holds no .git",
+            project.folder.join(&path).display()
+        )));
+    }
+    // A link leading elsewhere would make a repository of the project out of someone else's.
+    let stays = std::fs::canonicalize(project.folder.join(&path))
+        .and_then(|folder| Ok(folder.starts_with(std::fs::canonicalize(&project.folder)?)))
+        .unwrap_or(false);
+    if !stays {
+        return Err(Failure::refused(format!(
+            "{path} leads outside the project folder"
+        )));
+    }
+    let saved = rewrite(&daemon, &asked.name, |_, document| {
+        let entries = document
+            .entry("repositories")
+            .or_insert(toml_edit::Item::ArrayOfTables(Default::default()))
+            .as_array_of_tables_mut()
+            .ok_or_else(|| {
+                Failure::new(
+                    "invalid-config",
+                    format!(
+                        "projects/{}.toml: repositories: must be an array of tables",
+                        asked.name
+                    ),
+                )
+            })?;
+        let mut table = toml_edit::Table::new();
+        table.insert("path", toml_edit::value(path.clone()));
+        table.decor_mut().set_prefix("\n");
+        entries.push(table);
+        Ok(())
+    })?;
+    Ok(repositories_of(&saved).await)
+}
+
+/// `project.remove_repository`: the project forgets one of its repositories, written in the file
+/// where it stands, its comments kept. Its folder, its branches and the worktrees of the
+/// workspaces that took it are never touched. Refused when the file would no longer be one the
+/// daemon can use (a repository depending on it, a task running in it…), with the reason.
+pub async fn remove_repository(
+    daemon: Arc<Daemon>,
+    params: Value,
+) -> std::result::Result<Value, Failure> {
+    let asked: ProjectRepository = serde_json::from_value(params)?;
+    let project = load_project(&daemon, &asked.name)?;
+    let path = repository_path(&asked.path).unwrap_or_else(|| asked.path.clone());
+    if !project.repositories.iter().any(|r| r.path == path) {
+        return Err(Failure::refused(format!(
+            "{} has no repository {path}",
+            asked.name
+        )));
+    }
+    if project.repositories.len() == 1 {
+        return Err(Failure::refused(format!(
+            "{path} is the last repository of {}, and a project keeps at least one repository",
+            asked.name
+        )));
+    }
+    let saved = rewrite(&daemon, &asked.name, |_, document| {
+        let entries = document
+            .get_mut("repositories")
+            .and_then(toml_edit::Item::as_array_of_tables_mut)
+            .ok_or_else(|| {
+                Failure::new(
+                    "invalid-config",
+                    format!(
+                        "projects/{}.toml: repositories: must be an array of tables",
+                        asked.name
+                    ),
+                )
+            })?;
+        let at = entries
+            .iter()
+            .position(|entry| entry.get("path").and_then(|p| p.as_str()) == Some(path.as_str()));
+        if let Some(at) = at {
+            entries.remove(at);
+        }
+        Ok(())
+    })
+    .map_err(|failure| match failure.code {
+        "invalid-config" => Failure::refused(format!(
+            "{path} is not removed, nothing was written: {}",
+            failure.message
+        )),
+        _ => failure,
+    })?;
+    Ok(repositories_of(&saved).await)
 }
 
 /// A declaration as the TOML inline table it is written as: its keys hold strings and lists of

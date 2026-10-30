@@ -164,15 +164,16 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
 - tasks and runs: `tasks` (the project's tasks, written by a root only), `run` (a task or one
   line, **never a shell**), `run_status` (a run's output, or its stop);
 - forges (every agent of a project whose repositories declare a forge, in `main` as in a
-  workspace): `forge_read`, the pull requests of a workspace's repositories and their checks, read
-  only (`forges.md`), and `forge_write`, which opens or merges them or re-runs a failed pipeline,
-  each call to judge (§7); in `main` they name the workspace;
-- the workspace (every agent): `workspace_remove`, which removes a workspace once nothing in
-  it would be lost, the agent's own or, in `main`, the one it names, a call to judge;
+  workspace): `forge`, which lists and reads the pull requests of the place's repositories and
+  their checks (`forges.md`), and opens, comments, edits or merges them or re-runs a failed
+  pipeline, each write a call to judge (§7); in `main` it names the workspace;
+- the workspace (every agent): `workspace`, which lists and reads the workspaces, removes one
+  once nothing in it would be lost, the agent's own or, in `main`, the one it names, a call to
+  judge, and, for a root, creates and prepares them;
 - skills: `skill_read`, one of the project's skills, texts read when relevant (`skills.md`);
 - tickets (every agent of a project that declares a tracker, in `main` as in a workspace):
-  `ticket_read`, the ticket a workspace is linked to, or another of the same tracker, read only
-  (`tickets.md`);
+  `tickets`, which lists, searches and reads the tracker's tickets, and writes GitHub issues,
+  each write a call to judge; Jira is read only (`tickets.md`);
 - the project (a root): `skills` and `commands` (list, show, add, edit, remove), `setup` (its
   steps, numbered) and `project` (its settings, its forges and tracker, its rules), and the writes
   of `tasks`, what the window does, each change a call to judge, a change of the tracker or of the
@@ -180,8 +181,11 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
 
 Flottille's own tools:
 
-- `agent_launch {title, brief, model?, role?, workspace? | new_workspace? + repositories?}`, the parent's place when neither:
-  starts a child, answers at once with its id. Refused (never queued) above the caps.
+- `agent_launch {title, brief, model?, role?, workspace? | new_workspace? + repositories?, root?}`, the parent's place when neither:
+  starts a child, answers at once with its id. Refused (never queued) above the caps. With
+  `root`, a root only starts a session for the user instead, judged, in the tree's mode, its
+  first message the agent's and never the user's, base when that root was itself started by an
+  agent (`tools.md`, "Sessions for the user").
 - `agent_send {agent_id, message}`: a message to one of the caller's children.
 - `agent_status {agent_id?, action?, detail?, after?}`: for one child or all of them: state, what
   it is doing now (thinking, in a tool call, which command runs and for how long, waiting for
@@ -201,10 +205,10 @@ Flottille's own tools:
 
 The tool list of a session is fixed for its whole life (prompt cache, `reference/hemera.md` §7)
 and depends on what the agent can do, known when it starts: a root gets `ask_user`, `skills`,
-`commands`, `setup`, `project` and `workspace`, a child `ask_parent`; an agent at the depth limit gets no `agent_*` tools
-and no `approval_answer`. A root lead has 22 tools, a leaf worker 12; two more each when the
-project's repositories declare a forge (`forge_read`, `forge_write`), one more when it declares a
-tracker (`ticket_read`), whatever the place (`reference/mcp.md` §4).
+`commands`, `setup` and `project`, a child `ask_parent`; an agent at the depth limit gets no `agent_*` tools
+and no `approval_answer`. A root lead has 21 tools, a leaf worker 12; one more each when the
+project's repositories declare a forge (`forge`), one more when it declares a tracker
+(`tickets`), whatever the place (`reference/mcp.md` §4).
 
 ### 4.4 Roles
 
@@ -311,6 +315,8 @@ by `reference/multi-repo-case.md`:
 
 - **Repository set**: all of the project's repositories by default; the project can say so
   ("environment scope is not change scope").
+- **No fetch imposed**: a repository with no remote, or whose fetch fails, starts from its own
+  base branch, and the creation says so in one line (`docs/workspaces.md`).
 - **Root entries**: when the project folder is not itself a repository, its other top-level
   entries (instruction files, shared folders) can be linked into the workspace folder by one
   setup step, never `.git` nor `.gitignore`.
@@ -364,7 +370,7 @@ a malformed call, a login printed, the daemon driven from a command.
 
 ### 7.1 The mode and the judge
 
-Each session is in **Ask** or **Auto**, a switch in the composer's bar. A new session starts in
+Each session is in **Ask** or **Auto**, a small two-choice control in the composer's bar. A new session starts in
 Auto. A tree has one mode, its root's, stored with the root and read at each call: a switch
 reaches every agent of the tree at once, children included. Only the user changes it, in the
 window or with `flottille agent mode <agent> ask|auto` (`agent.mode`, which switches the tree's
@@ -392,19 +398,22 @@ the project up) or the user's own, edited in Settings ("Judge", with Reset to de
 empty text resets it) and read at each judgement. A guidance that cannot be read whole, or is over
 its 4,000 characters, is never cut nor replaced by the default: each judgement fails, and so asks,
 saying which file is wrong and why, and Settings show it. The guidance changes neither what
-reaches the judge nor what it may answer. It sees the call masked (secrets masked, the line
-and the path whole, contents cut to their first lines with how many they had), why the rules held
-it, the place, the agent's `why`, and last the user's last messages to the session, nothing else.
+reaches the judge nor what it may answer. It sees the call masked (secrets masked, the line,
+the path, a brief, a title and a body whole, contents cut to their first lines with how many they
+had), why the rules held it, the place, the agent's `why`, the first message of a session an agent
+started for the user (labelled as that agent's, never the user's), and last the user's last
+messages to the session, nothing else.
 What the agent wrote comes in blocks of its own, every `<` escaped, so that no text of the agent
 reads as the user's; only the user's messages say what is wanted. It answers one JSON object,
 `{"verdict": "allow" | "ask", "reason": "…"}`. A failure, an answer that is not that object, or
 30 seconds without one is an ask; a line or a path longer than the 8,000 characters it is given
-whole asks without it. A process of the provider is started for each judgement, and its whole
+whole asks without it, and the gate refuses a longer brief, title or body. A process of the provider is started for each judgement, and its whole
 process group stopped after it. Each verdict is recorded with the
 call (who judged, what, why: the `judgement` of its `agent.tool_served` event, and of its request
 when it asks), shown on the card and in `flottille approvals`.
-Without a judge, none picked or "No judge" chosen, Auto behaves as Ask, and the composer says once
-"Choose an Auto judge in Settings". A judgement is a turn of the judge's model: it uses the user's quota on that provider,
+Without a judge, none picked or "No judge" chosen, Auto behaves as Ask, and the control carries a
+small warning icon whose tooltip says so and whose click opens Settings, where the judge is
+chosen. A judgement is a turn of the judge's model: it uses the user's quota on that provider,
 which Settings say.
 
 ### 7.2 Requests
@@ -471,9 +480,19 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
 - a top bar with search and a bell counting what waits for the user;
 - left: the tree project › place › session. `main` and the workspaces sit at the same level
   under their project; sessions sit under their place, with a mark when running or when the
-  root needs the user; a folded level shows the strongest mark it holds; a click on a project's name
-  opens its page and leaves its places as they were, only its chevron folds and unfolds them;
-- a project page: its repositories, its places with their sessions, creating and removing a
+  root needs the user. The mark is where the work is, once: on the session's own row while that row
+  is in sight, and on a folded place or project, which shows the strongest mark of what it holds,
+  only while it is folded (never on a row and on its parents together); a session whose agent
+  ended shows no mark. A click on a project's name opens its page and leaves its places as they
+  were, only its chevron folds and unfolds them. A place's row offers, under the pointer, a "+"
+  that opens its project's composer set to start there, with the field focused; a session's row
+  offers a "⋯" menu with End session (the confirmation of the session page, counting the agents
+  that end) and, on an ended session whose agent can resume, Resume, with no need to open the
+  session first;
+- a project page: its repositories (each with its branch, its remote or "local only" and its
+  forge; added, removed, which only forgets one, and detected again), its places with their
+  sessions, each workspace's card saying where each of its repositories stands (branch, commits
+  ahead, files not committed, setup steps played), creating and removing a
   workspace (with the preparation's progress and failure output), the composer that starts
   a session (place, agent, model, first message), and its tasks, each with Run, which runs it in
   the project folder, listed below with the rail's rows and output panel; its Settings: each
@@ -488,46 +507,67 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   judge (Auto asks like Ask)" among its choices), the providers, then the Judge guidance and the
   Rules for every project, both edited the same way; a judge Flottille picked is said once in a
   notice, with Open Settings and Dismiss;
-- a session page: the root's conversation, live (messages, thoughts collapsed, tool calls with
-  their result, the children launched, reports, diffs), the approvals that reach the user, inline,
-  each a card that says what the call does, then its class, then the judge's reason when one was
-  asked, with Allow and Deny only (a base card stands apart, in the alarm colour, with a sentence
-  that says why it always comes back), and a composer that writes to the root, with the session's
-  mode switch (Ask, Auto) in its bar, whose Stop
-  button and `Escape` interrupt the turn that runs (the agent stays), which grows with its lines up to
+- a session page: the root's conversation, live (messages, the user's own as selectable as the agent's, thoughts collapsed, tool calls with
+  their result, the children launched, reports, diffs), one compact line for each command a
+  tool call ran (an icon, the line, how it ended, how long: a click opens the output panel the
+  rail opens, and the output itself is only there), one line for each request that reached the
+  user ("Waiting for you: Run pnpm test", which scrolls the rail to its card and lights it, then,
+  once answered, the outcome), and a composer that writes to the root, with the session's mode
+  (an Ask | Auto control, with a warning icon when Auto has no judge) in its bar, whose Stop
+  button, in Send's place while a turn runs and Send has nothing to send (the two cross-fade), and
+  `Escape` interrupt the turn that runs (the agent stays), which grows with its lines up to
   about ten and then scrolls, and takes pictures (pasted from the clipboard, dropped from a file or
   picked with Attach: thumbnails with a remove button, sent with the message as ACP image blocks,
   stored in Flottille's data folder so the conversation shows them again; said in one sentence and
-  left out when the session's agent takes none); a line just above it says what the root does while
-  a turn runs (`Thinking…`, `Writing…`, `Running <tool>…`) and goes with the turn. A running agent is
+  left out when the session's agent takes none); what the root does while a turn runs (`Thinking…`,
+  `Writing…`, `Running <tool>…`) is said in the same bar, where the words cross-fade as they change,
+  and goes with the turn. A running agent is
   drawn by its icon alone, in the tree and in the rail: no text badge, nothing in the header. In the
   composer, `/` at the start
   of a message lists the project's commands, filtered as the user types: picking one puts `/name `
   in the field, and sending it sends the command's instructions with what follows the name (a
-  `/word` that names none is sent as text); a rail with the session's
-  tree of agents, its workspace (each repository's forge as the daemon reads it, its ticket,
+  `/word` that names none is sent as text); a rail with, from its top, "Waiting for you" (each
+  request that reached the user is a card that says what the call does, then its class, then the
+  judge's reason when one was asked, then why it was held, one sentence for each reason, with
+  Allow and Deny only; a base card stands apart, in the alarm colour, with a sentence that says
+  why it always comes back; an answered card leaves), the session's
+  tree of agents, its runs, its workspace (each repository's branch, commits ahead, files not
+  committed and setup steps played, and its forge as the daemon reads it, its ticket,
   linked or unlinked there) and facts. The
   root's row menu ("⋯") holds End session, the only way the window ends an agent: it ends the root
   and its tree, after a confirmation that counts the agents that end. An ended session leaves its
-  place in the left tree for its project's "Ended" group, folded at the bottom, and its page shows,
+  place in the left tree for the "Ended" group, folded, at the bottom of the whole tree below
+  every project (its rows say their project), and its page shows,
   in place of the composer, why it ended and Resume when its agent can resume or load its session
   (`agent.resume`), enabled once its process is gone, which brings the composer back; its header
   says `STOPPED` or `FAILED`, as its rail does, and its conversation says it ended, then resumed. Selecting a child shows its
   conversation read-only;
-- the commands the agents run (`docs/tools.md`): the rail lists those of the session's tree, running
-  first, each with its line, who started it (the agent, and the task when it is one),
-  how long, its last output line and Stop; a click opens its output, live, in a panel. One that
-  ended stays listed, greyed, with its exit code, until the user dismisses it or the session ends.
-  A project, and a session, with a command running show a small icon in the left tree, so that no
-  server is forgotten. A command's result in the conversation is a card: the line, the exit code in
-  a colour, the duration, the output folded to its last lines and expandable, its ANSI colours
-  drawn (the stored output keeps the program's bytes, masked); a call that came back through an
-  approval is the same card with one line saying the user allowed it, never the daemon's raw text;
+- the runs of the agents (`docs/tools.md`, "Tasks and runs"): the rail's **Runs** section lists
+  those of the session's tree (it is not called "Commands", which are the project's `/name`
+  instructions), running first, each with its line, who started it (the agent, and the task when
+  it is one), how long, its last output line and Stop; a click opens its output, live, in a panel,
+  and the panel is the same when the conversation's line for that run is clicked. One that ended
+  stays listed, greyed, with its exit code, until the user dismisses it or the session ends; the
+  last three that ended are in sight, the older ones, and any that ended before the session's last
+  turn began, fold into one row, "N ended", which opens them, each still with its Dismiss. A
+  project, and a session, with a command running show a small icon in the left tree, so that no
+  server is forgotten. The conversation draws a run as one line, its ANSI colours turned into the
+  palette's in the panel (the stored output keeps the program's bytes, masked); a call that came
+  back through an approval is the same line with "allowed by you", never the daemon's raw text;
 - narrow and portrait windows: the rail, then the left tree, become drawers.
 - a history of the pages shown (project pages, sessions with the agent shown in them, settings),
   as a browser keeps one: it lives as long as the window and is not stored. The mouse's back and
   forward buttons and `Alt+Left` / `Alt+Right` move in it; an open list, modal or drawer takes
   the button first and closes; a page that no longer exists is skipped.
+
+Motion: **everything that moves is animated**, with the grammar of `reference/gpui.md` (ease-out
+cubic, the durations of `crates/flottille-ui/src/motion.rs`: hover 140 ms, press 90 ms, an entrance
+240 ms, a fold or a state 280 ms; reduced motion honoured). Hover and press on every interactive
+element; a state that changes (selected, chosen, focused, open); an element or a block that
+appears or leaves, with the gap around it; a row inserted into, removed from or moved in a list; a
+fold; a panel or a menu that opens or closes; a page and its sections, one after the other (at most
+eight waits, whatever the length). At rest nothing moves and nothing is redrawn. An issue about
+the window without its animations is incomplete.
 
 Colours: Flottille's own palette, or, on an Omarchy desktop, the current Omarchy theme's colours
 followed live. Shapes, type and motion do not change with the theme. A state is drawn the same

@@ -62,6 +62,10 @@ pub struct Agent {
     /// Ask or Auto: what becomes of a call to judge (`docs/design.md` §7). Only the user sets it.
     #[serde(default)]
     pub gate_mode: GateMode,
+    /// The agent that started this root for the user (`agent_launch` with `root`); `None` for a
+    /// child or a root the user started.
+    #[serde(default)]
+    pub launched_by: Option<String>,
     /// The system prompt, frozen at creation, with its cache boundary.
     pub instructions: String,
     /// The exact names of its tools, frozen at creation (the prompt cache depends on it).

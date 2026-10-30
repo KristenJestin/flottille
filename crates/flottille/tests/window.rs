@@ -345,7 +345,10 @@ fn one_session_changing_state_redraws_its_row_and_not_the_others(cx: &mut TestAp
     });
     // Atlas's page is open, its details and its lists read: an answer that lands later draws it.
     until(&shell, cx, "the page has its details", |cx| {
-        page_of(&shell, cx).read_with(cx, |page, _| page.chips()) == ["atlas · main"]
+        page_of(&shell, cx).read_with(cx, |page, cx| {
+            page.chips() == ["atlas · main"]
+                && page.repositories().read(cx).repositories().is_some()
+        })
     });
     settle(cx);
     let renders = |id: &str, cx: &mut VisualTestContext| {
@@ -1537,6 +1540,8 @@ fn open_session<'a>(
     until(&shell, cx, "the session is in the tree", |cx| {
         cx.update(|window, _| window.try_find(session_id(lead)).is_some())
     });
+    // Its row unfolds into the tree: it is there to be clicked once it has.
+    settle(cx);
     if width < 860. {
         cx.update(|window, cx| window.click("open-tree", cx));
         settle(cx);
@@ -1914,7 +1919,7 @@ fn a_worker_s_request_held_by_the_lead_waits_on_it_then_forwarded_needs_me_with_
     assert_eq!(card.asked.as_deref(), Some("Read .env"));
     let why = card.why.unwrap();
     assert!(
-        why.contains("the conversation forwards it: the form needs the database name"),
+        why.contains("The conversation forwards it: the form needs the database name."),
         "{why}"
     );
     assert_eq!(
@@ -1939,6 +1944,7 @@ fn approving_once_from_the_card_performs_the_call_and_leaves_the_record(cx: &mut
 
     cx.update(|window, cx| window.click(format!("allow-{number}"), cx));
     until(&shell, cx, "the card folds into its record", |cx| {
+        moving(cx);
         cx.update(|window, _| {
             window
                 .try_find(format!("approval-record-{number}"))
@@ -2160,48 +2166,75 @@ fn writing_in_main_in_ask_makes_a_card_to_judge_with_allow_and_deny_only(cx: &mu
     });
 }
 
-/// What the mode switch of the open session's composer shows, and the sentence beside it.
-fn mode_shown(
-    shell: &Entity<Shell>,
-    cx: &mut VisualTestContext,
-) -> (Option<String>, Option<String>) {
+/// What the mode control of the open session's composer shows, and whether the no-judge warning
+/// is there.
+fn mode_shown(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> (Option<String>, bool) {
     let page = session_page(shell, cx);
     page.read_with(cx, |page, cx| {
         let mode = page.reply().unwrap().read(cx).mode.read(cx);
-        (mode.mode().map(str::to_owned), mode.said())
+        (mode.mode().map(str::to_owned), mode.no_judge())
     })
 }
 
 #[gpui_kit::test]
-fn the_mode_switch_shows_auto_says_once_to_choose_a_judge_and_puts_the_session_in_ask(
+fn the_mode_is_a_compact_ask_auto_control_with_a_warning_icon_when_auto_has_no_judge(
     cx: &mut TestAppContext,
 ) {
     let user = team_user();
     let (lead, _mcp, shell, cx) = lead_in_main(&user, cx);
-    let no_judge = Some(flottille_window::mode::NO_JUDGE.to_owned());
     until(
         &shell,
         cx,
         "a new session shows Auto, without a judge",
-        |cx| mode_shown(&shell, cx) == (Some("auto".into()), no_judge.clone()),
+        |cx| mode_shown(&shell, cx) == (Some("auto".into()), true),
     );
+    settle(cx);
     cx.update(|window, _| {
-        assert!(window.find("reply-mode-switch").visible());
-        assert!(window.find("reply-mode-said").visible());
+        assert_eq!(window.find("reply-mode-auto").selected(), Some(true));
+        assert_eq!(window.find("reply-mode-ask").selected(), Some(false));
+        // No sentence: the long line is gone, a small icon with a tooltip stands for it.
+        assert!(window.try_find("reply-mode-said").is_none());
+        let warning = window.find("reply-mode-warning");
+        assert_eq!(warning.label(), Some(flottille_window::mode::NO_JUDGE));
+        assert!(
+            warning.bounds().size.width <= px(30.),
+            "an icon, not a sentence"
+        );
+        let control = window.find("reply-mode").bounds();
+        assert!(
+            control.size.width < px(120.),
+            "a compact control: {control:?}"
+        );
     });
 
-    cx.update(|window, cx| window.click("reply-mode-switch", cx));
+    // The icon leads to Settings.
+    cx.update(|window, cx| window.click("reply-mode-warning", cx));
+    until(&shell, cx, "Settings opens", |cx| {
+        shell.read_with(cx, |s, _| s.selected() == Some(&Selection::Settings))
+    });
+    shell.update_in(cx, |shell, window, cx| {
+        shell.open(Selection::Session(lead.clone()), window, cx)
+    });
+    settle(cx);
+
+    // Choosing Ask puts the session in Ask: no judge is needed, no warning.
+    cx.update(|window, cx| window.click("reply-mode-ask", cx));
     eventually("the daemon puts the session in Ask", || {
         user.call("agent.show", json!({"agent": lead})).unwrap()["agent"]["gate_mode"] == "ask"
     });
-    until(&shell, cx, "the switch shows Ask, and no sentence", |cx| {
-        mode_shown(&shell, cx) == (Some("ask".into()), None)
+    until(&shell, cx, "the control shows Ask, with no warning", |cx| {
+        mode_shown(&shell, cx) == (Some("ask".into()), false)
+    });
+    settle(cx);
+    cx.update(|window, _| {
+        assert_eq!(window.find("reply-mode-ask").selected(), Some(true));
+        assert!(window.try_find("reply-mode-warning").is_none());
     });
 
     // The command line changes it too, and the window follows.
     user.call("agent.mode", json!({"agent": lead, "mode": "auto"}))
         .unwrap();
-    until(&shell, cx, "the switch follows the daemon", |cx| {
+    until(&shell, cx, "the control follows the daemon", |cx| {
         mode_shown(&shell, cx).0.as_deref() == Some("auto")
     });
 }
@@ -4213,12 +4246,16 @@ fn a_report_is_folded_until_clicked(cx: &mut TestAppContext) {
         assert!(window.try_find("row-0-report-text").is_none(), "folded");
     });
 
+    // It unfolds and folds over a moment, and is drawn until it has.
     cx.update(|window, cx| window.click("row-0-report-toggle", cx));
     frame(cx);
     cx.update(|window, _| assert!(window.try_find("row-0-report-text").is_some()));
+    settle(cx);
 
     cx.update(|window, cx| window.click("row-0-report-toggle", cx));
     frame(cx);
+    cx.update(|window, _| assert!(window.try_find("row-0-report-text").is_some(), "folding"));
+    settle(cx);
     cx.update(|window, _| assert!(window.try_find("row-0-report-text").is_none()));
 }
 
@@ -5327,7 +5364,7 @@ fn listed_in(shell: &Entity<Shell>, place: Place, cx: &mut VisualTestContext) ->
 /// The sessions the "Ended" group of `app` lists, and whether it is open.
 fn ended_in_app(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> (Vec<String>, bool) {
     shell.read_with(cx, |s, cx| {
-        s.ended("app")
+        s.ended()
             .map(|node| {
                 let node = node.read(cx);
                 let ids = node
@@ -5349,9 +5386,9 @@ fn open_ended<'a>(
 ) -> (Entity<Shell>, &'a mut VisualTestContext) {
     let (shell, cx) = window(user, Arc::new(user.connector()), 1280., cx);
     until(&shell, cx, "the Ended group is in the tree", |cx| {
-        cx.update(|window, _| window.try_find("ended-app").is_some())
+        cx.update(|window, _| window.try_find("ended").is_some())
     });
-    cx.update(|window, cx| window.click("ended-app", cx));
+    cx.update(|window, cx| window.click("ended", cx));
     settle(cx);
     cx.update(|window, cx| window.click(session_id(lead), cx));
     until(
@@ -5386,10 +5423,12 @@ fn stop_during_a_turn_cancels_it_and_the_next_message_is_taken(cx: &mut TestAppC
     });
 
     send(&user, &lead, "HANG");
-    until(&shell, cx, "the turn runs and Stop is offered", |cx| {
+    until(&shell, cx, "the turn runs", |cx| {
         reply.read_with(cx, |r, _| r.is_running())
-            && cx.update(|window, _| window.try_find("reply-stop").is_some())
     });
+    // Stop fades in, in Send's place.
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find("reply-stop").is_some(), "Stop is offered"));
     cx.update(|window, cx| window.click("reply-stop", cx));
     until(&shell, cx, "the turn ends", |cx| {
         !reply.read_with(cx, |r, _| r.is_running())
@@ -5488,7 +5527,7 @@ fn end_session_asks_ends_the_tree_moves_it_to_ended_and_replaces_the_composer(
     });
     assert!(!ended_in_app(&shell, cx).1, "the group is folded");
     settle(cx);
-    cx.update(|window, cx| window.click("ended-app", cx));
+    cx.update(|window, cx| window.click("ended", cx));
     settle(cx);
     assert!(ended_in_app(&shell, cx).1);
     cx.update(|window, _| assert!(window.find(session_id(&lead)).visible()));
@@ -5798,15 +5837,17 @@ fn stop_and_escape_cancel_the_turn_that_runs_and_the_agent_stays_alive(cx: &mut 
 
     // The Stop button.
     send(&user, &lead, "HANG");
-    until(
-        &shell,
-        cx,
-        "the turn runs and the composer offers Stop",
-        |cx| {
-            reply.read_with(cx, |r, _| r.is_running())
-                && cx.update(|window, _| window.try_find("reply-stop").is_some())
-        },
-    );
+    until(&shell, cx, "the turn runs", |cx| {
+        reply.read_with(cx, |r, _| r.is_running())
+    });
+    // Stop fades in, in Send's place.
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(
+            window.try_find("reply-stop").is_some(),
+            "the composer offers Stop"
+        )
+    });
     cx.update(|window, cx| window.click("reply-stop", cx));
     until(&shell, cx, "the turn ends", |cx| {
         !reply.read_with(cx, |r, _| r.is_running())
@@ -5828,6 +5869,7 @@ fn stop_and_escape_cancel_the_turn_that_runs_and_the_agent_stays_alive(cx: &mut 
     assert_eq!(cancels(&user), 2);
     let agent = user.call("agent.show", json!({"agent": lead})).unwrap();
     assert_eq!(agent["agent"]["state"], "idle");
+    settle(cx);
     cx.update(|window, _| assert!(window.try_find("reply-stop").is_none()));
 }
 
@@ -7074,7 +7116,7 @@ fn agent_steps_are_folded_until_clicked_and_stay_open_while_the_session_is_shown
     });
 
     cx.update(|window, cx| window.click("row-0-steps-toggle", cx));
-    frame(cx);
+    settle(cx);
     cx.update(|window, _| {
         assert!(window.find("step-0-0").visible());
         assert!(window.find("step-0-1").visible());
@@ -7086,7 +7128,7 @@ fn agent_steps_are_folded_until_clicked_and_stay_open_while_the_session_is_shown
     cx.update(|window, _| assert!(window.find("step-0-2").visible()));
 
     cx.update(|window, cx| window.click("row-0-steps-toggle", cx));
-    frame(cx);
+    settle(cx);
     cx.update(|window, _| {
         assert!(window.try_find("step-0-0").is_none());
         assert_eq!(
@@ -7586,4 +7628,497 @@ fn run_on_a_task_of_the_project_page_lists_its_run_and_opens_its_output(cx: &mut
         })
     });
     assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
+}
+
+// ── Everything that moves is animated ─────────────────────────────────────────────────────────
+
+fn y_of(id: &str, cx: &mut VisualTestContext) -> f32 {
+    let id = id.to_owned();
+    cx.update(|window, _| f32::from(window.find(id).bounds().origin.y))
+}
+
+fn seed_skills(user: &User, names: &[&str]) {
+    for name in names {
+        user.call(
+            "skill.add",
+            json!({"project": "atlas", "name": name, "description": format!("The {name}"),
+                   "text": "Read it before you start."}),
+        )
+        .unwrap();
+    }
+}
+
+#[gpui_kit::test]
+fn the_sections_of_a_project_s_settings_below_the_forges_enter_as_the_forges_do(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    open_project(&shell, "atlas", cx);
+    cx.update(|window, cx| window.click("project-settings", cx));
+    until(&shell, cx, "the settings are read", |cx| {
+        settings_of(&shell, cx).is_some_and(|page| {
+            page.read_with(cx, |page, _| page.name() == "atlas" && page.is_loaded())
+        })
+    });
+    let ids = [
+        "forges", "tracker", "save", "skills", "commands", "tasks", "setup", "rules",
+    ]
+    .map(|part| format!("enter-settings-atlas-{part}"));
+    // Every section sits in an entrance, and the last ones are still waiting for theirs while
+    // the first are done: they come one after the other, as the forges do.
+    run_for(Duration::from_millis(420), cx);
+    let waiting: Vec<f32> = ids.iter().map(|id| y_of(id, cx)).collect();
+    run_for(Duration::from_millis(1500), cx);
+    let arrived: Vec<f32> = ids.iter().map(|id| y_of(id, cx)).collect();
+    let rise = |at: usize| waiting[at] - arrived[at];
+    assert!(rise(0).abs() < 0.5, "the forges are in place: {}", rise(0));
+    for (at, id) in ids.iter().enumerate().skip(3) {
+        assert!(
+            (rise(at) - 6.0).abs() < 0.5,
+            "{id} was still to rise {}px (it rises 6px)",
+            rise(at)
+        );
+    }
+}
+
+#[gpui_kit::test]
+fn a_skill_that_is_removed_folds_away_before_it_is_gone_and_the_empty_line_unfolds(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    seed_skills(&user, &["alpha"]);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", cx);
+    until(&shell, cx, "the skill is listed", |cx| {
+        !skills_listed(&shell, cx).is_empty()
+    });
+    settle(cx);
+    assert!(text_of("skill-description-alpha", cx).is_some());
+
+    cx.update(|window, cx| window.click("remove-skill-alpha", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("confirm-remove-skill-alpha", cx));
+    until(&shell, cx, "the skill is gone from the list", |cx| {
+        skills_listed(&shell, cx).is_empty()
+    });
+    // The daemon has answered, and the row is still there, folding.
+    run_for(Duration::from_millis(100), cx);
+    let height = cx.update(|window, _| {
+        window
+            .try_find("skill-item-alpha")
+            .map(|row| f32::from(row.bounds().size.height))
+    });
+    assert!(
+        height.is_some_and(|h| h > 0.0),
+        "the removed row is still drawn, part way: {height:?}"
+    );
+    run_for(Duration::from_millis(600), cx);
+    assert!(
+        cx.update(|window, _| window.try_find("skill-item-alpha").is_none()),
+        "and gone once folded"
+    );
+    cx.update(|window, _| assert!(window.find("no-skills").visible()));
+}
+
+#[gpui_kit::test]
+fn a_setup_step_moved_down_slides_instead_of_jumping(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    for step in [json!({"copy": [".env"]}), json!({"link": "node_modules"})] {
+        user.call("setup.add", json!({"project": "atlas", "step": step}))
+            .unwrap();
+    }
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", cx);
+    until(&shell, cx, "the steps are listed", |cx| {
+        steps_listed(&shell, cx).len() == 2
+    });
+    settle(cx);
+    let (first, second) = (y_of("setup-step-1", cx), y_of("setup-step-2", cx));
+    assert!(first < second);
+
+    cx.update(|window, cx| window.click("setup-down-1", cx));
+    until(&shell, cx, "the list is read in its new order", |cx| {
+        steps_listed(&shell, cx)
+            .first()
+            .is_some_and(|step| step.link.is_some())
+    });
+    // The link step is first now, and it is drawn where it was, on its way up.
+    run_for(Duration::from_millis(16), cx);
+    let sliding = y_of("setup-step-1", cx);
+    assert!(
+        sliding > first + 10.0,
+        "the step that went up starts from its old place: {sliding} (in place: {first})"
+    );
+    settle(cx);
+    assert_eq!(y_of("setup-step-1", cx), first);
+    assert_eq!(y_of("setup-step-2", cx), second);
+}
+
+#[gpui_kit::test]
+fn the_bell_s_list_rises_in_and_fades_out_instead_of_appearing_and_vanishing(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    settle(cx);
+    cx.update(|window, cx| window.click("bell", cx));
+    run_for(Duration::from_millis(32), cx);
+    let rising = y_of("bell-list", cx);
+    run_for(Duration::from_millis(600), cx);
+    let open = y_of("bell-list", cx);
+    assert!(
+        rising > open + 1.0,
+        "it rises into place: {rising} → {open}"
+    );
+
+    shell.update(cx, |shell, cx| shell.toggle_bell(cx));
+    assert!(!shell.read_with(cx, |s, _| s.bell_open()));
+    run_for(Duration::from_millis(32), cx);
+    assert!(
+        cx.update(|window, _| window.try_find("bell-list").is_some()),
+        "it stays drawn while it fades"
+    );
+    run_for(Duration::from_millis(600), cx);
+    assert!(
+        cx.update(|window, _| window.try_find("bell-list").is_none()),
+        "and is gone once it has"
+    );
+}
+
+// ── Runs and approvals in the rail (#137) ──────────────────────────────────────────────────────
+
+/// A frame of the clock and a few of drawing: what a window that is looked at does while a block
+/// folds away.
+fn moving(cx: &mut VisualTestContext) {
+    cx.executor().advance_clock(Duration::from_millis(16));
+    for _ in 0..4 {
+        cx.update(|window, cx| window.render_frame(cx));
+        cx.run_until_parked();
+    }
+}
+
+fn rect_of(id: &str, cx: &mut VisualTestContext) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+    cx.update(|window, _| window.find(id.to_owned()).bounds())
+}
+
+#[gpui_kit::test]
+fn a_request_waits_in_the_rail_with_allow_and_deny_and_the_conversation_keeps_one_compact_line(
+    cx: &mut TestAppContext,
+) {
+    let user = team_user();
+    let (lead, mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+
+    let number = held_number(mcp.call("fs_read", json!({"path": ".env"})));
+    let card = card_for(&shell, number, cx);
+    assert_eq!(card.asked.as_deref(), Some("Read .env"));
+    settle(cx);
+
+    let rail = rect_of("session-rail", cx);
+    let waiting = rect_of("rail-waiting", cx);
+    let allow = rect_of(&format!("allow-{number}"), cx);
+    let deny = rect_of(&format!("deny-{number}"), cx);
+    assert!(
+        allow.origin.x >= rail.origin.x && deny.origin.x >= rail.origin.x,
+        "Allow and Deny are in the rail: {allow:?} {rail:?}"
+    );
+    assert!(
+        waiting.origin.y < rail.origin.y + px(40.),
+        "the section is at the top of the rail: {waiting:?}"
+    );
+    cx.update(|window, _| {
+        assert_eq!(
+            window.find("rail-waiting-title").label(),
+            Some("Waiting for you")
+        );
+        let line = window.find(format!("approval-line-{number}"));
+        assert_eq!(line.label(), Some("Waiting for you: Read .env"));
+        assert!(line.bounds().origin.x < rail.origin.x, "it is in the chat");
+        assert!(line.bounds().size.height < px(44.), "one compact line");
+    });
+}
+
+#[gpui_kit::test]
+fn three_requests_do_not_pile_up_in_the_conversation_they_wait_in_the_rail(
+    cx: &mut TestAppContext,
+) {
+    let user = team_user();
+    let (lead, mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+
+    let numbers: Vec<u64> = [".env", ".env.local", ".env.test"]
+        .into_iter()
+        .map(|path| held_number(mcp.call("fs_read", json!({"path": path}))))
+        .collect();
+    for number in &numbers {
+        card_for(&shell, *number, cx);
+    }
+    settle(cx);
+
+    let lines: Vec<_> = numbers
+        .iter()
+        .map(|number| rect_of(&format!("approval-line-{number}"), cx))
+        .collect();
+    let span = lines.last().unwrap().bottom() - lines[0].origin.y;
+    assert!(
+        span < px(3. * 44. + 30.),
+        "three lines, not three cards: {span:?}"
+    );
+    let rail = rect_of("session-rail", cx);
+    for number in &numbers {
+        let allow = rect_of(&format!("allow-{number}"), cx);
+        assert!(
+            allow.origin.x >= rail.origin.x,
+            "request {number} in the rail"
+        );
+    }
+}
+
+#[gpui_kit::test]
+fn the_conversation_s_line_scrolls_the_rail_to_the_request_and_lights_it(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let numbers: Vec<u64> = [".env", ".env.local", ".env.test"]
+        .into_iter()
+        .map(|path| held_number(mcp.call("fs_read", json!({"path": path}))))
+        .collect();
+    for number in &numbers {
+        card_for(&shell, *number, cx);
+    }
+    // A window too short for the rail: it scrolls.
+    cx.simulate_resize(size(px(1280.), px(380.)));
+    settle(cx);
+    let rail = session_page(&shell, cx).read_with(cx, |p, _| p.rail().clone());
+    cx.update(|window, cx| {
+        window.scroll(
+            "rail",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-400.))),
+            cx,
+        )
+    });
+    settle(cx);
+    let away = rail.read_with(cx, |rail, _| rail.scrolled());
+    assert!(
+        away > px(100.),
+        "the rail was scrolled away from its cards: {away:?}"
+    );
+
+    cx.update(|window, cx| window.click(format!("approval-line-{}", numbers[2]), cx));
+    let waiting = session_page(&shell, cx).read_with(cx, |p, cx| p.waiting(cx));
+    assert_eq!(
+        waiting.read_with(cx, |w, _| w.pointed()),
+        Some(numbers[2]),
+        "the card is lit"
+    );
+    // It moves there over frames, not at once.
+    cx.executor().advance_clock(Duration::from_millis(60));
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    let part = rail.read_with(cx, |rail, _| rail.scrolled());
+    assert!(
+        part > px(0.) && part < away,
+        "on its way: {part:?} of {away:?}"
+    );
+    settle(cx);
+    assert_eq!(rail.read_with(cx, |rail, _| rail.scrolled()), px(0.));
+    assert!(rect_of(&format!("allow-{}", numbers[0]), cx).origin.y > px(0.));
+
+    // The light goes out by itself.
+    for _ in 0..40 {
+        cx.executor().advance_clock(Duration::from_millis(50));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    }
+    assert_eq!(waiting.read_with(cx, |w, _| w.pointed()), None);
+}
+
+#[gpui_kit::test]
+fn an_answered_request_leaves_the_rail_and_its_line_in_the_conversation_says_the_outcome(
+    cx: &mut TestAppContext,
+) {
+    let user = team_user();
+    let (lead, mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let number = held_number(mcp.call("fs_read", json!({"path": ".env"})));
+    card_for(&shell, number, cx);
+    settle(cx);
+
+    cx.update(|window, cx| window.click(format!("deny-{number}"), cx));
+    until(&shell, cx, "the card leaves the rail", |cx| {
+        moving(cx);
+        cx.update(|window, _| window.try_find(format!("deny-{number}")).is_none())
+    });
+    settle(cx);
+    let waiting = session_page(&shell, cx).read_with(cx, |p, cx| p.waiting(cx));
+    assert!(waiting.read_with(cx, |w, _| w.cards().is_empty()));
+    assert!(
+        cx.update(|window, _| window.try_find("rail-waiting".to_owned()).is_none()),
+        "no section is left"
+    );
+    assert_eq!(
+        text_of(&format!("approval-record-{number}"), cx).as_deref(),
+        Some("Denied · Read .env · the conversation")
+    );
+    cx.update(|window, _| {
+        assert!(
+            window.try_find(format!("approval-line-{number}")).is_none(),
+            "the waiting line is gone"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn a_base_request_keeps_its_alarm_and_its_sentence_in_the_rail(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, mcp, shell, cx) = lead_in_main(&user, cx);
+    let _ = lead;
+    let number = held_number(mcp.call("run", json!({"line": "git push --force origin main"})));
+    let card = card_for(&shell, number, cx);
+    assert!(card.base);
+    settle(cx);
+    let rail = rect_of("session-rail", cx);
+    assert_eq!(
+        text_of(&format!("approval-base-{number}"), cx).as_deref(),
+        Some(flottille_window::session::BASE_SAYS)
+    );
+    assert!(rect_of(&format!("approval-base-{number}"), cx).origin.x >= rail.origin.x);
+    // In the chat the line is in the alarm colour too: a base request is never quiet.
+    cx.update(|window, _| {
+        assert!(window.try_find(format!("approval-line-{number}")).is_some());
+    });
+}
+
+#[gpui_kit::test]
+fn a_call_with_two_reasons_reads_as_two_sentences_with_no_doubled_word(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let number = held_number(mcp.call(
+        "setup",
+        json!({"action": "add", "step": {"copy": [".env"], "for_each_repository": true}}),
+    ));
+    let card = card_for(&shell, number, cx);
+
+    let asked = user.call("approval.list", json!({})).unwrap();
+    let reasons: Vec<String> = asked["requests"][0]["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        reasons.len() >= 2,
+        "the call carries two reasons: {reasons:?}"
+    );
+    let why = card.why.unwrap();
+    assert_eq!(
+        why,
+        flottille_window::waiting::sentences(reasons.iter().map(String::as_str))
+    );
+    for reason in &reasons {
+        let first = reason.chars().next().unwrap().to_uppercase().to_string();
+        let sentence = format!(
+            "{first}{}",
+            &reason[reason.chars().next().unwrap().len_utf8()..]
+        );
+        assert!(
+            why.contains(&format!("{}. ", sentence.trim_end_matches('.')))
+                || why.ends_with(&format!("{}.", sentence.trim_end_matches('.'))),
+            "{reason:?} is a sentence of its own in {why:?}"
+        );
+    }
+    // The words one reason ends on and the next begins with are never run together.
+    let words: Vec<&str> = why.split_whitespace().collect();
+    assert!(
+        words
+            .windows(2)
+            .all(|pair| !pair[0].eq_ignore_ascii_case(pair[1])),
+        "a doubled word in {why:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn the_status_sits_in_the_composer_s_bar_under_the_field_not_above_it(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    user.call("agent.send", json!({"agent": lead, "message": "HANG"}))
+        .unwrap();
+    until(&shell, cx, "the status shows", |cx| {
+        cx.update(|window, _| window.try_find("reply-status".to_owned()).is_some())
+    });
+    settle(cx);
+    let (status, field, send, reply) = (
+        rect_of("reply-status", cx),
+        rect_of("reply-field", cx),
+        rect_of("reply-send-slot", cx),
+        rect_of("reply", cx),
+    );
+    assert!(
+        status.origin.y >= field.bottom(),
+        "under the field: {status:?} {field:?}"
+    );
+    assert!(status.origin.x < send.origin.x, "left of the send slot");
+    assert!(status.bottom() <= reply.bottom(), "inside the composer");
+    assert_eq!(
+        cx.update(|window, _| window
+            .find("reply-status".to_owned())
+            .label()
+            .map(str::to_owned)),
+        Some("Thinking…".to_owned())
+    );
+    user.call("agent.cancel", json!({"agent": lead})).unwrap();
+}
+
+#[gpui_kit::test]
+fn the_setup_s_up_and_down_are_chevron_icon_buttons_that_do_nothing_at_the_ends(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    for step in [json!({"copy": [".env"]}), json!({"link": "node_modules"})] {
+        user.call("setup.add", json!({"project": "atlas", "step": step}))
+            .unwrap();
+    }
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", cx);
+    until(&shell, cx, "the steps are listed", |cx| {
+        steps_listed(&shell, cx).len() == 2
+    });
+    settle(cx);
+
+    // Icons with a tooltip for their name, not the words Up and Down.
+    for number in [1, 2] {
+        cx.update(|window, _| {
+            assert_eq!(
+                window.find(format!("setup-up-{number}")).label(),
+                Some("Move up")
+            );
+            assert_eq!(
+                window.find(format!("setup-down-{number}")).label(),
+                Some("Move down")
+            );
+            assert!(
+                window
+                    .find(format!("setup-up-{number}"))
+                    .bounds()
+                    .size
+                    .width
+                    <= px(30.)
+            );
+        });
+    }
+    // Disabled at the ends: the first cannot go up, the last cannot go down.
+    let before = steps_listed(&shell, cx);
+    cx.update(|window, cx| window.click("setup-up-1", cx));
+    cx.update(|window, cx| window.click("setup-down-2", cx));
+    settle(cx);
+    run_for(Duration::from_millis(500), cx);
+    assert_eq!(steps_listed(&shell, cx), before, "nothing moved");
 }

@@ -6,9 +6,8 @@
 //! checks the step as the file is checked, and the section shows the list the daemon gives next.
 
 use flottille_core::project::SetupStep;
-use flottille_ui::{Button, Modal, Type, palette};
+use flottille_ui::{Button, Icon, Item, Listing, Modal, Type, enter, palette, presence};
 use gpui_kit::base::input::{Input, InputEvent, InputState};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Context, ElementId, Entity, Focusable as _, InteractiveElement, IntoElement, ParentElement,
     Render, SharedString, StatefulInteractiveElement, Styled, Subscription, TestSupportExt as _,
@@ -17,7 +16,9 @@ use gpui_kit::{
 use serde_json::{Value, json};
 
 use crate::actions::Command;
-use crate::commands::{boxed, heading, line_field, perform_later};
+use crate::commands::{
+    boxed, empty_note, heading, line_field, perform_later, problem_line, save_or_saving,
+};
 use crate::project::repository_label;
 use crate::shell::Shell;
 
@@ -199,6 +200,8 @@ pub struct SetupSection {
     shell: WeakEntity<Shell>,
     project: String,
     listed: Option<Vec<SetupStep>>,
+    /// The rows as drawn: a removed step folds away and a moved one slides before it settles.
+    rows: Listing<(usize, SetupStep)>,
     /// The project's repositories, for where a step is done.
     repositories: Vec<String>,
     /// What the daemon said when the list could not be read, or a change was refused.
@@ -217,6 +220,7 @@ impl SetupSection {
             shell,
             project,
             listed: None,
+            rows: Listing::default(),
             repositories: Vec::new(),
             problem: None,
             form: None,
@@ -469,14 +473,14 @@ impl SetupSection {
                     .test_support(),
             )
             .child(
-                Button::quiet(id("setup-up"), "Up")
+                Button::icon(id("setup-up"), Icon::ChevronUp, "Move up")
                     .disabled(number == 1 || self.saving)
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.move_step(number, number - 1, cx)),
                     ),
             )
             .child(
-                Button::quiet(id("setup-down"), "Down")
+                Button::icon(id("setup-down"), Icon::Chevron, "Move down")
                     .disabled(number == count || self.saving)
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.move_step(number, number + 1, cx)),
@@ -486,7 +490,7 @@ impl SetupSection {
                 cx.listener(move |this, _, window, cx| this.open(Some(number), window, cx)),
             ))
             .child(if confirming {
-                div()
+                let group = div()
                     .flex()
                     .gap(px(4.))
                     .child(Button::quiet(id("cancel-remove-setup"), "Cancel").on_click(
@@ -501,8 +505,8 @@ impl SetupSection {
                             format!("Remove step {number}"),
                         )
                         .on_click(cx.listener(move |this, _, _, cx| this.remove(number, cx))),
-                    )
-                    .into_any_element()
+                    );
+                enter(id("confirm-setup"), 0, group).into_any_element()
             } else {
                 Button::quiet(id("remove-setup"), "Remove")
                     .on_click(cx.listener(move |this, _, _, cx| this.remove(number, cx)))
@@ -528,11 +532,7 @@ impl SetupSection {
             return modal;
         };
         let choice = |id: String, label: String, chosen: bool| {
-            if chosen {
-                Button::primary(ElementId::Name(id.into()), label)
-            } else {
-                Button::quiet(ElementId::Name(id.into()), label)
-            }
+            Button::choice(ElementId::Name(id.into()), label, chosen)
         };
         let kinds = Kind::ALL.into_iter().map(|kind| {
             choice(
@@ -577,56 +577,93 @@ impl SetupSection {
             .gap(px(10.))
             .child(label("What it does"))
             .child(div().flex().flex_wrap().gap(px(4.)).children(kinds))
-            .when(form.kind != Kind::RootEntries, |d| {
-                d.child(boxed("setup-value", Input::new(&fields.value), cx))
-                    .child(label("Where"))
-                    .child(div().flex().flex_wrap().gap(px(4.)).children(places))
-            })
-            .when(form.kind == Kind::RootEntries, |d| {
-                d.child(div().text_size(px(12.5)).text_color(p.mute).child(
-                    "Links into the workspace folder every top-level entry of the project \
-                             folder that is not a repository, .git or .gitignore.",
-                ))
-            })
-            .when(form.kind.runs(), |d| {
-                d.child(label("Time limit, in seconds")).child(boxed(
-                    "setup-limit",
-                    Input::new(&fields.limit),
-                    cx,
-                ))
-            })
+            // What the kind needs unfolds as it is chosen and the rest folds away.
+            .child(
+                presence(
+                    "setup-value-block",
+                    form.kind != Kind::RootEntries,
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.))
+                        .child(boxed("setup-value", Input::new(&fields.value), cx))
+                        .child(label("Where"))
+                        .child(div().flex().flex_wrap().gap(px(4.)).children(places)),
+                )
+                .gap(px(10.)),
+            )
+            .child(
+                presence(
+                    "setup-root-note",
+                    form.kind == Kind::RootEntries,
+                    div().text_size(px(12.5)).text_color(p.mute).child(
+                        "Links into the workspace folder every top-level entry of the project \
+                         folder that is not a repository, .git or .gitignore.",
+                    ),
+                )
+                .gap(px(10.)),
+            )
+            .child(
+                presence(
+                    "setup-limit-block",
+                    form.kind.runs(),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.))
+                        .child(label("Time limit, in seconds"))
+                        .child(boxed("setup-limit", Input::new(&fields.limit), cx)),
+                )
+                .gap(px(10.)),
+            )
+            .child(problem_line(
+                "setup-error",
+                self.form_error.clone(),
+                10.,
+                cx,
+            ))
             .test_support();
-        let error = self.form_error.clone().map(|error| {
-            div()
-                .id("setup-error")
-                .text_size(px(12.5))
-                .text_color(p.fail)
-                .child(error)
-                .test_support()
-        });
-        modal.child(body).children(error).action(if self.saving {
-            div()
-                .mono(11.5)
-                .text_color(p.faint)
-                .child("Saving…")
-                .into_any_element()
-        } else {
-            Button::primary("save-setup", "Save")
-                .on_click(cx.listener(|this, _, _, cx| this.save(cx)))
-                .into_any_element()
-        })
+        modal.child(body).action(save_or_saving(
+            "setup",
+            self.saving,
+            || {
+                Button::primary("save-setup", "Save")
+                    .on_click(cx.listener(|this, _, _, cx| this.save(cx)))
+            },
+            cx,
+        ))
     }
 }
 
 impl Render for SetupSection {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let steps = self.listed.clone().unwrap_or_default();
-        let count = steps.len();
-        let rows: Vec<_> = steps
-            .iter()
-            .enumerate()
-            .map(|(index, step)| self.row(index + 1, step, count, cx).into_any_element())
+        if let Some(listed) = self.listed.clone() {
+            let now = cx.background_executor().now();
+            let reduce = cx.reduce_motion();
+            // A step has no name: its words tell it from the others, and a repeat is numbered.
+            let mut seen: std::collections::HashMap<String, usize> = Default::default();
+            let keyed = listed.into_iter().enumerate().map(|(index, step)| {
+                let words = said(&step);
+                let again = seen.entry(words.clone()).or_default();
+                *again += 1;
+                (format!("{words}#{again}"), (index + 1, step))
+            });
+            self.rows.sync(keyed, now, reduce);
+        }
+        let count = self.rows.len();
+        let rows: Vec<_> = self
+            .rows
+            .rows()
+            .map(|row| {
+                let (number, step) = row.value;
+                Item::new(
+                    ElementId::Name(format!("setup-item-{}", row.key).into()),
+                    row.placement,
+                    self.row(*number, step, count, cx),
+                )
+                .gap(px(8.))
+            })
             .collect();
         let empty = self.listed.as_ref().is_some_and(Vec::is_empty);
         let modal = self.modal(cx);
@@ -636,7 +673,7 @@ impl Render for SetupSection {
                 "Setup",
                 count,
                 Button::secondary("add-setup", "New step")
-                    .leading(flottille_ui::Icon::Plus)
+                    .leading(Icon::Plus)
                     .on_click(cx.listener(|this, _, window, cx| this.open(None, window, cx))),
                 cx,
             ))
@@ -656,29 +693,14 @@ impl Render for SetupSection {
                     .flex_col()
                     .gap(px(8.))
                     .children(rows)
-                    .when(empty, |d| {
-                        d.child(
-                            div()
-                                .id("no-setup")
-                                .text_size(px(12.5))
-                                .text_color(p.faint)
-                                .child(
-                                    "No step yet: a new workspace is its worktrees alone. Copy \
-                                     the .env files, link what is shared, run the install.",
-                                )
-                                .test_support(),
-                        )
-                    })
-                    .when_some(self.problem.clone(), |d, problem| {
-                        d.child(
-                            div()
-                                .id("setup-problem")
-                                .text_size(px(12.5))
-                                .text_color(p.fail)
-                                .child(problem)
-                                .test_support(),
-                        )
-                    }),
+                    .child(empty_note(
+                        "no-setup",
+                        empty,
+                        "No step yet: a new workspace is its worktrees alone. Copy the .env \
+                         files, link what is shared, run the install.",
+                        cx,
+                    ))
+                    .child(problem_line("setup-problem", self.problem.clone(), 8., cx)),
             )
             .child(modal)
     }

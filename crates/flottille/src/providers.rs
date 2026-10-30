@@ -104,7 +104,7 @@ const FILE_AND_COMMAND_TOOLS: [&str; 8] = [
     "run_status",
 ];
 const AGENT_TOOLS: [&str; 4] = ["agent_launch", "agent_send", "agent_status", "agent_stop"];
-const ACTION_TOOLS: [&str; 5] = ["skills", "commands", "setup", "project", "workspace"];
+const ACTION_TOOLS: [&str; 4] = ["skills", "commands", "setup", "project"];
 
 impl Provider {
     /// The exact tool names an agent gets, as the provider names them: what it can do decides
@@ -112,9 +112,9 @@ impl Provider {
     /// its parent; an agent at the depth limit cannot have children, so it has no `agent_*` tool
     /// and nobody's request to answer. The same tools in `main` as in a workspace: `main` names
     /// the workspace they act on. A tool that can only refuse is not listed (`docs/reference/mcp.md`
-    /// §4 rule 9): `forge_read` and `forge_write` need a repository with a declared forge,
-    /// `ticket_read` a declared tracker; `workspace_remove` acts in any project. What each may do
-    /// is the gate's business, not the list's.
+    /// §4 rule 9): `forge` needs a repository with a declared forge, `tickets` a declared
+    /// tracker; `workspace` acts in any project (a child reads the workspaces and removes its
+    /// own). What each may do is the gate's business, not the list's.
     pub fn tools(
         &self,
         root: bool,
@@ -124,16 +124,13 @@ impl Provider {
     ) -> Vec<String> {
         let mut names: Vec<&str> = FILE_AND_COMMAND_TOOLS.to_vec();
         if forge {
-            names.push("forge_read");
+            names.push("forge");
         }
         names.push("skill_read");
         if tracker {
-            names.push("ticket_read");
+            names.push("tickets");
         }
-        if forge {
-            names.push("forge_write");
-        }
-        names.push("workspace_remove");
+        names.push("workspace");
         if !at_depth_limit {
             names.extend(AGENT_TOOLS);
         }
@@ -1289,7 +1286,7 @@ mod tests {
                 "run",
                 "run_status",
                 "skill_read",
-                "workspace_remove",
+                "workspace",
                 "agent_launch",
                 "agent_send",
                 "agent_status",
@@ -1298,7 +1295,6 @@ mod tests {
                 "commands",
                 "setup",
                 "project",
-                "workspace",
                 "report",
                 "ask_user",
                 "approval_answer",
@@ -1321,11 +1317,13 @@ mod tests {
         assert!(lead_child.contains(&"ask_parent".to_owned()));
         assert!(lead_child.contains(&"approval_answer".to_owned()));
         assert!(!lead_child.contains(&"ask_user".to_owned()));
-        // A child does its brief: the project's skills, commands, setup, settings and
-        // workspaces are the root's. It reads the tasks it runs, and changes none of them.
+        // A child does its brief: the project's skills, commands, setup and settings are the
+        // root's. It reads the tasks it runs and changes none of them, and reads the workspaces
+        // and removes its own (the gate and the family refuse the rest).
         for child in [&leaf, &lead_child] {
             assert!(child.contains(&"tasks".to_owned()));
-            for family in ["skills", "commands", "setup", "project", "workspace"] {
+            assert!(child.contains(&"workspace".to_owned()));
+            for family in ["skills", "commands", "setup", "project"] {
                 assert!(!child.contains(&family.to_owned()), "{family}");
             }
         }
@@ -1336,42 +1334,43 @@ mod tests {
         // The same tools in `main` and in a workspace: the place does not decide, the project's
         // declarations do, and what is allowed stays the gate's business.
         let bare = short(claude::PROVIDER.tools(true, false, false, false));
-        for tool in ["forge_read", "ticket_read", "forge_write"] {
+        for tool in ["forge", "tickets"] {
             assert!(!bare.contains(&tool.to_owned()), "{tool}");
         }
         let forge = short(claude::PROVIDER.tools(true, false, true, false));
-        assert_eq!(forge[8], "forge_read", "after the command tools");
-        assert_eq!(forge[9], "skill_read", "after forge_read");
-        assert_eq!(forge[10], "forge_write", "after skill_read");
-        assert!(!forge.contains(&"ticket_read".to_owned()));
+        assert_eq!(forge[8], "forge", "after the command tools");
+        assert_eq!(forge[9], "skill_read", "after forge");
+        assert_eq!(forge[10], "workspace", "after skill_read");
+        assert!(!forge.contains(&"tickets".to_owned()));
         let both = short(claude::PROVIDER.tools(true, false, true, true));
-        assert_eq!(both.len(), 25);
-        assert_eq!(both[10], "ticket_read", "after skill_read");
-        assert_eq!(both[11], "forge_write", "after ticket_read");
-        assert_eq!(both[12], "workspace_remove", "after forge_write");
+        assert_eq!(both.len(), 23);
+        assert_eq!(both[10], "tickets", "after skill_read");
+        assert_eq!(both[11], "workspace", "after tickets");
         assert_eq!(
             short(claude::PROVIDER.tools(false, true, true, true)).len(),
-            15
+            14
         );
     }
 
     #[test]
-    fn ticket_read_is_listed_only_when_a_tracker_is_declared() {
+    fn tickets_is_listed_only_when_a_tracker_is_declared() {
         // Without a tracker it could only refuse (`docs/reference/mcp.md` §4 rule 9).
         let tracker = short(claude::PROVIDER.tools(true, false, false, true));
-        assert_eq!(tracker[9], "ticket_read", "after skill_read");
-        assert!(!tracker.contains(&"forge_read".to_owned()));
-        assert!(!tracker.contains(&"forge_write".to_owned()));
+        assert_eq!(tracker[9], "tickets", "after skill_read");
+        assert!(!tracker.contains(&"forge".to_owned()));
         let forge = short(claude::PROVIDER.tools(true, false, true, false));
-        assert!(!forge.contains(&"ticket_read".to_owned()));
+        assert!(!forge.contains(&"tickets".to_owned()));
     }
 
     #[test]
-    fn workspace_remove_is_listed_in_any_project() {
-        // It acts in `main` too, naming the workspace: the close command closes one in any project.
+    fn workspace_is_listed_in_any_project_to_every_agent() {
+        // Its remove acts in `main` too, naming the workspace: the close command closes one in
+        // any project; a child removes its own.
         for (forge, tracker) in [(false, false), (true, false), (false, true), (true, true)] {
-            let listed = short(claude::PROVIDER.tools(true, false, forge, tracker));
-            assert!(listed.contains(&"workspace_remove".to_owned()));
+            for root in [true, false] {
+                let listed = short(claude::PROVIDER.tools(root, false, forge, tracker));
+                assert!(listed.contains(&"workspace".to_owned()));
+            }
         }
     }
 

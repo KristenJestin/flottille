@@ -352,7 +352,7 @@ fn link_ticket_links_a_ticket() {
 }
 
 #[test]
-fn a_child_is_refused_the_workspace_family() {
+fn a_child_reads_the_workspaces_and_is_refused_the_root_s_writes() {
     let user = user();
     project(&user);
     let (_, lead) = root(&user);
@@ -365,9 +365,15 @@ fn a_child_is_refused_the_workspace_family() {
     let (url, authorization) = server_of(&user, opened);
     let child = Mcp::initialize(&url, &authorization);
 
-    assert!(!child.names().contains(&"workspace".to_owned()));
-    for action in ["list", "create"] {
-        let text = refused(child.call("workspace", json!({"action": action, "name": "x"})));
+    // Since #141 every agent has the family: a child reads it and removes its own workspace.
+    assert!(child.names().contains(&"workspace".to_owned()));
+    let listed = child.call("workspace", json!({"action": "list"}));
+    assert!(!listed.error, "{}", listed.text);
+    for action in ["create", "prepare", "link_ticket"] {
+        let text = refused(child.call(
+            "workspace",
+            json!({"action": action, "name": "x", "ticket": "#1"}),
+        ));
         assert!(text.contains("ask_parent"), "{text}");
     }
     assert!(no_request(&user));
@@ -396,5 +402,30 @@ fn agent_launch_with_new_workspace_is_judged_the_same() {
         "{launched}"
     );
     assert!(workspace(&user, "a").is_err(), "made before the answer");
+    assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
+}
+
+#[test]
+fn an_agent_s_create_in_a_repository_with_no_remote_starts_from_the_local_branch() {
+    let user = judged_user();
+    let folder = project(&user);
+    user.git(&folder, &["remote", "remove", "origin"]);
+    let (_, mcp) = root(&user);
+
+    let text = done(mcp.call("workspace", json!({"action": "create", "name": "login"})));
+
+    assert!(text.contains("Workspace login created"), "{text}");
+    assert!(
+        text.contains(" In the project folder, no remote origin: started from the local main."),
+        "{text}"
+    );
+    let made = workspace(&user, "login").unwrap();
+    assert_eq!(
+        made["repositories"][0]["base"]["note"],
+        "no remote origin: started from the local main"
+    );
+    eventually("the setup's end", || {
+        workspace(&user, "login").unwrap()["state"] == "ready"
+    });
     assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
 }

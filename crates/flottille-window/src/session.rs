@@ -19,10 +19,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use flottille_ui::motion::{Motion, PANEL};
+use flottille_ui::color::mix;
+use flottille_ui::motion::{HOVER, Motion, PANEL};
 use flottille_ui::{
     AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Menu, Modal, Palette, Pill,
-    PulsingLabel, Side, StateIcon, Status, Type, enter, fold_frame, icon, palette, section_label,
+    PulsingLabel, Side, StateIcon, Status, Type, enter, fade, fold_frame, hoverable, icon, palette,
+    presence, presence_of, section_label, selectable, turning,
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{
@@ -33,12 +35,13 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Bounds, Context, Div, ElementId, Entity, EventEmitter,
     Focusable as _, FollowMode, ImageCacheError, ImageSource, InteractiveElement, IntoElement,
-    ListAlignment, ListState, ParentElement, PathBuilder, Pixels, Render, SharedString, SharedUri,
-    Stateful, StatefulInteractiveElement, Styled, StyledImage as _, Subscription, Task,
-    TestSupportExt as _, Transformation, WeakEntity, Window, canvas, div, list, point, px, radians,
+    ListAlignment, ListState, ParentElement, PathBuilder, Pixels, Render, ScrollHandle,
+    SharedString, SharedUri, Stateful, StatefulInteractiveElement, Styled, StyledImage as _,
+    Subscription, Task, TestSupportExt as _, Transformation, WeakEntity, Window, canvas, div, list,
+    point, px, radians,
 };
 
-use crate::actions::{Answer, Command, Picture};
+use crate::actions::{Answer, Command, Picture, RepositoryStatus};
 use crate::commands::CommandInfo;
 use crate::conversation::{Activity, Block, Call, CallState, Change, Conversation, DiffLine, USER};
 use crate::link::{Connect, Update};
@@ -52,12 +55,25 @@ use crate::session_link::{
 };
 use crate::shell::{Layout, Shell, now_ms};
 use crate::tree::place_name;
+use crate::waiting::{Waiting, sentences};
 
 /// Width of the session page's right rail.
 pub const RAIL: f32 = 290.;
 
 /// How the screen names the root agent, which has no name of its own there.
 pub const THE_CONVERSATION: &str = "the conversation";
+
+/// What the confirmation of ending a session says: how many agents end.
+pub fn end_sentence(count: usize) -> String {
+    match count {
+        0 | 1 => format!("This ends {THE_CONVERSATION}. Its workspace stays."),
+        n => format!(
+            "This ends {n} agents: {THE_CONVERSATION} and its {} sub-agent{}. Workspaces stay.",
+            n - 1,
+            if n == 2 { "" } else { "s" }
+        ),
+    }
+}
 
 /// The reply field's placeholder and its send button's tooltip: the field writes to the root.
 pub const REPLY_PLACEHOLDER: &str = "Reply…";
@@ -170,6 +186,9 @@ pub struct SessionPage {
     pictures: HashMap<String, Arc<gpui_kit::Image>>,
     asked_pictures: HashSet<String>,
     needs_you: bool,
+    /// When the user's last message began a turn of the root: an ended run from before it folds
+    /// away in the rail.
+    turn_at: Option<u64>,
     /// The confirmation of ending the session is open.
     ending: bool,
     /// What the daemon said when it refused to end the session.
@@ -239,6 +258,7 @@ impl SessionPage {
             pictures: HashMap::new(),
             asked_pictures: HashSet::new(),
             needs_you,
+            turn_at: None,
             ending: false,
             end_error: None,
             resuming: false,
@@ -299,9 +319,14 @@ impl SessionPage {
         &self.rail
     }
 
-    /// The rail's Commands section.
+    /// The rail's Runs section.
     pub fn commands(&self, cx: &gpui_kit::App) -> Entity<CommandList> {
         self.rail.read(cx).commands.clone()
+    }
+
+    /// The rail's "Waiting for you" section.
+    pub fn waiting(&self, cx: &gpui_kit::App) -> Entity<Waiting> {
+        self.rail.read(cx).waiting.clone()
     }
 
     /// The panel that follows a command's output.
@@ -352,15 +377,7 @@ impl SessionPage {
         if !self.ending {
             return None;
         }
-        Some(match self.end_count() {
-            0 | 1 => format!("This ends {THE_CONVERSATION}. Its workspace stays."),
-            n => format!(
-                "This ends {n} agents: {THE_CONVERSATION} and its {} sub-agent{}. Workspaces \
-                 stay.",
-                n - 1,
-                if n == 2 { "" } else { "s" }
-            ),
-        })
+        Some(end_sentence(self.end_count()))
     }
 
     /// Opens the confirmation of ending the session, from the root's menu.
@@ -652,6 +669,7 @@ impl SessionPage {
                 for event in &events {
                     self.note_usage(event, cx);
                     self.note_decision(event);
+                    self.note_turn(event, cx);
                 }
                 let root = self.shown == self.opened.id;
                 // The requests another agent of the tree asked are not in this one's events:
@@ -686,6 +704,7 @@ impl SessionPage {
             SessionUpdate::Live(event) => {
                 self.note_usage(&event, cx);
                 self.note_decision(&event);
+                self.note_turn(&event, cx);
                 let (conversation, this) = (self.conversation.clone(), &*self);
                 conversation.update(cx, |view, cx| {
                     let changes = view.model.apply(&event);
@@ -701,9 +720,8 @@ impl SessionPage {
             }
             SessionUpdate::Requests(requests) => {
                 self.requests = requests.into_iter().map(|r| (r.number, r)).collect();
-                if self.read {
-                    self.refresh_conversation(cx);
-                }
+                // The rail's cards do not wait for the conversation to be read.
+                self.refresh_conversation(cx);
             }
             SessionUpdate::Decided { number, decision } => {
                 self.decisions.insert(number, decision);
@@ -725,6 +743,17 @@ impl SessionPage {
         }
     }
 
+    /// The user answers a request from its card in the rail: Allow or Deny. The daemon's answer
+    /// comes back to [`SessionPage::answered`].
+    pub fn answer(&mut self, number: u64, answer: Answer, cx: &mut Context<Self>) {
+        let command = Command::Answer {
+            session: self.opened.id.clone(),
+            number,
+            answer,
+        };
+        self.perform(command, cx);
+    }
+
     /// What the daemon answered to an answer given on a card.
     pub fn answered(
         &mut self,
@@ -736,11 +765,17 @@ impl SessionPage {
         if let Some(decision) = decision {
             self.decisions.insert(number, decision);
         }
-        let row = self.conversation.read(cx).approval_row(number, cx);
-        if let Some(row) = row {
-            row.update(cx, |row, cx| row.answered(refused, cx));
-        }
+        let waiting = self.waiting(cx);
+        waiting.update(cx, |waiting, cx| waiting.answered(number, refused, cx));
         self.refresh_conversation(cx);
+    }
+
+    /// The conversation's line about a request was clicked: the rail shows its card, at its top.
+    pub fn reveal_waiting(&mut self, number: u64, cx: &mut Context<Self>) {
+        if self.layout != Layout::Wide {
+            self.drawer.update(cx, |drawer, cx| drawer.open(cx));
+        }
+        self.rail.update(cx, |rail, cx| rail.reveal(number, cx));
     }
 
     /// A decision on a request, read from the shown agent's events.
@@ -753,6 +788,21 @@ impl SessionPage {
         if let (Some(decision), Some(number)) = (decision, event.data["number"].as_u64()) {
             self.decisions.insert(number, decision.to_owned());
         }
+    }
+
+    /// The user's message began a turn of the root: the Runs section folds what ended before it.
+    /// A turn a delivery began (a command that ended, a child's report) is not the session's turn:
+    /// the run that woke the agent keeps its row.
+    fn note_turn(&mut self, event: &flottille_core::protocol::Event, cx: &mut Context<Self>) {
+        if !crate::conversation::is_user_turn(event) || self.shown != self.opened.id {
+            return;
+        }
+        if self.turn_at.is_some_and(|at| at >= event.at) {
+            return;
+        }
+        self.turn_at = Some(event.at);
+        let list = self.commands(cx);
+        list.update(cx, |list, cx| list.set_turn(Some(event.at), cx));
     }
 
     fn has_children(&self) -> bool {
@@ -939,6 +989,7 @@ impl SessionPage {
     /// Brings the rows that show the tree or the requests up to what the page knows: the
     /// sub-agents list, the requests' cards and their records. Only those rows are looked at.
     fn refresh_conversation(&self, cx: &mut Context<Self>) {
+        self.sync_waiting(cx);
         if !self.read {
             return;
         }
@@ -991,6 +1042,20 @@ impl SessionPage {
         });
     }
 
+    /// Brings the rail's "Waiting for you" up to the requests that wait for the user, in the order
+    /// they were asked.
+    fn sync_waiting(&self, cx: &mut Context<Self>) {
+        let mut numbers: Vec<u64> = self.requests.keys().copied().collect();
+        numbers.sort();
+        let cards: Vec<ApprovalCard> = numbers
+            .into_iter()
+            .filter_map(|number| self.card(number))
+            .filter(|card| card.decision.is_none())
+            .collect();
+        let waiting = self.waiting(cx);
+        waiting.update(cx, |waiting, cx| waiting.set(cards, cx));
+    }
+
     /// The children of the shown agent, as its sub-agents list shows them.
     fn sub_agents(&self) -> Vec<SubAgent> {
         self.tree
@@ -1028,11 +1093,17 @@ impl SessionPage {
             says: request.map(|r| r.says.clone()).unwrap_or_default(),
             asked: request.map(Request::asked),
             why: request.map(|r| {
-                let mut why = r.reasons.join(" ");
-                for (by, said) in &r.forwards {
-                    why.push_str(&format!(" {} forwards it: {said}", self.said_name(by)));
-                }
-                why.trim().to_owned()
+                let forwards: Vec<String> = r
+                    .forwards
+                    .iter()
+                    .map(|(by, said)| format!("{} forwards it: {said}", self.said_name(by)))
+                    .collect();
+                sentences(
+                    r.reasons
+                        .iter()
+                        .map(String::as_str)
+                        .chain(forwards.iter().map(String::as_str)),
+                )
             }),
             source: request.map(|r| {
                 let mut source = format!("asked by {}", self.said_name(&r.agent));
@@ -1152,7 +1223,8 @@ impl Render for SessionPage {
                         .bg(p.side)
                         .border_l_1()
                         .border_color(p.line)
-                        .child(self.rail.clone()),
+                        .child(self.rail.clone())
+                        .test_support(),
                 )
             }))
             .when(!wide, |d| d.child(self.drawer.clone()))
@@ -1438,14 +1510,6 @@ impl ConversationView {
         self.touched += 1;
     }
 
-    fn approval_row(&self, number: u64, cx: &gpui_kit::App) -> Option<Entity<Row>> {
-        self.specials
-            .iter()
-            .map(|at| &self.rows[*at])
-            .find(|row| *row.read(cx).block == Block::Approval { number })
-            .cloned()
-    }
-
     /// Adds a row for each block added, and draws again each row whose block changed.
     fn changed(&mut self, changes: &[Change], page: &SessionPage, cx: &mut Context<Self>) {
         let mut added = false;
@@ -1650,8 +1714,6 @@ pub struct Row {
     card: Option<ApprovalCard>,
     icons: HashMap<String, Entity<StateIcon>>,
     pills: HashMap<String, Entity<Pill>>,
-    busy: bool,
-    error: Option<String>,
     renders: usize,
 }
 
@@ -1690,8 +1752,6 @@ impl Row {
                 card,
                 icons: HashMap::new(),
                 pills: HashMap::new(),
-                busy: false,
-                error: None,
                 renders: 0,
             };
             row.set_block(block, cx);
@@ -1726,8 +1786,27 @@ impl Row {
             .iter()
             .map(|piece| piece.read(cx).state.read(cx));
         let rendered = pieces.map(|state| state.rendered_text().as_str().to_owned());
-        matches!(*self.block, Block::Text { .. } | Block::Thought { .. })
-            .then(|| rendered.collect())
+        matches!(
+            *self.block,
+            Block::Text { .. } | Block::Thought { .. } | Block::Message { .. }
+        )
+        .then(|| rendered.collect())
+    }
+
+    /// Selects all the text the row shows, as `Ctrl+A` over it does.
+    pub fn select_all(&self, cx: &mut Context<Self>) {
+        for piece in &self.markdown {
+            let state = piece.read(cx).state.clone();
+            state.update(cx, |state, cx| state.select_all(cx));
+        }
+    }
+
+    /// What the user selected in the text the row shows.
+    pub fn selected_text(&self, cx: &gpui_kit::App) -> String {
+        self.markdown
+            .iter()
+            .map(|piece| piece.read(cx).state.read(cx).selected_text())
+            .collect()
     }
 
     /// The pieces of a reply past its first, which the list draws as items of their own.
@@ -1778,10 +1857,6 @@ impl Row {
         self.card.as_ref()
     }
 
-    pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
-    }
-
     /// The state each call's mark shows.
     pub fn marks(&self, cx: &gpui_kit::App) -> Vec<AgentState> {
         self.calls.iter().map(|(s, _)| s.read(cx).state()).collect()
@@ -1791,6 +1866,10 @@ impl Row {
         if let Block::Text { text } | Block::Thought { text, .. } = &block {
             let muted = matches!(block, Block::Thought { .. });
             self.set_markdown(text, muted, cx);
+        }
+        // The user's own message is selectable like a reply: the same view, fed what was typed.
+        if let Block::Message { text, .. } = &block {
+            self.set_markdown(&as_typed(text), false, cx);
         }
         match &block {
             Block::Thought { since, until, .. } => {
@@ -1858,40 +1937,26 @@ impl Row {
             cx.notify();
         }
     }
+}
 
-    fn answer(&mut self, answer: Answer, cx: &mut Context<Self>) {
-        let Some(card) = &self.card else {
-            return;
-        };
-        if self.busy || card.decision.is_some() {
-            return;
+/// What the user typed, as the Markdown that draws it as typed: each mark is escaped, each line
+/// keeps its break and its indentation.
+fn as_typed(text: &str) -> String {
+    let line = |line: &str| {
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        let mut out = "\u{a0}".repeat(indent);
+        for c in line[indent..].chars() {
+            if "\\`*_{}[]()#+-.!|<>~&$".contains(c) {
+                out.push('\\');
+            }
+            out.push(c);
         }
-        self.busy = true;
-        self.error = None;
-        let number = card.number;
-        if let Some(page) = self.page.upgrade() {
-            let (shell, session) = {
-                let page = page.read(cx);
-                (page.shell.clone(), page.opened.id.clone())
-            };
-            shell
-                .update(cx, |shell, _| {
-                    shell.perform(Command::Answer {
-                        session,
-                        number,
-                        answer,
-                    })
-                })
-                .ok();
-        }
-        cx.notify();
-    }
-
-    fn answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
-        self.busy = false;
-        self.error = refused;
-        cx.notify();
-    }
+        out
+    };
+    text.split("\n\n")
+        .map(|paragraph| paragraph.lines().map(line).collect::<Vec<_>>().join("\\\n"))
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// A reply or a thought, its Markdown pieces one under the other.
@@ -1993,14 +2058,14 @@ fn call_state(call: &Call) -> AgentState {
 }
 
 impl Render for Row {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
         let p = palette(cx);
         let id = |part: &str| ElementId::Name(format!("row-{}-{part}", self.at).into());
         // The row's own block, not a copy of it.
         let block = self.block.clone();
         match &*block {
-            Block::Message { text, .. } => div()
+            Block::Message { .. } => div()
                 .id(id("message"))
                 .flex()
                 .flex_col()
@@ -2028,7 +2093,7 @@ impl Render for Row {
                                     .test_support(),
                             )
                         })
-                        .child(SharedString::from(text.clone())),
+                        .child(markdown_view(&self.markdown)),
                 )
                 .test_support()
                 .into_any_element(),
@@ -2078,17 +2143,26 @@ impl Render for Row {
                     .text_color(p.faint)
                     .child(label)
                     .child(timer);
+                let turn = turning(id("thought-toggle"), self.open, window, cx);
                 let head = match said {
-                    true => head
-                        .id(id("thought-toggle"))
-                        .cursor_pointer()
-                        .child(icon(Icon::Chevron).size(px(12.)).text_color(p.faint))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.open = !this.open;
-                            cx.notify();
-                        }))
-                        .test_support()
-                        .into_any_element(),
+                    true => hoverable(
+                        head.id(id("thought-toggle"))
+                            .cursor_pointer()
+                            .child(
+                                icon(Icon::Chevron)
+                                    .size(px(12.))
+                                    .text_color(p.faint)
+                                    .with_transformation(Transformation::rotate(radians(
+                                        -FRAC_PI_2 * turn,
+                                    ))),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.open = !this.open;
+                                cx.notify();
+                            })),
+                        move |d, t| d.text_color(mix(p.faint, p.mute, t)),
+                    )
+                    .into_any_element(),
                     false => head.into_any_element(),
                 };
                 div()
@@ -2096,21 +2170,21 @@ impl Render for Row {
                     .flex()
                     .flex_col()
                     .child(head)
-                    .when(said && self.open, |d| {
-                        d.child(
-                            div()
-                                .id(id("thought-text"))
-                                .mt(px(8.))
-                                .ml(px(6.))
-                                .pl(px(14.))
-                                .border_l_1()
-                                .border_color(p.line)
-                                .text_size(px(13.))
-                                .text_color(p.mute)
-                                .child(markdown_view(&self.markdown))
-                                .test_support(),
-                        )
-                    })
+                    .child(presence(
+                        id("thought-body"),
+                        said && self.open,
+                        div()
+                            .id(id("thought-text"))
+                            .mt(px(8.))
+                            .ml(px(6.))
+                            .pl(px(14.))
+                            .border_l_1()
+                            .border_color(p.line)
+                            .text_size(px(13.))
+                            .text_color(p.mute)
+                            .child(markdown_view(&self.markdown))
+                            .test_support(),
+                    ))
                     .test_support()
                     .into_any_element()
             }
@@ -2215,10 +2289,12 @@ impl Render for Row {
                                 ))
                                 .test_support()
                         });
-                let toggle = cx.listener(|this, _, _, cx| {
-                    this.open = !this.open;
-                    cx.notify();
-                });
+                let toggle = || {
+                    cx.listener(|this, _, _, cx| {
+                        this.open = !this.open;
+                        cx.notify();
+                    })
+                };
                 let chevron = |turn: f32| {
                     icon(Icon::Chevron)
                         .size(px(12.))
@@ -2226,56 +2302,48 @@ impl Render for Row {
                         .with_transformation(Transformation::rotate(radians(-FRAC_PI_2 * turn)))
                 };
                 // Folded to one discreet line until a click opens it: a long run of calls
-                // would push the conversation down.
-                if !self.open {
-                    let last = calls.last().expect("a block of steps holds a call");
-                    let count = calls.len();
-                    let line = SharedString::from(format!(
-                        "{count} {} · {}",
-                        if count == 1 { "step" } else { "steps" },
-                        last.name
-                    ));
-                    return div()
-                        .id(id("steps"))
-                        .child(
-                            div()
-                                .id(id("steps-toggle"))
-                                .flex()
-                                .items_center()
-                                .gap(px(7.))
-                                .py(px(2.))
-                                .cursor_pointer()
-                                .mono(12.)
-                                .text_color(p.faint)
-                                .hover(|d| d.text_color(p.mute))
-                                .child(chevron(1.))
-                                .aria_label(line.clone())
-                                .child(line)
-                                .on_click(toggle)
-                                .test_support(),
-                        )
-                        .test_support()
-                        .into_any_element();
-                }
+                // would push the conversation down. The line and the card fold into each other.
+                let last = calls.last().expect("a block of steps holds a call");
+                let count = calls.len();
+                let line = SharedString::from(format!(
+                    "{count} {} · {}",
+                    if count == 1 { "step" } else { "steps" },
+                    last.name
+                ));
+                let folded = hoverable(
+                    div()
+                        .id(id("steps-toggle"))
+                        .flex()
+                        .items_center()
+                        .gap(px(7.))
+                        .py(px(2.))
+                        .cursor_pointer()
+                        .mono(12.)
+                        .child(chevron(1.))
+                        .aria_label(line.clone())
+                        .child(line)
+                        .on_click(toggle()),
+                    move |d, t| d.text_color(mix(p.faint, p.mute, t)),
+                );
+                let card = Card::new()
+                    .title(hoverable(
+                        div()
+                            .id(id("steps-toggle"))
+                            .flex()
+                            .items_center()
+                            .gap(px(7.))
+                            .cursor_pointer()
+                            .child("Agent steps")
+                            .child(chevron(0.))
+                            .on_click(toggle()),
+                        move |d, t| d.text_color(mix(p.mute, p.text, t)),
+                    ))
+                    .meta(meta)
+                    .child(div().px(px(12.)).py(px(6.)).children(rows));
                 div()
                     .id(id("steps"))
-                    .child(
-                        Card::new()
-                            .title(
-                                div()
-                                    .id(id("steps-toggle"))
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(7.))
-                                    .cursor_pointer()
-                                    .child("Agent steps")
-                                    .child(chevron(0.))
-                                    .on_click(toggle)
-                                    .test_support(),
-                            )
-                            .meta(meta)
-                            .child(div().px(px(12.)).py(px(6.)).children(rows)),
-                    )
+                    .child(presence(id("steps-folded"), !self.open, folded))
+                    .child(presence(id("steps-open"), self.open, card))
                     .test_support()
                     .into_any_element()
             }
@@ -2322,27 +2390,37 @@ impl Render for Row {
                     .into_any_element()
             }
             // Folded to its one line until a click opens it.
-            Block::Report { text, .. } => div()
-                .id(id("report"))
-                .child(
-                    Card::new()
-                        .title(
-                            div()
-                                .id(id("report-toggle"))
-                                .flex()
-                                .items_center()
-                                .gap(px(7.))
-                                .cursor_pointer()
-                                .child(SharedString::from(self.label().unwrap_or_default()))
-                                .child(icon(Icon::Chevron).size(px(12.)).text_color(p.faint))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.open = !this.open;
-                                    cx.notify();
-                                }))
-                                .test_support(),
-                        )
-                        .when(self.open, |card| {
-                            card.child(
+            Block::Report { text, .. } => {
+                let turn = turning(id("report-toggle"), self.open, window, cx);
+                div()
+                    .id(id("report"))
+                    .child(
+                        Card::new()
+                            .title(hoverable(
+                                div()
+                                    .id(id("report-toggle"))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(7.))
+                                    .cursor_pointer()
+                                    .child(SharedString::from(self.label().unwrap_or_default()))
+                                    .child(
+                                        icon(Icon::Chevron)
+                                            .size(px(12.))
+                                            .text_color(p.faint)
+                                            .with_transformation(Transformation::rotate(radians(
+                                                -FRAC_PI_2 * turn,
+                                            ))),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.open = !this.open;
+                                        cx.notify();
+                                    })),
+                                move |d, t| d.text_color(mix(p.mute, p.text, t)),
+                            ))
+                            .child(presence(
+                                id("report-body"),
+                                self.open,
                                 div()
                                     .id(id("report-text"))
                                     .px(px(14.))
@@ -2353,11 +2431,11 @@ impl Render for Row {
                                             .image_source(no_image),
                                     )
                                     .test_support(),
-                            )
-                        }),
-                )
-                .test_support()
-                .into_any_element(),
+                            )),
+                    )
+                    .test_support()
+                    .into_any_element()
+            }
             Block::Notice { kind, text } => div()
                 .id(id("notice"))
                 .flex()
@@ -2416,153 +2494,86 @@ impl Render for Row {
             }
             Block::Approval { number } => self.render_card(*number, cx).into_any_element(),
             Block::Answered { .. } => div().into_any_element(),
+            // One line; a click opens the output in the panel the rail opens.
             Block::Command(result) => {
-                let toggle = cx.listener(|this, _, _, cx| {
-                    this.open = !this.open;
-                    cx.notify();
-                });
-                runs::card(result, self.at, self.open, toggle, cx)
+                let (page, run) = (self.page.clone(), result.run.clone());
+                let open = move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| {
+                    page.update(cx, |page, cx| page.open_command(&run, cx)).ok();
+                };
+                runs::card(result, self.at, open, cx)
             }
         }
     }
 }
 
 impl Row {
+    /// A request in the conversation is one compact line: while it waits, "Waiting for you:" and
+    /// what it asks, which scrolls the rail to its card; once answered, the record of the outcome.
+    /// The card, with Allow and Deny, is in the rail.
     fn render_card(&mut self, number: u64, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let card_id = ElementId::Name(format!("approval-{number}").into());
         let Some(card) = self.card.clone() else {
-            return div().id(card_id).into_any_element();
+            return div()
+                .id(ElementId::Name(format!("approval-line-{number}").into()))
+                .into_any_element();
         };
-        if let Some(record) = card.record() {
-            return enter(
-                ElementId::Name(format!("record-enter-{number}").into()),
-                0,
-                div()
-                    .id(ElementId::Name(format!("approval-record-{number}").into()))
-                    .mono(12.)
-                    .text_color(p.faint)
-                    .child(SharedString::from(record))
-                    .test_support(),
-            )
-            .into_any_element();
-        }
-        let disabled = self.busy;
-        let button = |id: &str, label: &str, answer: Answer, primary: bool| {
-            let id = ElementId::Name(format!("{id}-{number}").into());
-            let button = match primary {
-                true => Button::primary(id, label.to_owned()),
-                false => Button::quiet(id, label.to_owned()),
-            };
-            button
-                .disabled(disabled)
-                .on_click(cx.listener(move |this, _, _, cx| this.answer(answer, cx)))
-        };
-        div()
-            .id(card_id)
+        let record = card.record();
+        let said = format!(
+            "Waiting for you: {}",
+            card.asked
+                .clone()
+                .unwrap_or_else(|| format!("request #{number}"))
+        );
+        let page = self.page.clone();
+        let ink = if card.base { p.fail } else { p.wait };
+        let line = div()
+            .id(ElementId::Name(format!("approval-line-{number}").into()))
+            .flex()
+            .items_center()
+            .gap(px(9.))
+            .px(px(12.))
+            .py(px(7.))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(if card.base { p.fail } else { p.wait_line })
+            .cursor_pointer()
+            .text_size(px(13.))
+            .aria_label(SharedString::from(said.clone()))
+            .child(div().flex_none().size(px(8.)).rounded_full().bg(ink))
             .child(
-                Card::new()
-                    .attention()
-                    .when(card.base, Card::alarm)
-                    .child(
-                        div()
-                            .px(px(16.))
-                            .pt(px(14.))
-                            .flex()
-                            .flex_col()
-                            .gap(px(4.))
-                            .child(
-                                div()
-                                    .text_size(px(14.))
-                                    .semibold()
-                                    .child(SharedString::from(format!(
-                                        "{}?",
-                                        card.asked
-                                            .clone()
-                                            .unwrap_or_else(|| format!("Request #{number}"))
-                                    ))),
-                            )
-                            .children(card.says.iter().enumerate().map(|(i, said)| {
-                                div()
-                                    .id(ElementId::Name(
-                                        format!("approval-says-{number}-{i}").into(),
-                                    ))
-                                    .text_size(px(13.))
-                                    .child(SharedString::from(said.clone()))
-                                    .test_support()
-                            }))
-                            .child({
-                                let class = match card.base {
-                                    true => "Base",
-                                    false => "To judge",
-                                };
-                                div()
-                                    .id(ElementId::Name(format!("approval-class-{number}").into()))
-                                    .aria_label(class)
-                                    .mono(11.)
-                                    .text_color(if card.base { p.fail } else { p.wait })
-                                    .child(class)
-                                    .test_support()
-                            })
-                            .when(card.base, |d| {
-                                d.child(
-                                    div()
-                                        .id(ElementId::Name(
-                                            format!("approval-base-{number}").into(),
-                                        ))
-                                        .aria_label(BASE_SAYS)
-                                        .text_size(px(13.))
-                                        .semibold()
-                                        .text_color(p.fail)
-                                        .child(BASE_SAYS)
-                                        .test_support(),
-                                )
-                            })
-                            .when_some(card.judgement.clone(), |d, judgement| {
-                                d.child(
-                                    div()
-                                        .id(ElementId::Name(
-                                            format!("approval-judge-{number}").into(),
-                                        ))
-                                        .aria_label(SharedString::from(judgement.clone()))
-                                        .text_size(px(13.))
-                                        .child(SharedString::from(judgement))
-                                        .test_support(),
-                                )
-                            })
-                            .when_some(card.why.clone(), |d, why| {
-                                d.child(
-                                    div()
-                                        .text_size(px(13.))
-                                        .text_color(p.mute)
-                                        .child(SharedString::from(why)),
-                                )
-                            })
-                            .when_some(card.source.clone(), |d, source| {
-                                d.child(
-                                    div()
-                                        .mono(11.)
-                                        .text_color(p.faint)
-                                        .child(SharedString::from(source)),
-                                )
-                            })
-                            .when_some(self.error.clone(), |d, error| {
-                                d.child(
-                                    div()
-                                        .id(ElementId::Name(
-                                            format!("approval-error-{number}").into(),
-                                        ))
-                                        .text_size(px(12.5))
-                                        .text_color(p.fail)
-                                        .child(SharedString::from(error))
-                                        .test_support(),
-                                )
-                            }),
-                    )
-                    .action(button("deny", "Deny", Answer::Deny, false))
-                    .action(button("allow", "Allow", Answer::Once, true)),
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(SharedString::from(said)),
             )
-            .test_support()
+            .on_click(move |_, _, cx| {
+                page.update(cx, |page, cx| page.reveal_waiting(number, cx))
+                    .ok();
+            });
+        let waiting = hoverable(line, move |d, t| d.bg(p.hover.opacity(t)));
+        let outcome = div()
+            .id(ElementId::Name(format!("approval-record-{number}").into()))
+            .aria_label(SharedString::from(record.clone().unwrap_or_default()))
+            .mono(12.)
+            .text_color(p.faint)
+            .child(SharedString::from(record.clone().unwrap_or_default()))
+            .test_support();
+        // The waiting line folds away and the record unfolds in its place.
+        div()
+            .id(ElementId::Name(format!("approval-{number}-row").into()))
+            .child(presence(
+                ElementId::Name(format!("approval-waiting-{number}").into()),
+                record.is_none(),
+                waiting,
+            ))
+            .child(presence(
+                ElementId::Name(format!("approval-decided-{number}").into()),
+                record.is_some(),
+                outcome,
+            ))
             .into_any_element()
     }
 }
@@ -2737,6 +2748,13 @@ pub struct SessionRail {
     agent_menu: Entity<Menu>,
     /// The commands of the session's tree.
     commands: Entity<CommandList>,
+    /// The requests that wait for the user, above everything else.
+    waiting: Entity<Waiting>,
+    /// The rail's scroll, which a click on a request's line in the conversation brings back to
+    /// the top, where the cards are.
+    scroll: ScrollHandle,
+    /// The scroll on its way to the top: where it started and how far it is.
+    scrolling: Option<(Pixels, Motion)>,
     /// Where a ticket is typed to link it, made when the section first shows a workspace.
     ticket_field: Option<Entity<InputState>>,
     /// What the daemon said of the ticket typed.
@@ -2775,9 +2793,13 @@ impl SessionRail {
             )
         });
         let commands = cx.new(|_| CommandList::new(page.clone()));
+        let waiting = cx.new(|_| Waiting::new(page.clone()));
         Self {
             page,
             commands,
+            waiting,
+            scroll: ScrollHandle::new(),
+            scrolling: None,
             agents: Vec::new(),
             marks: HashMap::new(),
             open_ended: HashSet::new(),
@@ -2888,6 +2910,25 @@ impl SessionRail {
         self.place.as_ref()
     }
 
+    /// How far the rail is scrolled, in pixels from its top.
+    pub fn scrolled(&self) -> Pixels {
+        -self.scroll.offset().y
+    }
+
+    /// Scrolls the rail to its top, over [`PANEL`], and lights the card of request `number`.
+    pub fn reveal(&mut self, number: u64, cx: &mut Context<Self>) {
+        let from = self.scroll.offset().y;
+        if from != px(0.) {
+            let now = cx.background_executor().now();
+            let mut motion = Motion::settled(0.0);
+            motion.play(1.0, 0.0, Duration::ZERO, PANEL, now, cx.reduce_motion());
+            self.scrolling = Some((from, motion));
+        }
+        self.waiting
+            .update(cx, |waiting, cx| waiting.point_at(number, cx));
+        cx.notify();
+    }
+
     pub fn renders(&self) -> usize {
         self.renders
     }
@@ -2931,6 +2972,14 @@ impl Render for SessionRail {
         let p = palette(cx);
         // A folding "ended" row still has its children until the fold ends.
         let now = cx.background_executor().now();
+        if let Some((from, motion)) = self.scrolling {
+            let offset = point(self.scroll.offset().x, from * motion.value(now));
+            self.scroll.set_offset(offset);
+            match motion.is_running(now) {
+                true => window.request_animation_frame(),
+                false => self.scrolling = None,
+            }
+        }
         let mut drawn_open = self.open_ended.clone();
         for (parent, fold) in &mut self.ended_folds {
             if fold.motion.is_running(now) {
@@ -2948,6 +2997,20 @@ impl Render for SessionRail {
                     AgentState::Failed | AgentState::Completed | AgentState::Stopped
                 )
         });
+        let listed = self.rows_among(&drawn_open);
+        // The chevrons of the "ended" rows turn as their level folds.
+        let turns: HashMap<String, f32> = listed
+            .iter()
+            .filter_map(|row| match row {
+                RailRow::Ended { parent, .. } => Some(parent.clone()),
+                _ => None,
+            })
+            .map(|parent| {
+                let open = self.open_ended.contains(&parent);
+                let id = ElementId::Name(format!("rail-ended-{parent}").into());
+                (parent, turning(id, open, window, cx))
+            })
+            .collect();
         let agent_menu = self.agent_menu.clone();
         let agent_row = |agent: &RailAgent| {
             let (mark, pill) = self.marks[&agent.id].clone();
@@ -2973,10 +3036,10 @@ impl Render for SessionRail {
                             .h(px(32.)),
                     ))
                 })
-                .child(
+                .child({
                     // The name over the provider and model: a rail is too narrow for both on one
                     // line.
-                    div()
+                    let row = div()
                         .id(ElementId::Name(format!("rail-row-{}", agent.id).into()))
                         .flex_1()
                         .min_w_0()
@@ -2987,8 +3050,6 @@ impl Render for SessionRail {
                         .py(px(6.))
                         .rounded(px(8.))
                         .cursor_pointer()
-                        .when(agent.id == self.selected, |d| d.bg(p.card2))
-                        .when(agent.id != self.selected, |d| d.hover(|s| s.bg(p.hover)))
                         .child(
                             div()
                                 .w(px(16.))
@@ -3039,13 +3100,15 @@ impl Render for SessionRail {
                             if let Some(page) = page.upgrade() {
                                 page.update(cx, |page, cx| page.select(&target, cx));
                             }
-                        })
-                        .test_support(),
-                )
+                        });
+                    selectable(row, agent.id == self.selected, move |d, hover, chosen| {
+                        d.bg(mix(p.hover.opacity(hover), p.card2, chosen))
+                    })
+                })
                 .when(!kid && endable, |d| d.child(agent_menu.clone()))
                 .test_support()
         };
-        let ended_row = |parent: &str, count: usize, open: bool| {
+        let ended_row = |parent: &str, count: usize, open: bool, turn: f32| {
             let depth = self
                 .agents
                 .iter()
@@ -3066,8 +3129,8 @@ impl Render for SessionRail {
                         .w(px(10.))
                         .h(px(32.)),
                 ))
-                .child(
-                    div()
+                .child({
+                    let row = div()
                         .id(ElementId::Name(format!("rail-ended-{parent}").into()))
                         .aria_expanded(open)
                         .flex()
@@ -3078,25 +3141,27 @@ impl Render for SessionRail {
                         .rounded(px(8.))
                         .cursor_pointer()
                         .text_size(px(12.5))
-                        .text_color(p.faint)
-                        .hover(|s| s.bg(p.hover).text_color(p.text))
-                        .child(div().w(px(16.)).flex_none().flex().justify_center().child(
-                            icon(Icon::Chevron).size(px(12.)).text_color(p.faint).when(
-                                !open,
-                                |i| {
-                                    i.with_transformation(Transformation::rotate(radians(
-                                        -FRAC_PI_2,
-                                    )))
-                                },
+                        .child(
+                            div().w(px(16.)).flex_none().flex().justify_center().child(
+                                icon(Icon::Chevron)
+                                    .size(px(12.))
+                                    .text_color(p.faint)
+                                    .with_transformation(Transformation::rotate(radians(
+                                        -FRAC_PI_2 * turn,
+                                    ))),
                             ),
-                        ))
+                        )
                         .child(SharedString::from(format!("{count} ended")))
-                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_ended(&target, cx)))
-                        .test_support(),
-                )
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.toggle_ended(&target, cx)),
+                        );
+                    hoverable(row, move |d, t| {
+                        d.bg(p.hover.opacity(t)).text_color(mix(p.faint, p.text, t))
+                    })
+                })
         };
         let mut rows: Vec<AnyElement> = Vec::new();
-        let mut listed = self.rows_among(&drawn_open).into_iter();
+        let mut listed = listed.into_iter();
         while let Some(row) = listed.next() {
             match row {
                 RailRow::Agent(id) => {
@@ -3113,8 +3178,13 @@ impl Render for SessionRail {
                     open,
                 } => {
                     rows.push(
-                        ended_row(&parent, count, self.open_ended.contains(&parent))
-                            .into_any_element(),
+                        ended_row(
+                            &parent,
+                            count,
+                            self.open_ended.contains(&parent),
+                            turns.get(&parent).copied().unwrap_or(0.0),
+                        )
+                        .into_any_element(),
                     );
                     if !open {
                         continue;
@@ -3162,7 +3232,40 @@ impl Render for SessionRail {
                 .find(|(repository, _)| repository == path)
                 .map(|(_, line)| line.clone())
         };
-        let repositories: Vec<(String, String, Option<PullRequest>, Option<String>)> = self
+        // Several repositories with no forge: said once under the section, not under each.
+        let no_forge: Vec<String> = self
+            .place
+            .iter()
+            .flat_map(|place| place.forges.iter())
+            .filter(|(_, line)| line.starts_with(flottille_core::declared::NO_FORGE))
+            .map(|(path, _)| crate::project::repository_label(&self.project, path))
+            .collect();
+        let once = no_forge.len() > 1;
+        let said = once.then(|| {
+            SharedString::from(format!(
+                "No forge set for {}: choose it in the project's Settings",
+                no_forge.join(", ")
+            ))
+        });
+        let forge_of = |path: &str| {
+            forge_of(path)
+                .filter(|line| !(once && line.starts_with(flottille_core::declared::NO_FORGE)))
+        };
+        let status_of = |path: &str| {
+            self.place
+                .iter()
+                .flat_map(|place| place.statuses.iter())
+                .find(|status| status.path == path)
+                .cloned()
+        };
+        #[allow(clippy::type_complexity)]
+        let repositories: Vec<(
+            String,
+            String,
+            Option<PullRequest>,
+            Option<String>,
+            Option<RepositoryStatus>,
+        )> = self
             .place
             .iter()
             .flat_map(|place| place.repositories.iter())
@@ -3186,6 +3289,7 @@ impl Render for SessionRail {
                     said,
                     pull_of(path),
                     forge_of(path),
+                    status_of(path),
                 )
             })
             .collect();
@@ -3234,8 +3338,8 @@ impl Render for SessionRail {
             div()
                 .flex()
                 .items_start()
-                .child(
-                    div()
+                .child({
+                    let row = div()
                         .id("rail-ticket")
                         .flex_1()
                         .flex()
@@ -3244,7 +3348,6 @@ impl Render for SessionRail {
                         .py(px(4.))
                         .rounded(px(6.))
                         .when(url.is_some(), |d| d.cursor_pointer())
-                        .hover(|s| s.bg(p.hover))
                         .aria_label(SharedString::from(format!("{} {said}", ticket.reference)))
                         .child(
                             div()
@@ -3266,9 +3369,9 @@ impl Render for SessionRail {
                             if let Some(url) = &url {
                                 page.update(cx, |page, _| page.open_link(url)).ok();
                             }
-                        })
-                        .test_support(),
-                )
+                        });
+                    hoverable(row, move |d, t| d.bg(p.hover.opacity(t)))
+                })
                 .child(
                     Button::quiet("rail-ticket-unlink", "Unlink").on_click(move |_, _, cx| {
                         rail.update(cx, |rail, cx| rail.link_ticket(None, cx)).ok();
@@ -3300,10 +3403,12 @@ impl Render for SessionRail {
             .id("rail")
             .size_full()
             .overflow_y_scroll()
+            .track_scroll(&self.scroll)
             .px(px(12.))
             .py(px(14.))
             .flex()
             .flex_col()
+            .child(self.waiting.clone())
             .child(section_label("Agents", cx))
             .children(rows)
             .child(self.commands.clone())
@@ -3315,51 +3420,98 @@ impl Render for SessionRail {
                     .child(div().flex_1().child(section_label("Workspace", cx)))
                     .child(self.menu.clone()),
             )
-            .children(repositories.into_iter().map(|(path, said, pull, forge)| {
-                let row = div()
-                    .id(ElementId::Name(format!("rail-repository-{path}").into()))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .px(px(8.))
-                    .py(px(6.))
-                    .text_size(px(12.5))
-                    .child(icon(Icon::Repository).size(px(13.)).text_color(p.faint))
-                    .child(SharedString::from(path.clone()))
-                    .child(
+            .children(
+                repositories
+                    .into_iter()
+                    .map(|(path, said, pull, forge, status)| {
+                        let row = div()
+                            .id(ElementId::Name(format!("rail-repository-{path}").into()))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .px(px(8.))
+                            .py(px(6.))
+                            .text_size(px(12.5))
+                            .child(icon(Icon::Repository).size(px(13.)).text_color(p.faint))
+                            .child(SharedString::from(path.clone()))
+                            .child(
+                                div()
+                                    .ml_auto()
+                                    .mono(11.)
+                                    .text_color(p.faint)
+                                    .child(SharedString::from(said)),
+                            )
+                            .test_support();
+                        let pull = pull.map(|pull| {
+                            let page = self.page.clone();
+                            let url = pull.url.clone();
+                            let row = pull_row(
+                                ElementId::Name(format!("rail-pull-{path}").into()),
+                                &pull,
+                                cx,
+                            )
+                            .pl(px(29.))
+                            .on_click(move |_, _, cx| {
+                                page.update(cx, |page, _| page.open_link(&url)).ok();
+                            });
+                            pull_hover(row, cx)
+                        });
+                        // Its branch, commits ahead, files not committed and setup played; it unfolds
+                        // once the daemon said.
+                        let status = presence(
+                            ElementId::Name(format!("rail-status-{path}-block").into()),
+                            status.is_some(),
+                            div()
+                                .id(ElementId::Name(format!("rail-status-{path}").into()))
+                                .pl(px(29.))
+                                .pb(px(4.))
+                                .flex()
+                                .flex_col()
+                                .mono(11.)
+                                .text_color(p.faint)
+                                .children(status.as_ref().map(|s| SharedString::from(s.line())))
+                                .children(status.as_ref().and_then(|s| s.note.clone()).map(
+                                    |note| div().text_color(p.mute).child(SharedString::from(note)),
+                                ))
+                                .aria_label(SharedString::from(status.as_ref().map_or(
+                                    String::new(),
+                                    |s| match &s.note {
+                                        Some(note) => format!("{} · {note}", s.line()),
+                                        None => s.line(),
+                                    },
+                                )))
+                                .test_support(),
+                        );
+                        let forge = forge.map(|line| {
+                            div()
+                                .id(ElementId::Name(format!("rail-forge-{path}").into()))
+                                .pl(px(29.))
+                                .pb(px(4.))
+                                .mono(11.)
+                                .text_color(p.faint)
+                                .child(SharedString::from(line))
+                                .test_support()
+                        });
                         div()
-                            .ml_auto()
-                            .mono(11.)
-                            .text_color(p.faint)
-                            .child(SharedString::from(said)),
-                    )
-                    .test_support();
-                let pull = pull.map(|pull| {
-                    let page = self.page.clone();
-                    let url = pull.url.clone();
-                    pull_row(
-                        ElementId::Name(format!("rail-pull-{path}").into()),
-                        &pull,
-                        cx,
-                    )
-                    .pl(px(29.))
-                    .on_click(move |_, _, cx| {
-                        page.update(cx, |page, _| page.open_link(&url)).ok();
-                    })
-                    .test_support()
-                });
-                let forge = forge.map(|line| {
-                    div()
-                        .id(ElementId::Name(format!("rail-forge-{path}").into()))
-                        .pl(px(29.))
-                        .pb(px(4.))
-                        .mono(11.)
-                        .text_color(p.faint)
-                        .child(SharedString::from(line))
-                        .test_support()
-                });
-                div().child(row).children(forge).children(pull)
-            }))
+                            .child(row)
+                            .child(status)
+                            .children(forge)
+                            .children(pull)
+                    }),
+            )
+            .child(presence(
+                ElementId::Name("rail-no-forge-block".into()),
+                once,
+                div()
+                    .id("rail-no-forge")
+                    .px(px(8.))
+                    .pb(px(4.))
+                    .text_size(px(11.5))
+                    .text_color(p.faint)
+                    .children(said.clone())
+                    .aria_label(said.unwrap_or_default())
+                    .test_support(),
+            ))
             .children(forge_problem.map(|problem| {
                 div()
                     .id("rail-forge-problem")
@@ -3416,6 +3568,7 @@ impl Render for SessionRail {
                     }))
                     .test_support(),
             )
+            .test_support()
     }
 }
 
@@ -3439,11 +3592,17 @@ pub(crate) fn pull_row(id: ElementId, pull: &PullRequest, cx: &App) -> Stateful<
         .rounded(px(6.))
         .cursor_pointer()
         .mono(11.)
-        .text_color(p.mute)
-        .hover(|s| s.bg(p.hover).text_color(p.text))
         .aria_label(SharedString::from(format!("{}, {said}", pull.label())))
         .child(SharedString::from(pull.label()))
         .child(div().text_color(color).child(glyph))
+}
+
+/// A [`pull_row`] once its handlers and children are on: its hover fades in.
+pub(crate) fn pull_hover(row: Stateful<Div>, cx: &App) -> flottille_ui::Hoverable {
+    let p = palette(cx);
+    hoverable(row, move |d, t| {
+        d.bg(p.hover.opacity(t)).text_color(mix(p.mute, p.text, t))
+    })
 }
 
 /// The drawn link from a parent to its child in the rail: down, then right, with a round corner.
@@ -3483,6 +3642,8 @@ pub struct Reply {
     dismissed: bool,
     field: Entity<TextareaState>,
     facts: Entity<ReplyFacts>,
+    /// What the root does while its turn runs, in the bar under the field.
+    status_line: Entity<StatusLine>,
     pub mode: Entity<ModeSwitch>,
     has_text: bool,
     focused: bool,
@@ -3570,6 +3731,7 @@ impl Reply {
                 model: None,
                 context: None,
             }),
+            status_line: cx.new(|_| StatusLine::new()),
             mode,
             has_text: false,
             focused: false,
@@ -3620,8 +3782,15 @@ impl Reply {
     fn set_activity(&mut self, activity: Option<Activity>, cx: &mut Context<Self>) {
         if self.activity != activity {
             self.activity = activity;
+            self.sync_status(cx);
             cx.notify();
         }
+    }
+
+    /// Hands the bar's status line what the root does now, or none once the turn ended.
+    fn sync_status(&mut self, cx: &mut Context<Self>) {
+        let status = self.status().map(SharedString::from);
+        self.status_line.update(cx, |line, cx| line.set(status, cx));
     }
 
     fn set_images(&mut self, images: Option<bool>) {
@@ -3761,6 +3930,7 @@ impl Reply {
     fn set_running(&mut self, running: bool, cx: &mut Context<Self>) {
         if self.running != running {
             self.running = running;
+            self.sync_status(cx);
             cx.notify();
         }
     }
@@ -4034,11 +4204,18 @@ impl Reply {
 }
 
 impl Render for Reply {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let focus = fade("reply-focus", self.focused, HOVER, window, cx);
         self.renders += 1;
         let p = palette(cx);
         let can_send = (self.has_text || !self.attachments.is_empty()) && !self.sending;
-        let status = self.status();
+        let swap = fade(
+            "reply-stop-swap",
+            self.running && !can_send,
+            HOVER,
+            window,
+            cx,
+        );
         let thumbs: Vec<AnyElement> = self
             .attachments
             .iter()
@@ -4055,7 +4232,7 @@ impl Render for Reply {
                             .rounded(px(8.))
                             .object_fit(gpui_kit::ObjectFit::Cover),
                     )
-                    .child(
+                    .child(hoverable(
                         div()
                             .id(ElementId::Name(format!("attachment-remove-{at}").into()))
                             .absolute()
@@ -4070,13 +4247,15 @@ impl Render for Reply {
                             .items_center()
                             .justify_center()
                             .text_size(px(12.))
-                            .text_color(p.mute)
                             .cursor_pointer()
                             .aria_label("Remove the picture")
                             .child("×")
-                            .on_click(cx.listener(move |this, _, _, cx| this.detach(at, cx)))
-                            .test_support(),
-                    )
+                            .on_click(cx.listener(move |this, _, _, cx| this.detach(at, cx))),
+                        move |d, t| {
+                            d.text_color(mix(p.mute, p.text, t))
+                                .bg(mix(p.card2, p.hover, t))
+                        },
+                    ))
                     .test_support()
                     .into_any_element()
             })
@@ -4134,20 +4313,6 @@ impl Render for Reply {
             .shadow_lg()
             .ui_text()
             .text_color(p.text)
-            .when_some(status, |d, line| {
-                d.child(
-                    div()
-                        .id("reply-status")
-                        .aria_label(SharedString::from(line.clone()))
-                        .px(px(10.))
-                        .pb(px(6.))
-                        .pt(px(2.))
-                        .text_size(px(12.5))
-                        .text_color(p.faint)
-                        .child(SharedString::from(line))
-                        .test_support(),
-                )
-            })
             .when(!thumbs.is_empty(), |d| {
                 d.child(
                     div()
@@ -4167,11 +4332,7 @@ impl Render for Reply {
                     .rounded(px(11.))
                     .bg(p.field)
                     .border_1()
-                    .border_color(if self.focused {
-                        p.focus_line
-                    } else {
-                        p.field_line
-                    })
+                    .border_color(mix(p.field_line, p.focus_line, focus))
                     .min_h(px(60.))
                     .px(px(14.))
                     .py(px(12.))
@@ -4201,22 +4362,53 @@ impl Render for Reply {
                                 cx.listener(|this, _, window, cx| this.pick_files(window, cx)),
                             ),
                     )
-                    .child(div().flex_1())
-                    .when(self.running, |d| {
-                        d.child(
-                            Button::icon("reply-stop", Icon::Stop, STOP)
-                                .disabled(self.interrupting)
-                                .on_click(cx.listener(|this, _, _, cx| this.interrupt(cx))),
-                        )
-                    })
+                    // What the root does while its turn runs, where the line above the field was.
                     .child(
-                        Button::round("reply-send", Icon::Send, SEND)
-                            .disabled(!can_send)
-                            .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .justify_end()
+                            .pr(px(10.))
+                            .child(self.status_line.clone()),
+                    )
+                    .child(
+                        // Stop takes Send's place while Send has nothing to send: the two cross-fade
+                        // in one slot.
+                        div()
+                            .id("reply-send-slot")
+                            .relative()
+                            .flex_none()
+                            .size(px(30.))
+                            .when(swap < 1.0, |d| {
+                                d.child(
+                                    div().absolute().inset_0().opacity(1.0 - swap).child(
+                                        Button::round("reply-send", Icon::Send, SEND)
+                                            .disabled(!can_send)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.send(window, cx)
+                                            })),
+                                    ),
+                                )
+                            })
+                            .when(swap > 0.0, |d| {
+                                d.child(
+                                    div().absolute().inset_0().opacity(swap).child(
+                                        Button::round("reply-stop", Icon::Stop, STOP)
+                                            .disabled(self.interrupting)
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| this.interrupt(cx)),
+                                            ),
+                                    ),
+                                )
+                            })
+                            .test_support(),
                     ),
             )
-            .when_some(self.error.clone(), |d, error| {
-                d.child(
+            .child(presence_of(
+                "reply-error-line",
+                self.error.clone(),
+                move |error| {
                     div()
                         .id("reply-error")
                         .aria_label(error.clone())
@@ -4225,10 +4417,88 @@ impl Render for Reply {
                         .text_size(px(12.5))
                         .text_color(p.fail)
                         .child(error)
-                        .test_support(),
-                )
-            })
+                        .test_support()
+                        .into_any_element()
+                },
+            ))
             .test_support()
+    }
+}
+
+/// What the root does while its turn runs (`Thinking…`, `Writing…`, `Running <tool>…`), in the
+/// composer's bar. A change of words cross-fades: the old ones fade out as the new fade in.
+pub struct StatusLine {
+    current: Option<SharedString>,
+    leaving: Option<SharedString>,
+    /// How far the change is, 0 to 1.
+    motion: Motion,
+}
+
+impl StatusLine {
+    fn new() -> Self {
+        Self {
+            current: None,
+            leaving: None,
+            motion: Motion::settled(1.0),
+        }
+    }
+
+    fn set(&mut self, status: Option<SharedString>, cx: &mut Context<Self>) {
+        if self.current == status {
+            return;
+        }
+        self.leaving = self.current.take();
+        self.current = status;
+        let now = cx.background_executor().now();
+        self.motion
+            .play(0.0, 1.0, Duration::ZERO, PANEL, now, cx.reduce_motion());
+        cx.notify();
+    }
+
+    /// The words shown now.
+    pub fn shown(&self) -> Option<&str> {
+        self.current.as_deref()
+    }
+}
+
+impl Render for StatusLine {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let now = cx.background_executor().now();
+        let t = self.motion.value(now);
+        if self.motion.is_running(now) {
+            window.request_animation_frame();
+        } else {
+            self.leaving = None;
+        }
+        let line = |id: &'static str, text: SharedString, opacity: f32| {
+            div()
+                .id(id)
+                .aria_label(text.clone())
+                .text_size(px(12.5))
+                .text_color(p.faint)
+                .whitespace_nowrap()
+                .opacity(opacity)
+                .child(text)
+                .test_support()
+        };
+        // The new words take the room; the old ones leave over them, from the same edge.
+        div()
+            .relative()
+            .flex()
+            .justify_end()
+            .children(
+                self.current
+                    .clone()
+                    .map(|text| line("reply-status", text, t)),
+            )
+            .children(self.leaving.clone().map(|text| {
+                let leaving = line("reply-status-leaving", text, 1.0 - t);
+                match self.current.is_some() {
+                    true => div().absolute().right_0().child(leaving).into_any_element(),
+                    false => leaving.into_any_element(),
+                }
+            }))
     }
 }
 

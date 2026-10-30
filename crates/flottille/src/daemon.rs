@@ -37,6 +37,7 @@ use crate::skills;
 use crate::sweep;
 use crate::tasks;
 use crate::tickets;
+use crate::tree;
 use crate::workspaces;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -318,6 +319,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     );
     workspaces::resume_at_start(&daemon);
     agents::settle_at_start(&daemon);
+    tree::brief_at_start(&daemon);
     runs::settle_at_start(&daemon);
     approvals::settle_at_start(&daemon);
     projects::migrate_files(&daemon);
@@ -558,6 +560,9 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
         .any(|prefix| request.method.starts_with(prefix))
             || [
                 "project.show",
+                "project.repositories",
+                "project.add_repository",
+                "project.remove_repository",
                 "project.settings",
                 "project.set_settings",
                 "project.ticket",
@@ -579,6 +584,12 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     sweep::call(daemon, &request.method, request.params).await
                 } else if request.method == "project.show" {
                     projects::show(daemon, request.params).await
+                } else if request.method == "project.repositories" {
+                    projects::repositories(daemon, request.params).await
+                } else if request.method == "project.add_repository" {
+                    projects::add_repository(daemon, request.params).await
+                } else if request.method == "project.remove_repository" {
+                    projects::remove_repository(daemon, request.params).await
                 } else if request.method == "project.settings" {
                     projects::settings(daemon, request.params).await
                 } else if request.method == "project.set_settings" {

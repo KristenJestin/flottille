@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use flottille_ui::motion::{ENTER, HOVER, Motion, RISE};
 use flottille_ui::{
     AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Side, StateIcon, Status, Type,
     dismiss_on_navigate, dismiss_top_overlay, enter, forget_overlays, icon, open_overlay, palette,
@@ -93,10 +94,12 @@ pub struct Shell {
     left: Entity<Drawer>,
     bell: Entity<BellList>,
     bell_open: bool,
+    /// How far the bell's list is in view: it rises in and fades out, and stays drawn until then.
+    bell_shown: Motion,
     projects: HashMap<String, Entity<ProjectNode>>,
     places: HashMap<(String, Place), Entity<PlaceNode>>,
-    /// Each project's "Ended" group, while it holds a session.
-    ended: HashMap<String, Entity<PlaceNode>>,
+    /// The "Ended" group at the bottom of the tree, made when a session first ends.
+    ended: Option<Entity<PlaceNode>>,
     sessions: HashMap<String, Entity<SessionRow>>,
     /// Each project's composer and new workspace form, made when its page first opens: a draft,
     /// a send and a name asked belong to their project.
@@ -225,9 +228,10 @@ impl Shell {
             left,
             bell,
             bell_open: false,
+            bell_shown: Motion::settled(0.0),
             projects: HashMap::new(),
             places: HashMap::new(),
-            ended: HashMap::new(),
+            ended: None,
             sessions: HashMap::new(),
             forms: HashMap::new(),
             actions,
@@ -445,6 +449,43 @@ impl Shell {
         }
     }
 
+    /// The "+" of a place's row: the composer of its project, set to start there, with the field
+    /// focused.
+    pub fn start_in(
+        &mut self,
+        project: &str,
+        choice: Choice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open(Selection::Project(project.to_owned()), window, cx);
+        // The focus given while the page is built is taken back by what is built after it: wait
+        // for the frame, then give it.
+        let project = project.to_owned();
+        cx.defer_in(window, move |shell, window, cx| {
+            shell.compose_in(&project, choice, window, cx)
+        });
+    }
+
+    /// "End session" in a session's row: the confirmation, which counts the agents that end.
+    pub fn ask_end_of(&mut self, session: &str, cx: &mut Context<Self>) {
+        let Some(found) = self.snapshot.session(session) else {
+            return;
+        };
+        let (id, count) = (found.id.clone(), found.live);
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.ask_end(id, count, cx));
+    }
+
+    /// "Resume" in an ended session's row.
+    pub fn resume_of(&mut self, session: &str, cx: &mut Context<Self>) {
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.resuming(session, cx));
+        self.perform(Command::Resume {
+            session: session.to_owned(),
+        });
+    }
+
     /// What the window shows now, as the daemon last gave it.
     pub fn snapshot(&self) -> &Snapshot {
         &self.snapshot
@@ -486,9 +527,9 @@ impl Shell {
         self.sessions.get(id)
     }
 
-    /// The project's "Ended" group, while it holds a session.
-    pub fn ended(&self, project: &str) -> Option<&Entity<PlaceNode>> {
-        self.ended.get(project)
+    /// The "Ended" group at the bottom of the tree, once a session ended.
+    pub fn ended(&self) -> Option<&Entity<PlaceNode>> {
+        self.ended.as_ref()
     }
 
     fn relayout(&mut self, first: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -570,6 +611,9 @@ impl Shell {
                 }
             }
             Outcome::Stopped { session, refused } => {
+                self.sidebar.update(cx, |sidebar, cx| {
+                    sidebar.answered(&session, refused.clone(), cx)
+                });
                 if let Some(page) = self.session_page.clone()
                     && page.read(cx).id() == session
                 {
@@ -577,6 +621,9 @@ impl Shell {
                 }
             }
             Outcome::Resumed { session, refused } => {
+                self.sidebar.update(cx, |sidebar, cx| {
+                    sidebar.answered(&session, refused.clone(), cx)
+                });
                 if let Some(page) = self.session_page.clone()
                     && page.read(cx).id() == session
                 {
@@ -642,6 +689,34 @@ impl Shell {
                     && page.read(cx).name() == project
                 {
                     page.update(cx, |page, cx| page.answered(read, saved, window, cx));
+                }
+            }
+            Outcome::Repositories {
+                project,
+                read,
+                serial,
+            } => {
+                let page = self.main.read(cx).project_page().cloned();
+                let section = page
+                    .filter(|page| page.read(cx).name() == project)
+                    .map(|page| page.read(cx).repositories().clone());
+                // An answer to an older request than the last is no news, for the form either.
+                if section
+                    .as_ref()
+                    .is_some_and(|section| !section.read(cx).is_latest(serial))
+                {
+                    return;
+                }
+                if let Ok(value) = &read
+                    && let Some(form) = self.new_workspace_of(&project).cloned()
+                {
+                    let rules = crate::repositories::rules_of(
+                        &crate::repositories::Repositories::of(value),
+                    );
+                    form.update(cx, |form, cx| form.set_rules(rules, cx));
+                }
+                if let Some(section) = section {
+                    section.update(cx, |section, cx| section.answered(serial, read, window, cx));
                 }
             }
             Outcome::ProjectChecked { project, read } => {
@@ -1082,6 +1157,17 @@ impl Shell {
             if row.read(cx).commands() != session.commands {
                 row.update(cx, |row, cx| row.set_commands(session.commands, cx));
             }
+            if row.read(cx).started_by() != session.started_by.as_deref() {
+                row.update(cx, |row, cx| {
+                    row.set_started_by(session.started_by.as_deref(), cx)
+                });
+            }
+            // Ended, it sits among other projects' sessions: its row says whose it is.
+            let scope = session.ended.then_some(session.project.as_str());
+            row.update(cx, |row, cx| {
+                row.set_scope(scope, cx);
+                row.set_actions(session.ended, session.resumable, cx)
+            });
             marks.extend(session.mark);
             shown.push(row.clone());
             rows.insert(session.id.clone(), row);
@@ -1096,7 +1182,6 @@ impl Shell {
         let this = cx.entity().downgrade();
         let mut projects = HashMap::new();
         let mut places = HashMap::new();
-        let mut ended_groups = HashMap::new();
         let mut sessions = HashMap::new();
         let mut project_nodes = Vec::new();
         for project in &snapshot.projects {
@@ -1114,7 +1199,8 @@ impl Shell {
                 let key = (project.name.clone(), place.clone());
                 let node = self.places.remove(&key).unwrap_or_else(|| {
                     let (name, place) = key.clone();
-                    cx.new(|cx| PlaceNode::new(name, place, cx))
+                    let this = this.clone();
+                    cx.new(|cx| PlaceNode::new(name, place, this, cx))
                 });
                 let mark = AgentState::strongest(marks.iter().copied());
                 if !node.read(cx).holds(&rows, mark, cx) {
@@ -1123,24 +1209,6 @@ impl Shell {
                 project_marks.extend(mark);
                 place_nodes.push(node.clone());
                 places.insert(key, node);
-            }
-            // The ended sessions leave their places for one folded group at the bottom.
-            let mut marks = Vec::new();
-            let ended = snapshot
-                .sessions
-                .iter()
-                .filter(|session| session.project == project.name && session.ended);
-            let rows = self.session_rows(ended, &mut sessions, &mut marks, now, cx);
-            if !rows.is_empty() {
-                let node = self.ended.remove(&project.name).unwrap_or_else(|| {
-                    let name = project.name.clone();
-                    cx.new(|cx| PlaceNode::ended(name, cx))
-                });
-                if !node.read(cx).holds(&rows, None, cx) {
-                    node.update(cx, |node, cx| node.set(rows, None, cx));
-                }
-                place_nodes.push(node.clone());
-                ended_groups.insert(project.name.clone(), node);
             }
             let node = self.projects.remove(&project.name).unwrap_or_else(|| {
                 let name = project.name.clone();
@@ -1157,7 +1225,21 @@ impl Shell {
             project_nodes.push(node.clone());
             projects.insert(project.name.clone(), node);
         }
-        self.ended = ended_groups;
+        // The ended sessions leave their places for one folded group below every project.
+        let ended = snapshot.sessions.iter().filter(|session| session.ended);
+        let mut marks = Vec::new();
+        let rows = self.session_rows(ended, &mut sessions, &mut marks, now, cx);
+        let present = !rows.is_empty();
+        if self.ended.is_none() && present {
+            self.ended = Some(cx.new(|cx| PlaceNode::ended(this.clone(), cx)));
+        }
+        if let Some(group) = self.ended.clone() {
+            if !group.read(cx).holds(&rows, None, cx) {
+                group.update(cx, |group, cx| group.set(rows, None, cx));
+            }
+            self.sidebar
+                .update(cx, |sidebar, cx| sidebar.set_ended(group, present, cx));
+        }
         self.projects = projects;
         self.places = places;
         self.sessions = sessions;
@@ -1172,7 +1254,10 @@ impl Shell {
             .map(|item| {
                 let title = snapshot
                     .session(&item.session)
-                    .map(|s| s.title.clone())
+                    .map(|s| match &s.started_by {
+                        Some(by) => format!("{} · started by {by}", s.title),
+                        None => s.title.clone(),
+                    })
                     .unwrap_or_default();
                 (item.clone(), title)
             })
@@ -1188,6 +1273,7 @@ impl Shell {
             .retain(|name, _| snapshot.projects.iter().any(|p| &p.name == name));
         self.replies
             .retain(|id, _| snapshot.sessions.iter().any(|s| &s.id == id));
+        let edited = snapshot.project_changes != self.snapshot.project_changes;
         self.snapshot = snapshot;
 
         // What was open is shown as it is now; the first project opens when nothing is.
@@ -1208,6 +1294,12 @@ impl Shell {
                 }
                 self.refresh_project(cx);
             }
+        }
+        // A project's file was edited (by hand, or by the command line): its repositories as the
+        // page shows them may no longer be.
+        if edited && let Some(page) = self.main.read(cx).project_page().cloned() {
+            let section = page.read(cx).repositories().clone();
+            section.update(cx, |section, cx| section.read(cx));
         }
     }
 
@@ -1452,9 +1544,44 @@ impl Shell {
     fn set_bell(&mut self, open: bool, cx: &mut Context<Self>) {
         if self.bell_open != open {
             self.bell_open = open;
-            self.bell.update(cx, |bell, cx| bell.show(open, cx));
+            let now = cx.background_executor().now();
+            let duration = if open { ENTER } else { HOVER };
+            self.bell_shown.animate(
+                if open { 1.0 } else { 0.0 },
+                duration,
+                now,
+                cx.reduce_motion(),
+            );
+            if open {
+                self.bell.update(cx, |bell, cx| bell.show(true, cx));
+            } else {
+                // The marks stay while the list fades out.
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(HOVER + Duration::from_millis(20))
+                        .await;
+                    this.update(cx, |this, cx| {
+                        if !this.bell_open {
+                            this.bell.update(cx, |bell, cx| bell.show(false, cx));
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
             cx.notify();
         }
+    }
+
+    /// What the bell's items say of their sessions, in order: the session's title, and who
+    /// started it when an agent did.
+    pub fn bell_sessions(&self, cx: &App) -> Vec<String> {
+        self.bell
+            .read(cx)
+            .items
+            .iter()
+            .map(|(_, title)| title.clone())
+            .collect()
     }
 
     pub fn bell_open(&self) -> bool {
@@ -1480,8 +1607,16 @@ impl Shell {
 }
 
 impl Render for Shell {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
+        let now = cx.background_executor().now();
+        if self.bell_shown.is_running(now) {
+            window.request_animation_frame();
+        } else {
+            self.bell_shown.settle(now);
+        }
+        let bell_in = self.bell_shown.value(now);
+        let bell_drawn = self.bell_open || bell_in > 0.0;
         let side = match self.layout {
             Layout::Wide => Some(SIDEBAR),
             Layout::Medium => Some(SIDEBAR_MEDIUM),
@@ -1566,20 +1701,23 @@ impl Render for Shell {
                 d.child(self.judge_notice_card(text, cx))
             })
             .child(self.add_project.clone())
-            .when(self.bell_open, |d| {
+            .when(bell_drawn, |d| {
                 let scrim = div()
                     .id("bell-scrim")
                     .absolute()
                     .inset_0()
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_bell(cx)));
-                d.child(dismiss_on_navigate(scrim, move |_, cx| {
-                    shell.update(cx, |this, cx| this.set_bell(false, cx)).ok();
-                }))
+                d.when(self.bell_open, |d| {
+                    d.child(dismiss_on_navigate(scrim, move |_, cx| {
+                        shell.update(cx, |this, cx| this.set_bell(false, cx)).ok();
+                    }))
+                })
                 .child(
                     div()
                         .absolute()
-                        .top(px(40.))
+                        .top(px(40. + RISE * (1.0 - bell_in)))
                         .right(px(12.))
+                        .opacity(bell_in)
                         .child(self.bell.clone()),
                 )
             })
@@ -1785,12 +1923,15 @@ impl Render for BellList {
             shell.update(cx, |shell, cx| shell.set_bell(false, cx)).ok();
         });
         if self.items.is_empty() {
-            return list.child(
-                div()
-                    .p(px(10.))
-                    .text_color(p.faint)
-                    .child("Nothing waits for you."),
-            );
+            return list
+                .child(
+                    div()
+                        .p(px(10.))
+                        .text_color(p.faint)
+                        .child("Nothing waits for you."),
+                )
+                .test_support()
+                .into_any_element();
         }
         list.children(
             self.items
@@ -1812,6 +1953,8 @@ impl Render for BellList {
                     })
                 }),
         )
+        .test_support()
+        .into_any_element()
     }
 }
 

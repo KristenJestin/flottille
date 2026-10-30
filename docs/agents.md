@@ -220,11 +220,11 @@ bridge sets on `claude` ("The Claude bridge", below):
   and `report`; one that can have children (below the depth limit) also
   `agent_launch`, `agent_send`, `agent_status`, `agent_stop` and
   `approval_answer`; a root `ask_user`, a child `ask_parent`. Every agent has
-  `workspace_remove`; one of a project whose repositories declare a forge also has `forge_read`
-  and `forge_write`, and one of a project that declares a tracker `ticket_read`, in `main` as in
-  a workspace. A root of a project with neither gets, in this order, the first eight,
-  `skill_read`, `workspace_remove`, the four `agent_*`, `skills`, `commands`, `setup`, `project`,
-  `report`, `ask_user`, `approval_answer` (21). The list is
+  `workspace`; one of a project whose repositories declare a forge also has `forge`, and one of
+  a project that declares a tracker `tickets`, in `main` as in a workspace. A root of a project
+  with neither gets, in this order, the first eight, `skill_read`, `workspace`, the four
+  `agent_*`, `skills`, `commands`, `setup`, `project`, `report`, `ask_user`, `approval_answer`
+  (21). The list is
   frozen in the agent when it is created (the prompt cache depends on it).
 - `settingSources: []`: Claude Code's own default loads the user's settings, hooks, plugins,
   skills and instruction files; this overrides it.
@@ -743,7 +743,8 @@ workspace of the project, or a new one, made and prepared before it starts.
 ### Deliveries
 
 Everything Flottille hands to an agent is a delivery: the user's messages (`user`), a brief
-(`brief`), a parent's message (`parent`), what happens to a child (`child-report`,
+(`brief`), the first message of a session an agent started for the user (`launched`, under a first
+line naming that agent: it is the agent's words, never the user's), a parent's message (`parent`), what happens to a child (`child-report`,
 `child-question`, `child-asks`, `child-failed`, `child-stuck`, `child-idle`, `child-replaced`,
 `children-status`), an approval's answer (`approval`), a reminder (`reminder`), a session's
 restart (`resume`). It is stored before it is sent, under an id that makes it idempotent, and it
@@ -754,8 +755,8 @@ is the only thing that wakes an agent.
   are written `&lt;flottille-note` and `&lt;/flottille-note`, so that no text forges a delivery
   nor opens or closes a note. Every tool's result is escaped the same way (`docs/tools.md`).
   Bodies are masked of the daemon's secrets.
-- **Between turns**, the agent's queued deliveries are sent together as one prompt: a `brief`
-  first, then a `resume`, then the others in their order.
+- **Between turns**, the agent's queued deliveries are sent together as one prompt: a `brief` (or
+  a `launched`) first, then a `resume`, then the others in their order.
 - **During a turn**, an urgent one (`child-report`, `child-failed`, `child-asks`, `parent`,
   `approval`) is pinned as a note on the agent's next tool result:
   `<flottille-note id="…">`, the delivery, `</flottille-note>`. A note rides only in the room its

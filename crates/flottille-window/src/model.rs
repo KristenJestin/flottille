@@ -17,6 +17,9 @@ pub struct Snapshot {
     pub workspaces: Vec<Workspace>,
     /// Oldest first.
     pub bell: Vec<BellItem>,
+    /// How many `project.changed` events the link has seen: a project's file was edited when it
+    /// grows.
+    pub project_changes: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -136,6 +139,10 @@ pub struct Session {
     pub mark: Option<AgentState>,
     /// How many agents its tree holds, the root included.
     pub agents: usize,
+    /// How many of them have not ended: what ending the session ends.
+    pub live: usize,
+    /// Its root can be started again on its own session (`agent.resume`).
+    pub resumable: bool,
     /// Its root ended or failed: the left tree lists it in its project's "Ended" group.
     pub ended: bool,
     /// The last sign of activity of its tree, in milliseconds since the Unix epoch.
@@ -143,6 +150,9 @@ pub struct Session {
     pub created_at: u64,
     /// How many commands the agents of its tree run now.
     pub commands: usize,
+    /// The agent that started it for the user, by the name it goes by: `None` for a session the
+    /// user started. Its title stays the first line of its brief.
+    pub started_by: Option<String>,
 }
 
 /// One thing that waits for the user. Choosing it opens its session.
@@ -218,6 +228,24 @@ fn root_of<'a>(parents: &HashMap<&'a str, Option<&'a str>>, mut id: &'a str) -> 
     id
 }
 
+/// Whether an agent or one of its parents ended.
+fn under_an_ended<'a>(
+    parents: &HashMap<&'a str, Option<&'a str>>,
+    ended: &HashSet<&str>,
+    mut id: &'a str,
+) -> bool {
+    for _ in 0..64 {
+        if ended.contains(id) {
+            return true;
+        }
+        match parents.get(id) {
+            Some(Some(parent)) => id = parent,
+            _ => break,
+        }
+    }
+    false
+}
+
 impl Snapshot {
     /// What waits for the user is the daemon's to say, as `flottille status` shows it:
     ///
@@ -270,10 +298,19 @@ impl Snapshot {
         }
         bell.sort_by_key(|item| item.at);
 
-        let mut trees: HashMap<&str, (bool, u64, usize)> = HashMap::new();
+        let ended = |agent: &Value| matches!(agent["state"].as_str(), Some("ended" | "failed"));
+        let final_ids: HashSet<&str> = agents
+            .iter()
+            .filter(|agent| ended(agent))
+            .filter_map(|agent| agent["id"].as_str())
+            .collect();
+        let mut trees: HashMap<&str, (bool, u64, usize, usize)> = HashMap::new();
         for agent in agents {
-            let root = root_of(&parents, agent["id"].as_str().unwrap_or_default());
-            let busy = matches!(agent["state"].as_str(), Some("starting" | "working"));
+            let id = agent["id"].as_str().unwrap_or_default();
+            let root = root_of(&parents, id);
+            // Nothing runs under an agent that ended: whatever its record still says.
+            let busy = matches!(agent["state"].as_str(), Some("starting" | "working"))
+                && !under_an_ended(&parents, &final_ids, id);
             let active = agent["active_at"]
                 .as_u64()
                 .unwrap_or_else(|| number(agent, "created_at"));
@@ -281,6 +318,7 @@ impl Snapshot {
             entry.0 |= busy;
             entry.1 = entry.1.max(active);
             entry.2 += 1;
+            entry.3 += usize::from(!ended(agent));
         }
         let running = list(answers.commands, "commands");
         let commands_of = |key: &str, name: &str| {
@@ -289,13 +327,25 @@ impl Snapshot {
                 .filter(|command| command[key].as_str() == Some(name))
                 .count()
         };
+        let name_of = |id: &str| {
+            let agent = agents.iter().find(|a| a["id"].as_str() == Some(id));
+            agent
+                .and_then(|a| a["title"].as_str())
+                .map(str::to_owned)
+                .or_else(|| answers.briefs.get(id).map(|brief| title_of(brief)))
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| format!("agent {id}"))
+        };
         let mut sessions: Vec<Session> = agents
             .iter()
             .filter(|agent| agent["parent"].is_null())
             .map(|agent| {
                 let id = text(agent, "id");
-                let (busy, active_at, size) = trees.get(id.as_str()).copied().unwrap_or_default();
-                let mark = if answers.needs_user.contains(&id) {
+                let (busy, active_at, size, live) =
+                    trees.get(id.as_str()).copied().unwrap_or_default();
+                let mark = if ended(agent) {
+                    None
+                } else if answers.needs_user.contains(&id) {
                     Some(AgentState::NeedsYou)
                 } else if busy {
                     Some(AgentState::Running)
@@ -313,10 +363,13 @@ impl Snapshot {
                     place: agent["workspace"].as_str().map(str::to_owned),
                     mark,
                     agents: size.max(1),
-                    ended: matches!(agent["state"].as_str(), Some("ended" | "failed")),
+                    live,
+                    resumable: agent["resumable"] == true,
+                    ended: ended(agent),
                     active_at,
                     created_at: number(agent, "created_at"),
                     commands: commands_of("root", &id),
+                    started_by: agent["launched_by"].as_str().map(name_of),
                     id,
                 }
             })
@@ -367,6 +420,7 @@ impl Snapshot {
             sessions,
             workspaces,
             bell,
+            project_changes: 0,
         }
     }
 
@@ -474,6 +528,30 @@ mod tests {
     }
 
     #[test]
+    fn a_child_that_ended_after_reporting_does_not_make_its_session_run() {
+        let mut child = agent("c1", Some("r1"), "ended", None);
+        child["state_reason"] = json!("it reported");
+        let snapshot = build(
+            json!({"agents": [agent("r1", None, "idle", None), child]}),
+            json!({"requests": []}),
+            &[],
+        );
+        assert_eq!(snapshot.sessions[0].mark, None);
+    }
+
+    #[test]
+    fn an_ended_session_has_no_mark_whatever_its_tree_still_says() {
+        let snapshot = build(
+            json!({"agents": [agent("r1", None, "ended", None),
+                agent("c1", Some("r1"), "working", None)]}),
+            json!({"requests": []}),
+            &["r1"],
+        );
+        assert!(snapshot.sessions[0].ended);
+        assert_eq!(snapshot.sessions[0].mark, None);
+    }
+
+    #[test]
     fn a_session_needs_the_user_when_the_daemon_says_its_root_does() {
         let agents = json!({"agents": [agent("r1", None, "idle", None)]});
         let said = build(agents.clone(), json!({"requests": []}), &["r1"]);
@@ -492,6 +570,34 @@ mod tests {
         );
         assert_eq!(snapshot.sessions[0].title, "agent r2");
         assert_eq!(snapshot.projects[0].workspaces, ["login"]);
+    }
+
+    #[test]
+    fn a_session_an_agent_started_keeps_its_title_and_names_the_agent_that_started_it() {
+        let mut started = agent("r2", None, "idle", None);
+        started["launched_by"] = json!("r1");
+        let mut child = agent("c1", Some("r1"), "idle", None);
+        child["title"] = json!("planner");
+        let mut by_child = agent("r3", None, "idle", None);
+        by_child["launched_by"] = json!("c1");
+        let snapshot = Snapshot::build(Answers {
+            projects: &json!({"projects": []}),
+            workspaces: &json!({"workspaces": []}),
+            agents: &json!({"agents": [agent("r1", None, "idle", None), started, child, by_child]}),
+            approvals: &json!({"requests": []}),
+            needs_user: &HashSet::new(),
+            questions: &HashMap::new(),
+            briefs: &HashMap::from([
+                ("r1".into(), "Lead the work".into()),
+                ("r2".into(), "Write the docs\nwith care".into()),
+            ]),
+            commands: &json!({"commands": []}),
+        });
+        let by = |id: &str| snapshot.session(id).unwrap().started_by.clone();
+        assert_eq!(snapshot.session("r2").unwrap().title, "Write the docs");
+        assert_eq!(by("r2").as_deref(), Some("Lead the work"));
+        assert_eq!(by("r3").as_deref(), Some("planner"));
+        assert_eq!(by("r1"), None, "a session the user started names nobody");
     }
 
     fn workspace_json(steps: Value) -> Value {

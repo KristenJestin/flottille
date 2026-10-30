@@ -12,7 +12,7 @@ A project is a set of repositories the user registered. You work in `main`, the 
 - Tasks: named lines. `tasks` lists them, `run` runs one or a line.
 - Commands: named instructions, sent as a message /name. A root edits them (`commands`) and sends one to a child with `agent_send`.
 - Rules: how the user wants you to work, already in your instructions. A root reads them with `project` and proposes a change with `set_rules`.
-- With a forge declared, `forge_read` reads a workspace's pull requests and `forge_write` opens or merges one or re-runs a failed pipeline. With a tracker, `ticket_read` reads a workspace's ticket or one named. A root creates workspaces with `workspace`; `workspace_remove` removes one. In `main` each acts on the workspace it names; `ticket_read` may name a ticket instead.
+- With a forge declared, `forge` lists, reads and writes pull requests; with a tracker, `tickets` lists, searches, reads and writes tickets (Jira only reads). `workspace` reads workspaces and removes yours; a root also creates them, and starts a session for the user with `agent_launch` and root set. In `main` each names the workspace it acts on.
 
 ## The gate
 

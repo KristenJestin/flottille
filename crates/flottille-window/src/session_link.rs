@@ -20,7 +20,7 @@ use flottille_core::protocol::Event;
 use futures::channel::mpsc::UnboundedSender;
 use serde_json::{Value, json};
 
-use crate::actions::Changes;
+use crate::actions::{Changes, RepositoryStatus};
 use crate::conversation::one_line;
 use crate::link::{Conn, Connect, Update, quiet_wait};
 use crate::runs::{CommandOutput, CommandRow};
@@ -309,6 +309,8 @@ pub struct PlaceFacts {
     pub forge_problem: Option<String>,
     /// The ticket it is linked to (a workspace).
     pub ticket: Option<TicketFacts>,
+    /// Where each of its repositories stands (a workspace).
+    pub statuses: Vec<RepositoryStatus>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -788,6 +790,7 @@ impl Link {
                 PlaceFacts {
                     forges,
                     ticket: ticket.as_ref().map(|(facts, _)| facts.clone()),
+                    statuses: RepositoryStatus::of_workspace(&shown),
                     repositories,
                     branch: shown["branch"].as_str().map(str::to_owned),
                     bases,

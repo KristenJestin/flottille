@@ -5,9 +5,10 @@
 
 use std::collections::HashMap;
 
+use flottille_ui::color::mix;
 use flottille_ui::{
     AgentState, Button, Card, Icon, ListRow, Modal, Pill, StateIcon, Status, Switch, Type, enter,
-    icon, palette,
+    hoverable, icon, palette, presence, presence_of, selectable,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -17,10 +18,11 @@ use gpui_kit::{
     TestSupportExt as _, WeakEntity, Window, div, px,
 };
 
-use crate::actions::{Changes, Command, Details};
+use crate::actions::{Changes, Command, Details, RepositoryStatus};
 use crate::composer::{Choice, Composer, agents_label};
 use crate::model::{Place, Preparation, ago};
-use crate::session::pull_row;
+use crate::repositories::ProjectRepositories;
+use crate::session::{pull_hover, pull_row};
 use crate::session_link::PullRequest;
 use crate::shell::{Selection, Shell, now_ms};
 use crate::tasks::ProjectTasks;
@@ -85,6 +87,8 @@ pub struct ProjectPage {
     new_workspace: Entity<NewWorkspace>,
     /// Its tasks, each with a Run button, and what the user ran.
     tasks: Entity<ProjectTasks>,
+    /// Its repositories, added and removed there.
+    repositories_section: Entity<ProjectRepositories>,
     narrow: bool,
     /// Nothing but `main`, and no session in it: the page says what to start with, instead of a
     /// section of one bare card. Kept here for the same reason as `places`.
@@ -108,6 +112,12 @@ impl ProjectPage {
         // Asked once the shell, which is making this page, is no longer being updated.
         let reading = tasks.clone();
         cx.defer(move |cx| reading.update(cx, |tasks, cx| tasks.read(cx)));
+        let repositories_section = {
+            let (shell, project) = (shell.clone(), name.clone());
+            cx.new(|_| ProjectRepositories::new(shell, project))
+        };
+        let reading = repositories_section.clone();
+        cx.defer(move |cx| reading.update(cx, |section, cx| section.read(cx)));
         Self {
             shell,
             name,
@@ -119,6 +129,7 @@ impl ProjectPage {
             composer,
             new_workspace,
             tasks,
+            repositories_section,
             narrow: false,
             empty: false,
             renders: 0,
@@ -136,6 +147,10 @@ impl ProjectPage {
 
     pub fn tasks(&self) -> &Entity<ProjectTasks> {
         &self.tasks
+    }
+
+    pub fn repositories(&self) -> &Entity<ProjectRepositories> {
+        &self.repositories_section
     }
 
     pub fn renders(&self) -> usize {
@@ -250,6 +265,16 @@ impl ProjectPage {
             if card.read(cx).pulls != pulls {
                 card.update(cx, |card, cx| {
                     card.pulls = pulls;
+                    cx.notify();
+                });
+            }
+            let statuses = match &card.read(cx).data.place {
+                None => Vec::new(),
+                Some(name) => details.statuses.get(name).cloned().unwrap_or_default(),
+            };
+            if card.read(cx).statuses != statuses {
+                card.update(cx, |card, cx| {
+                    card.statuses = statuses;
                     cx.notify();
                 });
             }
@@ -467,7 +492,16 @@ impl Render for ProjectPage {
                         ))
                         .child(grid)
                     })
-                    .child(div().mt(px(34.)).child(self.tasks.clone())),
+                    .child(enter(
+                        key("project-repositories"),
+                        5 + places,
+                        div().mt(px(34.)).child(self.repositories_section.clone()),
+                    ))
+                    .child(enter(
+                        key("tasks"),
+                        6 + places,
+                        div().child(self.tasks.clone()),
+                    )),
             )
     }
 }
@@ -489,6 +523,8 @@ pub struct PlaceCard {
     changes: Option<Changes>,
     /// Its repositories' pull requests, once the daemon said.
     pulls: Vec<PullRequest>,
+    /// Where each of its repositories stands, once the daemon said.
+    statuses: Vec<RepositoryStatus>,
     confirming: bool,
     busy: Option<Busy>,
     error: Option<SharedString>,
@@ -517,6 +553,7 @@ impl PlaceCard {
             },
             changes: None,
             pulls: Vec::new(),
+            statuses: Vec::new(),
             confirming: false,
             busy: None,
             error: None,
@@ -540,6 +577,10 @@ impl PlaceCard {
 
     pub fn pulls(&self) -> &[PullRequest] {
         &self.pulls
+    }
+
+    pub fn statuses(&self) -> &[RepositoryStatus] {
+        &self.statuses
     }
 
     pub fn error(&self) -> Option<&str> {
@@ -712,6 +753,58 @@ impl Render for PlaceCard {
                 .test_support()
         });
 
+        // Where each repository stands; it unfolds once the daemon said.
+        let statuses =
+            presence(
+                id("repositories-status"),
+                !self.statuses.is_empty(),
+                div()
+                    .px(px(14.))
+                    .pl(px(36.))
+                    .pb(px(10.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .children(self.statuses.iter().map(|status| {
+                        let label = repository_label(&self.project, &status.path);
+                        div()
+                            .id(ElementId::Name(
+                                format!("repository-status-{name}-{label}").into(),
+                            ))
+                            .flex()
+                            .flex_col()
+                            .mono(11.)
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(8.))
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(p.mute)
+                                            .child(SharedString::from(label.clone())),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .text_color(p.faint)
+                                            .child(SharedString::from(status.line())),
+                                    ),
+                            )
+                            .children(status.note.clone().map(|note| {
+                                div().text_color(p.mute).child(SharedString::from(note))
+                            }))
+                            .aria_label(SharedString::from(match &status.note {
+                                Some(note) => format!("{label} {} · {note}", status.line()),
+                                None => format!("{label} {}", status.line()),
+                            }))
+                            .test_support()
+                    })),
+            );
+
         // Each repository's pull request, opened in the browser on a click.
         let pulls = (!self.pulls.is_empty()).then(|| {
             let project = self.project.clone();
@@ -725,7 +818,7 @@ impl Render for PlaceCard {
                 .children(self.pulls.iter().map(|pull| {
                     let (shell, url) = (self.shell.clone(), pull.url.clone());
                     let label = repository_label(&project, &pull.repository);
-                    pull_row(
+                    let row = pull_row(
                         ElementId::Name(format!("pull-{name}-{label}").into()),
                         pull,
                         cx,
@@ -733,8 +826,8 @@ impl Render for PlaceCard {
                     .child(div().text_color(p.faint).child(SharedString::from(label)))
                     .on_click(move |_, _, cx| {
                         shell.update(cx, |shell, _| shell.open_link(&url)).ok();
-                    })
-                    .test_support()
+                    });
+                    pull_hover(row, cx)
                 }))
         });
 
@@ -877,22 +970,23 @@ impl Render for PlaceCard {
             .border_color(p.line)
             .rounded_b(px(12.))
             .text_size(px(12.5))
-            .text_color(p.faint)
             .when(ready, |d| {
-                d.hover(|d| d.bg(p.hover).text_color(p.text))
-                    .on_click(move |_, window, cx| {
-                        let choice = choice.clone();
-                        shell
-                            .update(cx, |shell, cx| {
-                                shell.compose_in(&project, choice, window, cx)
-                            })
-                            .ok();
-                    })
+                d.on_click(move |_, window, cx| {
+                    let choice = choice.clone();
+                    shell
+                        .update(cx, |shell, cx| {
+                            shell.compose_in(&project, choice, window, cx)
+                        })
+                        .ok();
+                })
             })
             .when(!ready, |d| d.opacity(0.5))
             .child(icon(Icon::Plus).size(px(12.)).text_color(p.faint))
-            .child(SharedString::from(format!("New session in {name}")))
-            .test_support();
+            .child(SharedString::from(format!("New session in {name}")));
+        let add = hoverable(add, move |d, t| {
+            let t = if ready { t } else { 0.0 };
+            d.bg(p.hover.opacity(t)).text_color(mix(p.faint, p.text, t))
+        });
 
         div()
             .id(card_id(&place))
@@ -901,6 +995,7 @@ impl Render for PlaceCard {
                 Card::new()
                     .title(title)
                     .children_opt(meta.map(|meta| div().pt(px(10.)).child(meta)))
+                    .child(statuses)
                     .children_opt(pulls)
                     .children_opt(status)
                     .children_opt(busy)
@@ -959,6 +1054,11 @@ pub struct NewWorkspace {
     default_set: Option<Vec<String>>,
     /// The repositories chosen; the project's default set until one is changed.
     chosen: Vec<String>,
+    /// Each repository's base rule, once the daemon said: what its base field proposes.
+    rules: HashMap<String, Vec<String>>,
+    /// The base branch typed for each repository, made when its row is first drawn: the rule
+    /// when empty. With the rule its placeholder says.
+    bases: HashMap<String, (Entity<InputState>, String)>,
     branch: Entity<InputState>,
     offline: bool,
     /// Drawn as the dashed card of the grid; not when the page's empty state carries the
@@ -1045,6 +1145,8 @@ impl NewWorkspace {
             repositories: Vec::new(),
             default_set: None,
             chosen: Vec::new(),
+            rules: HashMap::new(),
+            bases: HashMap::new(),
             branch,
             offline: false,
             framed: true,
@@ -1075,6 +1177,55 @@ impl NewWorkspace {
 
     pub fn chosen(&self) -> &[String] {
         &self.chosen
+    }
+
+    /// The field a repository's base branch is typed in, once its row was drawn.
+    pub fn base_field(&self, path: &str) -> Option<&Entity<InputState>> {
+        self.bases.get(path).map(|(field, _)| field)
+    }
+
+    /// What a repository's base field proposes while it is empty, once drawn.
+    pub fn base_said(&self, path: &str) -> Option<&str> {
+        self.bases.get(path).map(|(_, said)| said.as_str())
+    }
+
+    /// Each repository's base rule, as the daemon read the project.
+    pub fn set_rules(&mut self, rules: HashMap<String, Vec<String>>, cx: &mut Context<Self>) {
+        if self.rules != rules {
+            self.rules = rules;
+            cx.notify();
+        }
+    }
+
+    /// What a repository's base field says when it is empty: the project's rule.
+    fn rule_said(&self, path: &str) -> String {
+        match self.rules.get(path).map(Vec::as_slice) {
+            Some([first, rest @ ..]) => {
+                let rest: String = rest.iter().map(|b| format!(", else {b}")).collect();
+                format!("base: {first}{rest}")
+            }
+            _ => "base: the project's rule".to_owned(),
+        }
+    }
+
+    /// The base field of `path`, made the first time, its placeholder kept to the rule.
+    fn base_of(
+        &mut self,
+        path: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<InputState> {
+        let said = self.rule_said(path);
+        let (field, shown) = self.bases.entry(path.to_owned()).or_insert_with(|| {
+            let field = cx.new(|cx| crate::project_settings::styled_input("", window, cx));
+            (field, String::new())
+        });
+        let field = field.clone();
+        if *shown != said {
+            *shown = said.clone();
+            field.update(cx, |field, cx| field.set_placeholder(said, window, cx));
+        }
+        field
     }
 
     pub fn offline(&self) -> bool {
@@ -1221,6 +1372,15 @@ impl NewWorkspace {
             .default_set
             .clone()
             .unwrap_or_else(|| self.repositories.clone());
+        // The base typed for a repository taken; the others keep their rule.
+        let bases = self
+            .chosen
+            .iter()
+            .filter_map(|path| {
+                let typed = self.bases.get(path)?.0.read(cx).value().trim().to_owned();
+                (!typed.is_empty()).then(|| (path.clone(), typed))
+            })
+            .collect();
         let command = Command::CreateWorkspace {
             project: self.project.clone(),
             name,
@@ -1229,6 +1389,7 @@ impl NewWorkspace {
             repositories: (self.chosen != default && !self.chosen.is_empty())
                 .then(|| self.chosen.clone()),
             branch: (!branch.is_empty()).then_some(branch),
+            bases,
             offline: self.offline,
         };
         self.shell
@@ -1258,6 +1419,9 @@ impl NewWorkspace {
                     .update(cx, |ticket, cx| ticket.set_value("", window, cx));
                 self.branch
                     .update(cx, |branch, cx| branch.set_value("", window, cx));
+                for (field, _) in self.bases.values() {
+                    field.update(cx, |field, cx| field.set_value("", window, cx));
+                }
                 self.preview = None;
                 self.offline = false;
                 self.chosen = self
@@ -1306,7 +1470,7 @@ impl NewWorkspace {
 }
 
 impl Render for NewWorkspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let card = div()
             .id("new-workspace-card")
@@ -1321,9 +1485,7 @@ impl Render for NewWorkspace {
             .flex_col()
             .items_center()
             .justify_center()
-            .text_color(p.faint)
             .text_size(px(13.))
-            .hover(|d| d.bg(p.hover).text_color(p.text))
             .child(icon(Icon::Plus).size(px(18.)).text_color(p.faint))
             .child(
                 div()
@@ -1334,8 +1496,7 @@ impl Render for NewWorkspace {
                     .child("New workspace"),
             )
             .child("a branch of its own in every repository")
-            .on_click(cx.listener(|this, _, window, cx| this.open(window, cx)))
-            .test_support();
+            .on_click(cx.listener(|this, _, window, cx| this.open(window, cx)));
         let creating = self.creating.is_some();
         let this = cx.entity().downgrade();
         let modal = Modal::new("new-workspace-modal", "New workspace")
@@ -1380,39 +1541,80 @@ impl Render for NewWorkspace {
                     .test_support(),
             )
             .children(self.preview_line(cx))
-            .when(self.repositories.len() > 1, |d| {
-                d.child(
-                    div()
-                        .id("new-workspace-repositories")
-                        .flex()
-                        .flex_wrap()
-                        .gap(px(6.))
-                        .children(self.repositories.iter().map(|path| {
-                            let taken = self.chosen.contains(path);
-                            let toggled = path.clone();
-                            div()
-                                .id(ElementId::Name(format!("new-workspace-take-{path}").into()))
-                                .h(px(24.))
-                                .px(px(8.))
-                                .rounded(px(6.))
-                                .border_1()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .mono(11.5)
-                                // By shape as well as colour: a tick when it is taken.
-                                .when(taken, |d| {
-                                    d.bg(p.card).border_color(p.focus_line).text_color(p.text)
-                                })
-                                .when(!taken, |d| d.border_color(p.line).text_color(p.faint))
-                                .child(if taken { "✓" } else { "·" })
-                                .child(SharedString::from(repository_label(&self.project, path)))
-                                .on_click(cx.listener(move |this, _, _, cx| {
+            .child({
+                // A row per repository: taken or not (when there is a choice), and its base.
+                let several = self.repositories.len() > 1;
+                let rows: Vec<_> = self
+                    .repositories
+                    .clone()
+                    .into_iter()
+                    .map(|path| {
+                        let taken = self.chosen.contains(&path);
+                        let base = self.base_of(&path, window, cx);
+                        let toggled = path.clone();
+                        let chip = div()
+                            .id(ElementId::Name(format!("new-workspace-take-{path}").into()))
+                            .flex_none()
+                            .w(px(130.))
+                            .h(px(28.))
+                            .px(px(8.))
+                            .rounded(px(6.))
+                            .border_1()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .mono(11.5)
+                            // By shape as well as colour: a tick when it is taken.
+                            .child(if taken { "✓" } else { "·" })
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(SharedString::from(repository_label(
+                                        &self.project,
+                                        &path,
+                                    ))),
+                            )
+                            .when(several, |chip| {
+                                chip.on_click(cx.listener(move |this, _, _, cx| {
                                     this.toggle_repository(&toggled, cx)
                                 }))
-                                .test_support()
-                        })),
-                )
+                            });
+                        let chip = selectable(chip, taken, move |d, hover, taken| {
+                            d.bg(mix(p.hover.opacity(hover), p.card, taken))
+                                .border_color(mix(p.line, p.focus_line, taken))
+                                .text_color(mix(p.faint, p.text, taken))
+                        });
+                        let field = div()
+                            .id(ElementId::Name(format!("new-workspace-base-{path}").into()))
+                            .h(px(28.))
+                            .px(px(10.))
+                            .rounded(px(8.))
+                            .bg(p.field)
+                            .border_1()
+                            .border_color(p.line2)
+                            .flex()
+                            .items_center()
+                            .mono(12.)
+                            .child(Input::new(&base))
+                            .test_support();
+                        div().flex().items_start().gap(px(8.)).child(chip).child(
+                            div().flex_1().min_w_0().child(presence(
+                                ElementId::Name(format!("new-workspace-base-{path}-block").into()),
+                                taken,
+                                field,
+                            )),
+                        )
+                    })
+                    .collect();
+                div()
+                    .id("new-workspace-repositories")
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .children(rows)
             })
             .child(
                 div()
@@ -1442,15 +1644,18 @@ impl Render for NewWorkspace {
                     )
                     .child(OFFLINE),
             )
-            .when_some(self.error.clone(), |d, error| {
-                d.child(
+            .child(presence_of(
+                "new-workspace-error-block",
+                self.error.clone(),
+                move |error| {
                     div()
                         .id("new-workspace-error")
                         .text_size(px(12.5))
                         .text_color(p.fail)
-                        .child(error),
-                )
-            })
+                        .child(error)
+                        .into_any_element()
+                },
+            ))
             .action(if creating {
                 div()
                     .mono(11.5)
@@ -1469,6 +1674,9 @@ impl Render for NewWorkspace {
                 .child(modal)
                 .into_any_element();
         }
-        card.child(modal).into_any_element()
+        hoverable(card.child(modal), move |d, t| {
+            d.bg(p.hover.opacity(t)).text_color(mix(p.faint, p.text, t))
+        })
+        .into_any_element()
     }
 }

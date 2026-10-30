@@ -46,6 +46,52 @@ measured on a 16-core Linux machine with a 165 Hz screen. Keep them; they cost a
   `Arc<[T]>` replaced on change, rows as their own views, and append without rebuilding the
   others.
 
+## Motion in the window: the rule and its checklist
+
+The rule (`AGENTS.md`, `docs/design.md` §10): **everything that moves is animated**, with the
+durations and the easing of `crates/flottille-ui/src/motion.rs` (`HOVER` 140 ms, `PRESS` 90 ms,
+`ENTER` 240 ms, `PANEL` 280 ms, a stagger of 70 ms for at most eight siblings, a rise of 6 px).
+`flottille-ui` has one helper for each thing that moves; a screen uses them and invents none.
+
+| What moves | The helper |
+|---|---|
+| a button, a list row, a tree row, a menu item | the component itself (`Button`, `ListRow`, `TreeRow`, `MenuItem`): hover, press, selection fade |
+| any other element that is clicked (a link, a card, a chip, a toggle) | `hoverable(element, paint)`: `paint(element, t)` gets the hover `t`, 0 to 1; it sets a background with `p.hover.opacity(t)`, an ink with `mix(from, to, t)` |
+| the same element when it can also be the chosen one (a selected row, a taken chip) | `selectable(element, chosen, paint)`: `paint` also gets how far it is the chosen one; a choice among buttons is `Button::choice` |
+| a state with no pointer: a focus ring, a highlight, a button enabled or not | `fade(id, on, duration, window, cx)` (`Button` fades its own enabled state) |
+| a choice among a few words (Ask \| Auto) | `Segmented`: its highlight slides to the one clicked, the inks fade along it |
+| a chevron | `turning(id, open, window, cx)` |
+| a page's blocks, a card, anything that shows once | `enter(id, index, element)` |
+| a block that comes and goes while its view stays (an empty-list line, the fields a choice needs, a body that unfolds) | `presence(id, present, element).gap(..)`: build it on every frame, outside a `when`; `.gap` is the gap the parent flex puts between its children, which folds with the block |
+| a line that goes away with its text (an error, a refusal) | `presence_of(id, Option<line>, build)`: it still shows the last line while it folds |
+| the rows of a list that comes from elsewhere | `Listing::sync` on each render, each row drawn inside an `Item`: it unfolds when it arrives, folds away when it leaves (it stays drawn until then), slides when it moves |
+| a level that folds | `Fold` (a view) or `fold_frame` |
+| a panel over the page (a menu, a drawer, a modal, the bell's list) | rises a little and fades in, fades out, and stays drawn until it has |
+
+Never in a screen: `.hover(..)` or `.group_hover(..)` (they switch at once; `tests/the_rule.rs`
+of the window crate refuses them), a state that changes by swapping one element for another with
+nothing between (wrap what appears in `enter`, `presence` or an `Item`), a `Motion` kept by hand
+when a helper above does it.
+
+**The guard.** gpui-kit's test support (`test_support()`, `window.find(..)`) says an element's
+role, label, bounds and focus, not which listeners it has: no test can walk a view and ask each
+interactive element for its hover transition. What a test can hold is held: the instant hover
+style is refused in every source of the window (`crates/flottille-window/tests/the_rule.rs`), each
+helper has its own scenarios (`crates/flottille-ui/tests/everything_moves.rs`: a hover fades and
+stops, a row arrives, goes and slides, a block folds, reduced motion jumps, nothing is drawn once
+it arrived), and the rest is this checklist, which each window pull request ticks in its
+description:
+
+- [ ] every element that is clicked fades its hover (a component, `hoverable` or `selectable`);
+- [ ] every state that changes (selected, chosen, focused, open, enabled) moves, not jumps;
+- [ ] everything that appears, leaves or changes size is an `enter`, a `presence`, an `Item` or a
+      `Fold`, and the gap around it goes with it;
+- [ ] every list that gains, loses or reorders rows is a `Listing` of `Item`s;
+- [ ] every new page, section or panel enters (staggered), and every overlay rises and fades;
+- [ ] reduced motion jumps (the helpers do it; a `Motion` kept by hand must pass `reduce`);
+- [ ] nothing is redrawn at rest: a scenario ends on `pending_frames == 0`;
+- [ ] the pull request lists each element it animated, and a capture or a scenario shows one.
+
 ## Pitfalls
 
 - `use gpui_kit::prelude::*` brings `ParentElement`, `StatefulInteractiveElement`, `AppContext`,

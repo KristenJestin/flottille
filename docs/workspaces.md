@@ -10,7 +10,7 @@ multi-repository case (`docs/reference/multi-repo-case.md`) needs.
 
 | Command | |
 |---|---|
-| `flottille workspace create <project> <name> [--repositories a,b] [--branch <branch>] [--offline]` | Makes the worktrees and answers; the rest of the setup goes on in the background. Fails when the preparation already failed. |
+| `flottille workspace create <project> <name> [--repositories a,b] [--branch <branch>] [--base <repository>=<branch>] [--offline]` | Makes the worktrees and answers; the rest of the setup goes on in the background. Fails when the preparation already failed. |
 | `flottille workspace list [<project>]` | The workspaces with their state. |
 | `flottille workspace show <project> <name>` | Its repositories, their bases, and each step with its state; a failure with its last lines. |
 | `flottille workspace ticket <project> <name> <ticket>` | Links it to a ticket (`#123` or a Jira key), or to none with `--clear` (`docs/tickets.md`). `create` takes `--ticket` too. |
@@ -42,15 +42,17 @@ The project's default set (`default_repositories`, all of them unless the file s
 or `--repositories`. They come in dependency order, leaves first, with the root repository first
 of all.
 
-The window's New workspace form offers the same: the project's repositories as chips, the default
-set taken (at least one stays taken), a branch field (`<branch prefix>/<name>` when empty), the
-offline switch (`--offline`), and the optional ticket, previewed as it is typed
-(`docs/tickets.md`).
+The window's New workspace form offers the same: a row per repository of the project, taken or
+not (the default set taken, at least one stays taken), with the base branch it starts from (its
+rule when the field is left empty, which the field says; `--base`), a branch field (`<branch
+prefix>/<name>` when empty), the offline switch (`--offline`), and the optional ticket, previewed
+as it is typed (`docs/tickets.md`). The agent's `workspace create` takes `repositories` the same
+way, each repository on its rule.
 
 ## The base of each branch
 
-For each repository, before anything is written, the base rule (`base = ["develop", "main"]`) is
-read against the remote:
+For each repository, before anything is written, the base rule (`base = ["develop", "main"]`), or
+the one branch chosen for it (`--base`, the form's base field), is read against the remote:
 
 1. `git ls-remote --heads` lists the remote's branches;
 2. every branch of the rule that is there is fetched into its tracking ref
@@ -58,11 +60,22 @@ read against the remote:
    user's;
 3. the first one of the rule is the base, at the commit its tracking ref now holds.
 
-**If the fetch fails, nothing is created**: the request is refused with git's reason. A stale cache
-once based a branch on `main` instead of `develop`; a fetch that fails loudly is what prevents it.
+**A fetch is never a requirement.** When the repository has no such remote, when listing or
+fetching it fails (a network down, an address that leads nowhere), or when none of the rule's
+branches is on it, the base is the first branch of the rule the repository has itself
+(`refs/heads/<b>`), as it is, and the creation says why in one line, the base's `note`: `no remote
+origin: started from the local main`. When the listing or the fetch fails, the same lookup as
+`--offline` comes first (the first branch of the rule with a tracking ref, as last fetched), then
+the local branches: `origin could not be fetched (<git's reason>): started from origin/develop as
+last fetched`, `…: started from the local main`. The CLI prints it on the repository's line, the agent's `workspace create`
+says it, and the window shows it under the repository on the workspace's card and in the rail. A
+stale cache once based a branch on `main` instead of `develop`: the line is there so that a base
+taken without a fetch is never silent. Only a repository with none of its base branches, on the
+remote or of its own, is refused.
+
 With `--offline`, nothing is fetched: the first branch of the rule that has a tracking ref is the
 base, as it is, and its age is said (from git's reflog of the tracking ref; unknown when git kept
-none).
+none); with no tracking ref at all, the local branch, as above.
 
 ## Preparation
 
@@ -106,6 +119,14 @@ through the agents' gate.
 When the daemon starts, every workspace still `preparing` goes on by itself. A failed one waits
 for the user.
 
+### At a glance
+
+`workspace.show` says, for each repository, the branch its worktree is on, its commits ahead of
+its base and its files not committed (`docs/protocol.md`). The window shows them with the setup
+steps played in it (`setup 2/3`), one line per repository, on the workspace's card of the project
+page and in the Workspace section of a session's rail: `app/login · 2 ahead of develop · 3
+uncommitted · setup 2/3`, and under it the base's `note` when it started from a local branch.
+
 ## Templates and the environment
 
 The words of a `run` line and the project's variables are templates:
@@ -148,7 +169,9 @@ Refused while the workspace is being prepared. Then nothing is touched unless:
   is not committed`); the links Flottille made and the worktrees standing inside the root one are
   not work;
 - in each worktree made, `git log HEAD --not --remotes` shows no commit (`<repository> has commits
-  on no remote: <hash> <subject>, …`);
+  on no remote: <hash> <subject>, …`); in a repository with no remote at all, no commit is on no
+  other branch (`git log HEAD --not --exclude=<branch> --branches`: `<repository> has commits on no
+  other branch: …`), since its work stays on its own branches;
 - outside the worktrees made, the workspace folder holds nothing but the links Flottille made and
   folders holding nothing else (`<path> is in no worktree`): no `git status` sees a file written in
   the folder of a workspace that does not take the root repository, nor in a repository folder
@@ -159,7 +182,7 @@ worktree, the deepest first, with `git worktree remove` (never `--force`), then 
 prune`; the folder is removed (links as links, never followed); Flottille checks the folder is gone
 and that `git worktree list` no longer lists it, then forgets the workspace. Its branches are kept.
 
-An agent in a workspace removes its own workspace the same way, with the tool `workspace_remove`
+An agent in a workspace removes its own workspace the same way, with `workspace` `remove`
 (a call to judge), and then deletes, in each repository, the workspace's branch when
 it holds no commit of its own (every commit of it is in its base's tracking ref): an empty branch.
 A branch with commits is kept (`docs/commands.md`). It is refused, nothing touched, while the

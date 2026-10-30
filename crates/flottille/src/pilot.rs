@@ -110,8 +110,10 @@ const TOOLS: [Definition; 11] = [
         title: "Make a workspace",
         description: "Makes a workspace for a piece of work: fetches the base of each \
             repository and makes a worktree on a new branch; the project's setup then goes on \
-            in the background (workspaces_list says when it is ready). Refused when the name \
-            or the branch is taken, or a fetch fails: nothing is made then.",
+            in the background (workspaces_list says when it is ready). A repository with no \
+            remote, or whose fetch fails, starts from the tracking ref as last fetched or from \
+            its own branch, and the answer says so. Refused when the name or the branch is \
+            taken: nothing is made then.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -121,6 +123,7 @@ const TOOLS: [Definition; 11] = [
                 "name": {"type": "string", "description": "The workspace's name: letters, digits, - and _."},
                 "repositories": {"type": "array", "items": {"type": "string"}, "description": "The repositories it takes, by path; the project's default set when left out."},
                 "branch": {"type": "string", "description": "<branch prefix>/<name> when left out."},
+                "bases": {"type": "object", "additionalProperties": {"type": "string"}, "description": "The base branch of a repository it takes, by path, in place of the repository's rule."},
                 "offline": {"type": "boolean", "description": "Fetch nothing: start from the tracking refs as they are."}
             }, "required": ["project", "name"], "additionalProperties": false})
         },

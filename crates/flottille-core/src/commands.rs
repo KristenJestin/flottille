@@ -112,7 +112,7 @@ none for the others. You change no file and make no commit.
    - uncommitted work: `git status --porcelain`;
    - commits on no remote: `git log --oneline HEAD --not --remotes`;
    - commits ahead of its base: `git log --oneline <remote>/<base>..HEAD`;
-   - its pull request, if it has one already: `forge_read`.
+   - its pull request, if it has one already: `forge` `show`.
    Send the report to the user with `ask_user`: one short block per repository, then the exact
    list of what you will do: which branch you push where, which pull request you open, with its
    title.
@@ -121,9 +121,9 @@ none for the others. You change no file and make no commit.
 3. Otherwise, for each repository with commits ahead of its base and no open pull request, in the
    order of the list:
    - push its branch: `git push <remote> <branch>`, in that repository;
-   - open its pull request: `forge_write` with `pr-create`. Its title follows the project's
+   - open its pull request: `forge` `create`. Its title follows the project's
      format when one is given above, else says in one line what the change does; its body says
-     what changed and why, in a few lines drawn from the commits and the ticket (`ticket_read`).
+     what changed and why, in a few lines drawn from the commits and the ticket (`tickets` `show`).
    Each of these may be held for the user's approval: that approval is their confirmation of that
    one operation, so do not ask for it again, and never request anything the report did not show.
    A repository with no commit of its own gets nothing.
@@ -136,7 +136,7 @@ dependency levels above: a level is merged only once every level before it is me
 follows its merges is done. The repositories of one level are merged together.
 
 1. Check everything before merging anything. For each repository with commits of its own, read
-   its pull request (`forge_read`): its review, its comments and reviews, its checks. Each of these
+   its pull request (`forge` `show`): its review, its comments and reviews, its checks. Each of these
    blocks the stack: no pull request, checks failing or still running, a review asking for
    changes, a comment or a review left unanswered. Send the user the state of every pull request
    in one `ask_user`, what blocks first. While anything blocks, stop there, unless the user waives
@@ -148,11 +148,11 @@ follows its merges is done. The repositories of one level are merged together.
      <remote>/<base>`, the project's checks for it (its tasks, `tasks` and `run`), then `git push
      --force-with-lease <remote> <branch>`, and its checks are read again. A conflict you cannot
      resolve with certainty is `git rebase --abort` and a question to the user;
-   - merge the level's pull requests with `forge_write` `pr-merge-squash`, one after the other;
+   - merge the level's pull requests with `forge` `merge`, one after the other;
    - before the next level, wait for what the project says follows a merge (its instructions, its
      references): the pipelines of the bases, the release of a library, a version to bump in its
      consumers. A pipeline that failed for a reason outside the change (a runner, the network) is
-     re-run once with `forge_write` `pipeline-rerun`; one that fails again, or fails because of the
+     re-run once with `forge` `checks`; one that fails again, or fails because of the
      change, stops the stack.
    Nothing waits inside a tool call. When you must wait for something outside (a pipeline, a
    release), tell the user with `ask_user` what you wait for and where to see it, and end your
@@ -170,7 +170,7 @@ Close this workspace: check that nothing in it would be lost, then remove it.
    - uncommitted work: `git status --porcelain`;
    - commits on no remote: `git log --oneline HEAD --not --remotes`;
    - commits of its own: `git log --oneline <remote>/<base>..HEAD`;
-   - its pull request: `forge_read`.
+   - its pull request: `forge` `show`.
 2. Then, for each repository:
    - uncommitted work or commits on no remote: the closing stops;
    - no commit of its own: its branch is empty, and Flottille deletes it with the workspace;
@@ -179,7 +179,7 @@ Close this workspace: check that nothing in it would be lost, then remove it.
 3. If the closing stops, change nothing: send the user (`ask_user`) the audit, what keeps the
    workspace open and what they can do (commit and push, merge the pull request, or open it
    first), then `report`.
-4. Otherwise call `workspace_remove`. Flottille checks again and refuses, naming what would be
+4. Otherwise call `workspace` `remove`. Flottille checks again and refuses, naming what would be
    lost: then stop, and say so. Once it is removed there is nothing left to work in: `report` at
    once, with the audit, what was removed, and what is kept (the branches with commits stay in
    the repositories and on their remotes).";

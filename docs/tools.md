@@ -4,11 +4,11 @@ The tools of the agents Flottille runs, and the MCP server that serves them: the
 `docs/design.md` §1. It follows `docs/reference/hemera.md` §3, with the rules of
 `docs/reference/mcp.md` §4 where they differ. A session lists the tools of its agent, which
 depend on what it can do (`docs/agents.md`): the file and command tools below for every agent,
-`skill_read`, then `forge_read` and `forge_write` for every agent whose project's repositories
-declare a forge, `ticket_read` for every agent whose project declares a tracker, in `main` as in a
-workspace, and `workspace_remove` for every agent (a tool that could only refuse is not listed;
-what each may do is the gate's business, not the list's),
-`skills`, `commands` and `project` for a root (below, "The project"),
+`skill_read`, then `forge` for every agent whose project's repositories declare a forge,
+`tickets` for every agent whose project declares a tracker, in `main` as in a workspace, and
+`workspace` for every agent (a tool that could only refuse is not listed; what each may do is the
+gate's business, not the list's), `skills`, `commands`, `setup` and `project` for a root (below,
+"The project"),
 and the tree's tools (`agent_*`, `report`, `ask_user` or `ask_parent`,
 `approval_answer`).
 
@@ -287,21 +287,59 @@ pending requests.
 
 | Tool | |
 |---|---|
-| `forge_read {workspace?, repository?, detail? short \| full}` | The pull request of a workspace's branch in each of its repositories, or the one named (`workspace` names the workspace: the agent's own when left out, required in `main`, where `refused: this agent works in main, which has no workspace of its own: name the workspace forge_read acts on …` lists the project's): number, state, base, link, review, checks with their states, and how many comments and reviews it has (`comments: 2, read them with forge_read {"detail": "full"}`); `detail full` gives their texts, cut and under the result limit. Read only, through the user's own `gh`, run by the daemon; an agent has no forge sign-in of its own. A repository the workspace does not take is refused (`refused: X is not a repository of this agent's workspace: it has …`). Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace; an agent in a workspace that names another workspace than its own is refused. |
+| `forge {action, workspace?, repository?, number?, state?, branch?, detail?, title?, body?, draft?, waive?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
 
-| `forge_write {workspace?, action, repository, title?, body?, draft?, waive?}` | Opens the pull request of a workspace's branch (named as for `forge_read`) (`pr-create`, with the project's reviewers), merges it by squash (`pr-merge-squash`; refused while its checks fail or run or a review asks for changes, unless `waive` gives the user's words, which holds the merge for their approval) or re-runs the failed jobs of its last commit's pipelines (`pipeline-rerun`), in one of the workspace's repositories, through the user's own `gh` run by the daemon (`docs/commands.md`, "`forge_write`"). Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `pr-create` and of `pr-merge-squash`. |
+- **The repositories** are those of the agent's place: its workspace's, or the project's in
+  `main`. One the place does not take is refused (`refused: X is not a repository of this
+  agent's place: it has …; forge acts only on those`), and nothing is asked of the forge.
+- **`list {repository?, state?, branch?}`**: the pull requests of each repository, or of the one
+  named, a line each (`- #12 open, app/login into main: Add the login page  <link>`): `state` is
+  `open` (the default), `closed`, `merged` or `all`, `branch` keeps those of one source branch;
+  the newest 100 of each. Bitbucket lists by state and the branch is picked from them
+  ([`forges.md`](forges.md), "Bitbucket").
+- **`show {workspace?, repository?, detail?}`**: the pull request of a workspace's branch in each
+  of its repositories, or the one named (`workspace` names the workspace: the agent's own when
+  left out, required in `main`, where `refused: this agent works in main, which has no workspace
+  of its own: name the workspace forge acts on …` lists the project's; an agent in a workspace
+  that names another is refused): number, state, base, link, review, checks with their states,
+  and how many comments and reviews it has (`comments: 2, read them with forge {"action":
+  "show", "workspace": "login", "detail": "full"}`); `detail full` gives their texts, cut and
+  under the result limit. **`show {number, repository?, detail?}`**: that pull request of a
+  repository of the place, the same way; `repository` is needed when the place has several.
+- **`create`, `merge`, `checks` `{workspace?, repository, …}`**: opens the pull request of a
+  workspace's branch (`title`, `body`, `draft`, with the project's reviewers), merges it by squash
+  (refused while its checks fail or run or a review asks for changes, unless `waive` gives the
+  user's words, which holds the merge for their approval), or re-runs the failed jobs of its last
+  commit's pipelines (`docs/commands.md`, "`forge`").
+- **`comment {number, repository?, body}`** posts a comment on a pull request of a repository of
+  the place; **`edit {number, repository?, title?, body?}`** changes its title or description, at
+  least one of them (`gh pr comment`, `gh pr edit`; `bkt pr comment --text`, `bkt pr edit --title
+  --description`). A `title` on `comment` is refused before anything is asked (`refused: forge
+  comment takes no title: title is for edit and create`).
 
-`forge_read` goes through the gate like every call, which allows it; a `forge_write` call is to
-judge, and one that waives the checks base.
+`list` and `show` go through the gate like every call, which allows them; `create`, `comment`,
+`edit`, `merge` and `checks` are to judge, and a merge that waives the checks base. A write is
+done only once the repository's remote is checked to lead where its forge is declared. **What a
+write posts is shown whole**: its request says `Its title: …` and `Its body: …` in full (the
+arguments recorded are cut at 500 characters), and the judge is given them whole. A title or a
+body longer than the 8,000 characters the judge is given whole is refused (`refused: the body is
+longer than the 8000 characters the user and the judge are shown whole (…): shorten it`); one
+that holds what the masking takes for a secret makes the write base (`its body holds what looks
+like a secret: the card shows it masked, and it is sent as it is written`), since the card shows
+it masked and the forge gets it as written.
+
+Until #141 the reads were `forge_read` and the writes `forge_write` (`pr-create`,
+`pr-merge-squash`, `pipeline-rerun`). For one release a call under an old name is the new
+action's, and the store renamed them in the agents' fixed lists and their pending requests.
 
 ## The workspace
 
 | Tool | |
 |---|---|
-| `workspace {action: list \| show \| create \| prepare \| link_ticket, name?, repositories?, ticket?}` | The project's workspaces, as the window manages them (`docs/workspaces.md`). `list` gives each one's state, branch, repositories and ticket; `show {name?}` one whole, each step of its preparation with its state and why a failed one failed. `create {name, repositories?, ticket?}` makes one as `workspace.create` does: its worktrees, answered once they are made, then its setup in the background. `prepare {name?}` resumes a failed preparation (`workspace.prepare`); `link_ticket {name?, ticket}` links its ticket (`workspace.link_ticket`). `name` is the agent's own workspace when left out, but for `create`; in `main` it names one. Only a root has it: a child is refused (`refused: the agent the user talks to manages the project's workspaces; … ask your parent (ask_parent)`). |
-| `workspace_remove {workspace?}` | Removes a workspace, the agent's own when `workspace` is left out and the one named in `main`, where it is required, as `flottille workspace remove` does (`docs/workspaces.md`, "Removal"): refused, nothing touched, while a repository holds uncommitted work or commits on no remote, or while another agent than the caller's tree works in the workspace or a command run not the tree's own runs there (`refused: workspace … is not removed, nothing was touched: the agent …, outside this agent's tree, works in it…`), each named; then deletes, in each repository, the workspace's branch when it holds no commit of its own (every commit of it is in its base's tracking ref), and keeps the others. Every agent has it; an agent in a workspace removes only its own; each call is to judge. |
+| `workspace {action: list \| show \| create \| prepare \| link_ticket \| remove, name?, repositories?, ticket?}` | The project's workspaces, as the window manages them (`docs/workspaces.md`). `list` gives each one's state, branch, repositories and ticket; `show {name?}` one whole, each step of its preparation with its state and why a failed one failed. `create {name, repositories?, ticket?}` makes one as `workspace.create` does: its worktrees, answered once they are made, then its setup in the background. `prepare {name?}` resumes a failed preparation (`workspace.prepare`); `link_ticket {name?, ticket}` links its ticket, and unlinks it with `ticket: null` (`workspace.link_ticket`). `name` is the agent's own workspace when left out, but for `create`; in `main` it names one. Every agent has it. A child reads the workspaces and removes its own; its other writes are refused (`refused: the agent the user talks to manages the project's workspaces; … ask your parent (ask_parent)`). |
+| `remove {name?}` | Removes a workspace, the agent's own when `name` is left out and the one named in `main`, where it is required, as `flottille workspace remove` does (`docs/workspaces.md`, "Removal"): refused, nothing touched, while a repository holds uncommitted work or commits on no remote, or while another agent than the caller works in the workspace, of its tree or not, or a command run not the tree's own runs there (`refused: workspace … is not removed, nothing was touched: the agent …, outside this agent's tree, works in it…`, `the agent …, of this agent's tree, works in it`), each named; then deletes, in each repository, the workspace's branch when it holds no commit of its own (every commit of it is in its base's tracking ref), and keeps the others. An agent in a workspace removes only its own, and a child in `main` none (`refused: a child removes only its own workspace, and this one works in main, …`); each call is to judge. Until #141 it was the tool `workspace_remove {workspace?}`, still answered for one release. |
 
-`list` and `show` run at once. `create`, `prepare` and `link_ticket` are to judge, as any write
+`list` and `show` run at once. `create`, `prepare`, `link_ticket` and `remove` are to judge, as any write
 of "The project" is: an `action` request, which says what it does in words and is done only while
 they hold. Making a workspace ready plays setup steps that run without the gate, so `create`
 (the project's setup) and `prepare` (the steps it does again: those not done, and the done ones
@@ -324,16 +362,53 @@ reasons.
 
 | Tool | |
 |---|---|
-| `ticket_read {workspace?, ticket?, detail? short \| full}` | The ticket the agent's workspace (or the one `workspace` names, required in `main` unless `ticket` is given) is linked to, or `ticket`, another ticket of the same tracker by its key (`#123` or `ABC-123`): its reference, tracker, state, title, link and description, masked, and how many comments it has with the newest one's author (`Comments: 12, … read them with ticket_read {"detail": "full"}`); `detail full` gives the comments (the newest 30). Read only, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own, and none of either's write commands is reachable from it. The tracker is that of the workspace's ticket, or GitHub's (its own repositories' issues) when it has none; a key of the other tracker is refused (`refused: ABC-123 is a Jira ticket, and this workspace's tracker is GitHub issues (#123): …`), and nothing is asked of any tracker. A workspace with no ticket and no key is refused (`refused: workspace X is linked to no ticket: …`). An unreadable ticket (`gh` or `acli` missing or signed out, no such ticket) is an error saying why and what to do. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
+| `tickets {action, ticket?, workspace?, query?, state?, label?, assignee?, detail?, title?, body?, labels?}` | The tickets of the project's tracker, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
 
-It goes through the gate like every call, which allows it. How a ticket is read, Jira's text
-turned into plain text, and what is assumed of `acli`'s output, is in [`tickets.md`](tickets.md).
+- **`list {state?, label?, assignee?}`**: every ticket of a state, in one call, a line each (`-
+  #12 open: The login fails [bug] (ana)  <link>`): `state` is `open` (the default), `closed` or
+  `all`; up to 200, the newest, and the answer says when there may be more. **`search {query,
+  …}`**: the same, with words. On GitHub, `gh issue list -R github.com/<owner/name> --state …
+  --limit 200 [--label] [--assignee] [--search] --json number,title,state,labels,assignees,url`;
+  on Jira, `acli jira workitem search --jql <JQL> --fields key,summary,status,assignee,labels
+  --json --limit 200`, the JQL being the tracker's projects, the state as a status category
+  (`statusCategory != Done`), each filter quoted, and the words as `text ~`. An item that says
+  another site than the tracker's is left out, and counted; one that says no site is kept.
+  **A search stays in the tracker's repository**: on GitHub a `query` holding `repo:`, `org:`,
+  `user:`, `is:pr` or `type:pr`, in any case, is refused (`refused: tickets search looks in the
+  tracker's repository only: …`), and of what `gh` answers only the issues whose link is the
+  tracker repository's (`https://github.com/<owner>/<name>/issues/…`) are kept, the others left
+  out and counted (`(2 answered from outside the tracker's repository are left out)`).
+- **`show {ticket?, workspace?, detail?}`**: the ticket the agent's workspace (or the one
+  `workspace` names, required in `main` unless `ticket` is given) is linked to, or `ticket`,
+  another ticket of the same tracker by its key (`#123` or `ABC-123`): its reference, tracker,
+  state, title, link and description, masked, and how many comments it has with the newest one's
+  author (`Comments: 12, … read them with tickets {"action": "show", "detail": "full"}`); `detail
+  full` gives the comments (the newest 30). A key of the other tracker is refused (`refused:
+  ABC-123 is a Jira ticket, and this workspace's tracker is GitHub issues (#123): …`), and nothing
+  is asked of any tracker. A workspace with no ticket and no key is refused (`refused: workspace X
+  is linked to no ticket: …`). An unreadable ticket (`gh` or `acli` missing or signed out, no such
+  ticket) is an error saying why and what to do.
+- **The writes, GitHub issues only**: `create {title, body?, labels?}` (`gh issue create`),
+  `comment {ticket?, body}`, `edit {ticket?, title?, body?}` (at least one), `close {ticket?}` and
+  `reopen {ticket?}` (`gh issue comment`, `edit`, `close`, `reopen`), the ticket named as for
+  `show`. A `title` on `comment`, `close` or `reopen` is refused before anything is asked
+  (`refused: tickets comment takes no title: title is for edit and create`). The request shows
+  the title and the body whole, and a long one or one holding a secret is refused or base, as
+  for the forge's writes ("The forge"). **Jira is read only**, by the user's decision: a write on a Jira tracker is refused
+  before anything is asked, plainly (`refused: tickets comment is not supported on Jira:
+  Flottille reads Jira tickets and writes nothing to Jira; write the text for the user, who posts
+  it`), and no `acli` write command appears anywhere in the code.
+
+Reads go through the gate like every call, which allows them; a write is to judge. How a ticket
+is read, Jira's text turned into plain text, and what is assumed of `acli`'s output, is in
+[`tickets.md`](tickets.md). Until #141 `show` was the tool `ticket_read`, still answered for one
+release.
 
 ## The project
 
 What the user does in the window, the agent they talk to does too, under the gate, always on its
-own project: a root has these four tools and the writes of `tasks` (above), a child none of them
-(it does its brief). Families with an `action`, as `agent_status` is:
+own project: a root has these four tools, the writes of `tasks` (above) and of `workspace`, a
+child none of them (it does its brief). Families with an `action`, as `agent_status` is:
 
 | Tool | |
 |---|---|
@@ -404,7 +479,7 @@ Two of them take an `action`, as the tools of a family do: `agent_status` (`stat
 
 | Tool | |
 |---|---|
-| `agent_launch {title, brief, provider?, model?, effort?, role?, new_workspace?, repositories?}` | Starts a child on one task and answers at once with its id. `provider` is the caller's when left out, and the child's for life; `model` and `effort` the provider's defaults when left out (`docs/agents.md`, "Providers"): a provider not enabled or not ready, or a model or an effort it is known not to offer, is refused naming those that are (`refused: provider opencode is not enabled (…); the ready providers are claude`). `role` is `worker` (by default) or `lead`; `workspace` is an existing workspace's name, `new_workspace` the name of a new one (made at once, with `repositories` as its repositories, the child's brief sent once it is prepared; a workspace that fails fails the child; the launch is judged as `workspace create` is, "The workspace"), neither for the caller's own place; both are plain optional fields, and a mix is refused naming the field to use (`refused: workspace and new_workspace are exclusive: …`, `refused: repositories goes with new_workspace, …`). Its description holds a call of each form. Refused, never queued, above the project's children cap (`refused: N children already run in project P, its cap: do the work yourself, or wait for one of them to end (agent_stop ends one of yours)`) and past the depth limit. |
+| `agent_launch {title, brief, provider?, model?, effort?, role?, new_workspace?, repositories?, root?}` | Starts a child on one task and answers at once with its id. `provider` is the caller's when left out, and the child's for life; `model` and `effort` the provider's defaults when left out (`docs/agents.md`, "Providers"): a provider not enabled or not ready, or a model or an effort it is known not to offer, is refused naming those that are (`refused: provider opencode is not enabled (…); the ready providers are claude`). `role` is `worker` (by default) or `lead`; `workspace` is an existing workspace's name, `new_workspace` the name of a new one (made at once, with `repositories` as its repositories, the child's brief sent once it is prepared; a workspace that fails fails the child; the launch is judged as `workspace create` is, "The workspace"), neither for the caller's own place; both are plain optional fields, and a mix is refused naming the field to use (`refused: workspace and new_workspace are exclusive: …`, `refused: repositories goes with new_workspace, …`). Its description holds a call of each form. Refused, never queued, above the project's children cap (`refused: N children already run in project P, its cap: do the work yourself, or wait for one of them to end (agent_stop ends one of yours)`) and past the depth limit. **`root: true`** starts a session for the user instead of a child ("Sessions for the user", below). |
 | `agent_send {agent_id, message}` | A message to a child, urgent: on its next tool result in a turn, a new turn otherwise. It answers the child's question. |
 | `agent_status {agent_id?, action? status \| conversation, detail? short \| full, after?}` | `action status` (the default): one line per child (or for the one named): what it does (in a turn, `running \`<line>\` for 12 min`, `waiting for approval #3`, `waiting on the provider`, idle, reported, ended or failed with why), the time since its last sign of activity, its context use. For all the children it stops there (`detail short`) and says how to get more; for the one named, or with `detail full`, each also has its last three messages. `action conversation` (with `agent_id`; `after` pages): a page of the child's conversation, oldest first, one line per event that says something (`#<n> sent: …`, `said: …` for a whole reply, its streamed pieces joined and masked, two messages apart, `tool call: …`, a tool served and its outcome, a turn's end, a replacement, a report), each line of 2,000 characters at most (a longer reply goes on, whole, on the next lines), the page under 30,000; it ends with the `after` to pass for the next page. |
 | `agent_stop {agent_id}` | Stops the child and its own children, deepest first; what was queued for them is superseded; their runs are stopped. Their workspaces stay. |
@@ -415,6 +490,42 @@ Two of them take an `action`, as the tools of a family do: `agent_status` (`stat
 
 They go through the gate like every call (it allows them). Their texts are masked of the
 daemon's secrets before anyone else reads them.
+
+### Sessions for the user
+
+The user asked that the agent they talk to may start, for them, a session like one they start
+from the window: `agent_launch {"title", "brief", "root": true, workspace? | new_workspace?}`.
+
+- **Only a root starts one.** A child is refused before anything is asked (`refused: only the
+  agent the user talks to starts a session for the user; a child's work stays in its tree, under
+  its parent: ask your parent (ask_parent)`), and refused again when the call is performed: a
+  child starting a root would leave its tree, its parent's sight and its parent's answers to its
+  requests, with a root's tools.
+- **It is to judge** (a card in Ask, the judge in Auto), as an `action` request whose words name
+  the place and the title and give the first message whole (`Start a session for the user in the
+  workspace login: "Fix login", theirs, not a child of this agent`, `Its first message: …`), done
+  only while they hold. With `new_workspace` it is also judged as `workspace create` is. The
+  judge is given the brief whole too: a brief longer than its 8,000 characters is refused at the
+  launch (`refused: the brief is longer than …`), and one that holds what the masking takes for a
+  secret makes the launch base, since the card shows it masked and the session gets it as
+  written.
+- **No chain without the user.** The session keeps who started it (`launched_by`). A session an
+  agent started may start one in turn only as base, whatever its mode (`this agent is a session
+  another agent started for the user, and a session it starts comes to the user, …`): each step
+  of a chain is the user's.
+- **The session is the user's**: no parent, depth 0, in the project's tree list and the window's
+  sidebar like any root (`agent.created` with no parent). **Its first message is the agent's,
+  never the user's**: it is delivered as `[flottille:launched]`, under a line naming the agent
+  that wrote it (`agent 0123456789ab started this session for the user with this message:`), the
+  window shows it as `started by` that agent, and the judge never takes it for the user's words:
+  it shows it in a block of its own, `written by agent <id> when it started this session`. A
+  replacement of the session delivers it again the same way. It is a lead by default (`role`), on
+  the caller's provider unless `provider` names another, in `workspace`, a new workspace, or the
+  caller's own place.
+- **It takes the tree's mode**: the mode of the caller's tree, never a looser one; only the user
+  changes it afterwards. It counts in no children cap and no depth.
+- The caller is answered at once with the new session's id and name; the `agent_*` tools do not
+  reach it, and the caller is told nothing of it afterwards.
 
 ## The gate
 
@@ -517,16 +628,20 @@ says who answers a call to judge (`docs/design.md` §7.1).
      `publish` or `unpublish`, `twine upload`, `gem`, `dotnet` and `nuget` with `push`;
    - `acli` and `bkt`, Atlassian's and Bitbucket's command lines, every line, reads included:
      they run with the user's own sign-in, in a place no variable of ours moves, so it cannot be
-     emptied as `gh`'s is (`docs/forges.md`, "Bitbucket"). An agent reads a ticket with
-     `ticket_read` and the pull requests with `forge_read`;
-   - a `forge_write` merge that waives the checks or a review; a change of the project's tracker
+     emptied as `gh`'s is (`docs/forges.md`, "Bitbucket"). An agent reads the tickets with
+     `tickets` and the pull requests with `forge`;
+   - a `forge` merge that waives the checks or a review; a change of the project's tracker
      or of its rules (`set_rules`);
+   - a write of `forge` or `tickets` whose title or body, or a session for the user whose brief,
+     holds what the masking takes for a secret; a session for the user started by a session an
+     agent started ("Sessions for the user");
    - a write of `tasks` or `setup` whose line, or task, would be base to run, and one that says
      what only the user's word may say ("The project": asking turned off, `check` or `read_only`
      set, a `link` or `root_entries` step, a `copy` of a sensitive name).
 3. **Harmless**: passes in every mode.
    - reading inside the agent's place (the project folder or the workspace), the tree's tools,
-     `tasks` `list` and `show`, `run_status`, `skill_read`, `forge_read`, `ticket_read`;
+     `tasks` `list` and `show`, `run_status`, `skill_read`, the reads of `forge` (`list`, `show`)
+     and of `tickets` (`list`, `search`, `show`), `workspace` `list` and `show`;
    - writing inside a workspace (`fs_write`, `fs_edit`, and `git add`, `mv`, `rm` there);
    - a line the rules know to only read, inside the place: the reads of git (`status`, `log`,
      `diff`, `show`, `branch` and `tag` listings, `config` and `remote` reads…), of `gh` and
@@ -557,7 +672,8 @@ says who answers a call to judge (`docs/design.md` §7.1).
    looks through (20,000), the judge told which; `git commit`, `git push`, `git rebase` of a
    branch on no remote, `git reset --hard` in a workspace, `git -c` or `--config-env` of other
    keys, git's other global options, `git remote` and `git config` writes of other keys; the
-   forge command lines beyond their reads; `forge_write`, `workspace_remove`, and a write of
+   forge command lines beyond their reads; the writes of `forge` and `tickets`, `workspace`
+   `remove`, `agent_launch` with `root` (a session for the user), and a write of
    `tasks`, `setup`, `skills`, `commands` or `project` ("The project"), with the line it sets;
    `workspace` `create`, `prepare` and `link_ticket`, and `agent_launch` with `new_workspace`,
    with the setup steps they play ("The workspace").

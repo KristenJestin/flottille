@@ -1,8 +1,9 @@
-//! The session's mode in the composer's bar: Ask or Auto, which only the user changes
-//! (`agent.mode`). In Auto without a judge chosen, calls to judge come to the user as in Ask, and
-//! the bar says once where to choose one.
+//! The session's mode in the composer's bar: a small Ask | Auto control, which only the user
+//! changes (`agent.mode`). In Auto without a judge chosen, calls to judge come to the user as in
+//! Ask: a warning icon beside the control says so in a tooltip and leads to Settings.
 
-use flottille_ui::{Switch, palette};
+use flottille_ui::motion::PANEL;
+use flottille_ui::{Button, Icon, Segmented, enter, fade, palette};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Context, InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled,
@@ -10,9 +11,12 @@ use gpui_kit::{
 };
 
 use crate::actions::Command;
-use crate::shell::Shell;
+use crate::shell::{Selection, Shell};
 
-pub const NO_JUDGE: &str = "Choose an Auto judge in Settings";
+/// What the warning icon says: Auto has no judge to answer, so each call to judge comes to the
+/// user as in Ask.
+pub const NO_JUDGE: &str =
+    "Auto has no judge, so every call to judge comes to you, as in Ask. Choose one in Settings.";
 
 pub struct ModeSwitch {
     shell: WeakEntity<Shell>,
@@ -44,12 +48,14 @@ impl ModeSwitch {
         self.pending.as_deref().or(self.mode.as_deref())
     }
 
-    /// The sentence the bar shows beside the switch, if any.
+    /// What the daemon said when it refused the last change, shown beside the control.
     pub fn said(&self) -> Option<String> {
-        if let Some(why) = &self.refused {
-            return Some(why.clone());
-        }
-        (self.mode() == Some("auto") && !self.judge_chosen).then(|| NO_JUDGE.to_owned())
+        self.refused.clone()
+    }
+
+    /// Auto is shown and no judge is chosen: the warning icon is there.
+    pub fn no_judge(&self) -> bool {
+        self.mode() == Some("auto") && !self.judge_chosen
     }
 
     pub fn set_mode(&mut self, mode: Option<String>, cx: &mut Context<Self>) {
@@ -80,14 +86,11 @@ impl ModeSwitch {
         cx.notify();
     }
 
-    fn flip(&mut self, cx: &mut Context<Self>) {
-        if self.pending.is_some() {
+    /// The user chose `wanted` (`ask` or `auto`) in the control.
+    pub fn choose(&mut self, wanted: &str, cx: &mut Context<Self>) {
+        if self.pending.is_some() || self.mode.as_deref().is_none_or(|mode| mode == wanted) {
             return;
         }
-        let Some(mode) = self.mode.as_deref() else {
-            return;
-        };
-        let wanted = if mode == "auto" { "ask" } else { "auto" };
         self.pending = Some(wanted.to_owned());
         self.refused = None;
         let command = Command::SetMode {
@@ -102,36 +105,72 @@ impl ModeSwitch {
 }
 
 impl Render for ModeSwitch {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let auto = self.mode() == Some("auto");
-        let switch = Switch::new("reply-mode-switch", auto, "Auto mode")
-            .disabled(self.mode.is_none() || self.pending.is_some())
-            .on_click(cx.listener(|this, _, _, cx| this.flip(cx)));
+        let control = Segmented::new(
+            "reply-mode",
+            "Mode",
+            [("ask", "Ask"), ("auto", "Auto")],
+            usize::from(auto),
+        )
+        .disabled(self.mode.is_none() || self.pending.is_some())
+        .on_choose({
+            let this = cx.entity().downgrade();
+            move |index, _, cx| {
+                let wanted = ["ask", "auto"][index];
+                this.update(cx, |this, cx| this.choose(wanted, cx)).ok();
+            }
+        });
+        // The warning comes and goes beside the control: its room opens and its icon fades in.
+        let warn = fade(
+            "reply-mode-warning-shown",
+            self.no_judge(),
+            PANEL,
+            window,
+            cx,
+        );
+        let shell = self.shell.clone();
         div()
-            .id("reply-mode")
+            .id("reply-mode-bar")
             .h(px(28.))
             .px(px(9.))
             .flex()
             .items_center()
-            .gap(px(7.))
             .text_size(px(12.5))
-            .text_color(if auto { p.text } else { p.mute })
-            .child(switch)
-            .child(if auto { "Auto" } else { "Ask" })
-            .when_some(self.said(), |d, said| {
-                let color = if self.refused.is_some() {
-                    p.fail
-                } else {
-                    p.faint
-                };
+            .child(control)
+            .when(warn > 0.0, |d| {
                 d.child(
                     div()
+                        .flex_none()
+                        .w(px(28. * warn))
+                        .opacity(warn)
+                        .overflow_hidden()
+                        .child(
+                            Button::icon("reply-mode-warning", Icon::Warning, NO_JUDGE).on_click(
+                                move |_, window, cx| {
+                                    shell
+                                        .update(cx, |shell, cx| {
+                                            shell.open(Selection::Settings, window, cx)
+                                        })
+                                        .ok();
+                                },
+                            ),
+                        ),
+                )
+            })
+            // A refusal is a word beside the control, not a block: it fades in and does not fold.
+            .when_some(self.said(), |d, said| {
+                d.child(enter(
+                    "reply-mode-said-enter",
+                    0,
+                    div()
                         .id("reply-mode-said")
-                        .text_color(color)
+                        .ml(px(8.))
+                        .text_color(p.fail)
                         .child(SharedString::from(said))
                         .test_support(),
-                )
+                ))
             })
             .test_support()
     }

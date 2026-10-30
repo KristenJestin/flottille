@@ -9,9 +9,8 @@
 //! The same editor holds the Auto judge's guidance in Settings (`judge.show`, `judge.set`,
 //! `judge.reset`), read at each judgement: a change reaches the next one.
 
-use flottille_ui::{Button, Card, palette};
+use flottille_ui::{Button, Card, palette, presence_of};
 use gpui_kit::base::input::{InputEvent, TextareaState};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement,
     Render, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
@@ -350,35 +349,54 @@ impl Render for RulesEditor {
                     .child(field)
                     .test_support(),
             )
-            .when_some(
-                self.shown.as_ref().and_then(|shown| shown.cut.clone()),
-                |d, cut| {
-                    d.child(
-                        div()
-                            .id(id("cut"))
-                            .text_size(px(12.5))
-                            .text_color(p.fail)
-                            .child(SharedString::from(format!("Cut: {cut}.")))
-                            .test_support(),
-                    )
-                },
+            .child(
+                presence_of(
+                    id("cut-block"),
+                    self.shown
+                        .as_ref()
+                        .and_then(|shown| shown.cut.clone())
+                        .map(|cut| SharedString::from(format!("Cut: {cut}."))),
+                    {
+                        let cut = id("cut");
+                        move |line| {
+                            div()
+                                .id(cut)
+                                .text_size(px(12.5))
+                                .text_color(p.fail)
+                                .child(line)
+                                .test_support()
+                                .into_any_element()
+                        }
+                    },
+                )
+                .gap(px(8.)),
             )
-            .when_some(
-                self.shown.as_ref().and_then(|shown| shown.error.clone()),
-                |d, error| {
-                    let said = SharedString::from(format!(
-                        "The judge asks you about every call until this is fixed: {error}."
-                    ));
-                    d.child(
-                        div()
-                            .id(id("error"))
-                            .aria_label(said.clone())
-                            .text_size(px(12.5))
-                            .text_color(p.fail)
-                            .child(said)
-                            .test_support(),
-                    )
-                },
+            .child(
+                presence_of(
+                    id("error-block"),
+                    self.shown
+                        .as_ref()
+                        .and_then(|shown| shown.error.clone())
+                        .map(|error| {
+                            SharedString::from(format!(
+                                "The judge asks you about every call until this is fixed: {error}."
+                            ))
+                        }),
+                    {
+                        let error = id("error");
+                        move |said| {
+                            div()
+                                .id(error)
+                                .aria_label(said.clone())
+                                .text_size(px(12.5))
+                                .text_color(p.fail)
+                                .child(said)
+                                .test_support()
+                                .into_any_element()
+                        }
+                    },
+                )
+                .gap(px(8.)),
             )
             .child(
                 div()
@@ -388,16 +406,21 @@ impl Render for RulesEditor {
                     .child(if self.judge { JUDGE_REACH } else { REACH })
                     .test_support(),
             )
-            .when_some(self.problem.clone(), |d, problem| {
-                d.child(
-                    div()
-                        .id(id("problem"))
-                        .text_size(px(12.5))
-                        .text_color(p.fail)
-                        .child(problem)
-                        .test_support(),
-                )
-            })
+            .child(
+                presence_of(id("problem-block"), self.problem.clone(), {
+                    let problem = id("problem");
+                    move |line| {
+                        div()
+                            .id(problem)
+                            .text_size(px(12.5))
+                            .text_color(p.fail)
+                            .child(line)
+                            .test_support()
+                            .into_any_element()
+                    }
+                })
+                .gap(px(8.)),
+            )
             .child(buttons);
         Card::new()
             .title(if self.judge { "Judge" } else { "Rules" })

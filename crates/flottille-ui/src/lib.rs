@@ -10,12 +10,14 @@ pub mod drawer;
 pub mod dropdown;
 pub mod icons;
 mod interact;
+pub mod listing;
 pub mod menu;
 pub mod modal;
 pub mod motion;
 pub mod omarchy;
 pub mod reveal;
 pub mod rows;
+pub mod segmented;
 pub mod state;
 pub mod switch;
 pub mod theme;
@@ -28,12 +30,21 @@ pub use card::Card;
 pub use drawer::{Drawer, Side};
 pub use dropdown::{Align, Dropdown, MenuItem};
 pub use icons::{Icon, Icons, icon};
-pub use interact::{dismiss_on_navigate, dismiss_top_overlay, forget_overlays, open_overlay};
+pub use interact::{
+    Hoverable, dismiss_on_navigate, dismiss_top_overlay, fade, forget_overlays, hoverable,
+    open_overlay, selectable,
+};
+pub use listing::{Item, Listing, Placement};
 pub use menu::Menu;
 pub use modal::Modal;
 pub use omarchy::Environment;
-pub use reveal::{Fold, PulsingLabel, enter, fold_frame};
-pub use rows::{ListRow, TreeLevel, TreeRow, meta, section_label, toggle_id, tree_children};
+pub use reveal::{
+    Fold, Presence, PresenceOf, PulsingLabel, enter, fold_frame, presence, presence_of,
+};
+pub use rows::{
+    ListRow, TreeLevel, TreeRow, meta, section_label, toggle_id, tree_children, turning,
+};
+pub use segmented::Segmented;
 pub use state::{AgentState, Pill, StateIcon, Status};
 pub use switch::Switch;
 pub use theme::{Palette, palette};

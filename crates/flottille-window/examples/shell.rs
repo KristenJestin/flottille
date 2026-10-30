@@ -3,7 +3,7 @@
 //! compositor.
 //!
 //! ```text
-//! cargo run -p flottille-window --example shell [--features frames] -- [--project <name>] [--add-project <folder>] [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace] [--add-command] [--edit-command <name>] [--add-skill] [--edit-skill <name>] [--edit-task <name>] [--edit-setup <number>] [--run-task <name>] [--slash <text>] [--attach <picture>] [--end] [--ended <project>] [--project-settings <project>] [--size <w>x<h>]
+//! cargo run -p flottille-window --example shell [--features frames] -- [--project <name>] [--add-project <folder>] [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace] [--add-command] [--edit-command <name>] [--add-skill] [--edit-skill <name>] [--edit-task <name>] [--edit-setup <number>] [--run-task <name>] [--slash <text>] [--attach <picture>] [--end] [--ended] [--open-run <text of its line>] [--open-ended] [--project-settings <project>] [--size <w>x<h>]
 //! ```
 //!
 //! `--project` opens a project's page, `--add-project` the "Add a project" modal with the
@@ -14,8 +14,8 @@
 //! `--edit-command`, `--add-skill` and `--edit-skill` the modals of the Commands and Skills
 //! sections, `--edit-task` and `--edit-setup` those of the Tasks and Setup sections, `--run-task`
 //! runs a task of the open project's page and opens its output, `--slash` types a text in the open session's composer (its `/` list), `--attach` attaches a picture file to it, `--end` opens the open
-//! session's "End the session?" confirmation, `--ended` unfolds a project's "Ended" group of the
-//! left tree, `--project-settings` a project's settings page, `--size` the window's size. The daemon is found on
+//! session's "End the session?" confirmation, `--ended` unfolds the "Ended" group at the bottom of the
+//! left tree, `--open-run` opens the output of the open session's first run whose line holds the text, in its panel, `--open-ended` the rail's "N ended" row, `--project-settings` a project's settings page, `--size` the window's size. The daemon is found on
 //! `$XDG_RUNTIME_DIR/flottille/daemon.sock`; it is not started.
 
 use std::os::unix::net::UnixStream;
@@ -37,7 +37,8 @@ fn main() {
     let (mut project, mut add_project) = (None, None);
     let (mut add_command, mut add_skill) = (false, false);
     let (mut edit_command, mut edit_skill, mut slash, mut attach) = (None, None, None, None);
-    let (mut end, mut ended) = (false, None);
+    let (mut end, mut ended) = (false, false);
+    let (mut open_run, mut open_ended) = (None::<String>, false);
     let (mut edit_task, mut edit_setup, mut run_task) = (None, None, None);
     let mut dimensions = (1280., 800.);
     let mut args = std::env::args().skip(1);
@@ -65,7 +66,9 @@ fn main() {
             "--slash" => slash = Some(args.next().expect("what the reply's field holds")),
             "--attach" => attach = Some(args.next().expect("a picture file")),
             "--end" => end = true,
-            "--ended" => ended = Some(args.next().expect("a project")),
+            "--ended" => ended = true,
+            "--open-run" => open_run = Some(args.next().expect("the text of a run's line")),
+            "--open-ended" => open_ended = true,
             "--size" => {
                 let size = args.next().expect("a size like 1280x1400");
                 let (w, h) = size.split_once('x').expect("WxH");
@@ -242,8 +245,35 @@ fn main() {
                         .ok();
                 }
             }
+            // A run's output, or the folded runs, once the rail has listed them.
+            if open_run.is_some() || open_ended {
+                cx.background_executor()
+                    .timer(Duration::from_millis(2500))
+                    .await;
+                window
+                    .update(cx, |_, _, cx| {
+                        let page = shell.read(cx).main().read(cx).session_page().cloned();
+                        if let Some(page) = page {
+                            let runs = page.read(cx).commands(cx);
+                            if open_ended {
+                                runs.update(cx, |runs, cx| runs.toggle_ended(cx));
+                            }
+                            let found = open_run.as_ref().and_then(|text| {
+                                let list = runs.read(cx);
+                                list.rows()
+                                    .iter()
+                                    .find(|row| row.line.contains(text))
+                                    .cloned()
+                            });
+                            if let Some(row) = found {
+                                page.update(cx, |page, cx| page.open_command(&row.run, cx));
+                            }
+                        }
+                    })
+                    .ok();
+            }
             // A sub-agent read, or the end asked, once the page knows its tree.
-            if agent.is_some() || end || ended.is_some() {
+            if agent.is_some() || end || ended {
                 cx.background_executor()
                     .timer(Duration::from_millis(1500))
                     .await;
@@ -260,9 +290,7 @@ fn main() {
                                 }
                             });
                         }
-                        let group = ended
-                            .as_deref()
-                            .and_then(|p| shell.read(cx).ended(p).cloned());
+                        let group = ended.then(|| shell.read(cx).ended().cloned()).flatten();
                         if let Some(group) = group {
                             group.update(cx, |group, cx| group.toggle(cx));
                         }

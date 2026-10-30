@@ -561,8 +561,8 @@ fn forge_read_returns_its_workspace_s_pull_requests_and_refuses_another_reposito
     one_pull_request(&user, pull(12, "Add the login page"));
     let (_, mcp) = agent_in(&user, Some("login"));
 
-    assert!(mcp.names().contains(&"forge_read".to_owned()));
-    let answer = mcp.call("forge_read", json!({}));
+    assert!(mcp.names().contains(&"forge".to_owned()));
+    let answer = mcp.call("forge", json!({"action": "show"}));
     assert!(!answer.error, "{}", answer.text);
     let text = answer.text;
     for said in [
@@ -570,8 +570,8 @@ fn forge_read_returns_its_workspace_s_pull_requests_and_refuses_another_reposito
         "https://github.com/acme/api/pull/12",
         "review: changes requested",
         "checks: pending (build passing, lint pending)",
-        "comments: 1, read them with forge_read {\"detail\": \"full\"}",
-        "reviews: 1, read them with forge_read {\"detail\": \"full\"}",
+        "comments: 1, read them with forge {\"action\": \"show\", \"workspace\": \"login\", \"detail\": \"full\"}",
+        "reviews: 1, read them with forge {\"action\": \"show\", \"workspace\": \"login\", \"detail\": \"full\"}",
         "web (acme/web): no pull request for app/login.",
         &format!("lib: {NO_FORGE}."),
     ] {
@@ -579,7 +579,7 @@ fn forge_read_returns_its_workspace_s_pull_requests_and_refuses_another_reposito
     }
     // The texts come only when asked for.
     assert!(!text.contains("Looks good to me"), "{text}");
-    let full = mcp.call("forge_read", json!({"detail": "full"}));
+    let full = mcp.call("forge", json!({"action": "show", "detail": "full"}));
     assert!(!full.error, "{}", full.text);
     for said in [
         "- alice: Looks good to me",
@@ -587,20 +587,23 @@ fn forge_read_returns_its_workspace_s_pull_requests_and_refuses_another_reposito
     ] {
         assert!(full.text.contains(said), "{said} in {}", full.text);
     }
-    let refused = mcp.call("forge_read", json!({"detail": "all"}));
+    let refused = mcp.call("forge", json!({"action": "show", "detail": "all"}));
     assert!(
         refused.error && refused.text.contains("has no detail \"all\""),
         "{}",
         refused.text
     );
 
-    let answer = mcp.call("forge_read", json!({"repository": "api"}));
+    let answer = mcp.call("forge", json!({"action": "show", "repository": "api"}));
     assert!(!answer.error, "{}", answer.text);
     assert!(!answer.text.contains("acme/web"), "{}", answer.text);
 
     // Outside its workspace: refused, and never asked of the forge.
     let calls = gh_calls(&user).len();
-    let answer = mcp.call("forge_read", json!({"repository": "elsewhere"}));
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "show", "repository": "elsewhere"}),
+    );
     assert!(answer.error);
     assert!(
         answer.text.starts_with(
@@ -611,7 +614,7 @@ fn forge_read_returns_its_workspace_s_pull_requests_and_refuses_another_reposito
     );
     assert_eq!(gh_calls(&user).len(), calls);
     let (_, narrow) = agent_in(&user, Some("narrow"));
-    let answer = narrow.call("forge_read", json!({"repository": "api"}));
+    let answer = narrow.call("forge", json!({"action": "show", "repository": "api"}));
     assert!(answer.error, "{}", answer.text);
     assert!(answer.text.contains("it has web"), "{}", answer.text);
 
@@ -628,12 +631,12 @@ fn the_short_forge_read_of_a_named_repository_points_at_that_repository() {
     one_pull_request(&user, pull(12, "Add the login page"));
     let (_, mcp) = agent_in(&user, Some("login"));
 
-    let answer = mcp.call("forge_read", json!({"repository": "api"}));
+    let answer = mcp.call("forge", json!({"action": "show", "repository": "api"}));
 
     assert!(!answer.error, "{}", answer.text);
     for said in [
-        "comments: 1, read them with forge_read {\"repository\": \"api\", \"detail\": \"full\"}",
-        "reviews: 1, read them with forge_read {\"repository\": \"api\", \"detail\": \"full\"}",
+        "comments: 1, read them with forge {\"action\": \"show\", \"workspace\": \"login\", \"repository\": \"api\", \"detail\": \"full\"}",
+        "reviews: 1, read them with forge {\"action\": \"show\", \"workspace\": \"login\", \"repository\": \"api\", \"detail\": \"full\"}",
     ] {
         assert!(answer.text.contains(said), "{said} in {}", answer.text);
     }
@@ -647,11 +650,11 @@ fn a_root_agent_in_main_with_a_forge_lists_the_forge_tools() {
     let (_, workspace) = agent_in(&user, Some("login"));
 
     // The same tools wherever it works: the place does not decide, the project's declarations
-    // do. The fixture declares a forge and no tracker, so `ticket_read` could only refuse.
-    for tool in ["forge_read", "forge_write", "workspace_remove"] {
+    // do. The fixture declares a forge and no tracker, so `tickets` could only refuse.
+    for tool in ["forge", "workspace"] {
         assert!(main.names().contains(&tool.to_owned()), "{tool}");
     }
-    assert!(!main.names().contains(&"ticket_read".to_owned()));
+    assert!(!main.names().contains(&"tickets".to_owned()));
     assert_eq!(main.names(), workspace.names());
 }
 
@@ -663,25 +666,23 @@ fn in_main_forge_read_names_the_workspace_it_reads_and_in_a_workspace_only_its_o
     let (_, main) = agent_in(&user, None);
     let (_, inside) = agent_in(&user, Some("login"));
 
-    let nameless = main.call("forge_read", json!({}));
+    let nameless = main.call("forge", json!({"action": "show"}));
     assert!(nameless.error, "{}", nameless.text);
     assert!(
-        nameless
-            .text
-            .contains("name the workspace forge_read acts on")
+        nameless.text.contains("name the workspace forge acts on")
             && nameless.text.contains("its workspaces are login"),
         "{}",
         nameless.text
     );
-    let unknown = main.call("forge_read", json!({"workspace": "elsewhere"}));
+    let unknown = main.call("forge", json!({"action": "show", "workspace": "elsewhere"}));
     assert!(unknown.error && unknown.text.contains("has no workspace named elsewhere"));
-    let named = main.call("forge_read", json!({"workspace": "login"}));
+    let named = main.call("forge", json!({"action": "show", "workspace": "login"}));
     assert!(!named.error, "{}", named.text);
     assert!(named.text.contains("Add the login page"), "{}", named.text);
     // In a workspace its own, named or not, and no other.
-    let own = inside.call("forge_read", json!({"workspace": "login"}));
+    let own = inside.call("forge", json!({"action": "show", "workspace": "login"}));
     assert_eq!(own.text, named.text);
-    let other = inside.call("forge_read", json!({"workspace": "elsewhere"}));
+    let other = inside.call("forge", json!({"action": "show", "workspace": "elsewhere"}));
     assert!(other.error && other.text.contains("acts on this agent's own workspace"));
 }
 
@@ -700,7 +701,7 @@ fn no_token_reaches_an_agent_and_the_daemon_never_asks_gh_for_one() {
     ]}]}));
     let (id, mcp) = agent_in(&user, Some("login"));
 
-    let read = mcp.call("forge_read", json!({}));
+    let read = mcp.call("forge", json!({"action": "show"}));
     let state = forge(&user);
     let watch = stored(&user, "workspace.forge");
 
@@ -1107,7 +1108,7 @@ fn forge_read_returns_the_bitbucket_pull_requests_of_the_workspace() {
     bitbucket_pull_requests(&user);
     let (_, mcp) = agent_in(&user, Some("login"));
 
-    let answer = mcp.call("forge_read", json!({"detail": "full"}));
+    let answer = mcp.call("forge", json!({"action": "show", "detail": "full"}));
 
     assert!(!answer.error, "{}", answer.text);
     for said in [
@@ -1177,7 +1178,7 @@ fn no_token_reaches_an_agent_and_the_daemon_never_asks_bkt_for_one() {
     ]}]}));
     let (id, mcp) = agent_in(&user, Some("login"));
 
-    let read = mcp.call("forge_read", json!({}));
+    let read = mcp.call("forge", json!({"action": "show"}));
     let state = forge(&user);
 
     assert!(!read.text.contains(token), "{}", read.text);

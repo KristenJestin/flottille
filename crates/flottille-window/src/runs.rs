@@ -1,22 +1,28 @@
-//! The commands the agents run, as the window shows them: the rail's Commands section (every
-//! command of the session's tree, running ones first, ended ones greyed until dismissed), the panel
-//! that follows one's output live, and the card a command's result is in the conversation.
+//! The commands the agents run, as the window shows them: the rail's Runs section (every command
+//! of the session's tree, running ones first, the last ended ones in sight and the older ones
+//! behind one folded row), the panel that follows one's output live, and the one compact line a
+//! command's result is in the conversation.
 //!
 //! What a program wrote is drawn as the daemon gave it (masked): its colours (`ESC [ … m`) turned
 //! into the palette's, every other escape sequence dropped (`flottille_core::ansi`). The stored
 //! output is untouched.
 
 use std::collections::HashMap;
+use std::f32::consts::FRAC_PI_2;
 use std::time::Duration;
 
 use flottille_core::ansi;
 use flottille_ui::color::mix;
-use flottille_ui::{Button, Card, Icon, Modal, Palette, Type, icon, palette, section_label};
+use flottille_ui::motion::PANEL;
+use flottille_ui::{
+    Button, Icon, Item, Listing, Modal, Palette, Type, fade, hoverable, icon, palette, presence,
+    section_label, turning,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, ClickEvent, Context, ElementId, FocusHandle, Hsla, InteractiveElement,
     IntoElement, ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement,
-    Styled, Task, TestSupportExt as _, WeakEntity, Window, div, px,
+    Styled, Task, TestSupportExt as _, Transformation, WeakEntity, Window, div, px, radians,
 };
 use serde_json::Value;
 
@@ -82,9 +88,6 @@ impl Owner {
         };
     }
 }
-
-/// The lines a card shows before it is unfolded.
-pub const FOLDED_LINES: usize = 5;
 
 /// A command of the session, as `run.list` gives it.
 #[derive(Clone, Debug, PartialEq)]
@@ -208,9 +211,12 @@ fn ink(color: ansi::Color, p: &Palette) -> Hsla {
 pub fn coloured_line(id: ElementId, text: &str, base: Hsla, p: &Palette) -> impl IntoElement {
     let spans = ansi::spans(text);
     let plain: String = spans.iter().map(|span| span.text.as_str()).collect();
+    // `flex_none`: in a column of fixed height a line that may shrink (it clips its overflow)
+    // is squeezed onto the ones around it once the output is longer than the column.
     div()
         .id(id)
         .flex()
+        .flex_none()
         .mono(11.5)
         .text_color(base)
         .whitespace_nowrap()
@@ -225,31 +231,30 @@ pub fn coloured_line(id: ElementId, text: &str, base: Hsla, p: &Palette) -> impl
         }))
         .test_support()
 }
-
-/// A command's result in the conversation: its line, its exit code in a colour, its duration, and
-/// its output folded to its last lines until `open`. `at` makes the ids; `toggle` unfolds it.
+/// A command's result in the conversation, as one compact line: an icon, the line, how it ended
+/// (a colour and a shape) and how long it took. The output is not here: a click opens it in the
+/// panel the rail opens. `at` makes the ids.
 pub fn card(
     card: &CommandCard,
     at: usize,
-    open: bool,
-    toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    open: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> AnyElement {
     let p = palette(cx);
     let (glyph, color, said) = mark_of(card.ending, &p);
     let id = |part: &str| ElementId::Name(format!("command-{part}-{at}").into());
-    let hidden = if open {
-        0
-    } else {
-        card.lines.len().saturating_sub(FOLDED_LINES)
-    };
-    let shown = &card.lines[hidden..];
-    let title = div()
+    let line = div()
+        .id(id("card"))
         .flex()
-        .flex_1()
-        .min_w_0()
         .items_center()
         .gap(px(8.))
+        .px(px(12.))
+        .py(px(7.))
+        .rounded(px(8.))
+        .border_1()
+        .border_color(p.line)
+        .cursor_pointer()
+        .on_click(open)
         .child(icon(Icon::Terminal).size(px(13.)).text_color(p.faint))
         .child(
             div()
@@ -264,6 +269,15 @@ pub fn card(
                 .child(SharedString::from(card.line.clone()))
                 .test_support(),
         )
+        .children(card.allowed_by.as_ref().map(|by| {
+            div()
+                .id(id("allowed"))
+                .flex_none()
+                .text_size(px(11.5))
+                .text_color(p.faint)
+                .child(SharedString::from(format!("allowed by {by}")))
+                .test_support()
+        }))
         .child(
             div()
                 .id(id("exit"))
@@ -273,76 +287,98 @@ pub fn card(
                 .aria_label(SharedString::from(said.clone()))
                 .child(SharedString::from(format!("{glyph} {said}")))
                 .test_support(),
-        );
-    let body = div()
-        .id(id("output"))
-        .px(px(14.))
-        .py(px(8.))
-        .flex()
-        .flex_col()
-        .children(shown.iter().enumerate().map(|(i, line)| {
-            coloured_line(
-                ElementId::Name(format!("command-line-{at}-{}", hidden + i).into()),
-                line,
-                p.mute,
-                &p,
-            )
-        }))
-        .when(card.lines.is_empty(), |d| {
-            d.child(div().mono(11.5).text_color(p.faint).child("(no output)"))
-        })
-        .test_support();
-    let more = (card.lines.len() > FOLDED_LINES).then(|| {
-        let said = match open {
-            true => "Fold".to_owned(),
-            false => format!("Show {hidden} earlier lines"),
-        };
-        div()
-            .id(id("more"))
-            .px(px(14.))
-            .pb(px(8.))
-            .mono(11.)
-            .text_color(p.faint)
-            .cursor_pointer()
-            .hover(|s| s.text_color(p.text))
-            .on_click(toggle)
-            .child(SharedString::from(said))
-            .test_support()
-    });
-    let allowed = card.allowed_by.as_ref().map(|by| {
-        div()
-            .id(id("allowed"))
-            .px(px(14.))
-            .pb(px(10.))
-            .text_size(px(12.))
-            .text_color(p.faint)
-            .child(SharedString::from(format!("Allowed by {by}")))
-            .test_support()
-    });
-    div()
-        .id(id("card"))
-        .child(
-            Card::new()
-                .title(title)
-                .meta(seconds_text(card.seconds))
-                .child(body)
-                .children_of(more)
-                .children_of(allowed),
         )
-        .test_support()
-        .into_any_element()
+        .children(card.seconds.map(|seconds_taken| {
+            div()
+                .id(id("seconds"))
+                .flex_none()
+                .mono(11.)
+                .text_color(p.faint)
+                .child(SharedString::from(seconds((seconds_taken * 1000.) as u64)))
+                .test_support()
+        }));
+    hoverable(line, move |d, t| d.bg(p.hover.opacity(t))).into_any_element()
 }
 
-fn seconds_text(seconds_taken: Option<f64>) -> String {
-    seconds_taken.map_or_else(String::new, |s| seconds((s * 1000.) as u64))
+/// The ended runs that stay in sight under the running ones; the others are behind "N ended".
+pub const KEPT_ENDED: usize = 3;
+
+/// The rail's runs, sorted: what is in sight, and what is behind the "N ended" row.
+#[derive(Debug, PartialEq)]
+pub struct Arranged<'a> {
+    /// Running first, in the order the daemon lists them.
+    pub running: Vec<&'a CommandRow>,
+    /// Ended and in sight: the latest ones, [`KEPT_ENDED`] at most, and none that ended before
+    /// the session's last turn began.
+    pub kept: Vec<&'a CommandRow>,
+    /// Ended and folded away, the latest first.
+    pub folded: Vec<&'a CommandRow>,
 }
 
-/// The rail's Commands section: nothing while the session ran no command.
+/// Sorts the rows of the section. `turn_at` is when the session's last turn began, when known.
+pub fn arrange(rows: &[CommandRow], turn_at: Option<u64>) -> Arranged<'_> {
+    let running = rows.iter().filter(|row| row.running()).collect();
+    let mut ended: Vec<&CommandRow> = rows.iter().filter(|row| !row.running()).collect();
+    let ended_at = |row: &CommandRow| row.ended_at.unwrap_or(row.started_at);
+    ended.sort_by_key(|row| std::cmp::Reverse((ended_at(row), row.started_at)));
+    let (mut kept, mut folded) = (Vec::new(), Vec::new());
+    for row in ended {
+        if kept.len() < KEPT_ENDED && turn_at.is_none_or(|turn| ended_at(row) >= turn) {
+            kept.push(row);
+        } else {
+            folded.push(row);
+        }
+    }
+    Arranged {
+        running,
+        kept,
+        folded,
+    }
+}
+
+/// What the section lists: a run, or the row that folds the older ended ones.
+#[derive(Clone)]
+enum Entry {
+    Run(CommandRow),
+    Ended { count: usize },
+}
+
+/// A small text button on a row (Stop, Dismiss): its ink and fill fade with the pointer.
+fn text_action(
+    id: ElementId,
+    label: &'static str,
+    p: Palette,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let button = div()
+        .id(id)
+        .flex_none()
+        .px(px(6.))
+        .py(px(1.))
+        .rounded(px(5.))
+        .text_size(px(11.5))
+        .cursor_pointer()
+        .aria_label(label)
+        .child(label)
+        .on_click(on_click);
+    hoverable(button, move |d, t| {
+        d.bg(p.hover.opacity(t)).text_color(mix(p.faint, p.text, t))
+    })
+}
+
+/// The rail's Runs section: nothing while the session ran no command.
 pub struct CommandList {
     page: Owner,
     rows: Vec<CommandRow>,
+    /// The rows as drawn: one that was dismissed, or that folded behind "N ended", folds away
+    /// before it is gone.
+    list: Listing<Entry>,
     /// How the tree names each agent.
     names: HashMap<String, String>,
+    /// When the session's last turn began: an ended run from before it folds away on its own.
+    turn_at: Option<u64>,
+    /// The "N ended" row is open: the runs behind it are listed.
+    open_ended: bool,
     error: Option<SharedString>,
     /// Draws the time again each second, while a command runs.
     ticker: Option<Task<()>>,
@@ -354,7 +390,10 @@ impl CommandList {
         Self {
             page: page.into(),
             rows: Vec::new(),
+            list: Listing::default(),
             names: HashMap::new(),
+            turn_at: None,
+            open_ended: false,
             error: None,
             ticker: None,
             renders: 0,
@@ -363,6 +402,16 @@ impl CommandList {
 
     pub fn rows(&self) -> &[CommandRow] {
         &self.rows
+    }
+
+    /// The rows in sight and the ones folded behind "N ended", as the section sorts them now.
+    pub fn arranged(&self) -> Arranged<'_> {
+        arrange(&self.rows, self.turn_at)
+    }
+
+    /// Whether the "N ended" row is open.
+    pub fn is_ended_open(&self) -> bool {
+        self.open_ended
     }
 
     pub fn renders(&self) -> usize {
@@ -403,6 +452,20 @@ impl CommandList {
         }
     }
 
+    /// When the session's last turn began (milliseconds since the epoch).
+    pub fn set_turn(&mut self, at: Option<u64>, cx: &mut Context<Self>) {
+        if self.turn_at != at {
+            self.turn_at = at;
+            cx.notify();
+        }
+    }
+
+    /// Opens or folds the "N ended" row.
+    pub fn toggle_ended(&mut self, cx: &mut Context<Self>) {
+        self.open_ended = !self.open_ended;
+        cx.notify();
+    }
+
     /// The daemon refused what was asked of a command, and why; none clears it.
     pub fn failed(&mut self, why: Option<String>, cx: &mut Context<Self>) {
         self.error = why.map(Into::into);
@@ -424,116 +487,134 @@ impl CommandList {
             None => agent,
         }
     }
-}
 
-impl Render for CommandList {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.renders += 1;
-        if self.rows.is_empty() {
-            return div().id("rail-commands").into_any_element();
-        }
-        let p = palette(cx);
-        let now = now_ms();
-        let rows = self.rows.iter().map(|row| {
-            let ended = !row.running();
-            let (glyph, color, said) = mark_of(row.ending(), &p);
-            let run = row.run.clone();
-            let open = {
-                let page = self.page.clone();
-                let run = run.clone();
-                move |_: &ClickEvent, _: &mut Window, cx: &mut App| page.open(&run, cx)
-            };
-            let button = if ended {
-                let page = self.page.clone();
-                let run = run.clone();
-                Button::quiet(
-                    ElementId::Name(format!("command-dismiss-{run}").into()),
-                    "Dismiss",
-                )
-                .on_click(move |_, _, cx| {
-                    // The row opens the output; its buttons do not.
+    /// One run: its line and how long, who started it and how it ended, the last line of its
+    /// output, and Stop or Dismiss.
+    fn run_row(
+        &self,
+        row: &CommandRow,
+        now: u64,
+        p: Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let ended = !row.running();
+        let (glyph, color, said) = mark_of(row.ending(), &p);
+        let run = row.run.clone();
+        let id = |part: &str| ElementId::Name(format!("command-{part}-{run}").into());
+        let open = {
+            let page = self.page.clone();
+            let run = run.clone();
+            move |_: &ClickEvent, _: &mut Window, cx: &mut App| page.open(&run, cx)
+        };
+        // The row opens the output; its buttons do not.
+        let action = {
+            let (page, run) = (self.page.clone(), run.clone());
+            match ended {
+                true => text_action(id("dismiss"), "Dismiss", p, move |_, _, cx| {
                     cx.stop_propagation();
                     page.dismiss(&run, cx);
                 })
-            } else {
-                let page = self.page.clone();
-                let run = run.clone();
-                Button::quiet(
-                    ElementId::Name(format!("command-stop-{run}").into()),
-                    "Stop",
-                )
-                .on_click(move |_, _, cx| {
+                .into_any_element(),
+                false => text_action(id("stop"), "Stop", p, move |_, _, cx| {
                     cx.stop_propagation();
                     page.stop(&run, cx);
                 })
-            };
-            let last = ansi::strip(&row.last_line);
-            div()
-                .id(ElementId::Name(format!("command-{}", row.run).into()))
-                .flex()
-                .flex_col()
-                .gap(px(2.))
-                .px(px(8.))
-                .py(px(6.))
-                .rounded(px(8.))
-                .cursor_pointer()
-                .hover(|s| s.bg(p.hover))
-                .when(ended, |d| d.opacity(0.6))
-                .on_click(open)
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(
+                .into_any_element(),
+            }
+        };
+        // A run that ended greys over PANEL; one first drawn ended is simply grey.
+        let grey = fade(id("grey"), ended, PANEL, window, cx);
+        let last = ansi::strip(&row.last_line);
+        let who = self.who(row);
+        let card = div()
+            .id(ElementId::Name(format!("command-{}", row.run).into()))
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .px(px(8.))
+            .py(px(6.))
+            .rounded(px(8.))
+            .cursor_pointer()
+            .opacity(1.0 - 0.4 * grey)
+            .on_click(open)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .id(id("mark"))
+                            .flex_none()
+                            .mono(12.)
+                            .text_color(color)
+                            .aria_label(SharedString::from(said.clone()))
+                            .child(glyph)
+                            .test_support(),
+                    )
+                    .child(
+                        div()
+                            .id(id("line"))
+                            .flex_1()
+                            .min_w_0()
+                            .mono(12.)
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .aria_label(SharedString::from(row.line.clone()))
+                            .child(SharedString::from(row.line.clone()))
+                            .test_support(),
+                    )
+                    .child(
+                        div()
+                            .id(id("time"))
+                            .flex_none()
+                            .mono(11.)
+                            .text_color(p.faint)
+                            .child(SharedString::from(seconds(row.elapsed_ms(now))))
+                            .test_support(),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .pl(px(20.))
+                    .when(ended, |d| {
+                        d.child(
                             div()
-                                .id(ElementId::Name(format!("command-mark-{}", row.run).into()))
-                                .flex_none()
-                                .mono(12.)
-                                .text_color(color)
-                                .aria_label(SharedString::from(said.clone()))
-                                .child(glyph)
-                                .test_support(),
-                        )
-                        .child(
-                            div()
-                                .id(ElementId::Name(format!("command-line-{}", row.run).into()))
-                                .flex_1()
-                                .min_w_0()
-                                .mono(12.)
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .aria_label(SharedString::from(row.line.clone()))
-                                .child(SharedString::from(row.line.clone()))
-                                .test_support(),
-                        )
-                        .child(
-                            div()
-                                .id(ElementId::Name(format!("command-time-{}", row.run).into()))
+                                .id(id("status"))
                                 .flex_none()
                                 .mono(11.)
-                                .text_color(p.faint)
-                                .child(SharedString::from(seconds(row.elapsed_ms(now))))
+                                .text_color(color)
+                                .aria_label(SharedString::from(said.clone()))
+                                .child(SharedString::from(said.clone()))
                                 .test_support(),
-                        ),
-                )
-                .child(
+                        )
+                    })
+                    .child(
+                        div()
+                            .id(id("who"))
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(11.5))
+                            .text_color(p.faint)
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .aria_label(SharedString::from(who.clone()))
+                            .child(SharedString::from(who))
+                            .test_support(),
+                    )
+                    .child(action),
+            )
+            // A run that wrote nothing has no line to show, not an empty one.
+            .when(!last.is_empty(), |d| {
+                d.child(
                     div()
-                        .id(ElementId::Name(format!("command-who-{}", row.run).into()))
-                        .pl(px(20.))
-                        .text_size(px(11.5))
-                        .text_color(p.faint)
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .aria_label(SharedString::from(self.who(row)))
-                        .child(SharedString::from(self.who(row)))
-                        .test_support(),
-                )
-                .child(
-                    div()
-                        .id(ElementId::Name(format!("command-last-{}", row.run).into()))
+                        .id(id("last"))
                         .pl(px(20.))
                         .mono(11.)
                         .text_color(p.faint)
@@ -544,40 +625,123 @@ impl Render for CommandList {
                         .child(SharedString::from(last))
                         .test_support(),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .pl(px(20.))
-                        .when(ended, |d| {
-                            d.child(
-                                div()
-                                    .id(ElementId::Name(
-                                        format!("command-status-{}", row.run).into(),
-                                    ))
-                                    .mono(11.)
-                                    .text_color(color)
-                                    .aria_label(SharedString::from(said.clone()))
-                                    .child(SharedString::from(said.clone()))
-                                    .test_support(),
-                            )
-                        })
-                        .child(div().flex_1())
-                        .child(button),
+            });
+        hoverable(card, move |d, t| d.bg(p.hover.opacity(t))).into_any_element()
+    }
+
+    /// The row that folds the older ended runs: "3 ended", a chevron that turns as it opens.
+    fn ended_row(
+        &self,
+        count: usize,
+        p: Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = ElementId::from("rail-runs-ended");
+        let turn = turning(id.clone(), self.open_ended, window, cx);
+        let said = SharedString::from(format!("{count} ended"));
+        let row = div()
+            .id(id)
+            .aria_expanded(self.open_ended)
+            .aria_label(said.clone())
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(8.))
+            .py(px(6.))
+            .rounded(px(8.))
+            .cursor_pointer()
+            .text_size(px(12.5))
+            .child(
+                div().w(px(14.)).flex_none().flex().justify_center().child(
+                    icon(Icon::Chevron)
+                        .size(px(12.))
+                        .text_color(p.faint)
+                        .with_transformation(Transformation::rotate(radians(-FRAC_PI_2 * turn))),
+                ),
+            )
+            .child(said)
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_ended(cx)));
+        hoverable(row, move |d, t| {
+            d.bg(p.hover.opacity(t)).text_color(mix(p.faint, p.text, t))
+        })
+        .into_any_element()
+    }
+}
+
+impl Render for CommandList {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.renders += 1;
+        let arranged = arrange(&self.rows, self.turn_at);
+        if arranged.folded.is_empty() {
+            self.open_ended = false;
+        }
+        let mut entries: Vec<(String, Entry)> = arranged
+            .running
+            .iter()
+            .chain(&arranged.kept)
+            .map(|row| (row.run.clone(), Entry::Run((*row).clone())))
+            .collect();
+        if !arranged.folded.is_empty() {
+            let count = arranged.folded.len();
+            entries.push(("ended".to_owned(), Entry::Ended { count }));
+            if self.open_ended {
+                entries.extend(
+                    arranged
+                        .folded
+                        .iter()
+                        .map(|row| (row.run.clone(), Entry::Run((*row).clone()))),
+                );
+            }
+        }
+        let at = cx.background_executor().now();
+        self.list.sync(entries, at, cx.reduce_motion());
+        let p = palette(cx);
+        let now = now_ms();
+        let present = !self.list.is_empty();
+        let listed: Vec<(String, Entry, flottille_ui::Placement)> = self
+            .list
+            .rows()
+            .map(|listed| {
+                (
+                    listed.key.to_owned(),
+                    listed.value.clone(),
+                    listed.placement,
                 )
-                .test_support()
-        });
-        div()
-            .id("rail-commands")
+            })
+            .collect();
+        let rows: Vec<AnyElement> = listed
+            .into_iter()
+            .map(|(key, entry, placement)| {
+                let (id, content) = match entry {
+                    Entry::Run(row) => (
+                        format!("command-item-{key}"),
+                        self.run_row(&row, now, p, window, cx),
+                    ),
+                    Entry::Ended { count } => (
+                        "command-item-ended".to_owned(),
+                        self.ended_row(count, p, window, cx),
+                    ),
+                };
+                Item::new(ElementId::Name(id.into()), placement, content).into_any_element()
+            })
+            .collect();
+        let section = div()
+            .id("rail-runs")
             .flex()
             .flex_col()
             .child(div().h(px(1.)).bg(p.line).mx(px(6.)).my(px(16.)))
-            .child(section_label("Commands", cx))
+            .child(
+                div()
+                    .id("rail-runs-title")
+                    .aria_label("Runs")
+                    .child(section_label("Runs", cx))
+                    .test_support(),
+            )
             .children(rows)
             .children(self.error.clone().map(|error| {
                 div()
-                    .id("rail-commands-error")
+                    .id("rail-runs-error")
                     .px(px(8.))
                     .py(px(4.))
                     .text_size(px(11.5))
@@ -585,8 +749,8 @@ impl Render for CommandList {
                     .child(error)
                     .test_support()
             }))
-            .test_support()
-            .into_any_element()
+            .test_support();
+        presence("rail-runs-presence", present, section)
     }
 }
 
@@ -765,16 +929,68 @@ impl Render for CommandPanel {
     }
 }
 
-/// `Card`'s optional child: nothing for none.
-trait ChildrenOf: Sized {
-    fn children_of(self, child: Option<impl IntoElement>) -> Self;
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl ChildrenOf for Card {
-    fn children_of(self, child: Option<impl IntoElement>) -> Self {
-        match child {
-            Some(child) => self.child(child),
-            None => self,
+    fn row(run: &str, state: &str, started_at: u64, ended_at: Option<u64>) -> CommandRow {
+        CommandRow {
+            run: run.into(),
+            agent: "a".into(),
+            name: None,
+            line: run.into(),
+            state: state.into(),
+            exit_code: Some(0),
+            signal: None,
+            started_at,
+            ended_at,
+            last_line: String::new(),
+            tail: Vec::new(),
         }
+    }
+
+    fn runs(rows: &[&CommandRow]) -> Vec<String> {
+        rows.iter().map(|row| row.run.clone()).collect()
+    }
+
+    #[test]
+    fn running_come_first_then_the_last_three_ended_and_the_older_ones_are_folded() {
+        let rows = vec![
+            row("e1", "exited", 10, Some(20)),
+            row("r1", "running", 15, None),
+            row("e2", "exited", 11, Some(30)),
+            row("e3", "exited", 12, Some(40)),
+            row("e4", "exited", 13, Some(50)),
+            row("r2", "running", 16, None),
+            row("e5", "stopped", 14, Some(60)),
+        ];
+        let arranged = arrange(&rows, None);
+        assert_eq!(runs(&arranged.running), ["r1", "r2"]);
+        assert_eq!(runs(&arranged.kept), ["e5", "e4", "e3"], "the latest first");
+        assert_eq!(runs(&arranged.folded), ["e2", "e1"]);
+    }
+
+    #[test]
+    fn an_ended_run_from_before_the_last_turn_is_folded_whatever_the_count() {
+        let rows = vec![
+            row("old", "exited", 1, Some(100)),
+            row("new", "exited", 150, Some(210)),
+        ];
+        let arranged = arrange(&rows, Some(200));
+        assert_eq!(runs(&arranged.kept), ["new"]);
+        assert_eq!(runs(&arranged.folded), ["old"]);
+        assert_eq!(
+            arrange(&rows, None).folded.len(),
+            0,
+            "no turn known, no fold"
+        );
+    }
+
+    #[test]
+    fn a_running_run_is_never_folded_by_a_turn() {
+        let rows = vec![row("long", "running", 1, None)];
+        let arranged = arrange(&rows, Some(1_000));
+        assert_eq!(runs(&arranged.running), ["long"]);
+        assert!(arranged.kept.is_empty() && arranged.folded.is_empty());
     }
 }

@@ -538,7 +538,7 @@ fn what_a_tracker_says_is_masked_like_any_output() {
     };
 
     let github = ticket(&user);
-    let tool = mcp.call("ticket_read", json!({}));
+    let tool = mcp.call("tickets", json!({"action": "show"}));
     track(&user, jira_abc());
     link(&user, Some("ABC-1")).unwrap();
     let jira = ticket(&user);
@@ -681,17 +681,20 @@ fn the_short_ticket_read_of_a_named_ticket_points_at_that_ticket() {
     link(&user, Some("#12")).unwrap();
     let mcp = agent_in(&user, Some("login"));
 
-    let other = mcp.call("ticket_read", json!({"ticket": "13"}));
+    let other = mcp.call("tickets", json!({"action": "show", "ticket": "13"}));
 
     assert!(!other.error, "{}", other.text);
     assert!(
         other
             .text
-            .contains("read them with ticket_read {\"ticket\": \"13\", \"detail\": \"full\"}"),
+            .contains("read them with tickets {\"action\": \"show\", \"ticket\": \"13\", \"detail\": \"full\"}"),
         "{}",
         other.text
     );
-    let full = mcp.call("ticket_read", json!({"ticket": "13", "detail": "full"}));
+    let full = mcp.call(
+        "tickets",
+        json!({"action": "show", "ticket": "13", "detail": "full"}),
+    );
     assert!(full.text.contains("The logout fails"), "{}", full.text);
 }
 
@@ -711,21 +714,21 @@ fn ticket_read_returns_the_workspace_s_ticket_or_another_of_its_tracker_and_neve
     link(&user, Some("#12")).unwrap();
     let mcp = agent_in(&user, Some("login"));
 
-    assert!(mcp.names().contains(&"ticket_read".to_owned()));
-    let own = mcp.call("ticket_read", json!({}));
+    assert!(mcp.names().contains(&"tickets".to_owned()));
+    let own = mcp.call("tickets", json!({"action": "show"}));
     assert!(!own.error, "{}", own.text);
     for said in [
         "Ticket #12 of acme/api (GitHub), open: The login fails",
         "https://github.com/acme/api/issues/12",
         "Users cannot sign in.",
-        "Comments: 2, the newest by bob on 2026-10-02T09:30:00Z, read them with ticket_read \
-         {\"detail\": \"full\"}",
+        "Comments: 2, the newest by bob on 2026-10-02T09:30:00Z, read them with tickets \
+         {\"action\": \"show\", \"detail\": \"full\"}",
     ] {
         assert!(own.text.contains(said), "{said} in {}", own.text);
     }
     // The comments themselves come only when asked for.
     assert!(!own.text.contains("I can reproduce"), "{}", own.text);
-    let full = mcp.call("ticket_read", json!({"detail": "full"}));
+    let full = mcp.call("tickets", json!({"action": "show", "detail": "full"}));
     assert!(!full.error, "{}", full.text);
     for said in [
         "- alice, 2026-10-01T10:00:00Z: I can reproduce",
@@ -733,7 +736,7 @@ fn ticket_read_returns_the_workspace_s_ticket_or_another_of_its_tracker_and_neve
     ] {
         assert!(full.text.contains(said), "{said} in {}", full.text);
     }
-    let refused = mcp.call("ticket_read", json!({"detail": "all"}));
+    let refused = mcp.call("tickets", json!({"action": "show", "detail": "all"}));
     assert!(
         refused.error && refused.text.contains("has no detail \"all\""),
         "{}",
@@ -741,7 +744,7 @@ fn ticket_read_returns_the_workspace_s_ticket_or_another_of_its_tracker_and_neve
     );
 
     // Another ticket of the same tracker, by its key.
-    let other = mcp.call("ticket_read", json!({"ticket": "13"}));
+    let other = mcp.call("tickets", json!({"action": "show", "ticket": "13"}));
     assert!(!other.error, "{}", other.text);
     assert!(
         other
@@ -751,7 +754,7 @@ fn ticket_read_returns_the_workspace_s_ticket_or_another_of_its_tracker_and_neve
 
     // Another tracker's: refused, and never asked.
     let jira_calls = user.acli_received().len();
-    let refused = mcp.call("ticket_read", json!({"ticket": "ABC-123"}));
+    let refused = mcp.call("tickets", json!({"action": "show", "ticket": "ABC-123"}));
     assert!(refused.error);
     assert!(
         refused.text.starts_with(
@@ -761,7 +764,7 @@ fn ticket_read_returns_the_workspace_s_ticket_or_another_of_its_tracker_and_neve
         refused.text
     );
     assert_eq!(user.acli_received().len(), jira_calls);
-    let refused = mcp.call("ticket_read", json!({"ticket": "--web"}));
+    let refused = mcp.call("tickets", json!({"action": "show", "ticket": "--web"}));
     assert!(
         refused.error && refused.text.starts_with("refused:"),
         "{}",
@@ -772,7 +775,7 @@ fn ticket_read_returns_the_workspace_s_ticket_or_another_of_its_tracker_and_neve
     track(&user, jira_abc());
     link(&user, Some("ABC-123")).unwrap();
     let jira_agent = agent_in(&user, Some("login"));
-    let own = jira_agent.call("ticket_read", json!({}));
+    let own = jira_agent.call("tickets", json!({"action": "show"}));
     assert!(!own.error, "{}", own.text);
     assert!(
         own.text
@@ -782,22 +785,29 @@ fn ticket_read_returns_the_workspace_s_ticket_or_another_of_its_tracker_and_neve
     );
     assert!(own.text.contains("- a form"), "{}", own.text);
     let github_calls = user.gh_received().len();
-    let refused = jira_agent.call("ticket_read", json!({"ticket": "#12"}));
+    let refused = jira_agent.call("tickets", json!({"action": "show", "ticket": "#12"}));
     assert!(refused.error, "{}", refused.text);
     assert_eq!(user.gh_received().len(), github_calls);
 
     // No ticket linked: nothing to read by default, and the tracker's tickets by key.
     link(&user, None).unwrap();
     let none = agent_in(&user, Some("login"));
-    let refused = none.call("ticket_read", json!({}));
+    let refused = none.call("tickets", json!({"action": "show"}));
     assert!(refused.error);
     assert!(
         refused.text.contains("is linked to no ticket"),
         "{}",
         refused.text
     );
-    assert!(!none.call("ticket_read", json!({"ticket": "ABC-123"})).error);
-    assert!(none.call("ticket_read", json!({"ticket": "#13"})).error);
+    assert!(
+        !none
+            .call("tickets", json!({"action": "show", "ticket": "ABC-123"}))
+            .error
+    );
+    assert!(
+        none.call("tickets", json!({"action": "show", "ticket": "#13"}))
+            .error
+    );
 
     // Read only: every call either CLI got is one of the reads, and the gate held nothing.
     for call in calls(user.acli_received()) {
@@ -822,7 +832,7 @@ fn an_agent_in_the_project_folder_has_no_ticket_read() {
     fixture(&user);
     let mcp = agent_in(&user, None);
 
-    assert!(!mcp.names().contains(&"ticket_read".to_owned()));
+    assert!(!mcp.names().contains(&"tickets".to_owned()));
 }
 
 #[test]

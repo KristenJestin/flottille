@@ -47,11 +47,12 @@ pub struct Base {
     pub branch: String,
     pub remote: String,
     /// Where the remote led when the workspace was created, credentials taken out: its fetch and
-    /// push URLs, sorted. A push and `forge_write` go only where it still leads; empty for a
+    /// push URLs, sorted. A push and `forge`'s writes go only where it still leads; empty for a
     /// workspace created before it was recorded.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub urls: Vec<String>,
-    /// `refs/remotes/<remote>/<branch>`.
+    /// `refs/remotes/<remote>/<branch>`, or `refs/heads/<branch>` when it started from the local
+    /// branch.
     #[serde(rename = "ref")]
     pub reference: String,
     pub commit: String,
@@ -60,6 +61,10 @@ pub struct Base {
     /// When the tracking ref was last updated, in milliseconds since the Unix epoch; unknown when
     /// git kept no trace of it.
     pub fetched_at: Option<u64>,
+    /// Why it started from the local branch, in one line: `no remote origin: started from the
+    /// local main`. None when it started from the remote's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// One step of a workspace's preparation.

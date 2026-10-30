@@ -8,9 +8,8 @@
 //! its remote and keeps the file's comments.
 
 use flottille_core::declared::{ProjectTracker, RepositoryForge};
-use flottille_ui::{Button, Card, Dropdown, MenuItem, Type, enter, palette};
+use flottille_ui::{Button, Card, Dropdown, MenuItem, Type, enter, palette, presence, presence_of};
 use gpui_kit::base::input::{Input, InputEditorStyle, InputState};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement,
     ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, TestSupportExt as _,
@@ -653,11 +652,13 @@ impl ProjectSettingsPage {
             .child(picker);
         let mut fields = div().flex().gap(px(8.));
         if row.kind == ForgeKind::BitbucketDataCenter {
-            fields = fields.child(div().flex_1().child(field_frame(
-                id("forge-host"),
-                &row.host,
-                cx,
-            )));
+            fields = fields.child(enter(
+                id("forge-host-enter"),
+                0,
+                div()
+                    .flex_1()
+                    .child(field_frame(id("forge-host"), &row.host, cx)),
+            ));
         }
         if row.kind != ForgeKind::None {
             fields = fields.child(div().flex_1().child(field_frame(
@@ -701,7 +702,9 @@ impl ProjectSettingsPage {
                 .flex()
                 .flex_col()
                 .gap(px(8.))
-                .when(row.kind != ForgeKind::None, |d| d.child(fields))
+                .child(
+                    presence(id("forge-fields"), row.kind != ForgeKind::None, fields).gap(px(8.)),
+                )
                 .child(said)
                 .test_support(),
         )
@@ -862,32 +865,38 @@ impl Render for ProjectSettingsPage {
             .disabled(self.checking)
             .on_click(cx.listener(|this, _, _, cx| this.check(cx))),
         );
-        actions = if self.removing {
-            actions.child(div().mono(11.5).text_color(p.faint).child("Removing…"))
-        } else if self.confirming_remove {
-            actions
-                .child(
-                    Button::quiet("cancel-remove-project", "Cancel").on_click(cx.listener(
-                        |this, _, _, cx| {
-                            this.confirming_remove = false;
-                            cx.notify();
-                        },
-                    )),
-                )
-                .child(
-                    Button::secondary("confirm-remove-project", format!("Forget {}", self.name))
-                        .on_click(cx.listener(|this, _, _, cx| this.remove(cx))),
-                )
-        } else {
-            actions.child(
-                Button::quiet("remove-project", "Remove project").on_click(cx.listener(
-                    |this, _, _, cx| {
+        actions =
+            if self.removing {
+                actions.child(div().mono(11.5).text_color(p.faint).child("Removing…"))
+            } else if self.confirming_remove {
+                actions.child(enter(
+                    "confirm-remove-project-group",
+                    0,
+                    div()
+                        .flex()
+                        .gap(px(8.))
+                        .child(Button::quiet("cancel-remove-project", "Cancel").on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.confirming_remove = false;
+                                cx.notify();
+                            }),
+                        ))
+                        .child(
+                            Button::secondary(
+                                "confirm-remove-project",
+                                format!("Forget {}", self.name),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.remove(cx))),
+                        ),
+                ))
+            } else {
+                actions.child(Button::quiet("remove-project", "Remove project").on_click(
+                    cx.listener(|this, _, _, cx| {
                         this.confirming_remove = true;
                         cx.notify();
-                    },
-                )),
-            )
-        };
+                    }),
+                ))
+            };
         let header = div()
             .flex()
             .flex_col()
@@ -915,23 +924,38 @@ impl Render for ProjectSettingsPage {
                     .text_color(p.faint)
                     .child(SharedString::from(self.folder.clone())),
             )
-            .when(self.confirming_remove, |d| {
-                d.child(div().text_size(px(12.5)).text_color(p.mute).child(
-                    "Flottille forgets the project and its file; its folder and repositories \
-                     stay as they are.",
-                ))
-            });
-        let said = |id: &'static str, said: &Said| {
-            let (text, color) = match said {
-                Said::Fine(text) => (text.clone(), p.ok),
-                Said::Refused(text) => (text.clone(), p.fail),
+            .child(
+                presence(
+                    "confirm-remove-note",
+                    self.confirming_remove,
+                    div().text_size(px(12.5)).text_color(p.mute).child(
+                        "Flottille forgets the project and its file; its folder and \
+                         repositories stay as they are.",
+                    ),
+                )
+                .gap(px(6.)),
+            );
+        // A line the page says, in the colour of what it says; it folds away when it is cleared.
+        let said = |id: &'static str, said: Option<Said>| {
+            let (fine, refused) = match said {
+                Some(Said::Fine(text)) => (Some(SharedString::from(text)), None),
+                Some(Said::Refused(text)) => (None, Some(SharedString::from(text))),
+                None => (None, None),
+            };
+            let line = move |color| {
+                move |text: SharedString| {
+                    div()
+                        .id(id)
+                        .pb(px(12.))
+                        .text_size(px(12.5))
+                        .text_color(color)
+                        .child(text)
+                        .into_any_element()
+                }
             };
             div()
-                .id(id)
-                .mb(px(12.))
-                .text_size(px(12.5))
-                .text_color(color)
-                .child(SharedString::from(text))
+                .child(presence_of(format!("{id}-fine"), fine, line(p.ok)))
+                .child(presence_of(format!("{id}-refused"), refused, line(p.fail)))
         };
         let label = |text: &'static str| {
             div()
@@ -995,15 +1019,15 @@ impl Render for ProjectSettingsPage {
                     .flex()
                     .flex_col()
                     .child(enter(key("header"), 0, header))
-                    .when_some(self.checked.clone(), |d, checked| {
-                        d.child(said("project-checked", &checked))
-                    })
-                    .when_some(self.removed.clone(), |d, why| {
-                        d.child(said("project-remove-error", &Said::Refused(why)))
-                    })
-                    .when_some(self.error.clone(), |d, why| {
-                        d.child(said("project-settings-error", &Said::Refused(why)))
-                    })
+                    .child(said("project-checked", self.checked.clone()))
+                    .child(said(
+                        "project-remove-error",
+                        self.removed.clone().map(Said::Refused),
+                    ))
+                    .child(said(
+                        "project-settings-error",
+                        self.error.clone().map(Said::Refused),
+                    ))
                     .children(self.obsolete.iter().map(|obsolete| {
                         div()
                             .mb(px(12.))
@@ -1011,9 +1035,11 @@ impl Render for ProjectSettingsPage {
                             .text_color(p.wait)
                             .child(SharedString::from(format!("Not read: {obsolete}")))
                     }))
-                    .when(!self.loaded && self.error.is_none(), |d| {
-                        d.child(div().text_color(p.faint).child("Asking the daemon…"))
-                    })
+                    .child(presence(
+                        "asking-the-daemon",
+                        !self.loaded && self.error.is_none(),
+                        div().text_color(p.faint).child("Asking the daemon…"),
+                    ))
                     .child(enter(key("forges"), 1, label("Forges")))
                     .child(enter(
                         key("forges-note"),
@@ -1031,17 +1057,15 @@ impl Render for ProjectSettingsPage {
                         5 + count,
                         div().mb(px(12.)).child(tracker),
                     ))
-                    .when_some(self.saved.clone(), |d, saved| {
-                        d.child(said("project-settings-saved", &saved))
-                    })
-                    .child(footer)
-                    .child(self.skills.clone())
-                    .child(self.commands.clone())
-                    .child(self.tasks.clone())
-                    .child(self.setup.clone())
+                    .child(said("project-settings-saved", self.saved.clone()))
+                    .child(enter(key("save"), 6 + count, footer))
+                    .child(enter(key("skills"), 7 + count, self.skills.clone()))
+                    .child(enter(key("commands"), 8 + count, self.commands.clone()))
+                    .child(enter(key("tasks"), 9 + count, self.tasks.clone()))
+                    .child(enter(key("setup"), 10 + count, self.setup.clone()))
                     .child(enter(
                         key("rules"),
-                        6 + count,
+                        11 + count,
                         div().mt(px(24.)).mb(px(12.)).child(self.rules.clone()),
                     )),
             )

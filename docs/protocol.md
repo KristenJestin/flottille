@@ -200,6 +200,33 @@ changing nothing: `{"name", "folder", "new", "missing"}`, `new` the repositories
 configured, `missing` the ones configured and no longer there. `refused` when the folder no longer
 exists.
 
+#### `project.repositories`
+
+`{"name"}`. The project's repositories as their checkouts stand, for its page in the window:
+`{"name", "folder", "repositories": [{"path", "found", "branch", "remote", "url", "forge", "base",
+"branches"}], "new"}`. `found` is false when the folder no longer holds the repository; `branch` is
+the branch its checkout is on (`null` when on none); `url` the remote's address, credentials taken
+out and masked, `null` when it has no such remote: the window says "local only"; `forge` the one
+declared; `base` its base rule; `branches` its local branches. `new` lists the repositories the
+folder holds that the file does not name, detected again as `project.detect` detects them.
+
+#### `project.add_repository`
+
+`{"name", "path"}`. Writes a `[[repositories]]` with that `path` (relative to the folder, `.` for
+the folder itself) in the project's file, where it stands, what is around it kept, the other keys
+left to their defaults (`origin`, base `["main"]`), and answers as `project.repositories`.
+`refused`, with nothing written, when the path leads out of the folder, holds no `.git`, or is
+already one of the project's.
+
+#### `project.remove_repository`
+
+`{"name", "path"}`. Removes that repository's `[[repositories]]` from the file, its comments
+going with it and everything else kept, and answers as `project.repositories`. The project only
+forgets it: its folder, its branches and the worktrees of the workspaces that took it are never
+touched. `refused`, with nothing written, when it is not one of the project's, is the last one,
+or the file would no longer be one the daemon can use (another repository depends on it, a task
+or a setup step runs in it…), with the key at fault.
+
 #### `project.settings`
 
 `{"name"}`. The project's forges and tracker as its Settings show them (`docs/forges.md`, "The
@@ -323,7 +350,10 @@ A workspace is one worktree per repository, on one branch, prepared by the proje
   "repositories": [
     {"path": "api", "base": {"branch": "develop", "remote": "origin", "ref": "refs/remotes/origin/develop",
       "urls": ["git@git.example.com:acme/api.git"], "commit": "503144c9654d6762b17fd670ddc9f88aa39ecfaf",
-      "fetched_now": true, "fetched_at": 1792843730790}}
+      "fetched_now": true, "fetched_at": 1792843730790}},
+    {"path": "lib", "base": {"branch": "main", "remote": "origin", "ref": "refs/heads/main",
+      "commit": "9d1c0e4f6a2b8c3d5e7f9a1b2c3d4e5f6a7b8c9d", "fetched_now": false, "fetched_at": null,
+      "note": "no remote origin: started from the local main"}}
   ],
   "steps": [
     {"position": 0, "repository": "api", "kind": "worktree", "state": "done"},
@@ -336,7 +366,10 @@ A workspace is one worktree per repository, on one branch, prepared by the proje
 ```
 
 `state` is `preparing`, `failed` or `ready`. `variables` are the project's as they were at
-creation, not yet filled. A base's `fetched_now` is false when the workspace was created offline;
+creation, not yet filled. A base's `fetched_now` is false when the workspace was created offline or from a local branch;
+`note` is there when it started from the repository's own branch rather than the remote's, and
+says why in one line (`no remote origin: started from the local main`, `origin could not be
+fetched (…): started from origin/develop as last fetched`, `…: started from the local main`);
 `fetched_at` (milliseconds since the Unix epoch) is when its tracking ref was last updated, `null`
 when unknown. Its `urls` are where its remote led at creation, fetch and push, credentials taken
 out (`docs/commands.md`); absent for a workspace created before they were recorded. A step's `kind` is `worktree`, `copy` (`globs`), `link` (`path`), `root_entries`
@@ -351,17 +384,21 @@ cannot be used.
 
 #### `workspace.create`
 
-`{"project", "name", "repositories"?, "branch"?, "offline"?, "ticket"?}`. Fetches the base of each
-repository, writes the workspace, makes the worktrees and answers the workspace; the rest of the
-setup goes on in the background. `repositories` is the project's default set when left out,
-`branch` is `<branch prefix>/<name>`, `offline: true` fetches nothing, and `ticket` (`#123`, `123`
+`{"project", "name", "repositories"?, "branch"?, "bases"?, "offline"?, "ticket"?}`. Fetches the
+base of each repository, writes the workspace, makes the worktrees and answers the workspace; the
+rest of the setup goes on in the background. `repositories` is the project's default set when left
+out, `branch` is `<branch prefix>/<name>`, `bases` (`{"api": "main"}`) gives a repository it takes
+the branch it starts from in place of its base rule, `offline: true` fetches nothing, and `ticket` (`#123`, `123`
 or a Jira key) links the workspace to a ticket (`tickets.md`); the workspace's `ticket` says it, in
 every answer that shows a workspace, `null` when it has none.
 
 `refused`, with nothing written nor made, when the name is not one, the ticket is not one, a
-repository is not the project's, the branch is not one git accepts, the project has a workspace of that name, the folder
-exists, the branch exists in a repository, no branch of a base rule is on the remote, or **a fetch
-fails** (the message is git's reason). A worktree that cannot be made is not a refusal: the
+repository is not the project's, a base is chosen for a repository it does not take or is not a
+branch name, the branch is not one git accepts, the project has a workspace of that name, the folder
+exists, the branch exists in a repository, or a repository has none of its base branches, neither
+on its remote nor itself. A fetch is never a requirement: a repository with no remote, whose fetch
+fails, or whose remote has none of its base branches starts from the first of them it has itself,
+and its base's `note` says so. A worktree that cannot be made is not a refusal: the
 workspace is answered `failed`, with the step's failure.
 
 #### `workspace.list`
@@ -377,6 +414,9 @@ binary file, a link, anything but a regular file, or a file over 8 MiB counts no
 1000 new files and 16 MiB of them are read: past that the count stops and `capped` is `true`, the
 real count being higher. It writes nothing, not even git's index. `changes` is `null` when git
 cannot read the worktree (not made yet, or gone). `workspace.list` leaves it out: it runs no git.
+Each repository also has `branch`, the branch its worktree is on (`null` when on none), `ahead`,
+its commits since its base commit, and `uncommitted`, how many files `git status` shows (the links
+Flottille made and the worktrees inside it left out), each `null` when its worktree is not there.
 `ready_at` is when its last preparation ended, the time of its newest `workspace.ready` event
 (`docs/events.md`), kept with the workspace; `null` while it is not `ready`. `workspace.list`
 leaves it out too.
@@ -590,6 +630,7 @@ there. An agent in a result:
   "epoch": 0,
   "title": null,
   "brief": null,
+  "launched_by": null,
   "reported_at": null,
   "quiet_turns": 0,
   "waiting_on_answer": false,
@@ -625,7 +666,9 @@ when it last opened one, `false` once Flottille forgot an ended root's session; 
 it took images in a prompt when it last started, `null` before it did. `active_at` is its last sign of activity, `null` before the
 first. `instructions` and `tools` are frozen when the agent is created. `parent` is the agent that
 launched it (`null` for a root), `depth` its depth in the tree, `epoch` the number of its session
-(each replacement adds one), `title` and `brief` a child's task, `reported_at` when it reported,
+(each replacement adds one), `title` and `brief` a child's task, `launched_by` the id of the agent
+that started a root for the user (`null` for a root the user started, and for a child), whose
+`brief` is then that agent's first message, never the user's, `reported_at` when it reported,
 `quiet_turns` its turns ended without a report in a row, `waiting_on_answer` whether a question of
 it waits for an answer: a child's from its parent, a root's from the user, until that one writes to
 it (`docs/agents.md`, "The tree"). `gate_mode` is its session's mode, `ask` or `auto`
@@ -723,7 +766,7 @@ alone reaches it: no tool of an agent changes a mode.
 
 `{"agent"}`. The whole tree of the agent's root, each agent before its children:
 `{"agents": [{"agent", "doing", "waiting_on", "needs_user"}]}`. `agent` is the agent in short
-(`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `depth`, `epoch`, `state`,
+(`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `launched_by`, `depth`, `epoch`, `state`,
 `state_reason`, `created_at`, `active_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
 took at the last start of its process, else the one asked, `null` for the agent's default before it
 started; `resumable`: whether `agent.resume` takes it once its last process is gone; `stopping`:

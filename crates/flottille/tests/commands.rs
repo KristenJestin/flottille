@@ -108,14 +108,15 @@ fn allowed(user: &User, answer: Answer) -> Answer {
     }
 }
 
-/// `forge_write`, allowed by the user.
+/// A write of `forge`, allowed by the user.
 fn write(user: &User, mcp: &Mcp, args: Value) -> Answer {
-    allowed(user, mcp.call("forge_write", args))
+    allowed(user, mcp.call("forge", args))
 }
 
-/// `workspace_remove`, allowed by the user.
-fn remove(user: &User, mcp: &Mcp, args: Value) -> Answer {
-    allowed(user, mcp.call("workspace_remove", args))
+/// `workspace` `remove`, allowed by the user.
+fn remove(user: &User, mcp: &Mcp, mut args: Value) -> Answer {
+    args["action"] = "remove".into();
+    allowed(user, mcp.call("workspace", args))
 }
 
 /// A line, allowed by the user.
@@ -412,13 +413,13 @@ fn forge_write_creates_a_pull_request_with_the_fake_gh_once_allowed() {
     let user = User::with_fake_agent().with_fake_gh();
     on_github(&user);
     user.gh_script(json!({"created": 12}));
-    let create = json!({"action": "pr-create", "repository": ".", "title": "Add the login page",
+    let create = json!({"action": "create", "repository": ".", "title": "Add the login page",
         "body": "What it does"});
 
     // Listed to an agent of a workspace, held: never asked of the forge before the user allows it.
     let mcp = plain_agent(&user);
-    assert!(mcp.names().contains(&"forge_write".to_owned()));
-    let answer = mcp.call("forge_write", create.clone());
+    assert!(mcp.names().contains(&"forge".to_owned()));
+    let answer = mcp.call("forge", create.clone());
     assert!(
         answer.text.contains("Waiting for the user's approval"),
         "{}",
@@ -582,7 +583,7 @@ fn forge_write_refuses_a_remote_changed_since_the_workspace_was_created() {
     let answer = write(
         &user,
         &open,
-        json!({"action": "pr-create", "repository": ".", "title": "Add the login page"}),
+        json!({"action": "create", "repository": ".", "title": "Add the login page"}),
     );
 
     assert!(answer.error, "{}", answer.text);
@@ -600,7 +601,7 @@ fn pr_merge_squash_merges_only_the_workspace_s_own_pull_request_into_its_base() 
     on_github(&user);
     command(&user, "merge");
     let (_, mcp) = run(&user, "merge");
-    let merge = json!({"action": "pr-merge-squash", "repository": "."});
+    let merge = json!({"action": "merge", "repository": "."});
     let merges = |user: &User| {
         gh_calls(user)
             .iter()
@@ -920,7 +921,7 @@ fn open_the_pull_requests_reports_first_opens_nothing_before_the_confirmation_th
     }
     let ahead = line_in(&mcp, "api", "git log --oneline origin/main..HEAD");
     assert!(ahead.text.contains("add login.ts"), "{}", ahead.text);
-    let read = mcp.call("forge_read", json!({}));
+    let read = mcp.call("forge", json!({"action": "show"}));
     assert!(!read.error, "{}", read.text);
     let asked = mcp.call(
         "ask_user",
@@ -937,9 +938,9 @@ fn open_the_pull_requests_reports_first_opens_nothing_before_the_confirmation_th
         pushed.text
     );
     assert!(!remote_branches(&user, &user.path("remotes/api.git")).contains("app/login"));
-    let create = json!({"action": "pr-create", "repository": "api",
+    let create = json!({"action": "create", "repository": "api",
         "title": "feat(LOGIN-1): add the login", "body": "Adds the login page."});
-    let opened = mcp.call("forge_write", create);
+    let opened = mcp.call("forge", create);
     assert!(
         opened.text.contains("Waiting for the user's approval"),
         "{}",
@@ -1028,7 +1029,7 @@ fn merge_a_stack_refuses_while_a_check_is_failing_and_merges_the_levels_in_order
         write(
             &user,
             &mcp,
-            json!({"action": "pr-merge-squash", "repository": repository}),
+            json!({"action": "merge", "repository": repository}),
         )
     };
 
@@ -1062,8 +1063,8 @@ fn merge_a_stack_refuses_while_a_check_is_failing_and_merges_the_levels_in_order
     let answer = merge("web");
     assert!(answer.error, "{}", answer.text);
     let waived = mcp.call(
-        "forge_write",
-        json!({"action": "pr-merge-squash", "repository": "web",
+        "forge",
+        json!({"action": "merge", "repository": "web",
             "waive": "the build of web fails on a known flaky test"}),
     );
     assert!(
@@ -1103,7 +1104,7 @@ fn close_stops_on_unpushed_work_and_removes_a_workspace_whose_branches_are_merge
     adopt(&user, "close");
     let (_, mcp) = run(&user, "close");
     let brief = brief_of(&user, "The command close of project app");
-    assert!(brief.contains("call `workspace_remove`"), "{brief}");
+    assert!(brief.contains("`workspace` `remove`"), "{brief}");
 
     // api's commit is on no remote: refused, and nothing is touched.
     let answer = remove(&user, &mcp, json!({}));
@@ -1211,12 +1212,12 @@ fn forge_write_creates_a_bitbucket_pull_request_with_the_fake_bkt_once_allowed()
     on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
     user.bkt_script(json!({"created": 12,
         "pulls": {"acme/app": [cloud_pull(12, "acme/app", "acme/app", "main")]}}));
-    let create = json!({"action": "pr-create", "repository": ".", "title": "Add the login page",
+    let create = json!({"action": "create", "repository": ".", "title": "Add the login page",
         "body": "What it does"});
 
     // Held: never asked of the forge before the user allows it.
     let mcp = plain_agent(&user);
-    let answer = mcp.call("forge_write", create.clone());
+    let answer = mcp.call("forge", create.clone());
     assert!(
         answer.text.contains("Waiting for the user's approval"),
         "{}",
@@ -1256,13 +1257,9 @@ fn a_bitbucket_pull_request_is_never_a_draft_and_needs_its_title() {
     let draft = write(
         &user,
         &open,
-        json!({"action": "pr-create", "repository": ".", "title": "Login", "draft": true}),
+        json!({"action": "create", "repository": ".", "title": "Login", "draft": true}),
     );
-    let untitled = write(
-        &user,
-        &open,
-        json!({"action": "pr-create", "repository": "."}),
-    );
+    let untitled = write(&user, &open, json!({"action": "create", "repository": "."}));
 
     assert!(draft.error, "{}", draft.text);
     assert!(draft.text.contains("draft"), "{}", draft.text);
@@ -1285,7 +1282,7 @@ fn forge_write_names_a_data_center_repository_by_its_project() {
     let answer = write(
         &user,
         &open,
-        json!({"action": "pr-create", "repository": ".", "title": "Login"}),
+        json!({"action": "create", "repository": ".", "title": "Login"}),
     );
 
     assert!(!answer.error, "{}", answer.text);
@@ -1309,7 +1306,7 @@ fn forge_write_names_a_data_center_repository_by_its_project() {
     let answer = write(
         &user,
         &open,
-        json!({"action": "pr-create", "repository": ".", "title": "Login"}),
+        json!({"action": "create", "repository": ".", "title": "Login"}),
     );
     assert!(answer.error, "{}", answer.text);
     assert!(
@@ -1334,7 +1331,7 @@ fn a_host_bkt_has_no_context_for_is_a_failure_that_says_what_to_do() {
     let answer = write(
         &user,
         &open,
-        json!({"action": "pr-create", "repository": ".", "title": "Login"}),
+        json!({"action": "create", "repository": ".", "title": "Login"}),
     );
 
     assert!(answer.error, "{}", answer.text);
@@ -1352,7 +1349,7 @@ fn bitbucket_pr_merge_squash_merges_only_the_workspace_s_own_pull_request_into_i
     on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
     command(&user, "merge");
     let (_, mcp) = run(&user, "merge");
-    let merge = json!({"action": "pr-merge-squash", "repository": "."});
+    let merge = json!({"action": "merge", "repository": "."});
     // Its own page names no reviewer, and it has no check: nothing blocks the merge.
     let pulls = |pulls: Value| {
         user.bkt_script(json!({"pulls": {"acme/app": pulls},
@@ -1415,7 +1412,7 @@ fn bitbucket_pipeline_rerun_starts_the_branch_s_pipeline_again_only_when_its_las
     on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
     command(&user, "rerun");
     let (_, mcp) = run(&user, "rerun");
-    let rerun = json!({"action": "pipeline-rerun", "repository": "."});
+    let rerun = json!({"action": "checks", "repository": "."});
     let pipeline = |number: u64, branch: &str, result: &str| {
         json!({"uuid": format!("{{{number}}}"), "build_number": number,
             "state": {"name": "COMPLETED", "result": {"name": result}},
@@ -1475,11 +1472,7 @@ fn a_data_center_repository_has_no_pipeline_bkt_can_run() {
     command(&user, "rerun");
     let (_, mcp) = run(&user, "rerun");
 
-    let answer = write(
-        &user,
-        &mcp,
-        json!({"action": "pipeline-rerun", "repository": "."}),
-    );
+    let answer = write(&user, &mcp, json!({"action": "checks", "repository": "."}));
 
     assert!(answer.error, "{}", answer.text);
     assert!(
@@ -1509,7 +1502,7 @@ fn a_bitbucket_write_is_refused_when_the_remote_leads_elsewhere_than_when_the_wo
     let answer = write(
         &user,
         &open,
-        json!({"action": "pr-create", "repository": ".", "title": "Login"}),
+        json!({"action": "create", "repository": ".", "title": "Login"}),
     );
 
     assert!(answer.error, "{}", answer.text);
@@ -1541,7 +1534,7 @@ fn bitbucket_pr_create_asks_the_project_s_reviewers() {
     let answer = write(
         &user,
         &open,
-        json!({"action": "pr-create", "repository": ".", "title": "Login", "body": "Adds it"}),
+        json!({"action": "create", "repository": ".", "title": "Login", "body": "Adds it"}),
     );
 
     assert!(!answer.error, "{}", answer.text);
@@ -1574,7 +1567,7 @@ fn bitbucket_pr_merge_squash_refuses_while_a_check_fails_or_runs_or_a_reviewer_a
     on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
     command(&user, "merge");
     let (_, mcp) = run(&user, "merge");
-    let merge = json!({"action": "pr-merge-squash", "repository": "."});
+    let merge = json!({"action": "merge", "repository": "."});
     let page = "/repositories/acme/app/pullrequests/12";
     let script = |checks: Value, reviewers: &[&str]| {
         user.bkt_script(json!({
@@ -1601,8 +1594,8 @@ fn bitbucket_pr_merge_squash_refuses_while_a_check_fails_or_runs_or_a_reviewer_a
 
     // Waived: held for the user, and merged once they allow that very merge.
     let waived = mcp.call(
-        "forge_write",
-        json!({"action": "pr-merge-squash", "repository": ".",
+        "forge",
+        json!({"action": "merge", "repository": ".",
             "waive": "the reviewer's request is already answered"}),
     );
     assert!(
@@ -1649,7 +1642,7 @@ fn a_data_center_pull_request_a_reviewer_marked_needs_work_is_not_merged() {
     };
     command(&user, "merge");
     let (_, mcp) = run(&user, "merge");
-    let merge = json!({"action": "pr-merge-squash", "repository": "."});
+    let merge = json!({"action": "merge", "repository": "."});
 
     script("NEEDS_WORK");
     let answer = write(&user, &mcp, merge.clone());
@@ -1761,8 +1754,8 @@ fn forge_write_and_workspace_remove_are_listed_to_every_agent_of_a_workspace() {
     let listed = |mcp: &Mcp| -> (bool, bool) {
         let names = mcp.names();
         (
-            names.contains(&"forge_write".to_owned()),
-            names.contains(&"workspace_remove".to_owned()),
+            names.contains(&"forge".to_owned()),
+            names.contains(&"workspace".to_owned()),
         )
     };
 

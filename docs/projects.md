@@ -20,6 +20,15 @@ Unknown keys are refused too, so a typo is never silently ignored.
 | `flottille project remove <name>` | Forgets the project, never its folder. |
 | `flottille project check <name>` | Detects the repositories again; fails when they differ from the configuration. |
 
+The project page lists the project's repositories (`project.repositories`): each with the branch
+its checkout is on, where its remote leads or "local only", and its forge; the repositories the
+folder holds that the file does not name, detected again, each with Add; a field that adds one by
+its path; Detect again; and Remove, which asks first and only forgets the repository: its folder,
+its branches and the worktrees of its workspaces stay, and the window says so. Adding and removing
+write the file where it stands, its comments kept (`project.add_repository`,
+`project.remove_repository`), and are refused, nothing written, when the file would no longer be
+one the daemon can use.
+
 The window does the same from the sidebar's **+** beside "Projects" (or the empty window's "Add a
 project"): a folder, typed or picked, the repositories detected in it shown before anything is
 registered, then the new project's Settings, where it can be checked again or removed.

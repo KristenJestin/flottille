@@ -1,7 +1,7 @@
 //! A scripted `acli` (Atlassian's command line) for the tests of Flottille's Jira reads
 //! (`docs/tickets.md`), so that no test ever calls Jira nor uses anyone's sign-in. It answers the
-//! two commands Flottille runs, from a script, and records every call; any other command, a write
-//! above all, ends with 2 and is in the record for a test to find.
+//! three commands Flottille runs, from a script, and records every call; any other command, a
+//! write above all, ends with 2 and is in the record for a test to find.
 //!
 //! The shape of what it prints is **assumed**, from Atlassian's documentation of
 //! `acli jira workitem view` (which gives its flags and not its output): the work item as Jira's
@@ -26,6 +26,11 @@
 //! `signed_in: false` makes `acli jira auth status` end with 1. `items` gives, by key, what
 //! `acli jira workitem view KEY --json` prints; a key with none ends with 1. `fail` makes the view
 //! of that key end with 1, saying its text.
+//!
+//! `acli jira workitem search --jql Q --json [--limit N]` prints the script's `search` (an array
+//! of work items, Jira's REST shape assumed as for `view`), or every item of `items` without it,
+//! at most `--limit`. The fake does not read the JQL: the test reads it in the record. Without
+//! `--jql` (or `--filter`) or `--json` it ends with 2, as a call Flottille never makes.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -84,6 +89,31 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                     1
                 }
             }
+        }
+        ["jira", "workitem", "search", rest @ ..]
+            if rest.contains(&"--json") && rest.contains(&"--jql") =>
+        {
+            if let Some(failure) = script["fail"]["search"].as_str() {
+                eprintln!("{failure}");
+                return 1;
+            }
+            let limit = rest
+                .iter()
+                .position(|word| *word == "--limit")
+                .and_then(|at| rest.get(at + 1))
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(usize::MAX);
+            let mut found: Vec<Value> = match &script["search"] {
+                Value::Array(items) => items.clone(),
+                _ => script["items"]
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|items| items.values().cloned())
+                    .collect(),
+            };
+            found.truncate(limit);
+            println!("{}", Value::from(found));
+            0
         }
         _ => {
             eprintln!(
