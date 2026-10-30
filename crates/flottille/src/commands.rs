@@ -303,8 +303,8 @@ pub fn message_for(
         return Ok(text.to_owned());
     };
     let mut message = format!(
-        "The command {name} of project {}: {}\n",
-        project.name,
+        "{}{}\n",
+        header(&name, &project.name),
         project.commands[&name].description.trim()
     );
     let workspace = workspace.and_then(|workspace| {
@@ -326,9 +326,29 @@ pub fn message_for(
             ));
         }
     }
-    message.push_str("\n---\n\n");
+    message.push_str(TEXT_FOLLOWS);
     message.push_str(&instructions);
     Ok(message)
+}
+
+/// How a message `message_for` made from a command starts, its description after it.
+fn header(name: &str, project: &str) -> String {
+    format!("The command {name} of project {project}: ")
+}
+
+/// What ends the header of a command's message: its text follows.
+const TEXT_FOLLOWS: &str = "\n---\n\n";
+
+/// The command of `project` a message stands for, when `message_for` made it from one: its name,
+/// the command, and its text as it was sent (the file's text then, which the file may no longer
+/// hold), with what was written after `/name` at its end.
+pub fn ran<'a>(project: &'a Project, message: &'a str) -> Option<(&'a str, &'a Command, &'a str)> {
+    let (name, command) = project
+        .commands
+        .iter()
+        .find(|(name, _)| message.starts_with(&header(name, &project.name)))?;
+    let (_, text) = message.split_once(TEXT_FOLLOWS)?;
+    Some((name, command, text))
 }
 
 /// The workspace's repositories by dependency level, as the project declares them

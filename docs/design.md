@@ -402,7 +402,9 @@ reaches the judge nor what it may answer. It sees the call masked (secrets maske
 the path, a brief, a title and a body whole, contents cut to their first lines with how many they
 had), why the rules held it, the place, the agent's `why`, the first message of a session an agent
 started for the user (labelled as that agent's, never the user's), and last the user's last
-messages to the session, nothing else.
+messages to the session, nothing else. A message that ran a command (`/name`) is told as that:
+the user ran the command, from its file or the project's, and its text as it was sent comes in a
+block of its own, escaped, since it is the project's text, not the user's words.
 What the agent wrote comes in blocks of its own, every `<` escaped, so that no text of the agent
 reads as the user's; only the user's messages say what is wanted. It answers one JSON object,
 `{"verdict": "allow" | "ask", "reason": "…"}`. A failure, an answer that is not that object, or
