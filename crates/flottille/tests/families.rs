@@ -753,6 +753,7 @@ fn a_root_session_started_by_an_agent_appears_and_is_the_user_s() {
     );
     let done = allow(&user, number);
     assert!(done.contains("Started a session for the user"), "{done}");
+    assert!(done.contains("session_send"), "{done}");
 
     let all = agents(&user);
     assert_eq!(all.len(), before + 1);

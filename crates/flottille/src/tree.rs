@@ -283,8 +283,8 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     if asked.root {
         return Ok(Outcome::Done(format!(
             "Started a session for the user, {}, in {place}. It is the user's, not your child: \
-             the user follows it in the window, the agent_* tools do not reach it, and you are \
-             told nothing of it.",
+             the user follows it in the window and the agent_* tools do not reach it. You can \
+             write to it with session_send; its answers come back to you as deliveries.",
             named(&child)
         )));
     }
