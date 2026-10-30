@@ -404,3 +404,28 @@ fn agent_launch_with_new_workspace_is_judged_the_same() {
     assert!(workspace(&user, "a").is_err(), "made before the answer");
     assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
 }
+
+#[test]
+fn an_agent_s_create_in_a_repository_with_no_remote_starts_from_the_local_branch() {
+    let user = judged_user();
+    let folder = project(&user);
+    user.git(&folder, &["remote", "remove", "origin"]);
+    let (_, mcp) = root(&user);
+
+    let text = done(mcp.call("workspace", json!({"action": "create", "name": "login"})));
+
+    assert!(text.contains("Workspace login created"), "{text}");
+    assert!(
+        text.contains(" In the project folder, no remote origin: started from the local main."),
+        "{text}"
+    );
+    let made = workspace(&user, "login").unwrap();
+    assert_eq!(
+        made["repositories"][0]["base"]["note"],
+        "no remote origin: started from the local main"
+    );
+    eventually("the setup's end", || {
+        workspace(&user, "login").unwrap()["state"] == "ready"
+    });
+    assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
+}

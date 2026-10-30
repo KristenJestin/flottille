@@ -16,6 +16,7 @@ pub mod page;
 pub mod project;
 pub mod project_settings;
 pub mod providers;
+pub mod repositories;
 pub mod rules;
 pub mod runs;
 pub mod session;
@@ -26,6 +27,7 @@ pub mod shell;
 pub mod skills;
 pub mod tasks;
 pub mod tree;
+pub mod waiting;
 
 use flottille_ui::Icons;
 use gpui_kit::{AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};

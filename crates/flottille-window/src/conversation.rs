@@ -952,6 +952,19 @@ fn marker(line: &str) -> Option<&str> {
     (!kind.is_empty() && kind.chars().all(|c| c.is_ascii_lowercase() || c == '-')).then_some(kind)
 }
 
+/// Whether an event is the user's own message starting a turn of the root (not a delivery: a
+/// command that ended, a child's report, an answer to a request): a text with no marker, or one
+/// of kind `user`, or pictures sent alone.
+pub fn is_user_turn(event: &Event) -> bool {
+    event.name == "agent.prompted"
+        && (event.data["images"]
+            .as_array()
+            .is_some_and(|images| !images.is_empty())
+            || sections(event.data["text"].as_str().unwrap_or_default())
+                .iter()
+                .any(|(kind, _)| matches!(kind.as_str(), "" | "user")))
+}
+
 /// The deliveries pinned as notes on a tool's result: `<flottille-note id="…">`, the delivery,
 /// `</flottille-note>`, in any text of the result.
 fn notes(output: &Value) -> Vec<(String, String)> {
@@ -997,6 +1010,28 @@ mod tests {
             name: name.into(),
             data,
         }
+    }
+
+    #[test]
+    fn only_the_user_s_message_begins_a_turn_a_delivery_does_not() {
+        let prompted = |text: &str| event(1, "agent.prompted", json!({ "text": text }));
+        assert!(is_user_turn(&prompted("run the tests")));
+        assert!(is_user_turn(&prompted("[flottille:user]\nrun the tests")));
+        assert!(!is_user_turn(&prompted(
+            "[flottille:command-ended]\nrun 1 ended"
+        )));
+        assert!(!is_user_turn(&prompted("[flottille:child-report]\ndone")));
+        assert!(!is_user_turn(&event(
+            1,
+            "agent.reported",
+            json!({ "text": "x" })
+        )));
+        let pictures = event(
+            1,
+            "agent.prompted",
+            json!({ "text": "", "images": ["a.png"] }),
+        );
+        assert!(is_user_turn(&pictures), "a picture sent alone is a message");
     }
 
     fn root() -> Conversation {

@@ -1083,8 +1083,9 @@ async fn performed(
                         "Workspace {made} created in {}: its worktrees are made, and its setup \
                          goes on without you; workspace {{\"action\": \"show\", \"name\": \
                          \"{made}\"}} follows it, agent_launch {{\"workspace\": \"{made}\"}} \
-                         starts a child there.",
-                        created["folder"].as_str().unwrap_or_default()
+                         starts a child there.{}",
+                        created["folder"].as_str().unwrap_or_default(),
+                        crate::workspaces::notes(&created)
                     ))
                 }
                 "prepare" => {

@@ -3,7 +3,7 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::{SharedString, Styled, Svg, px, svg};
 
-gpui_kit::assets::icon_assets!(pub Icons, [Folder, GitBranch, Book, ChevronDown, Plus, Search, Bell, ExternalLink, Network, Menu, ArrowUp, ChevronsUpDown, Settings, Ellipsis, CircleStop, Terminal]);
+gpui_kit::assets::icon_assets!(pub Icons, [Folder, GitBranch, Book, ChevronDown, Plus, Search, Bell, ExternalLink, Network, Menu, ArrowUp, ChevronsUpDown, Settings, Ellipsis, CircleStop, Terminal, ChevronUp, TriangleAlert]);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
@@ -27,12 +27,16 @@ pub enum Icon {
     More,
     /// The composer's button that interrupts the turn that runs.
     Stop,
-    /// A command is running (the left tree, the rail's Commands).
+    /// A command is running (the left tree, the rail's Runs).
     Terminal,
+    /// A button that moves a row up (a chevron whose tip points up).
+    ChevronUp,
+    /// Something needs a look: the composer's Auto with no judge chosen.
+    Warning,
 }
 
 impl Icon {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 18] = [
         Self::Folder,
         Self::Branch,
         Self::Repository,
@@ -49,6 +53,8 @@ impl Icon {
         Self::More,
         Self::Stop,
         Self::Terminal,
+        Self::ChevronUp,
+        Self::Warning,
     ];
 
     pub fn path(self) -> SharedString {
@@ -69,6 +75,8 @@ impl Icon {
             Self::More => IconName::Ellipsis,
             Self::Stop => IconName::CircleStop,
             Self::Terminal => IconName::Terminal,
+            Self::ChevronUp => IconName::ChevronUp,
+            Self::Warning => IconName::TriangleAlert,
         }
         .path()
     }

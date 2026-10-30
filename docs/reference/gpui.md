@@ -58,7 +58,8 @@ durations and the easing of `crates/flottille-ui/src/motion.rs` (`HOVER` 140 ms,
 | a button, a list row, a tree row, a menu item | the component itself (`Button`, `ListRow`, `TreeRow`, `MenuItem`): hover, press, selection fade |
 | any other element that is clicked (a link, a card, a chip, a toggle) | `hoverable(element, paint)`: `paint(element, t)` gets the hover `t`, 0 to 1; it sets a background with `p.hover.opacity(t)`, an ink with `mix(from, to, t)` |
 | the same element when it can also be the chosen one (a selected row, a taken chip) | `selectable(element, chosen, paint)`: `paint` also gets how far it is the chosen one; a choice among buttons is `Button::choice` |
-| a state with no pointer: a focus ring, a highlight | `fade(id, on, duration, window, cx)` |
+| a state with no pointer: a focus ring, a highlight, a button enabled or not | `fade(id, on, duration, window, cx)` (`Button` fades its own enabled state) |
+| a choice among a few words (Ask \| Auto) | `Segmented`: its highlight slides to the one clicked, the inks fade along it |
 | a chevron | `turning(id, open, window, cx)` |
 | a page's blocks, a card, anything that shows once | `enter(id, index, element)` |
 | a block that comes and goes while its view stays (an empty-list line, the fields a choice needs, a body that unfolds) | `presence(id, present, element).gap(..)`: build it on every frame, outside a `when`; `.gap` is the gap the parent flex puts between its children, which folds with the block |

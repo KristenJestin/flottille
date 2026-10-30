@@ -28,6 +28,10 @@ pub enum WorkspaceAction {
         /// The branch (default: <branch prefix>/<name>)
         #[arg(long)]
         branch: Option<String>,
+        /// The base branch of one repository, in place of its rule: <repository>=<branch>, once
+        /// per repository
+        #[arg(long = "base", value_name = "REPOSITORY=BRANCH", value_parser = base_of)]
+        bases: Vec<(String, String)>,
         /// Fetch nothing: start from the tracking refs as they are
         #[arg(long)]
         offline: bool,
@@ -96,6 +100,7 @@ pub fn run(paths: &Paths, action: WorkspaceAction) -> Result<ExitCode> {
             name,
             repositories,
             branch,
+            bases,
             offline,
             ticket,
             json,
@@ -107,6 +112,7 @@ pub fn run(paths: &Paths, action: WorkspaceAction) -> Result<ExitCode> {
                     name,
                     repositories,
                     branch,
+                    bases: bases.into_iter().collect(),
                     offline,
                     ticket,
                 })?,
@@ -201,6 +207,15 @@ pub fn run(paths: &Paths, action: WorkspaceAction) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+fn base_of(text: &str) -> std::result::Result<(String, String), String> {
+    match text.split_once('=') {
+        Some((repository, branch)) if !repository.is_empty() && !branch.is_empty() => {
+            Ok((repository.to_owned(), branch.to_owned()))
+        }
+        _ => Err(format!("{text} is not <repository>=<branch>")),
+    }
+}
+
 fn print(value: &Value, json: bool, text: &str) {
     if json {
         println!("{value}");
@@ -248,7 +263,9 @@ fn repositories_text(workspace: &Value) -> String {
     for repository in workspace["repositories"].as_array().into_iter().flatten() {
         let base = &repository["base"];
         let commit: String = text(base, "commit").chars().take(12).collect();
-        let freshness = if base["fetched_now"] == true {
+        let freshness = if let Some(note) = base["note"].as_str() {
+            note.to_owned()
+        } else if base["fetched_now"] == true {
             format!("{commit}, fetched")
         } else {
             let age = match base["fetched_at"].as_u64() {

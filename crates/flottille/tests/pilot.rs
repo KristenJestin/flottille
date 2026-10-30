@@ -550,6 +550,27 @@ fn a_pilot_makes_a_workspace_and_lists_it() {
 }
 
 #[test]
+fn the_workspace_create_tool_lists_the_bases_it_takes_and_says_a_failed_fetch_falls_back() {
+    let user = user();
+    project(&user);
+    let pilot = Mcp::pilot(&user);
+
+    let tools = pilot.tools();
+
+    let create = tools
+        .iter()
+        .find(|tool| tool["name"] == "workspace_create")
+        .expect("the tool is listed");
+    assert!(
+        create["inputSchema"]["properties"]["bases"].is_object(),
+        "{create}"
+    );
+    let said = create["description"].as_str().unwrap();
+    assert!(!said.contains("or a fetch fails"), "{said}");
+    assert!(said.contains("whose fetch fails, starts from"), "{said}");
+}
+
+#[test]
 fn a_refusal_is_a_sentence_under_2000_characters_naming_what_to_do() {
     let user = user();
     project(&user);

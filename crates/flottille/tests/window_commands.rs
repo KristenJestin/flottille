@@ -21,7 +21,7 @@ use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
 
-const SCRIPTS: [(&str, &str); 4] = [
+const SCRIPTS: [(&str, &str); 6] = [
     // A server: prints a line a second.
     (
         "server.sh",
@@ -35,11 +35,20 @@ const SCRIPTS: [(&str, &str); 4] = [
         "#!/bin/sh\nprintf '\\033[32mok\\033[0m first\\n\\033[1;31mred\\033[0m failed\\n'\nexit 1\n",
     ),
     ("quiet.sh", "#!/bin/sh\ntrue\n"),
+    // Ends at once with a line of its own.
+    ("blip.sh", "#!/bin/sh\necho blip\n"),
+    // Sixty coloured lines: more than the output panel's column holds.
+    (
+        "many.sh",
+        "#!/bin/sh\ni=0\nwhile [ $i -lt 60 ]; do printf '\\033[3%dmline %d\\033[0m \\033[1;3%dmbold\\033[0m\\n' $((i % 7 + 1)) $i $(((i + 1) % 7 + 1)); i=$((i + 1)); done\n",
+    ),
 ];
 
 const CATALOGUE: &str = "\n[commands.server]\nline = \"./server.sh\"\nserve = true\n\
     [commands.fails]\nline = \"./fails.sh\"\n\
-    [commands.colours]\nline = \"./colours.sh\"\n";
+    [commands.colours]\nline = \"./colours.sh\"\n\
+    [commands.blip]\nline = \"./blip.sh\"\n\
+    [commands.many]\nline = \"./many.sh\"\n";
 
 fn user() -> User {
     let user = User::with_fake_agent();
@@ -414,7 +423,7 @@ fn card_of(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Option<(us
 }
 
 #[gpui_kit::test]
-fn a_command_s_result_is_a_card_with_its_colours_turned_into_the_palette_s_never_shown_raw(
+fn a_run_in_the_conversation_is_one_compact_line_and_its_output_is_in_the_panel_with_its_colours_never_shown_raw(
     cx: &mut TestAppContext,
 ) {
     let user = user();
@@ -427,7 +436,7 @@ fn a_command_s_result_is_a_card_with_its_colours_turned_into_the_palette_s_never
         json!({"agent": lead, "message": "show colours"}),
     )
     .unwrap();
-    until(&shell, cx, "the card is in the conversation", |cx| {
+    until(&shell, cx, "the line is in the conversation", |cx| {
         card_of(&page, cx).is_some()
     });
     settle(cx);
@@ -442,20 +451,37 @@ fn a_command_s_result_is_a_card_with_its_colours_turned_into_the_palette_s_never
         card.lines[0].contains('\u{1b}'),
         "the model keeps the bytes"
     );
-    // What is drawn is the words, and the exit code in its own element.
-    assert_eq!(
-        label(cx, &format!("command-line-{at}-0")).unwrap(),
-        "ok first"
-    );
-    assert_eq!(
-        label(cx, &format!("command-line-{at}-1")).unwrap(),
-        "red failed"
-    );
-    assert_eq!(label(cx, &format!("command-exit-{at}")).unwrap(), "exit 1");
+    // The line says the command, how it ended and for how long; no output is drawn in the chat.
     assert_eq!(
         label(cx, &format!("command-line-{at}")).unwrap(),
         "./colours.sh"
     );
+    assert_eq!(label(cx, &format!("command-exit-{at}")).unwrap(), "exit 1");
+    cx.update(|window, _| {
+        assert!(window.try_find(format!("command-seconds-{at}")).is_some());
+        assert!(
+            window.try_find(format!("command-line-{at}-0")).is_none(),
+            "the output is not in the conversation"
+        );
+        let line = window.find(format!("command-card-{at}")).bounds();
+        assert!(line.size.height < px(50.), "one compact line: {line:?}");
+    });
+
+    // A click opens the same panel the rail opens, and the panel draws the words, not the bytes.
+    cx.update(|window, cx| window.click(format!("command-card-{at}"), cx));
+    let panel = page.read_with(cx, |page, _| page.command_panel().clone());
+    until(&shell, cx, "the panel shows the output", |cx| {
+        panel.read_with(cx, |panel, _| {
+            panel.run() == Some(card.run.as_str()) && panel.shown().is_some()
+        })
+    });
+    settle(cx);
+    assert_eq!(
+        label(cx, "command-panel-line-0").unwrap(),
+        "ok first",
+        "the colours are the palette's"
+    );
+    assert_eq!(label(cx, "command-panel-line-1").unwrap(), "red failed");
 }
 
 #[gpui_kit::test]
@@ -491,13 +517,9 @@ fn a_command_that_came_back_through_an_approval_is_the_same_card_with_who_allowe
     };
     assert_eq!(card.ending, Ending::Exited(1));
     assert_eq!(card.allowed_by.as_deref(), Some("you"));
-    assert_eq!(
-        label(cx, &format!("command-line-{at}-1")).unwrap(),
-        "red failed"
-    );
     assert!(
         cx.update(|window, _| window.try_find(format!("command-allowed-{at}")).is_some()),
-        "the card says who allowed it"
+        "the line says who allowed it"
     );
     let blocks = page.read_with(cx, |page, cx| {
         page.conversation().read(cx).blocks().to_vec()
@@ -552,7 +574,6 @@ fn a_running_card_shows_its_end(cx: &mut TestAppContext) {
     assert_eq!(label(cx, &format!("command-exit-{at}")).unwrap(), "exit 3");
     assert!(card.seconds.is_some_and(|s| s >= 1.5), "{:?}", card.seconds);
     assert_eq!(card.lines, ["one"], "the final tail of its output");
-    assert_eq!(label(cx, &format!("command-line-{at}-0")).unwrap(), "one");
 }
 
 #[gpui_kit::test]
@@ -736,7 +757,9 @@ fn texts_of(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Vec<Strin
 }
 
 #[gpui_kit::test]
-fn a_running_card_ticks_and_shows_the_last_lines_of_its_output(cx: &mut TestAppContext) {
+fn a_running_line_follows_the_rail_s_run_its_time_and_the_end_of_its_output_in_its_model(
+    cx: &mut TestAppContext,
+) {
     let user = user();
     let (lead, mcp, _) = lead(&user);
     let (shell, cx) = open_session(&user, &lead, cx);
@@ -764,10 +787,183 @@ fn a_running_card_ticks_and_shows_the_last_lines_of_its_output(cx: &mut TestAppC
     };
     assert_eq!(card.ending, Ending::Running);
     assert_eq!(label(cx, &format!("command-exit-{at}")).unwrap(), "running");
-    let last = card.lines.len() - 1;
-    assert!(
-        label(cx, &format!("command-line-{at}-{last}")).is_some_and(|l| l.starts_with("tick")),
-        "the card draws the tail"
-    );
+    cx.update(|window, _| {
+        assert!(window.try_find(format!("command-seconds-{at}")).is_some());
+    });
     ok(mcp.call("run_status", json!({"run": card.run, "action": "stop"})));
+}
+
+fn ids_of(rows: &[&CommandRow]) -> Vec<String> {
+    rows.iter().map(|row| row.run.clone()).collect()
+}
+
+fn present(cx: &mut VisualTestContext, id: impl Into<gpui_kit::ElementId>) -> bool {
+    let id = id.into();
+    cx.update(|window, _| window.try_find(id).is_some())
+}
+
+/// The runs in sight and the ones behind "N ended", as the section sorts them.
+fn arranged(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> (Vec<String>, Vec<String>) {
+    page.read_with(cx, |page, cx| {
+        let list = page.commands(cx);
+        let list = list.read(cx);
+        let arranged = list.arranged();
+        (ids_of(&arranged.kept), ids_of(&arranged.folded))
+    })
+}
+
+#[gpui_kit::test]
+fn the_rail_section_is_named_runs_and_only_the_last_three_ended_runs_are_in_sight_the_rest_behind_n_ended(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let (lead, mcp, _) = lead(&user);
+    let runs: Vec<String> = (0..5).map(|_| start(&mcp, "blip")).collect();
+    let (shell, cx) = open_session(&user, &lead, cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the rail lists the five runs", |cx| {
+        commands(&page, cx).len() == 5
+    });
+    settle(cx);
+
+    assert_eq!(
+        label(cx, "rail-runs-title").as_deref(),
+        Some("Runs"),
+        "not 'Commands', which is the project's /name instructions"
+    );
+    let (kept, folded) = arranged(&page, cx);
+    assert_eq!((kept.len(), folded.len()), (3, 2), "{kept:?} {folded:?}");
+    for run in &runs {
+        assert_eq!(
+            present(cx, format!("command-{run}")),
+            kept.contains(run),
+            "{run}: in sight only if one of the last three"
+        );
+    }
+    assert_eq!(label(cx, "rail-runs-ended").as_deref(), Some("2 ended"));
+    cx.update(|window, _| assert_eq!(window.find("rail-runs-ended").expanded(), Some(false)));
+
+    // The folded row opens the older ones, and folds them again.
+    cx.update(|window, cx| window.click("rail-runs-ended", cx));
+    settle(cx);
+    for run in &runs {
+        assert!(present(cx, format!("command-{run}")), "{run} after opening");
+    }
+    cx.update(|window, _| assert_eq!(window.find("rail-runs-ended").expanded(), Some(true)));
+
+    // Dismiss stays on each row, the ones behind the fold too.
+    cx.update(|window, cx| window.click(format!("command-dismiss-{}", folded[0]), cx));
+    until(&shell, cx, "the run is dismissed", |cx| {
+        commands(&page, cx).len() == 4
+    });
+    settle(cx);
+    assert_eq!(label(cx, "rail-runs-ended").as_deref(), Some("1 ended"));
+
+    cx.update(|window, cx| window.click("rail-runs-ended", cx));
+    settle(cx);
+    assert!(!present(cx, format!("command-{}", folded[1])));
+    assert!(present(cx, format!("command-{}", kept[0])));
+}
+
+#[gpui_kit::test]
+fn an_ended_run_older_than_the_session_s_last_turn_folds_away_on_its_own(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp, _) = lead(&user);
+    let run = start(&mcp, "blip");
+    let (shell, cx) = open_session(&user, &lead, cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the rail lists the run", |cx| {
+        commands(&page, cx).len() == 1
+    });
+    settle(cx);
+    assert!(present(cx, format!("command-{run}")), "ended in this turn");
+    assert!(!present(cx, "rail-runs-ended"));
+
+    // A new turn begins: what ended before it goes behind "N ended".
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": "hello again"}),
+    )
+    .unwrap();
+    until(&shell, cx, "the run folds behind its row", |cx| {
+        present(cx, "rail-runs-ended")
+    });
+    settle(cx);
+    assert_eq!(label(cx, "rail-runs-ended").as_deref(), Some("1 ended"));
+    assert!(!present(cx, format!("command-{run}")));
+    assert_eq!(commands(&page, cx).len(), 1, "kept in the history");
+}
+
+#[gpui_kit::test]
+fn a_run_in_the_conversation_opens_the_panel_the_rail_opens(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp, _) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, cx);
+    let page = session_page(&shell, cx);
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": "run server"}),
+    )
+    .unwrap();
+    until(&shell, cx, "the line says the server runs", |cx| {
+        ending_of_card(&page, cx) == Some(Ending::Running)
+    });
+    settle(cx);
+    let (at, Block::Command(card)) = card_of(&page, cx).unwrap() else {
+        unreachable!()
+    };
+    cx.update(|window, cx| window.click(format!("command-card-{at}"), cx));
+    let panel = page.read_with(cx, |page, _| page.command_panel().clone());
+    until(&shell, cx, "the panel follows the run", |cx| {
+        panel.read_with(cx, |panel, _| {
+            panel.run() == Some(card.run.as_str())
+                && panel.shown().is_some_and(|shown| !shown.lines.is_empty())
+        })
+    });
+    ok(mcp.call("run_status", json!({"run": card.run, "action": "stop"})));
+}
+
+#[gpui_kit::test]
+fn the_output_panel_draws_every_line_of_a_long_coloured_output_on_a_line_of_its_own(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let (lead, mcp, _) = lead(&user);
+    let run = start(&mcp, "many");
+    let (shell, cx) = open_session(&user, &lead, cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the rail lists the run", |cx| {
+        !commands(&page, cx).is_empty()
+    });
+    settle(cx);
+
+    cx.update(|window, cx| window.click(format!("command-{run}"), cx));
+    let panel = page.read_with(cx, |page, _| page.command_panel().clone());
+    until(&shell, cx, "the panel shows the sixty lines", |cx| {
+        panel.read_with(cx, |panel, _| {
+            panel.shown().is_some_and(|shown| shown.lines.len() == 60)
+        })
+    });
+    // The panel has opened and its output has come: a line is drawn once the panel is at rest.
+    settle(cx);
+
+    let lines: Vec<(f32, f32)> = (0..60)
+        .map(|i| {
+            cx.update(|window, _| {
+                let bounds = window.find(format!("command-panel-line-{i}")).bounds();
+                (f32::from(bounds.origin.y), f32::from(bounds.size.height))
+            })
+        })
+        .collect();
+    for (i, pair) in lines.windows(2).enumerate() {
+        let ((top, height), (next, _)) = (pair[0], pair[1]);
+        assert!(height >= 12., "line {i} is squeezed to {height}px");
+        assert!(
+            next >= top + height - 0.5,
+            "line {} starts at {next}, over line {i} which ends at {}",
+            i + 1,
+            top + height
+        );
+    }
+    assert_eq!(label(cx, "command-panel-line-0").unwrap(), "line 0 bold");
 }

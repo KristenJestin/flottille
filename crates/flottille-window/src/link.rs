@@ -50,6 +50,8 @@ pub struct Seen {
     pub events: AtomicU64,
     pub gaps: AtomicU64,
     pub connections: AtomicU64,
+    /// The `project.changed` events seen.
+    pub project_changes: AtomicU64,
 }
 
 const FIRST_RETRY: Duration = Duration::from_millis(100);
@@ -244,6 +246,9 @@ fn note(seen: &Seen, event: &Event) {
         seen.gaps.fetch_add(1, Ordering::Relaxed);
     }
     seen.events.fetch_add(1, Ordering::Relaxed);
+    if event.name == "project.changed" {
+        seen.project_changes.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Whether an event changes what the shell shows. A conversation's pieces and tool calls do not:
@@ -304,7 +309,7 @@ fn read(conn: &mut Conn, briefs: &mut HashMap<String, String>, seen: &Seen) -> R
         }
     }
     let questions = questions(conn, &agents)?;
-    Ok(Snapshot::build(Answers {
+    let mut snapshot = Snapshot::build(Answers {
         projects: &projects,
         workspaces: &workspaces,
         agents: &agents,
@@ -313,7 +318,9 @@ fn read(conn: &mut Conn, briefs: &mut HashMap<String, String>, seen: &Seen) -> R
         briefs,
         questions: &questions,
         commands: &commands,
-    }))
+    });
+    snapshot.project_changes = seen.project_changes.load(Ordering::Relaxed);
+    Ok(snapshot)
 }
 
 /// The last question of each root asking the user, from the inbox: read only while one asks.

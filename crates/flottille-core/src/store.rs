@@ -2195,6 +2195,7 @@ mod tests {
                     commit: "0123abcd".into(),
                     fetched_now: true,
                     fetched_at: Some(1_792_843_730_000),
+                    note: None,
                 },
             }],
             steps: vec![
