@@ -29,7 +29,7 @@ use tokio::sync::oneshot;
 use crate::daemon::Daemon;
 use crate::forge;
 use crate::git::{self, Class};
-use crate::mcp::{Outcome, arguments, workspace_named};
+use crate::mcp::{Outcome, workspace_named};
 use crate::place::Place;
 use crate::projects::{self, Failure};
 use crate::tree;
@@ -1347,21 +1347,28 @@ async fn remove(daemon: Arc<Daemon>, asked: WorkspaceName) -> Answer {
     removed
 }
 
-/// What works in the workspace outside the tree whose root is `ours`: its agents not ended and
-/// its command runs still running (`docs/design.md` §5.1), each as a sentence.
-fn in_use(daemon: &Daemon, workspace: &Workspace, ours: &str) -> Result<Vec<String>, Failure> {
+/// What works in the workspace but the agent `caller` of the tree whose root is `ours`: the
+/// other agents not ended, of its tree or not (a tree's agent loses its place as well), and the
+/// command runs still running outside the tree (`docs/design.md` §5.1), each as a sentence.
+fn in_use(
+    daemon: &Daemon,
+    workspace: &Workspace,
+    ours: &str,
+    caller: &str,
+) -> Result<Vec<String>, Failure> {
     let theirs = |agent: &str| tree::root_of(daemon, agent) != ours;
     let mut used = Vec::new();
     for agent in daemon.read(Store::agents)? {
         if agent.project == workspace.project
             && agent.workspace.as_deref() == Some(workspace.name.as_str())
             && !agent.state.is_final()
-            && theirs(&agent.id)
+            && agent.id != caller
         {
-            used.push(format!(
-                "the agent {}, outside this agent's tree, works in it",
-                agent.id
-            ));
+            let whose = match theirs(&agent.id) {
+                true => "outside this agent's tree",
+                false => "of this agent's tree",
+            };
+            used.push(format!("the agent {}, {whose}, works in it", agent.id));
         }
     }
     for run in daemon.read(Store::running_runs)? {
@@ -1542,31 +1549,16 @@ async fn remove_held(daemon: &Daemon, workspace: &Workspace) -> Answer {
     Ok(json!({"removed": workspace.name, "project": workspace.project}))
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WorkspaceRemove {
-    workspace: Option<String>,
-}
-
-/// `workspace_remove`, once the gate let it through: the agent's own
-/// workspace removed as `workspace.remove` removes it, then the branches of it that hold no commit
-/// of their own deleted from their repositories (`docs/commands.md`).
+/// `workspace` `remove`, once the gate let it through: the agent's own workspace (or, in
+/// `main`, the one named) removed as `workspace.remove` removes it, then the branches of it that
+/// hold no commit of their own deleted from their repositories (`docs/commands.md`).
 pub async fn workspace_remove(
     daemon: &Arc<Daemon>,
     agent: &str,
     place: &Place,
-    args: Value,
+    named: Option<&str>,
 ) -> Outcome {
-    let asked: WorkspaceRemove = match arguments("workspace_remove", args) {
-        Ok(asked) => asked,
-        Err(refusal) => return refusal,
-    };
-    let name = match workspace_named(
-        daemon,
-        place,
-        asked.workspace.as_deref(),
-        "workspace_remove",
-    ) {
+    let name = match workspace_named(daemon, place, named, "workspace remove") {
         Ok(name) => name,
         Err(refusal) => return refusal,
     };
@@ -1578,7 +1570,7 @@ pub async fn workspace_remove(
         Ok(workspace) => workspace,
         Err(failure) => return Outcome::Failed(failure.message),
     };
-    let used = match in_use(daemon, &workspace, &tree::root_of(daemon, agent)) {
+    let used = match in_use(daemon, &workspace, &tree::root_of(daemon, agent), agent) {
         Ok(used) => used,
         Err(failure) => return Outcome::Failed(failure.message),
     };

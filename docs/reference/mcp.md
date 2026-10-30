@@ -130,33 +130,66 @@ and the 2026 practice around it:
    Code's `tool-results` files. Rule 5 is therefore a hard limit here: fs_read pages, search
    results, command tails and agent conversations are cut and paged below the threshold, never
    above it. The reads whose full result can be long (`agent_status` for all the children,
-   `forge_read`, `ticket_read`) answer **short by default**, with the way to ask for the rest
+   `forge` and `tickets` `show`) answer **short by default**, with the way to ask for the rest
    written in the short result.
 9. **The tool list depends on what the agent can do**, and stays fixed for its life:
    - an agent at the depth limit gets no `agent_*` tools;
    - only an agent that can have children gets `approval_answer`;
    - a root gets `ask_user`, a child gets `ask_parent`.
 
-   - `forge_read` and `forge_write` are listed to every agent whose project's repositories
-     declare a forge, `ticket_read` to every agent whose project declares a tracker, in `main` as
-     in a workspace, and `workspace_remove` to every agent: the same tools wherever it works. A
-     tool that could only refuse is not listed: without a forge or a tracker there is nothing for
-     them to read or write. Listing grants nothing: each call goes through the gate's classes and
-     the session's mode (`docs/tools.md`, "The gate"). In `main` they name the workspace they act
-     on (`workspace`).
+   - `forge` is listed to every agent whose project's repositories declare a forge, `tickets`
+     to every agent whose project declares a tracker, in `main` as in a workspace, and
+     `workspace` to every agent: the same tools wherever it works. A tool that could only refuse
+     is not listed: without a forge or a tracker there is nothing for them to read or write.
+     Listing grants nothing: each call goes through the gate's classes and the session's mode
+     (`docs/tools.md`, "The gate"). In `main` they name the workspace they act on (`workspace`).
 
-   - only a root gets `skills`, `commands`, `setup`, `project` and `workspace`, the project's
-     skills, commands, setup, settings and workspaces, and writes its tasks (`docs/tools.md`,
-     "The project", "The workspace"): a child does its brief. Every agent gets `tasks`, `run` and `run_status`, the names `commands_list`,
-     `commands_run` and `commands_status` had until #131, which are still served under them for
+   - only a root gets `skills`, `commands`, `setup` and `project`, the project's skills,
+     commands, setup and settings, writes its tasks and its workspaces, and starts sessions for
+     the user (`agent_launch` with `root`) (`docs/tools.md`, "The project", "The workspace",
+     "Sessions for the user"): a child does its brief, reads the workspaces and removes its own.
+     Every agent gets `tasks`, `run` and `run_status`, the names `commands_list`,
+     `commands_run` and `commands_status` had until #131, and `forge`, `tickets` and
+     `workspace` `remove`, the names `forge_read`, `forge_write`, `ticket_read` and
+     `workspace_remove` had until #141; the old names are still served under the new ones for
      one release.
 
-   A root lead has 22 tools, a leaf worker 12; two more each when the project's repositories
-   declare a forge (`forge_read`, `forge_write`), one more when it declares a tracker
-   (`ticket_read`).
-   The biggest list, a root's with a forge and a tracker (25 tools), is 26,889 characters of
-   definitions, about 6,700 tokens: under the 27,000 a test holds it to, far under tool search's
-   threshold (§3).
+   A root lead has 21 tools, a leaf worker 12; one more each when the project's repositories
+   declare a forge (`forge`), one more when it declares a tracker (`tickets`).
+
+   **The budget.** Every tool loads upfront (rule 7), so the definitions must stay under
+   Anthropic's line for tool search (§3: more than 10 tools or 10k tokens). Flottille's lists
+   pass 10 tools, which is why each family is one tool with an `action` rather than one tool per
+   verb; the tokens are the line kept. JSON schemas tokenize densely, about 3 characters a token
+   at worst and 4 usually: **28,000 characters** of definitions is under 9,400 tokens at worst,
+   and a test holds the biggest list, a root's with a forge and a tracker, under it. Measured
+   with that test (`the_biggest_list_stays_far_under_the_threshold_of_tool_search`):
+
+   | | Tools | Characters |
+   |---|---|---|
+   | Before #141 (forge, ticket and removal tools apart, a 27,000 limit) | 25 | 26,889 |
+   | After #141 (`forge`, `tickets`, `workspace` complete families) | 23 | 25,236 |
+
+   A family grows by an action and a line of description, not by a tool; a new tool or a long
+   description that passes the limit is answered by merging or shortening, and the limit moves
+   only with the threshold it stands for.
+
+   **Every family is complete** (#141): what the window lets the user list, search, read,
+   create or change, a family lets the agent do under the gate, or this table says why not.
+
+   | Family | List | Search | Read | Create | Change | Left out, and why |
+   |---|---|---|---|---|---|---|
+   | `forge` | `list` (state, branch) | `list` by branch | `show` (a workspace's branch, or a number) | `create` | `comment`, `edit`, `merge`, `checks` | Closing a pull request: the window has no such action, and closing someone's work is the user's; deleting a branch is `workspace` `remove`'s, for the workspace's own. |
+   | `tickets` | `list` (state, label, assignee), every ticket in one call | `search` | `show` | `create` (GitHub) | `comment`, `edit`, `close`, `reopen` (GitHub) | Every write on Jira: Flottille reads Jira and writes nothing to it, by the user's decision; Bitbucket's issues: no tracker of that kind is declared today. |
+   | `workspace` | `list` | `list` (few, a line each) | `show` | `create` | `prepare`, `link_ticket` (null unlinks), `remove` | Renaming: a workspace's name is its branch and its folder, fixed when it is made, in the window as here. |
+   | `skills` | `list` | `list` (few) | `show`, and `skill_read` for the text | `add` | `edit`, `remove` | Nothing. |
+   | `commands` | `list` | `list` (few) | `show` | `add` (own words or a template) | `edit`, `remove` | Nothing. |
+   | `tasks` | `list` | `list` (few) | `show` | `add` | `edit`, `remove` | Nothing. |
+   | `setup` | `list` (each step whole) | `list` | `list` | `add` | `edit`, `remove`, `move` | A `show` of one step: `list` gives each whole. |
+   | `project` | — | — | `settings`, `rules` | — | `set_settings`, `set_rules` | Listing, creating or removing projects: an agent works in its own project only, and another project is the user's to register. |
+   | `run`, `run_status` | — | — | `run_status` `output` | `run` | `run_status` `stop` | A list of the agent's runs: each run's id is in the answer that started it and in the delivery that says it ended, and the window lists them for the user. |
+   | `agent_*` | `agent_status` (every child) | — | `agent_status` (one, or `conversation`) | `agent_launch` (a child, or a session for the user with `root`) | `agent_send`, `agent_stop` | Changing a child's model or mode: a child keeps what it was launched with, and only the user sets a mode. |
+
 10. **The idempotency key** of a call is read from the call's `_meta` (`claudecode/toolUseId` for
     Claude). `claude` calls Flottille's server itself and sends it with every call; the bridge
     never sees MCP calls. Check that the `claude` version Flottille pins still sends it, and fall

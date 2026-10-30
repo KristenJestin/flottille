@@ -1138,6 +1138,11 @@ impl Shell {
             if row.read(cx).commands() != session.commands {
                 row.update(cx, |row, cx| row.set_commands(session.commands, cx));
             }
+            if row.read(cx).started_by() != session.started_by.as_deref() {
+                row.update(cx, |row, cx| {
+                    row.set_started_by(session.started_by.as_deref(), cx)
+                });
+            }
             // Ended, it sits among other projects' sessions: its row says whose it is.
             let scope = session.ended.then_some(session.project.as_str());
             row.update(cx, |row, cx| {
@@ -1230,7 +1235,10 @@ impl Shell {
             .map(|item| {
                 let title = snapshot
                     .session(&item.session)
-                    .map(|s| s.title.clone())
+                    .map(|s| match &s.started_by {
+                        Some(by) => format!("{} · started by {by}", s.title),
+                        None => s.title.clone(),
+                    })
                     .unwrap_or_default();
                 (item.clone(), title)
             })
@@ -1466,6 +1474,17 @@ impl Shell {
             }
             cx.notify();
         }
+    }
+
+    /// What the bell's items say of their sessions, in order: the session's title, and who
+    /// started it when an agent did.
+    pub fn bell_sessions(&self, cx: &App) -> Vec<String> {
+        self.bell
+            .read(cx)
+            .items
+            .iter()
+            .map(|(_, title)| title.clone())
+            .collect()
     }
 
     pub fn bell_open(&self) -> bool {

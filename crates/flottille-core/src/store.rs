@@ -388,6 +388,66 @@ const MIGRATIONS: &[&str] = &[
         ELSE tool
     END;
 ",
+    "
+    -- Complete families (#141): `forge_read` and `forge_write` became `forge`, `ticket_read`
+    -- `tickets`, and `workspace_remove` the `remove` of `workspace`, which every agent now has. An
+    -- agent made before keeps its tools under the new names, in their order, each once, and a
+    -- request its tool's with the action it meant.
+    UPDATE agents SET tools = (
+        SELECT json_group_array(name) FROM (
+            SELECT CASE value
+                WHEN 'mcp__flottille__forge_read' THEN 'mcp__flottille__forge'
+                WHEN 'mcp__flottille__forge_write' THEN 'mcp__flottille__forge'
+                WHEN 'mcp__flottille__ticket_read' THEN 'mcp__flottille__tickets'
+                WHEN 'mcp__flottille__workspace_remove' THEN 'mcp__flottille__workspace'
+                WHEN 'flottille_forge_read' THEN 'flottille_forge'
+                WHEN 'flottille_forge_write' THEN 'flottille_forge'
+                WHEN 'flottille_ticket_read' THEN 'flottille_tickets'
+                WHEN 'flottille_workspace_remove' THEN 'flottille_workspace'
+                ELSE value
+            END AS name FROM json_each(agents.tools) AS tool
+            WHERE NOT (
+                tool.value IN ('mcp__flottille__forge_write', 'flottille_forge_write')
+                AND EXISTS (SELECT 1 FROM json_each(agents.tools) AS other WHERE other.value
+                    IN ('mcp__flottille__forge_read', 'flottille_forge_read'))
+            ) AND NOT (
+                tool.value IN ('mcp__flottille__workspace_remove', 'flottille_workspace_remove')
+                AND EXISTS (SELECT 1 FROM json_each(agents.tools) AS other WHERE other.value
+                    IN ('mcp__flottille__workspace', 'flottille_workspace'))
+            )
+            ORDER BY tool.key
+        )
+    );
+    UPDATE approval_requests SET arguments = json_set(arguments, '$.action', CASE
+            json_extract(arguments, '$.action')
+            WHEN 'pr-create' THEN 'create'
+            WHEN 'pr-merge-squash' THEN 'merge'
+            WHEN 'pipeline-rerun' THEN 'checks'
+            ELSE json_extract(arguments, '$.action')
+        END)
+        WHERE tool = 'forge_write';
+    UPDATE approval_requests SET arguments = json_set(arguments, '$.action', 'show')
+        WHERE tool IN ('forge_read', 'ticket_read');
+    UPDATE approval_requests
+        SET arguments = json_set(json_remove(arguments, '$.workspace'), '$.action', 'remove')
+        WHERE tool = 'workspace_remove' AND json_type(arguments, '$.workspace') IS NULL;
+    UPDATE approval_requests
+        SET arguments = json_set(json_remove(arguments, '$.workspace'), '$.action', 'remove',
+            '$.name', json_extract(arguments, '$.workspace'))
+        WHERE tool = 'workspace_remove' AND json_type(arguments, '$.workspace') IS NOT NULL;
+    UPDATE approval_requests SET tool = CASE tool
+        WHEN 'forge_read' THEN 'forge'
+        WHEN 'forge_write' THEN 'forge'
+        WHEN 'ticket_read' THEN 'tickets'
+        WHEN 'workspace_remove' THEN 'workspace'
+        ELSE tool
+    END;
+",
+    "
+    -- A root an agent started for the user keeps who started it: such a root cannot start one in
+    -- turn without the user (`docs/tools.md`, \"The tree's tools\").
+    ALTER TABLE agents ADD COLUMN launched_by TEXT REFERENCES agents (id);
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -399,7 +459,8 @@ const RUN_COLUMNS: &str = "id, agent, name, line, folder, state, exit_code, sign
 const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, state, state_reason, \
     created_at, updated_at, active_at, ended_at, chosen_model, chosen_effort, chosen_mode, \
     taken_model, taken_effort, taken_mode, native_id, agent_version, instructions, tools, parent, \
-    depth, epoch, title, brief, reported_at, quiet_turns, waiting_on_answer, reopens, images, gate_mode";
+    depth, epoch, title, brief, reported_at, quiet_turns, waiting_on_answer, reopens, images, gate_mode, \
+    launched_by";
 
 const DELIVERY_COLUMNS: &str = "id, agent, kind, body, urgency, state, created_at, sent_at, images";
 
@@ -709,7 +770,7 @@ impl Store {
             &format!(
                 "INSERT INTO agents ({AGENT_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, \
                  ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, \
-                 ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33)"
+                 ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34)"
             ),
             params![
                 agent.id,
@@ -745,6 +806,7 @@ impl Store {
                 agent.reopens,
                 agent.images,
                 agent.gate_mode.as_str(),
+                agent.launched_by,
             ],
         )?;
         let event = append_agent_event(&transaction, &agent.id, event.0, event.1)?;
@@ -2006,6 +2068,7 @@ fn agent_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Agent>> {
         images: row.get(31)?,
         // A mode the store does not know is the safer one.
         gate_mode: GateMode::parse(&row.get::<_, String>(32)?).unwrap_or(GateMode::Ask),
+        launched_by: text(33)?,
     }))
 }
 
@@ -2570,6 +2633,7 @@ mod tests {
             reopens: false,
             images: None,
             gate_mode: GateMode::Auto,
+            launched_by: None,
         }
     }
 
@@ -2861,6 +2925,132 @@ mod tests {
         let run = store.run("r1").unwrap().unwrap();
         assert_eq!(run.agent.as_deref(), Some(agent.id.as_str()));
         assert_eq!(run.project, "app");
+    }
+
+    #[test]
+    fn the_migration_of_the_tool_families_renames_the_forge_ticket_and_removal_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let old = Connection::open(&path).unwrap();
+        let previous = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("WHEN 'workspace_remove' THEN 'workspace'"))
+            .unwrap();
+        for migration in &MIGRATIONS[..previous] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.pragma_update(None, "user_version", previous).unwrap();
+        for (id, tools) in [
+            // A child (Claude's names), a root that also had the workspace family (opencode's).
+            (
+                "000000000001",
+                r#"["mcp__flottille__fs_read","mcp__flottille__forge_read","mcp__flottille__skill_read","mcp__flottille__ticket_read","mcp__flottille__forge_write","mcp__flottille__workspace_remove","mcp__flottille__report"]"#,
+            ),
+            (
+                "000000000002",
+                r#"["flottille_forge_read","flottille_skill_read","flottille_forge_write","flottille_workspace_remove","flottille_agent_launch","flottille_project","flottille_workspace","flottille_report"]"#,
+            ),
+        ] {
+            old.execute(
+                "INSERT INTO agents (id, provider, role, project, workspace, folder, state, \
+                 created_at, updated_at, instructions, tools) VALUES (?1, 'claude', 'lead', \
+                 'app', NULL, '/work/app', 'idle', 1, 1, 'text', ?2)",
+                params![id, tools],
+            )
+            .unwrap();
+        }
+        for (number, tool, arguments) in [
+            (
+                1,
+                "forge_write",
+                r#"{"action":"pr-merge-squash","repository":"api","waive":"ship it"}"#,
+            ),
+            (2, "forge_read", r#"{"workspace":"login"}"#),
+            (3, "ticket_read", r##"{"ticket":"#12"}"##),
+            (4, "workspace_remove", r#"{"workspace":"login"}"#),
+            (5, "workspace_remove", r#"{}"#),
+            (
+                6,
+                "forge_write",
+                r#"{"action":"pr-create","repository":"api","title":"t"}"#,
+            ),
+            (
+                7,
+                "forge_write",
+                r#"{"action":"pipeline-rerun","repository":"api"}"#,
+            ),
+        ] {
+            old.execute(
+                "INSERT INTO approval_requests (number, agent, tool, arguments, shown, reasons, \
+                 sensitive, identity, held_by, forwards, state, created_at, kind) VALUES \
+                 (?1, '000000000001', ?2, ?3, '{}', '[]', 0, 'x', 'user', '[]', 'pending', 1, \
+                 'call')",
+                params![number, tool, arguments],
+            )
+            .unwrap();
+        }
+        drop(old);
+
+        let store = Store::open(&path).unwrap();
+
+        let tools = |id: &str| store.agent(id).unwrap().unwrap().tools;
+        assert_eq!(
+            tools("000000000001"),
+            [
+                "mcp__flottille__fs_read",
+                "mcp__flottille__forge",
+                "mcp__flottille__skill_read",
+                "mcp__flottille__tickets",
+                "mcp__flottille__workspace",
+                "mcp__flottille__report"
+            ]
+        );
+        assert_eq!(
+            tools("000000000002"),
+            [
+                "flottille_forge",
+                "flottille_skill_read",
+                "flottille_agent_launch",
+                "flottille_project",
+                "flottille_workspace",
+                "flottille_report"
+            ]
+        );
+        let request = |number: u64| {
+            let request = store.request(number).unwrap().unwrap();
+            (request.tool, request.arguments)
+        };
+        assert_eq!(
+            request(1),
+            (
+                "forge".into(),
+                json!({"action": "merge", "repository": "api", "waive": "ship it"})
+            )
+        );
+        assert_eq!(
+            request(2),
+            (
+                "forge".into(),
+                json!({"action": "show", "workspace": "login"})
+            )
+        );
+        assert_eq!(
+            request(3),
+            ("tickets".into(), json!({"action": "show", "ticket": "#12"}))
+        );
+        assert_eq!(
+            request(4),
+            (
+                "workspace".into(),
+                json!({"action": "remove", "name": "login"})
+            )
+        );
+        assert_eq!(
+            request(5),
+            ("workspace".into(), json!({"action": "remove"}))
+        );
+        assert_eq!(request(6).1["action"], "create");
+        assert_eq!(request(7).1["action"], "checks");
     }
 
     #[test]

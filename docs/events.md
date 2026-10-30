@@ -465,7 +465,7 @@ the same id is not stored again, and has no event.
 |---|---|
 | `agent` | |
 | `delivery` | Its id. |
-| `kind` | `user`, `brief`, `parent`, `child-report`… |
+| `kind` | `user`, `brief`, `launched`, `parent`, `child-report`… |
 | `urgency` | `between-turns`, `urgent` or `redirect`. |
 
 #### `delivery.sent`, `delivery.given_back`, `delivery.superseded`

@@ -182,7 +182,7 @@ worktree, the deepest first, with `git worktree remove` (never `--force`), then 
 prune`; the folder is removed (links as links, never followed); Flottille checks the folder is gone
 and that `git worktree list` no longer lists it, then forgets the workspace. Its branches are kept.
 
-An agent in a workspace removes its own workspace the same way, with the tool `workspace_remove`
+An agent in a workspace removes its own workspace the same way, with `workspace` `remove`
 (a call to judge), and then deletes, in each repository, the workspace's branch when
 it holds no commit of its own (every commit of it is in its base's tracking ref): an empty branch.
 A branch with commits is kept (`docs/commands.md`). It is refused, nothing touched, while the

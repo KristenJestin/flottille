@@ -47,7 +47,7 @@ pub struct Base {
     pub branch: String,
     pub remote: String,
     /// Where the remote led when the workspace was created, credentials taken out: its fetch and
-    /// push URLs, sorted. A push and `forge_write` go only where it still leads; empty for a
+    /// push URLs, sorted. A push and `forge`'s writes go only where it still leads; empty for a
     /// workspace created before it was recorded.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub urls: Vec<String>,

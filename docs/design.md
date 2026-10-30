@@ -164,15 +164,16 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
 - tasks and runs: `tasks` (the project's tasks, written by a root only), `run` (a task or one
   line, **never a shell**), `run_status` (a run's output, or its stop);
 - forges (every agent of a project whose repositories declare a forge, in `main` as in a
-  workspace): `forge_read`, the pull requests of a workspace's repositories and their checks, read
-  only (`forges.md`), and `forge_write`, which opens or merges them or re-runs a failed pipeline,
-  each call to judge (§7); in `main` they name the workspace;
-- the workspace (every agent): `workspace_remove`, which removes a workspace once nothing in
-  it would be lost, the agent's own or, in `main`, the one it names, a call to judge;
+  workspace): `forge`, which lists and reads the pull requests of the place's repositories and
+  their checks (`forges.md`), and opens, comments, edits or merges them or re-runs a failed
+  pipeline, each write a call to judge (§7); in `main` it names the workspace;
+- the workspace (every agent): `workspace`, which lists and reads the workspaces, removes one
+  once nothing in it would be lost, the agent's own or, in `main`, the one it names, a call to
+  judge, and, for a root, creates and prepares them;
 - skills: `skill_read`, one of the project's skills, texts read when relevant (`skills.md`);
 - tickets (every agent of a project that declares a tracker, in `main` as in a workspace):
-  `ticket_read`, the ticket a workspace is linked to, or another of the same tracker, read only
-  (`tickets.md`);
+  `tickets`, which lists, searches and reads the tracker's tickets, and writes GitHub issues,
+  each write a call to judge; Jira is read only (`tickets.md`);
 - the project (a root): `skills` and `commands` (list, show, add, edit, remove), `setup` (its
   steps, numbered) and `project` (its settings, its forges and tracker, its rules), and the writes
   of `tasks`, what the window does, each change a call to judge, a change of the tracker or of the
@@ -180,8 +181,11 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
 
 Flottille's own tools:
 
-- `agent_launch {title, brief, model?, role?, workspace? | new_workspace? + repositories?}`, the parent's place when neither:
-  starts a child, answers at once with its id. Refused (never queued) above the caps.
+- `agent_launch {title, brief, model?, role?, workspace? | new_workspace? + repositories?, root?}`, the parent's place when neither:
+  starts a child, answers at once with its id. Refused (never queued) above the caps. With
+  `root`, a root only starts a session for the user instead, judged, in the tree's mode, its
+  first message the agent's and never the user's, base when that root was itself started by an
+  agent (`tools.md`, "Sessions for the user").
 - `agent_send {agent_id, message}`: a message to one of the caller's children.
 - `agent_status {agent_id?, action?, detail?, after?}`: for one child or all of them: state, what
   it is doing now (thinking, in a tool call, which command runs and for how long, waiting for
@@ -201,10 +205,10 @@ Flottille's own tools:
 
 The tool list of a session is fixed for its whole life (prompt cache, `reference/hemera.md` §7)
 and depends on what the agent can do, known when it starts: a root gets `ask_user`, `skills`,
-`commands`, `setup`, `project` and `workspace`, a child `ask_parent`; an agent at the depth limit gets no `agent_*` tools
-and no `approval_answer`. A root lead has 22 tools, a leaf worker 12; two more each when the
-project's repositories declare a forge (`forge_read`, `forge_write`), one more when it declares a
-tracker (`ticket_read`), whatever the place (`reference/mcp.md` §4).
+`commands`, `setup` and `project`, a child `ask_parent`; an agent at the depth limit gets no `agent_*` tools
+and no `approval_answer`. A root lead has 21 tools, a leaf worker 12; one more each when the
+project's repositories declare a forge (`forge`), one more when it declares a tracker
+(`tickets`), whatever the place (`reference/mcp.md` §4).
 
 ### 4.4 Roles
 
@@ -379,14 +383,16 @@ resumes.
 
 The judge is an agent of a provider the user chose in Settings ("Auto judge": provider and
 model, `provider.set_judge`), run in bare mode **with no tool at all**: no Flottille tool, no MCP
-server. Its instructions are `roles/judge.md`. It sees the call masked (secrets masked, the line
-and the path whole, contents cut to their first lines with how many they had), why the rules held
-it, the place, the agent's `why`, and last the user's last messages to the session, nothing else.
+server. Its instructions are `roles/judge.md`. It sees the call masked (secrets masked, the line,
+the path, a brief, a title and a body whole, contents cut to their first lines with how many they
+had), why the rules held it, the place, the agent's `why`, the first message of a session an agent
+started for the user (labelled as that agent's, never the user's), and last the user's last
+messages to the session, nothing else.
 What the agent wrote comes in blocks of its own, every `<` escaped, so that no text of the agent
 reads as the user's; only the user's messages say what is wanted. It answers one JSON object,
 `{"verdict": "allow" | "ask", "reason": "…"}`. A failure, an answer that is not that object, or
 30 seconds without one is an ask; a line or a path longer than the 8,000 characters it is given
-whole asks without it. A process of the provider is started for each judgement, and its whole
+whole asks without it, and the gate refuses a longer brief, title or body. A process of the provider is started for each judgement, and its whole
 process group stopped after it. Each verdict is recorded with the
 call (who judged, what, why: the `judgement` of its `agent.tool_served` event, and of its request
 when it asks), shown on the card and in `flottille approvals`.
