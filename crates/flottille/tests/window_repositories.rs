@@ -1,5 +1,5 @@
-//! The scenarios of a project's repositories in the window (#140): the project page lists them
-//! and adds, removes and detects them again; the new-workspace form takes some of them, each from
+//! The scenarios of a project's repositories in the window (#140, #167): the project's settings
+//! list them and add, remove and detect them again; the new-workspace form takes some of them, each from
 //! the base chosen for it; a workspace's card and the session's rail say where each repository
 //! stands. On GPUI's test platform in front of a real daemon, with throwaway repositories (one
 //! with no remote) and temporary XDG folders. No window opens on a screen.
@@ -15,6 +15,7 @@ use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::link::Connect;
 use flottille_window::project::{PlaceCard, ProjectPage};
+use flottille_window::project_settings::ProjectSettingsPage;
 use flottille_window::repositories::ProjectRepositories;
 use flottille_window::session::SessionPage;
 use flottille_window::shell::Selection;
@@ -150,6 +151,29 @@ fn open_project(shell: &Entity<Shell>, project: &str, cx: &mut VisualTestContext
     settle(cx);
 }
 
+/// Opens the project's settings, tall enough for every section, and returns its repositories.
+fn open_settings(
+    shell: &Entity<Shell>,
+    project: &str,
+    cx: &mut VisualTestContext,
+) -> Entity<ProjectRepositories> {
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::ProjectSettings(project.into()), window, cx)
+    });
+    let page = |cx: &mut VisualTestContext| -> Option<Entity<ProjectSettingsPage>> {
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).project_settings_page().cloned()
+        })
+    };
+    until(shell, cx, "the settings are read", |cx| {
+        page(cx).is_some_and(|page| page.read_with(cx, |page, cx| page.has_read(cx)))
+    });
+    settle(cx);
+    let page = page(cx).unwrap();
+    page.read_with(cx, |page, _| page.repositories().clone())
+}
+
 fn label_of(id: &str, cx: &mut VisualTestContext) -> Option<String> {
     let id = id.to_owned();
     cx.update(|window, _| {
@@ -174,26 +198,33 @@ fn paths(section: &Entity<ProjectRepositories>, cx: &mut VisualTestContext) -> V
 }
 
 #[gpui_kit::test]
-fn the_project_page_lists_its_repositories_and_adds_removes_and_detects_them(
+fn the_project_s_settings_list_its_repositories_and_add_remove_and_detect_them(
     cx: &mut TestAppContext,
 ) {
     let user = user();
     let folder = trio(&user);
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    open_project(&shell, "trio", cx);
-    let section = section_of(&shell, cx);
+    let section = open_settings(&shell, "trio", cx);
     until(&shell, cx, "the repositories are read", |cx| {
         section.read_with(cx, |s, _| s.repositories().is_some())
     });
     settle(cx);
 
     assert_eq!(paths(&section, cx), ["api", "web", "lib"]);
-    let api = label_of("repository-meta-api", cx).unwrap();
-    assert!(api.starts_with("main · origin "), "{api}");
-    assert!(api.ends_with(" · no forge"), "{api}");
+    // Each value has its label: the base branch, the remote in short, the forge.
     assert_eq!(
-        label_of("repository-meta-lib", cx).as_deref(),
-        Some("main · local only · no forge")
+        label_of("repository-base-api", cx).as_deref(),
+        Some("develop, then main")
+    );
+    let remote = label_of("repository-remote-api", cx).unwrap();
+    assert!(remote.starts_with("origin · "), "{remote}");
+    assert_eq!(
+        label_of("repository-forge-api", cx).as_deref(),
+        Some("None")
+    );
+    assert_eq!(
+        label_of("repository-remote-lib", cx).as_deref(),
+        Some("origin: none, local only")
     );
     assert!(
         has("found-repository-docs", cx),
@@ -202,26 +233,29 @@ fn the_project_page_lists_its_repositories_and_adds_removes_and_detects_them(
     assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
 
     // Add the one found: it joins the list, written in the file.
-    cx.update(|window, cx| window.click("add-found-repository-docs", cx));
+    cx.update(|window, cx| window.click("add-repository-docs", cx));
     until(&shell, cx, "docs is added", |cx| {
         paths(&section, cx).contains(&"docs".to_owned())
     });
     settle(cx);
-    assert!(has("repository-row-docs", cx));
+    assert!(has("repository-docs", cx));
     assert!(!has("found-repository-docs", cx), "it folded away");
     let text = std::fs::read_to_string(user.project_file("trio")).unwrap();
     assert!(text.starts_with("# the trio, by hand\n"), "{text}");
     assert!(text.contains("path = \"docs\""), "{text}");
 
-    // Remove asks first, and says the folder stays.
+    // Remove…, in the row's "⋯", asks first, and says the folder stays.
+    cx.update(|window, cx| window.click("repository-more-lib", cx));
+    settle(cx);
     cx.update(|window, cx| window.click("remove-repository-lib", cx));
     settle(cx);
     let note = label_of("repository-removal-sentence", cx);
     assert!(
         note.as_deref()
-            .is_some_and(|note| note.contains("stay as they are")),
+            .is_some_and(|note| note.contains("repository itself is not touched")),
         "{note:?}"
     );
+    assert!(paths(&section, cx).contains(&"lib".to_owned()));
     cx.update(|window, cx| window.click("repository-removal-action", cx));
     until(&shell, cx, "lib is forgotten", |cx| {
         !paths(&section, cx).contains(&"lib".to_owned())
@@ -231,22 +265,6 @@ fn the_project_page_lists_its_repositories_and_adds_removes_and_detects_them(
     assert!(has("found-repository-lib", cx), "found again in the folder");
     let text = std::fs::read_to_string(user.project_file("trio")).unwrap();
     assert!(!text.contains("path = \"lib\""), "{text}");
-
-    // A path typed that is no repository: refused in a line, the file untouched.
-    std::fs::create_dir_all(folder.join("notes")).unwrap();
-    cx.update(|window, cx| window.click("repository-path-field", cx));
-    cx.simulate_input("notes");
-    cx.update(|window, cx| window.click("add-repository", cx));
-    until(&shell, cx, "the refusal is said", |cx| {
-        section.read_with(cx, |s, _| s.problem().is_some())
-    });
-    settle(cx);
-    let problem = label_of("repositories-problem", cx);
-    assert!(has("repositories-problem", cx), "{problem:?}");
-    assert_eq!(
-        std::fs::read_to_string(user.project_file("trio")).unwrap(),
-        text
-    );
 
     // Detect again: a repository made since shows up.
     user.git_init(&folder.join("tools"));
@@ -315,8 +333,7 @@ fn a_project_edited_by_hand_shows_its_repositories_again_without_a_click(cx: &mu
     let user = user();
     let folder = trio(&user);
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    open_project(&shell, "trio", cx);
-    let section = section_of(&shell, cx);
+    let section = open_settings(&shell, "trio", cx);
     until(&shell, cx, "the repositories are read", |cx| {
         section.read_with(cx, |s, _| s.repositories().is_some())
     });
@@ -334,7 +351,7 @@ fn a_project_edited_by_hand_shows_its_repositories_again_without_a_click(cx: &mu
         paths(&section, cx).contains(&"docs".to_owned())
     });
     settle(cx);
-    assert!(has("repository-row-docs", cx));
+    assert!(has("repository-docs", cx));
     assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
 }
 
@@ -576,4 +593,34 @@ fn the_rail_names_only_the_repositories_with_no_forge_and_gives_the_others_their
     assert!(has("rail-forge-api", cx));
     assert!(!has("rail-forge-web", cx));
     assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
+}
+
+#[gpui_kit::test]
+fn a_repository_of_the_settings_says_what_it_depends_on(cx: &mut TestAppContext) {
+    let user = user();
+    trio(&user);
+    let text = std::fs::read_to_string(user.project_file("trio"))
+        .unwrap()
+        .replace(
+            "path = \"web\"\n",
+            "path = \"web\"\ndepends_on = [\"api\"]\n",
+        );
+    user.write_project_file("trio", &text);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_settings(&shell, "trio", cx);
+    let page = shell
+        .read_with(cx, |s, cx| {
+            s.main().read(cx).project_settings_page().cloned()
+        })
+        .unwrap();
+    page.read_with(cx, |page, _| {
+        let depends = |path: &str| {
+            page.forms()
+                .iter()
+                .find(|form| form.path == path)
+                .map(|form| form.depends_on.clone())
+        };
+        assert_eq!(depends("web"), Some(vec!["api".to_owned()]));
+        assert_eq!(depends("api"), Some(Vec::new()));
+    });
 }

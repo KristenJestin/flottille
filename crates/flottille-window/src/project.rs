@@ -492,11 +492,8 @@ impl Render for ProjectPage {
                         ))
                         .child(grid)
                     })
-                    .child(enter(
-                        key("project-repositories"),
-                        5 + places,
-                        div().mt(px(34.)).child(self.repositories_section.clone()),
-                    ))
+                    // The repositories are configured in the project settings; the page only
+                    // reads them (the new workspace form's bases).
                     .child(enter(
                         key("tasks"),
                         6 + places,

@@ -218,6 +218,19 @@ pub enum Command {
         method: &'static str,
         params: Value,
     },
+    /// What the project's `.claude` folder holds of skills or commands (`skill.detect`,
+    /// `command.detect`).
+    ClaudeFound {
+        project: String,
+        kind: ClaudeKind,
+    },
+    /// Imports from `.claude` the files named, or all that can be (`skill.import`,
+    /// `command.import`).
+    ClaudeImport {
+        project: String,
+        kind: ClaudeKind,
+        names: Option<Vec<String>>,
+    },
     /// One skill whole (a text skill's text), to edit it.
     SkillRead {
         project: String,
@@ -278,6 +291,24 @@ pub enum Command {
         number: u64,
         answer: Answer,
     },
+}
+
+/// What is imported from a project's `.claude` folder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClaudeKind {
+    Skill,
+    Command,
+}
+
+impl ClaudeKind {
+    fn method(self, verb: &str) -> &'static str {
+        match (self, verb) {
+            (ClaudeKind::Skill, "detect") => "skill.detect",
+            (ClaudeKind::Skill, _) => "skill.import",
+            (ClaudeKind::Command, "detect") => "command.detect",
+            (ClaudeKind::Command, _) => "command.import",
+        }
+    }
 }
 
 /// A change to a project's skills, as the daemon takes it: a skill is a path or a text.
@@ -538,6 +569,19 @@ pub enum Outcome {
         project: Option<String>,
         written: bool,
         shown: Result<Shown, String>,
+    },
+    /// What `.claude` holds of a kind, each file with its state, or why it cannot be read.
+    ClaudeFound {
+        project: String,
+        kind: ClaudeKind,
+        found: Result<Vec<crate::claude::Found>, String>,
+    },
+    /// An import from `.claude`: the names imported and the files left out with why, or why
+    /// nothing was.
+    ClaudeImported {
+        project: String,
+        kind: ClaudeKind,
+        read: Result<Value, String>,
     },
     /// A change to the skills was made, or refused with why.
     SkillWritten {
@@ -1056,6 +1100,43 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                         .collect()
                 }),
                 project,
+            }
+        }
+        Command::ClaudeFound { project, kind } => {
+            let found = ask_alone(
+                connect,
+                kind.method("detect"),
+                json!({"project": project}),
+                bounds.quick,
+            );
+            Outcome::ClaudeFound {
+                found: found.and_then(|found| found).map(|found| {
+                    found["found"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(crate::claude::Found::of)
+                        .collect()
+                }),
+                project,
+                kind,
+            }
+        }
+        Command::ClaudeImport {
+            project,
+            kind,
+            names,
+        } => {
+            let read = ask_alone(
+                connect,
+                kind.method("import"),
+                json!({"project": project, "names": names}),
+                bounds.quick,
+            );
+            Outcome::ClaudeImported {
+                read: read.and_then(|read| read),
+                project,
+                kind,
             }
         }
         Command::SkillRead { project, name } => {
