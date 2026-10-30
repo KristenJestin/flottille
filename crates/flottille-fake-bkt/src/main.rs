@@ -36,7 +36,11 @@
 //! (N is `created`, 1 by default), `pr merge` prints `✓ Merged pull request #N` and `pipeline run`
 //! `✓ Triggered pipeline …`. `pr comment <id> --text T` prints `✓ Commented on pull request #N`
 //! and `pr edit <id>` (`--title`, `--description`, at least one) `✓ Updated pull request #N`, as
-//! `pkg/cmd/pr/pr.go` does (`:1707`, `:829`); both need a pull request of `pulls`.
+//! `pkg/cmd/pr/pr.go` does (`:1707`, `:829`); both need a pull request of `pulls`. With
+//! `strategies` (`{"acme/api": ["merge_commit"]}`), `pr merge` fails for a `--strategy` the
+//! repository's list does not hold, as the server refuses it. A pull request whose `checks` is the
+//! string `"unreadable"` has a `bkt pr checks --json` answer without `statuses`, as a `bkt` whose
+//! output changed shape.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -146,10 +150,11 @@ fn answer(script: &Value, args: &[String]) -> i32 {
         ["pr", "checks", id] => {
             payload["pull_request"] = json!(id.parse::<u64>().unwrap_or(0));
             payload["commit"] = json!("0123456789abcdef");
-            payload["statuses"] = match &script["checks"][&key][*id] {
-                Value::Null => json!([]),
-                statuses => statuses.clone(),
-            };
+            match &script["checks"][&key][*id] {
+                Value::Null => payload["statuses"] = json!([]),
+                Value::String(shape) if shape == "unreadable" => {}
+                statuses => payload["statuses"] = statuses.clone(),
+            }
         }
         ["pipeline", "list"] => {
             payload["pipelines"] = match &script["pipelines"][&key] {
@@ -192,6 +197,16 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             return 0;
         }
         ["pr", "merge", id] => {
+            let strategy = option("--strategy").unwrap_or_default();
+            if let Some(allowed) = script["strategies"][&key].as_array()
+                && !allowed.iter().any(|s| s == strategy)
+            {
+                eprintln!(
+                    "Error: 400 Bad Request: the merge strategy {strategy} is not allowed for \
+                     this repository"
+                );
+                return 1;
+            }
             println!("✓ Merged pull request #{id}");
             return 0;
         }

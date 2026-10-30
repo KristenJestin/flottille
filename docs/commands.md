@@ -96,7 +96,7 @@ which `forge_write` made until #141 (`pr-create`, `pr-merge-squash`, `pipeline-r
 is to judge; merging what the checks or a review block (`waive`) is base. Its `comment` and `edit`
 act on a pull request by its number, and are in `docs/tools.md`:
 
-`forge {action, workspace?, repository, title?, body?, draft?, waive?}`
+`forge {action, workspace?, repository, title?, body?, draft?, waive?, method?}`
 
 - `action`: `create`, `merge` or `checks`;
 - `repository`: one of the workspace's repositories, by its path; another is refused, and so is
@@ -106,12 +106,24 @@ act on a pull request by its number, and are in `docs/tools.md`:
   a `--reviewer` for each of the project's reviewers (below), on Bitbucket as on GitHub (`draft` is
   refused for Bitbucket, whose `bkt` opens none);
 - `merge`: the open pull request of the workspace's branch from the repository itself
-  (not from a fork, which can have a branch of the same name) into its base,
-  `gh pr merge <n> -R … --squash`; none is refused. So is one whose checks fail or are still
-  running, or whose review asks for changes (`refused: the pull request #n of … is not merged: its
-  checks fail (build)…`), on Bitbucket as on GitHub (`docs/forges.md`), unless `waive` gives the user's words for merging it as it is: the gate
-  then holds the call for the user, in every mode, and the merge goes without looking
-  at the checks once they allow it;
+  (not from a fork, which can have a branch of the same name) into its base, by `method`:
+  `squash` (the default), `merge` or `rebase`, `gh pr merge <n> -R … --squash` (`--merge`,
+  `--rebase`); another method is refused by the gate, and so is a `method` on another action. None
+  open is refused. So is one no check ran on (`refused: the pull request #n of … is not merged: no
+  check ran on this pull request…`), one whose checks were all skipped or neutral (`… all its
+  checks were skipped (build), none passed…`), and one `gh` or `bkt` answers in a shape that
+  cannot be read (`… it could not be read, so nothing verified it…`; on Bitbucket, `the checks of
+  the pull request #n could not be read`): a repository with no CI merges nothing unverified. So
+  is one whose checks fail or are still running, or whose review asks for changes (`… is not merged: its
+  checks fail (build)…`), on Bitbucket as on GitHub (`docs/forges.md`), unless `waive` gives the
+  user's words for merging it as it is (without checks included): the gate then holds the call for
+  the user, in every mode, and the merge goes without looking at the checks once they allow it.
+  When the forge refuses the method, and the repository does not allow it, the refusal names those
+  it allows (`refused: acme/app does not allow merging by squash: it allows merge and rebase
+  (method); nothing was merged`; on Bitbucket, the repository's own strategies that no method
+  reaches follow as the forge names them: `…, and its own strategies ff and squash-ff-only (no
+  method reaches them)`), read then (`gh repo view … --json
+  squashMergeAllowed,mergeCommitAllowed,rebaseMergeAllowed`); another failure is the forge's own;
 - `checks`: the failed runs of the branch's last commit (`gh run list -R … --branch <branch>`),
   each `gh run rerun <id> -R … --failed`; none failed is refused.
 
@@ -119,7 +131,7 @@ It is run by the daemon with the user's own `gh`, as `forge` `show` is: the agen
 
 **On Bitbucket** (`bkt`, Cloud and Data Center) the same three actions run under the same classes and
 the same checks (the remote kept, the workspace's own pull request, not a fork's, into the recorded
-base), through `bkt pr create`, `bkt pr merge --strategy squash` and, on Cloud only, `bkt pipeline
+base), through `bkt pr create`, `bkt pr merge --strategy <the method's>` and, on Cloud only, `bkt pipeline
 run --ref <branch>` after the branch's newest pipeline failed: what each does, and what differs
 from `gh`, is in [`forges.md`](forges.md#bitbucket).
 It is listed to every agent of a project whose repositories declare a forge, in `main` as in a

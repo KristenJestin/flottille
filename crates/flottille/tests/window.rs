@@ -2490,7 +2490,11 @@ fn a_judge_flottille_picked_is_said_once_in_a_notice_that_opens_settings(cx: &mu
         shell.read_with(cx, |s, _| s.judge_notice().is_none())
     });
     cx.update(|window, _| assert!(window.try_find("judge-notice").is_none()));
-    // Seen once, said no more: the daemon keeps the judge and drops the notice.
+    // Seen once, said no more: the daemon keeps the judge and drops the notice. The window hides
+    // the notice at once and tells the daemon after, so the daemon's answer is waited for.
+    until(&shell, cx, "the daemon dropped the notice", |cx| {
+        shell.read_with(cx, |s, _| !s.providers().judge_picked)
+    });
     let listed = user.call("provider.list", json!({})).unwrap();
     assert_eq!(
         listed["judge"],

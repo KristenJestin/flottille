@@ -441,8 +441,8 @@ often it asks.
   "problem": null,
   "repositories": [
     {"path": "api", "remote": "origin", "forge": "github", "repository": "acme/api", "note": null,
-     "pull_request": {"number": 12, "title": "Add the login page", "state": "open", "base": "develop",
-       "url": "https://github.com/acme/api/pull/12", "review": "approved",
+     "pull_request": {"number": 12, "title": "Add the login page", "state": "open", "head": "app/login",
+       "base": "develop", "mergeable": true, "url": "https://github.com/acme/api/pull/12", "review": "approved",
        "checks": [{"name": "build", "state": "passing"}], "mark": "passing", "comments": 2},
      "error": null},
     {"path": "web", "remote": "origin", "forge": null, "repository": null,
@@ -456,7 +456,9 @@ several are joined by `; `), else `null`; the repositories it stops have no `pul
 each repository, `forge` is `github`, `bitbucket` or `null` (then `note` says why), `repository`
 is `owner/name` (a Bitbucket Cloud workspace and name, or a Data Center project key and name),
 `pull_request` is `null` when its branch has none, and `error` says why its forge could not be
-read. A pull request's `state` is `open`, `draft`, `merged` or `closed`; `review` `approved`,
+read. A pull request's `state` is `open`, `draft`, `merged` or `closed`; `head` is its branch and `base`
+the one it merges into; `mergeable` is `true`, `false` (it conflicts) or `null` while the forge does
+not say; `review` `approved`,
 `changes requested`, `review required` or `null`; a check's `state` `passing`, `failing`,
 `pending` or `skipped`; `mark` the checks as one (`failing`, `pending`, `passing`), `null` without
 checks. A Bitbucket pull request also has `reviewers`, each `{"name", "state"}` with `state`
