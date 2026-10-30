@@ -110,14 +110,19 @@ act on a pull request by its number, and are in `docs/tools.md`:
   `squash` (the default), `merge` or `rebase`, `gh pr merge <n> -R … --squash` (`--merge`,
   `--rebase`); another method is refused by the gate, and so is a `method` on another action. None
   open is refused. So is one no check ran on (`refused: the pull request #n of … is not merged: no
-  check ran on this pull request…`): a repository with no CI merges nothing unverified. So is one
-  whose checks fail or are still running, or whose review asks for changes (`… is not merged: its
+  check ran on this pull request…`), one whose checks were all skipped or neutral (`… all its
+  checks were skipped (build), none passed…`), and one `gh` or `bkt` answers in a shape that
+  cannot be read (`… it could not be read, so nothing verified it…`; on Bitbucket, `the checks of
+  the pull request #n could not be read`): a repository with no CI merges nothing unverified. So
+  is one whose checks fail or are still running, or whose review asks for changes (`… is not merged: its
   checks fail (build)…`), on Bitbucket as on GitHub (`docs/forges.md`), unless `waive` gives the
   user's words for merging it as it is (without checks included): the gate then holds the call for
   the user, in every mode, and the merge goes without looking at the checks once they allow it.
   When the forge refuses the method, and the repository does not allow it, the refusal names those
   it allows (`refused: acme/app does not allow merging by squash: it allows merge and rebase
-  (method); nothing was merged`), read then (`gh repo view … --json
+  (method); nothing was merged`; on Bitbucket, the repository's own strategies that no method
+  reaches follow as the forge names them: `…, and its own strategies ff and squash-ff-only (no
+  method reaches them)`), read then (`gh repo view … --json
   squashMergeAllowed,mergeCommitAllowed,rebaseMergeAllowed`); another failure is the forge's own;
 - `checks`: the failed runs of the branch's last commit (`gh run list -R … --branch <branch>`),
   each `gh run rerun <id> -R … --failed`; none failed is refused.

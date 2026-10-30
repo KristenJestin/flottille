@@ -315,7 +315,9 @@ impl Pull {
             "number": self.number,
             "title": self.title,
             "state": self.state,
+            "head": self.head,
             "base": self.base,
+            "mergeable": self.mergeable,
             "url": self.url,
             "review": self.review,
             "checks": self.checks.iter()
@@ -876,16 +878,36 @@ impl ForgeCall {
     }
 }
 
-/// The refusal of a merge by `method` that the repository does not allow, naming those it does.
-fn method_refused(slug: &str, method: &str, allowed: &[&str]) -> Outcome {
-    let allowed = match allowed {
-        [] => "none of squash, merge and rebase".to_owned(),
-        [one] => (*one).to_owned(),
-        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+/// The refusal of a merge by `method` that the repository does not allow, naming those it does,
+/// and the forge's own strategies that no method reaches, as the forge calls them.
+fn method_refused(slug: &str, method: &str, allowed: &[&str], others: &[String]) -> Outcome {
+    fn listed<S: AsRef<str>>(words: &[S]) -> String {
+        match words {
+            [] => String::new(),
+            [one] => one.as_ref().to_owned(),
+            [rest @ .., last] => format!(
+                "{} and {}",
+                rest.iter()
+                    .map(AsRef::as_ref)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                last.as_ref()
+            ),
+        }
+    }
+    let own = format!(
+        "its own strategies {} (no method reaches them)",
+        listed(others)
+    );
+    let allowed = match (allowed.is_empty(), others.is_empty()) {
+        (true, true) => "none of squash, merge and rebase".to_owned(),
+        (true, false) => format!("none of squash, merge and rebase, only {own}"),
+        (false, true) => format!("{} (method)", listed(allowed)),
+        (false, false) => format!("{} (method), and {own}", listed(allowed)),
     };
     Outcome::Refused(format!(
-        "refused: {slug} does not allow merging by {method}: it allows {allowed} (method); \
-         nothing was merged"
+        "refused: {slug} does not allow merging by {method}: it allows {allowed}; nothing was \
+         merged"
     ))
 }
 
@@ -1235,7 +1257,8 @@ async fn forge_read(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
 }
 
 /// What blocks the merge of a pull request with these checks and this review; none when nothing
-/// does. A pull request no check ran on is blocked as a failing one is: nothing verified it.
+/// does. A pull request no check ran on, or whose checks were all skipped, is blocked as a failing
+/// one is: nothing verified it.
 fn blocks(checks: &[(String, &'static str)], review: Option<&str>) -> Option<String> {
     let named = |state: &str| {
         let names: Vec<&str> = checks
@@ -1248,6 +1271,12 @@ fn blocks(checks: &[(String, &'static str)], review: Option<&str>) -> Option<Str
     let mut blocks = Vec::new();
     if checks.is_empty() {
         blocks.push("no check ran on this pull request".to_owned());
+    } else if let Some(names) = named("skipped")
+        && checks.iter().all(|(_, s)| *s == "skipped")
+    {
+        blocks.push(format!(
+            "all its checks were skipped ({names}), none passed"
+        ));
     }
     if let Some(names) = named("failing") {
         blocks.push(format!("its checks fail ({names})"));
@@ -1398,7 +1427,12 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                         Ok(viewed) => viewed,
                         Err(why) => return Outcome::Failed(why),
                     };
-                if let Some(blocks) = Pull::of(&viewed).as_ref().and_then(Pull::blocks) {
+                // A pull request that cannot be read is one nothing verified.
+                let blocked = match Pull::of(&viewed) {
+                    Some(pull) => pull.blocks(),
+                    None => Some("it could not be read, so nothing verified it".to_owned()),
+                };
+                if let Some(blocks) = blocked {
                     return Outcome::Refused(format!(
                         "refused: the pull request #{number} of {branch} in {slug} is not \
                          merged: {blocks}; wait for its checks, or have it waived by the user \
@@ -1428,7 +1462,7 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                             if allowed.contains(&method) {
                                 Outcome::Failed(why)
                             } else {
-                                method_refused(&slug, method, &allowed)
+                                method_refused(&slug, method, &allowed, &[])
                             }
                         }
                         Err(_) => Outcome::Failed(why),
@@ -1676,6 +1710,28 @@ mod tests {
         assert_eq!(
             pull(json!([status("SUCCESS")])).checks,
             [("ci".to_owned(), "passing")]
+        );
+    }
+
+    #[test]
+    fn nothing_that_passed_blocks_the_merge_as_much_as_a_failure() {
+        let blocked = |checks: &[(&str, &'static str)]| {
+            let checks: Vec<(String, &'static str)> =
+                checks.iter().map(|(n, s)| ((*n).to_owned(), *s)).collect();
+            blocks(&checks, None)
+        };
+        assert_eq!(
+            blocked(&[]).as_deref(),
+            Some("no check ran on this pull request")
+        );
+        assert_eq!(
+            blocked(&[("build", "skipped"), ("lint", "skipped")]).as_deref(),
+            Some("all its checks were skipped (build, lint), none passed")
+        );
+        assert_eq!(blocked(&[("build", "passing"), ("lint", "skipped")]), None);
+        assert_eq!(
+            blocked(&[("build", "skipped"), ("lint", "failing")]).as_deref(),
+            Some("its checks fail (lint)")
         );
     }
 

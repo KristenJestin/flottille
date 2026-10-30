@@ -281,7 +281,9 @@ fn a_branch_with_a_pull_request_shows_it_with_its_checks_and_one_without_says_no
             "number": 12,
             "title": "Add the login page",
             "state": "open",
+            "head": "app/login",
             "base": "main",
+            "mergeable": null,
             "url": "https://github.com/acme/api/pull/12",
             "review": "changes requested",
             "checks": [{"name": "build", "state": "passing"}, {"name": "lint", "state": "pending"}],
@@ -734,6 +736,72 @@ fn bitbucket_forge_show_prints_mergeable_review_and_checks() {
 }
 
 #[test]
+fn the_json_read_says_the_head_and_whether_the_pull_request_merges() {
+    let user = User::new().with_fake_gh();
+    fixture(&user);
+    let mut conflicting = pull(12, "Add the login page");
+    conflicting["mergeable"] = json!("CONFLICTING");
+    let mut clean = pull(14, "Add the login form");
+    clean["mergeable"] = json!("MERGEABLE");
+    user.gh_script(json!({"pulls": {"acme/api": {"app/login": conflicting},
+        "acme/web": {"app/login": clean}}}));
+
+    let forge = forge(&user);
+
+    let api = &repository(&forge, "api")["pull_request"];
+    assert_eq!(
+        (&api["head"], &api["mergeable"]),
+        (&json!("app/login"), &json!(false))
+    );
+    let web = &repository(&forge, "web")["pull_request"];
+    assert_eq!(
+        (&web["head"], &web["mergeable"]),
+        (&json!("app/login"), &json!(true))
+    );
+}
+
+#[test]
+fn a_cloud_diffstat_with_more_pages_leaves_mergeable_not_known_unless_a_conflict_shows() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    bitbucket_fixture(&user);
+    bitbucket_pull_requests(&user);
+    let mut script: Value =
+        serde_json::from_str(&std::fs::read_to_string(user.path("bkt/script.json")).unwrap())
+            .unwrap();
+    let more =
+        "https://api.bitbucket.org/2.0/repositories/acme/api/pullrequests/12/diffstat?page=2";
+    script["api"]["/repositories/acme/api/pullrequests/12/diffstat"] = json!({"values": [
+        {"status": "modified", "new": {"path": "src/a.rs"}}
+    ], "next": more});
+    user.bkt_script(script.clone());
+    let (_, mcp) = agent_in(&user, Some("login"));
+
+    let answer = mcp.call("forge", json!({"action": "show", "repository": "api"}));
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("mergeable: not known yet"),
+        "{}",
+        answer.text
+    );
+    assert!(!answer.text.contains("mergeable: yes"), "{}", answer.text);
+
+    // A conflict on the page read is a conflict, whatever follows.
+    script["api"]["/repositories/acme/api/pullrequests/12/diffstat"] = json!({"values": [
+        {"status": "merge conflict", "new": {"path": "src/a.rs"}}
+    ], "next": more});
+    user.bkt_script(script);
+    let answer = mcp.call("forge", json!({"action": "show", "repository": "api"}));
+    assert!(
+        answer
+            .text
+            .contains("mergeable: no, it conflicts with main"),
+        "{}",
+        answer.text
+    );
+}
+
+#[test]
 fn a_root_agent_in_main_with_a_forge_lists_the_forge_tools() {
     let user = User::with_fake_agent().with_fake_gh();
     fixture(&user);
@@ -1014,7 +1082,9 @@ fn a_cloud_branch_shows_its_newest_own_pull_request_with_reviewers_checks_and_co
             "number": 12,
             "title": "Add the login page",
             "state": "open",
+            "head": "app/login",
             "base": "main",
+            "mergeable": null,
             "url": "https://bitbucket.org/acme/api/pull-requests/12",
             "review": "changes requested",
             "checks": [{"name": "build", "state": "passing"}, {"name": "lint", "state": "pending"}],
@@ -1053,7 +1123,9 @@ fn a_data_center_branch_shows_its_pull_request_with_reviewers_checks_and_comment
             "number": 7,
             "title": "Add the login form",
             "state": "open",
+            "head": "app/login",
             "base": "main",
+            "mergeable": null,
             "url": "https://bitbucket.example.com/projects/APP/repos/web/pull-requests/7",
             "review": "review required",
             "checks": [{"name": "Jenkins", "state": "failing"}],

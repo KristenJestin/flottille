@@ -1667,13 +1667,17 @@ fn a_data_center_pull_request_a_reviewer_marked_needs_work_is_not_merged() {
 /// The fake `gh`'s pull request #12 of `app/login` into `main` in `acme/app`, with `checks`
 /// (`statusCheckRollup`), and the merge methods the repository allows (all when none is given).
 fn github_merge(user: &User, checks: Value, methods: Option<&[&str]>) {
+    user.gh_script(github_script(checks, methods));
+}
+
+fn github_script(checks: Value, methods: Option<&[&str]>) -> Value {
     let mut script = json!({"pulls": {"acme/app": {"app/login": {"number": 12, "title": "Login",
         "state": "OPEN", "isDraft": false, "baseRefName": "main", "isCrossRepository": false,
         "url": "https://github.com/acme/app/pull/12", "statusCheckRollup": checks}}}});
     if let Some(methods) = methods {
         script["merge_methods"] = json!({"acme/app": methods});
     }
-    user.gh_script(script);
+    script
 }
 
 fn passing() -> Value {
@@ -1758,6 +1762,159 @@ fn a_bitbucket_pull_request_with_no_check_is_refused_and_merged_after_the_user_s
     );
     assert!(!answer.error, "{}", answer.text);
     assert_eq!(bkt_calls_starting(&user, "pr merge"), 1);
+}
+
+#[test]
+fn a_pull_request_gh_answers_without_its_number_is_not_merged_and_says_why() {
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user);
+    command(&user, "merge");
+    let (_, mcp) = run(&user, "merge");
+    let mut script = github_script(passing(), None);
+    script["view_omits"] = json!({"acme/app": ["number"]});
+    user.gh_script(script);
+
+    let answer = write(&user, &mcp, json!({"action": "merge", "repository": "."}));
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains(
+            "the pull request #12 of app/login in acme/app is not merged: it could not be read, \
+             so nothing verified it"
+        ),
+        "{}",
+        answer.text
+    );
+    assert_eq!(gh_merges(&user), Vec::<String>::new());
+}
+
+#[test]
+fn a_pull_request_whose_checks_were_all_skipped_is_refused_as_one_with_no_check() {
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user);
+    command(&user, "merge");
+    let (_, mcp) = run(&user, "merge");
+    github_merge(
+        &user,
+        json!([
+            {"__typename": "CheckRun", "name": "build", "status": "COMPLETED",
+                "conclusion": "SKIPPED"},
+            {"__typename": "CheckRun", "name": "lint", "status": "COMPLETED",
+                "conclusion": "NEUTRAL"}
+        ]),
+        None,
+    );
+
+    let answer = write(&user, &mcp, json!({"action": "merge", "repository": "."}));
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains(
+            "the pull request #12 of app/login in acme/app is not merged: all its checks were \
+             skipped (build, lint), none passed"
+        ),
+        "{}",
+        answer.text
+    );
+    assert_eq!(gh_merges(&user), Vec::<String>::new());
+    // One check that passed beside a skipped one verifies it.
+    github_merge(
+        &user,
+        json!([
+            {"__typename": "CheckRun", "name": "build", "status": "COMPLETED",
+                "conclusion": "SUCCESS"},
+            {"__typename": "CheckRun", "name": "lint", "status": "COMPLETED",
+                "conclusion": "SKIPPED"}
+        ]),
+        None,
+    );
+    let answer = write(&user, &mcp, json!({"action": "merge", "repository": "."}));
+    assert!(!answer.error, "{}", answer.text);
+}
+
+#[test]
+fn a_bitbucket_pull_request_whose_checks_cannot_be_read_is_not_merged_and_says_so() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
+    command(&user, "merge");
+    let (_, mcp) = run(&user, "merge");
+    user.bkt_script(json!({
+        "pulls": {"acme/app": [cloud_pull(12, "acme/app", "acme/app", "main")]},
+        "checks": {"acme/app": {"12": "unreadable"}},
+        "api": {"/repositories/acme/app/pullrequests/12": cloud_page(&["approved"])}}));
+
+    let answer = write(&user, &mcp, json!({"action": "merge", "repository": "."}));
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("the checks of the pull request #12 could not be read"),
+        "{}",
+        answer.text
+    );
+    assert!(!answer.text.contains("no check ran"), "{}", answer.text);
+    assert_eq!(bkt_calls_starting(&user, "pr merge"), 0);
+}
+
+#[test]
+fn a_bitbucket_repository_that_allows_only_its_own_strategies_names_them_as_they_are() {
+    // Cloud: `fast_forward` is a strategy of its own that no method here reaches.
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
+    command(&user, "merge");
+    let (_, mcp) = run(&user, "merge");
+    let mut page = cloud_page(&["approved"]);
+    page["destination"] = json!({"branch": {"name": "main",
+        "merge_strategies": ["fast_forward"], "default_merge_strategy": "fast_forward"}});
+    user.bkt_script(json!({
+        "pulls": {"acme/app": [cloud_pull(12, "acme/app", "acme/app", "main")]},
+        "checks": {"acme/app": {"12": [{"state": "SUCCESSFUL", "name": "build"}]}},
+        "strategies": {"acme/app": ["fast_forward"]},
+        "api": {"/repositories/acme/app/pullrequests/12": page}}));
+
+    let answer = write(&user, &mcp, json!({"action": "merge", "repository": "."}));
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains(
+            "it allows none of squash, merge and rebase, only its own strategies fast_forward \
+             (no method reaches them)"
+        ),
+        "{}",
+        answer.text
+    );
+
+    // Data Center: the ones that are reached are named, then the others.
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user, "ssh://git@bitbucket.example.com:7999/APP/app.git");
+    user.bkt_script(json!({
+    "contexts": [{"name": "work", "host": "bitbucket.example.com:7990"}],
+    "pulls": {"APP/app": [dc_pull("APPROVED")]},
+    "checks": {"APP/app": {"5": [{"state": "SUCCESSFUL", "name": "build"}]}},
+    "strategies": {"APP/app": ["ff", "rebase-no-ff", "squash-ff-only", "no-ff"]},
+    "api": {"/rest/api/1.0/projects/APP/repos/app/settings/pull-requests": {
+        "mergeConfig": {"defaultStrategy": {"id": "ff"}, "strategies": [
+            {"id": "ff", "enabled": true},
+            {"id": "rebase-no-ff", "enabled": true},
+            {"id": "squash-ff-only", "enabled": true},
+            {"id": "no-ff", "enabled": true},
+            {"id": "squash", "enabled": false}
+        ]}}}}));
+    command(&user, "merge");
+    let (_, mcp) = run(&user, "merge");
+
+    let answer = write(&user, &mcp, json!({"action": "merge", "repository": "."}));
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains(
+            "it allows merge (method), and its own strategies ff, rebase-no-ff and \
+             squash-ff-only (no method reaches them)"
+        ),
+        "{}",
+        answer.text
+    );
 }
 
 #[test]

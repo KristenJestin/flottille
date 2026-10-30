@@ -397,17 +397,20 @@ async fn checks_of(
     id: &str,
 ) -> Result<Vec<(String, &'static str)>, String> {
     let statuses = json(&command(forge, context, &["pr", "checks", id], &["--json"])).await?;
-    Ok(statuses["statuses"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(check_of)
-        .collect())
+    // An answer without its `statuses` is not "no check ran": `bkt` said nothing about them.
+    let Some(statuses) = statuses["statuses"].as_array() else {
+        return Err(format!(
+            "the checks of the pull request #{id} could not be read: `bkt pr checks --json` \
+             answered without `statuses`"
+        ));
+    };
+    Ok(statuses.iter().map(check_of).collect())
 }
 
 /// Whether the pull request `id` merges without conflict: on Cloud, no file of its diffstat is
-/// `merge conflict`; on Data Center, its merge's page is not `conflicted`. None when it cannot be
-/// read: the rest of the pull request is still shown.
+/// `merge conflict` (a page that has a next one, and no conflict, says nothing); on Data Center,
+/// its merge's page is not `conflicted`. None when it cannot be read: the rest of the pull request
+/// is still shown.
 async fn mergeable(forge: &Forge, context: &str, id: &str) -> Option<bool> {
     let Forge::Bitbucket { owner, name, .. } = forge else {
         unreachable!()
@@ -419,7 +422,11 @@ async fn mergeable(forge: &Forge, context: &str, id: &str) -> Option<bool> {
             .await
             .ok()?;
         let files = page["values"].as_array()?;
-        return Some(!files.iter().any(|file| file["status"] == "merge conflict"));
+        if files.iter().any(|file| file["status"] == "merge conflict") {
+            return Some(false);
+        }
+        // Another page may hold the conflict: without it, nothing is known.
+        return page["next"].is_null().then_some(true);
     }
     let path = format!("/rest/api/1.0/projects/{owner}/repos/{name}/pull-requests/{id}/merge");
     let page = json(&["api", &path, "--context", context]).await.ok()?;
@@ -440,7 +447,13 @@ fn strategy(forge: &Forge, method: &str) -> Option<&'static str> {
 
 /// The methods the repository allows its pull request `id` to be merged by: Cloud says them on
 /// the pull request's destination branch, Data Center in the repository's pull request settings.
-async fn allowed(forge: &Forge, context: &str, id: &str) -> Result<Vec<&'static str>, String> {
+/// Then the strategies it allows that no method reaches (`ff`, `squash-ff-only`, `fast_forward`…),
+/// as it names them.
+async fn allowed(
+    forge: &Forge,
+    context: &str,
+    id: &str,
+) -> Result<(Vec<&'static str>, Vec<String>), String> {
     let Forge::Bitbucket { owner, name, .. } = forge else {
         unreachable!()
     };
@@ -463,10 +476,17 @@ async fn allowed(forge: &Forge, context: &str, id: &str) -> Result<Vec<&'static 
             .filter_map(|s| s["id"].as_str().map(str::to_owned))
             .collect()
     };
-    Ok(MERGE_METHODS
+    let reached = |strategy: &String| {
+        MERGE_METHODS
+            .into_iter()
+            .any(|method| self::strategy(forge, method) == Some(strategy.as_str()))
+    };
+    let others = strategies.iter().filter(|s| !reached(s)).cloned().collect();
+    let methods = MERGE_METHODS
         .into_iter()
         .filter(|method| strategy(forge, method).is_some_and(|s| strategies.iter().any(|t| t == s)))
-        .collect())
+        .collect();
+    Ok((methods, others))
 }
 
 /// The path of a Cloud pull request's own page, for `bkt api`.
@@ -739,8 +759,8 @@ pub(super) async fn write(
                 // Refused by the server: when the repository forbids the method, say which ones
                 // it allows.
                 Err(why) => match allowed(forge, context, &number).await {
-                    Ok(allowed) if !allowed.contains(&method) => {
-                        method_refused(&slug, method, &allowed)
+                    Ok((allowed, others)) if !allowed.contains(&method) => {
+                        method_refused(&slug, method, &allowed, &others)
                     }
                     _ => Outcome::Failed(why),
                 },

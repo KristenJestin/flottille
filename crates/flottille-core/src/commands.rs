@@ -141,8 +141,9 @@ follows its merges is done. The repositories of one level are merged together.
    asking for changes, a comment or a review left unanswered. Send the user the state of every
    pull request in one `ask_user`, what blocks first. While anything blocks, stop there, unless the
    user waives it in their answer: pass their words as `waive` to that merge, and Flottille holds
-   the waived merge for their approval. Flottille refuses to merge a pull request no check ran on,
-   whose checks fail or run, or whose review asks for changes, unless it is waived.
+   the waived merge for their approval. Flottille refuses to merge a pull request no check ran on
+   or whose checks were all skipped, whose checks fail or run, or whose review asks for changes,
+   unless it is waived.
 2. Then, level by level:
    - a branch behind its base is brought up to date first: `git fetch <remote> <base>`, `git rebase
      <remote>/<base>`, the project's checks for it (its tasks, `tasks` and `run`), then `git push

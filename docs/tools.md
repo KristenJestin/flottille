@@ -310,7 +310,7 @@ pending requests.
   repository of the place, the same way; `repository` is needed when the place has several.
 - **`create`, `merge`, `checks` `{workspace?, repository, …}`**: opens the pull request of a
   workspace's branch (`title`, `body`, `draft`, with the project's reviewers), merges it by
-  `method`, `squash` (the default), `merge` or `rebase` (refused when no check ran on it, while its
+  `method`, `squash` (the default), `merge` or `rebase` (refused when no check ran on it or all were skipped, while its
   checks fail or run or a review asks for changes, unless `waive` gives the
   user's words, which holds the merge for their approval), or re-runs the failed jobs of its last
   commit's pipelines (`docs/commands.md`, "`forge`").

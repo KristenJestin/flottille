@@ -97,7 +97,9 @@ itself (`gh pr view <n> -R github.com/owner/name --json …`):
 - its review decision (`approved`, `changes requested`, `review required`, or none);
 - its checks, each with its name and its state: `passing`, `failing`, `pending` or `skipped`;
   and the checks as one mark: `failing` when one fails, else `pending` when one runs, else
-  `passing`; none when there are no checks;
+  `passing` (skipped ones count as passing in the mark, but a merge needs one that passed: a pull
+  request whose checks were all skipped is refused like one with none); none when there are no
+  checks;
 - its comments (their number; `forge` `show` gives their text, and the reviews').
 
 **`gh` missing or not signed in** is said once for the workspace, in `problem`, with what to do
@@ -195,9 +197,10 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
   replies in `comment.comments`). **These shapes are assumed, and the maintainer checks them**:
   nothing in `bkt`'s source prints them. Only the first 100 comments are read.
 - **Mergeable is read the same way, assumed too**: on Cloud, the pull request has a conflict when
-  a file of its `/diffstat?pagelen=500` (`values[].status`) is `merge conflict`; on Data Center,
-  when its `/rest/api/1.0/projects/{key}/repos/{repo}/pull-requests/{id}/merge` says `conflicted`.
-  When that read fails, it is not known, and the rest of the pull request is shown.
+  a file of its `/diffstat?pagelen=500` (`values[].status`) is `merge conflict`, and when that
+  page has a `next` and no conflict, it is not known (only the first page is read); on Data
+  Center, when its `/rest/api/1.0/projects/{key}/repos/{repo}/pull-requests/{id}/merge` says
+  `conflicted`. When that read fails, it is not known, and the rest of the pull request is shown.
 - **The review is the reviewers' verdicts as one**: `changes requested` when one reviewer asks
   for it (Cloud `state: changes_requested`, Data Center `status: NEEDS_WORK`), else `review
   required` while one has not decided, else `approved`; none when nobody was asked. It is not
@@ -233,8 +236,10 @@ the base the repository started from):
   pull request's own page; Data Center: the `enabled` ones of `mergeConfig.strategies[].id` in
   `/rest/api/1.0/projects/{key}/repos/{repo}/settings/pull-requests`, both through `bkt api`,
   **assumed shapes**) and, when the method is not among them, the refusal names the methods they
-  allow; otherwise the server's own refusal is the result. Before it, as for GitHub, it is refused
-  when no check ran on the pull request (`bkt pr checks` lists none), while a check of the pull
+  allow, then the strategies it allows that no method reaches (`ff`, `squash-ff-only`,
+  `fast_forward`…) as it names them; otherwise the server's own refusal is the result. Before it, as for GitHub, it is refused
+  when no check ran on the pull request (`bkt pr checks` lists none; an answer without `statuses`
+  is not that: the checks could not be read, and nothing is merged), while a check of the pull
   request fails or runs, or while the review is `changes requested`
   (Data Center: a reviewer's `NEEDS_WORK` in the list; Cloud: a participant's `changes_requested`
   on the pull request's own page, read with `bkt api`), unless the user waives it.
