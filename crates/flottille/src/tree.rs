@@ -29,7 +29,7 @@ use crate::roles;
 use crate::workspaces;
 
 /// The tree's tools, served with the others.
-pub const TOOLS: [&str; 8] = [
+pub const TOOLS: [&str; 9] = [
     "agent_launch",
     "agent_send",
     "agent_status",
@@ -38,6 +38,7 @@ pub const TOOLS: [&str; 8] = [
     "ask_user",
     "ask_parent",
     "approval_answer",
+    "session_send",
 ];
 
 /// What `agent_status` shows of a conversation at once, at most, in characters: under the result
@@ -67,6 +68,7 @@ pub async fn call(daemon: &Arc<Daemon>, grant: &Arc<Grant>, tool: &str, args: Va
         "report" => report(daemon, grant, &caller, args).await,
         "ask_user" | "ask_parent" => ask(daemon, &caller, tool, args),
         "approval_answer" => answer(daemon, &caller, args),
+        "session_send" => session_send(daemon, &caller, args),
         other => Err(Outcome::Failed(format!("{other} is not served"))),
     };
     done.unwrap_or_else(|outcome| outcome)
@@ -131,7 +133,36 @@ enum WorkspaceChoice {
     },
 }
 
+/// What a child is told when it would work in another place than its parent's: a workspace is a
+/// session's (`docs/tools.md`, "Sessions for the user").
+pub const CHILD_PLACES: &str = "refused: a child works where you work: workspace and \
+    new_workspace are for a session for the user, which works there on its own, \
+    agent_launch {\"title\": \"Fix login\", \"brief\": \"...\", \"root\": true, \"workspace\": \
+    \"login\"} (or \"new_workspace\": \"login\"), judged; leave them out for a child in your own \
+    place";
+
+/// The refusals of a launch that need nothing looked up but the caller's place: checked before
+/// the gate is asked, and again when the launch is performed.
+pub fn launch_refusal(workspace: Option<&str>, args: &Value) -> Result<(), Outcome> {
+    let asked: Launch = arguments("agent_launch", args.clone())?;
+    asked.place(workspace).map(|_| ())
+}
+
 impl Launch {
+    /// Where the agent launched works: a session anywhere, a child only in its parent's place,
+    /// which it may name.
+    fn place(&self, own: Option<&str>) -> Result<WorkspaceChoice, Outcome> {
+        match self.workspace_choice()? {
+            WorkspaceChoice::Existing(name) if !self.root && own == Some(name.as_str()) => {
+                Ok(WorkspaceChoice::Own)
+            }
+            WorkspaceChoice::Existing(_) | WorkspaceChoice::New { .. } if !self.root => {
+                Err(refused(CHILD_PLACES))
+            }
+            choice => Ok(choice),
+        }
+    }
+
     fn workspace_choice(&self) -> Result<WorkspaceChoice, Outcome> {
         match (&self.workspace, &self.new_workspace, &self.repositories) {
             (Some(_), Some(_), _) => Err(refused(
@@ -159,11 +190,11 @@ impl Launch {
 
 async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     let asked: Launch = arguments("agent_launch", args)?;
-    let choice = asked.workspace_choice()?;
     // Checked again here, as the request was: only a root starts a root.
     if asked.root && caller.parent.is_some() {
         return Err(refused(crate::actions::CHILD_ROOTS));
     }
+    let choice = asked.place(caller.workspace.as_deref())?;
     if !asked.root && caller.depth + 1 > DEPTH_LIMIT {
         return Err(refused(format!(
             "refused: this agent is at the depth limit ({DEPTH_LIMIT}): it cannot launch \
@@ -436,6 +467,74 @@ fn send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     Ok(Outcome::Done(format!(
         "Sent to {}: it reaches it on its next tool result, or as a new turn.",
         named(&child)
+    )))
+}
+
+// Sessions that talk to each other.
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionSend {
+    pub session: String,
+    pub text: String,
+}
+
+/// The session a `session_send` writes to, and whether the caller started it (else it started
+/// the caller), or the refusal: only a session the caller started, or the one that started it.
+pub fn session_of(
+    daemon: &Daemon,
+    caller: &Agent,
+    asked: &SessionSend,
+) -> Result<(Agent, bool), Outcome> {
+    let found = daemon
+        .read(|store| store.agent(&asked.session))
+        .map_err(failed)?;
+    let (session, started) = match found {
+        Some(agent) if agent.launched_by.as_deref() == Some(caller.id.as_str()) => (agent, true),
+        Some(agent) if caller.launched_by.as_deref() == Some(agent.id.as_str()) => (agent, false),
+        _ => {
+            return Err(refused(format!(
+                "refused: {} is neither a session you started nor the agent that started you: \
+                 session_send writes only to those; your children are written to with agent_send",
+                asked.session
+            )));
+        }
+    };
+    if session.state.is_final() {
+        return Err(refused(format!(
+            "refused: {} has {}: it reads nothing more",
+            named(&session),
+            session.state.as_str()
+        )));
+    }
+    if asked.text.trim().is_empty() {
+        return Err(refused("refused: the text is empty"));
+    }
+    Ok((session, started))
+}
+
+/// What follows the sender's name on the first line of a message `session_send` delivers.
+pub const SESSION_WROTE: &str = " wrote to this session:";
+
+/// `session_send`: a message to a session the caller started, or to the one that started it,
+/// delivered as `session` under a line naming the sender: an agent's words, never the user's.
+/// The delivery's id names the sender, for the judge (`judge::session_messages`).
+fn session_send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
+    let asked: SessionSend = arguments("session_send", args)?;
+    let (session, _) = session_of(daemon, caller, &asked)?;
+    let id = flottille_core::agent::new_id().map_err(failed)?;
+    deliveries::deliver(
+        daemon,
+        &session.id,
+        "session",
+        Some(format!("session-{}-{id}", caller.id)),
+        &format!("{}{SESSION_WROTE}\n\n{}", named(caller), asked.text),
+        approval::URGENT,
+    );
+    Ok(Outcome::Done(format!(
+        "Sent to {}: it reaches it on its next tool result, or as a new turn. An answer comes \
+         as a [flottille:session] message.",
+        named(&session)
     )))
 }
 

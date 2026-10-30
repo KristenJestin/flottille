@@ -705,8 +705,10 @@ between reads as two lines.
 An agent launches children with `agent_launch` (`docs/tools.md`): each is an agent of its own,
 with a parent, a depth (a root is at 0), a title and a brief, which is all it knows of its task.
 The user writes to and stops roots only: `agent.send` and `agent.stop` on a child are refused,
-naming its root. The tree is one project's: a child works in its parent's place, an existing
-workspace of the project, or a new one, made and prepared before it starts.
+naming its root. The tree is one project's: a child works in its parent's place, always. Work that
+belongs in another workspace is a session for the user (`agent_launch` with `root`, `docs/tools.md`
+"Sessions for the user"), in an existing workspace or a new one, made and prepared before it
+starts; the agent that started it and the session write to each other with `session_send`.
 
 - **Caps**: at most `max_children` children of a project run at once (`docs/projects.md`, 1 to
   6, 3 by default), and a tree is at most 2 deep: an agent at depth 2 has no `agent_*` tool nor
@@ -744,7 +746,9 @@ workspace of the project, or a new one, made and prepared before it starts.
 
 Everything Flottille hands to an agent is a delivery: the user's messages (`user`), a brief
 (`brief`), the first message of a session an agent started for the user (`launched`, under a first
-line naming that agent: it is the agent's words, never the user's), a parent's message (`parent`), what happens to a child (`child-report`,
+line naming that agent: it is the agent's words, never the user's), a message another session
+wrote with `session_send` (`session`, under a first line naming its sender, never the user's), a
+parent's message (`parent`), what happens to a child (`child-report`,
 `child-question`, `child-asks`, `child-failed`, `child-stuck`, `child-idle`, `child-replaced`,
 `children-status`), an approval's answer (`approval`), a reminder (`reminder`), a session's
 restart (`resume`). It is stored before it is sent, under an id that makes it idempotent, and it
