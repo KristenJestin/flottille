@@ -1,12 +1,18 @@
-//! `Segmented`: a small control of two or more choices, one of them chosen (the composer's
-//! Ask | Auto). The chosen one is a highlight that slides to the one clicked over [`PANEL`], the
-//! inks fade along it, and each segment fades its hover.
+//! `Segmented`: two or three short words that switch a mode or a view at once (the composer's
+//! Ask | Auto), one of them chosen. Sized to its words, never stretched, never in a form (a scan
+//! of the window's dialogs refuses it there: a form's choice of a kind is [`RadioChoices`] or a
+//! [`Select`]). The chosen one is a filled highlight that slides to the one clicked over
+//! [`PANEL`], the inks fade along it, and each segment fades its hover.
+//!
+//! [`RadioChoices`]: crate::RadioChoices
+//! [`Select`]: crate::Select
 
 use std::sync::Arc;
 
 use gpui_kit::{
     App, ClickEvent, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    SharedString, StatefulInteractiveElement, Styled, TestSupportExt, Window, div, px,
+    SharedString, StatefulInteractiveElement, Styled, TestSupportExt, TextRun, Window, div, font,
+    px,
 };
 
 use crate::color::mix;
@@ -16,10 +22,13 @@ use crate::theme::palette;
 
 type OnChoose = Box<dyn Fn(usize, &mut Window, &mut App) + 'static>;
 
-/// How wide a segment is: the same for all, so that the highlight slides by whole segments.
-const WIDTH: f32 = 42.;
-const HEIGHT: f32 = 24.;
+/// The most choices it takes: more is a select's.
+pub const MAX_CHOICES: usize = 3;
+const HEIGHT: f32 = 26.;
 const INSET: f32 = 2.;
+/// The space on each side of a segment's words.
+const PAD: f32 = 9.;
+const TEXT: f32 = 12.;
 
 #[derive(IntoElement)]
 pub struct Segmented {
@@ -33,20 +42,25 @@ pub struct Segmented {
 
 impl Segmented {
     /// `label` says what it chooses (its accessible name). Each option is `(key, words)`: its
-    /// segment's id is `{id}-{key}`.
+    /// segment's id is `{id}-{key}`. More than [`MAX_CHOICES`] options is a defect: it panics.
     pub fn new(
         id: impl Into<ElementId>,
         label: impl Into<SharedString>,
         options: impl IntoIterator<Item = (&'static str, &'static str)>,
         chosen: usize,
     ) -> Self {
+        let options: Vec<(SharedString, SharedString)> = options
+            .into_iter()
+            .map(|(key, words)| (key.into(), words.into()))
+            .collect();
+        assert!(
+            options.len() <= MAX_CHOICES,
+            "a segmented control takes at most three choices; more is a Select"
+        );
         Self {
             id: id.into(),
             label: label.into(),
-            options: options
-                .into_iter()
-                .map(|(key, words)| (key.into(), words.into()))
-                .collect(),
+            options,
             chosen,
             disabled: false,
             on_choose: None,
@@ -85,6 +99,44 @@ impl RenderOnce for Segmented {
             window.request_animation_frame();
         }
         let at = motion.value(now);
+        // Each segment is as wide as its words: the highlight slides from one place and width to
+        // the other's.
+        let face = font(crate::typography::UI);
+        let widths: Vec<f32> = self
+            .options
+            .iter()
+            .map(|(_, words)| {
+                let run = TextRun {
+                    len: words.len(),
+                    font: face.clone(),
+                    color: p.text,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let line = window
+                    .text_system()
+                    .shape_line(words.clone(), px(TEXT), &[run], None);
+                (f32::from(line.width) + 2. * PAD).ceil()
+            })
+            .collect();
+        let lefts: Vec<f32> = widths
+            .iter()
+            .scan(INSET, |left, width| {
+                let at = *left;
+                *left += width;
+                Some(at)
+            })
+            .collect();
+        let (low, high) = (at.floor() as usize, at.ceil() as usize);
+        let (low, high) = (
+            low.min(widths.len().saturating_sub(1)),
+            high.min(widths.len().saturating_sub(1)),
+        );
+        let part = at - at.floor();
+        let lerp = |a: f32, b: f32| a + (b - a) * part;
+        let highlight_left = lerp(lefts[low], lefts[high]);
+        let highlight_width = lerp(widths[low], widths[high]);
         let on_choose: Option<Arc<OnChoose>> = self.on_choose.map(Arc::new);
         let chosen = self.chosen;
         let disabled = self.disabled;
@@ -106,13 +158,14 @@ impl RenderOnce for Segmented {
                     .aria_selected(index == chosen)
                     .relative()
                     .flex_none()
-                    .w(px(WIDTH))
-                    .h(px(HEIGHT - 2. * INSET))
+                    .w(px(widths[index]))
+                    .h(px(HEIGHT - 2. * INSET - 2.))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(5.))
-                    .text_size(px(12.5))
+                    .whitespace_nowrap()
+                    .rounded(px(6.))
+                    .text_size(px(TEXT))
                     .child(words.clone());
                 if !disabled && index != chosen {
                     segment = segment.cursor_pointer();
@@ -123,11 +176,11 @@ impl RenderOnce for Segmented {
                     }
                 }
                 hoverable(segment, move |d, hover| {
-                    d.text_color(mix(mix(p.faint, p.mute, hover), p.text, near))
+                    d.text_color(mix(mix(p.mute, p.text, hover), p.on_acc, near))
                 })
             });
         // Border-box: the 1 px border takes a pixel on each side.
-        let width = WIDTH * self.options.len() as f32 + 2. * INSET + 2.;
+        let width = widths.iter().sum::<f32>() + 2. * INSET + 2.;
         let mut control = div()
             .id(self.id.clone())
             .aria_label(self.label.clone())
@@ -138,19 +191,19 @@ impl RenderOnce for Segmented {
             .px(px(INSET))
             .w(px(width))
             .h(px(HEIGHT))
-            .rounded(px(7.))
+            .rounded(px(8.))
             .bg(p.field)
             .border_1()
-            .border_color(p.line)
+            .border_color(p.field_line)
             .child(
                 div()
                     .absolute()
-                    .top(px(1.))
-                    .left(px(INSET + WIDTH * at))
-                    .w(px(WIDTH))
-                    .h(px(HEIGHT - 2. * INSET))
-                    .rounded(px(5.))
-                    .bg(p.card2),
+                    .top(px(INSET))
+                    .left(px(highlight_left))
+                    .w(px(highlight_width))
+                    .h(px(HEIGHT - 2. * INSET - 2.))
+                    .rounded(px(6.))
+                    .bg(p.acc),
             )
             .children(segments);
         if disabled {

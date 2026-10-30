@@ -126,6 +126,8 @@ pub fn palette_from_toml(text: &str) -> Result<Palette, String> {
         ok_bg: tint(green),
         fail: red,
         fail_bg: tint(red),
+        on_fail: bg,
+        fail_line: over(red, 0.3, lighter),
         add: over(green, 0.13, bg),
         del: over(red, 0.13, bg),
         scrim: hex(0x000000).opacity(0.5),

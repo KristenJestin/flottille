@@ -8,7 +8,7 @@ use flottille_ui::motion::PANEL;
 use flottille_ui::rows::TreeLevel;
 use flottille_ui::{
     AgentState, Button, Fold, Icon, Item, Listing, Menu, Modal, StateIcon, Status, TreeRow, enter,
-    meta, palette, presence, presence_of, section_label, tree_children,
+    meta, palette, presence, presence_of, section_label, space, tree_children,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -93,7 +93,7 @@ fn trailing(id: ElementId, commands: usize, last: impl IntoElement, cx: &App) ->
     div()
         .flex()
         .items_center()
-        .gap(px(6.))
+        .gap(space::SM)
         .when(commands > 0, |d| {
             d.child(
                 div()
@@ -314,7 +314,7 @@ impl Render for Sidebar {
         let adds = self.shell.clone();
         let ended = self.ended.clone().map(|(group, present)| {
             // Below every project, a little apart; it folds away when its last session leaves.
-            presence("sidebar-ended", present, div().pt(px(10.)).child(group))
+            presence("sidebar-ended", present, div().pt(space::MD).child(group))
         });
         let count = self.ending.as_ref().map_or(self.said, |(_, count)| *count);
         let this = cx.entity().downgrade();
@@ -332,7 +332,7 @@ impl Render for Sidebar {
                     .test_support(),
             )
             .action(
-                Button::primary(
+                Button::danger(
                     "sidebar-end-confirm",
                     match count {
                         0 | 1 => "End session".to_owned(),
@@ -347,16 +347,21 @@ impl Render for Sidebar {
             .flex()
             .flex_col()
             .child(
-                div().flex_none().pt(px(12.)).px(px(12.)).pb(px(4.)).child(
-                    Button::primary("new-session", "New session")
-                        .leading(Icon::Plus)
-                        .full_width()
-                        .on_click(move |_, window, cx| {
-                            shell
-                                .update(cx, |shell, cx| shell.new_session(window, cx))
-                                .ok();
-                        }),
-                ),
+                div()
+                    .flex_none()
+                    .pt(space::MD)
+                    .px(space::MD)
+                    .pb(space::XS)
+                    .child(
+                        Button::primary("new-session", "New session")
+                            .leading(Icon::Plus)
+                            .full_width()
+                            .on_click(move |_, window, cx| {
+                                shell
+                                    .update(cx, |shell, cx| shell.new_session(window, cx))
+                                    .ok();
+                            }),
+                    ),
             )
             .child(
                 div()
@@ -364,9 +369,9 @@ impl Render for Sidebar {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .px(px(8.))
-                    .pt(px(8.))
-                    .pb(px(14.))
+                    .px(space::SM)
+                    .pt(space::SM)
+                    .pb(space::LG)
                     .flex()
                     .flex_col()
                     .child(
@@ -374,7 +379,7 @@ impl Render for Sidebar {
                             .flex()
                             .items_center()
                             .justify_between()
-                            .pr(px(4.))
+                            .pr(space::XS)
                             .child(section_label("Projects", cx))
                             .child(
                                 Button::icon("add-project", Icon::Plus, "Add a project").on_click(
@@ -395,8 +400,8 @@ impl Render for Sidebar {
                     div()
                         .id("sidebar-refused")
                         .aria_label(line.clone())
-                        .px(px(14.))
-                        .pb(px(10.))
+                        .px(space::LG)
+                        .pb(space::MD)
                         .text_size(px(12.5))
                         .text_color(p.fail)
                         .child(line)
@@ -990,7 +995,7 @@ impl Render for SessionRow {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(6.))
+                    .gap(space::SM)
                     .child(enter(format!("started-by-enter-{}", self.id), 0, text))
                     .child(last)
                     .into_any_element()

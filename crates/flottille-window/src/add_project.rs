@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use flottille_ui::{Button, Modal, Type, enter, palette};
+use flottille_ui::{Button, Modal, Type, enter, palette, space};
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::{
     AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement, IntoElement,
@@ -234,7 +234,7 @@ impl Render for AddProject {
                 .id("add-project-detected")
                 .flex()
                 .flex_col()
-                .gap(px(4.))
+                .gap(space::XS)
                 .text_size(px(12.5))
                 .text_color(p.mute)
                 .child(SharedString::from(format!(
@@ -255,7 +255,7 @@ impl Render for AddProject {
                             format!("add-project-repository-{i}").into(),
                         ))
                         .aria_label(name.clone())
-                        .pl(px(10.))
+                        .pl(space::MD)
                         .mono(12.)
                         .text_color(p.text)
                         .child(name)
@@ -298,7 +298,7 @@ impl Render for AddProject {
             .child(
                 div()
                     .flex()
-                    .gap(px(8.))
+                    .gap(space::SM)
                     .child(div().flex_1().child(field_frame(
                         "add-project-folder",
                         &self.folder,
@@ -314,7 +314,7 @@ impl Render for AddProject {
             .child(problem_line(
                 "add-project-error",
                 self.error.clone(),
-                14.,
+                space::LG,
                 cx,
             ))
             .action(action)

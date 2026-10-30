@@ -92,6 +92,86 @@ description:
 - [ ] nothing is redrawn at rest: a scenario ends on `pending_frames == 0`;
 - [ ] the pull request lists each element it animated, and a capture or a scenario shows one.
 
+## Rules of the window
+
+The window holds together because every screen follows the same rules and builds them from the
+same components of `flottille-ui`, which make the wrong thing hard to write. **[test]** marks a
+rule a test holds: the components' scenarios are in `crates/flottille-ui/tests/rules.rs`, the scans
+of the window's sources in `crates/flottille-window/tests/window_rules.rs` (each shown a sample of
+the wrong code first).
+
+1. **Buttons: four kinds, one size.** Primary (filled accent, at most one per view: Save, Create,
+   Send, Allow), Secondary (transparent, bordered: a page's or a section's actions), Quiet (no
+   border: Cancel, Deny, lesser actions), Danger (filled fail colour: only the action of a
+   confirmation of something destructive). Every text button is 30 px high, 13 px medium; an icon
+   button is a 28 px square with a tooltip. **[test]** `Button` takes no size. A page header holds
+   at most two secondary buttons, on the title's line, and a "⋯" menu for the rest
+   (**[test]** `PageHeader` refuses a third). A destructive action is never a visible button in a
+   page or a row: it is a "Remove…" item of a "⋯" menu, last. A label never repeats a name the
+   title already says.
+2. **One confirmation: a modal dialog.** Its title is the question with the object's name, then
+   one sentence of consequence, Cancel and the danger button; Escape and the scrim cancel; when
+   the action cannot be done, the dialog says why and its button is disabled. Never a button that
+   turns into other buttons in place. **[test]** `Confirm`, and a scan refusing the
+   inline-confirmation ids.
+3. **An action's result is a toast**: bottom right, 360 px, an icon, one line and an optional
+   second; it rises and fades in, folds away with its gap; a success leaves after 4 s (held while
+   hovered), a failure stays until dismissed; several stack, the newest on top. Never a line
+   appended under a form. **[test]** `Toast`, and a scan refusing such lines outside it. A form's
+   own validation stays under its field.
+4. **Every control has a visible label.** A text field has its label above it (a placeholder is
+   only an example); a switch draws its label beside it. **[test]** `Field` takes a label;
+   `Switch` draws its label and its hint. Which control for which choice: a switch for one thing
+   on or off; a segmented control only for two or three short words that switch a mode or a view
+   at once (Ask | Auto), sized to its words, never in a form; radio choices for two to four kinds
+   in a form that each need a line; a select for a list that may grow, more than three options or
+   long labels. **[test]** `Segmented` takes at most three choices and a scan refuses it in a
+   dialog.
+5. **A state is said once per view**: an agent's state by its icon on its own row, "needs you" in
+   one place. **[test]** on the session page, "needs you" is said at most once.
+6. **Where things live**: the project page shows and runs, the project settings configure; a
+   setting editable in two places is a defect; a run opens its detail in a drawer.
+7. **Lists, one pattern**: a configured item is a row (icon, name, tags, one line) in a
+   `ListCard`; a click opens its edit dialog; its "⋯", shown on hover, holds Edit, the moves and
+   "Remove…"; an empty list is one dashed line saying what to add and why; reordering is by drag,
+   with Move up and Move down in the "⋯". A separator is drawn only between two blocks that exist.
+   **[test]** `Card` draws a block's separator only when the block has content.
+8. **Words**: paths relative to the project folder; a remote in its short form, labelled; labelled
+   values when there are more than two, never a run of mono values separated by dots; a section
+   has a title, a count when it is a list, and one sentence saying what it is for.
+9. **Spacing**: the scale 4, 8, 12, 16, 24, 32, 48 px (`flottille_ui::space`). **[test]** the
+   constants, and a scan refusing any other gap or padding literal in the window crate. A page's
+   column is 880 px at most with 32 px between its sections; a dialog is 520 px (640 wide) with
+   24 px of padding.
+10. **Motion**, as above: everything that appears, leaves, opens, folds or changes state moves
+    with the shared durations; a drawer slides from the right; a select's list fades in; a
+    radio's dot scales in. **[test]** each component's scenario.
+
+The components that hold them:
+
+| Component | What it is for |
+|---|---|
+| `Button::{primary, secondary, quiet, danger, icon}` | rule 1; `.leading(Icon)`, `.disabled(bool)`, `.badge(Badge)` |
+| `PageHeader::new(id, title)` | `.path(p)`, `.crumb(el)`, `.below(el)`, `.action(id, label, Option<Icon>, f)` twice at most, `.more(Entity<Menu>)` |
+| `Section::new(id, title)` | `.count(c)`, `.sentence(s)`, `.action(Button)`, then its children |
+| `Menu::new(..).entry(..).danger(id, label, f)` | a "⋯" menu; danger entries come last, after a line |
+| `Confirm::new(id, question)` | `.sentence(s)`, `.action(label)`, `.refused(Option<why>)`, `.open(bool)`, `.on_confirm(f)`, `.on_cancel(f)`; ids `<id>-action`, `<id>-cancel`, `<id>-scrim` |
+| `Modal::new(id, title)` | a form dialog: `.sentence(s)`, `.wide()`, `.action(Button)`, `.on_close(f)` |
+| `toast(Toast::success(t).detail(d), cx)` / `Toast::failure` | rule 3; the shell owns the `ToastStack` |
+| `Field::new(id, label, control)` | `.optional()`, `.hint(h)`, `.hint_mono()`, `.error(Option<e>)` |
+| `Switch::new(id, on, label)` | `.hint(h)`, `.on_click(f)`; the whole row toggles |
+| `Segmented::new(id, label, choices, chosen)` | at most three choices, never in a dialog |
+| `RadioChoices::new(id, label)` | `.choice(key, title, line)`, `.leading(Icon)`, `.chosen(i)`, `.on_choose(f)`; two to four |
+| `Select::new(id, options, chosen)` | `SelectOption::new(key, title).line(l)`, `.fit()`, `.disabled(b)`, `.on_choose(f)` |
+| `Drawer::detail(id, view, cx)` | a run's detail: 520 px from the right, no scrim, Escape closes; `.show(window, cx)` |
+| `Card::new().id(id).block(Block)` | a card whose separators are drawn only between blocks with content |
+| `ListCard::new(id).row(ListRow)` | rule 7's list; `ListRow` has `.mono()`, `.tag(t)`, `.line(l)`, `.more(Entity<Menu>)` |
+| `EmptyLine::new(id, Icon, text)` | an empty list; `.action(Button)` |
+| `space::{XS, SM, MD, LG, XL, XXL, XXXL}`, `COLUMN`, `DIALOG`, `DIALOG_WIDE` | rule 9 |
+
+`cargo run -p flottille-ui --example components` shows them on one page (`--dialog`, `--confirm`,
+`--drawer`, `--menu` open one of them), for a capture in a headless compositor.
+
 ## Pitfalls
 
 - `use gpui_kit::prelude::*` brings `ParentElement`, `StatefulInteractiveElement`, `AppContext`,

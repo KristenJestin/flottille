@@ -100,6 +100,11 @@ A window pull request, and a window issue, without its animations is incomplete:
 sends it back. The pull request lists each element it animated; the checklist in
 `docs/reference/gpui.md` is ticked in it.
 
+Motion is the tenth of the **rules of the window** (`docs/reference/gpui.md`, "Rules of the
+window"): four kinds of button, one confirmation dialog, results as toasts, a visible label on
+every control, a state said once, one list pattern, the spacing scale. A screen builds them from
+the components of `flottille-ui` that hold them, never its own.
+
 ## Agents and safety (non-negotiable)
 
 - **Bare mode is the product.** An agent Flottille runs has no built-in tool, no user setting,

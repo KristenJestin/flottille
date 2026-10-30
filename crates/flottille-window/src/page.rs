@@ -1,10 +1,10 @@
 //! The main area: the page of what is open, a project's ([`ProjectPage`]) or a session's
 //! ([`SessionPage`]).
 
-use flottille_ui::{Status, Type, palette};
+use flottille_ui::{Status, Type, palette, space};
 use gpui_kit::{
     AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
-    Styled, WeakEntity, Window, div, px,
+    Styled, WeakEntity, Window, div,
 };
 
 use crate::composer::Composer;
@@ -176,7 +176,7 @@ impl Render for MainArea {
                     .justify_center()
                     .text_color(p.faint)
                     .flex_col()
-                    .gap(px(12.))
+                    .gap(space::MD)
                     .child("No project yet.")
                     .child({
                         let shell = self.shell.clone();

@@ -9,7 +9,7 @@
 //! The same editor holds the Auto judge's guidance in Settings (`judge.show`, `judge.set`,
 //! `judge.reset`), read at each judgement: a change reaches the next one.
 
-use flottille_ui::{Button, Card, palette, presence_of};
+use flottille_ui::{Button, Card, palette, presence_of, space};
 use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::{
     AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement,
@@ -310,7 +310,7 @@ impl Render for RulesEditor {
         let buttons = div()
             .flex()
             .items_center()
-            .gap(px(8.))
+            .gap(space::SM)
             .child(
                 Button::secondary(id("reset"), "Reset to default")
                     .disabled(!self.is_own() || self.waiting)
@@ -323,11 +323,11 @@ impl Render for RulesEditor {
                     .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
             );
         let body = div()
-            .px(px(14.))
-            .py(px(12.))
+            .px(space::LG)
+            .py(space::MD)
             .flex()
             .flex_col()
-            .gap(px(8.))
+            .gap(space::SM)
             .child(
                 div()
                     .id(id("origin"))
@@ -339,8 +339,8 @@ impl Render for RulesEditor {
             .child(
                 div()
                     .id(id("text"))
-                    .px(px(10.))
-                    .py(px(8.))
+                    .px(space::MD)
+                    .py(space::SM)
                     .rounded(px(8.))
                     .bg(p.field)
                     .border_1()
@@ -369,7 +369,7 @@ impl Render for RulesEditor {
                         }
                     },
                 )
-                .gap(px(8.)),
+                .gap(space::SM),
             )
             .child(
                 presence_of(
@@ -396,7 +396,7 @@ impl Render for RulesEditor {
                         }
                     },
                 )
-                .gap(px(8.)),
+                .gap(space::SM),
             )
             .child(
                 div()
@@ -419,7 +419,7 @@ impl Render for RulesEditor {
                             .into_any_element()
                     }
                 })
-                .gap(px(8.)),
+                .gap(space::SM),
             )
             .child(buttons);
         Card::new()

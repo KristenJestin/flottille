@@ -7,7 +7,7 @@
 //! `project.remove_repository`).
 
 use flottille_core::declared::RepositoryForge;
-use flottille_ui::{Button, Icon, Item, Listing, Type, enter, icon, palette};
+use flottille_ui::{Button, Confirm, Icon, Item, Listing, Type, icon, palette, space};
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
     App, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, Render,
@@ -131,6 +131,8 @@ pub struct ProjectRepositories {
     rows: Listing<Row>,
     /// The repository whose Remove waits for its confirmation.
     confirming: Option<String>,
+    /// The repository the confirmation names, kept while it fades away.
+    asked: String,
     busy: Option<Busy>,
     /// How many requests were made: an answer to an older one never replaces a newer one's.
     requests: u64,
@@ -148,6 +150,7 @@ impl ProjectRepositories {
             read: None,
             rows: Listing::default(),
             confirming: None,
+            asked: String::new(),
             busy: None,
             requests: 0,
             problem: None,
@@ -228,10 +231,11 @@ impl ProjectRepositories {
         cx.notify();
     }
 
-    /// Asks to forget `path`; the second click confirms.
+    /// Asks to forget `path`, in a confirmation; called again from it, forgets it.
     pub fn remove(&mut self, path: &str, cx: &mut Context<Self>) {
         if self.confirming.as_deref() != Some(path) {
             self.confirming = Some(path.to_owned());
+            self.asked = path.to_owned();
             cx.notify();
             return;
         }
@@ -297,12 +301,40 @@ impl ProjectRepositories {
         field
     }
 
+    /// The confirmation of forgetting a repository.
+    fn confirm(&self, cx: &mut Context<Self>) -> Confirm {
+        let path = self.asked.clone();
+        let label = repository_label(&self.project, &path);
+        let (this, again) = (cx.entity().downgrade(), cx.entity().downgrade());
+        Confirm::new(
+            "repository-removal",
+            format!("Forget the repository {label}?"),
+        )
+        .sentence(
+            "Flottille forgets it: its folder, its branches and the worktrees of its \
+                 workspaces stay as they are.",
+        )
+        .action("Forget repository")
+        .open(self.confirming.is_some())
+        .on_confirm(move |_, cx| {
+            let path = path.clone();
+            this.update(cx, |this, cx| this.remove(&path, cx)).ok();
+        })
+        .on_cancel(move |_, cx| {
+            again
+                .update(cx, |this, cx| {
+                    this.confirming = None;
+                    cx.notify();
+                })
+                .ok();
+        })
+    }
+
     fn known_row(&self, info: &RepositoryInfo, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let path = info.path.clone();
         let id = |part: &str| ElementId::Name(format!("{part}-{path}").into());
         let label = repository_label(&self.project, &info.path);
-        let confirming = self.confirming.as_deref() == Some(&info.path);
         let removing = self.busy == Some(Busy::Removing(info.path.clone()));
         let action = if removing {
             div()
@@ -310,48 +342,6 @@ impl ProjectRepositories {
                 .text_color(p.faint)
                 .child("Removing…")
                 .into_any_element()
-        } else if confirming {
-            let (cancel, remove) = (path.clone(), path.clone());
-            let group = div()
-                .flex()
-                .flex_col()
-                .items_end()
-                .gap(px(6.))
-                .child(
-                    div()
-                        .id(id("forget-note"))
-                        .max_w(px(300.))
-                        .text_size(px(12.))
-                        .text_color(p.mute)
-                        .child(
-                            "Flottille forgets it: its folder, its branches and the worktrees of \
-                             its workspaces stay as they are.",
-                        )
-                        .test_support(),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(4.))
-                        .child(
-                            Button::quiet(id("cancel-remove-repository"), "Cancel").on_click(
-                                cx.listener(move |this, _, _, cx| {
-                                    if this.confirming.as_deref() == Some(&cancel) {
-                                        this.confirming = None;
-                                        cx.notify();
-                                    }
-                                }),
-                            ),
-                        )
-                        .child(
-                            Button::secondary(
-                                id("confirm-remove-repository"),
-                                format!("Forget {label}"),
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| this.remove(&remove, cx))),
-                        ),
-                );
-            enter(id("confirm-repository"), 0, group).into_any_element()
         } else {
             let remove = path.clone();
             Button::quiet(id("remove-repository"), "Remove")
@@ -363,18 +353,18 @@ impl ProjectRepositories {
         };
         div()
             .id(id("repository-row"))
-            .px(px(14.))
-            .py(px(10.))
+            .px(space::LG)
+            .py(space::MD)
             .rounded(px(10.))
             .border_1()
             .border_color(p.line)
             .bg(p.card)
             .flex()
             .items_start()
-            .gap(px(10.))
+            .gap(space::MD)
             .child(
                 div()
-                    .pt(px(2.))
+                    .pt(space::XS)
                     .child(icon(Icon::Repository).size(px(14.)).text_color(p.faint)),
             )
             .child(
@@ -383,7 +373,7 @@ impl ProjectRepositories {
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .gap(px(2.))
+                    .gap(space::XS)
                     .child(
                         div()
                             .text_size(px(13.))
@@ -414,15 +404,15 @@ impl ProjectRepositories {
         let added = path.to_owned();
         div()
             .id(id("found-repository"))
-            .px(px(14.))
-            .py(px(10.))
+            .px(space::LG)
+            .py(space::MD)
             .rounded(px(10.))
             .border_1()
             .border_dashed()
             .border_color(p.line2)
             .flex()
             .items_center()
-            .gap(px(10.))
+            .gap(space::MD)
             .child(icon(Icon::Repository).size(px(14.)).text_color(p.faint))
             .child(
                 div()
@@ -430,7 +420,7 @@ impl ProjectRepositories {
                     .min_w_0()
                     .flex()
                     .items_center()
-                    .gap(px(8.))
+                    .gap(space::SM)
                     .child(
                         div()
                             .text_size(px(13.))
@@ -486,7 +476,7 @@ impl Render for ProjectRepositories {
                     row.placement,
                     content,
                 )
-                .gap(px(8.))
+                .gap(space::SM)
             })
             .collect();
         let count = self.read.as_ref().map_or(0, |r| r.listed.len());
@@ -502,7 +492,7 @@ impl Render for ProjectRepositories {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(8.))
+                    .gap(space::SM)
                     .mb(px(12.))
                     .text_size(px(13.))
                     .semibold()
@@ -533,19 +523,19 @@ impl Render for ProjectRepositories {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(8.))
+                    .gap(space::SM)
                     .children(rows)
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(8.))
+                            .gap(space::SM)
                             .child(
                                 div()
                                     .id("repository-path-field")
                                     .flex_1()
                                     .h(px(32.))
-                                    .px(px(10.))
+                                    .px(space::MD)
                                     .rounded(px(8.))
                                     .bg(p.field)
                                     .border_1()
@@ -578,10 +568,11 @@ impl Render for ProjectRepositories {
                     .child(problem_line(
                         "repositories-problem",
                         self.problem.clone(),
-                        8.,
+                        space::SM,
                         cx,
                     )),
             )
+            .child(self.confirm(cx))
             .test_support()
     }
 }

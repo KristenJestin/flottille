@@ -633,6 +633,8 @@ fn the_page_lists_main_and_two_workspaces_with_their_sessions(cx: &mut TestAppCo
         std::fs::write(generated.join(format!("{at}.txt")), "x\n").unwrap();
     }
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    // The page is taller than 800 px: the last card stays in the window.
+    cx.simulate_resize(size(px(1280.), px(1000.)));
 
     until(&shell, cx, "the page shows the lines changed", |cx| {
         card_of(&shell, Some("login"), cx).is_some_and(|card| {
@@ -6250,7 +6252,7 @@ fn editing_a_command_in_the_modal_writes_the_project_s_file_and_a_removal_asks_t
             .unwrap()
             .contains("[commands.close]")
     );
-    cx.update(|window, cx| window.click("confirm-remove-command-close", cx));
+    cx.update(|window, cx| window.click("command-removal-action", cx));
     until(&shell, cx, "the list is empty", |cx| {
         commands_listed(&shell, cx).is_empty()
     });
@@ -6637,7 +6639,7 @@ fn a_skill_is_added_with_a_path_picked_in_the_project_folder_and_removed(cx: &mu
     cx.update(|window, cx| window.click("remove-skill-react", cx));
     settle(cx);
     assert_eq!(skills_listed(&shell, cx).len(), 1, "the first click asks");
-    cx.update(|window, cx| window.click("confirm-remove-skill-react", cx));
+    cx.update(|window, cx| window.click("skill-removal-action", cx));
     until(&shell, cx, "the list is empty", |cx| {
         skills_listed(&shell, cx).is_empty()
     });
@@ -6901,7 +6903,7 @@ fn a_project_is_added_from_the_window_checked_again_and_removed(cx: &mut TestApp
     settle(cx);
     cx.update(|window, cx| window.click("remove-project", cx));
     settle(cx);
-    cx.update(|window, cx| window.click("confirm-remove-project", cx));
+    cx.update(|window, cx| window.click("project-removal-action", cx));
     until(&shell, cx, "the project is gone", |cx| {
         shell.read_with(cx, |s, _| {
             !matches!(s.selected(), Some(Selection::ProjectSettings(_)))
@@ -7616,7 +7618,7 @@ fn a_task_is_added_edited_and_removed_from_the_tasks_section(cx: &mut TestAppCon
         file().contains("[tasks.test]"),
         "a removal needs a second click"
     );
-    cx.update(|window, cx| window.click("confirm-remove-task-test", cx));
+    cx.update(|window, cx| window.click("task-removal-action", cx));
     until(&shell, cx, "the list is empty", |cx| {
         tasks_listed(&shell, cx).is_empty()
     });
@@ -7692,7 +7694,7 @@ fn setup_steps_are_added_reordered_and_removed_in_the_setup_section(cx: &mut Tes
 
     cx.update(|window, cx| window.click("remove-setup-1", cx));
     settle(cx);
-    cx.update(|window, cx| window.click("confirm-remove-setup-1", cx));
+    cx.update(|window, cx| window.click("setup-removal-action", cx));
     until(&shell, cx, "one step is left", |cx| {
         steps_listed(&shell, cx).len() == 1
     });
@@ -7828,7 +7830,7 @@ fn a_skill_that_is_removed_folds_away_before_it_is_gone_and_the_empty_line_unfol
 
     cx.update(|window, cx| window.click("remove-skill-alpha", cx));
     settle(cx);
-    cx.update(|window, cx| window.click("confirm-remove-skill-alpha", cx));
+    cx.update(|window, cx| window.click("skill-removal-action", cx));
     until(&shell, cx, "the skill is gone from the list", |cx| {
         skills_listed(&shell, cx).is_empty()
     });
@@ -7969,6 +7971,35 @@ fn a_request_waits_in_the_rail_with_allow_and_deny_and_the_conversation_keeps_on
         assert!(line.bounds().origin.x < rail.origin.x, "it is in the chat");
         assert!(line.bounds().size.height < px(44.), "one compact line");
     });
+}
+
+/// What on the session page says that the user is needed: an element whose label says it.
+fn needs_you_said(cx: &mut VisualTestContext) -> Vec<String> {
+    cx.update(|window, _| {
+        window
+            .within("session-page")
+            .elements()
+            .into_iter()
+            .filter(|element| {
+                element
+                    .label()
+                    .is_some_and(|label| label.to_lowercase().contains("needs you"))
+            })
+            .map(|element| format!("{:?}", element.path()))
+            .collect()
+    })
+}
+
+#[gpui_kit::test]
+fn on_the_session_page_needs_you_is_said_at_most_once(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let number = held_number(mcp.call("fs_read", json!({"path": ".env"})));
+    card_for(&shell, number, cx);
+    settle(cx);
+    let said = needs_you_said(cx);
+    assert!(said.len() <= 1, "said once per view: {said:?}");
 }
 
 #[gpui_kit::test]

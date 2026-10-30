@@ -216,9 +216,13 @@ fn the_project_page_lists_its_repositories_and_adds_removes_and_detects_them(
     // Remove asks first, and says the folder stays.
     cx.update(|window, cx| window.click("remove-repository-lib", cx));
     settle(cx);
-    let note = label_of("forget-note-lib", cx);
-    assert!(has("forget-note-lib", cx), "{note:?}");
-    cx.update(|window, cx| window.click("confirm-remove-repository-lib", cx));
+    let note = label_of("repository-removal-sentence", cx);
+    assert!(
+        note.as_deref()
+            .is_some_and(|note| note.contains("stay as they are")),
+        "{note:?}"
+    );
+    cx.update(|window, cx| window.click("repository-removal-action", cx));
     until(&shell, cx, "lib is forgotten", |cx| {
         !paths(&section, cx).contains(&"lib".to_owned())
     });
