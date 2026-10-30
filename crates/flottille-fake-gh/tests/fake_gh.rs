@@ -220,3 +220,62 @@ fn pull_requests_are_listed_by_state_and_branch_newest_first() {
         json!([{"number": 4, "headRefName": "login"}])
     );
 }
+
+#[test]
+fn a_merge_by_a_method_the_repository_forbids_fails_and_repo_view_says_the_allowed_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        json!({"pulls": {"acme/app": {"app/login": {"number": 12}}},
+            "merge_methods": {"acme/app": ["merge", "rebase"]}})
+        .to_string(),
+    )
+    .unwrap();
+    let merge = |method: &str| {
+        fake(dir.path())
+            .args(["pr", "merge", "12", "-R", "github.com/acme/app", method])
+            .output()
+            .unwrap()
+    };
+
+    let squash = merge("--squash");
+    let rebase = merge("--rebase");
+    let allowed = fake(dir.path())
+        .args([
+            "repo",
+            "view",
+            "github.com/acme/app",
+            "--json",
+            "mergeCommitAllowed,rebaseMergeAllowed,squashMergeAllowed",
+        ])
+        .output()
+        .unwrap();
+    let viewed = fake(dir.path())
+        .args([
+            "pr",
+            "view",
+            "12",
+            "-R",
+            "github.com/acme/app",
+            "--json",
+            "headRefName",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!squash.status.success());
+    assert!(
+        String::from_utf8_lossy(&squash.stderr).contains("not allowed on this repository"),
+        "{squash:?}"
+    );
+    assert!(rebase.status.success(), "{rebase:?}");
+    assert!(allowed.status.success(), "{allowed:?}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&allowed.stdout).unwrap(),
+        json!({"mergeCommitAllowed": true, "rebaseMergeAllowed": true,
+            "squashMergeAllowed": false})
+    );
+    // A pull request's branch is the key it is held under.
+    let viewed: Value = serde_json::from_slice(&viewed.stdout).unwrap();
+    assert_eq!(viewed["headRefName"], "app/login");
+}

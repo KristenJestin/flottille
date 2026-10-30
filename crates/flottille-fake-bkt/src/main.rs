@@ -36,7 +36,9 @@
 //! (N is `created`, 1 by default), `pr merge` prints `✓ Merged pull request #N` and `pipeline run`
 //! `✓ Triggered pipeline …`. `pr comment <id> --text T` prints `✓ Commented on pull request #N`
 //! and `pr edit <id>` (`--title`, `--description`, at least one) `✓ Updated pull request #N`, as
-//! `pkg/cmd/pr/pr.go` does (`:1707`, `:829`); both need a pull request of `pulls`.
+//! `pkg/cmd/pr/pr.go` does (`:1707`, `:829`); both need a pull request of `pulls`. With
+//! `strategies` (`{"acme/api": ["merge_commit"]}`), `pr merge` fails for a `--strategy` the
+//! repository's list does not hold, as the server refuses it.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -192,6 +194,16 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             return 0;
         }
         ["pr", "merge", id] => {
+            let strategy = option("--strategy").unwrap_or_default();
+            if let Some(allowed) = script["strategies"][&key].as_array()
+                && !allowed.iter().any(|s| s == strategy)
+            {
+                eprintln!(
+                    "Error: 400 Bad Request: the merge strategy {strategy} is not allowed for \
+                     this repository"
+                );
+                return 1;
+            }
             println!("✓ Merged pull request #{id}");
             return 0;
         }

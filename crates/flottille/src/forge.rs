@@ -43,8 +43,10 @@ const SSH_TIME: Duration = Duration::from_secs(5);
 /// What `forge show` shows of one comment at most.
 const COMMENT_CHARS: usize = 2000;
 /// What `gh pr view` is asked for.
-const FIELDS: &str = "number,title,state,isDraft,baseRefName,url,reviewDecision,\
-    statusCheckRollup,comments,reviews";
+const FIELDS: &str = "number,title,state,isDraft,headRefName,baseRefName,url,mergeable,\
+    reviewDecision,statusCheckRollup,comments,reviews";
+/// The ways `forge` `merge` merges a pull request, the first by default.
+pub const MERGE_METHODS: [&str; 3] = ["squash", "merge", "rebase"];
 
 /// The forge a repository's remote is on: GitHub, or Bitbucket (Cloud, or a Data Center host the
 /// project names).
@@ -261,8 +263,12 @@ pub struct Pull {
     pub title: String,
     /// `open`, `draft`, `merged` or `closed`.
     pub state: &'static str,
+    /// The branch it merges.
+    pub head: String,
     pub base: String,
     pub url: String,
+    /// Whether it merges into its base without conflict; none while the forge does not know.
+    pub mergeable: Option<bool>,
     /// `approved`, `changes requested`, `review required`, or none.
     pub review: Option<&'static str>,
     /// Each check's name and state: `passing`, `failing`, `pending` or `skipped`.
@@ -298,8 +304,8 @@ impl Pull {
         }
     }
 
-    /// What blocks its merge: its checks failing or still running, or a review asking for
-    /// changes; none when nothing does.
+    /// What blocks its merge: no check, its checks failing or still running, or a review asking
+    /// for changes; none when nothing does.
     pub fn blocks(&self) -> Option<String> {
         blocks(&self.checks, self.review)
     }
@@ -353,8 +359,14 @@ impl Pull {
                 (_, true) => "draft",
                 _ => "open",
             },
+            head: text(&value["headRefName"]),
             base: text(&value["baseRefName"]),
             url: text(&value["url"]),
+            mergeable: match value["mergeable"].as_str() {
+                Some("MERGEABLE") => Some(true),
+                Some("CONFLICTING") => Some(false),
+                _ => None,
+            },
             review: match value["reviewDecision"].as_str() {
                 Some("APPROVED") => Some("approved"),
                 Some("CHANGES_REQUESTED") => Some("changes requested"),
@@ -854,6 +866,27 @@ pub(crate) struct ForgeCall {
     /// merge: why the user lets a pull request whose checks or review block it be merged; the
     /// gate held the call for them.
     waive: Option<String>,
+    /// merge: `squash` (the default), `merge` or `rebase`; the gate refused any other.
+    method: Option<String>,
+}
+
+impl ForgeCall {
+    fn method(&self) -> &str {
+        self.method.as_deref().unwrap_or(MERGE_METHODS[0])
+    }
+}
+
+/// The refusal of a merge by `method` that the repository does not allow, naming those it does.
+fn method_refused(slug: &str, method: &str, allowed: &[&str]) -> Outcome {
+    let allowed = match allowed {
+        [] => "none of squash, merge and rebase".to_owned(),
+        [one] => (*one).to_owned(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    Outcome::Refused(format!(
+        "refused: {slug} does not allow merging by {method}: it allows {allowed} (method); \
+         nothing was merged"
+    ))
 }
 
 /// `forge`, once the gate let it through: the pull requests of the project's repositories, read
@@ -1202,7 +1235,7 @@ async fn forge_read(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
 }
 
 /// What blocks the merge of a pull request with these checks and this review; none when nothing
-/// does.
+/// does. A pull request no check ran on is blocked as a failing one is: nothing verified it.
 fn blocks(checks: &[(String, &'static str)], review: Option<&str>) -> Option<String> {
     let named = |state: &str| {
         let names: Vec<&str> = checks
@@ -1213,6 +1246,9 @@ fn blocks(checks: &[(String, &'static str)], review: Option<&str>) -> Option<Str
         (!names.is_empty()).then(|| names.join(", "))
     };
     let mut blocks = Vec::new();
+    if checks.is_empty() {
+        blocks.push("no check ran on this pull request".to_owned());
+    }
     if let Some(names) = named("failing") {
         blocks.push(format!("its checks fail ({names})"));
     }
@@ -1370,12 +1406,34 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                     ));
                 }
             }
-            match gh_text(&["pr", "merge", &number, "-R", &repo, "--squash"]).await {
+            let method = asked.method();
+            let flag = format!("--{method}");
+            match gh_text(&["pr", "merge", &number, "-R", &repo, &flag]).await {
                 Ok(_) => Outcome::Done(format!(
-                    "The pull request #{number} of {branch} was merged by squash into {base} in \
-                     {slug}."
+                    "The pull request #{number} of {branch} was merged by {method} into {base} \
+                     in {slug}."
                 )),
-                Err(why) => Outcome::Failed(why),
+                Err(why) => {
+                    // Refused by the forge: when the repository forbids the method, say which
+                    // ones it allows rather than GitHub's own sentence.
+                    let fields = "squashMergeAllowed,mergeCommitAllowed,rebaseMergeAllowed";
+                    match gh_json(&["repo", "view", &repo, "--json", fields]).await {
+                        Ok(allows) => {
+                            let allowed: Vec<&str> = MERGE_METHODS
+                                .into_iter()
+                                .zip(fields.split(','))
+                                .filter(|(_, field)| allows[*field] == true)
+                                .map(|(method, _)| method)
+                                .collect();
+                            if allowed.contains(&method) {
+                                Outcome::Failed(why)
+                            } else {
+                                method_refused(&slug, method, &allowed)
+                            }
+                        }
+                        Err(_) => Outcome::Failed(why),
+                    }
+                }
             }
         }
         "checks" => {
@@ -1502,12 +1560,21 @@ fn read_text(workspace: &Workspace, read: &Read, full: bool, asked: Option<&str>
 /// `full`, otherwise their number and `again`, the call that gives them.
 fn pull_text(text: &mut String, named: &str, pull: &Pull, full: bool, again: &str) {
     text.push_str(&format!(
-        "\n{named}: pull request #{}, {}, into {}: {}\n  {}\n",
-        pull.number, pull.state, pull.base, pull.title, pull.url
+        "\n{named}: pull request #{}, {}, {} into {}: {}\n  {}\n",
+        pull.number, pull.state, pull.head, pull.base, pull.title, pull.url
     ));
-    if let Some(review) = pull.review {
-        text.push_str(&format!("  review: {review}\n"));
+    match pull.mergeable {
+        Some(true) => text.push_str(&format!(
+            "  mergeable: yes, no conflict with {}\n",
+            pull.base
+        )),
+        Some(false) => text.push_str(&format!(
+            "  mergeable: no, it conflicts with {}\n",
+            pull.base
+        )),
+        None => text.push_str("  mergeable: not known yet\n"),
     }
+    text.push_str(&format!("  review: {}\n", pull.review.unwrap_or("none")));
     if !pull.reviewers.is_empty() {
         let each: Vec<String> = pull
             .reviewers
@@ -1517,7 +1584,7 @@ fn pull_text(text: &mut String, named: &str, pull: &Pull, full: bool, again: &st
         text.push_str(&format!("  reviewers: {}\n", each.join(", ")));
     }
     match pull.mark() {
-        None => text.push_str("  checks: none\n"),
+        None => text.push_str("  checks: none ran on this pull request\n"),
         Some(mark) => {
             let each: Vec<String> = pull
                 .checks

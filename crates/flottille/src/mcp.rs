@@ -296,8 +296,8 @@ const SERVED: [Definition; 24] = [
             (open by default) and branch. show: a workspace's branch's (yours; in main, name \
             workspace), or number's, with checks, review and comment counts; detail full adds \
             texts. Writes, judged, answered at once, the result maybe later: create, merge \
-            (squash; refused while checks fail or a review asks for changes unless waive gives \
-            the user's words) and checks (re-run failed) act on a workspace's branch; comment \
+            (method, squash by default; refused with no check, while checks fail or a review \
+            asks for changes unless waive gives the user's words) and checks (re-run failed) act on a workspace's branch; comment \
             and edit on number. {\"action\": \"create\", \"repository\": \"api\", \"title\": \
             \"fix: ...\", \"body\": \"...\"}",
         read_only: false,
@@ -315,7 +315,8 @@ const SERVED: [Definition; 24] = [
                 "title": {"type": "string"},
                 "body": {"type": "string", "description": "create, edit: description; comment: the comment."},
                 "draft": {"type": "boolean"},
-                "waive": {"type": "string", "description": "merge: the user's words letting a blocked pull request be merged; held for them."}
+                "waive": {"type": "string", "description": "merge: the user's words letting a blocked pull request be merged; held for them."},
+                "method": {"type": "string", "enum": ["squash", "merge", "rebase"], "description": "merge: squash when left out."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },

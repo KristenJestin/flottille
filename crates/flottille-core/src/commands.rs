@@ -137,12 +137,12 @@ follows its merges is done. The repositories of one level are merged together.
 
 1. Check everything before merging anything. For each repository with commits of its own, read
    its pull request (`forge` `show`): its review, its comments and reviews, its checks. Each of these
-   blocks the stack: no pull request, checks failing or still running, a review asking for
-   changes, a comment or a review left unanswered. Send the user the state of every pull request
-   in one `ask_user`, what blocks first. While anything blocks, stop there, unless the user waives
-   it in their answer: pass their words as `waive` to that merge, and Flottille holds the waived
-   merge for their approval. Flottille refuses to merge a pull request whose checks fail or run,
-   or whose review asks for changes, unless it is waived.
+   blocks the stack: no pull request, no check at all, checks failing or still running, a review
+   asking for changes, a comment or a review left unanswered. Send the user the state of every
+   pull request in one `ask_user`, what blocks first. While anything blocks, stop there, unless the
+   user waives it in their answer: pass their words as `waive` to that merge, and Flottille holds
+   the waived merge for their approval. Flottille refuses to merge a pull request no check ran on,
+   whose checks fail or run, or whose review asks for changes, unless it is waived.
 2. Then, level by level:
    - a branch behind its base is brought up to date first: `git fetch <remote> <base>`, `git rebase
      <remote>/<base>`, the project's checks for it (its tasks, `tasks` and `run`), then `git push

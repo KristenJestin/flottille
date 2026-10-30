@@ -233,3 +233,41 @@ fn a_comment_and_an_edit_answer_as_bkt_does_for_a_pull_request_it_holds() {
     assert!(!empty_edit.status.success());
     assert!(!missing.status.success());
 }
+
+#[test]
+fn a_merge_by_a_strategy_the_repository_forbids_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    script(
+        dir.path(),
+        json!({"strategies": {"acme/api": ["merge_commit"]}}),
+    );
+    let merge = |strategy: &str| {
+        fake(dir.path())
+            .args([
+                "pr",
+                "merge",
+                "12",
+                "--context",
+                "cloud",
+                "--workspace",
+                "acme",
+                "--repo",
+                "api",
+                "--strategy",
+                strategy,
+                "--close-source=false",
+            ])
+            .output()
+            .unwrap()
+    };
+
+    let squash = merge("squash");
+    let merged = merge("merge_commit");
+
+    assert!(!squash.status.success());
+    assert!(
+        String::from_utf8_lossy(&squash.stderr).contains("squash"),
+        "{squash:?}"
+    );
+    assert!(merged.status.success(), "{merged:?}");
+}

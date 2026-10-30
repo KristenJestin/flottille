@@ -269,7 +269,7 @@ fn forge_show_reads_a_pull_request_by_its_number_or_the_workspace_s_branch() {
         main.call("forge", json!({"action": "show", "number": 7})),
     );
     assert!(
-        numbered.contains(". (acme/app): pull request #7, merged, into main: Old work"),
+        numbered.contains(". (acme/app): pull request #7, merged, app/old into main: Old work"),
         "{numbered}"
     );
     let own = read(&user, inside.call("forge", json!({"action": "show"})));

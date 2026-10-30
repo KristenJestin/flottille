@@ -566,7 +566,7 @@ fn forge_read_returns_its_workspace_s_pull_requests_and_refuses_another_reposito
     assert!(!answer.error, "{}", answer.text);
     let text = answer.text;
     for said in [
-        "api (acme/api): pull request #12, open, into main: Add the login page",
+        "api (acme/api): pull request #12, open, app/login into main: Add the login page",
         "https://github.com/acme/api/pull/12",
         "review: changes requested",
         "checks: pending (build passing, lint pending)",
@@ -639,6 +639,97 @@ fn the_short_forge_read_of_a_named_repository_points_at_that_repository() {
         "reviews: 1, read them with forge {\"action\": \"show\", \"workspace\": \"login\", \"repository\": \"api\", \"detail\": \"full\"}",
     ] {
         assert!(answer.text.contains(said), "{said} in {}", answer.text);
+    }
+}
+
+#[test]
+fn forge_show_prints_mergeable_review_and_checks() {
+    let user = User::with_fake_agent().with_fake_gh();
+    fixture(&user);
+    let mut conflicting = pull(12, "Add the login page");
+    conflicting["headRefName"] = json!("app/login");
+    conflicting["mergeable"] = json!("CONFLICTING");
+    let bare = json!({"number": 14, "title": "Add the login form", "state": "OPEN",
+        "isDraft": false, "baseRefName": "main", "headRefName": "app/form",
+        "url": "https://github.com/acme/web/pull/14", "mergeable": "MERGEABLE",
+        "reviewDecision": "", "statusCheckRollup": [], "comments": [], "reviews": []});
+    user.gh_script(json!({"pulls": {"acme/api": {"app/login": conflicting},
+        "acme/web": {"app/form": bare}}}));
+    let (_, mcp) = agent_in(&user, Some("login"));
+
+    let answer = mcp.call("forge", json!({"action": "show", "repository": "api"}));
+
+    assert!(!answer.error, "{}", answer.text);
+    for said in [
+        "api (acme/api): pull request #12, open, app/login into main: Add the login page",
+        "mergeable: no, it conflicts with main",
+        "review: changes requested",
+        "checks: pending (build passing, lint pending)",
+    ] {
+        assert!(answer.text.contains(said), "{said} in {}", answer.text);
+    }
+    // One by its number with no review and no check says so, rather than nothing.
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "show", "repository": "web", "number": 14}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    for said in [
+        "web (acme/web): pull request #14, open, app/form into main: Add the login form",
+        "mergeable: yes, no conflict with main",
+        "review: none",
+        "checks: none ran on this pull request",
+    ] {
+        assert!(answer.text.contains(said), "{said} in {}", answer.text);
+    }
+    let asked = gh_calls(&user)
+        .into_iter()
+        .find(|call| call.starts_with("pr view 14 "))
+        .unwrap();
+    assert!(
+        asked.contains("headRefName") && asked.contains("mergeable"),
+        "{asked}"
+    );
+}
+
+#[test]
+fn bitbucket_forge_show_prints_mergeable_review_and_checks() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    bitbucket_fixture(&user);
+    bitbucket_pull_requests(&user);
+    let mut script: Value =
+        serde_json::from_str(&std::fs::read_to_string(user.path("bkt/script.json")).unwrap())
+            .unwrap();
+    // Cloud says a conflict in the pull request's diffstat, Data Center on its merge's page.
+    script["api"]["/repositories/acme/api/pullrequests/12/diffstat"] = json!({"values": [
+        {"status": "modified", "new": {"path": "src/a.rs"}},
+        {"status": "merge conflict", "new": {"path": "src/b.rs"}}
+    ]});
+    script["api"]["/rest/api/1.0/projects/APP/repos/web/pull-requests/7/merge"] =
+        json!({"canMerge": false, "conflicted": false, "outcome": "CLEAN", "vetoes": []});
+    user.bkt_script(script);
+    let (_, mcp) = agent_in(&user, Some("login"));
+
+    let answer = mcp.call("forge", json!({"action": "show"}));
+
+    assert!(!answer.error, "{}", answer.text);
+    for said in [
+        "api (acme/api): pull request #12, open, app/login into main: Add the login page",
+        "mergeable: no, it conflicts with main",
+        "review: changes requested",
+        "checks: pending (build passing, lint pending)",
+        "web (APP/web): pull request #7, open, app/login into main: Add the login form",
+        "mergeable: yes, no conflict with main",
+        "checks: failing (Jenkins failing)",
+    ] {
+        assert!(answer.text.contains(said), "{said} in {}", answer.text);
+    }
+    let calls = bkt_calls(&user);
+    for call in [
+        "api /repositories/acme/api/pullrequests/12/diffstat --context cloud --param pagelen=500",
+        "api /rest/api/1.0/projects/APP/repos/web/pull-requests/7/merge --context work",
+    ] {
+        assert!(calls.contains(&call.to_owned()), "{call} in {calls:?}");
     }
 }
 
@@ -1112,13 +1203,13 @@ fn forge_read_returns_the_bitbucket_pull_requests_of_the_workspace() {
 
     assert!(!answer.error, "{}", answer.text);
     for said in [
-        "api (acme/api): pull request #12, open, into main: Add the login page",
+        "api (acme/api): pull request #12, open, app/login into main: Add the login page",
         "https://bitbucket.org/acme/api/pull-requests/12",
         "review: changes requested",
         "reviewers: Bob changes requested",
         "checks: pending (build passing, lint pending)",
         "- Alice: Looks good to me",
-        "web (APP/web): pull request #7, open, into main: Add the login form",
+        "web (APP/web): pull request #7, open, app/login into main: Add the login form",
         "review: review required",
         "reviewers: Bob approved, Carol pending",
         "checks: failing (Jenkins failing)",

@@ -9,13 +9,17 @@
 
 use serde_json::Value;
 
-use super::{Comment, Forge, ForgeCall, Gh, Pull, blocks, masked, run};
+use super::{
+    Comment, Forge, ForgeCall, Gh, MERGE_METHODS, Pull, blocks, masked, method_refused, run,
+};
 use crate::mcp::Outcome;
 
 /// How many pull requests one list asks for: the newest ones.
 const LISTED: &str = "100";
 /// How many comments one read asks for.
 const COMMENTS: &str = "100";
+/// How many changed files one read of a Cloud pull request's conflicts asks for.
+const DIFFSTAT: &str = "500";
 
 /// `bkt <args>`: whether it succeeded, its output and its errors.
 async fn bkt(args: &[&str]) -> Result<(bool, String, String), Gh> {
@@ -341,6 +345,7 @@ pub(super) async fn pull_numbered(
 async fn detailed(forge: &Forge, context: &str, found: Listed) -> Result<Pull, String> {
     let id = found.id.to_string();
     let checks = checks_of(forge, context, &id).await?;
+    let mergeable = mergeable(forge, context, &id).await;
     let (reviewers, comments) = if cloud(forge) {
         let base = cloud_page(forge, &id);
         let pull = json(&["api", &base, "--context", context]).await?;
@@ -373,8 +378,10 @@ async fn detailed(forge: &Forge, context: &str, found: Listed) -> Result<Pull, S
         number: found.id,
         title: found.title,
         state: found.state,
+        head: found.branch,
         base: found.base,
         url: found.url,
+        mergeable,
         review: decision(&reviewers),
         checks,
         comments,
@@ -395,6 +402,70 @@ async fn checks_of(
         .into_iter()
         .flatten()
         .map(check_of)
+        .collect())
+}
+
+/// Whether the pull request `id` merges without conflict: on Cloud, no file of its diffstat is
+/// `merge conflict`; on Data Center, its merge's page is not `conflicted`. None when it cannot be
+/// read: the rest of the pull request is still shown.
+async fn mergeable(forge: &Forge, context: &str, id: &str) -> Option<bool> {
+    let Forge::Bitbucket { owner, name, .. } = forge else {
+        unreachable!()
+    };
+    if cloud(forge) {
+        let path = format!("{}/diffstat", cloud_page(forge, id));
+        let pagelen = format!("pagelen={DIFFSTAT}");
+        let page = json(&["api", &path, "--context", context, "--param", &pagelen])
+            .await
+            .ok()?;
+        let files = page["values"].as_array()?;
+        return Some(!files.iter().any(|file| file["status"] == "merge conflict"));
+    }
+    let path = format!("/rest/api/1.0/projects/{owner}/repos/{name}/pull-requests/{id}/merge");
+    let page = json(&["api", &path, "--context", context]).await.ok()?;
+    page["conflicted"].as_bool().map(|conflicted| !conflicted)
+}
+
+/// The strategy `bkt pr merge --strategy` takes for a method, by host: none when `bkt` has none
+/// (a Cloud rebase: it knows `merge_commit`, `squash` and `fast_forward` only).
+fn strategy(forge: &Forge, method: &str) -> Option<&'static str> {
+    match (cloud(forge), method) {
+        (_, "squash") => Some("squash"),
+        (true, "merge") => Some("merge_commit"),
+        (false, "merge") => Some("no-ff"),
+        (false, "rebase") => Some("rebase-ff-only"),
+        _ => None,
+    }
+}
+
+/// The methods the repository allows its pull request `id` to be merged by: Cloud says them on
+/// the pull request's destination branch, Data Center in the repository's pull request settings.
+async fn allowed(forge: &Forge, context: &str, id: &str) -> Result<Vec<&'static str>, String> {
+    let Forge::Bitbucket { owner, name, .. } = forge else {
+        unreachable!()
+    };
+    let strategies: Vec<String> = if cloud(forge) {
+        let page = json(&["api", &cloud_page(forge, id), "--context", context]).await?;
+        page["destination"]["branch"]["merge_strategies"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|s| s.as_str().map(str::to_owned))
+            .collect()
+    } else {
+        let path = format!("/rest/api/1.0/projects/{owner}/repos/{name}/settings/pull-requests");
+        let page = json(&["api", &path, "--context", context]).await?;
+        page["mergeConfig"]["strategies"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|s| s["enabled"] == true)
+            .filter_map(|s| s["id"].as_str().map(str::to_owned))
+            .collect()
+    };
+    Ok(MERGE_METHODS
+        .into_iter()
+        .filter(|method| strategy(forge, method).is_some_and(|s| strategies.iter().any(|t| t == s)))
         .collect())
 }
 
@@ -595,6 +666,14 @@ pub(super) async fn write(
             ))
         }
         "merge" => {
+            let method = asked.method();
+            let Some(strategy) = strategy(forge, method) else {
+                return Outcome::Refused(format!(
+                    "refused: bkt merges a Bitbucket Cloud pull request by squash or merge, never \
+                     by {method}: its strategies are merge_commit, squash and fast_forward; \
+                     nothing was merged"
+                ));
+            };
             let open = match pulls(forge, context, "OPEN").await {
                 Ok(open) => open,
                 Err(why) => return Outcome::Failed(why),
@@ -645,19 +724,26 @@ pub(super) async fn write(
                     ));
                 }
             }
-            // `bkt` closes the source branch unless told not to; `gh pr merge --squash` leaves it.
+            // `bkt` closes the source branch unless told not to; `gh pr merge` leaves it.
             let args = command(
                 forge,
                 context,
                 &["pr", "merge", &number],
-                &["--strategy", "squash", "--close-source=false"],
+                &["--strategy", strategy, "--close-source=false"],
             );
             match text(&args).await {
                 Ok(_) => Outcome::Done(format!(
-                    "The pull request #{number} of {branch} was merged by squash into {base} in \
-                     {slug}."
+                    "The pull request #{number} of {branch} was merged by {method} into {base} \
+                     in {slug}."
                 )),
-                Err(why) => Outcome::Failed(why),
+                // Refused by the server: when the repository forbids the method, say which ones
+                // it allows.
+                Err(why) => match allowed(forge, context, &number).await {
+                    Ok(allowed) if !allowed.contains(&method) => {
+                        method_refused(&slug, method, &allowed)
+                    }
+                    _ => Outcome::Failed(why),
+                },
             }
         }
         "checks" => {
