@@ -6,8 +6,10 @@
 pub mod button;
 pub mod card;
 pub mod color;
+pub mod confirm;
 pub mod drawer;
 pub mod dropdown;
+pub mod field;
 pub mod icons;
 mod interact;
 pub mod listing;
@@ -15,20 +17,27 @@ pub mod menu;
 pub mod modal;
 pub mod motion;
 pub mod omarchy;
+pub mod page;
+pub mod radio;
 pub mod reveal;
 pub mod rows;
 pub mod segmented;
+pub mod select;
+pub mod space;
 pub mod state;
 pub mod switch;
 pub mod theme;
+pub mod toast;
 pub mod typography;
 
 use gpui_kit::App;
 
 pub use button::{Badge, Button, ButtonKind, Tooltip};
-pub use card::Card;
+pub use card::{Block, Card};
+pub use confirm::Confirm;
 pub use drawer::{Drawer, Side};
 pub use dropdown::{Align, Dropdown, MenuItem};
+pub use field::Field;
 pub use icons::{Icon, Icons, icon};
 pub use interact::{
     Hoverable, dismiss_on_navigate, dismiss_top_overlay, fade, forget_overlays, hoverable,
@@ -38,16 +47,20 @@ pub use listing::{Item, Listing, Placement};
 pub use menu::Menu;
 pub use modal::Modal;
 pub use omarchy::Environment;
+pub use page::{EmptyLine, PageHeader, Section};
+pub use radio::RadioChoices;
 pub use reveal::{
     Fold, Presence, PresenceOf, PulsingLabel, enter, fold_frame, presence, presence_of,
 };
 pub use rows::{
-    ListRow, TreeLevel, TreeRow, meta, section_label, toggle_id, tree_children, turning,
+    ListCard, ListRow, TreeLevel, TreeRow, meta, section_label, toggle_id, tree_children, turning,
 };
 pub use segmented::Segmented;
+pub use select::{Select, SelectOption};
 pub use state::{AgentState, Pill, StateIcon, Status};
 pub use switch::Switch;
 pub use theme::{Palette, palette};
+pub use toast::{Toast, ToastKind, ToastStack, toast};
 pub use typography::Type;
 
 /// Initialises gpui-kit (which reads the system's reduced-motion setting), the bundled fonts and

@@ -1,5 +1,7 @@
-//! `Modal`: a dialog over the page for every form that adds or changes something: a title, the
-//! fields, Cancel and the main action. Escape, Cancel and a click outside it close it.
+//! `Modal`: a dialog over the page for every form that adds or changes something: a title, one
+//! sentence under it, the fields, then Cancel and the main action on the right. Escape, Cancel
+//! and a click outside it close it. It is 520 px wide, 640 for a wide form, with 24 px on each
+//! side.
 //!
 //! It is drawn after everything else, above the dropdowns, over a scrim that takes the clicks
 //! meant for the page. The owner gives the focus to its first field when it opens it.
@@ -12,14 +14,15 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::{
-    AnyElement, App, BoxShadow, ElementId, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Pixels, RenderOnce, SharedString, Styled, TestSupportExt, Window, anchored,
-    deferred, div, hsla, point, px,
+    AnyElement, App, BoxShadow, ElementId, FocusHandle, InteractiveElement, IntoElement,
+    MouseButton, ParentElement, RenderOnce, SharedString, StatefulInteractiveElement, Styled,
+    TestSupportExt, Window, anchored, deferred, div, hsla, point, px,
 };
 
 use crate::button::Button;
 use crate::interact::{dismiss_on_navigate, open_overlay};
 use crate::motion::{MODAL, Motion, RISE};
+use crate::space;
 use crate::theme::palette;
 use crate::typography::Type;
 
@@ -27,6 +30,7 @@ use crate::typography::Type;
 struct Shown {
     open: bool,
     motion: Motion,
+    focus: Option<FocusHandle>,
 }
 
 type Handler = Rc<dyn Fn(&mut Window, &mut App) + 'static>;
@@ -35,12 +39,14 @@ type Handler = Rc<dyn Fn(&mut Window, &mut App) + 'static>;
 pub struct Modal {
     id: ElementId,
     title: SharedString,
-    width: Pixels,
+    sentence: Option<SharedString>,
+    wide: bool,
     body: Vec<AnyElement>,
     actions: Vec<AnyElement>,
     on_close: Option<Handler>,
     open: bool,
     cancel: SharedString,
+    takes_focus: bool,
 }
 
 impl Modal {
@@ -49,17 +55,32 @@ impl Modal {
         Self {
             id: id.into(),
             title: title.into(),
-            width: px(420.),
+            sentence: None,
+            wide: false,
             body: Vec::new(),
             actions: Vec::new(),
             on_close: None,
             open: true,
             cancel: "Cancel".into(),
+            takes_focus: false,
         }
     }
 
-    pub fn width(mut self, width: Pixels) -> Self {
-        self.width = width;
+    /// One sentence under the title: what the thing is, or what the action does.
+    pub fn sentence(mut self, sentence: impl Into<SharedString>) -> Self {
+        self.sentence = Some(sentence.into());
+        self
+    }
+
+    /// 640 px instead of 520: a form with wide fields.
+    pub fn wide(mut self) -> Self {
+        self.wide = true;
+        self
+    }
+
+    /// Takes the focus when it opens, so that Escape reaches it: a dialog with no field.
+    pub(crate) fn takes_focus(mut self) -> Self {
+        self.takes_focus = true;
         self
     }
 
@@ -107,16 +128,26 @@ impl RenderOnce for Modal {
         let state = window.use_keyed_state(part(&self.id, "motion"), cx, |_, _| Shown {
             open: false,
             motion: Motion::settled(0.0),
+            focus: None,
         });
         let now = cx.background_executor().now();
         let reduce = cx.reduce_motion();
-        state.update(cx, |shown, _| {
+        let takes_focus = self.takes_focus;
+        let (opening, focus) = state.update(cx, |shown, cx| {
+            let opening = !shown.open && self.open;
             if shown.open != self.open {
                 shown.open = self.open;
                 let target = if self.open { 1.0 } else { 0.0 };
                 shown.motion.animate(target, MODAL, now, reduce);
             }
+            if takes_focus && shown.focus.is_none() {
+                shown.focus = Some(cx.focus_handle());
+            }
+            (opening, shown.focus.clone())
         });
+        if opening && let Some(focus) = focus.clone() {
+            window.defer(cx, move |window, cx| window.focus(&focus, cx));
+        }
         let motion = state.read(cx).motion;
         if motion.is_running(now) {
             window.request_animation_frame();
@@ -124,8 +155,9 @@ impl RenderOnce for Modal {
             state.update(cx, |shown, _| shown.motion.settle(now));
         }
         let t = motion.value(now);
+        // Out of the page's flow, open or not: a modal takes no room and no gap where it is drawn.
         if !self.open && t == 0.0 {
-            return div().into_any_element();
+            return div().absolute().into_any_element();
         }
         let p = palette(cx);
         let viewport = window.viewport_size();
@@ -148,52 +180,95 @@ impl RenderOnce for Modal {
             .on_mouse_down(MouseButton::Left, move |_, window, cx| on_scrim(window, cx))
             .test_support();
         let scrim = dismiss_on_navigate(scrim, close.clone());
-        let panel = div()
+        let width = if self.wide {
+            space::DIALOG_WIDE
+        } else {
+            space::DIALOG
+        };
+        let header = div()
+            .pt(px(20.))
+            .px(px(24.))
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .child(
+                div()
+                    .id(part(&self.id, "title"))
+                    .aria_label(self.title.clone())
+                    .text_size(px(15.))
+                    .line_height(px(22.))
+                    .semibold()
+                    .child(self.title)
+                    .test_support(),
+            )
+            .children(self.sentence.map(|sentence| {
+                div()
+                    .id(part(&self.id, "sentence"))
+                    .aria_label(sentence.clone())
+                    .text_size(px(13.))
+                    .line_height(px(20.))
+                    .text_color(p.mute)
+                    .child(sentence)
+                    .test_support()
+            }));
+        let body = (!self.body.is_empty()).then(|| {
+            div()
+                .py(px(20.))
+                .px(px(24.))
+                .flex()
+                .flex_col()
+                .gap(px(16.))
+                .children(self.body)
+        });
+        let footer = div()
+            .pt(px(14.))
+            .pb(px(20.))
+            .px(px(24.))
+            .flex()
+            .justify_end()
+            .items_center()
+            .gap(px(8.))
+            .child(
+                Button::quiet(part(&self.id, "cancel"), self.cancel)
+                    .on_click(move |_, window, cx| on_cancel(window, cx)),
+            )
+            .children(self.actions);
+        let mut panel = div()
             .id(self.id.clone())
             .occlude()
             .relative()
             .top(px(RISE * (1.0 - t)))
             .opacity(t)
-            .w(self.width)
-            .max_w(viewport.width - px(32.))
-            .p(px(18.))
-            .rounded(px(12.))
+            .w(width)
+            .max_w(viewport.width - px(48.))
+            .rounded(px(14.))
             .bg(p.card)
             .border_1()
             .border_color(p.line2)
             .shadow(vec![BoxShadow {
                 color: hsla(0., 0., 0., 0.6),
-                offset: point(px(0.), px(16.)),
-                blur_radius: px(48.),
-                spread_radius: px(-8.),
+                offset: point(px(0.), px(24.)),
+                blur_radius: px(60.),
+                spread_radius: px(0.),
                 inset: false,
             }])
             .ui_text()
             .text_color(p.text)
             .flex()
             .flex_col()
-            .gap(px(14.))
             .on_key_down(move |event, window, cx| {
                 if event.keystroke.key == "escape" {
                     cx.stop_propagation();
                     on_key(window, cx);
                 }
             })
-            .child(div().text_size(px(15.)).semibold().child(self.title))
-            .children(self.body)
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(
-                        Button::quiet(part(&self.id, "cancel"), self.cancel)
-                            .on_click(move |_, window, cx| on_cancel(window, cx)),
-                    )
-                    .children(self.actions),
-            )
-            .test_support();
+            .child(header)
+            .children(body)
+            .child(footer);
+        if let Some(focus) = &focus {
+            panel = panel.track_focus(focus);
+        }
+        let panel = panel.test_support();
         let panel = dismiss_on_navigate(panel, close);
         let layer = deferred(
             anchored().position(point(px(0.), px(0.))).child(
@@ -209,6 +284,6 @@ impl RenderOnce for Modal {
             ),
         )
         .priority(2);
-        layer.into_any_element()
+        div().absolute().child(layer).into_any_element()
     }
 }

@@ -58,6 +58,10 @@ pub struct Palette {
     pub ok_bg: Hsla,
     pub fail: Hsla,
     pub fail_bg: Hsla,
+    /// The ink on a `fail` fill: a danger button.
+    pub on_fail: Hsla,
+    /// The border of what failed: a failure's toast.
+    pub fail_line: Hsla,
     /// Diff line backgrounds; their inks are `ok` and `fail`.
     pub add: Hsla,
     pub del: Hsla,
@@ -99,6 +103,8 @@ impl Palette {
             ok_bg: hex(0x15291c),
             fail: hex(0xf87171),
             fail_bg: over(hex(0xf87171), 0.15, hex(0x141414)),
+            on_fail: hex(0x1a0606),
+            fail_line: hex(0x5a2a2a),
             add: hex(0x132a1b),
             del: hex(0x2c1515),
             scrim: gpui_kit::rgba(0x00000080).into(),
@@ -117,6 +123,7 @@ impl Palette {
         self.on_wait = readable(self.on_wait, self.wait, min);
         self.ok = readable(self.ok, self.ok_bg, min);
         self.fail = readable(self.fail, self.fail_bg, min);
+        self.on_fail = readable(self.on_fail, self.fail, min);
         self
     }
 
@@ -154,6 +161,8 @@ impl Palette {
             ok_bg: m(self.ok_bg, to.ok_bg),
             fail: m(self.fail, to.fail),
             fail_bg: m(self.fail_bg, to.fail_bg),
+            on_fail: m(self.on_fail, to.on_fail),
+            fail_line: m(self.fail_line, to.fail_line),
             add: m(self.add, to.add),
             del: m(self.del, to.del),
             scrim: m(self.scrim, to.scrim),
@@ -171,19 +180,6 @@ pub mod radius {
     pub const FIELD: Pixels = px(11.);
     pub const PILL: Pixels = px(5.);
     pub const BUTTON: Pixels = px(7.);
-}
-
-/// Spacing steps, in pixels.
-pub mod space {
-    use super::*;
-    pub const XS: Pixels = px(4.);
-    pub const SM: Pixels = px(6.);
-    pub const MD: Pixels = px(8.);
-    pub const LG: Pixels = px(12.);
-    pub const XL: Pixels = px(14.);
-    pub const PAGE: Pixels = px(28.);
-    /// Paddings in a narrow window.
-    pub const NARROW: Pixels = px(16.);
 }
 
 /// The palette in use, cross-fading toward a new one when the theme changes.

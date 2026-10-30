@@ -14,7 +14,7 @@ use gpui_kit::{
 };
 
 use crate::button::Button;
-use crate::dropdown::{Align, Handler, MenuItem, list_overlay};
+use crate::dropdown::{Align, Handler, MenuItem, TRIGGER, list_overlay};
 use crate::icons::Icon;
 use crate::motion::{ENTER, HOVER, Motion};
 
@@ -22,6 +22,7 @@ struct Entry {
     id: ElementId,
     label: SharedString,
     leading: Option<Icon>,
+    danger: bool,
     pick: Handler,
 }
 
@@ -47,7 +48,7 @@ impl Menu {
             id: id.into(),
             tooltip: tooltip.into(),
             align: Align::End,
-            width: px(200.),
+            width: px(180.),
             entries: Vec::new(),
             open: false,
             fade: Motion::settled(0.0),
@@ -67,6 +68,25 @@ impl Menu {
             id: id.into(),
             label: label.into(),
             leading,
+            danger: false,
+            pick: Rc::new(pick),
+        });
+        self
+    }
+
+    /// A destructive entry, "Remove…": in the failure colour, after the others and a line,
+    /// whatever the order it was given in. Its `pick` opens the [`Confirm`](crate::Confirm).
+    pub fn danger(
+        mut self,
+        id: impl Into<ElementId>,
+        label: impl Into<SharedString>,
+        pick: impl Fn(&mut Window, &mut gpui_kit::App) + 'static,
+    ) -> Self {
+        self.entries.push(Entry {
+            id: id.into(),
+            label: label.into(),
+            leading: None,
+            danger: true,
             pick: Rc::new(pick),
         });
         self
@@ -148,24 +168,38 @@ impl Render for Menu {
             return root.test_support();
         }
         let menu = cx.entity().downgrade();
-        let items = self
+        let p = crate::theme::palette(cx);
+        let item = |entry: &Entry| {
+            let (menu, pick) = (menu.clone(), entry.pick.clone());
+            let item =
+                MenuItem::new(entry.id.clone(), entry.label.clone()).on_click(move |window, cx| {
+                    menu.update(cx, |menu, cx| menu.close(cx)).ok();
+                    pick(window, cx);
+                });
+            let item = match entry.leading {
+                Some(glyph) => item.leading(glyph),
+                None => item,
+            };
+            if entry.danger { item.danger() } else { item }.into_any_element()
+        };
+        let mut items: Vec<_> = self
             .entries
             .iter()
-            .map(|entry| {
-                let (menu, pick) = (menu.clone(), entry.pick.clone());
-                let item = MenuItem::new(entry.id.clone(), entry.label.clone()).on_click(
-                    move |window, cx| {
-                        menu.update(cx, |menu, cx| menu.close(cx)).ok();
-                        pick(window, cx);
-                    },
-                );
-                match entry.leading {
-                    Some(glyph) => item.leading(glyph),
-                    None => item,
-                }
-                .into_any_element()
-            })
+            .filter(|e| !e.danger)
+            .map(item)
             .collect();
+        let dangers: Vec<_> = self.entries.iter().filter(|e| e.danger).map(item).collect();
+        if !items.is_empty() && !dangers.is_empty() {
+            items.push(
+                div()
+                    .h(px(1.))
+                    .mx(px(2.))
+                    .my(px(4.))
+                    .bg(p.line)
+                    .into_any_element(),
+            );
+        }
+        items.extend(dangers);
         // While it closes, nothing is over the window to take a click.
         let dismiss: Option<Handler> = self.open.then(|| {
             let menu = menu.clone();
@@ -174,7 +208,7 @@ impl Render for Menu {
             }) as Handler
         });
         root.child(list_overlay(
-            &self.id, self.align, self.width, items, dismiss, t, window, cx,
+            &self.id, TRIGGER, self.align, self.width, items, dismiss, t, window, cx,
         ))
         .test_support()
     }

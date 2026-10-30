@@ -3,7 +3,7 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::{SharedString, Styled, Svg, px, svg};
 
-gpui_kit::assets::icon_assets!(pub Icons, [Folder, GitBranch, Book, ChevronDown, Plus, Search, Bell, ExternalLink, Network, Menu, ArrowUp, ChevronsUpDown, Settings, Ellipsis, CircleStop, Terminal, ChevronUp, TriangleAlert]);
+gpui_kit::assets::icon_assets!(pub Icons, [Folder, GitBranch, Book, ChevronDown, Plus, Search, Bell, ExternalLink, Network, Menu, ArrowUp, ChevronsUpDown, Settings, Ellipsis, CircleStop, Terminal, ChevronUp, TriangleAlert, Check, X, File, FileText, Slash, Play, GitPullRequest, Ticket]);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
@@ -33,10 +33,26 @@ pub enum Icon {
     ChevronUp,
     /// Something needs a look: the composer's Auto with no judge chosen.
     Warning,
+    /// Done: a success's toast, the chosen option of a select.
+    Check,
+    /// Closes or dismisses: a toast, a drawer.
+    Close,
+    /// A file of the project.
+    File,
+    /// A text Flottille keeps.
+    Text,
+    /// A command of the project, typed `/name`.
+    Slash,
+    /// Runs a task.
+    Play,
+    /// A pull request.
+    PullRequest,
+    /// A ticket of the tracker.
+    Ticket,
 }
 
 impl Icon {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 26] = [
         Self::Folder,
         Self::Branch,
         Self::Repository,
@@ -55,6 +71,14 @@ impl Icon {
         Self::Terminal,
         Self::ChevronUp,
         Self::Warning,
+        Self::Check,
+        Self::Close,
+        Self::File,
+        Self::Text,
+        Self::Slash,
+        Self::Play,
+        Self::PullRequest,
+        Self::Ticket,
     ];
 
     pub fn path(self) -> SharedString {
@@ -77,6 +101,14 @@ impl Icon {
             Self::Terminal => IconName::Terminal,
             Self::ChevronUp => IconName::ChevronUp,
             Self::Warning => IconName::TriangleAlert,
+            Self::Check => IconName::Check,
+            Self::Close => IconName::X,
+            Self::File => IconName::File,
+            Self::Text => IconName::FileText,
+            Self::Slash => IconName::Slash,
+            Self::Play => IconName::Play,
+            Self::PullRequest => IconName::GitPullRequest,
+            Self::Ticket => IconName::Ticket,
         }
         .path()
     }

@@ -8,7 +8,7 @@ use std::f32::consts::FRAC_PI_2;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, ClickEvent, ElementId, FontWeight, InteractiveElement, IntoElement,
+    AnyElement, App, ClickEvent, ElementId, Entity, FontWeight, InteractiveElement, IntoElement,
     ParentElement, RenderOnce, SharedString, StatefulInteractiveElement, Styled, TestSupportExt,
     Transformation, Window, div, px, radians,
 };
@@ -16,6 +16,7 @@ use gpui_kit::{
 use crate::color::mix;
 use crate::icons::{Icon, icon};
 use crate::interact::{choose, feel, wire};
+use crate::menu::Menu;
 use crate::motion::{Motion, PANEL};
 use crate::theme::{palette, radius};
 use crate::typography::Type;
@@ -269,10 +270,16 @@ pub struct ListRow {
     id: ElementId,
     leading: Option<AnyElement>,
     title: SharedString,
+    mono: bool,
+    tags: Vec<SharedString>,
     detail: Option<SharedString>,
     line: Option<SharedString>,
     meta: Option<SharedString>,
     trailing: Option<AnyElement>,
+    more: Option<Entity<Menu>>,
+    in_card: bool,
+    /// Rounded at the top, at the bottom: the first and the last row of a card.
+    corners: (bool, bool),
     selected: bool,
     on_click: Option<OnClick>,
 }
@@ -283,13 +290,43 @@ impl ListRow {
             id: id.into(),
             leading: None,
             title: title.into(),
+            mono: false,
+            tags: Vec::new(),
             detail: None,
             line: None,
             meta: None,
             trailing: None,
+            more: None,
+            in_card: false,
+            corners: (false, false),
             selected: false,
             on_click: None,
         }
+    }
+
+    /// The title in the mono face: a name that is an identifier (`style`, `open-prs`).
+    pub fn mono(mut self) -> Self {
+        self.mono = true;
+        self
+    }
+
+    /// A small bordered mono tag after the title: a path, a kind.
+    pub fn tag(mut self, tag: impl Into<SharedString>) -> Self {
+        self.tags.push(tag.into());
+        self
+    }
+
+    /// Its "⋯" menu (Edit, the moves, "Remove…"), shown while the pointer is on the row or the
+    /// menu is open: it fades in and out with the row's hover, in `<id>-actions`.
+    pub fn more(mut self, menu: Entity<Menu>) -> Self {
+        self.more = Some(menu);
+        self
+    }
+
+    /// A row of a [`ListCard`]: full width, 52 px at least, a line between rows.
+    pub(crate) fn in_card(mut self) -> Self {
+        self.in_card = true;
+        self
     }
 
     /// The state icon (or another 16 px mark) on the left.
@@ -343,19 +380,58 @@ impl RenderOnce for ListRow {
             p.card2,
             choose(&state, self.selected, window, cx),
         );
+        let menu_open = self
+            .more
+            .as_ref()
+            .is_some_and(|menu| menu.read(cx).is_open());
+        let actions = self.more.map(|menu| {
+            let shown = if menu_open { 1.0 } else { now.hover };
+            div()
+                .id(ElementId::Name(format!("{}-actions", self.id).into()))
+                .flex_none()
+                .opacity(shown)
+                .child(menu)
+                .test_support()
+        });
         let mut row = div()
             .id(self.id.clone())
             .aria_label(self.title.clone())
             .w_full()
             .flex()
             .items_center()
-            .gap(px(10.))
-            .px(px(10.))
-            .py(px(8.))
-            .rounded(radius::LIST_ROW)
             .bg(background)
             .text_color(p.text)
-            .ui_text()
+            .ui_text();
+        row = if self.in_card {
+            row.gap(px(12.))
+                .min_h(px(52.))
+                .pt(px(10.))
+                .pb(px(10.))
+                .pl(px(14.))
+                .pr(px(8.))
+                .when(self.corners.0, |d| d.rounded_t(px(11.)))
+                .when(self.corners.1, |d| d.rounded_b(px(11.)))
+        } else {
+            row.gap(px(10.))
+                .px(px(10.))
+                .py(px(8.))
+                .rounded(radius::LIST_ROW)
+        };
+        let tags = self.tags.into_iter().map(|tag| {
+            div()
+                .flex_none()
+                .mono(11.)
+                .text_color(p.faint)
+                .px(px(6.))
+                .py(px(1.))
+                .rounded(px(5.))
+                .border_1()
+                .border_color(p.line)
+                .whitespace_nowrap()
+                .child(tag)
+        });
+        let mono = self.mono;
+        let mut row = row
             .child(
                 div()
                     .w(px(16.))
@@ -365,19 +441,20 @@ impl RenderOnce for ListRow {
                     .children(self.leading),
             )
             .child({
+                let name = div()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_ellipsis()
+                    .overflow_hidden()
+                    .when(mono, |d| d.mono(13.).font_weight(FontWeight::MEDIUM))
+                    .child(self.title.clone());
                 let title = div()
                     .flex()
                     .items_baseline()
-                    .gap(px(6.))
+                    .gap(px(if self.in_card { 8. } else { 6. }))
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .child(
-                        div()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_ellipsis()
-                            .overflow_hidden()
-                            .child(self.title.clone()),
-                    )
+                    .child(name)
+                    .children(tags)
                     .when_some(self.detail, |d, detail| {
                         d.child(div().mono(11.5).text_color(p.faint).child(detail))
                     });
@@ -414,10 +491,64 @@ impl RenderOnce for ListRow {
             })
             .when_some(self.trailing, |d, trailing| {
                 d.child(div().flex_none().child(trailing))
-            });
+            })
+            .children(actions);
         if let Some(on_click) = self.on_click {
-            row = row.on_click(on_click);
+            row = row.cursor_pointer().on_click(on_click);
         }
         wire(row, state, false).test_support()
+    }
+}
+
+/// A list of configured items in one card (repositories, skills, commands, tasks, setup steps):
+/// each a [`ListRow`] with its "⋯", a line between two rows. An empty list is an
+/// [`EmptyLine`](crate::EmptyLine), not an empty card.
+#[derive(IntoElement)]
+pub struct ListCard {
+    id: ElementId,
+    rows: Vec<ListRow>,
+}
+
+impl ListCard {
+    pub fn new(id: impl Into<ElementId>) -> Self {
+        Self {
+            id: id.into(),
+            rows: Vec::new(),
+        }
+    }
+
+    pub fn row(mut self, row: ListRow) -> Self {
+        self.rows.push(row.in_card());
+        self
+    }
+
+    pub fn rows(mut self, rows: impl IntoIterator<Item = ListRow>) -> Self {
+        self.rows.extend(rows.into_iter().map(ListRow::in_card));
+        self
+    }
+}
+
+impl RenderOnce for ListCard {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let p = palette(cx);
+        let mut children: Vec<AnyElement> = Vec::new();
+        let last = self.rows.len().saturating_sub(1);
+        for (index, mut row) in self.rows.into_iter().enumerate() {
+            row.corners = (index == 0, index == last);
+            if index > 0 {
+                children.push(div().flex_none().h(px(1.)).bg(p.line).into_any_element());
+            }
+            children.push(row.into_any_element());
+        }
+        div()
+            .id(self.id)
+            .flex()
+            .flex_col()
+            .bg(p.card)
+            .border_1()
+            .border_color(p.line)
+            .rounded(radius::CARD)
+            .children(children)
+            .test_support()
     }
 }

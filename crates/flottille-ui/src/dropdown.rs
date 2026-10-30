@@ -23,7 +23,7 @@ use crate::theme::palette;
 use crate::typography::Type;
 
 /// The height of a picker's button: the list opens this far below its top.
-const TRIGGER: f32 = 28.;
+pub(crate) const TRIGGER: f32 = 28.;
 /// The space between the button and its list, on either side.
 const GAP: f32 = 4.;
 
@@ -178,7 +178,7 @@ impl RenderOnce for Dropdown {
         // While it closes, nothing is over the window to take a click.
         let dismiss = self.open.then_some(self.on_toggle).flatten();
         root.child(list_overlay(
-            &self.id, self.align, self.width, self.items, dismiss, t, window, cx,
+            &self.id, TRIGGER, self.align, self.width, self.items, dismiss, t, window, cx,
         ))
     }
 }
@@ -190,6 +190,7 @@ impl RenderOnce for Dropdown {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn list_overlay(
     id: &ElementId,
+    trigger: f32,
     align: Align,
     width: Pixels,
     items: Vec<AnyElement>,
@@ -231,16 +232,16 @@ pub(crate) fn list_overlay(
             d.relative().top(px(RISE * (1.0 - fade))).opacity(fade)
         })
         .w(width)
-        .p(px(6.))
+        .p(px(4.))
         .rounded(px(10.))
         .bg(p.card)
         .border_1()
         .border_color(p.line2)
         .shadow(vec![BoxShadow {
             color: hsla(0., 0., 0., 0.5),
-            offset: point(px(0.), px(8.)),
-            blur_radius: px(24.),
-            spread_radius: px(-4.),
+            offset: point(px(0.), px(12.)),
+            blur_radius: px(32.),
+            spread_radius: px(0.),
             inset: false,
         }])
         .ui_text()
@@ -259,7 +260,7 @@ pub(crate) fn list_overlay(
             Align::Start => Anchor::TopLeft,
             Align::End => Anchor::TopRight,
         })
-        .offset(point(px(0.), px(TRIGGER - GAP)))
+        .offset(point(px(0.), px(trigger - GAP)))
         .child(div().py(px(GAP)).child(panel));
     div()
         .absolute()
@@ -287,6 +288,7 @@ pub struct MenuItem {
     leading: Option<Icon>,
     note: Option<SharedString>,
     selected: bool,
+    danger: bool,
     on_click: Option<Handler>,
 }
 
@@ -298,8 +300,15 @@ impl MenuItem {
             leading: None,
             note: None,
             selected: false,
+            danger: false,
             on_click: None,
         }
+    }
+
+    /// In the failure colour: the "Remove…" of a "⋯" menu, which opens a confirmation.
+    pub fn danger(mut self) -> Self {
+        self.danger = true;
+        self
     }
 
     pub fn leading(mut self, glyph: Icon) -> Self {
@@ -328,19 +337,23 @@ impl RenderOnce for MenuItem {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let p = palette(cx);
         let active = self.on_click.is_some();
+        let (ink, hover_ink, hover_bg) = match (active, self.danger) {
+            (false, _) => (p.faint, p.faint, p.hover.opacity(0.)),
+            (true, true) => (p.fail, p.fail, p.fail_bg),
+            (true, false) => (p.mute, p.text, p.hover),
+        };
+        let selected = self.selected;
         let item = div()
             .id(self.id)
             .flex_none()
-            .min_h(px(28.))
-            .px(px(8.))
+            .min_h(px(30.))
+            .px(px(10.))
             .py(px(5.))
-            .rounded(px(7.))
+            .rounded(px(6.))
             .flex()
             .items_center()
             .gap(px(8.))
-            .text_size(px(12.5))
-            .text_color(if active { p.text } else { p.faint })
-            .when(self.selected, |d| d.bg(p.sel))
+            .text_size(px(13.))
             .when_some(self.leading, |d, glyph| {
                 d.child(icon(glyph).size(px(14.)).text_color(p.faint))
             })
@@ -352,12 +365,14 @@ impl RenderOnce for MenuItem {
                 d.cursor_pointer()
                     .on_click(move |_, window, cx| f(window, cx))
             });
-        let hovers = active && !self.selected;
-        hoverable(
-            item,
-            move |d, t| {
-                if hovers { d.bg(p.hover.opacity(t)) } else { d }
-            },
-        )
+        hoverable(item, move |d, t| {
+            let t = if selected { 1.0 } else { t };
+            let d = d.text_color(mix(ink, hover_ink, t));
+            if selected {
+                d.bg(p.sel)
+            } else {
+                d.bg(hover_bg.opacity(t))
+            }
+        })
     }
 }

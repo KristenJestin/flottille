@@ -411,6 +411,8 @@ pub struct Pill {
     shown: Shown,
     /// The pill says nothing while the state is `Running`: the icon beside it already does.
     quiet_running: bool,
+    /// Nor while it is `NeedsYou`, on a page whose "Waiting for you" says it once.
+    quiet_needs_you: bool,
 }
 
 impl Pill {
@@ -418,6 +420,7 @@ impl Pill {
         Self {
             shown: Shown::new(status, false, cx),
             quiet_running: false,
+            quiet_needs_you: false,
         }
     }
 
@@ -426,13 +429,21 @@ impl Pill {
         self.quiet_running = true;
         self
     }
+
+    /// A pill that draws nothing while the state is `NeedsYou`: a view says it once, elsewhere.
+    pub fn quiet_needs_you(mut self) -> Self {
+        self.quiet_needs_you = true;
+        self
+    }
 }
 
 impl Render for Pill {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let scale = self.shown.sync(false, window, cx);
         let state = self.shown.state;
-        if self.quiet_running && state == AgentState::Running {
+        if (self.quiet_running && state == AgentState::Running)
+            || (self.quiet_needs_you && state == AgentState::NeedsYou)
+        {
             return div().into_any_element();
         }
         let (ink, bg) = state.colors(&palette(cx));

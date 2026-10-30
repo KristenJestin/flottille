@@ -1,4 +1,8 @@
-//! Buttons (primary, secondary, icon), the badge an icon button can carry, and the tooltip.
+//! Buttons, the badge an icon button can carry, and the tooltip.
+//!
+//! Four kinds of text button and one size: every text button is 30 px high, 13 px medium, with
+//! 12 px on each side; a kind changes the fill, the border and the ink, never the size. An icon
+//! button is a 28 px square with a tooltip. There is no way to ask for another size.
 
 use std::sync::Arc;
 
@@ -17,12 +21,16 @@ use crate::typography::Type;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ButtonKind {
-    /// The primary: "New session", send, "Allow once".
+    /// Filled with the accent: the one main action of a view or a dialog (Save, Create, Send,
+    /// Allow).
     Primary,
-    /// Transparent with a stronger border.
+    /// Transparent with a stronger border: a page's or a section's actions.
     Secondary,
-    /// No border, a hover background: "Deny", "Allow for this tree".
+    /// No border, a hover background: Cancel, Deny, lesser actions.
     Quiet,
+    /// Filled with the failure colour: only the action of a confirmation of something
+    /// destructive ([`Confirm`](crate::Confirm)).
+    Danger,
     /// A 28 px square holding one icon.
     Icon,
     /// A 30 px round primary holding one icon: the composer's send.
@@ -73,6 +81,12 @@ impl Button {
 
     pub fn quiet(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
         Self::new(id, ButtonKind::Quiet).label(label)
+    }
+
+    /// The action of a confirmation of something destructive, and nothing else: a page or a row
+    /// offers it as a "Remove…" item of its "⋯" menu, which opens the confirmation.
+    pub fn danger(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
+        Self::new(id, ButtonKind::Danger).label(label)
     }
 
     /// An icon button; `tooltip` says what it does (it is also its accessible name).
@@ -148,14 +162,21 @@ impl RenderOnce for Button {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let p = palette(cx);
         let (state, now) = feel(&self.id, window, cx);
-        let (fill, ink, hover_ink, border, height) = match self.kind {
-            ButtonKind::Primary | ButtonKind::Round => (Some(p.acc), p.on_acc, p.on_acc, None, 30.),
-            ButtonKind::Secondary => (None, p.mute, p.text, Some(p.line2), 28.),
-            ButtonKind::Quiet => (None, p.mute, p.text, None, 30.),
-            ButtonKind::Icon => (None, p.mute, p.text, None, 28.),
+        let height = match self.kind {
+            ButtonKind::Icon => 28.,
+            _ => 30.,
         };
+        let (fill, ink, hover_ink) = match self.kind {
+            ButtonKind::Primary | ButtonKind::Round => (Some(p.acc), p.on_acc, p.on_acc),
+            ButtonKind::Danger => (Some(p.fail), p.on_fail, p.on_fail),
+            ButtonKind::Secondary => (None, p.text, p.text),
+            ButtonKind::Quiet | ButtonKind::Icon => (None, p.mute, p.text),
+        };
+        let border =
+            (self.kind == ButtonKind::Secondary).then(|| mix(p.line2, p.focus_line, now.hover));
         let hover_bg = match self.kind {
             ButtonKind::Primary | ButtonKind::Round => mix(p.acc, p.on_acc, 0.08),
+            ButtonKind::Danger => mix(p.fail, p.text, 0.15),
             _ => p.hover,
         };
         let mut background = match fill {
@@ -189,16 +210,9 @@ impl RenderOnce for Button {
             .h(px(height))
             .text_color(ink_now)
             .ui_text()
-            .text_size(px(if self.kind == ButtonKind::Secondary {
-                12.5
-            } else {
-                13.
-            }))
-            .font_weight(if self.kind == ButtonKind::Secondary {
-                FontWeight::NORMAL
-            } else {
-                FontWeight::MEDIUM
-            })
+            .text_size(px(13.))
+            .font_weight(FontWeight::MEDIUM)
+            .whitespace_nowrap()
             .child(
                 div()
                     .absolute()
@@ -216,11 +230,7 @@ impl RenderOnce for Button {
         button = match self.kind {
             ButtonKind::Icon => button.w(px(28.)),
             ButtonKind::Round => button.w(px(30.)),
-            _ => button.px(px(if self.kind == ButtonKind::Secondary {
-                10.
-            } else {
-                12.
-            })),
+            _ => button.px(px(12.)),
         };
         if self.full_width {
             button = button.w_full();
@@ -229,7 +239,7 @@ impl RenderOnce for Button {
             let size = match self.kind {
                 ButtonKind::Icon => 15.,
                 ButtonKind::Round => 14.,
-                _ => 13.,
+                _ => 14.,
             };
             button = button.child(icon(glyph).size(px(size)).text_color(ink_now).relative());
         }
@@ -237,7 +247,7 @@ impl RenderOnce for Button {
             button = button.child(div().relative().child(label));
         }
         if let Some(badge) = self.badge {
-            button = button.child(div().absolute().top(px(2.)).right(px(1.)).child(badge));
+            button = button.child(div().absolute().top(px(1.)).right(px(0.)).child(badge));
         }
         if let Some(text) = tooltip.filter(|_| !self.tooltip_hidden) {
             button = button.tooltip(move |_, cx| Tooltip::view(text.clone(), cx));
