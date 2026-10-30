@@ -295,6 +295,150 @@ fn an_unknown_model_is_refused_naming_the_provider_s_models() {
 }
 
 #[test]
+fn a_model_id_without_its_date_suffix_starts_as_the_listed_model() {
+    let user = User::with_fake_agent();
+    user.fake_script(
+        json!({"models": ["claude-haiku-4-5-20251001", "claude-sonnet-4-5-20250929"]}),
+    );
+    project(&user);
+    let first = id(&start(&user, json!({"message": "hello"})).unwrap());
+    eventually("the session", || agent(&user, &first)["state"] == "idle");
+
+    let started = start(
+        &user,
+        json!({"message": "hello", "model": "claude-haiku-4-5"}),
+    )
+    .unwrap();
+
+    let started = id(&started);
+    assert_eq!(
+        agent(&user, &started)["chosen"]["model"],
+        "claude-haiku-4-5-20251001"
+    );
+    eventually("the session", || agent(&user, &started)["state"] == "idle");
+    assert_eq!(
+        agent(&user, &started)["taken"]["model"],
+        "claude-haiku-4-5-20251001"
+    );
+    // The dated id, and the model of a name the list does not hold, are as before.
+    start(
+        &user,
+        json!({"message": "hello", "model": "claude-sonnet-4-5-20250929"}),
+    )
+    .unwrap();
+    let (code, message) = start(
+        &user,
+        json!({"message": "hello", "model": "claude-haiku-4-6"}),
+    )
+    .unwrap_err();
+    assert_eq!(code, "refused");
+    assert!(
+        message.contains("claude offers no model claude-haiku-4-6"),
+        "{message}"
+    );
+    assert!(
+        message.contains("claude-haiku-4-5-20251001, claude-sonnet-4-5-20250929"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_model_id_without_its_date_suffix_is_taken_by_a_session_that_lists_it_with_its_date() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"models": ["claude-haiku-4-5-20251001"]}));
+    project(&user);
+
+    // Its models are not known yet: its own session checks the model.
+    let first = id(&start(
+        &user,
+        json!({"message": "hello", "model": "claude-haiku-4-5"}),
+    )
+    .unwrap());
+
+    eventually("the session", || agent(&user, &first)["state"] == "idle");
+    assert_eq!(
+        agent(&user, &first)["taken"]["model"],
+        "claude-haiku-4-5-20251001"
+    );
+    let set: Vec<String> = user
+        .received_requests("session/set_config_option")
+        .iter()
+        .map(|r| r["params"]["value"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(set, ["claude-haiku-4-5-20251001"]);
+}
+
+#[test]
+fn a_lead_launches_a_child_on_a_model_id_without_its_date_suffix() {
+    let user = User::with_fake_providers();
+    user.provider_script(
+        "claude",
+        json!({"models": ["fake-small"], "turns": [
+            {"when": "LEAD", "do": [{"mcp": {"tool": "agent_launch", "arguments": {
+                "title": "other", "brief": "CHILD work", "provider": "opencode",
+                "model": "open/medium"}}}]}
+        ]}),
+    );
+    user.provider_script(
+        "opencode",
+        json!({"models": ["open/small", "open/medium-20251001"]}),
+    );
+    project(&user);
+    let warmed = id(&start(&user, json!({"message": "hello", "provider": "opencode"})).unwrap());
+    eventually("Opencode's models known", || {
+        listed(&user, "opencode")["models"].is_array() && agent(&user, &warmed)["state"] == "idle"
+    });
+
+    let lead = id(&start(&user, json!({"message": "LEAD go"})).unwrap());
+    let child = id(&child(&user, &lead));
+
+    assert_eq!(
+        agent(&user, &child)["chosen"]["model"],
+        "open/medium-20251001"
+    );
+    eventually("the child's session", || {
+        agent(&user, &child)["taken"]["model"] == "open/medium-20251001"
+    });
+}
+
+#[test]
+fn the_judge_model_without_its_date_suffix_is_kept_as_the_listed_model() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"models": ["claude-haiku-4-5-20251001"]}));
+    project(&user);
+    // Not known before a session of the provider: kept as it is, its session checks it.
+    let unknown = user
+        .call(
+            "provider.set_judge",
+            json!({"provider": "claude", "model": "claude-haiku-4-5"}),
+        )
+        .unwrap();
+    assert_eq!(
+        unknown,
+        json!({"judge": {"provider": "claude", "model": "claude-haiku-4-5"}})
+    );
+    let first = id(&start(&user, json!({"message": "hello"})).unwrap());
+    eventually("the session", || agent(&user, &first)["state"] == "idle");
+
+    let chosen = user
+        .call(
+            "provider.set_judge",
+            json!({"provider": "claude", "model": "claude-haiku-4-5"}),
+        )
+        .unwrap();
+
+    assert_eq!(
+        chosen,
+        json!({"judge": {"provider": "claude", "model": "claude-haiku-4-5-20251001"}})
+    );
+    assert!(
+        providers_file(&user).contains("model = \"claude-haiku-4-5-20251001\""),
+        "{}",
+        providers_file(&user)
+    );
+}
+
+#[test]
 fn an_effort_without_a_model_is_checked_against_the_default_model_s_efforts() {
     let user = User::with_fake_agent();
     user.fake_script(json!({"models": ["fake-small", "fake-large"], "efforts": ["low", "high"]}));

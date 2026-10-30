@@ -10,7 +10,7 @@ depend on what it can do (`docs/agents.md`): the file and command tools below fo
 gate's business, not the list's), `skills`, `commands`, `setup` and `project` for a root (below,
 "The project"),
 and the tree's tools (`agent_*`, `report`, `ask_user` or `ask_parent`,
-`approval_answer`).
+`approval_answer`, and `session_send` for a root).
 
 ## The server
 
@@ -482,7 +482,8 @@ Two of them take an `action`, as the tools of a family do: `agent_status` (`stat
 
 | Tool | |
 |---|---|
-| `agent_launch {title, brief, provider?, model?, effort?, role?, new_workspace?, repositories?, root?}` | Starts a child on one task and answers at once with its id. `provider` is the caller's when left out, and the child's for life; `model` and `effort` the provider's defaults when left out (`docs/agents.md`, "Providers"): a provider not enabled or not ready, or a model or an effort it is known not to offer, is refused naming those that are (`refused: provider opencode is not enabled (…); the ready providers are claude`). `role` is `worker` (by default) or `lead`; `workspace` is an existing workspace's name, `new_workspace` the name of a new one (made at once, with `repositories` as its repositories, the child's brief sent once it is prepared; a workspace that fails fails the child; the launch is judged as `workspace create` is, "The workspace"), neither for the caller's own place; both are plain optional fields, and a mix is refused naming the field to use (`refused: workspace and new_workspace are exclusive: …`, `refused: repositories goes with new_workspace, …`). Its description holds a call of each form. Refused, never queued, above the project's children cap (`refused: N children already run in project P, its cap: do the work yourself, or wait for one of them to end (agent_stop ends one of yours)`) and past the depth limit. **`root: true`** starts a session for the user instead of a child ("Sessions for the user", below). |
+| `agent_launch {title, brief, provider?, model?, effort?, role?, workspace?, new_workspace?, repositories?, root?}` | Starts a session for the user in a workspace with `root: true` ("Sessions for the user", below), or a child on one task, in the caller's own place, and answers at once with its id. A child never works in another place than its parent's: `workspace` and `new_workspace` are the session's, and a child launch that names another workspace than the caller's own, or a new one, is refused before anything is asked, naming the session form (`refused: a child works where you work: workspace and new_workspace are for a session for the user, … "root": true, "workspace": "login" …`); naming the caller's own workspace is its own place. Its description leads with the session form, for work that belongs in a workspace. `provider` is the caller's when left out, and the child's for life; `model` and `effort` the provider's defaults when left out (`docs/agents.md`, "Providers"): a provider not enabled or not ready, or a model or an effort it is known not to offer, is refused naming those that are (`refused: provider opencode is not enabled (…); the ready providers are claude`). `role` is `worker` (by default) or `lead`; with `root`, `workspace` is an existing workspace's name, `new_workspace` the name of a new one (made at once, with `repositories` as its repositories, the session's first message sent once it is prepared; a workspace that fails fails the session; the launch is judged as `workspace create` is, "The workspace"), neither for the caller's own place; both are plain optional fields, and a mix is refused naming the field to use (`refused: workspace and new_workspace are exclusive: …`, `refused: repositories goes with new_workspace, …`). Its description holds a call of each form. Refused, never queued, above the project's children cap (`refused: N children already run in project P, its cap: do the work yourself, or wait for one of them to end (agent_stop ends one of yours)`) and past the depth limit. **`root: true`** starts a session for the user instead of a child ("Sessions for the user", below). |
+| `session_send {session, text}` (a root) | A message to a session the caller started (`agent_launch` with `root`), or to the agent that started the caller's session ("Sessions for the user", below). |
 | `agent_send {agent_id, message}` | A message to a child, urgent: on its next tool result in a turn, a new turn otherwise. It answers the child's question. |
 | `agent_status {agent_id?, action? status \| conversation, detail? short \| full, after?}` | `action status` (the default): one line per child (or for the one named): what it does (in a turn, `running \`<line>\` for 12 min`, `waiting for approval #3`, `waiting on the provider`, idle, reported, ended or failed with why), the time since its last sign of activity, its context use. For all the children it stops there (`detail short`) and says how to get more; for the one named, or with `detail full`, each also has its last three messages. `action conversation` (with `agent_id`; `after` pages): a page of the child's conversation, oldest first, one line per event that says something (`#<n> sent: …`, `said: …` for a whole reply, its streamed pieces joined and masked, two messages apart, `tool call: …`, a tool served and its outcome, a turn's end, a replacement, a report), each line of 2,000 characters at most (a longer reply goes on, whole, on the next lines), the page under 30,000; it ends with the `after` to pass for the next page. |
 | `agent_stop {agent_id}` | Stops the child and its own children, deepest first; what was queued for them is superseded; their runs are stopped. Their workspaces stay. |
@@ -528,7 +529,30 @@ from the window: `agent_launch {"title", "brief", "root": true, workspace? | new
 - **It takes the tree's mode**: the mode of the caller's tree, never a looser one; only the user
   changes it afterwards. It counts in no children cap and no depth.
 - The caller is answered at once with the new session's id and name; the `agent_*` tools do not
-  reach it, and the caller is told nothing of it afterwards.
+  reach it, and the caller is told nothing of it afterwards but what it writes with
+  `session_send`.
+- **It sits under its workspace**, not under the agent that started it: a root of its own,
+  `agent.trees` lists it apart, with its `workspace` and `launched_by` (the window's sidebar puts
+  it under its place, as any session).
+
+#### Sessions that talk to each other
+
+`session_send {session, text}` (a root's tool) writes to a session the caller started, or to the
+agent that started the caller's session, and to no other agent: any other is refused before
+anything is asked (`refused: <id> is neither a session you started nor the agent that started
+you: …`), and so is one that ended or an empty text. Children are written to with `agent_send`.
+
+- **It is to judge**, as a write is (a card in Ask, the judge in Auto), as an `action` request
+  whose words name the session and give the text whole (`Send to the session "Login" (agent …),
+  which you started: …`). The judge is given the text whole: one longer than its 8,000
+  characters is refused, and one that holds what the masking takes for a secret is base.
+- **No call waits**: the caller is answered at once; the text reaches the other session as a
+  delivery, `session`, urgent (on its next tool result in a turn, a new turn otherwise), under a
+  line naming the sender (`agent 0123456789ab wrote to this session:`): it is an agent's words,
+  never the user's. Its answer, a `session_send` the other way, comes back the same way.
+- **The judge never takes it for the user's words**: the user's last messages it is given are
+  the user's only; the last messages written to the session with `session_send` come in blocks of
+  their own, each `written by agent <id> with session_send (an agent's words, not the user's)`.
 
 ## The gate
 
@@ -642,8 +666,8 @@ says who answers a call to judge (`docs/design.md` §7.1).
      what only the user's word may say ("The project": asking turned off, `check` or `read_only`
      set, a `link` or `root_entries` step, a `copy` of a sensitive name).
 3. **Harmless**: passes in every mode.
-   - reading inside the agent's place (the project folder or the workspace), the tree's tools,
-     `tasks` `list` and `show`, `run_status`, `skill_read`, the reads of `forge` (`list`, `show`)
+   - reading inside the agent's place (the project folder or the workspace), the tree's tools (but
+     `agent_launch` with `root` and `session_send`), `tasks` `list` and `show`, `run_status`, `skill_read`, the reads of `forge` (`list`, `show`)
      and of `tickets` (`list`, `search`, `show`), `workspace` `list` and `show`;
    - writing inside a workspace (`fs_write`, `fs_edit`, and `git add`, `mv`, `rm` there);
    - a line the rules know to only read, inside the place: the reads of git (`status`, `log`,
@@ -676,7 +700,8 @@ says who answers a call to judge (`docs/design.md` §7.1).
    branch on no remote, `git reset --hard` in a workspace, `git -c` or `--config-env` of other
    keys, git's other global options, `git remote` and `git config` writes of other keys; the
    forge command lines beyond their reads; the writes of `forge` and `tickets`, `workspace`
-   `remove`, `agent_launch` with `root` (a session for the user), and a write of
+   `remove`, `agent_launch` with `root` (a session for the user), `session_send` (a message to
+   another session), and a write of
    `tasks`, `setup`, `skills`, `commands` or `project` ("The project"), with the line it sets;
    `workspace` `create`, `prepare` and `link_ticket`, and `agent_launch` with `new_workspace`,
    with the setup steps they play ("The workspace").

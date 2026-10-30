@@ -17,6 +17,26 @@ const ENABLED_BY_DEFAULT: [&str; 1] = ["claude"];
 /// refused unless the user allows it (`allow_unqualified_version`).
 pub const QUALIFIED_ONLY: [&str; 2] = ["opencode", "codex"];
 
+/// The model a provider lists that `asked` names: the listed id itself, else the one listed id that
+/// is `asked` followed by a date (`-YYYYMMDD`), as a provider's CLI takes `claude-haiku-4-5` for
+/// `claude-haiku-4-5-20251001`. None when no listed model, or more than one, answers to it.
+pub fn listed_model<'a>(
+    offered: impl IntoIterator<Item = &'a str>,
+    asked: &str,
+) -> Option<&'a str> {
+    let offered: Vec<&str> = offered.into_iter().collect();
+    if let Some(id) = offered.iter().find(|id| **id == asked) {
+        return Some(id);
+    }
+    let mut dated = offered.into_iter().filter(|id| {
+        id.strip_prefix(asked)
+            .and_then(|rest| rest.strip_prefix('-'))
+            .is_some_and(|date| date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()))
+    });
+    let found = dated.next()?;
+    dated.next().is_none().then_some(found)
+}
+
 /// Which providers the user enabled: each known name, with its choice.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
@@ -172,6 +192,37 @@ pub fn known(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_model_id_without_its_date_suffix_is_the_listed_model() {
+        let listed = [
+            "haiku",
+            "claude-haiku-4-5-20251001",
+            "claude-sonnet-4-5-20250929",
+        ];
+        // The listed id itself, and the id without its date.
+        assert_eq!(
+            listed_model(listed, "claude-haiku-4-5-20251001"),
+            Some("claude-haiku-4-5-20251001")
+        );
+        assert_eq!(
+            listed_model(listed, "claude-haiku-4-5"),
+            Some("claude-haiku-4-5-20251001")
+        );
+        assert_eq!(listed_model(listed, "haiku"), Some("haiku"));
+        // Not a date, a wrong date, a prefix of the name, or a model that is not listed.
+        assert_eq!(listed_model(listed, "claude-haiku-4"), None);
+        assert_eq!(listed_model(listed, "claude-haiku-4-5-2025"), None);
+        assert_eq!(listed_model(listed, "claude-opus-4-5"), None);
+        assert_eq!(
+            listed_model(["claude-haiku-4-5-2025101x"], "claude-haiku-4-5"),
+            None
+        );
+        // Two listed models that answer to it: none is guessed.
+        assert_eq!(listed_model(["m-1-20250101", "m-1-20260101"], "m-1"), None);
+        // An exact id wins over a dated one.
+        assert_eq!(listed_model(["m-1", "m-1-20250101"], "m-1"), Some("m-1"));
+    }
 
     #[test]
     fn the_auto_judge_is_read_from_its_table_and_none_is_chosen_by_default() {

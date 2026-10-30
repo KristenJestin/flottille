@@ -269,6 +269,7 @@ pub fn decide(call: &Call) -> Verdict {
         "forge" => forge(call),
         "tickets" => tickets(call),
         "agent_launch" if call.args["root"] == true => root_launch(call.grant, call.args),
+        "session_send" => session_send(call.grant, call.args),
         "agent_launch" => match too_long("brief", &call.args["brief"]) {
             Some(refused) => refused,
             None => Verdict::Allow,
@@ -348,6 +349,21 @@ pub fn root_launch(grant: &Grant, args: &Value) -> Verdict {
         found.base(LAUNCHED_LAUNCH.into());
     }
     if let Err(refused) = texts(grant, args, &["brief"], &mut found) {
+        return refused;
+    }
+    found.verdict(Kind::Action)
+}
+
+/// Why the gate holds `session_send`.
+pub const SESSION_SEND: &str = "it writes to another session, the user's, as this agent: what it \
+    sends steers that session's work";
+
+/// `session_send`: a message into a session of the user's, which acts on it with a root's tools.
+/// Its text is shown whole to the user and to the judge.
+fn session_send(grant: &Grant, args: &Value) -> Verdict {
+    let mut found = Found::default();
+    found.judge(SESSION_SEND.into());
+    if let Err(refused) = texts(grant, args, &["text"], &mut found) {
         return refused;
     }
     found.verdict(Kind::Action)
