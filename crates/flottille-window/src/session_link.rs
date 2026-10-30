@@ -289,7 +289,7 @@ pub fn ticket_facts(read: &Value) -> Option<TicketFacts> {
 
 /// How long a ticket read stays as it is: a ticket is read when the page opens, when it is linked
 /// or unlinked, and again after this, never at every turn.
-const TICKET_FRESH: Duration = Duration::from_secs(300);
+pub(crate) const TICKET_FRESH: Duration = Duration::from_secs(300);
 
 /// What a place shows in the rail: each repository and its lines changed, and its facts.
 #[derive(Clone, Debug, Default, PartialEq)]

@@ -6,13 +6,19 @@
 
 use std::time::Duration;
 
-use flottille_ui::{Button, Confirm, Item, Listing, Modal, Switch, Type, palette, space};
+use std::collections::HashMap;
+
+use flottille_ui::{
+    AgentState, Button, Confirm, EmptyLine, Icon, Item, ListCard, ListRow, Listing, Modal,
+    Placement, Section, StateIcon, Status, Switch, Toast, Type, icon, palette, space, toast,
+};
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement,
-    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, Task, TestSupportExt as _, WeakEntity, Window, div, px,
+    AnyElement, App, AppContext as _, Context, ElementId, Entity, Focusable as _,
+    InteractiveElement, IntoElement, ParentElement, Render, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, Task, TestSupportExt as _, WeakEntity,
+    Window, div, px,
 };
 use serde_json::{Value, json};
 
@@ -20,8 +26,11 @@ use crate::actions::Command;
 use crate::commands::{
     boxed, empty_note, heading, line_field, perform_later, problem_line, save_or_saving,
 };
-use crate::runs::{CommandList, CommandOutput, CommandPanel, CommandRow};
-use crate::shell::Shell;
+use crate::conversation::Ending;
+use crate::project_settings::Reveal;
+use crate::runs::{CommandList, CommandOutput, CommandPanel, CommandRow, arrange_keeping};
+use crate::session::seconds;
+use crate::shell::{Shell, now_ms};
 
 /// How often the project page reads its runs again while one runs or its output is open.
 const RUNS_EVERY: Duration = Duration::from_secs(1);
@@ -563,36 +572,53 @@ impl Render for TasksSection {
 
 // ── The project page ───────────────────────────────────────────────────────────────────────────
 
-/// The project page's tasks: each with Run, then what the user ran, as the rail lists commands.
+/// The finished runs the project page keeps in sight under the running ones.
+pub const KEPT_ON_THE_PAGE: usize = 5;
+
+/// The project page's Runs and Tasks: each task with Run, and what the user ran, running first
+/// then the last five finished, each opening its detail in the run drawer.
 pub struct ProjectTasks {
     shell: WeakEntity<Shell>,
     project: String,
     listed: Option<Vec<TaskInfo>>,
-    /// Why a task did not start, or the list could not be read.
+    /// Why the list could not be read.
     problem: Option<SharedString>,
     /// The task being started.
     starting: Option<String>,
     commands: Entity<CommandList>,
     panel: Entity<CommandPanel>,
+    /// The runs as drawn: one that leaves the five folds away.
+    runs: Listing<CommandRow>,
+    /// Each run's mark, kept while it is listed: it turns to how the run ended.
+    marks: HashMap<String, (Entity<Status>, Entity<StateIcon>)>,
+    rows: Listing<TaskInfo>,
     /// The run whose output is open.
     watching: Option<String>,
     /// Reads the runs again each second while one runs or its output is open.
     ticker: Option<Task<()>>,
+    _commands: Subscription,
 }
 
 impl ProjectTasks {
     pub fn new(shell: WeakEntity<Shell>, project: String, cx: &mut Context<Self>) -> Self {
         let this = cx.entity().downgrade();
+        let commands = cx.new(|_| CommandList::new(this.clone()));
+        // The list's own ticker moves the times of the runs drawn here.
+        let observed = cx.observe(&commands, |_, _, cx| cx.notify());
         Self {
             shell,
             project,
             listed: None,
             problem: None,
             starting: None,
-            commands: cx.new(|_| CommandList::new(this.clone())),
-            panel: cx.new(|_| CommandPanel::new(this)),
+            commands,
+            panel: cx.new(|cx| CommandPanel::new(this, cx)),
+            runs: Listing::default(),
+            marks: HashMap::new(),
+            rows: Listing::default(),
             watching: None,
             ticker: None,
+            _commands: observed,
         }
     }
 
@@ -608,6 +634,7 @@ impl ProjectTasks {
         &self.commands
     }
 
+    /// The run drawer: the page draws it over itself.
     pub fn panel(&self) -> &Entity<CommandPanel> {
         &self.panel
     }
@@ -638,6 +665,7 @@ impl ProjectTasks {
     pub fn listed(&mut self, listed: Result<Vec<TaskInfo>, String>, cx: &mut Context<Self>) {
         match listed {
             Ok(list) => {
+                self.problem = None;
                 if self.listed.as_ref() != Some(&list) {
                     self.listed = Some(list);
                     cx.notify();
@@ -650,10 +678,9 @@ impl ProjectTasks {
         }
     }
 
-    /// The user's Run: the task starts in the project folder, and its row joins the list.
+    /// The user's Run: the task starts in the project folder, and its row joins the runs.
     pub fn run(&mut self, name: &str, cx: &mut Context<Self>) {
         self.starting = Some(name.to_owned());
-        self.problem = None;
         let command = Command::RunTask {
             project: self.project.clone(),
             name: name.to_owned(),
@@ -662,10 +689,17 @@ impl ProjectTasks {
         cx.notify();
     }
 
-    /// The daemon started the task, or refused with why.
+    /// The daemon started the task, or refused with why: a toast says which.
     pub fn started(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
-        self.starting = None;
-        self.problem = refused.map(Into::into);
+        let name = self.starting.take().unwrap_or_default();
+        toast(
+            match refused {
+                None => Toast::success(format!("{name} started"))
+                    .detail("In the project folder. Its output is under Runs."),
+                Some(why) => Toast::failure(format!("{name} did not start")).detail(why),
+            },
+            cx,
+        );
         self.read_runs(cx);
         cx.notify();
     }
@@ -714,7 +748,7 @@ impl ProjectTasks {
         }));
     }
 
-    /// Opens a run's output in the panel, followed live.
+    /// Opens a run's detail in the drawer, its output followed live.
     pub fn open_command(&mut self, run: &str, cx: &mut Context<Self>) {
         self.watching = Some(run.to_owned());
         self.panel.update(cx, |panel, cx| panel.open(run, cx));
@@ -736,7 +770,6 @@ impl ProjectTasks {
     }
 
     fn answer_run(&mut self, run: &str, dismiss: bool, cx: &mut Context<Self>) {
-        self.commands.update(cx, |list, cx| list.failed(None, cx));
         let command = Command::ProjectRun {
             project: self.project.clone(),
             run: run.to_owned(),
@@ -745,74 +778,219 @@ impl ProjectTasks {
         perform_later(&self.shell, command, cx);
     }
 
-    /// What the daemon answered to a stop or a dismissal.
+    /// What the daemon answered to a stop or a dismissal: a refusal is a toast.
     pub fn run_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
-        self.commands
-            .update(cx, |list, cx| list.failed(refused, cx));
+        if let Some(why) = refused {
+            toast(Toast::failure("The run was not stopped").detail(why), cx);
+        }
         self.read_runs(cx);
+    }
+
+    fn mark(&mut self, row: &CommandRow, cx: &mut Context<Self>) -> Entity<StateIcon> {
+        let state = match row.ending() {
+            Ending::Running => AgentState::Running,
+            Ending::Exited(0) => AgentState::Completed,
+            Ending::Exited(_) | Ending::Killed(_) => AgentState::Failed,
+            Ending::Stopped | Ending::Interrupted => AgentState::Stopped,
+        };
+        let (status, icon) = self.marks.entry(row.run.clone()).or_insert_with(|| {
+            let status = cx.new(|_| Status::new(state));
+            let icon = {
+                let status = status.clone();
+                cx.new(|cx| StateIcon::new(status, cx))
+            };
+            (status, icon)
+        });
+        if status.read(cx).state() != state {
+            status.update(cx, |status, cx| status.set(state, cx));
+        }
+        icon.clone()
+    }
+
+    fn runs_section(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let rows = self.commands.read(cx).rows().to_vec();
+        let arranged = arrange_keeping(&rows, None, KEPT_ON_THE_PAGE);
+        let running = arranged.running.len();
+        let shown: Vec<(String, CommandRow)> = arranged
+            .running
+            .iter()
+            .chain(&arranged.kept)
+            .map(|row| (row.run.clone(), (*row).clone()))
+            .collect();
+        let at = cx.background_executor().now();
+        self.runs.sync(shown, at, cx.reduce_motion());
+        let listed: Vec<(String, CommandRow, Placement)> = self
+            .runs
+            .rows()
+            .map(|row| (row.key.to_owned(), row.value.clone(), row.placement))
+            .collect();
+        self.marks
+            .retain(|run, _| listed.iter().any(|(key, ..)| key == run));
+        if listed.is_empty() {
+            return None;
+        }
+        let p = palette(cx);
+        let now = now_ms();
+        let mut card = ListCard::new("project-runs-list");
+        for (key, row, placement) in listed {
+            let mark = self.mark(&row, cx);
+            let who = match row.agent.as_str() {
+                "" => "by you".to_owned(),
+                agent => format!("by agent {agent}"),
+            };
+            let detail = match &row.name {
+                Some(task) => format!("task {task} · {who} · {}", seconds(row.elapsed_ms(now))),
+                None => format!("{who} · {}", seconds(row.elapsed_ms(now))),
+            };
+            let page = cx.entity().downgrade();
+            let open = row.run.clone();
+            let stop = row.running().then(|| {
+                let (page, run) = (page.clone(), row.run.clone());
+                Button::quiet(
+                    ElementId::Name(format!("command-stop-{}", row.run).into()),
+                    "Stop",
+                )
+                .leading(Icon::Stop)
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    page.update(cx, |tasks, cx| tasks.stop_command(&run, cx))
+                        .ok();
+                })
+            });
+            let mut list_row = ListRow::new(
+                ElementId::Name(format!("command-{}", row.run).into()),
+                SharedString::from(row.line.clone()),
+            )
+            .mono()
+            .leading(mark)
+            .detail(SharedString::from(detail))
+            .trailing(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(space::SM)
+                    .children(stop)
+                    .child(
+                        icon(Icon::Chevron)
+                            .size(px(13.))
+                            .text_color(p.faint)
+                            .with_transformation(gpui_kit::Transformation::rotate(
+                                gpui_kit::radians(-std::f32::consts::FRAC_PI_2),
+                            )),
+                    ),
+            )
+            .on_click(move |_, _, cx| {
+                page.update(cx, |tasks, cx| tasks.open_command(&open, cx))
+                    .ok();
+            });
+            let last = flottille_core::ansi::strip(&row.last_line);
+            if !last.is_empty() {
+                list_row = list_row.line(SharedString::from(last));
+            }
+            card = card.item(
+                ElementId::Name(format!("command-item-{key}").into()),
+                placement,
+                list_row,
+            );
+        }
+        let count = match running {
+            0 => format!("{} finished", arranged.kept.len()),
+            n => format!("{n} running"),
+        };
+        Some(
+            Section::new("project-runs", "Runs")
+                .count(count)
+                .child(card)
+                .into_any_element(),
+        )
     }
 }
 
 impl Render for ProjectTasks {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
+        let runs = self.runs_section(cx);
         let tasks = self.listed.clone().unwrap_or_default();
-        if tasks.is_empty() && self.commands.read(cx).rows().is_empty() {
-            return div()
-                .id("project-tasks")
-                .child(self.panel.clone())
-                .into_any_element();
-        }
-        let rows = tasks.iter().map(|info| {
+        let at = cx.background_executor().now();
+        self.rows.sync(
+            tasks.iter().map(|info| (info.name.clone(), info.clone())),
+            at,
+            cx.reduce_motion(),
+        );
+        let listed: Vec<(String, TaskInfo, Placement)> = self
+            .rows
+            .rows()
+            .map(|row| (row.key.to_owned(), row.value.clone(), row.placement))
+            .collect();
+        let mut card = ListCard::new("project-tasks-list");
+        for (key, info, placement) in listed {
             let name = info.name.clone();
             let starting = self.starting.as_deref() == Some(&info.name);
-            div()
-                .id(ElementId::Name(
-                    format!("project-task-{}", info.name).into(),
-                ))
-                .px(space::LG)
-                .py(space::MD)
-                .rounded(px(10.))
-                .border_1()
-                .border_color(p.line)
-                .bg(p.card)
-                .flex()
-                .items_center()
-                .gap(space::MD)
-                .child(task_text(info, &p))
-                .child(
-                    Button::secondary(
-                        ElementId::Name(format!("run-task-{}", info.name).into()),
-                        if starting { "Starting…" } else { "Run" },
-                    )
-                    .disabled(self.starting.is_some())
-                    .on_click(cx.listener(move |this, _, _, cx| this.run(&name, cx))),
+            let mut row = ListRow::new(
+                ElementId::Name(format!("project-task-{}", info.name).into()),
+                SharedString::from(info.name.clone()),
+            )
+            .mono()
+            .line(SharedString::from(info.line.clone()))
+            .trailing(
+                Button::secondary(
+                    ElementId::Name(format!("run-task-{}", info.name).into()),
+                    if starting { "Starting…" } else { "Run" },
                 )
-                .test_support()
-        });
-        let count = tasks.len();
+                .leading(Icon::Play)
+                .disabled(self.starting.is_some())
+                .on_click(cx.listener(move |this, _, _, cx| this.run(&name, cx))),
+            );
+            for tag in [
+                info.serve.then_some("server"),
+                info.check.then_some("check"),
+                info.read_only.then_some("changes nothing"),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                row = row.tag(tag);
+            }
+            if let Some(repository) = &info.repository {
+                row = row.tag(SharedString::from(format!("in {repository}")));
+            }
+            card = card.item(
+                ElementId::Name(format!("project-task-item-{key}").into()),
+                placement,
+                row,
+            );
+        }
+        let (shell, project) = (self.shell.clone(), self.project.clone());
+        let edit = Button::quiet("edit-tasks-in-settings", "Edit in Settings").on_click(
+            move |_, window, cx| {
+                let project = project.clone();
+                shell
+                    .update(cx, |shell, cx| {
+                        shell.open_project_settings_at(&project, Reveal::Tasks, window, cx)
+                    })
+                    .ok();
+            },
+        );
+        let mut section = Section::new("project-tasks", "Tasks")
+            .count(tasks.len().to_string())
+            .action(edit);
+        section = match (&self.problem, tasks.is_empty()) {
+            (Some(problem), _) => section.sentence(problem.clone()),
+            (None, true) => section.child(EmptyLine::new(
+                "no-project-tasks",
+                Icon::Play,
+                "No task yet: a task is a command line of the project, run here or by an agent. \
+                 Add one in Settings.",
+            )),
+            (None, false) => section.child(card),
+        };
         div()
             .id("project-tasks")
-            .child(heading("Tasks", count, div(), cx))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(space::SM)
-                    .children(rows)
-                    .when_some(self.problem.clone(), |d, problem| {
-                        d.child(
-                            div()
-                                .id("project-tasks-problem")
-                                .text_size(px(12.5))
-                                .text_color(p.fail)
-                                .child(problem)
-                                .test_support(),
-                        )
-                    }),
-            )
-            .child(div().max_w(px(520.)).child(self.commands.clone()))
-            .child(self.panel.clone())
-            .into_any_element()
+            .flex()
+            .flex_col()
+            .gap(space::XXL)
+            .text_color(p.text)
+            .children(runs)
+            .child(section)
     }
 }

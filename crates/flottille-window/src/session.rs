@@ -218,7 +218,7 @@ impl SessionPage {
     ) -> Self {
         let page = cx.entity().downgrade();
         let rail = cx.new(|cx| SessionRail::new(page.clone(), opened.id.clone(), &opened, cx));
-        let command_panel = cx.new(|_| CommandPanel::new(page.clone()));
+        let command_panel = cx.new(|cx| CommandPanel::new(page.clone(), cx));
         let drawer = cx.new(|_| Drawer::new("rail-drawer", Side::Right, px(RAIL), rail.clone()));
         let pill = cx.new(|cx| {
             Pill::new(status.clone(), cx)

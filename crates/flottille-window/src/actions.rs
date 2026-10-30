@@ -19,7 +19,7 @@ use crate::commands::CommandInfo;
 use crate::link::{Conn, Connect, Update};
 use crate::rules::Shown;
 use crate::runs::{CommandOutput, CommandRow};
-use crate::session_link::{PullRequest, pull_requests};
+use crate::session_link::{PullRequest, TICKET_FRESH, TicketFacts, pull_requests, ticket_facts};
 use crate::skills::SkillInfo;
 use crate::tasks::TaskInfo;
 
@@ -109,8 +109,6 @@ pub enum Command {
         branch: Option<String>,
         /// The base branch chosen for a repository, by path; its rule for the others.
         bases: std::collections::BTreeMap<String, String>,
-        /// Fetch nothing: base the branches on the tracking refs as they are.
-        offline: bool,
     },
     /// The project's repositories as their checkouts stand (`project.repositories`), or one
     /// added or removed (`project.add_repository`, `project.remove_repository`): each answers
@@ -343,6 +341,8 @@ pub struct Details {
     pub pulls: HashMap<String, Vec<PullRequest>>,
     /// Where each repository of each workspace stands.
     pub statuses: HashMap<String, Vec<RepositoryStatus>>,
+    /// The ticket each workspace is linked to, as its tracker said it.
+    pub tickets: HashMap<String, TicketFacts>,
 }
 
 /// Where one repository of a workspace stands (`workspace.show`): the branch its worktree is on,
@@ -699,6 +699,7 @@ fn read_details(
     bounds: Bounds,
 ) {
     let mut conn: Option<Conn> = None;
+    let mut tickets = Tickets::new();
     while let Ok(first) = asked.recv() {
         let began = Instant::now();
         // Details asked again before they were read are read once.
@@ -709,7 +710,8 @@ fn read_details(
             }
         }
         for project in projects {
-            if let Some(details) = details(&connect, &mut conn, &project, bounds.quick)
+            if let Some(details) =
+                details(&connect, &mut conn, &mut tickets, &project, bounds.quick)
                 && updates
                     .unbounded_send(Update::Done(Outcome::Details(details)))
                     .is_err()
@@ -838,14 +840,12 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             repositories,
             branch,
             bases,
-            offline,
         } => workspace_outcome(
             ask_alone(
                 connect,
                 "workspace.create",
                 json!({"project": project, "name": name, "ticket": ticket,
-                    "repositories": repositories, "branch": branch, "bases": bases,
-                    "offline": offline}),
+                    "repositories": repositories, "branch": branch, "bases": bases}),
                 bounds.slow,
             ),
             project,
@@ -1446,9 +1446,14 @@ fn started_outcome(project: &str, started: &Value) -> Outcome {
 
 /// Reads the branches of the project's repositories and the lines changed in its workspaces.
 /// `None` when the daemon cannot be asked: the page keeps what it showed.
+/// The tickets read, by project and workspace, with when: a tracker is asked again only once a
+/// read is [`TICKET_FRESH`] no more, or the workspace is linked to another ticket.
+type Tickets = HashMap<(String, String), (TicketFacts, Instant)>;
+
 fn details(
     connect: &Connect,
     conn: &mut Option<Conn>,
+    kept: &mut Tickets,
     project: &str,
     bound: Duration,
 ) -> Option<Details> {
@@ -1484,6 +1489,7 @@ fn details(
     let mut changes = HashMap::new();
     let mut pulls = HashMap::new();
     let mut statuses = HashMap::new();
+    let mut tickets = HashMap::new();
     for workspace in listed["workspaces"].as_array().into_iter().flatten() {
         let name = workspace["name"].as_str().unwrap_or_default();
         let Ok(Ok(shown)) = ask(
@@ -1504,6 +1510,41 @@ fn details(
         }
         changes.insert(name.to_owned(), total);
         statuses.insert(name.to_owned(), RepositoryStatus::of_workspace(&shown));
+        let key = (project.to_owned(), name.to_owned());
+        match shown["ticket"].as_str() {
+            None => {
+                kept.remove(&key);
+            }
+            Some(linked) => {
+                let stale = kept.get(&key).is_none_or(|(facts, at)| {
+                    facts.reference != linked || at.elapsed() > TICKET_FRESH
+                });
+                if stale {
+                    let read = ask(
+                        connect,
+                        conn,
+                        "workspace.ticket",
+                        json!({"project": project, "name": name}),
+                        bound,
+                    );
+                    let facts = match read {
+                        Ok(Ok(read)) => ticket_facts(&read),
+                        _ => None,
+                    }
+                    .unwrap_or_else(|| TicketFacts {
+                        reference: linked.to_owned(),
+                        state: None,
+                        title: None,
+                        url: None,
+                        problem: Some("the ticket could not be read".into()),
+                    });
+                    kept.insert(key.clone(), (facts, Instant::now()));
+                }
+                if let Some((facts, _)) = kept.get(&key) {
+                    tickets.insert(name.to_owned(), facts.clone());
+                }
+            }
+        }
         if let Ok(Ok(forge)) = ask(
             connect,
             conn,
@@ -1520,6 +1561,7 @@ fn details(
         changes,
         pulls,
         statuses,
+        tickets,
     })
 }
 

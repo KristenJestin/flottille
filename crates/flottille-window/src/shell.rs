@@ -30,7 +30,7 @@ use crate::link::{self, Connect, Seen, Update};
 use crate::model::{BellItem, Place, Preparation, Snapshot};
 use crate::open::Opener;
 use crate::page::{MainArea, Page};
-use crate::project::{NewWorkspace, PlaceData, ProjectData, SessionLine, repository_label};
+use crate::project::{NewWorkspace, PlaceData, ProjectData, SessionLine};
 use crate::project_settings::ProjectSettingsPage;
 use crate::providers::Providers;
 use crate::rules::RulesEditor;
@@ -704,7 +704,11 @@ impl Shell {
                 let page = self.main.read(cx).project_page().cloned();
                 let section = page
                     .filter(|page| page.read(cx).name() == project)
-                    .map(|page| page.read(cx).repositories().clone());
+                    .map(|page| page.read(cx).repositories().clone())
+                    .or_else(|| {
+                        self.settings_of_project(&project, cx)
+                            .map(|page| page.read(cx).repository_list().clone())
+                    });
                 // An answer to an older request than the last is no news, for the form either.
                 if section
                     .as_ref()
@@ -781,6 +785,13 @@ impl Shell {
                 name,
                 refused,
             } => {
+                if let Some(page) = self.main.read(cx).project_page().cloned()
+                    && page.read(cx).name() == project
+                    && let Some(card) = page.read(cx).card(&Some(name.clone()), cx)
+                {
+                    card.update(cx, |card, cx| card.ticket_answered(refused.clone(), cx));
+                    self.perform(Command::Details(project.clone()));
+                }
                 if let Some(page) = self.session_page.clone() {
                     page.update(cx, |page, cx| {
                         page.ticket_linked(&project, &name, refused, window, cx)
@@ -1004,6 +1015,8 @@ impl Shell {
         let mut places = vec![PlaceData {
             place: None,
             meta: None,
+            folder: project.folder.clone(),
+            steps: Vec::new(),
             preparation: Preparation::Ready,
             sessions: self
                 .snapshot
@@ -1022,17 +1035,10 @@ impl Shell {
             .filter(|w| w.project == name)
         {
             let place = Some(workspace.name.clone());
-            let repositories: Vec<String> = workspace
-                .repositories
-                .iter()
-                .map(|path| repository_label(&name, path))
-                .collect();
             places.push(PlaceData {
-                meta: Some(format!(
-                    "from {} · {}",
-                    workspace.bases.join(", "),
-                    repositories.join(", ")
-                )),
+                meta: Some(format!("from {}", workspace.bases.join(", "))),
+                folder: workspace.folder.clone(),
+                steps: workspace.steps.clone(),
                 preparation: workspace.preparation.clone(),
                 sessions: self
                     .snapshot
@@ -1306,6 +1312,10 @@ impl Shell {
             let section = page.read(cx).repositories().clone();
             section.update(cx, |section, cx| section.read(cx));
         }
+        if edited && let Some(page) = self.project_settings.clone() {
+            let section = page.read(cx).repository_list().clone();
+            section.update(cx, |section, cx| section.read(cx));
+        }
     }
 
     fn tick(&mut self, cx: &mut Context<Self>) {
@@ -1409,6 +1419,20 @@ impl Shell {
                 Card::new().title("Auto judge chosen").child(body),
             ))
             .test_support()
+    }
+
+    /// Opens a project's settings at a repository's row or at its tasks, from its page.
+    pub fn open_project_settings_at(
+        &mut self,
+        project: &str,
+        at: crate::project_settings::Reveal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open(Selection::ProjectSettings(project.to_owned()), window, cx);
+        if let Some(page) = self.settings_of_project(project, cx) {
+            page.update(cx, |page, cx| page.reveal(at, cx));
+        }
     }
 
     /// Opens a project's page or a session's: a choice made in a drawer closes it.

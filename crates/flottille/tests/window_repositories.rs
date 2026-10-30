@@ -131,8 +131,29 @@ fn page_of(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<ProjectP
         .expect("a project's page is open")
 }
 
+/// The repositories as the project's settings list them: the project page configures nothing.
 fn section_of(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<ProjectRepositories> {
-    page_of(shell, cx).read_with(cx, |page, _| page.repositories().clone())
+    shell
+        .read_with(cx, |s, cx| {
+            s.main().read(cx).project_settings_page().cloned()
+        })
+        .expect("a project's settings are open")
+        .read_with(cx, |page, _| page.repository_list().clone())
+}
+
+fn open_settings(shell: &Entity<Shell>, project: &str, cx: &mut VisualTestContext) {
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::ProjectSettings(project.into()), window, cx)
+    });
+    until(shell, cx, "the project's settings are shown", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .project_settings_page()
+                .is_some_and(|page| page.read(cx).name() == project)
+        })
+    });
+    settle(cx);
 }
 
 fn open_project(shell: &Entity<Shell>, project: &str, cx: &mut VisualTestContext) {
@@ -174,13 +195,13 @@ fn paths(section: &Entity<ProjectRepositories>, cx: &mut VisualTestContext) -> V
 }
 
 #[gpui_kit::test]
-fn the_project_page_lists_its_repositories_and_adds_removes_and_detects_them(
+fn the_project_settings_list_its_repositories_and_add_remove_and_detect_them(
     cx: &mut TestAppContext,
 ) {
     let user = user();
     let folder = trio(&user);
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    open_project(&shell, "trio", cx);
+    open_settings(&shell, "trio", cx);
     let section = section_of(&shell, cx);
     until(&shell, cx, "the repositories are read", |cx| {
         section.read_with(cx, |s, _| s.repositories().is_some())
@@ -269,7 +290,7 @@ fn an_older_answer_never_replaces_a_newer_one_and_busy_waits_for_the_last_answer
     let user = user();
     trio(&user);
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    open_project(&shell, "trio", cx);
+    open_settings(&shell, "trio", cx);
     let section = section_of(&shell, cx);
     until(&shell, cx, "the repositories are read", |cx| {
         section.read_with(cx, |s, _| s.repositories().is_some())
@@ -315,7 +336,7 @@ fn a_project_edited_by_hand_shows_its_repositories_again_without_a_click(cx: &mu
     let user = user();
     let folder = trio(&user);
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    open_project(&shell, "trio", cx);
+    open_settings(&shell, "trio", cx);
     let section = section_of(&shell, cx);
     until(&shell, cx, "the repositories are read", |cx| {
         section.read_with(cx, |s, _| s.repositories().is_some())
@@ -429,15 +450,12 @@ fn a_workspace_s_card_and_the_rail_show_where_each_repository_stands(cx: &mut Te
     settle(cx);
 
     assert_eq!(
-        label_of("repository-status-login-api", cx).as_deref(),
-        Some("api trio/login · 1 ahead of develop · 1 uncommitted")
+        label_of("repository-line-login-api", cx).as_deref(),
+        Some("Repository api 1 ahead · 1 uncommitted")
     );
     assert_eq!(
-        label_of("repository-status-login-lib", cx).as_deref(),
-        Some(
-            "lib trio/login · 0 ahead of main · clean · no remote origin: started from the \
-             local main"
-        )
+        label_of("repository-line-login-lib", cx).as_deref(),
+        Some("Repository lib 0 ahead · clean · no remote origin: started from the local main")
     );
     assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
 

@@ -3,7 +3,7 @@
 //! compositor.
 //!
 //! ```text
-//! cargo run -p flottille-window --example shell [--features frames] -- [--project <name>] [--add-project <folder>] [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace] [--add-command] [--edit-command <name>] [--add-skill] [--edit-skill <name>] [--edit-task <name>] [--edit-setup <number>] [--run-task <name>] [--slash <text>] [--attach <picture>] [--end] [--ended] [--open-run <text of its line>] [--open-ended] [--project-settings <project>] [--size <w>x<h>]
+//! cargo run -p flottille-window --example shell [--features frames] -- [--project <name>] [--add-project <folder>] [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace] [--add-command] [--edit-command <name>] [--add-skill] [--edit-skill <name>] [--edit-task <name>] [--edit-setup <number>] [--run-task <name>] [--workspace-menu <workspace>] [--remove <workspace>] [--slash <text>] [--attach <picture>] [--end] [--ended] [--open-run <text of its line>] [--open-ended] [--project-settings <project>] [--size <w>x<h>]
 //! ```
 //!
 //! `--project` opens a project's page, `--add-project` the "Add a project" modal with the
@@ -13,7 +13,7 @@
 //! pickers, `--new-workspace` the project page's new-workspace modal, `--add-command`,
 //! `--edit-command`, `--add-skill` and `--edit-skill` the modals of the Commands and Skills
 //! sections, `--edit-task` and `--edit-setup` those of the Tasks and Setup sections, `--run-task`
-//! runs a task of the open project's page and opens its output, `--slash` types a text in the open session's composer (its `/` list), `--attach` attaches a picture file to it, `--end` opens the open
+//! runs a task of the open project's page and opens its output, `--workspace-menu` opens a workspace card's "⋯" menu and `--remove` its removal confirmation, `--slash` types a text in the open session's composer (its `/` list), `--attach` attaches a picture file to it, `--end` opens the open
 //! session's "End the session?" confirmation, `--ended` unfolds the "Ended" group at the bottom of the
 //! left tree, `--open-run` opens the output of the open session's first run whose line holds the text, in its panel, `--open-ended` the rail's "N ended" row, `--project-settings` a project's settings page, `--size` the window's size. The daemon is found on
 //! `$XDG_RUNTIME_DIR/flottille/daemon.sock`; it is not started.
@@ -40,6 +40,7 @@ fn main() {
     let (mut end, mut ended) = (false, false);
     let (mut open_run, mut open_ended) = (None::<String>, false);
     let (mut edit_task, mut edit_setup, mut run_task) = (None, None, None);
+    let (mut workspace_menu, mut remove) = (None::<String>, None::<String>);
     let mut dimensions = (1280., 800.);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -62,6 +63,8 @@ fn main() {
                 let number = args.next().expect("a step's number");
                 edit_setup = Some(number.parse::<usize>().expect("a number"));
             }
+            "--workspace-menu" => workspace_menu = Some(args.next().expect("a workspace")),
+            "--remove" => remove = Some(args.next().expect("a workspace")),
             "--run-task" => run_task = Some(args.next().expect("a task")),
             "--slash" => slash = Some(args.next().expect("what the reply's field holds")),
             "--attach" => attach = Some(args.next().expect("a picture file")),
@@ -217,6 +220,31 @@ fn main() {
                     })
                     .ok();
             }
+            // A workspace card's menu or removal confirmation, once its card is drawn.
+            if workspace_menu.is_some() || remove.is_some() {
+                cx.background_executor()
+                    .timer(Duration::from_millis(2500))
+                    .await;
+                window
+                    .update(cx, |_, window, cx| {
+                        let Some(page) = shell.read(cx).main().read(cx).project_page().cloned()
+                        else {
+                            return;
+                        };
+                        let place = |name: &str| Some(name.to_owned());
+                        if let Some(name) = &workspace_menu
+                            && let Some(card) = page.read(cx).card(&place(name), cx)
+                        {
+                            card.update(cx, |c, cx| c.open_menu(window, cx));
+                        }
+                        if let Some(name) = &remove
+                            && let Some(card) = page.read(cx).card(&place(name), cx)
+                        {
+                            card.update(cx, |c, cx| c.ask_removal(cx));
+                        }
+                    })
+                    .ok();
+            }
             // A task run from the project's page, then its output opened once it is listed.
             if let Some(name) = run_task {
                 cx.background_executor()
@@ -237,7 +265,12 @@ fn main() {
                 if let Some(tasks) = tasks {
                     window
                         .update(cx, |_, _, cx| {
-                            let run = tasks.read(cx).commands().read(cx).rows().first().cloned();
+                            let rows = tasks.read(cx).commands().read(cx).rows().to_vec();
+                            let run = rows
+                                .iter()
+                                .find(|row| row.name.as_deref() == Some(name.as_str()))
+                                .or(rows.first())
+                                .cloned();
                             if let Some(row) = run {
                                 tasks.update(cx, |t, cx| t.open_command(&row.run, cx));
                             }

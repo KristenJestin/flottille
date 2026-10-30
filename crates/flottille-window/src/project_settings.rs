@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 use crate::actions::Command;
 use crate::commands::CommandsSection;
 use crate::project::repository_label;
+use crate::repositories::ProjectRepositories;
 use crate::rules::RulesEditor;
 use crate::setup::SetupSection;
 use crate::shell::Shell;
@@ -203,8 +204,20 @@ enum Picker {
     TrackerRepository,
 }
 
+/// Where the settings were opened at, from the project page: a repository's row (its chip) or
+/// the tasks ("Edit in Settings").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Reveal {
+    Repository(String),
+    Tasks,
+}
+
 pub struct ProjectSettingsPage {
     shell: WeakEntity<Shell>,
+    /// Where it was opened at, when it was.
+    revealed: Option<Reveal>,
+    /// The project's repositories, listed, added and removed here.
+    repository_list: Entity<ProjectRepositories>,
     name: String,
     folder: String,
     /// The daemon answered once.
@@ -249,6 +262,7 @@ impl ProjectSettingsPage {
         let commands = cx.new(|_| CommandsSection::new(shell.clone(), name.clone()));
         let tasks = cx.new(|_| TasksSection::new(shell.clone(), name.clone()));
         let setup = cx.new(|_| SetupSection::new(shell.clone(), name.clone()));
+        let repository_list = cx.new(|_| ProjectRepositories::new(shell.clone(), name.clone()));
         // Asked once the shell, which is making this page, is no longer being updated.
         let (listing, skilling, tasking, setting) = (
             commands.clone(),
@@ -256,7 +270,9 @@ impl ProjectSettingsPage {
             tasks.clone(),
             setup.clone(),
         );
+        let reading = repository_list.clone();
         cx.defer(move |cx| {
+            reading.update(cx, |section, cx| section.read(cx));
             listing.update(cx, |section, cx| section.read(cx));
             skilling.update(cx, |section, cx| section.read(cx));
             tasking.update(cx, |section, cx| section.read(cx));
@@ -264,6 +280,8 @@ impl ProjectSettingsPage {
         });
         Self {
             shell,
+            revealed: None,
+            repository_list,
             name,
             folder: String::new(),
             loaded: false,
@@ -289,6 +307,21 @@ impl ProjectSettingsPage {
             tasks,
             setup,
         }
+    }
+
+    /// Where it was opened at, from the project page.
+    pub fn revealed(&self) -> Option<&Reveal> {
+        self.revealed.as_ref()
+    }
+
+    pub fn reveal(&mut self, at: Reveal, cx: &mut Context<Self>) {
+        self.revealed = Some(at);
+        cx.notify();
+    }
+
+    /// The project's repositories, as this page lists them.
+    pub fn repository_list(&self) -> &Entity<ProjectRepositories> {
+        &self.repository_list
     }
 
     pub fn rules(&self) -> &Entity<RulesEditor> {
@@ -1044,6 +1077,11 @@ impl Render for ProjectSettingsPage {
                         "asking-the-daemon",
                         !self.loaded && self.error.is_none(),
                         div().text_color(p.faint).child("Asking the daemon…"),
+                    ))
+                    .child(enter(
+                        key("repositories"),
+                        1,
+                        div().mb(px(12.)).child(self.repository_list.clone()),
                     ))
                     .child(enter(key("forges"), 1, label("Forges")))
                     .child(enter(
