@@ -81,16 +81,42 @@ fn find(daemon: &Daemon, asked: &WorkspaceName) -> Result<Workspace, Failure> {
         })
 }
 
-/// `workspace.show`: the workspace, and the lines changed in each of its repositories.
+/// `workspace.show`: the workspace, and for each of its repositories the lines changed, the
+/// branch its worktree is on, its commits ahead of its base and its files not committed.
 async fn show(daemon: &Daemon, asked: WorkspaceName) -> Answer {
     let workspace = find(daemon, &asked)?;
     let mut shown = workspace.to_json();
     if let Some(repositories) = shown["repositories"].as_array_mut() {
         for (repository, worktree) in repositories.iter_mut().zip(&workspace.repositories) {
-            repository["changes"] =
-                changes(&workspace.folder_of(&worktree.path), &worktree.base.commit)
-                    .await
-                    .unwrap_or(Value::Null);
+            let folder = workspace.folder_of(&worktree.path);
+            repository["changes"] = changes(&folder, &worktree.base.commit)
+                .await
+                .unwrap_or(Value::Null);
+            // Read only where the worktree is made: git would answer for the one around it.
+            let made = std::fs::symlink_metadata(folder.join(".git")).is_ok();
+            let read = async |args: &[&str]| match made {
+                true => git::output(&folder, args, Class::Read).await.ok(),
+                false => None,
+            };
+            repository["branch"] = read(&["symbolic-ref", "--quiet", "--short", "HEAD"])
+                .await
+                .map_or(Value::Null, |branch| branch.trim().into());
+            let since = format!("{}..HEAD", worktree.base.commit);
+            repository["ahead"] = read(&["rev-list", "--count", "--end-of-options", &since])
+                .await
+                .and_then(|count| count.trim().parse::<u64>().ok())
+                .map_or(Value::Null, Value::from);
+            // Without the index's refresh: `status` would write it, as `diff` would.
+            let status = [
+                "--no-optional-locks",
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+            ];
+            repository["uncommitted"] = read(&status).await.map_or(Value::Null, |status| {
+                uncommitted(&workspace, &folder, &status).into()
+            });
         }
     }
     shown["ready_at"] = match shown["state"] == "ready" {
@@ -100,6 +126,29 @@ async fn show(daemon: &Daemon, asked: WorkspaceName) -> Answer {
         false => Value::Null,
     };
     Ok(shown)
+}
+
+/// How many files of a worktree's `git status` hold work: the links Flottille made and the
+/// worktrees standing inside this one are not work.
+fn uncommitted(workspace: &Workspace, folder: &Path, status: &str) -> usize {
+    let mut entries = status.split('\0').filter(|entry| !entry.is_empty());
+    let mut count = 0;
+    while let Some(entry) = entries.next() {
+        let (code, path) = entry.split_at(3.min(entry.len()));
+        // A rename or a copy names where it came from next.
+        if code.starts_with(['R', 'C']) {
+            entries.next();
+        }
+        let file = folder.join(path).components().collect::<PathBuf>();
+        let ours = code == "?? "
+            && (made_link(workspace, &file)
+                || workspace
+                    .repositories
+                    .iter()
+                    .any(|r| workspace.folder_of(&r.path) == file));
+        count += usize::from(!ours);
+    }
+    count
 }
 
 /// A new file larger than this is not read to count its lines.
@@ -117,7 +166,14 @@ async fn changes(folder: &Path, base: &str) -> Option<Value> {
     // agent's own `git add` or `commit` in the same worktree.
     let diff = git::run(
         folder,
-        &["diff-index", "--numstat", base, "--"],
+        &[
+            "diff-index",
+            "--numstat",
+            "--no-ext-diff",
+            "--no-textconv",
+            base,
+            "--",
+        ],
         Class::Read,
     )
     .await
@@ -218,6 +274,11 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
         )));
     }
     let taken = taken_repositories(&project, asked.repositories.as_deref())?;
+    if let Some(other) = asked.bases.keys().find(|path| !taken.contains(path)) {
+        return Err(Failure::refused(format!(
+            "a base is chosen for {other}, which the workspace does not take"
+        )));
+    }
     let ticket = asked
         .ticket
         .as_deref()
@@ -253,14 +314,14 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
             .find(|r| &r.path == path)
             .expect("a repository taken is one of the project's");
         let main = main_checkout(&project.folder, path);
-        let base = up_to_date_base(
-            &main,
-            path,
-            &repository.remote,
-            &repository.base,
-            asked.offline,
-        )
-        .await?;
+        let rule = match asked.bases.get(path) {
+            Some(chosen) => {
+                check_branch(&main, chosen).await?;
+                vec![chosen.clone()]
+            }
+            None => repository.base.clone(),
+        };
+        let base = up_to_date_base(&main, path, &repository.remote, &rule, asked.offline).await?;
         let exists = git::run(
             &main,
             &[
@@ -315,6 +376,22 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
     tokio::spawn(prepare(daemon.clone(), id, Some(made)));
     let _ = worktrees.await;
     Ok(daemon.read(|store| store.workspace_by_id(id))?.to_json())
+}
+
+/// What a workspace made says of the repositories that started from their local branch, one
+/// sentence each, each after a space: ` In lib, no remote origin: started from the local main.`
+pub fn notes(made: &Value) -> String {
+    let mut said = String::new();
+    for repository in made["repositories"].as_array().into_iter().flatten() {
+        if let Some(note) = repository["base"]["note"].as_str() {
+            let place = match repository["path"].as_str().unwrap_or(".") {
+                "." => "the project folder".to_owned(),
+                path => path.to_owned(),
+            };
+            said.push_str(&format!(" In {place}, {note}."));
+        }
+    }
+    said
 }
 
 /// The repositories a new workspace takes: the root one first, then in dependency order.
@@ -377,8 +454,29 @@ fn main_checkout(project_folder: &Path, repository: &str) -> PathBuf {
     }
 }
 
+/// The commit a ref leads to; none when there is no such ref.
+async fn commit_of(main: &Path, reference: &str) -> Result<Option<String>, Failure> {
+    git::run(
+        main,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &format!("{reference}^{{commit}}"),
+        ],
+        Class::Read,
+    )
+    .await
+    .map(|output| output.success.then(|| output.stdout.trim().to_owned()))
+    .map_err(Failure::refused)
+}
+
 /// The base of one repository's branch: the first branch of the rule that is on the remote,
-/// fetched into its tracking ref. Offline, the first one with a tracking ref, as it is.
+/// fetched into its tracking ref. Offline, or when the fetch fails, the first one with a tracking
+/// ref, as it is ([`tracked_base`]). A fetch is never a requirement: with no remote, no tracking
+/// ref, or none of the rule on the remote, it is the first branch of the rule the repository has
+/// itself ([`local_base`]).
 async fn up_to_date_base(
     main: &Path,
     path: &str,
@@ -387,76 +485,47 @@ async fn up_to_date_base(
     offline: bool,
 ) -> Result<Base, Failure> {
     let tracking = |branch: &str| format!("refs/remotes/{remote}/{branch}");
-    let resolve = async |branch: &str| {
-        git::run(
-            main,
-            &[
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                "--end-of-options",
-                &format!("{}^{{commit}}", tracking(branch)),
-            ],
-            Class::Read,
-        )
-        .await
-        .map(|output| output.success.then(|| output.stdout.trim().to_owned()))
-        .map_err(Failure::refused)
-    };
+    let has_remote = git::run(
+        main,
+        &["remote", "get-url", "--end-of-options", remote],
+        Class::Read,
+    )
+    .await
+    .map_err(Failure::refused)?
+    .success;
+    if !has_remote {
+        return local_base(main, path, remote, rule, format!("no remote {remote}")).await;
+    }
     if offline {
-        for branch in rule {
-            if let Some(commit) = resolve(branch).await? {
-                let updated = git::run(
-                    main,
-                    &[
-                        "log",
-                        "-g",
-                        "-n1",
-                        "--format=%ct",
-                        "--end-of-options",
-                        &tracking(branch),
-                    ],
-                    Class::Read,
-                )
-                .await
-                .map_err(Failure::refused)?;
-                let fetched_at = updated
-                    .success
-                    .then(|| updated.stdout.trim().parse::<u64>().ok())
-                    .flatten()
-                    .map(|seconds| seconds * 1000);
-                return Ok(Base {
-                    branch: branch.clone(),
-                    remote: remote.to_owned(),
-                    urls: forge::urls_of(main, remote).await,
-                    reference: tracking(branch),
-                    commit,
-                    fetched_now: false,
-                    fetched_at,
-                });
-            }
+        if let Some(base) = tracked_base(main, remote, rule).await? {
+            return Ok(base);
         }
-        return Err(Failure::refused(format!(
-            "{path} has no tracking ref of {remote} for {}: create the workspace online once",
+        let why = format!(
+            "offline, no tracking ref of {remote} for {}",
             rule.join(" nor ")
-        )));
+        );
+        return local_base(main, path, remote, rule, why).await;
     }
 
+    // Git's few lines, as one.
     let cannot_fetch = |reason: String| {
-        Failure::refused(format!(
-            "cannot fetch the base of {path} from {remote}: {}; nothing was created (with \
-             --offline, the tracking refs are used as they are)",
-            // Git's few lines, as one sentence.
+        format!(
+            "{remote} could not be fetched ({})",
             reason.split_whitespace().collect::<Vec<_>>().join(" ")
-        ))
+        )
     };
-    let heads = git::output(
+    let heads = match git::output(
         main,
         &["ls-remote", "--heads", "--end-of-options", remote],
         Class::Read,
     )
     .await
-    .map_err(cannot_fetch)?;
+    {
+        Ok(heads) => heads,
+        Err(reason) => {
+            return after_failed_fetch(main, path, remote, rule, cannot_fetch(reason)).await;
+        }
+    };
     let on_remote: Vec<&String> = rule
         .iter()
         .filter(|branch| {
@@ -466,10 +535,8 @@ async fn up_to_date_base(
         })
         .collect();
     let Some(branch) = on_remote.first() else {
-        return Err(Failure::refused(format!(
-            "none of the base branches of {path} ({}) is on {remote}",
-            rule.join(", ")
-        )));
+        let why = format!("none of {} is on {remote}", rule.join(", "));
+        return local_base(main, path, remote, rule, why).await;
     };
     // Every candidate there is, so that the tracking refs are fresh for a later offline creation.
     let mut fetch: Vec<String> = ["fetch", "--quiet", "--no-tags", "--end-of-options", remote]
@@ -480,10 +547,10 @@ async fn up_to_date_base(
             .iter()
             .map(|branch| format!("+refs/heads/{branch}:{}", tracking(branch))),
     );
-    git::output(main, &fetch, Class::Read)
-        .await
-        .map_err(cannot_fetch)?;
-    let commit = resolve(branch).await?.ok_or_else(|| {
+    if let Err(reason) = git::output(main, &fetch, Class::Read).await {
+        return after_failed_fetch(main, path, remote, rule, cannot_fetch(reason)).await;
+    }
+    let commit = commit_of(main, &tracking(branch)).await?.ok_or_else(|| {
         Failure::refused(format!(
             "the fetch of {path} left no tracking ref {}",
             tracking(branch)
@@ -497,7 +564,99 @@ async fn up_to_date_base(
         commit,
         fetched_now: true,
         fetched_at: Some(now_ms()),
+        note: None,
     })
+}
+
+/// The first branch of the rule that has a tracking ref, as it is.
+async fn tracked_base(main: &Path, remote: &str, rule: &[String]) -> Result<Option<Base>, Failure> {
+    for branch in rule {
+        let reference = format!("refs/remotes/{remote}/{branch}");
+        let Some(commit) = commit_of(main, &reference).await? else {
+            continue;
+        };
+        let updated = git::run(
+            main,
+            &[
+                "log",
+                "-g",
+                "-n1",
+                "--format=%ct",
+                "--end-of-options",
+                &reference,
+            ],
+            Class::Read,
+        )
+        .await
+        .map_err(Failure::refused)?;
+        let fetched_at = updated
+            .success
+            .then(|| updated.stdout.trim().parse::<u64>().ok())
+            .flatten()
+            .map(|seconds| seconds * 1000);
+        return Ok(Some(Base {
+            branch: branch.clone(),
+            remote: remote.to_owned(),
+            urls: forge::urls_of(main, remote).await,
+            reference,
+            commit,
+            fetched_now: false,
+            fetched_at,
+            note: None,
+        }));
+    }
+    Ok(None)
+}
+
+/// A fetch that failed starts from what `--offline` would take (the tracking refs as last
+/// fetched), then from the local branches, and says which.
+async fn after_failed_fetch(
+    main: &Path,
+    path: &str,
+    remote: &str,
+    rule: &[String],
+    why: String,
+) -> Result<Base, Failure> {
+    match tracked_base(main, remote, rule).await? {
+        Some(mut base) => {
+            base.note = Some(format!(
+                "{why}: started from {remote}/{} as last fetched",
+                base.branch
+            ));
+            Ok(base)
+        }
+        None => local_base(main, path, remote, rule, why).await,
+    }
+}
+
+/// The first branch of the rule the repository has itself, and a line that says why the base is
+/// that one: `no remote origin: started from the local main`.
+async fn local_base(
+    main: &Path,
+    path: &str,
+    remote: &str,
+    rule: &[String],
+    why: String,
+) -> Result<Base, Failure> {
+    for branch in rule {
+        let reference = format!("refs/heads/{branch}");
+        if let Some(commit) = commit_of(main, &reference).await? {
+            return Ok(Base {
+                branch: branch.clone(),
+                remote: remote.to_owned(),
+                urls: forge::urls_of(main, remote).await,
+                reference,
+                commit,
+                fetched_now: false,
+                fetched_at: None,
+                note: Some(format!("{why}: started from the local {branch}")),
+            });
+        }
+    }
+    Err(Failure::refused(format!(
+        "{path} has none of its base branches ({}) itself, and {why}; nothing was created",
+        rule.join(", ")
+    )))
 }
 
 /// The steps of a new workspace: a worktree per repository, then the setup as it is now, a step
@@ -1264,17 +1423,31 @@ async fn remove_held(daemon: &Daemon, workspace: &Workspace) -> Answer {
             };
             problems.push(format!("{shown} holds work that is not committed"));
         }
-        let commits = git::output(
-            &dir,
-            &["log", "--format=%h %s", "HEAD", "--not", "--remotes"],
-            Class::Read,
-        )
-        .await
-        .map_err(|error| cannot_check(&worktree.path, &error))?;
+        // A repository with no remote keeps its work on its own branches: a commit is safe once
+        // another branch holds it.
+        let remotes = git::output(&dir, &["remote"], Class::Read)
+            .await
+            .map_err(|error| cannot_check(&worktree.path, &error))?;
+        let exclude = format!("--exclude={}", workspace.branch);
+        let (elsewhere, nowhere): (&[&str], _) = match remotes.trim().is_empty() {
+            true => (&[&exclude, "--branches"], "no other branch"),
+            false => (&["--remotes"], "no remote"),
+        };
+        // What the workspace started from is not its own work, wherever that base came from.
+        let base = worktree.base.commit.as_str();
+        let log = [
+            &["log", "--format=%h %s", "HEAD", "--not"][..],
+            elsewhere,
+            &[base],
+        ]
+        .concat();
+        let commits = git::output(&dir, &log, Class::Read)
+            .await
+            .map_err(|error| cannot_check(&worktree.path, &error))?;
         let commits: Vec<&str> = commits.lines().filter(|line| !line.is_empty()).collect();
         if !commits.is_empty() {
             problems.push(format!(
-                "{} has commits on no remote: {}",
+                "{} has commits on {nowhere}: {}",
                 worktree.path,
                 commits.join(", ")
             ));

@@ -46,6 +46,14 @@ fn command<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> tokio::process::Command {
     command
         .arg("-C")
         .arg(dir)
+        // A repository's own config may name programs (a file system monitor, hooks): the daemon
+        // reads and edits repositories of the user's, it never runs what they say.
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ])
         .args(args)
         // A fetch that needs credentials fails at once; stored credentials still work.
         .env("GIT_TERMINAL_PROMPT", "0")

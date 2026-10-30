@@ -66,7 +66,9 @@ A script and a skill create one per feature:
 8. Some services (authentication relay) are shared and started by the user, not per group.
 
 **What Flottille provides instead**: a project with six repositories, all taken by default; a
-base branch rule `[develop, main]` per repository and a fetch that fails loudly; workspace
+base branch rule `[develop, main]` per repository and a fetch whose failure is said, never
+silent (a repository with no remote, or a fetch that fails, starts from its local branch and the
+creation says so in one line: Flottille imposes no fetch); workspace
 variables (store folder, compose project name, harness paths, `PATH` prefix) injected into every
 command; copy steps with globs; a root-entries link step that excludes `.git` and `.gitignore`;
 repository dependencies (declared, or read by a project command) and run steps "for each

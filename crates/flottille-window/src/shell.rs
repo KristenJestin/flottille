@@ -681,6 +681,34 @@ impl Shell {
                     page.update(cx, |page, cx| page.answered(read, saved, window, cx));
                 }
             }
+            Outcome::Repositories {
+                project,
+                read,
+                serial,
+            } => {
+                let page = self.main.read(cx).project_page().cloned();
+                let section = page
+                    .filter(|page| page.read(cx).name() == project)
+                    .map(|page| page.read(cx).repositories().clone());
+                // An answer to an older request than the last is no news, for the form either.
+                if section
+                    .as_ref()
+                    .is_some_and(|section| !section.read(cx).is_latest(serial))
+                {
+                    return;
+                }
+                if let Ok(value) = &read
+                    && let Some(form) = self.new_workspace_of(&project).cloned()
+                {
+                    let rules = crate::repositories::rules_of(
+                        &crate::repositories::Repositories::of(value),
+                    );
+                    form.update(cx, |form, cx| form.set_rules(rules, cx));
+                }
+                if let Some(section) = section {
+                    section.update(cx, |section, cx| section.answered(serial, read, window, cx));
+                }
+            }
             Outcome::ProjectChecked { project, read } => {
                 if let Some(page) = self.project_settings.clone()
                     && page.read(cx).name() == project
@@ -1218,6 +1246,7 @@ impl Shell {
             .retain(|name, _| snapshot.projects.iter().any(|p| &p.name == name));
         self.replies
             .retain(|id, _| snapshot.sessions.iter().any(|s| &s.id == id));
+        let edited = snapshot.project_changes != self.snapshot.project_changes;
         self.snapshot = snapshot;
 
         // What was open is shown as it is now; the first project opens when nothing is.
@@ -1238,6 +1267,12 @@ impl Shell {
                 }
                 self.refresh_project(cx);
             }
+        }
+        // A project's file was edited (by hand, or by the command line): its repositories as the
+        // page shows them may no longer be.
+        if edited && let Some(page) = self.main.read(cx).project_page().cloned() {
+            let section = page.read(cx).repositories().clone();
+            section.update(cx, |section, cx| section.read(cx));
         }
     }
 

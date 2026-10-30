@@ -17,6 +17,9 @@ pub struct Snapshot {
     pub workspaces: Vec<Workspace>,
     /// Oldest first.
     pub bell: Vec<BellItem>,
+    /// How many `project.changed` events the link has seen: a project's file was edited when it
+    /// grows.
+    pub project_changes: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -404,6 +407,7 @@ impl Snapshot {
             sessions,
             workspaces,
             bell,
+            project_changes: 0,
         }
     }
 

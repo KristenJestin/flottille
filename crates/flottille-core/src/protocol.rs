@@ -1,5 +1,7 @@
 //! The socket protocol: one JSON object per line (`docs/protocol.md`).
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -70,6 +72,15 @@ pub struct ProjectName {
     pub name: String,
 }
 
+/// The parameters of `project.add_repository` and `project.remove_repository`: a repository's
+/// path, relative to the project's folder.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectRepository {
+    pub name: String,
+    pub path: String,
+}
+
 /// The parameters of `project.ticket`: a ticket of the project's tracker, read before any
 /// workspace is linked to it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -112,6 +123,10 @@ pub struct WorkspaceCreate {
     /// `<branch prefix>/<name>` when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// The base branch chosen for a repository it takes, by path, in place of the repository's
+    /// rule; the rule for the others.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bases: BTreeMap<String, String>,
     /// Fetch nothing: base the branches on the tracking refs as they are.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub offline: bool,

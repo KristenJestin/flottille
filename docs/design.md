@@ -311,6 +311,8 @@ by `reference/multi-repo-case.md`:
 
 - **Repository set**: all of the project's repositories by default; the project can say so
   ("environment scope is not change scope").
+- **No fetch imposed**: a repository with no remote, or whose fetch fails, starts from its own
+  base branch, and the creation says so in one line (`docs/workspaces.md`).
 - **Root entries**: when the project folder is not itself a repository, its other top-level
   entries (instruction files, shared folders) can be linked into the workspace folder by one
   setup step, never `.git` nor `.gitignore`.
@@ -465,7 +467,10 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   offers a "⋯" menu with End session (the confirmation of the session page, counting the agents
   that end) and, on an ended session whose agent can resume, Resume, with no need to open the
   session first;
-- a project page: its repositories, its places with their sessions, creating and removing a
+- a project page: its repositories (each with its branch, its remote or "local only" and its
+  forge; added, removed, which only forgets one, and detected again), its places with their
+  sessions, each workspace's card saying where each of its repositories stands (branch, commits
+  ahead, files not committed, setup steps played), creating and removing a
   workspace (with the preparation's progress and failure output), the composer that starts
   a session (place, agent, model, first message), and its tasks, each with Run, which runs it in
   the project folder, listed below with the rail's rows and output panel; its Settings: each
@@ -500,7 +505,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   judge's reason when one was asked, then why it was held, one sentence for each reason, with
   Allow and Deny only; a base card stands apart, in the alarm colour, with a sentence that says
   why it always comes back; an answered card leaves), the session's
-  tree of agents, its runs, its workspace (each repository's forge as the daemon reads it, its ticket,
+  tree of agents, its runs, its workspace (each repository's branch, commits ahead, files not
+  committed and setup steps played, and its forge as the daemon reads it, its ticket,
   linked or unlinked there) and facts. The
   root's row menu ("⋯") holds End session, the only way the window ends an agent: it ends the root
   and its tree, after a confirmation that counts the agents that end. An ended session leaves its

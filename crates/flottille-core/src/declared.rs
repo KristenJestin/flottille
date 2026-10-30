@@ -16,6 +16,10 @@ pub const BITBUCKET_CLOUD: &str = "bitbucket.org";
 /// GitHub's host.
 pub const GITHUB: &str = "github.com";
 
+/// What is said of a repository whose forge is not declared: nothing is read nor written for it.
+pub const NO_FORGE: &str = "no forge set for this repository: choose it in the project's \
+    Settings (the window), or write its `forge` in the project's file; Flottille never guesses it";
+
 /// The forge one repository of a project is on, as its entry declares it:
 /// `forge = { kind = "github", repository = "acme/api" }`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
