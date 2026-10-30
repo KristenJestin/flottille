@@ -208,14 +208,14 @@ window: written into its file as they are, under the template's name unless anot
 they are the project's own from then on, to edit like any other (its instructions are a
 multi-line string). They are what
 `docs/reference/multi-repo-case.md` runs by hand with slash commands. Their agents use Flottille's
-tools only (`forge`, `tickets`, `workspace` `remove`, git lines through `run`),
+tools only (`forge`, `tickets`, git lines through `run`),
 never a forge's command line, so they work on every forge Flottille writes to.
 
 | Template | What its agent does |
 |---|---|
 | `open-prs` | Reports each repository first (uncommitted work, commits on no remote, commits ahead of its base, its pull request) to the user with `ask_user`, and stops if one holds uncommitted work; then, for each repository with commits of its own and no open pull request, pushes its branch and opens its pull request, its title in the project's format. None for the others. It makes no commit. |
 | `merge-stack` | Checks every pull request first (reviews, comments, checks) and sends the user what blocks; then merges by dependency levels, the repositories of one level together, rebasing a branch behind its base and pushing it with a lease, waiting between levels for what the project says follows a merge (its pipelines, a release), re-running a pipeline failed outside the change once. A merge the checks or a review block goes only when the user waives it. |
-| `close` | Audits each repository (uncommitted work, commits on no remote, commits of its own, its pull request): uncommitted or unpushed work, or a branch with commits whose pull request is not merged, stops it and is told to the user; otherwise `workspace` `remove`, which checks again, removes the workspace and deletes its empty branches. |
+| `close` | Audits each repository (uncommitted work, commits on no remote, commits of its own, its pull request): uncommitted or unpushed work, or a branch with commits whose pull request is not merged, stops it and is told to the user; otherwise it reports the workspace ready to be removed: it works in it, and `workspace` `remove` refuses the workspace its caller works in, so the user removes it, or the agent they talk to in `main`, whose removal checks again and deletes its empty branches. |
 
 What each call of theirs needs is the session's mode: in Ask, each push and pull request is a
 card; in Auto, the judge allows what the user asked for and asks the rest. A push with a lease

@@ -1096,18 +1096,30 @@ fn merge_a_stack_refuses_while_a_check_is_failing_and_merges_the_levels_in_order
 }
 
 #[test]
-fn close_stops_on_unpushed_work_and_removes_a_workspace_whose_branches_are_merged_or_empty() {
+fn close_leaves_the_removal_to_main_which_stops_on_unpushed_work_and_deletes_empty_branches() {
     let user = User::with_fake_agent();
     let workspace = stack(&user, false, "");
     let main = user.path("work/app");
     committed(&user, &workspace.join("api"), "login.ts");
     adopt(&user, "close");
-    let (_, mcp) = run(&user, "close");
+    let (closer, close) = run(&user, "close");
     let brief = brief_of(&user, "The command close of project app");
-    assert!(brief.contains("`workspace` `remove`"), "{brief}");
+    assert!(brief.contains("you cannot remove it"), "{brief}");
+    // It works in the workspace: it cannot remove it.
+    let refused = close.call("workspace", json!({"action": "remove"}));
+    assert!(
+        refused.error && refused.text.contains("works in the workspace login"),
+        "{}",
+        refused.text
+    );
+    let reported = close.call("report", json!({"text": "Ready to be removed."}));
+    assert!(!reported.error, "{}", reported.text);
+    user.call("agent.stop", json!({"agent": closer})).unwrap();
+    let mcp = in_main(&user);
+    let login = || json!({"name": "login"});
 
     // api's commit is on no remote: refused, and nothing is touched.
-    let answer = remove(&user, &mcp, json!({}));
+    let answer = remove(&user, &mcp, login());
     assert!(answer.error, "{}", answer.text);
     assert!(
         answer.text.contains("api has commits on no remote"),
@@ -1119,7 +1131,7 @@ fn close_stops_on_unpushed_work_and_removes_a_workspace_whose_branches_are_merge
         .unwrap();
     let uncommitted = workspace.join("web/notes.txt");
     std::fs::write(&uncommitted, "notes\n").unwrap();
-    let answer = remove(&user, &mcp, json!({}));
+    let answer = remove(&user, &mcp, login());
     assert!(
         answer.error
             && answer
@@ -1135,7 +1147,7 @@ fn close_stops_on_unpushed_work_and_removes_a_workspace_whose_branches_are_merge
         &workspace.join("api"),
         &["push", "--quiet", "origin", "app/login"],
     );
-    let answer = remove(&user, &mcp, json!({}));
+    let answer = remove(&user, &mcp, login());
     assert!(!answer.error, "{}", answer.text);
     assert!(
         answer
@@ -1156,9 +1168,6 @@ fn close_stops_on_unpushed_work_and_removes_a_workspace_whose_branches_are_merge
         let branches = user.git_output(&main.join(name), &["branch", "--list", "app/login"]);
         assert_eq!(branches.contains("app/login"), kept, "{name}: {branches}");
     }
-    // The run's agent still reports.
-    let reported = mcp.call("report", json!({"text": "Closed."}));
-    assert!(!reported.error, "{}", reported.text);
 }
 
 // Bitbucket, through the user's `bkt` (`docs/forges.md`): the same writes, the same classes, the
@@ -2174,11 +2183,10 @@ fn workspace_remove_is_refused_while_an_agent_outside_the_tree_or_a_command_not_
     adopt(&user, "close");
     let (outsider, outside) = plain_agent_with_id(&user);
     let theirs = sleeping(&user, &outside);
-    let (_, mcp) = run(&user, "close");
-    // The tree's own command run is no obstacle.
-    let ours = sleeping(&user, &mcp);
+    let mcp = in_main(&user);
+    let login = || json!({"name": "login"});
 
-    let answer = remove(&user, &mcp, json!({}));
+    let answer = remove(&user, &mcp, login());
     assert!(answer.error, "{}", answer.text);
     assert!(
         answer.text.contains(&format!(
@@ -2194,22 +2202,28 @@ fn workspace_remove_is_refused_while_an_agent_outside_the_tree_or_a_command_not_
         "{}",
         answer.text
     );
-    assert!(!answer.text.contains(&ours), "{}", answer.text);
     assert!(workspace.exists());
 
     let stopped = outside.call("run_status", json!({"run": theirs, "action": "stop"}));
     assert!(!stopped.error, "{}", stopped.text);
-    let answer = remove(&user, &mcp, json!({}));
+    let answer = remove(&user, &mcp, login());
     assert!(answer.error, "{}", answer.text);
     assert!(!answer.text.contains(&theirs), "{}", answer.text);
     assert!(workspace.exists());
 
     user.call("agent.stop", json!({"agent": outsider})).unwrap();
-    let answer = remove(&user, &mcp, json!({}));
+    let answer = remove(&user, &mcp, login());
     assert!(!answer.error, "{}", answer.text);
     assert!(!workspace.exists());
-    let stopped = mcp.call("run_status", json!({"run": ours, "action": "stop"}));
-    assert!(!stopped.error, "{}", stopped.text);
+}
+
+/// A root the user started in `main`: its MCP session.
+fn in_main(user: &User) -> Mcp {
+    let opened = user.received_requests("session/new").len();
+    user.call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let (url, authorization) = server_of(user, opened);
+    Mcp::initialize(&url, &authorization)
 }
 
 /// The MCP session of the agent a root launched: the last session opened.

@@ -341,11 +341,11 @@ action's, and the store renamed them in the agents' fixed lists and their pendin
 
 | Tool | |
 |---|---|
-| `workspace {action: list \| show \| create \| prepare \| link_ticket \| remove, name?, repositories?, ticket?}` | The project's workspaces, as the window manages them (`docs/workspaces.md`). `list` gives each one's state, branch, repositories and ticket; `show {name?}` one whole, each step of its preparation with its state and why a failed one failed. `create {name, repositories?, ticket?}` makes one as `workspace.create` does: its worktrees, answered once they are made, then its setup in the background. `prepare {name?}` resumes a failed preparation (`workspace.prepare`); `link_ticket {name?, ticket}` links its ticket, and unlinks it with `ticket: null` (`workspace.link_ticket`). `name` is the agent's own workspace when left out, but for `create`; in `main` it names one. Every agent has it. A child reads the workspaces and removes its own; its other writes are refused (`refused: the agent the user talks to manages the project's workspaces; … ask your parent (ask_parent)`). |
-| `remove {name?}` | Removes a workspace, the agent's own when `name` is left out and the one named in `main`, where it is required, as `flottille workspace remove` does (`docs/workspaces.md`, "Removal"): refused, nothing touched, while a repository holds uncommitted work or commits on no remote, or while another agent than the caller works in the workspace, of its tree or not, or a command run not the tree's own runs there (`refused: workspace … is not removed, nothing was touched: the agent …, outside this agent's tree, works in it…`, `the agent …, of this agent's tree, works in it`), each named; then deletes, in each repository, the workspace's branch when it holds no commit of its own (every commit of it is in its base's tracking ref), and keeps the others. An agent in a workspace removes only its own, and a child in `main` none (`refused: a child removes only its own workspace, and this one works in main, …`); each call is to judge. Until #141 it was the tool `workspace_remove {workspace?}`, still answered for one release. |
+| `workspace {action: list \| show \| create \| prepare \| link_ticket \| remove, name?, repositories?, ticket?}` | The project's workspaces, as the window manages them (`docs/workspaces.md`). `list` gives each one's state, branch, repositories and ticket; `show {name?}` one whole, each step of its preparation with its state and why a failed one failed. `create {name, repositories?, ticket?}` makes one as `workspace.create` does: its worktrees, answered once they are made, then its setup in the background. `prepare {name?}` resumes a failed preparation (`workspace.prepare`); `link_ticket {name?, ticket}` links its ticket, and unlinks it with `ticket: null` (`workspace.link_ticket`). `name` is the agent's own workspace when left out, but for `create`; in `main` it names one. Every agent has it. A child reads the workspaces; its writes, `remove` included, are refused (`refused: the agent the user talks to manages the project's workspaces; … ask your parent (ask_parent)`). |
+| `remove {name}` | Removes a workspace of the project, as `flottille workspace remove` does (`docs/workspaces.md`, "Removal"), **always held for the user**, whatever the mode and the judge: a request whose card says what would be lost, each repository's uncommitted files and commits on no remote (`This would be lost, and the workspace is removed only if your answer says to discard it:`, `api has commits on no remote: 1a2b3c4 Add the login`), or `Nothing would be lost`. Allowed, it is refused, nothing touched, while something would be lost, unless the user's answer said to discard it (`flottille approve <n> --discard`), and while another agent than the caller works in the workspace, of its tree or not, or a command run not the tree's own runs there (`refused: workspace … is not removed, nothing was touched: the agent …, outside this agent's tree, works in it…`, `the agent …, of this agent's tree, works in it`), each named; then deletes, in each repository, the workspace's branch when it holds no commit of its own (every commit of it is in its base's tracking ref), and keeps the others. An agent never removes the workspace it works in, whose folder its removal would take from under it (`refused: this agent works in the workspace login, and removing it would take the folder it works in from under it: …`), named or left out; a child removes none. Until #141 it was the tool `workspace_remove {workspace?}`, still answered for one release. |
 
-`list` and `show` run at once. `create`, `prepare`, `link_ticket` and `remove` are to judge, as any write
-of "The project" is: an `action` request, which says what it does in words and is done only while
+`list` and `show` run at once. `remove` is base (above). `create`, `prepare` and `link_ticket` are to judge, as any
+write of "The project" is: an `action` request, which says what it does in words and is done only while
 they hold. Making a workspace ready plays setup steps that run without the gate, so `create`
 (the project's setup) and `prepare` (the steps it does again: those not done, and the done ones
 whose result is gone) are also judged as setting each of those steps is ("The project", "A line
@@ -664,6 +664,7 @@ says who answers a call to judge (`docs/design.md` §7.1).
    - a write of `forge` or `tickets` whose title or body, or a session for the user whose brief,
      holds what the masking takes for a secret; a session for the user started by a session an
      agent started ("Sessions for the user");
+   - `workspace` `remove`, whose card says what would be lost ("The workspace");
    - a write of `tasks` or `setup` whose line, or task, would be base to run, and one that says
      what only the user's word may say ("The project": asking turned off, `check` or `read_only`
      set, a `link` or `root_entries` step, a `copy` of a sensitive name).
@@ -701,9 +702,9 @@ says who answers a call to judge (`docs/design.md` §7.1).
    looks through (20,000), the judge told which; `git commit`, `git push`, `git rebase` of a
    branch on no remote, `git reset --hard` in a workspace, `git -c` or `--config-env` of other
    keys, git's other global options, `git remote` and `git config` writes of other keys; the
-   forge command lines beyond their reads; the writes of `forge` and `tickets`, `workspace`
-   `remove`, `agent_launch` with `root` (a session for the user), `session_send` (a message to
-   another session), and a write of
+   forge command lines beyond their reads; the writes of `forge` and `tickets`,
+   `agent_launch` with `root` (a session for the user), `session_send` (a message to another
+   session), and a write of
    `tasks`, `setup`, `skills`, `commands` or `project` ("The project"), with the line it sets;
    `workspace` `create`, `prepare` and `link_ticket`, and `agent_launch` with `new_workspace`,
    with the setup steps they play ("The workspace").
@@ -764,14 +765,17 @@ twice gives the same request. A request that cannot be written refuses the call:
 request for the user could not be made, so nothing was done; say so and go on with what does not
 depend on it`.
 
-**The user answers** a request they hold: allow it once, or deny it. Nothing they answer allows
+**The user answers** a request they hold: allow it once, or deny it. A workspace's removal is
+also allowed with the answer to discard what would be lost (`flottille approve <n> --discard`),
+refused for any other request. That answer covers exactly what the card listed: work that appeared
+since is not discarded, the removal is refused and the agent calls again for a new card. Nothing they answer allows
 a later call: the next one goes through the gate again. A request held by an agent is not listed
 for the user and cannot be answered by them.
 
 | Command | |
 |---|---|
 | `flottille approvals [--json]` | The requests the user holds, each with its number, the agent, the call, its class, why, and the judge's verdict when one was asked. |
-| `flottille approve <n>` | Allows the request once. Refused for a request held by an agent, or one already decided. |
+| `flottille approve <n> [--discard]` | Allows the request once; `--discard`, for a workspace's removal only, removes it even with what would be lost. Refused for a request held by an agent, or one already decided. |
 | `flottille deny <n>` | Denies it: the agent is told nothing was done. |
 
 **An allowed request** is checked again (the gate on the frozen call: a refusal now, or a reason

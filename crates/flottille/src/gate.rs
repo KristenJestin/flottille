@@ -275,19 +275,19 @@ pub fn decide(call: &Call) -> Verdict {
             None => Verdict::Allow,
         },
         "workspace" if call.args["action"] == "remove" => {
-            // In `main` it names the workspace; elsewhere it is the agent's own.
-            let named = call.args["name"].as_str();
-            let which = match named.or(call.grant.place.workspace.as_deref()) {
+            let which = match call.args["name"].as_str() {
                 Some(name) => format!("the workspace {name}"),
                 None => "a workspace".to_owned(),
             };
+            // What a removal loses is the user's to weigh, never a judge's, in every mode.
             Found {
-                base: Vec::new(),
-                judge: vec![format!(
-                    "it removes {which} and deletes its branches that hold nothing of their own"
+                base: vec![format!(
+                    "it removes {which} and deletes its branches that hold nothing of their own: \
+                     only the user decides a workspace's removal"
                 )],
+                judge: Vec::new(),
             }
-            .verdict(Kind::Call)
+            .verdict(Kind::Action)
         }
         "run" => run(call),
         tool if FILES.contains(&tool) => files(call),
@@ -3194,7 +3194,7 @@ mod tests {
     }
 
     #[test]
-    fn to_judge_forge_writes_and_workspace_removal_are_judged() {
+    fn to_judge_forge_writes_are_judged() {
         let fixture = Fixture::workspace();
         for action in ["create", "comment", "edit", "merge", "checks"] {
             let verdict = fixture.judge(
@@ -3204,11 +3204,6 @@ mod tests {
             );
             assert!(to_judge(&verdict), "{action}");
         }
-        assert!(to_judge(&fixture.judge(
-            "workspace",
-            json!({"action": "remove"}),
-            Some(&fixture.never)
-        )));
     }
 
     #[test]
@@ -3305,17 +3300,18 @@ mod tests {
     }
 
     #[test]
-    fn workspace_remove_in_main_is_judged_and_names_the_workspace_it_removes() {
+    fn workspace_remove_is_base_an_action_and_names_the_workspace_it_removes() {
         let fixture = Fixture::main();
         let verdict = fixture.judge(
             "workspace",
             json!({"action": "remove", "name": "login"}),
             Some(&fixture.never),
         );
-        assert!(to_judge(&verdict), "{verdict:?}");
+        assert!(base_class(&verdict), "{verdict:?}");
         let Verdict::Ask(ask) = verdict else {
             unreachable!()
         };
+        assert_eq!(ask.kind, Kind::Action);
         assert!(
             ask.reasons[0].starts_with("it removes the workspace login and deletes"),
             "{:?}",

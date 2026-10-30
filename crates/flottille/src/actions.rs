@@ -290,18 +290,15 @@ pub async fn prepared(
         "skills" => skills_says(daemon, &project, &arguments(tool, args.clone())?),
         "commands" => commands_says(&project, &arguments(tool, args.clone())?),
         "workspace" => {
-            // In `main` a workspace removed is named: one a child does not work in.
-            if args["action"] == "remove"
-                && grant.place.workspace.is_none()
-                && !is_root(daemon, grant)
-            {
-                return Err(Outcome::Refused(CHILD_MAIN_REMOVAL.into()));
-            }
-            let mine = matches!(args["action"].as_str(), Some("list" | "show" | "remove"));
+            let mine = matches!(args["action"].as_str(), Some("list" | "show"));
             if !mine && !is_root(daemon, grant) {
                 return Err(Outcome::Refused(CHILD_WORKSPACES.into()));
             }
-            workspace_says(daemon, grant, &project, &arguments(tool, args.clone())?)
+            let call: WorkspaceCall = arguments(tool, args.clone())?;
+            if call.action == "remove" {
+                return removal_says(daemon, grant, &call).await;
+            }
+            workspace_says(daemon, grant, &project, &call)
         }
         _ => {
             let call: ProjectCall = arguments(tool, args.clone())?;
@@ -316,9 +313,71 @@ pub async fn prepared(
     }
 }
 
-/// Why a child in `main` cannot remove a workspace.
-const CHILD_MAIN_REMOVAL: &str = "refused: a child removes only its own workspace, and this one \
-    works in main, the project folder: ask your parent (ask_parent)";
+/// The workspace a removal names and what removing it would lose.
+async fn removal_losses(
+    daemon: &Daemon,
+    grant: &Grant,
+    call: &WorkspaceCall,
+) -> Result<(String, Vec<String>), Outcome> {
+    let name = crate::workspaces::removed_named(daemon, &grant.place, call.name.as_deref())?;
+    let losses = crate::workspaces::losses(daemon, &grant.place.project, &name)
+        .await
+        .map_err(refusal)?;
+    Ok((name, losses))
+}
+
+/// What removing a workspace does, in words: what would be lost, which the user's answer says to
+/// discard or not, or that nothing would be.
+async fn removal_says(
+    daemon: &Daemon,
+    grant: &Grant,
+    call: &WorkspaceCall,
+) -> Result<Vec<String>, Outcome> {
+    let (name, losses) = removal_losses(daemon, grant, call).await?;
+    Ok(removal_words(&name, losses))
+}
+
+fn removal_words(name: &str, losses: Vec<String>) -> Vec<String> {
+    let mut says = vec![format!(
+        "Remove the workspace {name}: its worktrees and its folder, and its branch in each \
+         repository where it holds no commit of its own"
+    )];
+    if losses.is_empty() {
+        says.push("Nothing would be lost".into());
+    } else {
+        says.push(
+            "This would be lost, and the workspace is removed only if your answer says to \
+             discard it:"
+                .into(),
+        );
+        says.extend(losses);
+    }
+    says
+}
+
+/// The losses the user's answer to discard covers: what removing the workspace loses now, once
+/// that is what the `card` the user read said. The removal is done only while it still finds
+/// these.
+pub async fn approved_losses(
+    daemon: &Daemon,
+    grant: &Grant,
+    args: &Value,
+    card: &[String],
+) -> Result<Vec<String>, Outcome> {
+    let call: WorkspaceCall = arguments("workspace", args.clone())?;
+    let (name, losses) = removal_losses(daemon, grant, &call).await?;
+    let says: Vec<String> = removal_words(&name, losses.clone())
+        .iter()
+        .map(|said| crate::mcp::masked(said, &grant.place))
+        .collect();
+    match says == card {
+        true => Ok(losses),
+        false => Err(Outcome::Refused(format!(
+            "what it does changed since the user allowed it; it would now: {}",
+            says.join("; ")
+        ))),
+    }
+}
 
 /// What a write of `forge` or `tickets` posts, whole: the user reads on the card what the forge
 /// or the tracker will show (the arguments recorded are cut). Nothing for a read.
@@ -862,6 +921,28 @@ fn command_of(call: &CommandsCall) -> Result<(String, Command), Outcome> {
     Ok((name, command))
 }
 
+/// `workspace` `remove` allowed by the user with the answer to discard what would be lost, which
+/// is `approved`: the removal is refused if it finds anything else.
+pub async fn remove_discarding(
+    daemon: &Arc<Daemon>,
+    grant: &Grant,
+    args: Value,
+    approved: &[String],
+) -> Outcome {
+    let call: WorkspaceCall = match arguments("workspace", args) {
+        Ok(call) => call,
+        Err(refused) => return refused,
+    };
+    crate::workspaces::workspace_remove(
+        daemon,
+        &grant.agent,
+        &grant.place,
+        call.name.as_deref(),
+        Some(approved),
+    )
+    .await
+}
+
 /// Performs a call the gate let through: on the agent's own project, always.
 pub async fn perform(daemon: &Arc<Daemon>, grant: &Grant, tool: &str, args: Value) -> Outcome {
     match performed(daemon, grant, tool, args).await {
@@ -1126,6 +1207,7 @@ async fn performed(
                         &grant.agent,
                         &grant.place,
                         call.name.as_deref(),
+                        None,
                     )
                     .await;
                     match removed {
@@ -1185,8 +1267,7 @@ const WORKSPACE_ACTIONS: &str = "list, show, create, prepare, link_ticket and re
 /// What a child is told of the writes of the `workspace` family but `remove`, which are not its
 /// own.
 pub const CHILD_WORKSPACES: &str = "refused: the agent the user talks to manages the project's \
-    workspaces; you work in the place you were given, and may only remove it once done: ask your \
-    parent (ask_parent)";
+    workspaces; you work in the place you were given: ask your parent (ask_parent)";
 
 /// The setup steps a call plays without the gate, as the gate judges them: creating a workspace
 /// (`workspace create`, `agent_launch` with `new_workspace`) plays the project's setup, resuming
@@ -1351,15 +1432,6 @@ fn workspace_says(
                     }
                     Ok(says)
                 }
-                // Judged as before #141, as a call: what it removes is said by the gate.
-                // An agent in a workspace removes only its own.
-                "remove" => crate::mcp::workspace_named(
-                    daemon,
-                    &grant.place,
-                    call.name.as_deref(),
-                    "workspace remove",
-                )
-                .map(|_| Vec::new()),
                 _ => {
                     let ticket = match &call.ticket {
                         Some(Some(ticket)) => ticket,

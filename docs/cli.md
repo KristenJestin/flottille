@@ -724,10 +724,11 @@ $ flottille approvals
 Answer with `flottille approve <n>` or `flottille deny <n>`.
 ```
 
-### `flottille approve <number>`
+### `flottille approve <number> [--discard]`
 
 Allows the request: its call is checked again, performed, and its result handed to the agent. It
-allows that call once; nothing is remembered for the next one.
+allows that call once; nothing is remembered for the next one. `--discard`, for an agent's removal
+of a workspace only, removes it even with the work its card says would be lost.
 
 ```
 $ flottille approve 1

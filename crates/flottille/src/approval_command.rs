@@ -18,13 +18,19 @@ pub fn approvals(paths: &Paths, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn approve(paths: &Paths, number: u64) -> Result<()> {
-    let decided =
-        Client::connect_or_start(paths)?.request("approval.approve", json!({"number": number}))?;
+pub fn approve(paths: &Paths, number: u64, discard: bool) -> Result<()> {
+    let decided = Client::connect_or_start(paths)?.request(
+        "approval.approve",
+        json!({"number": number, "discard": discard}),
+    )?;
     let agent = decided["request"]["agent"].as_str().unwrap_or("?");
+    let discarding = match discard {
+        true => ", discarding what the workspace's removal would lose,",
+        false => "",
+    };
     println!(
-        "Request #{number} is allowed; Flottille performs it and hands the result to agent \
-         {agent}."
+        "Request #{number} is allowed{discarding}; Flottille performs it and hands the result to \
+         agent {agent}."
     );
     Ok(())
 }
