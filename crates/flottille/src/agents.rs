@@ -115,7 +115,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 &agent.project,
                 agent.workspace.as_deref(),
                 &asked.message,
-            );
+            )?;
             let delivery = deliveries::deliver_with_images(
                 daemon,
                 &agent.id,
@@ -446,7 +446,7 @@ fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
         &project.name,
         asked.workspace.as_deref(),
         &asked.message,
-    );
+    )?;
     let agent = create(
         daemon,
         &project,

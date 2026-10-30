@@ -9,6 +9,7 @@ use flottille_core::paths::Paths;
 use serde_json::{Value, json};
 
 use crate::client::Client;
+use crate::import_command::{self, Import};
 use crate::project_command::in_full;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -52,6 +53,9 @@ pub enum SkillAction {
         #[arg(long)]
         json: bool,
     },
+    /// List the skills of the project's .claude folder, or import them: each points at its
+    /// SKILL.md, nothing is copied nor written in the project
+    Import(Import),
     /// Remove a skill; the project's files are never touched
     Remove {
         project: String,
@@ -98,6 +102,9 @@ impl What {
 
 pub fn run(paths: &Paths, action: SkillAction) -> Result<ExitCode> {
     let mut client = Client::connect_or_start(paths)?;
+    if let SkillAction::Import(import) = action {
+        return import_command::run(&mut client, "skill", |error| in_full(paths, error), import);
+    }
     let mut ask = |method: &str, params: Value| {
         client
             .request(method, params)
@@ -158,6 +165,7 @@ pub fn run(paths: &Paths, action: SkillAction) -> Result<ExitCode> {
             );
             (edited, json, text)
         }
+        SkillAction::Import(_) => unreachable!("imports return above"),
         SkillAction::Remove {
             project,
             name,

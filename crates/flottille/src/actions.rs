@@ -1815,7 +1815,16 @@ fn commands_text(project: &Project) -> String {
 fn command_text(command: &Value) -> String {
     let text = |key: &str| command[key].as_str().unwrap_or_default().to_owned();
     let mut shown = format!("Command /{}: {}\n", text("name"), text("description"));
-    shown.push_str(&format!("Instructions:\n{}\n", text("instructions")));
+    if command["path"].is_string() {
+        shown.push_str(&format!(
+            "Read from {} in the project folder each time it is used.\n",
+            text("path")
+        ));
+    }
+    match command["problem"].as_str() {
+        Some(why) => shown.push_str(&format!("Its instructions cannot be read: {why}\n")),
+        None => shown.push_str(&format!("Instructions:\n{}\n", text("instructions"))),
+    }
     shown
 }
 

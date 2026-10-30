@@ -424,7 +424,8 @@ fn send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
         &child.project,
         child.workspace.as_deref(),
         &asked.message,
-    );
+    )
+    .map_err(|failure| refused(format!("refused: {}", failure.message)))?;
     deliveries::deliver(
         daemon,
         &child.id,
