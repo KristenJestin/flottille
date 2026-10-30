@@ -16,6 +16,7 @@ use gpui_kit::{
 use crate::color::mix;
 use crate::icons::{Icon, icon};
 use crate::interact::{choose, feel, wire};
+use crate::listing::{Item, Placement};
 use crate::menu::Menu;
 use crate::motion::{Motion, PANEL};
 use crate::theme::{palette, radius};
@@ -506,7 +507,7 @@ impl RenderOnce for ListRow {
 #[derive(IntoElement)]
 pub struct ListCard {
     id: ElementId,
-    rows: Vec<ListRow>,
+    rows: Vec<(Option<(ElementId, Placement)>, ListRow)>,
 }
 
 impl ListCard {
@@ -518,12 +519,21 @@ impl ListCard {
     }
 
     pub fn row(mut self, row: ListRow) -> Self {
-        self.rows.push(row.in_card());
+        self.rows.push((None, row.in_card()));
         self
     }
 
     pub fn rows(mut self, rows: impl IntoIterator<Item = ListRow>) -> Self {
-        self.rows.extend(rows.into_iter().map(ListRow::in_card));
+        self.rows
+            .extend(rows.into_iter().map(|row| (None, row.in_card())));
+        self
+    }
+
+    /// A row of a [`Listing`](crate::Listing), drawn in the [`Item`] `id`: it unfolds when it
+    /// arrives and folds away with the line above it when it leaves.
+    pub fn item(mut self, id: impl Into<ElementId>, placement: Placement, row: ListRow) -> Self {
+        self.rows
+            .push((Some((id.into(), placement)), row.in_card()));
         self
     }
 }
@@ -533,12 +543,23 @@ impl RenderOnce for ListCard {
         let p = palette(cx);
         let mut children: Vec<AnyElement> = Vec::new();
         let last = self.rows.len().saturating_sub(1);
-        for (index, mut row) in self.rows.into_iter().enumerate() {
+        for (index, (item, mut row)) in self.rows.into_iter().enumerate() {
             row.corners = (index == 0, index == last);
-            if index > 0 {
-                children.push(div().flex_none().h(px(1.)).bg(p.line).into_any_element());
+            let line = (index > 0).then(|| div().flex_none().h(px(1.)).bg(p.line));
+            match item {
+                Some((id, placement)) => children.push(
+                    Item::new(
+                        id,
+                        placement,
+                        div().flex().flex_col().children(line).child(row),
+                    )
+                    .into_any_element(),
+                ),
+                None => {
+                    children.extend(line.map(IntoElement::into_any_element));
+                    children.push(row.into_any_element());
+                }
             }
-            children.push(row.into_any_element());
         }
         div()
             .id(self.id)

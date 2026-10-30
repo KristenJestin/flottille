@@ -49,6 +49,7 @@ pub struct Card {
     footer: Vec<AnyElement>,
     attention: bool,
     alarm: bool,
+    fill: bool,
 }
 
 impl Card {
@@ -89,6 +90,12 @@ impl Card {
     /// An action in the footer row, right-aligned.
     pub fn action(mut self, action: impl IntoElement) -> Self {
         self.footer.push(action.into_any_element());
+        self
+    }
+
+    /// As tall as its parent: the cards of a row of a grid end on one line.
+    pub fn fill(mut self) -> Self {
+        self.fill = true;
         self
     }
 
@@ -179,6 +186,7 @@ impl RenderOnce for Card {
         div()
             .flex()
             .flex_col()
+            .when(self.fill, |d| d.h_full())
             .bg(if self.alarm { p.fail_bg } else { p.card })
             .border_1()
             .border_color(match (self.alarm, self.attention) {
