@@ -49,7 +49,8 @@ path = ".claude/commands/review.md"       # relative to the project folder; no i
 
 Its instructions are then the file's text after its front matter, **read each time the command is
 used**: a file changed is sent changed. A file that cannot be read when the command is sent (gone,
-out of the project folder by a link, not text) sends nothing, and the sender is told why. A command
+out of the project folder by a link, not text, or where it really is a sensitive place or a file
+of secrets) sends nothing, and the sender is told why, never its content. A command
 has `instructions` or `path`, never both: `command.edit` refuses instructions for one that points
 at a file, whose text is the file's to edit.
 
@@ -76,7 +77,9 @@ folder.**
 As for skills (`docs/skills.md`, "Importing a `.claude` folder"), a file that cannot be imported
 whole is shown with why and never imported half (a file name that cannot be a command name,
 nothing after the front matter, a front matter that is not YAML or never closed, a file that cannot
-be read, a link out of the project folder); a name the project already uses is `taken` and never
+be read, a link out of the project folder, or to a place the gate holds as sensitive or a file of
+secrets, such as `.env` or `.claude/settings.local.json`, whose content is never read); what is
+shown of a file is masked; a name the project already uses is `taken` and never
 overwritten, and a file already imported is `imported`. The methods are `command.detect` and
 `command.import` (`docs/protocol.md`), the command `flottille command import` (`docs/cli.md`).
 

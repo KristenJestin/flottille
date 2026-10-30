@@ -794,3 +794,164 @@ fn the_commands_tool_of_a_root_shows_a_file_backed_command_with_its_file() {
     let shown = mcp.call("commands", json!({"action": "show", "name": "review"}));
     assert!(shown.text.contains("cannot be read"), "{}", shown.text);
 }
+
+/// The secrets the files a command may be linked to hold: none of them is ever shown or sent.
+const SECRETS: [&str; 3] = ["s3cr3t-env-4242", "hush-local-4343", "far-away-4444"];
+
+/// Links in `.claude/commands` to the project's `.env`, to `.claude/settings.local.json` and to a
+/// file outside the project, each holding one of `SECRETS`.
+fn secret_links(user: &User, folder: &Path) {
+    write(folder, ".env", &format!("API_TOKEN={}\n", SECRETS[0]));
+    write(
+        folder,
+        ".claude/settings.local.json",
+        &format!("{{\"token\": \"{}\"}}\n", SECRETS[1]),
+    );
+    write(
+        &user.path("elsewhere"),
+        "notes.md",
+        &format!("{}\n", SECRETS[2]),
+    );
+    let outside = user.path("elsewhere/notes.md");
+    let commands = folder.join(".claude/commands");
+    std::os::unix::fs::symlink("../../.env", commands.join("env.md")).unwrap();
+    std::os::unix::fs::symlink("../settings.local.json", commands.join("local.md")).unwrap();
+    std::os::unix::fs::symlink(&outside, commands.join("away.md")).unwrap();
+}
+
+fn holds_no_secret(what: &str) {
+    for secret in SECRETS {
+        assert!(!what.contains(secret), "{what}");
+    }
+}
+
+#[test]
+fn a_command_linked_to_a_secret_or_out_of_the_project_is_refused_at_detect() {
+    let user = User::new();
+    let folder = project(&user);
+    secret_links(&user, &folder);
+
+    let answer = user
+        .call("command.detect", json!({"project": "app"}))
+        .unwrap();
+    holds_no_secret(&answer.to_string());
+    for (file, why) in [
+        ("env.md", "sensitive place (.env)"),
+        ("local.md", "sensitive place (~/.claude)"),
+        ("away.md", "outside the project folder"),
+    ] {
+        let entry = found(&answer)
+            .into_iter()
+            .find(|entry| entry["path"] == format!(".claude/commands/{file}"))
+            .unwrap();
+        assert_eq!(entry["state"], "unusable", "{entry}");
+        assert!(entry.get("description").is_none(), "{entry}");
+        assert!(entry["problem"].as_str().unwrap().contains(why), "{entry}");
+    }
+    holds_no_secret(&stdout(&user, &["command", "import", "app"]));
+}
+
+#[test]
+fn a_command_linked_to_a_secret_or_out_of_the_project_is_never_imported() {
+    let user = User::new();
+    let folder = project(&user);
+    secret_links(&user, &folder);
+
+    for name in ["env", "local", "away"] {
+        let (code, message) = user
+            .call("command.import", json!({"project": "app", "names": [name]}))
+            .unwrap_err();
+        assert_eq!(code, "refused", "{message}");
+        holds_no_secret(&message);
+    }
+    let answer = user
+        .call("command.import", json!({"project": "app"}))
+        .unwrap();
+    holds_no_secret(&answer.to_string());
+    let listed = user
+        .call("command.list", json!({"project": "app"}))
+        .unwrap();
+    let names: Vec<&str> = listed["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|command| command["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["review"]);
+}
+
+#[test]
+fn a_command_linked_to_a_secret_or_out_of_the_project_after_the_import_is_never_used() {
+    let user = User::with_fake_agent();
+    let folder = project(&user);
+    user.call("command.import", json!({"project": "app"}))
+        .unwrap();
+    secret_links(&user, &folder);
+    let review = folder.join(".claude/commands/review.md");
+
+    for (target, why) in [
+        ("env.md", "sensitive place (.env)"),
+        ("local.md", "sensitive place (~/.claude)"),
+        ("away.md", "outside the project folder"),
+    ] {
+        std::fs::remove_file(&review).unwrap();
+        let real = std::fs::read_link(folder.join(".claude/commands").join(target)).unwrap();
+        std::os::unix::fs::symlink(&real, &review).unwrap();
+
+        let (code, message) = user
+            .call("agent.run", json!({"project": "app", "message": "/review"}))
+            .unwrap_err();
+        assert_eq!(code, "refused", "{message}");
+        assert!(message.contains(why), "{message}");
+        holds_no_secret(&message);
+        let shown = user
+            .call("command.show", json!({"project": "app", "name": "review"}))
+            .unwrap();
+        assert!(shown.get("instructions").is_none(), "{shown}");
+        assert!(shown["problem"].as_str().unwrap().contains(why), "{shown}");
+        holds_no_secret(&shown.to_string());
+    }
+    assert!(user.received_requests("session/prompt").is_empty());
+}
+
+#[test]
+fn a_secret_in_the_first_line_of_a_command_is_masked_where_it_is_shown_and_kept() {
+    let user = User::new();
+    let folder = project(&user);
+    let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    write(
+        &folder,
+        ".claude/commands/deploy.md",
+        &format!("Deploy with {token} then report.\n"),
+    );
+
+    let answer = user
+        .call("command.detect", json!({"project": "app"}))
+        .unwrap();
+    assert!(!answer.to_string().contains(token), "{answer}");
+    let deploy = found(&answer)
+        .into_iter()
+        .find(|entry| entry["name"] == "deploy")
+        .unwrap();
+    assert!(
+        deploy["description"].as_str().unwrap().contains("[masked]"),
+        "{deploy}"
+    );
+    let imported = user
+        .call(
+            "command.import",
+            json!({"project": "app", "names": ["deploy"]}),
+        )
+        .unwrap();
+    assert!(!imported.to_string().contains(token), "{imported}");
+    let file = std::fs::read_to_string(user.project_file("app")).unwrap();
+    assert!(!file.contains(token), "{file}");
+    let shown = user
+        .call("command.show", json!({"project": "app", "name": "deploy"}))
+        .unwrap();
+    assert!(!shown.to_string().contains(token), "{shown}");
+    assert!(
+        shown["instructions"].as_str().unwrap().contains("[masked]"),
+        "{shown}"
+    );
+}

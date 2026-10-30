@@ -5,14 +5,48 @@
 //! copy of them, so that a file changed is read changed at its next use. Nothing is written in the
 //! project's folder, and a file that cannot be imported whole is said with why and left out.
 
+use std::path::Path;
+
 use flottille_core::claude_folder::{self, Entry};
 use flottille_core::commands::Command;
 use flottille_core::project::{Project, Skill};
+use flottille_core::secrets;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
+use crate::gate;
+use crate::place::Resolved;
 use crate::projects::{self, Failure};
+
+/// Why a file of the project is never read for a skill or a command (`claude_folder::Guard`):
+/// where it really is, every link followed, is a place the gate holds as sensitive or a file of
+/// secrets. The project's own `.claude/skills` and `.claude/commands` are what is imported, not
+/// the `.claude` of an agent's login that the gate holds; what is below them is still looked at,
+/// and a link out of them to `.claude/settings.local.json` or to `.env` is held.
+pub fn guard(below: &Path, real: &Path) -> Option<String> {
+    let inside = [claude_folder::SKILLS, claude_folder::COMMANDS]
+        .iter()
+        .find_map(|folder| below.strip_prefix(folder).ok())
+        .unwrap_or(below);
+    let shown = Resolved::real_inside(inside.display().to_string(), real.to_owned());
+    if let Some(place) = gate::sensitive(&[], &shown) {
+        return Some(format!(
+            "it leads to {} in a sensitive place ({place}), which is never read for a skill or a \
+             command",
+            below.display()
+        ));
+    }
+    inside
+        .components()
+        .any(|part| secrets::secret_file(&part.as_os_str().to_string_lossy()))
+        .then(|| {
+            format!(
+                "it leads to {}, a file of secrets, which is never read for a skill or a command",
+                below.display()
+            )
+        })
+}
 
 /// What is imported: both come from a folder of `.claude`, and are told apart only here.
 #[derive(Clone, Copy)]
@@ -36,11 +70,23 @@ impl Kind {
         }
     }
 
+    /// What the folder holds, a description and a problem masked: they are shown, and a
+    /// description is written in the project's file, where a secret has no place.
     fn entries(self, project: &Project) -> Vec<Entry> {
-        match self {
-            Kind::Skill => claude_folder::skills(&project.folder),
-            Kind::Command => claude_folder::commands(&project.folder),
+        let mut entries = match self {
+            Kind::Skill => claude_folder::skills(&project.folder, &guard),
+            Kind::Command => claude_folder::commands(&project.folder, &guard),
+        };
+        let env = std::env::vars_os().collect();
+        for entry in &mut entries {
+            for text in [&mut entry.description, &mut entry.problem]
+                .into_iter()
+                .flatten()
+            {
+                *text = secrets::mask(text, &env);
+            }
         }
+        entries
     }
 
     /// What the project has under that name: the file it points at, or none for one that does not

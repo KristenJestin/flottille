@@ -25,6 +25,11 @@ const FILE_MAX: u64 = 1024 * 1024;
 /// The longest description made from a command's first line.
 const DESCRIPTION_MAX: usize = 100;
 
+/// Why a file of the project cannot be read for a skill or a command, from where it really is:
+/// relative to the project folder, then on the disk, every link followed. The rules of what is
+/// sensitive are the gate's, which this crate does not hold; none when it can be read.
+pub type Guard<'a> = &'a dyn Fn(&Path, &Path) -> Option<String>;
+
 /// One file of the `.claude` folder that holds, or should hold, a skill or a command.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
@@ -108,8 +113,9 @@ fn one_line(text: &str) -> String {
 }
 
 /// The file `relative` to `folder`, as text. Every link is followed and the real file must be in
-/// the project folder; the reason it cannot be read otherwise.
-pub fn read_text(folder: &Path, relative: &str) -> Result<String, String> {
+/// the project folder, and not where `guard` refuses it; the reason it cannot be read otherwise.
+/// Nothing is read before both are known.
+pub fn read_text(folder: &Path, relative: &str, guard: Guard) -> Result<String, String> {
     let root = folder
         .canonicalize()
         .map_err(|error| format!("the project folder cannot be read: {error}"))?;
@@ -120,8 +126,11 @@ pub fn read_text(folder: &Path, relative: &str) -> Result<String, String> {
             std::io::ErrorKind::NotFound => "it is not there".to_owned(),
             _ => format!("it cannot be read: {error}"),
         })?;
-    if !real.starts_with(&root) {
+    let Ok(below) = real.strip_prefix(&root) else {
         return Err("it leads outside the project folder".into());
+    };
+    if let Some(why) = guard(below, &real) {
+        return Err(why);
     }
     let metadata =
         std::fs::metadata(&real).map_err(|error| format!("it cannot be read: {error}"))?;
@@ -137,8 +146,8 @@ pub fn read_text(folder: &Path, relative: &str) -> Result<String, String> {
 
 /// What a command file sends: its text after the front matter, trimmed. This is what a file-backed
 /// command reads each time it is used, so that a changed file is read changed.
-pub fn command_text(folder: &Path, relative: &str) -> Result<String, String> {
-    let text = read_text(folder, relative)?;
+pub fn command_text(folder: &Path, relative: &str, guard: Guard) -> Result<String, String> {
+    let text = read_text(folder, relative, guard)?;
     let split = split(&text)?;
     let body = split.body.trim();
     if body.is_empty() {
@@ -163,24 +172,24 @@ fn names(folder: &Path) -> Vec<String> {
 
 /// The skills of `.claude/skills`: a folder each, with a `SKILL.md` whose front matter gives the
 /// skill's `name` and `description`. By path.
-pub fn skills(folder: &Path) -> Vec<Entry> {
+pub fn skills(folder: &Path, guard: Guard) -> Vec<Entry> {
     let mut found = Vec::new();
     for directory in names(&folder.join(SKILLS)) {
         if !folder.join(SKILLS).join(&directory).is_dir() {
             continue;
         }
         let path = format!("{SKILLS}/{directory}/SKILL.md");
-        found.push(skill(folder, path));
+        found.push(skill(folder, path, guard));
     }
     named_once(&mut found, "skill");
     found
 }
 
-fn skill(folder: &Path, path: String) -> Entry {
+fn skill(folder: &Path, path: String, guard: Guard) -> Entry {
     if !folder.join(&path).exists() && std::fs::symlink_metadata(folder.join(&path)).is_err() {
         return Entry::unusable(None, path, "the folder has no SKILL.md");
     }
-    let text = match read_text(folder, &path) {
+    let text = match read_text(folder, &path, guard) {
         Ok(text) => text,
         Err(why) => return Entry::unusable(None, path, why),
     };
@@ -235,7 +244,7 @@ fn skill(folder: &Path, path: String) -> Entry {
 
 /// The commands of `.claude/commands`: a Markdown file each, named after the file, whose text
 /// after the optional front matter is the instructions. By path.
-pub fn commands(folder: &Path) -> Vec<Entry> {
+pub fn commands(folder: &Path, guard: Guard) -> Vec<Entry> {
     let mut found = Vec::new();
     for file in names(&folder.join(COMMANDS)) {
         let Some(stem) = file.strip_suffix(".md") else {
@@ -245,13 +254,13 @@ pub fn commands(folder: &Path) -> Vec<Entry> {
             continue;
         }
         let path = format!("{COMMANDS}/{file}");
-        found.push(command(folder, stem, path));
+        found.push(command(folder, stem, path, guard));
     }
     named_once(&mut found, "command");
     found
 }
 
-fn command(folder: &Path, name: &str, path: String) -> Entry {
+fn command(folder: &Path, name: &str, path: String, guard: Guard) -> Entry {
     if !valid_name(name) {
         return Entry::unusable(
             None,
@@ -262,7 +271,7 @@ fn command(folder: &Path, name: &str, path: String) -> Entry {
             ),
         );
     }
-    let text = match read_text(folder, &path) {
+    let text = match read_text(folder, &path, guard) {
         Ok(text) => text,
         Err(why) => return Entry::unusable(Some(name.to_owned()), path, why),
     };
@@ -336,6 +345,10 @@ fn named_once(found: &mut [Entry], kind: &str) {
 mod tests {
     use super::*;
 
+    fn open(_: &Path, _: &Path) -> Option<String> {
+        None
+    }
+
     fn temp() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
     }
@@ -344,6 +357,40 @@ mod tests {
         let file = folder.join(relative);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(file, text).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_the_guard_refuses_where_it_really_is_is_never_read() {
+        let folder = temp();
+        write(folder.path(), ".env", "TOKEN=hush\n");
+        write(folder.path(), ".claude/commands/ok.md", "Fine.\n");
+        std::os::unix::fs::symlink("../../.env", folder.path().join(".claude/commands/env.md"))
+            .unwrap();
+        let seen = std::cell::RefCell::new(Vec::new());
+        let guard = |below: &Path, real: &Path| {
+            seen.borrow_mut().push(below.to_owned());
+            assert!(real.is_absolute());
+            (below == Path::new(".env")).then(|| "it is a secret".to_owned())
+        };
+        assert_eq!(
+            command_text(folder.path(), ".claude/commands/env.md", &guard),
+            Err("it is a secret".into())
+        );
+        assert_eq!(
+            command_text(folder.path(), ".claude/commands/ok.md", &guard),
+            Ok("Fine.".into())
+        );
+        assert_eq!(
+            *seen.borrow(),
+            [
+                Path::new(".env").to_owned(),
+                Path::new(".claude/commands/ok.md").to_owned()
+            ]
+        );
+        let found = commands(folder.path(), &guard);
+        assert_eq!(found[0].problem.as_deref(), Some("it is a secret"));
+        assert_eq!(found[0].description, None);
     }
 
     #[test]
@@ -391,7 +438,7 @@ mod tests {
             "---\nname: react\ndescription: >\n  How we write\n  React components\n\
              allowed-tools: [Read, Grep]\nmetadata:\n  version: 2\n---\nText\n",
         );
-        let found = skills(folder.path());
+        let found = skills(folder.path(), &open);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].problem, None);
         assert_eq!(
@@ -410,7 +457,7 @@ mod tests {
                 "---\nname: same\ndescription: d\n---\nText\n",
             );
         }
-        let found = skills(folder.path());
+        let found = skills(folder.path(), &open);
         assert_eq!(found[0].problem, None);
         assert!(
             found[1]
@@ -429,7 +476,7 @@ mod tests {
             ".claude/commands/long.md",
             &format!("## {}\nmore\n", "word ".repeat(40)),
         );
-        let found = commands(folder.path());
+        let found = commands(folder.path(), &open);
         let description = found[0].description.as_deref().unwrap();
         assert_eq!(description.chars().count(), DESCRIPTION_MAX);
         assert!(description.ends_with('…'));
@@ -445,7 +492,7 @@ mod tests {
             "---\ndescription: d\n---\n\nDo it.\n\n",
         );
         assert_eq!(
-            command_text(folder.path(), ".claude/commands/go.md").unwrap(),
+            command_text(folder.path(), ".claude/commands/go.md", &open).unwrap(),
             "Do it."
         );
         write(
@@ -454,12 +501,12 @@ mod tests {
             "Do it differently.\n",
         );
         assert_eq!(
-            command_text(folder.path(), ".claude/commands/go.md").unwrap(),
+            command_text(folder.path(), ".claude/commands/go.md", &open).unwrap(),
             "Do it differently."
         );
         std::fs::remove_file(folder.path().join(".claude/commands/go.md")).unwrap();
         assert_eq!(
-            command_text(folder.path(), ".claude/commands/go.md").unwrap_err(),
+            command_text(folder.path(), ".claude/commands/go.md", &open).unwrap_err(),
             "it is not there"
         );
     }

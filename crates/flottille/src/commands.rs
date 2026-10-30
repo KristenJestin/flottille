@@ -8,6 +8,7 @@ use std::path::Path;
 use flottille_core::claude_folder;
 use flottille_core::commands::{self, Command};
 use flottille_core::project::Project;
+use flottille_core::secrets;
 use flottille_core::workspace::Workspace;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -250,10 +251,16 @@ pub(crate) fn to_json(folder: &Path, name: &str, command: &Command, whole: bool)
     if whole {
         match &command.path {
             None => shown["instructions"] = command.instructions.clone().into(),
-            Some(path) => match claude_folder::command_text(folder, path) {
-                Ok(text) => shown["instructions"] = text.into(),
-                Err(why) => shown["problem"] = format!("{path}: {why}").into(),
-            },
+            Some(path) => {
+                match claude_folder::command_text(folder, path, &crate::claude_import::guard) {
+                    // A file of the project may hold what the project's file would not.
+                    Ok(text) => {
+                        shown["instructions"] =
+                            secrets::mask(&text, &std::env::vars_os().collect()).into()
+                    }
+                    Err(why) => shown["problem"] = format!("{path}: {why}").into(),
+                }
+            }
         }
     }
     shown
@@ -278,7 +285,12 @@ pub fn message_for(
     let expanded = commands::expanded(text, &project.commands, |name, command| {
         match &command.path {
             None => Ok(command.instructions.clone()),
-            Some(path) => claude_folder::command_text(&project.folder, path).map_err(|why| {
+            Some(path) => claude_folder::command_text(
+                &project.folder,
+                path,
+                &crate::claude_import::guard,
+            )
+            .map_err(|why| {
                 format!(
                     "the command {name} reads {path} each time it is used, and {why}; nothing \
                      was sent"

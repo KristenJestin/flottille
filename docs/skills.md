@@ -68,7 +68,8 @@ description on several lines is made one. **Nothing is written in the project's 
 A file that cannot be imported whole is shown with why and never imported half: no front matter,
 a front matter never closed or that is not YAML, no `name` or no `description`, a name that cannot
 be one (`docs/projects.md`), a name another file already has, a file that cannot be read (not
-UTF-8 text, larger than 1 MiB), a link that leads out of the project folder, a folder with no
+UTF-8 text, larger than 1 MiB), a link that leads out of the project folder, or to a place the
+gate holds as sensitive or a file of secrets (never read, below), a folder with no
 `SKILL.md`. A name the project already uses is not overwritten: the file is said `taken`. A file
 already imported is said `imported` and not offered again.
 
