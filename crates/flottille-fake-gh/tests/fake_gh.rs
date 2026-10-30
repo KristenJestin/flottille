@@ -279,3 +279,36 @@ fn a_merge_by_a_method_the_repository_forbids_fails_and_repo_view_says_the_allow
     let viewed: Value = serde_json::from_slice(&viewed.stdout).unwrap();
     assert_eq!(viewed["headRefName"], "app/login");
 }
+
+#[test]
+fn a_view_can_lose_the_fields_the_script_omits() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        json!({"pulls": {"acme/app": {"app/login": {"number": 12, "title": "Login"}}},
+            "view_omits": {"acme/app": ["number"]}})
+        .to_string(),
+    )
+    .unwrap();
+    let view = |number: &str| {
+        fake(dir.path())
+            .args([
+                "pr",
+                "view",
+                number,
+                "-R",
+                "github.com/acme/app",
+                "--json",
+                "number",
+            ])
+            .output()
+            .unwrap()
+    };
+
+    let viewed = view("12");
+
+    assert!(viewed.status.success(), "{viewed:?}");
+    let viewed: Value = serde_json::from_slice(&viewed.stdout).unwrap();
+    assert_eq!(viewed["title"], "Login");
+    assert!(viewed.get("number").is_none(), "{viewed}");
+}

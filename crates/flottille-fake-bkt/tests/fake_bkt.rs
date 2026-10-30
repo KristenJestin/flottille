@@ -271,3 +271,33 @@ fn a_merge_by_a_strategy_the_repository_forbids_fails() {
     );
     assert!(merged.status.success(), "{merged:?}");
 }
+
+#[test]
+fn checks_of_an_unreadable_shape_have_no_statuses() {
+    let dir = tempfile::tempdir().unwrap();
+    script(
+        dir.path(),
+        json!({"checks": {"acme/api": {"12": "unreadable"}}}),
+    );
+
+    let checked = fake(dir.path())
+        .args([
+            "pr",
+            "checks",
+            "12",
+            "--context",
+            "cloud",
+            "--workspace",
+            "acme",
+            "--repo",
+            "api",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(checked.status.success(), "{checked:?}");
+    let checked: Value = serde_json::from_slice(&checked.stdout).unwrap();
+    assert!(checked.get("statuses").is_none(), "{checked}");
+    assert_eq!(checked["pull_request"], 12);
+}

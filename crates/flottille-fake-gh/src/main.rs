@@ -39,7 +39,9 @@
 //! With `merge_methods` (`{"acme/app": ["merge", "rebase"]}`), `pr merge` fails for a method
 //! (`--squash`, `--merge`, `--rebase`) the repository does not allow, as GitHub refuses it, and
 //! `repo view <repository> --json …Allowed` says them (every one without). `pr view` gives a pull
-//! request its branch as `headRefName` when the script does not.
+//! request its branch as `headRefName` when the script does not. `view_omits`
+//! (`{"acme/app": ["number"]}`) takes those fields out of what `pr view` answers, as a `gh` whose
+//! output lost them.
 //!
 //! `pr list` keeps, as `gh` does, the pull requests of `--state` (`open` by default: `OPEN`,
 //! drafts included; `closed`, `merged`, `all`) and of `--head` when given, newest first, at most
@@ -353,6 +355,15 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                     let mut pull = pull.clone();
                     if pull["headRefName"].is_null() {
                         pull["headRefName"] = Value::from(branch.as_str());
+                    }
+                    for omitted in script["view_omits"][repository]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                    {
+                        if let Some(field) = omitted.as_str() {
+                            pull.as_object_mut().map(|fields| fields.remove(field));
+                        }
                     }
                     println!("{pull}");
                     0
