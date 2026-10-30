@@ -8,9 +8,10 @@ use std::time::Duration;
 
 use std::collections::HashMap;
 
+use flottille_ui::drawer::Closed;
 use flottille_ui::{
-    Button, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, Section,
-    Select, SelectOption, Switch, Toast, Type, palette, presence, space, toast,
+    Button, Confirm, Drawer, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal,
+    Section, Select, SelectOption, Switch, Toast, Type, palette, presence, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -724,6 +725,9 @@ pub struct ProjectTasks {
     starting: Option<String>,
     commands: Entity<CommandList>,
     panel: Entity<CommandPanel>,
+    /// The drawer a run's detail slides in with, drawn by the page over all of it.
+    drawer: Entity<Drawer>,
+    _drawer: Subscription,
     /// The run whose output is open.
     watching: Option<String>,
     /// Reads the runs again each second while one runs or its output is open.
@@ -733,14 +737,19 @@ pub struct ProjectTasks {
 impl ProjectTasks {
     pub fn new(shell: WeakEntity<Shell>, project: String, cx: &mut Context<Self>) -> Self {
         let this = cx.entity().downgrade();
+        let panel = cx.new(|_| CommandPanel::new(this.clone()));
+        let drawer = cx.new(|cx| Drawer::detail("run-drawer", panel.clone(), cx));
+        let _drawer = cx.subscribe(&drawer, |this, _, _: &Closed, cx| this.close_command(cx));
         Self {
             shell,
             project,
             listed: None,
             problem: None,
             starting: None,
-            commands: cx.new(|_| CommandList::new(this.clone())),
-            panel: cx.new(|_| CommandPanel::new(this)),
+            commands: cx.new(|_| CommandList::new(this)),
+            panel,
+            drawer,
+            _drawer,
             watching: None,
             ticker: None,
         }
@@ -760,6 +769,11 @@ impl ProjectTasks {
 
     pub fn panel(&self) -> &Entity<CommandPanel> {
         &self.panel
+    }
+
+    /// The drawer of a run's detail, which the page draws over itself.
+    pub fn drawer(&self) -> &Entity<Drawer> {
+        &self.drawer
     }
 
     /// Asks the daemon for the tasks and the runs.
@@ -830,6 +844,7 @@ impl ProjectTasks {
         let running = match listed {
             Ok(rows) => {
                 let running = rows.iter().any(CommandRow::running);
+                self.panel.update(cx, |panel, cx| panel.set_rows(&rows, cx));
                 self.commands.update(cx, |list, cx| list.set(rows, cx));
                 running
             }
@@ -864,10 +879,15 @@ impl ProjectTasks {
         }));
     }
 
-    /// Opens a run's output in the panel, followed live.
+    /// Opens a run's detail in its drawer, its output followed live.
     pub fn open_command(&mut self, run: &str, cx: &mut Context<Self>) {
         self.watching = Some(run.to_owned());
-        self.panel.update(cx, |panel, cx| panel.open(run, cx));
+        let rows = self.commands.read(cx).rows().to_vec();
+        self.panel.update(cx, |panel, cx| {
+            panel.open(run, cx);
+            panel.set_rows(&rows, cx);
+        });
+        self.drawer.update(cx, |drawer, cx| drawer.open(cx));
         self.read_runs(cx);
         self.follow(true, cx);
     }
@@ -875,14 +895,11 @@ impl ProjectTasks {
     pub fn close_command(&mut self, cx: &mut Context<Self>) {
         self.watching = None;
         self.panel.update(cx, |panel, cx| panel.close(cx));
+        self.drawer.update(cx, |drawer, cx| drawer.close(cx));
     }
 
     pub fn stop_command(&mut self, run: &str, cx: &mut Context<Self>) {
         self.answer_run(run, false, cx);
-    }
-
-    pub fn dismiss_command(&mut self, run: &str, cx: &mut Context<Self>) {
-        self.answer_run(run, true, cx);
     }
 
     fn answer_run(&mut self, run: &str, dismiss: bool, cx: &mut Context<Self>) {
@@ -908,10 +925,7 @@ impl Render for ProjectTasks {
         let p = palette(cx);
         let tasks = self.listed.clone().unwrap_or_default();
         if tasks.is_empty() && self.commands.read(cx).rows().is_empty() {
-            return div()
-                .id("project-tasks")
-                .child(self.panel.clone())
-                .into_any_element();
+            return div().id("project-tasks").into_any_element();
         }
         let rows = tasks.iter().map(|info| {
             let name = info.name.clone();
@@ -962,7 +976,6 @@ impl Render for ProjectTasks {
                     }),
             )
             .child(div().max_w(px(520.)).child(self.commands.clone()))
-            .child(self.panel.clone())
             .into_any_element()
     }
 }

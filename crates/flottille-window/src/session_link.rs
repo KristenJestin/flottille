@@ -49,6 +49,8 @@ pub struct TreeAgent {
     pub images: Option<bool>,
     /// `ask` or `auto`: how the gate answers the calls to judge of the agent.
     pub gate_mode: Option<String>,
+    /// How much of its context it used at its last report, in percent.
+    pub context: Option<u64>,
 }
 
 impl TreeAgent {
@@ -72,6 +74,7 @@ impl TreeAgent {
             stopping: agent["stopping"] == true,
             images: agent["images"].as_bool(),
             gate_mode: text(&agent["gate_mode"]),
+            context: entry["context"].as_u64(),
         }
     }
 }
@@ -143,6 +146,15 @@ impl Request {
                 Some("cancelled") => Some("cancelled".into()),
                 _ => request["decision"].as_str().map(str::to_owned),
             },
+        }
+    }
+
+    /// The call on one line, as the agent made it: a command's line, else the tool and its
+    /// arguments (`fs_read {"path":".env"}`).
+    pub fn call_line(&self) -> String {
+        match (self.tool.as_str(), self.call["line"].as_str()) {
+            ("run", Some(line)) => line.to_owned(),
+            (tool, _) => format!("{tool} {}", one_line(&self.call)),
         }
     }
 
@@ -402,6 +414,8 @@ const TREE_EVENTS: &[&str] = &[
     "agent.gate_mode_changed",
     "agent.reported",
     "agent.asked",
+    // The rail's gauge of each agent's context.
+    "agent.usage",
     "delivery.queued",
 ];
 

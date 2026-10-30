@@ -559,19 +559,11 @@ fn the_rail_says_once_that_several_repositories_have_no_forge(cx: &mut TestAppCo
         label_of("rail-no-forge", cx).as_deref(),
         Some("No forge set for api, web, lib: choose it in the project's Settings")
     );
-    for path in ["api", "web", "lib"] {
-        assert!(
-            !has(&format!("rail-forge-{path}"), cx),
-            "{path} does not repeat the sentence"
-        );
-    }
     assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
 }
 
 #[gpui_kit::test]
-fn the_rail_names_only_the_repositories_with_no_forge_and_gives_the_others_their_line(
-    cx: &mut TestAppContext,
-) {
+fn the_rail_names_only_the_repositories_with_no_forge(cx: &mut TestAppContext) {
     let user = user().with_fake_gh();
     trio(&user);
     user.git(
@@ -590,8 +582,6 @@ fn the_rail_names_only_the_repositories_with_no_forge_and_gives_the_others_their
         label_of("rail-no-forge", cx).as_deref(),
         Some("No forge set for web, lib: choose it in the project's Settings")
     );
-    assert!(has("rail-forge-api", cx));
-    assert!(!has("rail-forge-web", cx));
     assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
 }
 

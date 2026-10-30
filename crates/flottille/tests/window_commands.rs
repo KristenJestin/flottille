@@ -273,9 +273,7 @@ fn the_rail_lists_a_running_command_with_its_line_who_started_it_and_its_last_li
 }
 
 #[gpui_kit::test]
-fn stop_stops_the_command_and_it_stays_listed_greyed_with_its_end_until_dismissed(
-    cx: &mut TestAppContext,
-) {
+fn stop_stops_the_command_and_it_stays_listed_greyed_with_its_end(cx: &mut TestAppContext) {
     let user = user();
     let (lead, mcp, _) = lead(&user);
     let run = start(&mcp, "server");
@@ -304,11 +302,6 @@ fn stop_stops_the_command_and_it_stays_listed_greyed_with_its_end_until_dismisse
         cx.update(|window, _| window.try_find(format!("command-stop-{run}")).is_none()),
         "an ended command has no Stop"
     );
-
-    cx.update(|window, cx| window.click(format!("command-dismiss-{run}"), cx));
-    until(&shell, cx, "the command is dismissed", |cx| {
-        commands(&page, cx).is_empty()
-    });
 }
 
 #[gpui_kit::test]
@@ -791,107 +784,6 @@ fn a_running_line_follows_the_rail_s_run_its_time_and_the_end_of_its_output_in_i
         assert!(window.try_find(format!("command-seconds-{at}")).is_some());
     });
     ok(mcp.call("run_status", json!({"run": card.run, "action": "stop"})));
-}
-
-fn ids_of(rows: &[&CommandRow]) -> Vec<String> {
-    rows.iter().map(|row| row.run.clone()).collect()
-}
-
-fn present(cx: &mut VisualTestContext, id: impl Into<gpui_kit::ElementId>) -> bool {
-    let id = id.into();
-    cx.update(|window, _| window.try_find(id).is_some())
-}
-
-/// The runs in sight and the ones behind "N ended", as the section sorts them.
-fn arranged(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> (Vec<String>, Vec<String>) {
-    page.read_with(cx, |page, cx| {
-        let list = page.commands(cx);
-        let list = list.read(cx);
-        let arranged = list.arranged();
-        (ids_of(&arranged.kept), ids_of(&arranged.folded))
-    })
-}
-
-#[gpui_kit::test]
-fn the_rail_section_is_named_runs_and_only_the_last_three_ended_runs_are_in_sight_the_rest_behind_n_ended(
-    cx: &mut TestAppContext,
-) {
-    let user = user();
-    let (lead, mcp, _) = lead(&user);
-    let runs: Vec<String> = (0..5).map(|_| start(&mcp, "blip")).collect();
-    let (shell, cx) = open_session(&user, &lead, cx);
-    let page = session_page(&shell, cx);
-    until(&shell, cx, "the rail lists the five runs", |cx| {
-        commands(&page, cx).len() == 5
-    });
-    settle(cx);
-
-    assert_eq!(
-        label(cx, "rail-runs-title").as_deref(),
-        Some("Runs"),
-        "not 'Commands', which is the project's /name instructions"
-    );
-    let (kept, folded) = arranged(&page, cx);
-    assert_eq!((kept.len(), folded.len()), (3, 2), "{kept:?} {folded:?}");
-    for run in &runs {
-        assert_eq!(
-            present(cx, format!("command-{run}")),
-            kept.contains(run),
-            "{run}: in sight only if one of the last three"
-        );
-    }
-    assert_eq!(label(cx, "rail-runs-ended").as_deref(), Some("2 ended"));
-    cx.update(|window, _| assert_eq!(window.find("rail-runs-ended").expanded(), Some(false)));
-
-    // The folded row opens the older ones, and folds them again.
-    cx.update(|window, cx| window.click("rail-runs-ended", cx));
-    settle(cx);
-    for run in &runs {
-        assert!(present(cx, format!("command-{run}")), "{run} after opening");
-    }
-    cx.update(|window, _| assert_eq!(window.find("rail-runs-ended").expanded(), Some(true)));
-
-    // Dismiss stays on each row, the ones behind the fold too.
-    cx.update(|window, cx| window.click(format!("command-dismiss-{}", folded[0]), cx));
-    until(&shell, cx, "the run is dismissed", |cx| {
-        commands(&page, cx).len() == 4
-    });
-    settle(cx);
-    assert_eq!(label(cx, "rail-runs-ended").as_deref(), Some("1 ended"));
-
-    cx.update(|window, cx| window.click("rail-runs-ended", cx));
-    settle(cx);
-    assert!(!present(cx, format!("command-{}", folded[1])));
-    assert!(present(cx, format!("command-{}", kept[0])));
-}
-
-#[gpui_kit::test]
-fn an_ended_run_older_than_the_session_s_last_turn_folds_away_on_its_own(cx: &mut TestAppContext) {
-    let user = user();
-    let (lead, mcp, _) = lead(&user);
-    let run = start(&mcp, "blip");
-    let (shell, cx) = open_session(&user, &lead, cx);
-    let page = session_page(&shell, cx);
-    until(&shell, cx, "the rail lists the run", |cx| {
-        commands(&page, cx).len() == 1
-    });
-    settle(cx);
-    assert!(present(cx, format!("command-{run}")), "ended in this turn");
-    assert!(!present(cx, "rail-runs-ended"));
-
-    // A new turn begins: what ended before it goes behind "N ended".
-    user.call(
-        "agent.send",
-        json!({"agent": lead, "message": "hello again"}),
-    )
-    .unwrap();
-    until(&shell, cx, "the run folds behind its row", |cx| {
-        present(cx, "rail-runs-ended")
-    });
-    settle(cx);
-    assert_eq!(label(cx, "rail-runs-ended").as_deref(), Some("1 ended"));
-    assert!(!present(cx, format!("command-{run}")));
-    assert_eq!(commands(&page, cx).len(), 1, "kept in the history");
 }
 
 #[gpui_kit::test]
