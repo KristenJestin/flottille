@@ -4,8 +4,9 @@
 //! side. In a window too small for it, the fields scroll between the title and the buttons,
 //! which stay in sight.
 //!
-//! It is drawn after everything else, above the dropdowns, over a scrim that takes the clicks
-//! meant for the page. The owner gives the focus to its first field when it opens it.
+//! It is drawn after everything else, above the page's dropdowns, over a scrim that takes the
+//! clicks meant for the page. The list of a select or a menu opened inside it is drawn above it
+//! ([`layer`](crate::layer)). The owner gives the focus to its first field when it opens it.
 //!
 //! The owner draws it all the time and says whether it is [`open`](Modal::open): the scrim fades
 //! and the dialog fades and rises when it opens, and the other way when it closes. Once the close
@@ -22,6 +23,7 @@ use gpui_kit::{
 
 use crate::button::Button;
 use crate::interact::{dismiss_on_navigate, open_overlay};
+use crate::layer;
 use crate::motion::{MODAL, Motion, RISE};
 use crate::space;
 use crate::theme::palette;
@@ -311,7 +313,7 @@ impl RenderOnce for Modal {
                     .child(panel),
             ),
         )
-        .priority(2);
+        .priority(layer::MODAL);
         div().absolute().child(layer).into_any_element()
     }
 }

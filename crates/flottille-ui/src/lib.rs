@@ -12,6 +12,7 @@ pub mod dropdown;
 pub mod field;
 pub mod icons;
 mod interact;
+pub mod layer;
 pub mod lines;
 pub mod listing;
 pub mod menu;
