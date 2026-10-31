@@ -193,11 +193,12 @@ fn page(daemon: &Daemon, grant: &Grant, args: Value) -> Result<String, Outcome> 
     let caller = caller_of(daemon, grant)?;
     let session = session_of(daemon, &caller, &read.session)?;
     let asked = asked(&read)?;
-    // What the session was told and said is masked of its own place's secrets as well as of the
-    // reader's, which the result is masked of when it is shown.
-    let values = crate::mcp::grant_of(daemon, &session)
+    // Each message is masked of the secrets of the session's place and of the reader's before it
+    // is cut: masking the page afterwards would leave the start of a secret the cut went through.
+    let mut values = crate::mcp::grant_of(daemon, &session)
         .map(|grant| grant.place.secret_values())
         .unwrap_or_default();
+    values.extend(grant.place.secret_values());
     let env = std::env::vars_os().collect();
     let mask = |text: &str| secrets::mask_also(text, &env, &values);
     let (messages, next) = match asked.reading {
@@ -227,7 +228,7 @@ fn page(daemon: &Daemon, grant: &Grant, args: Value) -> Result<String, Outcome> 
             n + 1,
             messages.len(),
             shown_date(message.at),
-            escaped(&message.text)
+            message.text
         ));
     }
     let go_on = |cursor: &str, what: &str| {
@@ -392,10 +393,12 @@ impl Joiner {
     }
 }
 
-/// A message as a page shows it: masked whole, then cut, and its size on the page.
+/// A message as a page shows it: masked whole, cut, then escaped, and its size on the page in
+/// characters, as the result limit counts them: escaped, each marker the result's own escaping
+/// lengthens counted, and its heading.
 fn shown(mut message: Message, mask: &dyn Fn(&str) -> String) -> (Message, usize) {
-    message.text = crate::mcp::cut(&mask(&message.text), MESSAGE_CHARS);
-    let size = message.text.len() + 200;
+    message.text = escaped(&crate::mcp::cut(&mask(&message.text), MESSAGE_CHARS));
+    let size = message.text.chars().count() + message.text.matches("[flottille:").count() + 200;
     (message, size)
 }
 
@@ -588,15 +591,41 @@ fn escaped(text: &str) -> String {
 /// (`2026-10-31T14:05:00Z`, an offset, seconds and their fractions optional) or a day
 /// (`2026-10-31`, its start in UTC).
 fn date(text: &str) -> Result<u64, Outcome> {
-    parse_date(text).ok_or_else(|| {
-        refused(format!(
+    match parse_date(text) {
+        Ok(at) => Ok(at),
+        Err(Wrong::Year) => Err(refused(format!(
+            "refused: {text:?}: its year is out of the years session_read reads, {} to {}",
+            YEARS.start(),
+            YEARS.end()
+        ))),
+        Err(Wrong::Form) => Err(refused(format!(
             "refused: {text:?} is not a date session_read reads: give one as 2026-10-31T14:05:00Z \
              (UTC, or with an offset such as +02:00), or a day as 2026-10-31"
-        ))
-    })
+        ))),
+    }
 }
 
-fn parse_date(text: &str) -> Option<u64> {
+/// The years a date may name: none before the conversations, none so far that its days overflow.
+const YEARS: std::ops::RangeInclusive<i64> = 1970..=9999;
+
+/// Why a text is no date.
+enum Wrong {
+    Form,
+    Year,
+}
+
+fn parse_date(text: &str) -> Result<u64, Wrong> {
+    let year = text
+        .split(['-', 'T', 't', ' '])
+        .next()
+        .and_then(|year| year.parse::<i64>().ok());
+    if year.is_some_and(|year| !YEARS.contains(&year)) {
+        return Err(Wrong::Year);
+    }
+    form(text).ok_or(Wrong::Form)
+}
+
+fn form(text: &str) -> Option<u64> {
     let number = |s: &str| -> Option<i64> {
         (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse().ok())?
     };
@@ -704,17 +733,17 @@ mod tests {
 
     #[test]
     fn a_date_is_read_in_rfc_3339_or_as_a_day_and_shown_in_utc() {
-        let at = parse_date("2026-10-31T14:05:09Z").unwrap();
+        let at = form("2026-10-31T14:05:09Z").unwrap();
         assert_eq!(shown_date(at), "2026-10-31T14:05:09Z");
-        assert_eq!(parse_date("2026-10-31T16:05:09+02:00"), Some(at));
-        assert_eq!(parse_date("2026-10-31T14:05:09.250Z"), Some(at + 250));
+        assert_eq!(form("2026-10-31T16:05:09+02:00"), Some(at));
+        assert_eq!(form("2026-10-31T14:05:09.250Z"), Some(at + 250));
         assert_eq!(
-            parse_date("2026-10-31T14:05Z"),
+            form("2026-10-31T14:05Z"),
             Some(at - 9_000),
             "seconds are optional"
         );
         assert_eq!(
-            shown_date(parse_date("2026-10-31").unwrap()),
+            shown_date(form("2026-10-31").unwrap()),
             "2026-10-31T00:00:00Z"
         );
         assert_eq!(shown_date(0), "1970-01-01T00:00:00Z");
@@ -728,8 +757,26 @@ mod tests {
             "2026-10-31T14:05:09+2",
             "1969-12-31T00:00:00Z",
         ] {
-            assert_eq!(parse_date(wrong), None, "{wrong}");
+            assert_eq!(form(wrong), None, "{wrong}");
         }
+    }
+
+    #[test]
+    fn a_year_out_of_range_is_refused_with_its_reason_never_overflowing() {
+        for text in [
+            "99999999999999999-01-01",
+            "99999999999999999-01-01T00:00:00Z",
+            "10000-01-01",
+        ] {
+            match date(text) {
+                Err(Outcome::Refused(why)) => assert!(
+                    why.contains("its year is out of the years session_read reads, 1970 to 9999"),
+                    "{text}: {why}"
+                ),
+                _ => panic!("{text} was not refused"),
+            }
+        }
+        assert!(date("9999-12-31T23:59:59Z").is_ok());
     }
 
     #[test]

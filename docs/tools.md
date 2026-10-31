@@ -584,8 +584,11 @@ it at once.
   `until`, at most `last`, ending with a cursor to the next page (`Later messages: …`), saying it
   reached `until`, or, without `until`, the cursor to read on with later (`That is all for now;
   later, read on: …`). A date is RFC 3339 (an offset, the seconds and their fractions optional) or
-  a day (`2026-10-31`, its start in UTC). A page holds 30,000 characters at most, each message its
-  first 4,000 (a longer one says how much was cut). The cursor is given alone (with `last` at
+  a day (`2026-10-31`, its start in UTC), of a year from 1970 to 9999 (another is refused, saying
+  so). A page holds 30,000 characters at most, counted as they are shown, escaped, so that it
+  always ends with its cursor under the result limit; each message holds its first 4,000, masked
+  whole of the secrets of both sessions' places before it is cut (a longer one says how much was
+  cut). The cursor is given alone (with `last` at
   most): it carries the dates, names the event the page stopped at, and so stays where it was as
   new messages come; the agent passes it back as it was given, and one it did not get is refused.
 - **Framed as data**: the page opens with `The conversation of the session <name>, another session

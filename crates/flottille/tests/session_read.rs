@@ -461,3 +461,75 @@ fn a_child_has_no_session_read() {
     let child = Mcp::initialize(&url, &authorization);
     assert!(!child.names().iter().any(|name| name == "session_read"));
 }
+
+#[test]
+fn a_page_of_escaped_messages_stays_under_the_result_limit_and_ends_with_its_cursor() {
+    let user = user();
+    project(&user, "app");
+    let (_, mcp) = root(&user, "app", "lead the work");
+    // Each `<` is shown as `&lt;`: a message of them is four times as long on the page.
+    let big = "<".repeat(3_900);
+    let (session, _) = root(&user, "app", &big);
+    for n in 2..=6 {
+        user.call("agent.send", json!({"agent": session, "message": big}))
+            .unwrap();
+        eventually("the answer", || said(&user, &session).len() == n);
+        idle(&user, &session);
+    }
+
+    let mut page = ok(mcp.call("session_read", json!({"session": session})));
+    let mut seen = 0;
+    loop {
+        assert!(
+            page.chars().count() <= 40_000,
+            "{} characters",
+            page.chars().count()
+        );
+        let read = messages(&page);
+        assert!(!read.is_empty(), "{page}");
+        seen += read.iter().filter(|text| text.starts_with("&lt;")).count();
+        if page.contains("That is the start of its conversation.") {
+            break;
+        }
+        assert!(page.contains("Earlier messages: session_read"), "{page}");
+        page = ok(mcp.call(
+            "session_read",
+            json!({"session": session, "cursor": cursor(&page)}),
+        ));
+    }
+    assert_eq!(seen, 6, "every message was read");
+}
+
+#[test]
+fn a_secret_of_the_reader_s_place_is_masked_in_each_message_before_it_is_cut() {
+    let user = user();
+    project(&user, "app");
+    let workspace = user
+        .call(
+            "workspace.create",
+            json!({"project": "app", "name": "w", "offline": true}),
+        )
+        .unwrap();
+    let folder = std::path::PathBuf::from(workspace["folder"].as_str().unwrap());
+    let secret = "QzWv7Lp2Rt9Yk4Hs8Nb3";
+    std::fs::write(folder.join(".env"), format!("DB_PASSWORD={secret}\n")).unwrap();
+    let opened = user.received_requests("session/new").len();
+    let started = user
+        .call(
+            "agent.run",
+            json!({"project": "app", "workspace": "w", "message": "lead the work"}),
+        )
+        .unwrap();
+    let reader = started["agent"]["id"].as_str().unwrap().to_owned();
+    let (url, authorization) = server_of(&user, opened);
+    idle(&user, &reader);
+    let mcp = Mcp::initialize(&url, &authorization);
+    // The session works in main, where that secret is not: only the reader's place knows it. The
+    // message is cut at 4,000 characters, through the middle of the secret.
+    let (session, _) = root(&user, "app", &format!("{}{secret}", "x".repeat(3_990)));
+
+    let page = ok(mcp.call("session_read", json!({"session": session})));
+
+    assert!(!page.contains(&secret[..10]), "{page}");
+    assert!(page.contains("[masked]"), "{page}");
+}
