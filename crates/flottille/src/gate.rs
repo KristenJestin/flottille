@@ -573,7 +573,8 @@ fn forge(call: &Call) -> Verdict {
 pub const FORGE_ACTIONS: &str =
     "list, show, subscribe, unsubscribe, create, comment, edit, merge and checks";
 /// The actions of `tickets`, as a refusal names them.
-pub const TICKET_ACTIONS: &str = "list, search, show, create, comment, edit, close and reopen";
+pub const TICKET_ACTIONS: &str =
+    "list, search, show, create, comment, edit, close, reopen and status";
 
 /// `tickets`: its reads are harmless, its writes to the tracker to judge.
 fn tickets(call: &Call) -> Verdict {
@@ -585,6 +586,7 @@ fn tickets(call: &Call) -> Verdict {
         "edit" => "it changes the title or the description of a ticket on the tracker",
         "close" => "it closes a ticket on the tracker",
         "reopen" => "it reopens a ticket on the tracker",
+        "status" => "it moves a ticket to another status on the tracker",
         _ => {
             return Verdict::Deny(format!(
                 "refused: tickets has no action {action:?}: its actions are {TICKET_ACTIONS}"
@@ -593,7 +595,7 @@ fn tickets(call: &Call) -> Verdict {
     };
     let none: &[&str] = match action {
         "comment" => &["title"],
-        "close" | "reopen" => &["title", "body"],
+        "close" | "reopen" | "status" => &["title", "body"],
         _ => &[],
     };
     if let Err(refused) = untexted("tickets", action, call.args, none) {
@@ -3837,6 +3839,36 @@ mod tests {
         assert!(denied(&fixture.judge(
             "tickets",
             json!({"action": "delete"}),
+            Some(&fixture.never)
+        )));
+    }
+
+    #[test]
+    fn a_jira_write_is_classed_with_the_github_ticket_writes() {
+        // Full and Auto act on the class alone: the same class, the same treatment.
+        let fixture = Fixture::main();
+        for (action, extra) in [
+            ("create", json!({"title": "T"})),
+            ("comment", json!({"body": "b"})),
+            ("edit", json!({"title": "T"})),
+            ("close", json!({})),
+            ("reopen", json!({})),
+            ("status", json!({"status": "In Progress"})),
+        ] {
+            let verdict = |ticket: &str| {
+                let mut args = json!({"action": action, "ticket": ticket});
+                args.as_object_mut()
+                    .unwrap()
+                    .extend(extra.as_object().unwrap().clone());
+                fixture.judge("tickets", args, Some(&fixture.never))
+            };
+            let jira = verdict("ABC-1");
+            assert!(to_judge(&jira), "{action}: {jira:?}");
+            assert_eq!(jira, verdict("#1"), "{action}");
+        }
+        assert!(denied(&fixture.judge(
+            "tickets",
+            json!({"action": "status", "ticket": "ABC-1", "status": "Done", "body": "b"}),
             Some(&fixture.never)
         )));
     }

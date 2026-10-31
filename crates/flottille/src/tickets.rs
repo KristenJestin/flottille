@@ -1,10 +1,10 @@
 //! Tickets (`docs/tickets.md`): what the tracker says of the ticket a workspace is linked to, its
 //! title, state, description and comments, and the agents' `tickets`, which list, search and read
-//! the tracker's tickets and write GitHub issues. Through the user's own command lines, spawned
-//! without a shell: `gh` for the issues of GitHub, `acli` (Atlassian's) for Jira. Flottille never
-//! reads, keeps nor prints a token, and of each one's sign-in status it reads the exit code alone.
-//! Jira is read only: the only `acli` calls are `jira auth status`, `jira workitem view` and
-//! `jira workitem search`. A write to GitHub is a `tickets` call the gate let through.
+//! the tracker's tickets and write them. Through the user's own command lines, spawned without a
+//! shell: `gh` for the issues of GitHub, `acli` (Atlassian's) for Jira. Flottille never reads,
+//! keeps nor prints a token, and of each one's sign-in status it reads the exit code alone. A
+//! write is a `tickets` call the gate let through; on Jira, once `acli` is checked to be signed in
+//! to the tracker's site.
 //!
 //! A ticket is read on demand, never in the background, and kept nowhere. Every text kept from a
 //! tracker is masked before it is shown or stored.
@@ -266,8 +266,8 @@ fn signed_in_site(status: &str) -> Option<String> {
 }
 
 /// That `acli` is there, signed in, and to the tracker's site: nothing is asked of Jira
-/// otherwise.
-async fn jira_site(site: &str) -> Result<(), String> {
+/// otherwise. `nothing` says what was not done then: `read` or `written`.
+async fn jira_site(site: &str, nothing: &str) -> Result<(), String> {
     let status = match acli(&["jira", "auth", "status"]).await {
         Err(Gh::Missing) => {
             return Err(
@@ -292,15 +292,15 @@ async fn jira_site(site: &str) -> Result<(), String> {
         Some(active) => {
             return Err(format!(
                 "acli is signed in to {}, and this project's tracker is Jira on {site}: nothing \
-                 was read; switch acli to it (`acli jira auth switch --site {site}`) or correct \
-                 the project's tracker",
+                 was {nothing}; switch acli to it (`acli jira auth switch --site {site}`) or \
+                 correct the project's tracker",
                 masked(&active)
             ));
         }
         None => {
             return Err(format!(
                 "acli did not say which site it is signed in to (no Site: line in `acli jira \
-                 auth status`), so it cannot be checked to be {site}: nothing was read"
+                 auth status`), so it cannot be checked to be {site}: nothing was {nothing}"
             ));
         }
     }
@@ -308,7 +308,7 @@ async fn jira_site(site: &str) -> Result<(), String> {
 }
 
 async fn read_work_item(key: &str, site: &str) -> Result<Ticket, String> {
-    jira_site(site).await?;
+    jira_site(site, "read").await?;
     let (ok, stdout, stderr) = match acli(&[
         "jira",
         "workitem",
@@ -633,29 +633,77 @@ struct TicketsCall {
     title: Option<String>,
     body: Option<String>,
     labels: Option<Vec<String>>,
+    /// `status`: the status to move to.
+    status: Option<String>,
+    /// A Jira creation: the tracker's project, and the work item's type.
+    project: Option<String>,
+    #[serde(rename = "type")]
+    kind: Option<String>,
 }
 
 /// The writes of `tickets`.
-const WRITES: [&str; 5] = ["create", "comment", "edit", "close", "reopen"];
+const WRITES: [&str; 6] = ["create", "comment", "edit", "close", "reopen", "status"];
 
-/// Why a write of `tickets` cannot be done on the project's tracker, before anyone is asked:
-/// Flottille reads Jira and writes nothing to it.
+/// Why a write of `tickets` cannot be done on the project's tracker, before anyone is asked: a
+/// ticket or a Jira project the tracker does not take, a status not named.
 pub fn unwritable(project: &Project, args: &Value) -> Option<String> {
     let action = args["action"].as_str()?;
-    match project.tracker.as_ref()? {
-        ProjectTracker::Jira { .. } if WRITES.contains(&action) => Some(format!(
-            "refused: tickets {action} is not supported on Jira: Flottille reads Jira tickets and \
-             writes nothing to Jira; write the text for the user, who posts it"
-        )),
+    if !WRITES.contains(&action) {
+        return None;
+    }
+    let tracker = project.tracker.as_ref()?;
+    if let Some(Err(why)) = args["ticket"].as_str().map(|text| accepted(project, text)) {
+        return Some(format!("refused: {why}"));
+    }
+    let named = args["status"]
+        .as_str()
+        .is_some_and(|s| !s.trim().is_empty());
+    match tracker {
+        ProjectTracker::Jira { projects, .. } if action == "create" => {
+            created_in(tracker, projects, args["project"].as_str())
+                .err()
+                .map(|why| format!("refused: {why}"))
+        }
+        ProjectTracker::Jira { .. } if action == "status" && !named => {
+            Some("refused: tickets status needs status, the name of the status to move to".into())
+        }
+        ProjectTracker::Github { .. } if action == "status" => Some(
+            "refused: tickets status moves a Jira work item; a GitHub issue is closed or reopened"
+                .into(),
+        ),
         _ => None,
     }
 }
 
+/// The Jira project a creation goes to: the one named, or the tracker's only one.
+fn created_in<'a>(
+    tracker: &ProjectTracker,
+    projects: &'a [String],
+    named: Option<&str>,
+) -> Result<&'a str, String> {
+    match named.map(str::trim) {
+        Some(name) => projects
+            .iter()
+            .find(|p| p.eq_ignore_ascii_case(name))
+            .map(String::as_str)
+            .ok_or_else(|| {
+                format!(
+                    "{name} is not a project of this project's tracker ({})",
+                    tracker.said()
+                )
+            }),
+        None if projects.len() == 1 => Ok(&projects[0]),
+        None => Err(format!(
+            "tickets create on Jira needs project, one of the tracker's: {}",
+            projects.join(", ")
+        )),
+    }
+}
+
 /// `tickets`, once the gate let it through: the tickets of the project's tracker, listed,
-/// searched and read through the user's own `gh` or `acli`, and GitHub issues written through
-/// `gh`. Never another tracker's.
+/// searched, read and written through the user's own `gh` or `acli`. Never another tracker's.
 pub async fn tickets(daemon: &Daemon, place: &Place, args: Value) -> Outcome {
-    let asked: TicketsCall = match arguments("tickets", args) {
+    let asked: TicketsCall = match arguments("tickets", args.clone()) {
         Ok(asked) => asked,
         Err(refusal) => return refusal,
     };
@@ -663,14 +711,14 @@ pub async fn tickets(daemon: &Daemon, place: &Place, args: Value) -> Outcome {
         Ok(project) => project,
         Err(failure) => return Outcome::Failed(failure.message),
     };
-    if let Some(refusal) = unwritable(&project, &json!({"action": asked.action})) {
+    if let Some(refusal) = unwritable(&project, &args) {
         return Outcome::Refused(refusal);
     }
     match asked.action.as_str() {
         "list" | "search" => listed(&project, &asked).await,
         "show" => show(daemon, place, &project, &asked).await,
         "create" => create(&project, &asked).await,
-        "comment" | "edit" | "close" | "reopen" => {
+        "comment" | "edit" | "close" | "reopen" | "status" => {
             let key = match key_of(daemon, place, &project, &asked) {
                 Ok(key) => key,
                 Err(refusal) => return refusal,
@@ -910,7 +958,7 @@ async fn list_work_items(
     projects: &[String],
     filters: &Filters<'_>,
 ) -> Result<(Vec<Listed>, usize), String> {
-    jira_site(site).await?;
+    jira_site(site, "read").await?;
     let query = jql(projects, filters);
     let limit = LISTED.to_string();
     let (ok, stdout, stderr) = match acli(&[
@@ -1036,24 +1084,26 @@ async fn show(daemon: &Daemon, place: &Place, project: &Project, asked: &Tickets
     }
 }
 
-/// The GitHub repository of the project's tracker, for a write: Jira was refused before.
+/// The GitHub repository of the project's tracker, for a write: a Jira one writes through `acli`.
 async fn issues_of(project: &Project) -> Result<Forge, Outcome> {
     match &project.tracker {
         Some(ProjectTracker::Github { repository }) => github_of(project, repository)
             .await
             .map_err(|why| Outcome::Refused(format!("refused: {why}; nothing was written"))),
-        Some(ProjectTracker::Jira { .. }) => Err(Outcome::Refused(
-            "refused: Flottille writes nothing to Jira".into(),
-        )),
+        Some(ProjectTracker::Jira { .. }) => unreachable!("a Jira tracker writes through acli"),
         None => Err(Outcome::Refused(format!("refused: {NO_TRACKER}"))),
     }
 }
 
-/// `tickets create`: a new issue of the tracker's repository.
+/// `tickets create`: a new issue of the tracker's repository, or a work item of one of its Jira
+/// projects.
 async fn create(project: &Project, asked: &TicketsCall) -> Outcome {
     let Some(title) = asked.title.as_deref().filter(|t| !t.trim().is_empty()) else {
         return Outcome::Refused("refused: tickets create needs title".into());
     };
+    if let Some(tracker @ ProjectTracker::Jira { site, projects }) = &project.tracker {
+        return create_work_item(tracker, site, projects, title, asked).await;
+    }
     let forge = match issues_of(project).await {
         Ok(forge) => forge,
         Err(refusal) => return refusal,
@@ -1079,7 +1129,7 @@ async fn create(project: &Project, asked: &TicketsCall) -> Outcome {
     }
 }
 
-/// `tickets comment`, `edit`, `close` and `reopen` of an issue.
+/// `tickets comment`, `edit`, `close`, `reopen` and `status` of an issue or a work item.
 async fn write(project: &Project, asked: &TicketsCall, key: &Key) -> Outcome {
     let action = asked.action.as_str();
     let body = asked.body.as_deref().filter(|b| !b.trim().is_empty());
@@ -1096,7 +1146,10 @@ async fn write(project: &Project, asked: &TicketsCall, key: &Key) -> Outcome {
         _ => {}
     }
     let Key::Issue(number) = key else {
-        return Outcome::Refused("refused: Flottille writes nothing to Jira".into());
+        let Some(ProjectTracker::Jira { site, .. }) = &project.tracker else {
+            unreachable!("a key the tracker accepts");
+        };
+        return write_work_item(site, &key.text(), asked, body, title).await;
     };
     let forge = match issues_of(project).await {
         Ok(forge) => forge,
@@ -1124,6 +1177,261 @@ async fn write(project: &Project, asked: &TicketsCall, key: &Key) -> Outcome {
             _ => format!("#{number} of {slug} was reopened."),
         }),
         Err(why) => Outcome::Failed(why),
+    }
+}
+
+/// `acli <args>` for a write, or a search a write needs: what it printed, or why it failed,
+/// masked.
+async fn acli_run(args: &[&str]) -> Result<String, String> {
+    let what = format!("acli {}", args[..3].join(" "));
+    match acli(args).await {
+        Ok((true, stdout, _)) => Ok(stdout),
+        Ok((false, stdout, stderr)) => {
+            let said = stderr
+                .lines()
+                .chain(stdout.lines())
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("");
+            Err(format!(
+                "{what} failed: {}",
+                masked(&said.chars().take(300).collect::<String>())
+            ))
+        }
+        Err(Gh::Missing) => Err("acli is not on the daemon's PATH".into()),
+        Err(Gh::Failed(why)) => Err(format!("{what}: {why}")),
+    }
+}
+
+/// `tickets create` on Jira: a work item of one of the tracker's projects, of the type named or
+/// the project's default one.
+async fn create_work_item(
+    tracker: &ProjectTracker,
+    site: &str,
+    projects: &[String],
+    title: &str,
+    asked: &TicketsCall,
+) -> Outcome {
+    let project = match created_in(tracker, projects, asked.project.as_deref()) {
+        Ok(project) => project,
+        Err(why) => return Outcome::Refused(format!("refused: {why}")),
+    };
+    if let Err(problem) = jira_site(site, "written").await {
+        return Outcome::Failed(problem);
+    }
+    let labels = asked.labels.as_deref().unwrap_or_default().join(",");
+    let mut args = vec![
+        "jira",
+        "workitem",
+        "create",
+        "--project",
+        project,
+        "--summary",
+        title,
+    ];
+    if let Some(body) = asked.body.as_deref().filter(|b| !b.trim().is_empty()) {
+        args.extend(["--description", body]);
+    }
+    if let Some(kind) = asked.kind.as_deref().filter(|k| !k.trim().is_empty()) {
+        args.extend(["--type", kind]);
+    }
+    if !labels.is_empty() {
+        args.extend(["--label", &labels]);
+    }
+    args.push("--json");
+    let said = match acli_run(&args).await {
+        Ok(said) => said,
+        Err(why) => return Outcome::Failed(why),
+    };
+    // Assumed: the created work item as Jira's REST answers it, `{"key": …}`.
+    let created = serde_json::from_str::<Value>(&said).ok();
+    match created.as_ref().and_then(|item| item["key"].as_str()) {
+        Some(key) => {
+            let key = masked(key);
+            Outcome::Done(format!(
+                "The ticket {key} was opened in {project}: https://{site}/browse/{key}"
+            ))
+        }
+        None => Outcome::Done(format!(
+            "The ticket was opened in {project}: {}",
+            masked(said.trim())
+        )),
+    }
+}
+
+/// `tickets comment`, `edit`, `close`, `reopen` and `status` of a Jira work item, once `acli` is
+/// checked to be signed in to the tracker's site.
+async fn write_work_item(
+    site: &str,
+    key: &str,
+    asked: &TicketsCall,
+    body: Option<&str>,
+    title: Option<&str>,
+) -> Outcome {
+    if let Err(problem) = jira_site(site, "written").await {
+        return Outcome::Failed(problem);
+    }
+    let action = asked.action.as_str();
+    let mut args = vec!["jira", "workitem"];
+    match action {
+        "comment" => args.extend(["comment", "create", "--key", key]),
+        "edit" => args.extend(["edit", "--key", key]),
+        _ => return transition(site, key, asked).await,
+    }
+    if let Some(title) = title.filter(|_| action == "edit") {
+        args.extend(["--summary", title]);
+    }
+    match (action, body) {
+        ("comment", Some(body)) => args.extend(["--body", body]),
+        ("edit", Some(body)) => args.extend(["--description", body]),
+        _ => {}
+    }
+    if action == "edit" {
+        args.push("--yes");
+    }
+    match acli_run(&args).await {
+        Ok(_) if action == "comment" => Outcome::Done(format!("The comment was posted on {key}.")),
+        Ok(_) => Outcome::Done(format!("{key} was changed.")),
+        Err(why) => Outcome::Failed(why),
+    }
+}
+
+/// A status of a Jira project: its name, and its category's key (`new`, `indeterminate`,
+/// `done`).
+struct Status {
+    name: String,
+    category: String,
+}
+
+/// `a, b and c`.
+fn and_listed(names: &[&str]) -> String {
+    match names {
+        [] => "none".into(),
+        [one] => (*one).to_owned(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// The statuses of a Jira project, as its work items stand: `acli` lists no work item's
+/// transitions, so these are what a status named is found among, and what a close or a reopen
+/// moves to, never a guessed name.
+async fn statuses_of(site: &str, project: &str) -> Result<Vec<Status>, String> {
+    let query = format!("project = {} ORDER BY updated DESC", jql_quoted(project));
+    let limit = LISTED.to_string();
+    let answer = acli_run(&[
+        "jira",
+        "workitem",
+        "search",
+        "--jql",
+        &query,
+        "--fields",
+        "key,status",
+        "--json",
+        "--limit",
+        &limit,
+    ])
+    .await?;
+    let found: Value = serde_json::from_str(&answer)
+        .map_err(|error| format!("acli jira workitem search answered what is not JSON: {error}"))?;
+    let mut statuses: Vec<Status> = Vec::new();
+    for item in found
+        .as_array()
+        .or(found["issues"].as_array())
+        .into_iter()
+        .flatten()
+    {
+        let unlinked = item.get("self").is_none_or(Value::is_null);
+        if !unlinked && site_of(item).is_none_or(|from| !answered_by(item, &from, site)) {
+            continue;
+        }
+        let status = &item["fields"]["status"];
+        let name = said(&status["name"]);
+        if name.is_empty() || statuses.iter().any(|s| s.name.eq_ignore_ascii_case(&name)) {
+            continue;
+        }
+        statuses.push(Status {
+            name,
+            category: status["statusCategory"]["key"]
+                .as_str()
+                .unwrap_or_default()
+                .to_ascii_lowercase(),
+        });
+    }
+    Ok(statuses)
+}
+
+/// `tickets close`, `reopen` and `status` of a Jira work item: a transition to a status of its
+/// project's, the one named, or its only done status, or its only to-do one.
+async fn transition(site: &str, key: &str, asked: &TicketsCall) -> Outcome {
+    let project = key.rsplit_once('-').map_or(key, |(project, _)| project);
+    let statuses = match statuses_of(site, project).await {
+        Ok(statuses) => statuses,
+        Err(why) => return Outcome::Failed(why),
+    };
+    let names: Vec<&str> = statuses.iter().map(|s| s.name.as_str()).collect();
+    let known = and_listed(&names);
+    let target = match asked.action.as_str() {
+        "status" => {
+            let wanted = asked.status.as_deref().unwrap_or_default().trim();
+            match names.iter().find(|name| name.eq_ignore_ascii_case(wanted)) {
+                Some(name) => *name,
+                None => {
+                    return Outcome::Refused(format!(
+                        "refused: {} is not a status of {project}'s work items, which are \
+                         {known}; nothing was written",
+                        masked(wanted)
+                    ));
+                }
+            }
+        }
+        action => {
+            let (category, kind) = match action {
+                "close" => ("done", "done"),
+                _ => ("new", "to-do"),
+            };
+            let found: Vec<&str> = statuses
+                .iter()
+                .filter(|s| s.category == category)
+                .map(|s| s.name.as_str())
+                .collect();
+            match found.as_slice() {
+                [one] => *one,
+                [] => {
+                    return Outcome::Refused(format!(
+                        "refused: no work item of {project} is in a {kind} status, so Flottille \
+                         cannot tell which status {action}s {key}: move it with status, naming \
+                         one of {known}; nothing was written"
+                    ));
+                }
+                several => {
+                    return Outcome::Refused(format!(
+                        "refused: {project} has several {kind} statuses, {}: move {key} with \
+                         status, naming one; nothing was written",
+                        and_listed(several)
+                    ));
+                }
+            }
+        }
+    };
+    let args = [
+        "jira",
+        "workitem",
+        "transition",
+        "--key",
+        key,
+        "--status",
+        target,
+        "--yes",
+    ];
+    match acli_run(&args).await {
+        Ok(_) => Outcome::Done(match asked.action.as_str() {
+            "close" => format!("{key} was closed: moved to {target}."),
+            "reopen" => format!("{key} was reopened: moved to {target}."),
+            _ => format!("{key} was moved to {target}."),
+        }),
+        Err(why) => Outcome::Failed(format!(
+            "acli could not move {key} to {target}: {why}; the statuses of {project}'s work \
+             items are {known}"
+        )),
     }
 }
 
