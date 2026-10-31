@@ -5,11 +5,13 @@
 //! Git and the steps never run inside a store transaction nor on the daemon's thread: git and the
 //! run steps are child processes awaited by tokio, copies and links run on the blocking pool.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
+use std::collections::HashSet;
+use std::ffi::OsString;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flottille_core::command::split_line;
@@ -32,6 +34,7 @@ use crate::git::{self, Class};
 use crate::mcp::{Outcome, workspace_named};
 use crate::place::Place;
 use crate::projects::{self, Failure};
+use crate::runs::{OUTPUT_KEPT, Output};
 use crate::tree;
 
 type Answer = Result<Value, Failure>;
@@ -39,8 +42,45 @@ type Answer = Result<Value, Failure>;
 /// The lines of a failure's output that are kept, and at most how many characters of them.
 const FAILURE_LINES: usize = 40;
 const FAILURE_CHARS: usize = 8000;
-/// What is read of a run step's output, from its end.
-const RUN_OUTPUT: usize = 64 * 1024;
+/// The lines of a step's output `workspace.step_output` gives at most.
+const STEP_OUTPUT_LINES: usize = 1000;
+
+/// A setup step running: what it wrote so far, bounded as a run's output is, and what that is
+/// masked with (the environment it runs with).
+#[derive(Default)]
+pub struct StepLive {
+    output: Mutex<Output>,
+    env: Mutex<BTreeMap<OsString, OsString>>,
+}
+
+impl StepLive {
+    fn push(&self, read: &[u8]) {
+        self.output.lock().unwrap().push(read);
+    }
+
+    /// A line of its own after what was written: why the step ended, when it said nothing.
+    fn note(&self, text: &str) {
+        let mut output = self.output.lock().unwrap();
+        if output.kept.last().is_some_and(|last| *last != b'\n') {
+            output.push(b"\n");
+        }
+        output.push(text.as_bytes());
+    }
+
+    fn is_empty(&self) -> bool {
+        self.output.lock().unwrap().kept.is_empty()
+    }
+
+    /// What it wrote, masked, and whether the start of it was cut.
+    fn masked(&self) -> (String, bool) {
+        let output = self.output.lock().unwrap();
+        let text = String::from_utf8_lossy(&output.kept);
+        (
+            secrets::mask(&text, &self.env.lock().unwrap()),
+            output.cut > 0,
+        )
+    }
+}
 
 /// Answers a `workspace.*` request.
 pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
@@ -55,6 +95,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             Ok(json!({"workspaces": workspaces.iter().map(Workspace::to_json).collect::<Vec<_>>()}))
         }
         "workspace.show" => show(&daemon, serde_json::from_value(params)?).await,
+        "workspace.step_output" => step_output(&daemon, serde_json::from_value(params)?),
         "workspace.forge" => crate::forge::call(daemon, params).await,
         "workspace.ticket" => crate::tickets::call(daemon, params).await,
         "workspace.link_ticket" => crate::tickets::link(daemon, params).await,
@@ -65,6 +106,74 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             format!("unknown method `{method}`"),
         )),
     }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StepName {
+    project: String,
+    name: String,
+    position: u32,
+}
+
+/// `workspace.step_output`: one step of a workspace, where it ran and what it wrote so far or
+/// wrote, masked, the last lines of it.
+fn step_output(daemon: &Daemon, asked: StepName) -> Answer {
+    let workspace = find(
+        daemon,
+        &WorkspaceName {
+            project: asked.project,
+            name: asked.name,
+        },
+    )?;
+    let step = workspace
+        .steps
+        .iter()
+        .find(|step| step.position == asked.position)
+        .ok_or_else(|| {
+            Failure::new(
+                "not-found",
+                format!(
+                    "workspace {} has no step {}: its steps are 0 to {}",
+                    workspace.name,
+                    asked.position,
+                    workspace.steps.len().saturating_sub(1)
+                ),
+            )
+        })?;
+    let live = daemon
+        .step_outputs
+        .lock()
+        .unwrap()
+        .get(&(workspace.id, step.position))
+        .cloned();
+    let (text, cut) = match live {
+        Some(live) => live.masked(),
+        None => {
+            let text = daemon
+                .read(|store| store.step_output(workspace.id, step.position))?
+                .unwrap_or_default();
+            let cut = text.len() >= OUTPUT_KEPT;
+            (text, cut)
+        }
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    let from = lines.len().saturating_sub(STEP_OUTPUT_LINES);
+    let place = step.repository.clone().unwrap_or_else(|| ".".into());
+    Ok(json!({
+        "project": workspace.project,
+        "workspace": workspace.name,
+        "position": step.position,
+        "repository": step.repository,
+        "kind": kind_name(&step.action),
+        "line": step.doing(),
+        "folder": workspace.folder_of(&place),
+        "state": step.state.as_str(),
+        "started_at": step.started_at,
+        "ended_at": step.ended_at,
+        "output": lines[from..].join("\n"),
+        "earlier": from > 0 || cut,
+    }))
 }
 
 fn find(daemon: &Daemon, asked: &WorkspaceName) -> Result<Workspace, Failure> {
@@ -851,7 +960,13 @@ async fn prepare_steps(
                 .map(|event| ((), event))
         })?;
 
-        let outcome = run_step(&workspace, &step).await;
+        let live = Arc::new(StepLive::default());
+        daemon
+            .step_outputs
+            .lock()
+            .unwrap()
+            .insert((id, step.position), live.clone());
+        let outcome = run_step(&workspace, &step, &live).await;
 
         let (state, failure, name) = match outcome {
             Ok(StepState::Skipped) => (StepState::Skipped, None, "workspace.step_skipped"),
@@ -862,11 +977,25 @@ async fn prepare_steps(
         if let Some(failure) = &failure {
             data["output"] = failure.output.clone().into();
         }
-        daemon.write(|store| {
+        // A step that failed without a word of its own says why where its output would be.
+        if let Some(failure) = &failure
+            && live.is_empty()
+        {
+            live.push(failure.output.as_bytes());
+        }
+        let (written, _) = live.masked();
+        let result = daemon.write(|store| {
+            store.set_step_output(id, step.position, &written)?;
             store
                 .set_step(id, step.position, state, failure.as_ref(), (name, data))
                 .map(|event| ((), event))
-        })?;
+        });
+        daemon
+            .step_outputs
+            .lock()
+            .unwrap()
+            .remove(&(id, step.position));
+        result?;
         if failure.is_some() {
             return Ok(());
         }
@@ -884,7 +1013,11 @@ fn kind_name(action: &Action) -> &'static str {
 }
 
 /// Does one step: done, skipped, or its failure.
-async fn run_step(workspace: &Workspace, step: &Step) -> Result<StepState, StepFailure> {
+async fn run_step(
+    workspace: &Workspace,
+    step: &Step,
+    live: &StepLive,
+) -> Result<StepState, StepFailure> {
     let fail = |output: String| StepFailure {
         doing: step.doing(),
         output,
@@ -926,7 +1059,7 @@ async fn run_step(workspace: &Workspace, step: &Step) -> Result<StepState, StepF
         }
         Action::Run {
             line, time_limit, ..
-        } => run_line(workspace, &place, line, &target, *time_limit)
+        } => run_line(workspace, &place, line, &target, *time_limit, live)
             .await
             .map_err(fail)?,
     }
@@ -1162,6 +1295,7 @@ async fn run_line(
     line: &str,
     dir: &Path,
     time_limit: u64,
+    live: &StepLive,
 ) -> Result<(), String> {
     let names = Names {
         workspace: workspace.name.clone(),
@@ -1179,6 +1313,7 @@ async fn run_line(
         filled.insert(name.clone(), variables::fill(template, &names)?);
     }
     let env = variables::environment(std::env::vars_os(), &[&filled]);
+    live.env.lock().unwrap().clone_from(&env);
 
     let (reader, writer) = std::io::pipe().map_err(|error| format!("cannot run it: {error}"))?;
     let mut command = tokio::process::Command::new(&words[0]);
@@ -1203,7 +1338,6 @@ async fn run_line(
     let group = child.id();
     let mut reader = tokio::net::unix::pipe::Receiver::from_owned_fd(reader.into())
         .map_err(|error| format!("cannot read the output of {}: {error}", words[0]))?;
-    let mut output = Vec::new();
     let mut buffer = [0; 8192];
     let mut open = true;
     let deadline = tokio::time::sleep(Duration::from_secs(time_limit));
@@ -1213,7 +1347,7 @@ async fn run_line(
             status = child.wait() => break Some(status),
             read = reader.read(&mut buffer), if open => match read {
                 Ok(0) | Err(_) => open = false,
-                Ok(read) => keep_tail(&mut output, &buffer[..read]),
+                Ok(read) => live.push(&buffer[..read]),
             },
             () = &mut deadline => break None,
         }
@@ -1230,14 +1364,14 @@ async fn run_line(
         if read == 0 {
             break;
         }
-        keep_tail(&mut output, &buffer[..read]);
+        live.push(&buffer[..read]);
     }
-    let output = String::from_utf8_lossy(&output);
-    let kept = last_lines(&output);
+    let kept = last_lines(&String::from_utf8_lossy(&live.output.lock().unwrap().kept));
     let Some(status) = status else {
         // Killed with its group: waited for until it has exited.
         let _ = child.wait().await;
         let stopped = format!("it was stopped after {time_limit} s");
+        live.note(&stopped);
         return Err(if kept.is_empty() {
             stopped
         } else {
@@ -1249,21 +1383,15 @@ async fn run_line(
         return Ok(());
     }
     Err(if kept.is_empty() {
-        match status.code() {
+        let ended = match status.code() {
             Some(code) => format!("it ended with exit {code}"),
             None => "it ended with no exit code".into(),
-        }
+        };
+        live.note(&ended);
+        ended
     } else {
         secrets::mask(&kept, &env)
     })
-}
-
-/// Keeps the last `RUN_OUTPUT` bytes of a run's output.
-fn keep_tail(kept: &mut Vec<u8>, read: &[u8]) {
-    kept.extend_from_slice(read);
-    if kept.len() > RUN_OUTPUT {
-        kept.drain(..kept.len() - RUN_OUTPUT);
-    }
 }
 
 /// The last lines of an output, cut to its last characters.

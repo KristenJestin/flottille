@@ -16,8 +16,9 @@ use gpui_kit::{
 
 use crate::color::mix;
 use crate::icons::{Icon, icon};
-use crate::interact::hoverable;
+use crate::interact::{hoverable, tint};
 use crate::menu::Menu;
+use crate::motion::PANEL;
 use crate::theme::palette;
 use crate::typography::Type;
 
@@ -488,7 +489,7 @@ impl StepRow {
 }
 
 impl RenderOnce for StepRow {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let p = palette(cx);
         let ink = match self.tone {
             StepTone::Done => p.mute,
@@ -496,6 +497,8 @@ impl RenderOnce for StepRow {
             StepTone::Todo => p.faint,
             StepTone::Failed => p.fail,
         };
+        // Its ink moves when the step's state changes: to do, running, done, failed.
+        let ink = tint(self.id.clone(), ink, PANEL, window, cx);
         let said = match &self.object {
             Some(object) => format!("{} {object}", self.verb),
             None => self.verb.to_string(),

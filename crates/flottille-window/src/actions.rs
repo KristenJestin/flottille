@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use crate::commands::CommandInfo;
 use crate::link::{Conn, Connect, Update};
 use crate::rules::Shown;
-use crate::runs::{CommandOutput, CommandRow};
+use crate::runs::{CommandOutput, CommandRow, Watch};
 use crate::session_link::{PullRequest, TICKET_FRESH, TicketFacts, pull_requests, ticket_facts};
 use crate::skills::SkillInfo;
 use crate::tasks::TaskInfo;
@@ -203,7 +203,7 @@ pub enum Command {
     /// The tasks the user ran in the project, and the output of the one whose panel is open.
     ProjectRuns {
         project: String,
-        output: Option<String>,
+        output: Option<Watch>,
     },
     /// Stops a task the user ran and everything it started, or dismisses one that ended.
     ProjectRun {
@@ -1237,9 +1237,23 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 json!({"project": project, "user": true, "ended": true}),
                 bounds.quick,
             );
-            let output = output.and_then(|run| {
-                match ask_alone(connect, "run.output", json!({"run": run}), bounds.quick) {
-                    Ok(Ok(output)) => Some(Box::new(CommandOutput::of(&output))),
+            let output = output.and_then(|watch| {
+                let key = watch.key();
+                let (method, params) = match &watch {
+                    Watch::Run(run) => ("run.output", json!({"run": run})),
+                    Watch::Step {
+                        workspace,
+                        position,
+                    } => (
+                        "workspace.step_output",
+                        json!({"project": project, "name": workspace, "position": position}),
+                    ),
+                };
+                match ask_alone(connect, method, params, bounds.quick) {
+                    Ok(Ok(output)) => Some(Box::new(match watch {
+                        Watch::Run(_) => CommandOutput::of(&output),
+                        Watch::Step { .. } => CommandOutput::of_step(&output, &key),
+                    })),
                     Ok(Err(_)) | Err(_) => None,
                 }
             });

@@ -454,6 +454,11 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE workspace_steps ADD COLUMN started_at INTEGER;
     ALTER TABLE workspace_steps ADD COLUMN ended_at INTEGER;
 ",
+    "
+    -- What a step wrote while it ran, masked and bounded as a run's output is: the window opens it
+    -- from the project page, in the run drawer.
+    ALTER TABLE workspace_steps ADD COLUMN output TEXT;
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -708,6 +713,28 @@ impl Store {
         Ok(event)
     }
 
+    /// Keeps what a step wrote, masked, once it ended.
+    pub fn set_step_output(&mut self, workspace: i64, position: u32, output: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE workspace_steps SET output = ?3 WHERE workspace = ?1 AND position = ?2",
+            params![workspace, position, output],
+        )?;
+        Ok(())
+    }
+
+    /// What a step wrote and kept; none for a step that never ran.
+    pub fn step_output(&self, workspace: i64, position: u32) -> Result<Option<String>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT output FROM workspace_steps WHERE workspace = ?1 AND position = ?2",
+                params![workspace, position],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
     /// Puts these steps back to pending, forgetting their failure, with one event, in one
     /// transaction.
     pub fn reset_steps(
@@ -720,7 +747,7 @@ impl Store {
         for position in positions {
             transaction.execute(
                 "UPDATE workspace_steps SET state = 'pending', failed_doing = NULL, \
-                 failed_output = NULL, started_at = NULL, ended_at = NULL \
+                 failed_output = NULL, output = NULL, started_at = NULL, ended_at = NULL \
                  WHERE workspace = ?1 AND position = ?2",
                 params![workspace, position],
             )?;

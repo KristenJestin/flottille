@@ -467,6 +467,26 @@ worktrees inside it left out), each `null` when its worktree is not there.
 (`docs/events.md`), kept with the workspace; `null` while it is not `ready`. `workspace.list`
 leaves it out too.
 
+#### `workspace.step_output`
+
+`{"project", "name", "position"}`. One step of the workspace's preparation (`position` as in its
+`steps`) and what it wrote, for the window to open from the project page in the run drawer:
+
+```json
+{"project": "app", "workspace": "login", "position": 3, "repository": "api", "kind": "run",
+ "line": "npm install (in api)", "folder": "/work/app-work/login/api", "state": "running",
+ "started_at": 1792843731200, "ended_at": null, "output": "added 212 packages", "earlier": false}
+```
+
+`line` is what the step does (the `doing` of a failure), `folder` where it does it, `state` and the
+times are the step's. `output` is the last 1000 lines of what the step wrote, standard output and
+error together, masked and as the program wrote it, and `earlier` says whether lines before them
+were left out. It is kept as a run's output is (the last 64 KiB, cut at a line's start), read while
+the step runs and kept in the store once it ended, masked before it is stored. A step that fails
+without a program to speak (a `link` whose target is missing) has its reason as its output; a `run`
+that wrote nothing has `it ended with exit N`. A step that never ran has none. `not-found` when the
+project, the workspace or the step does not exist.
+
 #### `workspace.forge`
 
 `{"project", "name", "watch"?}`. The forge state of the workspace's repositories

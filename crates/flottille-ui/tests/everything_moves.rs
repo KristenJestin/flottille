@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use common::{Desktop, advance, init, pending_frames};
 use flottille_ui::motion::{ENTER, HOVER, MAX_STAGGER, PANEL, RISE, STAGGER};
-use flottille_ui::{Button, Item, Listing, Segmented, enter, presence, presence_of, selectable};
+use flottille_ui::{
+    Button, Item, Listing, Segmented, StepRow, StepTone, enter, presence, presence_of, selectable,
+};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     Context, InteractiveElement as _, IntoElement, ParentElement, Pixels, Render, SharedString,
@@ -602,5 +604,107 @@ fn an_entrance_waits_for_at_most_a_few_siblings_however_long_the_list(cx: &mut T
         at_rest + px(RISE) - px(RISE),
         "the 41st sibling is in place after eight staggers, not forty"
     );
+    assert_eq!(pending_frames(cx), 0);
+}
+
+// ── A setup step's ink ─────────────────────────────────────────────────────────────────────────
+
+struct Stepping {
+    tone: StepTone,
+}
+
+impl Render for Stepping {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().child(StepRow::new(
+            "step",
+            div().size(px(8.)),
+            "Run",
+            self.tone,
+            "step-time",
+        ))
+    }
+}
+
+fn step_tone(view: &gpui_kit::Entity<Stepping>, tone: StepTone, cx: &mut VisualTestContext) {
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.tone = tone;
+            cx.notify();
+        })
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+}
+
+#[gpui_kit::test]
+fn a_setup_step_whose_state_changes_fades_its_ink_and_then_stops(cx: &mut TestAppContext) {
+    init(cx, Desktop::new(false).env());
+    let (view, cx) = cx.add_window_view(|_, _| Stepping {
+        tone: StepTone::Todo,
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+    advance(cx, PANEL);
+    assert_eq!(pending_frames(cx), 0, "a step first drawn is just there");
+
+    for tone in [StepTone::Now, StepTone::Done, StepTone::Failed] {
+        step_tone(&view, tone, cx);
+        assert!(pending_frames(cx) > 0, "its ink moves toward {tone:?}");
+        advance(cx, PANEL * 2);
+        assert_eq!(pending_frames(cx), 0, "and stops once it is {tone:?}");
+    }
+}
+
+#[gpui_kit::test]
+fn with_reduced_motion_a_setup_step_s_ink_jumps(cx: &mut TestAppContext) {
+    init(cx, Desktop::new(false).env());
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (view, cx) = cx.add_window_view(|_, _| Stepping {
+        tone: StepTone::Todo,
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+    step_tone(&view, StepTone::Now, cx);
+    assert_eq!(pending_frames(cx), 0);
+}
+
+struct Tinted {
+    to: gpui_kit::Hsla,
+    seen: Rc<Cell<gpui_kit::Hsla>>,
+}
+
+impl Render for Tinted {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.seen
+            .set(flottille_ui::tint("tinted", self.to, PANEL, window, cx));
+        div().size_full()
+    }
+}
+
+#[gpui_kit::test]
+fn a_colour_that_changes_moves_through_the_colours_between_and_stops(cx: &mut TestAppContext) {
+    init(cx, Desktop::new(false).env());
+    let (black, white) = (
+        gpui_kit::rgb(0x000000).into(),
+        gpui_kit::rgb(0xffffff).into(),
+    );
+    let seen = Rc::new(Cell::new(black));
+    let shared = seen.clone();
+    let (view, cx) = cx.add_window_view(move |_, _| Tinted {
+        to: black,
+        seen: shared,
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+    assert_eq!(seen.get(), black, "first drawn, it is just there");
+
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.to = white;
+            cx.notify();
+        })
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+    advance(cx, PANEL / 3);
+    let part = seen.get().to_rgb().r;
+    assert!(0.0 < part && part < 1.0, "between black and white: {part}");
+    advance(cx, PANEL * 2);
+    assert_eq!(seen.get(), white);
     assert_eq!(pending_frames(cx), 0);
 }

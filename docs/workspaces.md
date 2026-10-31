@@ -88,7 +88,8 @@ steps of a workspace that exists.
 in the background, one preparation at a time for a workspace. Each step goes `pending`, `running`,
 then `done`, `skipped` (its repository is not in the workspace) or `failed`, every change an event
 (`docs/events.md`). The first failure stops the preparation and keeps everything done before it;
-the step keeps what it was doing and the last 40 lines of its output (at most 8000 characters),
+the step keeps what it was doing and the last 40 lines of its output (at most 8000 characters; its
+whole output, up to 64 KiB, is read with `workspace.step_output`),
 masked for secrets (the values of variables whose name holds `TOKEN`, `SECRET`, `PASS`,
 `CREDENTIAL`, `KEY` or `AUTH`, the longest first; private key blocks; the `user:password` of a
 URL; JWTs and the tokens of the usual forges, registries and providers). A workspace is
