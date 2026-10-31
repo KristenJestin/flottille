@@ -209,6 +209,13 @@ pub struct Conversation {
     /// calls.
     launched: bool,
     has_sub_agents: bool,
+    /// The `agent_launch` calls that launch a child, by their id: a call whose arguments, come
+    /// later, say it starts a session for the user leaves them.
+    child_launches: HashSet<String>,
+    /// The title of each session for the user an `agent_launch` call starts, by the call's id,
+    /// then, once held, by its request: it is no sub-agent, and is said as a session.
+    sessions: HashMap<String, String>,
+    held_sessions: HashMap<u64, String>,
     /// The arguments of each `fs_edit` call still running, for its diff once it is done: its
     /// updates do not repeat them.
     edits: HashMap<String, Value>,
@@ -247,6 +254,9 @@ impl Conversation {
             names: HashMap::new(),
             launched: false,
             has_sub_agents: false,
+            child_launches: HashSet::new(),
+            sessions: HashMap::new(),
+            held_sessions: HashMap::new(),
             edits: HashMap::new(),
             calls: HashMap::new(),
             running: HashSet::new(),
@@ -429,7 +439,7 @@ impl Conversation {
                 let name = text("title");
                 let name = name.strip_prefix(PREFIX).unwrap_or(&name).to_owned();
                 if name == "agent_launch" {
-                    self.launched = !self.has_sub_agents;
+                    self.launch(text("id"), &data["raw_input"]);
                 }
                 if name == "fs_edit" && !data["raw_input"].is_null() {
                     self.edits.insert(text("id"), data["raw_input"].clone());
@@ -560,6 +570,20 @@ impl Conversation {
         }
     }
 
+    /// An `agent_launch` call, with its arguments when they came: a child of the agent, whose
+    /// list follows the calls, or a session for the user (`root`), which is not one.
+    fn launch(&mut self, id: String, input: &Value) {
+        if input["root"] == true {
+            let title = input["title"].as_str().unwrap_or_default().to_owned();
+            self.sessions.insert(id.clone(), title);
+            if self.child_launches.remove(&id) && self.child_launches.is_empty() {
+                self.launched = false;
+            }
+        } else if self.child_launches.insert(id) {
+            self.launched = !self.has_sub_agents;
+        }
+    }
+
     fn push(&mut self, block: Block) -> Vec<Change> {
         self.blocks.push(block);
         self.times.push(self.now);
@@ -624,6 +648,8 @@ impl Conversation {
         {
             self.sends.insert(call.id.clone(), said.to_owned());
         }
+        let launch =
+            (call.name == "agent_launch" && !data["raw_input"].is_null()).then(|| call.id.clone());
         if !data["raw_input"].is_null() {
             call.args = shown_args(&data["raw_input"]);
             if call.name == "fs_edit" {
@@ -642,6 +668,9 @@ impl Conversation {
         let call = call.clone();
         if !calls.iter().any(|c| c.state == CallState::Running) {
             self.running.remove(&at);
+        }
+        if let Some(id) = launch {
+            self.launch(id, &data["raw_input"]);
         }
         let mut changes = vec![Change::Changed(at)];
         let ended = call.state == CallState::Done && call.until == Some(event.at);
@@ -687,6 +716,20 @@ impl Conversation {
                 self.held_sends.insert(number, said);
             }
         }
+        // A session started for the user: said once it started, which a held one does only once
+        // the user allowed it.
+        if ended
+            && call.name == "agent_launch"
+            && let Some(title) = self.sessions.remove(&call.id)
+        {
+            let mut texts = Vec::new();
+            strings(&data["raw_output"], &mut texts);
+            if texts.iter().any(|text| text.contains(STARTED_SESSION)) {
+                changes.extend(self.push(started_session(title)));
+            } else if let Some(number) = texts.iter().find_map(|text| held_request(text)) {
+                self.held_sessions.insert(number, title);
+            }
+        }
         // A report, or the end of a command, delivered as a note on the result.
         for (kind, body) in notes(&data["raw_output"]) {
             if matches!(kind.as_str(), "child-report" | "command-ended") {
@@ -728,6 +771,11 @@ impl Conversation {
                     }
                 }
                 changes.extend(self.push(block));
+                if let Some(title) = launched_after_approval(&body)
+                    .and_then(|number| self.held_sessions.remove(&number))
+                {
+                    changes.extend(self.push(started_session(title)));
+                }
                 return changes;
             }
             _ => {}
@@ -876,6 +924,29 @@ fn sent_to(text: &str) -> Option<String> {
     let rest = text.trim().strip_prefix("Sent to ")?;
     let (named, _) = rest.split_once(": it reaches")?;
     Some(peer_name(named))
+}
+
+/// What `agent_launch` answers when it started a session for the user (`tree.rs`).
+const STARTED_SESSION: &str = "Started a session for the user";
+
+/// The kind of the line that says a session was started for the user, before its title.
+pub const STARTED_SESSION_KIND: &str = "started session";
+
+fn started_session(title: String) -> Block {
+    Block::Notice {
+        kind: STARTED_SESSION_KIND.into(),
+        text: title,
+    }
+}
+
+/// An `agent_launch` the user allowed and the daemon performed, which started a session: its
+/// request.
+fn launched_after_approval(body: &str) -> Option<u64> {
+    let rest = body.strip_prefix("Request #")?;
+    let (number, rest) = rest.split_once(" (agent_launch) ")?;
+    let (_, result) = rest.split_once("has now done it. Its result:\n\n")?;
+    result.contains(STARTED_SESSION).then_some(())?;
+    number.parse().ok()
 }
 
 /// The request a held call's answer names (`… request #4 …`).
@@ -1345,6 +1416,64 @@ mod tests {
         assert_eq!(calls[0].duration_ms(), Some(100));
         assert_eq!(c.blocks()[1], Block::SubAgents);
         assert!(matches!(c.blocks()[2], Block::Text { .. }));
+    }
+
+    #[test]
+    fn a_session_started_for_the_user_is_said_as_a_session_not_a_sub_agent() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        c.apply(&event(
+            1,
+            "agent.tool_call",
+            json!({"id": "l", "title": "mcp__flottille__agent_launch", "status": "in_progress",
+                "raw_input": {"title": "Docs", "brief": "Write the docs", "root": true}}),
+        ));
+        c.apply(&event(
+            2,
+            "agent.tool_call",
+            json!({"id": "l", "update": true, "status": "completed", "raw_output":
+                "Started a session for the user, 0123456789ab, in w. It is the user's, not your child."}),
+        ));
+        c.apply(&event(3, "agent.message", json!({"text": "Started it."})));
+        assert!(!c.blocks().contains(&Block::SubAgents), "{:?}", c.blocks());
+        assert_eq!(
+            c.blocks()[1],
+            Block::Notice {
+                kind: STARTED_SESSION_KIND.into(),
+                text: "Docs".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_session_held_then_allowed_is_said_once_it_started() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        // The arguments come with an update, as Claude Code sends them.
+        c.apply(&event(
+            1,
+            "agent.tool_call",
+            json!({"id": "l", "title": "mcp__flottille__agent_launch", "status": "in_progress"}),
+        ));
+        c.apply(&event(
+            2,
+            "agent.tool_call",
+            json!({"id": "l", "update": true, "status": "completed",
+                "raw_input": {"title": "Docs", "root": true},
+                "raw_output": "Waiting for the user's approval, request #4."}),
+        ));
+        c.apply(&event(3, "agent.message", json!({"text": "Asked."})));
+        assert!(!c.blocks().contains(&Block::SubAgents), "{:?}", c.blocks());
+        c.apply(&event(
+            4,
+            "agent.prompted",
+            json!({"text": "[flottille:approval]\nRequest #4 (agent_launch) was approved by the user, and Flottille has now done it. Its result:\n\nStarted a session for the user, 0123456789ab, in w."}),
+        ));
+        assert_eq!(
+            c.blocks().last(),
+            Some(&Block::Notice {
+                kind: STARTED_SESSION_KIND.into(),
+                text: "Docs".into()
+            })
+        );
     }
 
     #[test]

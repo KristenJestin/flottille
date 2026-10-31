@@ -333,6 +333,8 @@ fn choosing_an_item_of_the_bell_opens_its_session(cx: &mut TestAppContext) {
     cx.update(|window, cx| window.click(session_id(&other), cx));
     cx.update(|window, cx| window.click("bell", cx));
     assert!(shell.read_with(cx, |s, _| s.bell_open()));
+    // Its rows unfold into the list as it rises (#185).
+    settle(cx);
     let key = shell.read_with(cx, |s, _| s.snapshot().bell[0].key.clone());
     cx.update(|window, cx| window.click(format!("bell-{key}"), cx));
     assert_eq!(

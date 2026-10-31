@@ -221,7 +221,7 @@ impl Waiting {
             .asked
             .clone()
             .unwrap_or_else(|| format!("Request #{number}"));
-        // The call on one line; an action, which changes the project, says it in words instead.
+        // The call; an action, which changes the project, says it in words instead.
         let (line, from_says) = match (card.kind.as_str(), &card.call) {
             ("call", Some(call)) => (Some(call.clone()), false),
             _ => (card.says.first().cloned(), true),
@@ -355,16 +355,21 @@ impl Waiting {
                 false => mix(p.wait, p.card, 0.7),
             })
             .child(head)
+            // The whole call, wrapping over as many lines as it takes: what is allowed is read
+            // before it is allowed, never guessed from its start.
             .children(line.map(|line| {
-                one_line(div().id(match from_says {
-                    true => ElementId::Name(format!("approval-says-{number}-0").into()),
-                    false => id("approval-call"),
-                }))
-                .mono(11.5)
-                .text_color(p.mute)
-                .aria_label(SharedString::from(line.clone()))
-                .child(SharedString::from(line))
-                .test_support()
+                div()
+                    .id(match from_says {
+                        true => ElementId::Name(format!("approval-says-{number}-0").into()),
+                        false => id("approval-call"),
+                    })
+                    .min_w_0()
+                    .whitespace_normal()
+                    .mono(11.5)
+                    .text_color(p.mute)
+                    .aria_label(SharedString::from(line.clone()))
+                    .child(SharedString::from(line))
+                    .test_support()
             }))
             .child(
                 div()

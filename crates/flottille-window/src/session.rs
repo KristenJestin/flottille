@@ -192,6 +192,9 @@ pub struct Opened {
     pub place: Place,
     /// The place's folder, for the editor.
     pub folder: Option<PathBuf>,
+    /// The agent that started the session for the user, by the name it goes by; `None` for a
+    /// session the user started. The header says it, not the left tree.
+    pub started_by: Option<String>,
 }
 
 pub struct SessionPage {
@@ -1221,6 +1224,20 @@ impl Render for SessionPage {
                     )
                     .test_support(),
             )
+            .children(self.opened.started_by.clone().map(|by| {
+                let said = SharedString::from(format!("started by {by}"));
+                div()
+                    .id("session-started-by")
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(px(12.))
+                    .text_color(p.faint)
+                    .aria_label(said.clone())
+                    .child(said)
+                    .test_support()
+            }))
             .child(div().flex_1())
             .children(self.end_error.clone().map(|error| {
                 div()
@@ -3384,7 +3401,6 @@ impl Render for SessionRail {
             })
             .collect();
         let agent_menu = self.agent_menu.clone();
-        let count = self.agents.len();
         let agent_row = |agent: &RailAgent| {
             let mark = self.marks[&agent.id].clone();
             let page = self.page.clone();
@@ -3392,43 +3408,31 @@ impl Render for SessionRail {
             let kid = agent.depth > 0;
             let indent = space::LG * agent.depth as f32;
             let runs = runs_on(&agent.provider, agent.model.as_deref());
-            // The root has no name on screen: what it runs on says it, over what it is.
-            let (top_id, sub_id) = match kid {
-                false => (
-                    format!("rail-runs-on-{}", agent.id),
-                    format!("rail-role-{}", agent.id),
-                ),
-                true => (
-                    format!("rail-name-{}", agent.id),
-                    format!("rail-runs-on-{}", agent.id),
-                ),
+            // The root has no name on screen: what it runs on says it, alone on its row.
+            let top_id = match kid {
+                false => format!("rail-runs-on-{}", agent.id),
+                true => format!("rail-name-{}", agent.id),
             };
             let (name, said) = match kid {
-                false => (
-                    runs,
-                    match count {
-                        1 => THE_CONVERSATION.to_owned(),
-                        n => format!("{THE_CONVERSATION} · {n} agents"),
-                    },
-                ),
+                false => (runs, None),
                 true => (
                     agent.name.clone(),
-                    match agent.doing.as_str() {
+                    Some(match agent.doing.as_str() {
                         "" => agent.model.clone().unwrap_or(agent.provider.clone()),
                         doing => format!(
                             "{} · {doing}",
                             agent.model.clone().unwrap_or(agent.provider.clone())
                         ),
-                    },
+                    }),
                 ),
             };
             let gauge = agent.context.map(|used| {
                 let used = used.min(100);
+                // The share and its bar on one line, the share before it.
                 div()
                     .id(ElementId::Name(format!("rail-context-{}", agent.id).into()))
                     .flex()
-                    .flex_col()
-                    .items_end()
+                    .items_center()
                     .gap(space::XS)
                     .mono(10.5)
                     .text_color(p.faint)
@@ -3436,7 +3440,7 @@ impl Render for SessionRail {
                     .child(SharedString::from(format!("{used}%")))
                     .child(
                         div()
-                            .w(px(40.))
+                            .w(px(32.))
                             .h(px(3.))
                             .rounded(px(2.))
                             .bg(p.line2)
@@ -3444,7 +3448,7 @@ impl Render for SessionRail {
                             .child(
                                 div()
                                     .h_full()
-                                    .w(px(40. * used as f32 / 100.))
+                                    .w(px(32. * used as f32 / 100.))
                                     .rounded(px(2.))
                                     .bg(p.mute),
                             ),
@@ -3488,19 +3492,26 @@ impl Render for SessionRail {
                                 .child(SharedString::from(name))
                                 .test_support(),
                         )
-                        .child(
+                        .children(said.map(|said| {
                             div()
-                                .id(ElementId::Name(sub_id.into()))
+                                .id(ElementId::Name(format!("rail-runs-on-{}", agent.id).into()))
                                 .mono(11.)
                                 .text_color(p.faint)
                                 .text_ellipsis()
                                 .overflow_hidden()
                                 .aria_label(SharedString::from(said.clone()))
                                 .child(SharedString::from(said))
-                                .test_support(),
-                        ),
+                                .test_support()
+                        })),
                 )
-                .child(div().w(px(40.)).flex_none().children(gauge))
+                .child(
+                    div()
+                        .w(px(64.))
+                        .flex_none()
+                        .flex()
+                        .justify_end()
+                        .children(gauge),
+                )
                 .map(|d| match !kid && endable {
                     true => d.child(agent_menu.clone()),
                     false => d.child(div().w(px(28.)).flex_none()),

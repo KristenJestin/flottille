@@ -12,8 +12,8 @@ use common::User;
 use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::link::Connect;
-use flottille_window::tree::{session_id, session_started_by_id};
-use gpui_kit::test::TestWindowExt;
+use flottille_window::tree::session_id;
+use gpui_kit::test::{TestQueryExt, TestWindowExt};
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
 
@@ -146,21 +146,15 @@ fn lead_and_launched(user: &User) -> (String, String) {
 }
 
 #[gpui_kit::test]
-fn a_session_an_agent_started_keeps_its_title_and_says_who_started_it_in_its_row(
-    cx: &mut TestAppContext,
-) {
+fn a_session_an_agent_started_keeps_its_title_and_its_row_names_nobody(cx: &mut TestAppContext) {
     let user = user();
     let (lead, launched) = lead_and_launched(&user);
     let (shell, cx) = window(&user, cx);
 
     until(&shell, cx, "the launched session's row", |cx| {
-        label(cx, session_started_by_id(&launched)).is_some()
+        label(cx, session_id(&launched)).is_some()
     });
 
-    assert_eq!(
-        label(cx, session_started_by_id(&launched)).as_deref(),
-        Some("started by begin the docs session")
-    );
     assert_eq!(
         shell.read_with(cx, |s, cx| s
             .session(&launched)
@@ -171,10 +165,17 @@ fn a_session_an_agent_started_keeps_its_title_and_says_who_started_it_in_its_row
         cx.update(|window, _| window.try_find(session_id(&lead)).is_some()),
         "the lead's row is there"
     );
-    assert_eq!(
-        label(cx, session_started_by_id(&lead)),
-        None,
-        "a session the user started names nobody"
+    // Who started it is said in the session's header, not in the left tree (#185).
+    let said: Vec<String> = cx.update(|window, _| {
+        window
+            .elements()
+            .into_iter()
+            .filter_map(|element| element.label().map(str::to_owned))
+            .collect()
+    });
+    assert!(
+        !said.iter().any(|said| said.starts_with("started by")),
+        "{said:?}"
     );
 }
 
