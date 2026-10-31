@@ -517,8 +517,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
 - Settings: the Auto judge (two lines on Auto: the rules pass what is known to be harmless, a
   small model on the user's own quota decides the rest, base calls always come to the user; "No
   judge (Auto asks like Ask)" among its choices), the providers, then the Judge guidance and the
-  Rules for every project, both edited the same way; a judge Flottille picked is said once in a
-  notice, with Open Settings and Dismiss;
+  Rules for every project, both edited the same way, and last the Developer mode, a switch with the
+  path of its log (`developer.md`: what the daemon decides and why, off by default); a judge
+  Flottille picked is said once in a notice, with Open Settings and Dismiss;
 - a session page: the root's conversation, live (messages, the user's own as selectable as the agent's, thoughts collapsed (their head says how long the thinking lasted, from the event before it
   to the one after it, and no time when it lasted less than a tenth of a second), tool calls with
   their result, the children launched, reports, diffs), one compact line for each command a

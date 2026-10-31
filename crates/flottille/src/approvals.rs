@@ -66,7 +66,7 @@ pub fn ask(
     ask: gate::Ask,
     says: Vec<String>,
     judgement: Option<Judgement>,
-) -> Outcome {
+) -> (Outcome, Option<u64>) {
     let asked = Request {
         number: 0,
         agent: grant.agent.clone(),
@@ -94,20 +94,28 @@ pub fn ask(
         decided_at: None,
     };
     match daemon.write(|store| store.ask(&asked)) {
-        Ok(request) if request.held_by == approval::USER => Outcome::Held(waiting(request.number)),
+        Ok(request) if request.held_by == approval::USER => {
+            (Outcome::Held(waiting(request.number)), Some(request.number))
+        }
         Ok(request) => {
             tree::asks_parent(daemon, &request);
-            Outcome::Held(waiting_on_parent(request.number))
+            (
+                Outcome::Held(waiting_on_parent(request.number)),
+                Some(request.number),
+            )
         }
         Err(error) => {
             eprintln!(
                 "flottille daemon: agent {}: a request cannot be written: {error}",
                 grant.agent
             );
-            Outcome::Refused(
-                "refused: the request for the user could not be made, so nothing was done; say \
-                 so and go on with what does not depend on it"
-                    .into(),
+            (
+                Outcome::Refused(
+                    "refused: the request for the user could not be made, so nothing was done; \
+                     say so and go on with what does not depend on it"
+                        .into(),
+                ),
+                None,
             )
         }
     }

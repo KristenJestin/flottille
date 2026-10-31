@@ -136,6 +136,30 @@ $ flottille provider disable opencode
 opencode is disabled: its agents running now go on, and fail at their next start.
 ```
 
+### `flottille developer show [--json]`
+
+Whether the developer mode is on, and where its log is (`docs/developer.md`). `--json` prints
+`developer.show`'s answer.
+
+```
+$ flottille developer show
+Developer mode is off. Its log: ~/.local/state/flottille/developer.log
+```
+
+### `flottille developer on`
+
+Turns the developer mode on: from now on the daemon logs what it decides and why, each text masked.
+Writes `log = true` in `developer.toml`; the window's settings page does the same with its switch.
+
+```
+$ flottille developer on
+Developer mode is on. Its log: ~/.local/state/flottille/developer.log
+```
+
+### `flottille developer off`
+
+Turns it off: nothing more is written. The log stays where it is.
+
 ### `flottille update`
 
 Replaces Flottille with the latest build of a channel (`docs/releases.md`): `--channel stable`,

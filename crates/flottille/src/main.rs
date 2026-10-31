@@ -15,6 +15,7 @@ mod command_command;
 mod commands;
 mod daemon;
 mod deliveries;
+mod developer;
 mod files;
 mod follow;
 mod forge;
@@ -55,7 +56,7 @@ use std::process::ExitCode;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use flottille_core::paths::Paths;
 use flottille_core::protocol::WatchParams;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::agent_command::AgentAction;
 use crate::client::Client;
@@ -138,6 +139,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// The developer mode: a log of what Flottille decides and why, off by default
+    Developer {
+        #[command(subcommand)]
+        action: DeveloperAction,
+    },
     /// Enable or disable a provider in providers.toml
     Provider {
         #[command(subcommand)]
@@ -202,6 +208,19 @@ enum ProviderAction {
     Enable { name: String },
     /// Start no more agents on it: those running now go on, and fail at their next start
     Disable { name: String },
+}
+
+#[derive(Subcommand)]
+enum DeveloperAction {
+    /// Whether it is on, and where its log is
+    Show {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Log what Flottille decides from now on
+    On,
+    /// Stop logging
+    Off,
 }
 
 #[derive(Subcommand)]
@@ -291,6 +310,31 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             } else {
                 println!(
                     "{name} is disabled: its agents running now go on, and fail at their next start."
+                );
+            }
+        }
+        Command::Developer { action } => {
+            let mut client = Client::connect_or_start(&paths)?;
+            let (answer, json) = match action {
+                DeveloperAction::Show { json } => {
+                    (client.request("developer.show", json!({}))?, json)
+                }
+                DeveloperAction::On => (
+                    client.request("developer.set", json!({"log": true}))?,
+                    false,
+                ),
+                DeveloperAction::Off => (
+                    client.request("developer.set", json!({"log": false}))?,
+                    false,
+                ),
+            };
+            if json {
+                println!("{answer}");
+            } else {
+                println!(
+                    "Developer mode is {}. Its log: {}",
+                    if answer["log"] == true { "on" } else { "off" },
+                    answer["file"].as_str().unwrap_or_default()
                 );
             }
         }
