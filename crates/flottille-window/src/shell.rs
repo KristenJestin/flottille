@@ -1059,6 +1059,7 @@ impl Shell {
             sessions: self
                 .snapshot
                 .sessions_in(&name, &None)
+                .filter(|s| !s.ended)
                 .filter_map(|s| line(s, cx))
                 .collect(),
         }];
@@ -1081,6 +1082,7 @@ impl Shell {
                 sessions: self
                     .snapshot
                     .sessions_in(&name, &place)
+                    .filter(|s| !s.ended)
                     .filter_map(|s| line(s, cx))
                     .collect(),
                 place,

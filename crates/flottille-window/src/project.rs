@@ -39,6 +39,16 @@ pub fn card_id(place: &Place) -> ElementId {
     ElementId::Name(format!("place-card-{}", place_name(place)).into())
 }
 
+/// The element id of the "⋯" menu a session's row in a place's card offers.
+pub fn card_session_menu_id(id: &str) -> ElementId {
+    ElementId::Name(format!("card-session-menu-{id}").into())
+}
+
+/// The element id of End session in that menu.
+pub fn card_session_end_id(id: &str) -> ElementId {
+    ElementId::Name(format!("card-session-end-{id}").into())
+}
+
 /// A session as a place's card lists it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionLine {
@@ -552,6 +562,9 @@ pub struct PlaceCard {
     line_rows: Listing<Line>,
     step_rows: Listing<SetupLine>,
     session_rows: Listing<SessionLine>,
+    /// Each session row's "⋯" menu, made when the row is first drawn; the card draws again as a
+    /// menu opens and closes.
+    session_menus: HashMap<String, (Entity<Menu>, Subscription)>,
     menu: Option<Entity<Menu>>,
     /// "Link a ticket" is open, its field made the first time.
     linking: bool,
@@ -617,6 +630,7 @@ impl PlaceCard {
             line_rows: Listing::default(),
             step_rows: Listing::default(),
             session_rows: Listing::default(),
+            session_menus: HashMap::new(),
             menu,
             linking: false,
             ticket_field: None,
@@ -667,8 +681,6 @@ impl PlaceCard {
     }
 
     fn set(&mut self, data: PlaceData, cx: &mut Context<Self>) {
-        self.icons
-            .retain(|id, _| data.sessions.iter().any(|s| &s.id == id));
         for session in &data.sessions {
             let status = session.status.clone();
             self.icons
@@ -699,6 +711,31 @@ impl PlaceCard {
         }
         self.data = data;
         cx.notify();
+    }
+
+    /// The "⋯" menu of a session's row: End session, which asks first (the confirmation of the
+    /// sidebar and of the session page, counting the agents that end). A session cannot be
+    /// removed: the daemon has no such operation, ending is what there is.
+    fn session_menu(&mut self, session: &str, cx: &mut Context<Self>) {
+        if self.session_menus.contains_key(session) {
+            return;
+        }
+        let (shell, id) = (self.shell.clone(), session.to_owned());
+        let menu = cx.new(|cx| {
+            Menu::new(card_session_menu_id(&id), "Session actions", cx).entry(
+                card_session_end_id(&id),
+                "End session…",
+                Some(Icon::Stop),
+                {
+                    let id = id.clone();
+                    move |_, cx| {
+                        shell.update(cx, |shell, cx| shell.ask_end_of(&id, cx)).ok();
+                    }
+                },
+            )
+        });
+        let watch = cx.observe(&menu, |_, _, cx| cx.notify());
+        self.session_menus.insert(session.to_owned(), (menu, watch));
     }
 
     /// What the daemon answered to this card's removal or new preparation: a toast says it.
@@ -1272,6 +1309,13 @@ impl Render for PlaceCard {
         let listed = self.data.sessions.clone();
         self.session_rows
             .sync(listed.into_iter().map(|s| (s.id.clone(), s)), at, reduce);
+        // A row that leaves keeps its mark and its menu until it has folded away.
+        let drawn: Vec<String> = self.session_rows.rows().map(|r| r.key.to_owned()).collect();
+        self.icons.retain(|id, _| drawn.contains(id));
+        self.session_menus.retain(|id, _| drawn.contains(id));
+        for key in &drawn {
+            self.session_menu(key, cx);
+        }
         let mut sessions =
             Block::new().present(id("sessions-block"), !self.session_rows.is_empty());
         if self.session_rows.rows().next().is_some() {
@@ -1306,6 +1350,10 @@ impl Render for PlaceCard {
                     row.leading(icon)
                 })
                 .meta(meta)
+                .when_some(
+                    self.session_menus.get(&session.id).map(|(m, _)| m.clone()),
+                    |row, menu| row.more(menu),
+                )
                 .on_click(move |_, window, cx| {
                     let session = open.clone();
                     shell
@@ -1339,7 +1387,7 @@ impl Render for PlaceCard {
             None => Choice::Main,
             Some(name) => Choice::Workspace(name.clone()),
         };
-        let footer = Block::new().child(
+        let footer = Block::new().at_bottom().child(
             FooterAction::new(id("new-session-in"), format!("New session in {name}"))
                 .enabled(ready)
                 .on_click(move |_, window, cx| {

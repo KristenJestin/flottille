@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, ClickEvent, ElementId, FontWeight, InteractiveElement, IntoElement,
+    AnyElement, App, ClickEvent, ElementId, Entity, FontWeight, InteractiveElement, IntoElement,
     ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement, Styled,
     TestSupportExt, Window, div, px,
 };
@@ -17,6 +17,7 @@ use gpui_kit::{
 use crate::color::mix;
 use crate::icons::{Icon, icon};
 use crate::interact::hoverable;
+use crate::menu::Menu;
 use crate::theme::palette;
 use crate::typography::Type;
 
@@ -314,6 +315,7 @@ pub struct FlatRow {
     leading: Option<AnyElement>,
     title: SharedString,
     meta: Option<AnyElement>,
+    more: Option<Entity<Menu>>,
     on_click: Option<OnClick>,
 }
 
@@ -324,6 +326,7 @@ impl FlatRow {
             leading: None,
             title: title.into(),
             meta: None,
+            more: None,
             on_click: None,
         }
     }
@@ -339,6 +342,13 @@ impl FlatRow {
         self
     }
 
+    /// Its "⋯" menu, shown while the pointer is on the row or the menu is open: it fades in and
+    /// out with the row's hover, in `<id>-actions`. Its clicks are its own, not the row's.
+    pub fn more(mut self, menu: Entity<Menu>) -> Self {
+        self.more = Some(menu);
+        self
+    }
+
     pub fn on_click(mut self, f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
         self.on_click = Some(Rc::new(f));
         self
@@ -348,6 +358,7 @@ impl FlatRow {
 impl RenderOnce for FlatRow {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let p = palette(cx);
+        let id = self.id.clone();
         let mut row = div()
             .id(self.id)
             .aria_label(self.title.clone())
@@ -394,7 +405,24 @@ impl RenderOnce for FlatRow {
                 .cursor_pointer()
                 .on_click(move |event, window, cx| on_click(event, window, cx));
         }
-        hoverable(row, move |d, t| d.bg(p.hover.opacity(t)))
+        let menu_open = self
+            .more
+            .as_ref()
+            .is_some_and(|menu| menu.read(cx).is_open());
+        let actions = self.more.map(|menu| {
+            div()
+                .id(ElementId::Name(format!("{id}-actions").into()))
+                .flex_none()
+                // The menu's clicks are its own, not the row's (which opens the session).
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .child(menu)
+                .test_support()
+        });
+        hoverable(row, move |d, t| {
+            let shown = if menu_open { 1.0 } else { t };
+            d.bg(p.hover.opacity(t))
+                .children(actions.map(|actions| actions.opacity(shown)))
+        })
     }
 }
 
