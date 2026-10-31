@@ -4239,6 +4239,61 @@ fn a_reply_with_bold_a_list_and_a_code_block_renders_them_not_their_marks(cx: &m
     assert!(!shown.contains("**"), "{shown:?}");
 }
 
+#[gpui_kit::test]
+fn a_message_s_text_is_one_text_cursor_region_from_its_first_line_to_its_last(
+    cx: &mut TestAppContext,
+) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    settle(cx);
+    read_events(
+        &page,
+        vec![
+            made_up(
+                1,
+                "agent.prompted",
+                json!({"text": "[flottille:user]\nplan it\n\nthen do it"}),
+            ),
+            made_up(2, "agent.message", json!({"text": MARKDOWN})),
+        ],
+        cx,
+    );
+    frame(cx);
+    settle(cx);
+
+    // The user's own message and the reply: each is one region, so that the pointer crossing the
+    // gap between two paragraphs, or the space beside a list, stays the I-beam.
+    for (at, region, within) in [
+        (0, "row-0-message-region", "row-0-message-text"),
+        (1, "row-1-text-region", "row-1-text"),
+    ] {
+        let (region, within) =
+            cx.update(|window, _| (window.find(region).bounds(), window.find(within).bounds()));
+        assert!(
+            region.left() >= within.left()
+                && region.top() >= within.top()
+                && region.right() <= within.right()
+                && region.bottom() <= within.bottom(),
+            "row {at}: the region {region:?} is inside its text {within:?}"
+        );
+        assert!(
+            region.size.height >= within.size.height - px(60.),
+            "row {at}: and spans the text, not a part of it: {region:?} in {within:?}"
+        );
+    }
+    // The line with the time and Copy is not text: it is outside the reply's region.
+    let (region, meta) = cx.update(|window, cx| {
+        window.hover("row-1-said", cx);
+        (
+            window.find("row-1-text-region").bounds(),
+            window.find("row-1-meta").bounds(),
+        )
+    });
+    assert!(region.bottom() <= meta.top(), "{region:?} above {meta:?}");
+}
+
 const TABLE: &str = "A table:\n\n| Tool | Result |\n| --- | --- |\n| `cargo test` | passes |\n| clippy | clean |\n\nAfter it.";
 
 /// Opens a session whose reply holds a table, in a window of the palette `colors` describes (the
