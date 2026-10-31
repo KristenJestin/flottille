@@ -42,6 +42,8 @@ pub enum Update {
         judge: bool,
         project: Option<String>,
     },
+    /// The developer mode was switched, from any client: the settings page reads it again.
+    DeveloperChanged,
     /// What the open session page's link read or saw, with the link's token.
     Session {
         token: u64,
@@ -146,6 +148,9 @@ fn follow(
         }
         if let Some(changed) = text_changed(event) {
             let _ = updates.unbounded_send(changed);
+        }
+        if event.name == "developer.changed" {
+            let _ = updates.unbounded_send(Update::DeveloperChanged);
         }
     };
     loop {
