@@ -72,22 +72,6 @@ impl Sections {
         self.scrolling = Some((from, to, motion));
     }
 
-    /// Whether the section of that index entry stands where [`Sections::go_to`] puts it, the
-    /// page laid out and no scroll on its way; if not, it goes there.
-    pub fn arrive_at(&mut self, entry: usize, cx: &App) -> bool {
-        if self.scrolling.is_some() {
-            return false;
-        }
-        match self.target(entry) {
-            Some((from, to)) if (from - to).abs() < 1. => true,
-            Some(_) => {
-                self.go_to(entry, cx);
-                false
-            }
-            None => false,
-        }
-    }
-
     /// Whether a scroll to a section is on its way.
     pub fn is_scrolling(&self) -> bool {
         self.scrolling.is_some()

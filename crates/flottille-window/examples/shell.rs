@@ -18,7 +18,7 @@
 //! session's "End the session?" confirmation, `--ended` unfolds the "Ended" group at the bottom of the
 //! left tree, `--open-run` opens the detail of the open session's first run whose line holds the text, in its drawer,
 //! `--details` unfolds the details of the first request waiting in the rail, `--workspace-menu` opens the
-//! rail's Workspace "⋯" menu, `--project-settings` a project's settings page (`--repository` and `--tracker` open its dialogs, `--section` scrolls to its n-th section, `--use-forge` uses the forge offered for a repository, `--remove-repository` and `--remove-project` ask their confirmation), `--how` opens "How Auto works" in the settings, `--size` the window's size. The daemon is found on
+//! rail's Workspace "⋯" menu, `--project-settings` a project's settings page (`--repository` and `--tracker` open its dialogs, `--section` chooses its n-th tab, `--use-forge` uses the forge offered for a repository, `--remove-repository` and `--remove-project` ask their confirmation), `--how` opens "How Auto works" in the settings, `--size` the window's size. The daemon is found on
 //! `$XDG_RUNTIME_DIR/flottille/daemon.sock`; it is not started.
 
 use std::os::unix::net::UnixStream;
@@ -303,7 +303,7 @@ fn main() {
                                 page.open_tracker(window, cx);
                             }
                             if let Some(entry) = section {
-                                page.go_to(entry, cx);
+                                page.choose(entry, cx);
                             }
                             if let Some(path) = &use_forge {
                                 page.use_proposal(path, cx);

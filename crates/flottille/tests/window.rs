@@ -6179,11 +6179,12 @@ fn a_repository_with_no_forge_says_why_in_the_workspace_section(cx: &mut TestApp
 
 // ── Commands and skills in the project's settings (#127) ──────────────────────────────────────
 
-/// The project's settings open in a window tall enough to show its Skills and Commands, which
-/// come after its forges, tracker and rules.
-fn sections_of(shell: &Entity<Shell>, project: &str, cx: &mut VisualTestContext) {
+/// The project's settings open in a window tall enough to show a section whole, on the tab of
+/// the section `tab`.
+fn sections_of(shell: &Entity<Shell>, project: &str, tab: &str, cx: &mut VisualTestContext) {
     cx.simulate_resize(size(px(1280.), px(3200.)));
     open_project_settings(shell, project, cx);
+    choose_tab(tab, cx);
 }
 
 fn commands_section(
@@ -6244,7 +6245,7 @@ fn a_command_added_from_a_template_appears_in_the_project_s_settings(cx: &mut Te
     let user = user();
     project(&user, "atlas");
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    sections_of(&shell, "atlas", cx);
+    sections_of(&shell, "atlas", "commands", cx);
     until(&shell, cx, "the empty list is shown", |cx| {
         cx.update(|window, _| window.try_find("no-commands").is_some())
     });
@@ -6284,7 +6285,7 @@ fn a_blank_command_is_written_from_the_form_and_a_refusal_says_why(cx: &mut Test
     let user = user();
     project(&user, "atlas");
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    sections_of(&shell, "atlas", cx);
+    sections_of(&shell, "atlas", "commands", cx);
     let section = commands_section(&shell, cx);
 
     cx.update(|window, cx| window.click("add-command", cx));
@@ -6333,7 +6334,7 @@ fn editing_a_command_in_the_modal_writes_the_project_s_file_and_a_removal_asks_t
     )
     .unwrap();
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    sections_of(&shell, "atlas", cx);
+    sections_of(&shell, "atlas", "commands", cx);
     until(&shell, cx, "the command is listed", |cx| {
         !commands_listed(&shell, cx).is_empty()
     });
@@ -6605,7 +6606,7 @@ fn the_template_list_adds_a_template_and_a_blank_one(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    sections_of(&shell, "atlas", cx);
+    sections_of(&shell, "atlas", "commands", cx);
     until(&shell, cx, "the empty list is shown", |cx| {
         cx.update(|window, _| window.try_find("no-commands").is_some())
     });
@@ -6701,7 +6702,7 @@ fn a_skill_is_added_with_a_path_picked_in_the_project_folder_and_removed(cx: &mu
     std::fs::create_dir_all(folder.join("docs")).unwrap();
     std::fs::write(folder.join("docs/react.md"), "How we write components.\n").unwrap();
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    sections_of(&shell, "atlas", cx);
+    sections_of(&shell, "atlas", "skills", cx);
     let section = skills_section(&shell, cx);
     until(&shell, cx, "the empty list is shown", |cx| {
         cx.update(|window, _| window.try_find("no-skills").is_some())
@@ -6773,7 +6774,7 @@ fn a_text_skill_is_written_in_the_settings_and_read_back_to_edit(cx: &mut TestAp
     let user = user();
     project(&user, "atlas");
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    sections_of(&shell, "atlas", cx);
+    sections_of(&shell, "atlas", "skills", cx);
     let section = skills_section(&shell, cx);
 
     cx.update(|window, cx| window.click("add-skill", cx));
@@ -6836,7 +6837,7 @@ fn a_skill_the_daemon_refuses_says_why_in_the_modal_and_adds_nothing(cx: &mut Te
     let user = user();
     project(&user, "atlas");
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    sections_of(&shell, "atlas", cx);
+    sections_of(&shell, "atlas", "skills", cx);
     let section = skills_section(&shell, cx);
 
     cx.update(|window, cx| window.click("add-skill", cx));
@@ -7071,6 +7072,7 @@ fn a_repository_s_dialog_offers_the_remote_s_forge_and_saves_it_with_a_toast(
 fn the_tracker_select_unfolds_jira_s_fields(cx: &mut TestAppContext) {
     let user = user().with_fake_gh();
     let (shell, cx, page) = atlas_on_github(&user, cx);
+    choose_tab("tracker", cx);
 
     assert_eq!(text_of("tracker-row", cx).as_deref(), Some("None"));
     cx.update(|window, cx| window.click("tracker-row", cx));
@@ -7111,7 +7113,7 @@ fn add_skill_offers_two_radio_choices_each_with_its_line(cx: &mut TestAppContext
     let user = user();
     project(&user, "atlas");
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    sections_of(&shell, "atlas", cx);
+    sections_of(&shell, "atlas", "skills", cx);
     let section = skills_section(&shell, cx);
 
     cx.update(|window, cx| window.click("add-skill", cx));
@@ -7145,7 +7147,7 @@ fn every_switch_of_the_task_dialog_draws_its_label_and_its_hint(cx: &mut TestApp
     let user = user();
     project(&user, "atlas");
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    sections_of(&shell, "atlas", cx);
+    sections_of(&shell, "atlas", "tasks", cx);
 
     cx.update(|window, cx| window.click("add-task", cx));
     settle(cx);
@@ -7175,7 +7177,7 @@ fn a_removal_goes_through_a_confirmation_and_says_it_in_a_toast(cx: &mut TestApp
     )
     .unwrap();
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    sections_of(&shell, "atlas", cx);
+    sections_of(&shell, "atlas", "commands", cx);
     let listed = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
         commands_listed(shell, cx)
             .iter()
@@ -7230,7 +7232,7 @@ fn a_claude_skill_and_command_are_offered_and_imported_and_a_broken_one_shown_wi
         "---\ndescription: Review the current change\n---\nRead the diff.\n",
     );
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    sections_of(&shell, "atlas", cx);
+    sections_of(&shell, "atlas", "skills", cx);
     let skills = skills_section(&shell, cx);
     let commands = commands_section(&shell, cx);
     until(&shell, cx, "the .claude folder is read", |cx| {
@@ -7240,7 +7242,6 @@ fn a_claude_skill_and_command_are_offered_and_imported_and_a_broken_one_shown_wi
     settle(cx);
     cx.update(|window, _| {
         assert!(window.find("skill-import-react").visible());
-        assert!(window.find("command-import-review").visible());
         assert!(
             window.try_find("skill-import-broken").is_none(),
             "it cannot be imported"
@@ -7261,6 +7262,8 @@ fn a_claude_skill_and_command_are_offered_and_imported_and_a_broken_one_shown_wi
         skills_listed(&shell, cx).iter().any(|s| s.name == "react")
     });
     toast_said(&shell, "Skill react imported", cx);
+    choose_tab("commands", cx);
+    cx.update(|window, _| assert!(window.find("command-import-review").visible()));
     cx.update(|window, cx| window.click("command-import-all", cx));
     until(&shell, cx, "the command is imported", |cx| {
         commands_listed(&shell, cx)
@@ -7299,37 +7302,59 @@ fn every_setting_of_a_project_is_edited_in_its_settings_and_the_project_page_has
         page.read_with(cx, |page, cx| page.has_read(cx))
     });
     settle(cx);
-    cx.update(|window, _| {
-        for (key, _) in flottille_window::project_settings::SECTIONS {
+    for (key, _) in flottille_window::project_settings::SECTIONS {
+        cx.update(|window, _| {
             assert!(
                 window
-                    .find(format!("project-settings-page-index-{key}"))
+                    .find(format!("project-settings-tabs-{key}"))
                     .visible(),
-                "the index has {key}"
+                "the tabs have {key}"
             );
+        });
+        choose_tab(key, cx);
+        cx.update(|window, _| {
             assert!(
                 window.find(format!("{key}-title")).visible(),
                 "the page has {key}"
             );
-        }
-        for id in [
-            "detect-repositories",
-            "tracker-row",
-            "add-skill",
-            "add-command",
-            "add-task",
-            "add-setup",
-            "rules-save-atlas",
-        ] {
-            assert!(window.find(id).visible(), "{id}");
-        }
-    });
+            let editor = match key {
+                "repositories" => "detect-repositories",
+                "tracker" => "tracker-row",
+                "skills" => "add-skill",
+                "commands" => "add-command",
+                "tasks" => "add-task",
+                "setup" => "add-setup",
+                "rules" => "rules-save-atlas",
+                other => panic!("no editor known for {other}"),
+            };
+            assert!(window.find(editor).visible(), "{editor}");
+        });
+    }
+}
+
+/// Clicks the tab of the section `key` and lets its section arrive.
+fn choose_tab(key: &str, cx: &mut VisualTestContext) {
+    let id = format!("project-settings-tabs-{key}");
+    cx.update(|window, cx| window.click(id, cx));
+    settle(cx);
+}
+
+fn the_section_shown(cx: &mut VisualTestContext) -> Vec<&'static str> {
+    cx.update(|window, _| {
+        flottille_window::project_settings::SECTIONS
+            .iter()
+            .filter(|(key, _)| {
+                window
+                    .try_find(format!("{key}-title"))
+                    .is_some_and(|found| found.visible())
+            })
+            .map(|(key, _)| *key)
+            .collect()
+    })
 }
 
 #[gpui_kit::test]
-fn the_index_stays_at_the_top_once_the_page_scrolls_past_it_and_lights_the_section_in_sight(
-    cx: &mut TestAppContext,
-) {
+fn opening_the_project_settings_shows_the_repositories_alone(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
@@ -7338,28 +7363,135 @@ fn the_index_stays_at_the_top_once_the_page_scrolls_past_it_and_lights_the_secti
         page.read_with(cx, |page, cx| page.has_read(cx))
     });
     settle(cx);
+    assert_eq!(page.read_with(cx, |p, _| p.tab()), 0);
+    assert_eq!(the_section_shown(cx), ["repositories"]);
     cx.update(|window, _| {
-        assert!(
-            window
-                .try_find("project-settings-page-index-stuck-tasks")
-                .is_none()
+        assert_eq!(
+            window.find("project-settings-tabs-repositories").selected(),
+            Some(true),
+            "the first tab is the chosen one"
+        );
+        assert_eq!(
+            window.find("project-settings-tabs-tracker").selected(),
+            Some(false)
         );
     });
-    assert_eq!(page.read_with(cx, |p, _| p.current_section()), 0);
+}
 
-    // A click on Tasks scrolls to it; the index follows the page down, Tasks lit.
-    cx.update(|window, cx| window.click("project-settings-page-index-tasks", cx));
-    settle(cx);
-    cx.update(|window, _| {
-        let stuck = window.find("project-settings-page-index-stuck-tasks");
-        assert!(stuck.visible());
-        assert!(
-            f32::from(stuck.bounds().origin.y) < 120.0,
-            "{:?}",
-            stuck.bounds()
-        );
+#[gpui_kit::test]
+fn choosing_each_tab_shows_its_section_alone(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_project_settings(&shell, "atlas", cx);
+    until(&shell, cx, "every section is read", |cx| {
+        page.read_with(cx, |page, cx| page.has_read(cx))
     });
-    assert_eq!(page.read_with(cx, |p, _| p.current_section()), 4);
+    settle(cx);
+    // Forwards, then backwards: each one alone, whichever one it comes from.
+    let keys: Vec<&str> = flottille_window::project_settings::SECTIONS
+        .iter()
+        .map(|(key, _)| *key)
+        .collect();
+    for (at, key) in keys
+        .iter()
+        .enumerate()
+        .skip(1)
+        .chain(keys.iter().enumerate().rev())
+    {
+        choose_tab(key, cx);
+        assert_eq!(page.read_with(cx, |p, _| p.tab()), at, "{key}");
+        assert_eq!(the_section_shown(cx), [*key], "{key} alone");
+        cx.update(|window, _| {
+            assert_eq!(
+                window
+                    .find(format!("project-settings-tabs-{key}"))
+                    .selected(),
+                Some(true),
+                "{key} is marked"
+            );
+        });
+    }
+}
+
+#[gpui_kit::test]
+fn a_dialog_opened_from_a_tab_and_closed_brings_back_the_same_tab(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_project_settings(&shell, "atlas", cx);
+    until(&shell, cx, "every section is read", |cx| {
+        page.read_with(cx, |page, cx| page.has_read(cx))
+    });
+    settle(cx);
+    choose_tab("tasks", cx);
+    let tasks = flottille_window::project_settings::SECTIONS
+        .iter()
+        .position(|(key, _)| *key == "tasks")
+        .unwrap();
+    cx.update(|window, cx| window.click("add-task", cx));
+    settle(cx);
+    cx.update(|window, _| assert!(window.find("task-place").visible(), "the dialog is open"));
+    cx.simulate_keystrokes("escape");
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find("task-place").is_none(), "it is closed"));
+    assert_eq!(page.read_with(cx, |p, _| p.tab()), tasks);
+    assert_eq!(the_section_shown(cx), ["tasks"]);
+}
+
+#[gpui_kit::test]
+fn the_tabs_say_the_count_of_their_lists_and_switching_moves_the_marker_and_fades_the_section_in(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    user.call(
+        "task.add",
+        json!({"project": "atlas", "name": "say", "line": "echo hi"}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_project_settings(&shell, "atlas", cx);
+    until(&shell, cx, "every section is read", |cx| {
+        page.read_with(cx, |page, cx| page.has_read(cx))
+    });
+    settle(cx);
+    let count = |key: &str, cx: &mut VisualTestContext| {
+        let id = format!("project-settings-tabs-{key}-count");
+        cx.update(|window, _| {
+            window
+                .try_find(id)
+                .and_then(|found| found.label().map(str::to_owned))
+        })
+    };
+    assert_eq!(count("repositories", cx).as_deref(), Some("1"));
+    assert_eq!(count("skills", cx).as_deref(), Some("0"));
+    assert_eq!(count("commands", cx).as_deref(), Some("0"));
+    assert_eq!(count("tasks", cx).as_deref(), Some("1"));
+    assert_eq!(
+        count("tracker", cx),
+        None,
+        "a section with no list has no count"
+    );
+    assert_eq!(count("rules", cx), None);
+
+    let before = cx.update(|window, _| window.find("project-settings-tabs-marker").bounds());
+    cx.update(|window, cx| window.click("project-settings-tabs-tasks", cx));
+    cx.update(|window, cx| window.render_frame(cx));
+    assert!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)) > 0,
+        "the marker moves and the section arrives"
+    );
+    settle(cx);
+    let after = cx.update(|window, _| window.find("project-settings-tabs-marker").bounds());
+    let tab = cx.update(|window, _| window.find("project-settings-tabs-tasks").bounds());
+    assert!(after.left() > before.left());
+    assert_eq!(after.left(), tab.left(), "under the chosen tab");
+    assert_eq!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)),
+        0,
+        "nothing moves once it is there"
+    );
 }
 
 #[gpui_kit::test]
@@ -7873,6 +8005,7 @@ fn a_project_s_settings_have_a_rules_section_that_replaces_the_global_rules_and_
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     cx.simulate_resize(size(px(1280.), px(2400.)));
     let page = open_project_settings(&shell, "atlas", cx);
+    choose_tab("rules", cx);
     let editor = page.read_with(cx, |page, _| page.rules().clone());
     until(&shell, cx, "the rules are shown", |cx| {
         editor.read_with(cx, |e, _| e.shown().is_some())
@@ -7934,6 +8067,7 @@ fn a_project_s_rules_can_be_saved_identical_to_the_global_text(cx: &mut TestAppC
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     cx.simulate_resize(size(px(1280.), px(2400.)));
     let page = open_project_settings(&shell, "atlas", cx);
+    choose_tab("rules", cx);
     let editor = page.read_with(cx, |page, _| page.rules().clone());
     until(&shell, cx, "the rules are shown", |cx| {
         editor.read_with(cx, |e, _| e.shown().is_some())
@@ -8029,37 +8163,31 @@ fn steps_listed(
 }
 
 #[gpui_kit::test]
-fn the_project_s_settings_show_skills_commands_tasks_and_setup_above_the_rules(
+fn the_project_s_settings_show_skills_commands_tasks_and_setup_each_in_its_tab(
     cx: &mut TestAppContext,
 ) {
     let user = user();
     project(&user, "atlas");
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    sections_of(&shell, "atlas", cx);
+    sections_of(&shell, "atlas", "skills", cx);
     until(&shell, cx, "the sections are read", |cx| {
         settings_of(&shell, cx).is_some_and(|page| page.read_with(cx, |p, cx| p.has_read(cx)))
     });
     settle(cx);
-    cx.update(|window, _| {
-        let y = |id: &str| window.find(id.to_owned()).bounds().origin.y;
-        let order = [
-            "add-skill",
-            "add-command",
-            "add-task",
-            "add-setup",
-            "rules-save-atlas",
-        ];
-        for pair in order.windows(2) {
-            assert!(
-                y(pair[0]) < y(pair[1]),
-                "{} comes before {}",
-                pair[0],
-                pair[1]
-            );
-        }
-        assert!(window.find("no-tasks").visible());
-        assert!(window.find("no-setup").visible());
-    });
+    for (tab, add, empty) in [
+        ("skills", "add-skill", "no-skills"),
+        ("commands", "add-command", "no-commands"),
+        ("tasks", "add-task", "no-tasks"),
+        ("setup", "add-setup", "no-setup"),
+    ] {
+        choose_tab(tab, cx);
+        cx.update(|window, _| {
+            assert!(window.find(add).visible(), "{add} in {tab}");
+            assert!(window.find(empty).visible(), "{empty} in {tab}");
+        });
+    }
+    choose_tab("rules", cx);
+    cx.update(|window, _| assert!(window.find("rules-save-atlas").visible()));
 }
 
 #[gpui_kit::test]
@@ -8067,7 +8195,7 @@ fn a_task_is_added_edited_and_removed_from_the_tasks_section(cx: &mut TestAppCon
     let user = user();
     project(&user, "atlas");
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    sections_of(&shell, "atlas", cx);
+    sections_of(&shell, "atlas", "tasks", cx);
     let section = tasks_section(&shell, cx);
 
     cx.update(|window, cx| window.click("add-task", cx));
@@ -8146,7 +8274,7 @@ fn setup_steps_are_added_reordered_and_removed_in_the_setup_section(cx: &mut Tes
     let user = user();
     project(&user, "atlas");
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    sections_of(&shell, "atlas", cx);
+    sections_of(&shell, "atlas", "setup", cx);
     let section = setup_section(&shell, cx);
 
     // A copy of the .env files, in each repository.
@@ -8306,25 +8434,16 @@ fn seed_skills(user: &User, names: &[&str]) {
 }
 
 #[gpui_kit::test]
-fn the_sections_of_a_project_s_settings_enter_one_after_the_other(cx: &mut TestAppContext) {
+fn the_parts_of_a_project_s_settings_enter_one_after_the_other_and_a_section_again_as_its_tab_is_chosen(
+    cx: &mut TestAppContext,
+) {
     let user = user();
     project(&user, "atlas");
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     cx.simulate_resize(size(px(1280.), px(2400.)));
     open_project(&shell, "atlas", cx);
     cx.update(|window, cx| window.click("project-settings", cx));
-    let ids = [
-        "header",
-        "index",
-        "repositories",
-        "tracker",
-        "skills",
-        "commands",
-        "tasks",
-        "setup",
-        "rules",
-    ]
-    .map(|part| format!("enter-settings-atlas-{part}"));
+    let ids = ["header", "tabs", "repositories"].map(|part| format!("enter-settings-atlas-{part}"));
     // Every part of the page sits in an entrance, and on the page's first frames the later ones
     // have risen less than the earlier: they come one after the other.
     run_for(Duration::from_millis(120), cx);
@@ -8341,11 +8460,32 @@ fn the_sections_of_a_project_s_settings_enter_one_after_the_other(cx: &mut TestA
             rise(at - 1)
         );
     }
-    let last = ids.len() - 1;
     assert!(
-        (rise(last) - 6.0).abs() < 0.5,
-        "the rules wait for their turn: {}",
-        rise(last)
+        (rise(2) - 6.0).abs() < 0.5,
+        "the section waits for its turn: {}",
+        rise(2)
+    );
+
+    // A section chosen enters, as the first one did, whichever one it comes after.
+    cx.update(|window, cx| window.click("project-settings-tabs-tasks", cx));
+    run_for(Duration::from_millis(20), cx);
+    let rising = y_of("enter-settings-atlas-tasks", cx);
+    run_for(Duration::from_millis(1500), cx);
+    let there = y_of("enter-settings-atlas-tasks", cx);
+    assert!(
+        rising - there > 1.0,
+        "the tasks are still rising when chosen: {}",
+        rising - there
+    );
+    cx.update(|window, cx| window.click("project-settings-tabs-repositories", cx));
+    run_for(Duration::from_millis(20), cx);
+    let again = y_of("enter-settings-atlas-repositories", cx);
+    run_for(Duration::from_millis(1500), cx);
+    let back = y_of("enter-settings-atlas-repositories", cx);
+    assert!(
+        again - back > 1.0,
+        "the repositories enter again when their tab is chosen again: {}",
+        again - back
     );
 }
 
@@ -8357,7 +8497,7 @@ fn a_skill_that_is_removed_folds_away_before_it_is_gone_and_the_empty_line_unfol
     project(&user, "atlas");
     seed_skills(&user, &["alpha"]);
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    sections_of(&shell, "atlas", cx);
+    sections_of(&shell, "atlas", "skills", cx);
     until(&shell, cx, "the skill is listed", |cx| {
         !skills_listed(&shell, cx).is_empty()
     });
@@ -8400,7 +8540,7 @@ fn a_setup_step_moved_down_slides_instead_of_jumping(cx: &mut TestAppContext) {
             .unwrap();
     }
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    sections_of(&shell, "atlas", cx);
+    sections_of(&shell, "atlas", "setup", cx);
     until(&shell, cx, "the steps are listed", |cx| {
         steps_listed(&shell, cx).len() == 2
     });
@@ -8765,7 +8905,7 @@ fn the_setup_s_move_up_and_down_are_in_the_row_s_menu_and_do_nothing_at_the_ends
             .unwrap();
     }
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    sections_of(&shell, "atlas", cx);
+    sections_of(&shell, "atlas", "setup", cx);
     until(&shell, cx, "the steps are listed", |cx| {
         steps_listed(&shell, cx).len() == 2
     });
@@ -8873,10 +9013,11 @@ fn edit_in_settings_opens_the_project_settings_scrolled_to_their_tasks(cx: &mut 
         .position(|(key, _)| *key == "tasks")
         .unwrap();
     assert_eq!(
-        settings.read_with(cx, |page, _| page.current_section()),
+        settings.read_with(cx, |page, _| page.tab()),
         tasks,
-        "the Tasks section is scrolled up under the index"
+        "the Tasks tab is the one chosen"
     );
+    assert_eq!(the_section_shown(cx), ["tasks"]);
     assert_eq!(
         cx.update(|window, cx| window.simulate_next_frame(cx)),
         0,
