@@ -1,7 +1,7 @@
-//! A scripted `acli` (Atlassian's command line) for the tests of Flottille's Jira reads
+//! A scripted `acli` (Atlassian's command line) for the tests of Flottille's Jira reads and writes
 //! (`docs/tickets.md`), so that no test ever calls Jira nor uses anyone's sign-in. It answers the
-//! three commands Flottille runs, from a script, and records every call; any other command, a
-//! write above all, ends with 2 and is in the record for a test to find.
+//! commands Flottille runs, from a script, and records every call; any other command ends with 2
+//! and is in the record for a test to find.
 //!
 //! The shape of what it prints is **assumed**, from Atlassian's documentation of
 //! `acli jira workitem view` (which gives its flags and not its output): the work item as Jira's
@@ -33,6 +33,16 @@
 //! of work items, Jira's REST shape assumed as for `view`), or every item of `items` without it,
 //! at most `--limit`. The fake does not read the JQL: the test reads it in the record. Without
 //! `--jql` (or `--filter`) or `--json` it ends with 2, as a call Flottille never makes.
+//!
+//! The writes change nothing: the test reads them in the record.
+//!
+//! - `acli jira workitem create --project P --summary S … --json` prints `{"key": …}`, the
+//!   script's `created` (`P-1` without it); without `--project` or `--summary` it ends with 2.
+//! - `acli jira workitem comment create --key K --body B` and `acli jira workitem edit --key K …
+//!   --yes` end with 0 for a key of `items`, with 1 for another.
+//! - `acli jira workitem transition --key K --status S --yes` ends with 0 when S is one of the
+//!   script's `transitions` of K (`{"ABC-1": ["In Progress", "Done"]}`), in any case, and with 1
+//!   saying so otherwise.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -117,12 +127,67 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             println!("{}", Value::from(found));
             0
         }
-        _ => {
-            eprintln!(
-                "fake acli: not a command Flottille runs: {}",
-                words.join(" ")
-            );
-            2
+        ["jira", "workitem", "create", rest @ ..]
+            if rest.contains(&"--json") && rest.contains(&"--summary") =>
+        {
+            let Some(project) = value(rest, "--project") else {
+                return not_run(&words);
+            };
+            let key = script["created"]
+                .as_str()
+                .map_or_else(|| format!("{project}-1"), str::to_owned);
+            println!("{}", json!({"key": key}));
+            0
         }
+        ["jira", "workitem", "comment", "create", rest @ ..] if rest.contains(&"--body") => {
+            known(script, rest)
+        }
+        ["jira", "workitem", "edit", rest @ ..] if rest.contains(&"--yes") => known(script, rest),
+        ["jira", "workitem", "transition", rest @ ..] if rest.contains(&"--yes") => {
+            let (Some(key), Some(status)) = (value(rest, "--key"), value(rest, "--status")) else {
+                return not_run(&words);
+            };
+            let possible = script["transitions"][key].as_array().into_iter().flatten();
+            if possible
+                .filter_map(Value::as_str)
+                .any(|to| to.eq_ignore_ascii_case(status))
+            {
+                println!("✓ Work item {key} transitioned to {status}");
+                0
+            } else {
+                eprintln!("✗ Error: no transition to status {status} for work item {key}");
+                1
+            }
+        }
+        _ => not_run(&words),
     }
+}
+
+/// What follows `flag` in `args`.
+fn value<'a>(args: &[&'a str], flag: &str) -> Option<&'a str> {
+    let at = args.iter().position(|word| *word == flag)?;
+    args.get(at + 1).copied()
+}
+
+/// A write to the work item of `--key`: done when the script holds it.
+fn known(script: &Value, args: &[&str]) -> i32 {
+    match value(args, "--key") {
+        Some(key) if script["items"].get(key).is_some() => {
+            println!("✓ Work item {key} updated");
+            0
+        }
+        Some(key) => {
+            eprintln!("✗ Error: work item {key} does not exist");
+            1
+        }
+        None => not_run(args),
+    }
+}
+
+fn not_run(words: &[&str]) -> i32 {
+    eprintln!(
+        "fake acli: not a command Flottille runs: {}",
+        words.join(" ")
+    );
+    2
 }
