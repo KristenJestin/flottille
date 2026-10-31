@@ -170,7 +170,8 @@ The workspace was linked to a ticket, or unlinked ([`tickets.md`](tickets.md)).
 
 ### `workspace.removed`
 
-The workspace's worktrees, folder and record are gone. Its branches are kept.
+The workspace's worktrees, folder and record are gone. Its local branches whose work landed are
+deleted after it, which the answer to `workspace.remove` says, not an event.
 
 | Field | |
 |---|---|

@@ -405,11 +405,12 @@ Nothing to resume: workspace login is ready.
 ### `flottille workspace remove <project> <name>`
 
 Removes a workspace whose work is all committed and pushed; never forced. The message names what
-stands in the way otherwise.
+stands in the way otherwise. Its local branches whose work has landed are deleted, each said with
+why, and the others kept; a remote branch never is.
 
 ```
 $ flottille workspace remove shop login
-Removed workspace login of shop: its worktrees and its folder. Its branches are kept.
+Removed workspace login of shop: its worktrees and its folder. Its branch shop/login was deleted in web: its pull request #12 is merged. It is kept in api: its pull request #13 is open, not merged.
 ```
 
 ## Commands

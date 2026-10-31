@@ -15,7 +15,7 @@ multi-repository case (`docs/reference/multi-repo-case.md`) needs.
 | `flottille workspace show <project> <name>` | Its repositories, their bases, and each step with its state; a failure with its last lines. |
 | `flottille workspace ticket <project> <name> <ticket>` | Links it to a ticket (`#123` or a Jira key), or to none with `--clear` (`docs/tickets.md`). `create` takes `--ticket` too. |
 | `flottille workspace prepare <project> <name>` | Resumes a preparation, from the step that failed. |
-| `flottille workspace remove <project> <name>` | Removes it when all its work is committed and pushed. Never forced: only the user's answer to an agent's request discards work ("Removal"). |
+| `flottille workspace remove <project> <name>` | Removes it when all its work is committed and pushed, then deletes its local branches whose work has landed, never a remote one. Never forced: only the user's answer to an agent's request discards work ("Removal"). |
 
 All of them take `--json` and print what the daemon answered (`docs/protocol.md`).
 
@@ -174,9 +174,14 @@ Refused while the workspace is being prepared. Then nothing is touched unless:
   is not committed`); the links Flottille made and the worktrees standing inside the root one are
   not work;
 - in each worktree made, `git log HEAD --not --remotes` shows no commit (`<repository> has commits
-  on no remote: <hash> <subject>, …`); in a repository with no remote at all, no commit is on no
-  other branch (`git log HEAD --not --exclude=<branch> --branches`: `<repository> has commits on no
-  other branch: …`), since its work stays on its own branches;
+  on no remote, on its branch <branch>: <hash> <subject>, …`); in a repository with no remote at
+  all, no commit is on no other branch (`git log HEAD --not --exclude=<branch> --branches`:
+  `<repository> has commits on no other branch, on its branch <branch>: …`), since its work stays
+  on its own branches. Commits on no remote are no loss when the repository's forge says the
+  branch's pull request is merged and every one of them is in the commit it merged (its head, as
+  the forge gives it: GitHub's): a squash-merged branch whose remote branch the forge deleted and
+  a fetch pruned. A commit made after, a pull request not merged, a forge that cannot be read or
+  none declared still refuse;
 - outside the worktrees made, the workspace folder holds nothing but the links Flottille made and
   folders holding nothing else (`<path> is in no worktree`): no `git status` sees a file written in
   the folder of a workspace that does not take the root repository, nor in a repository folder
@@ -185,15 +190,29 @@ Refused while the workspace is being prepared. Then nothing is touched unless:
 Every problem is named in one refusal. Otherwise: the links Flottille made are removed, then each
 worktree, the deepest first, with `git worktree remove` (never `--force`), then `git worktree
 prune`; the folder is removed (links as links, never followed); Flottille checks the folder is gone
-and that `git worktree list` no longer lists it, then forgets the workspace. Its branches are kept.
+and that `git worktree list` no longer lists it, then forgets the workspace.
+
+Then, in each repository, the workspace's **local** branch is deleted once its work has landed
+(`git branch -D`, since `-d` refuses a squash merge), and kept otherwise; the answer says each one
+and why (`docs/protocol.md`, `workspace.remove`):
+
+- it holds no commit of its own: every commit of it is in its base (`git merge-base
+  --is-ancestor`), and the forge is not asked;
+- or the repository's forge says its pull request is merged (a squash merge included, whose
+  commits git never finds in the base), and each of its commits is on a remote or in the commit
+  the pull request merged: a commit made after the merge and never pushed keeps it.
+
+Anything else keeps it, said: its pull request open, a draft or closed, none, no forge declared,
+or a forge that cannot be read (Flottille never deletes on a guess). **The remote branch is never
+deleted**, nor anything asked of the forge but the pull request's state. Work that is pushed but
+not merged is not lost by the removal: the workspace is removed and its branch kept.
 
 A root agent removes a workspace the same way, with `workspace` `remove`, always held for the
 user, its card saying what would be lost (`docs/tools.md`, "The workspace"); never the one it
 works in. What would be lost refuses it unless the user's answer said to discard it: then nothing
 is checked for loss, each worktree is removed with `git worktree remove --force`, and the folder
-with what it held. It then deletes, in each repository, the workspace's branch when
-it holds no commit of its own (every commit of it is in its base's tracking ref): an empty branch.
-A branch with commits is kept (`docs/commands.md`). It is refused, nothing touched, while the
+with what it held. Its landed branches are then deleted as above, and the others kept, which its
+answer says. It is refused, nothing touched, while the
 workspace is in use outside the agent's tree (`docs/design.md` §5.1): an agent of another tree not
 ended that works in it, or a command run of another tree still running in it, each named; the
 tree's own agents and command runs are no obstacle. The user's `flottille workspace remove` does not check
