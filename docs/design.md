@@ -664,7 +664,10 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   of its steps says it too; a message the user sent while the root works stays under the
   conversation, above the composer, drawn as waiting (quieter, "Sent when the agent finishes its
   step"), until the root reads it between its turns and it is a message like the others (the
-  queued deliveries of `agent.tree`); and a composer that writes to the root, with the session's mode
+  queued deliveries of `agent.tree`), with three buttons while it waits: Send now (stops the
+  root's turn and hands it this message next), Edit (takes it back into the composer, text and
+  pictures, after what is typed) and Cancel (takes it back); the daemon checks that the root has
+  not read it in one transaction, and says "already read by the agent" in a toast if it has; and a composer that writes to the root, with the session's mode
   (an Ask | Auto | Full control, with a warning icon when Auto has no judge, its highlight in the
   alarm colour on Full, each step Full let through saying "allowed by Full mode") in its bar, whose Stop
   button, in Send's place while a turn runs and Send has nothing to send (the two cross-fade), and

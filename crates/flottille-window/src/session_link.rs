@@ -440,6 +440,8 @@ const TREE_EVENTS: &[&str] = &[
     // The rail's gauge of each agent's context.
     "agent.usage",
     "delivery.queued",
+    // A waiting message taken back leaves the queue under the conversation.
+    "delivery.withdrawn",
 ];
 
 const FIRST_RETRY: Duration = Duration::from_millis(100);
