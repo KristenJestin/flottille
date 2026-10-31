@@ -1651,12 +1651,27 @@ pub fn tree(daemon: &Daemon, agent: &Agent) -> Result<Vec<Value>, Failure> {
                 || user_requests
                     .iter()
                     .any(|request| root_of(daemon, &request.agent) == agent.id));
+        // What the user wrote to the root while it worked, not sent yet: the window shows it
+        // waiting until the root reads it.
+        let queued: Vec<Value> = match agent.parent {
+            Some(_) => Vec::new(),
+            None => daemon
+                .read(|store| store.deliveries(&agent.id, "queued"))?
+                .into_iter()
+                .filter(|delivery| delivery.kind == "user")
+                .map(|delivery| {
+                    json!({"delivery": delivery.id, "text": delivery.body,
+                        "images": delivery.images.len(), "at": delivery.created_at})
+                })
+                .collect(),
+        };
         out.push(json!({
             "agent": summary(daemon, &agent),
             "doing": doing(daemon, &agent),
             "waiting_on": waiting_on,
             "needs_user": needs_user,
             "context": context_used(daemon, &agent),
+            "queued": queued,
         }));
         let children = daemon.read(|store| store.children(&agent.id))?;
         stack.extend(children.into_iter().rev().map(|child| child.id));

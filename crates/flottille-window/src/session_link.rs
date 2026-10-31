@@ -51,6 +51,18 @@ pub struct TreeAgent {
     pub gate_mode: Option<String>,
     /// How much of its context it used at its last report, in percent.
     pub context: Option<u64>,
+    /// What the user wrote to it while it worked, not sent to it yet, the oldest first.
+    pub queued: Vec<Queued>,
+}
+
+/// A message the user wrote to the root while it worked: the root reads it between its turns.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Queued {
+    pub delivery: String,
+    pub text: String,
+    /// How many pictures go with it.
+    pub images: usize,
+    pub at: u64,
 }
 
 impl TreeAgent {
@@ -75,6 +87,17 @@ impl TreeAgent {
             images: agent["images"].as_bool(),
             gate_mode: text(&agent["gate_mode"]),
             context: entry["context"].as_u64(),
+            queued: entry["queued"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|queued| Queued {
+                    delivery: text(&queued["delivery"]).unwrap_or_default(),
+                    text: text(&queued["text"]).unwrap_or_default(),
+                    images: queued["images"].as_u64().unwrap_or(0) as usize,
+                    at: queued["at"].as_u64().unwrap_or(0),
+                })
+                .collect(),
         }
     }
 }

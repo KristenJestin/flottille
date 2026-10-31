@@ -818,7 +818,7 @@ alone reaches it: no tool of an agent changes a mode.
 #### `agent.tree`
 
 `{"agent"}`. The whole tree of the agent's root, each agent before its children:
-`{"agents": [{"agent", "doing", "waiting_on", "needs_user", "context"}]}`. `agent` is the agent in short
+`{"agents": [{"agent", "doing", "waiting_on", "needs_user", "context", "queued"}]}`. `agent` is the agent in short
 (`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `launched_by`, `depth`, `epoch`, `state`,
 `state_reason`, `created_at`, `active_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
 took at the last start of its process, else the one asked, `null` for the agent's default before it
@@ -829,7 +829,10 @@ form); `doing` a sentence of what it does
 `waiting_on` `parent` for a child whose request or question waits for its parent, `user` for a
 root whose own does, else `null`; `needs_user`, for the root, whether a request of its tree or its
 own question waits for the user; `context`, how much of its context the agent used at its last
-report (`agent.usage`), in percent, `null` before one.
+report (`agent.usage`), in percent, `null` before one; `queued`, for the root, the messages the
+user wrote to it that wait for it to read them between its turns, the oldest first, each
+`{"delivery", "text", "images", "at"}` (its text masked as it is stored, how many pictures go with
+it, when it was written), empty for a child.
 
 #### `agent.read`
 

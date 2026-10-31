@@ -3,7 +3,7 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::{SharedString, Styled, Svg, px, svg};
 
-gpui_kit::assets::icon_assets!(pub Icons, [Folder, GitBranch, Book, ChevronDown, Plus, Search, Bell, ExternalLink, Network, Menu, ArrowUp, ChevronsUpDown, Settings, Ellipsis, CircleStop, Terminal, ChevronUp, TriangleAlert, Check, X, File, FileText, Slash, Play, GitPullRequest, Ticket, GripVertical]);
+gpui_kit::assets::icon_assets!(pub Icons, [Folder, GitBranch, Book, ChevronDown, Plus, Search, Bell, ExternalLink, Network, Menu, ArrowUp, ChevronsUpDown, Settings, Ellipsis, CircleStop, Terminal, ChevronUp, TriangleAlert, Check, X, File, FileText, Slash, Play, GitPullRequest, Ticket, GripVertical, Copy, Clock]);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
@@ -51,10 +51,14 @@ pub enum Icon {
     Ticket,
     /// Drag to move.
     Grip,
+    /// Copy to the clipboard.
+    Copy,
+    /// Waiting for its time.
+    Clock,
 }
 
 impl Icon {
-    pub const ALL: [Self; 27] = [
+    pub const ALL: [Self; 29] = [
         Self::Folder,
         Self::Branch,
         Self::Repository,
@@ -82,6 +86,8 @@ impl Icon {
         Self::PullRequest,
         Self::Ticket,
         Self::Grip,
+        Self::Copy,
+        Self::Clock,
     ];
 
     pub fn path(self) -> SharedString {
@@ -113,6 +119,8 @@ impl Icon {
             Self::PullRequest => IconName::GitPullRequest,
             Self::Ticket => IconName::Ticket,
             Self::Grip => IconName::GripVertical,
+            Self::Copy => IconName::Copy,
+            Self::Clock => IconName::Clock,
         }
         .path()
     }
