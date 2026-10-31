@@ -182,7 +182,7 @@ mod tests {
         registry.create(&project("b")).unwrap();
         registry.create(&project("a")).unwrap();
         let folder = dir.path().join("config/projects");
-        std::fs::write(folder.join("broken.toml"), "max_children = 9").unwrap();
+        std::fs::write(folder.join("broken.toml"), "max_children = 13").unwrap();
         std::fs::write(folder.join("notes.txt"), "not a project").unwrap();
         std::fs::write(folder.join(".a.toml.swp"), "an editor's file").unwrap();
 

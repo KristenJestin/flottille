@@ -12,8 +12,8 @@ use crate::commands::{Command, OBSOLETE_GRANTS};
 use crate::declared::{ProjectTracker, RepositoryForge};
 
 /// Children running at once per project: the bounds of `max_children`.
-pub const CHILDREN_CAP: std::ops::RangeInclusive<u8> = 1..=6;
-const DEFAULT_CHILDREN_CAP: u8 = 3;
+pub const CHILDREN_CAP: std::ops::RangeInclusive<u8> = 1..=12;
+const DEFAULT_CHILDREN_CAP: u8 = 12;
 /// Seconds a run step of the setup may take unless the project or the step says otherwise.
 const DEFAULT_RUN_TIME_LIMIT: u64 = 30 * 60;
 
@@ -1075,7 +1075,7 @@ mod tests {
             Path::new("/data/flottille/workspaces/app")
         );
         assert_eq!(project.default_repositories, RepositorySet::All);
-        assert_eq!(project.max_children, 3);
+        assert_eq!(project.max_children, 12);
         assert!(project.never.is_empty());
         let repository = &project.repositories[0];
         assert_eq!(repository.remote, "origin");
@@ -1181,7 +1181,7 @@ mod tests {
         );
 
         assert_eq!(project.branch_prefix, "shop-2");
-        assert_eq!(project.max_children, 3);
+        assert_eq!(project.max_children, 12);
         assert_eq!(
             parse_as("Shop_2", &project.to_toml().unwrap()).unwrap(),
             project
@@ -1252,20 +1252,20 @@ mod tests {
     }
 
     #[test]
-    fn a_children_cap_of_9_is_refused_with_the_key() {
+    fn a_children_cap_of_13_is_refused_with_the_key_and_one_of_12_is_allowed() {
         let text = r#"
             folder = "/work/app"
-            max_children = 9
+            max_children = 13
             [[repositories]]
             path = "."
         "#;
 
         assert_eq!(
             refusal(text),
-            "projects/app.toml: max_children: must be between 1 and 6, not 9"
+            "projects/app.toml: max_children: must be between 1 and 12, not 13"
         );
-        assert!(refusal(&text.replace('9', "0")).contains("max_children"));
-        assert!(parse(&text.replace('9', "6")).is_ok());
+        assert!(refusal(&text.replace("13", "0")).contains("max_children"));
+        assert!(parse(&text.replace("13", "12")).is_ok());
     }
 
     #[test]

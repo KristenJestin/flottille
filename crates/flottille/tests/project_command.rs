@@ -174,7 +174,7 @@ fn list_names_the_file_and_the_key_of_a_configuration_it_cannot_use() {
     registered(&user);
     user.write_project_file(
         "bad",
-        "folder = \"/work/bad\"\nmax_children = 9\n[[repositories]]\npath = \".\"\n",
+        "folder = \"/work/bad\"\nmax_children = 13\n[[repositories]]\npath = \".\"\n",
     );
 
     let output = user.run(&["project", "list"]);
@@ -183,7 +183,7 @@ fn list_names_the_file_and_the_key_of_a_configuration_it_cannot_use() {
     let file = user.project_file("bad");
     assert!(
         stderr(&output).contains(&format!(
-            "{}: max_children: must be between 1 and 6, not 9",
+            "{}: max_children: must be between 1 and 12, not 13",
             file.display()
         )),
         "{}",
@@ -200,7 +200,7 @@ fn show_of_a_configuration_it_cannot_use_names_the_file_by_its_path() {
     let user = User::new();
     user.write_project_file(
         "bad",
-        "folder = \"/work/bad\"\nmax_children = 9\n[[repositories]]\npath = \".\"\n",
+        "folder = \"/work/bad\"\nmax_children = 13\n[[repositories]]\npath = \".\"\n",
     );
 
     let output = user.run(&["project", "show", "bad"]);
@@ -209,7 +209,7 @@ fn show_of_a_configuration_it_cannot_use_names_the_file_by_its_path() {
     assert_eq!(
         stderr(&output).trim(),
         format!(
-            "flottille: {}: max_children: must be between 1 and 6, not 9",
+            "flottille: {}: max_children: must be between 1 and 12, not 13",
             user.project_file("bad").display()
         )
     );
@@ -251,7 +251,7 @@ check = true
         &format!("folder: {}", path(&app)),
         "branch prefix: rich",
         "workspaces take: all repositories",
-        "children at once: 3",
+        "children at once: 12",
         ".: remote origin, base develop then main",
         "lib: remote origin, base main, after .",
         "STORE = {workspace.path}/.store",

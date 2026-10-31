@@ -45,7 +45,7 @@ fn a_single_repository_is_registered() {
         user.path("data/flottille/workspaces/app").to_str().unwrap()
     );
     assert_eq!(project["default_repositories"], "all");
-    assert_eq!(project["max_children"], 3);
+    assert_eq!(project["max_children"], 12);
     assert!(user.project_file("app").is_file());
 }
 
@@ -325,7 +325,7 @@ fn a_file_that_cannot_be_used_is_reported_with_its_file_and_key() {
     add(&user, &app);
     let invalid =
         |extra: &str| format!("folder = \"/work/x\"\n{extra}\n[[repositories]]\npath = \"a\"\n");
-    user.write_project_file("cap", &invalid("max_children = 9"));
+    user.write_project_file("cap", &invalid("max_children = 13"));
     user.write_project_file("base", &invalid("").replace("path", "base = []\npath"));
     user.write_project_file(
         "dependency",
@@ -350,7 +350,7 @@ fn a_file_that_cannot_be_used_is_reported_with_its_file_and_key() {
         errors,
         [
             "projects/base.toml: repositories[0].base: must name at least one branch",
-            "projects/cap.toml: max_children: must be between 1 and 6, not 9",
+            "projects/cap.toml: max_children: must be between 1 and 12, not 13",
             r#"projects/dependency.toml: repositories[0].depends_on: unknown repository "x""#,
         ]
     );
@@ -463,7 +463,7 @@ fn adding_changing_and_removing_a_project_are_events() {
     let text = std::fs::read_to_string(user.project_file("app")).unwrap();
     std::fs::write(
         user.project_file("app"),
-        text.replace("max_children = 3", "max_children = 5"),
+        text.replace("max_children = 12", "max_children = 5"),
     )
     .unwrap();
     user.call("project.list", json!({})).unwrap();
@@ -827,7 +827,7 @@ fn former_file(user: &User, extra: &str) -> String {
 #[test]
 fn a_file_invalid_for_an_unrelated_reason_is_left_byte_for_byte() {
     let user = User::new();
-    let text = former_file(&user, "max_children = 9\n");
+    let text = former_file(&user, "max_children = 13\n");
     user.write_project_file("app", &text);
 
     user.status();

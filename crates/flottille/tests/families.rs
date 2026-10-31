@@ -769,6 +769,7 @@ fn a_root_session_started_by_an_agent_appears_and_is_the_user_s() {
     assert_eq!(new.depth, 0);
     assert_eq!(new.workspace.as_deref(), Some("login"));
     assert!(new.tools.iter().any(|t| t.ends_with("__ask_user")));
+    assert!(new.tools.iter().any(|t| t.ends_with("__agent_launch")));
     // It takes the tree's mode, Ask here, never the Auto a new root has by default.
     assert_eq!(new.gate_mode, GateMode::Ask);
     // Its first message is the launcher's, never the user's, and it keeps who started it.
@@ -855,7 +856,7 @@ fn a_child_cannot_start_a_root_session() {
     assert!(
         refused
             .text
-            .starts_with("refused: only the agent the user talks to starts a session for the user"),
+            .starts_with("refused: this agent has no tool agent_launch"),
         "{}",
         refused.text
     );

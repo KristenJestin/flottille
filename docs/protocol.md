@@ -137,7 +137,7 @@ result is the object of its file with every default filled in:
   "branch_prefix": "app",
   "workspaces_root": "$XDG_DATA_HOME/flottille/workspaces/app",
   "default_repositories": "all",
-  "max_children": 3,
+  "max_children": 12,
   "run_time_limit": 1800,
   "never": [],
   "repositories": [{"path": ".", "remote": "origin", "base": ["main"], "depends_on": []}]
