@@ -83,11 +83,16 @@ nothing was read; switch acli to it (`acli jira auth switch --site acme.atlassia
 the project's tracker`. A status with no `Site:` line is refused the same way. Nothing is asked of
 Jira then.
 
-**The work item must come from that site too.** The `Site:` line is what `acli` says of its
-sign-in; the item it prints says where it came from, in its `self` link. When that link's host is
-not the tracker's site, or the item has none, nothing of it is shown: `acli answered ABC-123 from
-other.atlassian.net, and this project's tracker is Jira on acme.atlassian.net: nothing of it is
-shown; check the site acli is signed in to (`acli jira auth status`)`.
+**That check is the guarantee**, and every read goes through it first: `workspace.ticket`,
+`project.ticket`, and the agents' `tickets` `show`, `list` and `search`. The work item itself
+cannot give it: its `self` link is on the site's own host when `acli` is signed in with an API
+token, but on an Atlassian host that names no site when it is signed in with OAuth
+(`https://<…>.prod.atl-paas.net/rest/api/3/issue/…`, or
+`https://api.atlassian.com/ex/jira/<cloud id>/…`). So a `self` on the tracker's site or on such a
+host is taken, and **only a `self` that names another site is refused**, in case the sign-in
+changed between the check and the read: `acli answered ABC-123 from other.atlassian.net, and
+this project's tracker is Jira on acme.atlassian.net: nothing of it is shown; check the site acli
+is signed in to (`acli jira auth status`)`. A work item with no `self` is not shown either.
 
 ## What is read
 
@@ -95,7 +100,7 @@ shown; check the site acli is signed in to (`acli jira auth status`)`.
 |---|---|---|
 | title | `title` | `fields.summary` |
 | state | `open` or `closed` | the status's name (`In Progress`) |
-| link | `url` | `https://<site>/browse/<KEY>`, the site being the host of `self` |
+| link | `url` | `https://<site>/browse/<KEY>`, the tracker's configured site |
 | description | `body` | `fields.description` |
 | comments | `comments[]`: `author.login`, `createdAt`, `body` | `fields.comment.comments[]`: `author.displayName`, `created`, `body` |
 
@@ -194,8 +199,8 @@ Its page (<https://developer.atlassian.com/cloud/acli/reference/commands/jira-wo
 gives its flags (`--jql`, `--fields`, `--json`, `--limit`, `--paginate`) and no output. The
 reading takes an array of work items in the shape `view` prints, or Jira's REST search object
 (`{"issues": [...]}`), and reads `key`, `self`, `fields.summary`, `fields.status.name`,
-`fields.assignee.displayName` and `fields.labels`. An item whose `self` names another site is
-left out and counted; one with no `self` is kept, since the search was of the signed-in site's
+`fields.assignee.displayName` and `fields.labels`. An item whose `self` names another site (not
+the tracker's, nor an Atlassian host, as above) is left out and counted; one with no `self` is kept, since the search was of the signed-in site's
 projects. The maintainer checks it on their work machine
 (`tickets list` from an agent of a Jira project); a different shape shows as an empty list.
 

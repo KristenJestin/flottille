@@ -333,9 +333,9 @@ async fn read_work_item(key: &str, site: &str) -> Result<Ticket, String> {
     }
     let item: Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("acli jira workitem view answered what is not JSON: {error}"))?;
-    // The `Site:` line said where the sign-in is; the item itself says where it came from.
+    // The `Site:` line said where the sign-in is; the item itself may name another site.
     match site_of(&item) {
-        Some(from) if from == site => Ok(work_item(key, &item)),
+        Some(from) if answered_by(&item, &from, site) => Ok(work_item(key, &item, site)),
         Some(from) => Err(format!(
             "acli answered {key} from {}, and this project's tracker is Jira on {site}: nothing \
              of it is shown; check the site acli is signed in to (`acli jira auth status`)",
@@ -361,9 +361,22 @@ fn site_of(item: &Value) -> Option<String> {
         .map(str::to_ascii_lowercase)
 }
 
+/// Whether a work item whose `self` link is on `host` may be the tracker's `site` answering. With
+/// an API token `acli` answers on the site's own host; signed in with OAuth, on an Atlassian host
+/// that names no site (`*.atl-paas.net`, or `api.atlassian.com/ex/jira/<cloud id>`), which says
+/// nothing of which site answered. That guarantee is the active sign-in's, checked before any
+/// read (`jira_site`); what is refused here is a link that names another site.
+fn answered_by(item: &Value, host: &str, site: &str) -> bool {
+    let gateway = item["self"].as_str().is_some_and(|link| {
+        link.to_ascii_lowercase()
+            .starts_with("https://api.atlassian.com/ex/jira/")
+    });
+    host == site || host.ends_with(".atl-paas.net") || gateway
+}
+
 /// A Jira work item as `acli jira workitem view --json` prints it: Jira's REST shape (`key`,
 /// `self`, `fields`). Its description and comments are Atlassian Document Format, or plain text.
-fn work_item(key: &str, item: &Value) -> Ticket {
+fn work_item(key: &str, item: &Value, site: &str) -> Ticket {
     let fields = &item["fields"];
     let comments: Vec<Comment> = fields["comment"]["comments"]
         .as_array()
@@ -382,7 +395,8 @@ fn work_item(key: &str, item: &Value) -> Ticket {
         repository: None,
         title: said(&fields["summary"]),
         state: said(&fields["status"]["name"]),
-        url: site_of(item).map(|host| masked(&format!("https://{host}/browse/{key}"))),
+        // The configured site: the host of `self` may be an Atlassian one that is no site.
+        url: Some(masked(&format!("https://{site}/browse/{key}"))),
         description: cut(
             &masked(&document_text(&fields["description"])),
             DESCRIPTION_CHARS,
@@ -938,7 +952,7 @@ async fn list_work_items(
         // Only an item with no `self` at all is kept: the search was of the signed-in site's
         // projects. One that has a `self` naming another site, or that cannot be read, is not.
         let unlinked = item.get("self").is_none_or(Value::is_null);
-        if !unlinked && site_of(item).is_none_or(|from| from != site) {
+        if !unlinked && site_of(item).is_none_or(|from| !answered_by(item, &from, site)) {
             left_out += 1;
             continue;
         }
@@ -1164,6 +1178,29 @@ mod tests {
     }
 
     #[test]
+    fn a_self_link_on_the_site_or_an_atlassian_host_is_taken_and_another_site_is_not() {
+        let taken = |link: &str| {
+            let item = json!({"self": link});
+            answered_by(&item, &site_of(&item).unwrap(), "acme.atlassian.net")
+        };
+
+        assert!(taken("https://Acme.atlassian.net/rest/api/3/issue/1"));
+        assert!(taken(
+            "https://jira-prod-xx-1-1.prod.atl-paas.net/rest/api/3/issue/1"
+        ));
+        assert!(taken(
+            "https://api.atlassian.com/ex/jira/0f1e2d3c-aaaa-4bbb-8ccc-123456789abc/rest/api/3/issue/1"
+        ));
+        assert!(!taken("https://other.atlassian.net/rest/api/3/issue/1"));
+        assert!(!taken(
+            "https://api.atlassian.com/ex/confluence/0f1e/wiki/1"
+        ));
+        assert!(!taken(
+            "https://atl-paas.net.example.com/rest/api/3/issue/1"
+        ));
+    }
+
+    #[test]
     fn a_work_item_gives_its_title_status_description_and_comments() {
         let item = json!({
             "key": "ABC-123", "self": "https://acme.atlassian.net/rest/api/3/issue/10001",
@@ -1177,7 +1214,7 @@ mod tests {
             }
         });
 
-        let ticket = work_item("ABC-123", &item);
+        let ticket = work_item("ABC-123", &item, "acme.atlassian.net");
 
         assert_eq!(ticket.title, "Add the login page");
         assert_eq!(ticket.state, "In Progress");

@@ -378,6 +378,38 @@ fn a_jira_work_item_read_from_another_site_than_the_declared_one_is_refused() {
     assert_eq!(unsaid["title"], Value::Null, "{unsaid}");
 }
 
+/// The `self` links `acli` answers with an OAuth sign-in: an Atlassian host that does not name
+/// the site, invented here as the real ones are.
+const ATLASSIAN_SELF: [&str; 2] = [
+    "https://jira-prod-xx-1-1.prod.atl-paas.net/rest/api/3/issue/10001",
+    "https://api.atlassian.com/ex/jira/0f1e2d3c-aaaa-4bbb-8ccc-123456789abc/rest/api/3/issue/10002",
+];
+
+#[test]
+fn a_work_item_answered_from_an_atlassian_host_is_shown_with_a_link_on_the_tracker_s_site() {
+    let user = User::new().with_fake_acli();
+    fixture(&user);
+    let mut paas = work_item("ABC-123", "Add the login page");
+    paas["self"] = json!(ATLASSIAN_SELF[0]);
+    let mut gateway = work_item("ABC-124", "Add the logout page");
+    gateway["self"] = json!(ATLASSIAN_SELF[1]);
+    jira(&user, json!({"ABC-123": paas, "ABC-124": gateway}));
+    track(&user, jira_abc());
+
+    let paas = link(&user, Some("ABC-123")).unwrap();
+    let gateway = link(&user, Some("ABC-124")).unwrap();
+
+    assert_eq!(paas["problem"], Value::Null, "{paas}");
+    assert_eq!(paas["title"], "Add the login page");
+    assert_eq!(paas["url"], "https://example.atlassian.net/browse/ABC-123");
+    assert_eq!(gateway["problem"], Value::Null, "{gateway}");
+    assert_eq!(gateway["title"], "Add the logout page");
+    assert_eq!(
+        gateway["url"],
+        "https://example.atlassian.net/browse/ABC-124"
+    );
+}
+
 #[test]
 fn the_new_workspace_form_s_preview_reads_a_ticket_before_any_workspace_has_it() {
     let user = User::new().with_fake_gh();
