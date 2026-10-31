@@ -7,16 +7,19 @@
 use std::sync::Arc;
 
 use gpui_kit::{
-    AnyView, App, AppContext as _, ClickEvent, Context, ElementId, FontWeight, InteractiveElement,
-    IntoElement, ParentElement, Render, RenderOnce, SharedString, StatefulInteractiveElement,
-    Styled, TestSupportExt, Window, div, px,
+    Anchor, AnyView, App, AppContext as _, ClickEvent, Context, ElementId, Entity, FontWeight,
+    InteractiveElement, IntoElement, MouseButton, ParentElement, Render, RenderOnce, SharedString,
+    StatefulInteractiveElement, Styled, Task, TestSupportExt, Window, anchored, deferred, div,
+    point, px,
 };
 
 use crate::color::mix;
 use crate::icons::{Icon, icon};
-use crate::interact::{choose, fade, feel, wire};
-use crate::motion::{HOVER, Motion};
-use crate::theme::{palette, radius};
+use crate::interact::{choose, fade, feel, wire_with};
+use crate::layer;
+use crate::motion::{HOVER, Motion, TOOLTIP};
+use crate::space::SM;
+use crate::theme::{Palette, palette, radius};
 use crate::typography::Type;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,9 +252,17 @@ impl RenderOnce for Button {
         if let Some(badge) = self.badge {
             button = button.child(div().absolute().top(px(1.)).right(px(0.)).child(badge));
         }
-        if let Some(text) = tooltip.filter(|_| !self.tooltip_hidden) {
-            button = button.tooltip(move |_, cx| Tooltip::view(text.clone(), cx));
+        // GPUI places its own tooltip under the pointer, in front of the element it describes:
+        // this one is anchored to the element.
+        let tip = tip_state(&self.id, window, cx);
+        let shown = tip.update(cx, |tip, cx| tip.sample(self.tooltip_hidden, window, cx));
+        if let Some(text) = tooltip.filter(|_| shown > 0.0) {
+            button = button.child(tooltip_overlay(&self.id, text, height, shown, p));
         }
+        let down = tip.clone();
+        button = button.on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            down.update(cx, |tip, cx| tip.rest(false, cx));
+        });
         // Enabled or not is a state: it fades over HOVER instead of switching.
         let enabled = fade(
             ElementId::NamedChild(Arc::new(self.id.clone()), "enabled".into()),
@@ -268,7 +279,11 @@ impl RenderOnce for Button {
         {
             button = button.on_click(on_click);
         }
-        wire(button, state, true).test_support()
+        let on_hover = tip.clone();
+        wire_with(button, state, true, move |hovered, cx| {
+            on_hover.update(cx, |tip, cx| tip.rest(hovered, cx));
+        })
+        .test_support()
     }
 }
 
@@ -334,17 +349,103 @@ impl Render for Tooltip {
         if self.shown.is_running(now) {
             window.request_animation_frame();
         }
-        div()
-            .opacity(self.shown.value(now))
-            .px(px(8.))
-            .py(px(4.))
-            .rounded(px(6.))
-            .bg(p.card2)
-            .border_1()
-            .border_color(p.line2)
-            .text_color(p.text)
-            .ui_text()
-            .text_size(px(12.))
-            .child(self.text.clone())
+        bubble(self.text.clone(), p).opacity(self.shown.value(now))
     }
+}
+
+fn bubble(text: SharedString, p: Palette) -> gpui_kit::Div {
+    div()
+        .px(px(8.))
+        .py(px(4.))
+        .rounded(px(6.))
+        .bg(p.card2)
+        .border_1()
+        .border_color(p.line2)
+        .text_color(p.text)
+        .ui_text()
+        .text_size(px(12.))
+        .whitespace_nowrap()
+        .child(text)
+}
+
+/// Whether the pointer rests on a button, and how far its tooltip is shown (0 to 1).
+struct Tip {
+    shown: Motion,
+    /// The wait before the tooltip comes; dropping it cancels it.
+    wait: Option<Task<()>>,
+}
+
+fn tip_state(id: &ElementId, window: &mut Window, cx: &mut App) -> Entity<Tip> {
+    let key = ElementId::NamedChild(Arc::new(id.clone()), "tooltip".into());
+    window.use_keyed_state(key, cx, |_, _: &mut Context<Tip>| Tip {
+        shown: Motion::settled(0.0),
+        wait: None,
+    })
+}
+
+impl Tip {
+    /// The pointer came or went: it comes after [`TOOLTIP`] of rest, and goes at once.
+    fn rest(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        self.wait = None;
+        if hovered {
+            self.wait = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(TOOLTIP).await;
+                this.update(cx, |tip, cx| tip.fade(1.0, cx)).ok();
+            }));
+        } else {
+            self.fade(0.0, cx);
+        }
+    }
+
+    fn fade(&mut self, target: f32, cx: &mut Context<Self>) {
+        if self.shown.target() != target {
+            let now = cx.background_executor().now();
+            self.shown.animate(target, HOVER, now, cx.reduce_motion());
+            cx.notify();
+        }
+    }
+
+    /// How far it is shown now. A button that hides its tooltip (its menu is open) loses the
+    /// pointer's rest, so the tooltip does not come back when the menu closes.
+    fn sample(&mut self, hidden: bool, window: &mut Window, cx: &mut Context<Self>) -> f32 {
+        if hidden {
+            self.wait = None;
+            self.shown = Motion::settled(0.0);
+            return 0.0;
+        }
+        let now = cx.background_executor().now();
+        if self.shown.is_running(now) {
+            window.request_animation_frame();
+        } else {
+            self.shown.settle(now);
+        }
+        self.shown.value(now)
+    }
+}
+
+/// The tooltip of the button `id`, drawn after everything else: centred below it with a gap, above
+/// it when the window has no room below, kept inside the window sideways. It takes no pointer, so
+/// the button keeps its hover.
+fn tooltip_overlay(
+    id: &ElementId,
+    text: SharedString,
+    height: f32,
+    shown: f32,
+    p: Palette,
+) -> impl IntoElement {
+    let name = ElementId::Name(format!("{id}-tooltip").into());
+    let tip = anchored()
+        .anchor(Anchor::TopCenter)
+        .offset(point(px(0.), px(height)))
+        .child(
+            // The padding is the gap on either side of the button, whichever it opens on.
+            div()
+                .py(SM)
+                .child(bubble(text, p).id(name).opacity(shown).test_support()),
+        );
+    div()
+        .absolute()
+        .top_0()
+        .left_1_2()
+        .child(deferred(tip).priority(layer::TOOLTIP))
 }
