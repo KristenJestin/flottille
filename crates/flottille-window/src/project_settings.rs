@@ -1640,7 +1640,7 @@ impl ProjectSettingsPage {
         let error = problem_line(
             "settings-modal-error",
             self.dialog_error.clone(),
-            space::LG,
+            px(0.),
             cx,
         );
         let save = Button::primary("save-settings-modal", "Save")
@@ -1729,7 +1729,7 @@ impl ProjectSettingsPage {
                         )
                         .gap(space::LG),
                     )
-                    .child(error)
+                    .kept(error)
                     .action(save)
             }
             Some(Dialog::Tracker) => {
@@ -1835,7 +1835,7 @@ impl ProjectSettingsPage {
                         )
                         .gap(space::LG),
                     )
-                    .child(error)
+                    .kept(error)
                     .action(save)
             }
         }

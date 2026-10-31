@@ -156,7 +156,7 @@ The components that hold them:
 | `Section::new(id, title)` | `.count(c)`, `.sentence(s)`, `.action(Button)`, then its children |
 | `Menu::new(..).entry(..).danger(id, label, f)` | a "⋯" menu; danger entries come last, after a line |
 | `Confirm::new(id, question)` | `.sentence(s)`, `.action(label)`, `.refused(Option<why>)`, `.open(bool)`, `.on_confirm(f)`, `.on_cancel(f)`; ids `<id>-action`, `<id>-cancel`, `<id>-scrim` |
-| `Modal::new(id, title)` | a form dialog: `.sentence(s)`, `.wide()`, `.action(Button)`, `.on_close(f)` |
+| `Modal::new(id, title)` | a form dialog: `.sentence(s)`, `.wide()`, `.action(Button)`, `.on_close(f)`; its body scrolls between the title and the buttons when the window is too small, and `.kept(el)` stays in sight under it (a refusal) |
 | `toast(Toast::success(t).detail(d), cx)` / `Toast::failure` | rule 3; the shell owns the `ToastStack` |
 | `Field::new(id, label, control)` | `.optional()`, `.hint(h)`, `.hint_mono()`, `.error(Option<e>)` |
 | `Switch::new(id, on, label)` | `.hint(h)`, `.on_click(f)`; the whole row toggles |

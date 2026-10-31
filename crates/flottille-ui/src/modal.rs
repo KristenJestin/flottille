@@ -43,6 +43,7 @@ pub struct Modal {
     sentence: Option<SharedString>,
     wide: bool,
     body: Vec<AnyElement>,
+    kept: Vec<AnyElement>,
     actions: Vec<AnyElement>,
     on_close: Option<Handler>,
     open: bool,
@@ -59,6 +60,7 @@ impl Modal {
             sentence: None,
             wide: false,
             body: Vec::new(),
+            kept: Vec::new(),
             actions: Vec::new(),
             on_close: None,
             open: true,
@@ -95,6 +97,13 @@ impl Modal {
     /// Whether it is open, `true` unless said.
     pub fn open(mut self, open: bool) -> Self {
         self.open = open;
+        self
+    }
+
+    /// What stays in sight under the fields, above the buttons, whatever the body has scrolled
+    /// to: a refusal. It takes no room while it is empty, and folds as the owner animates it.
+    pub fn kept(mut self, element: impl IntoElement) -> Self {
+        self.kept.push(element.into_any_element());
         self
     }
 
@@ -230,6 +239,12 @@ impl RenderOnce for Modal {
                         .children(self.body),
                 )
         });
+        let kept = div()
+            .flex_none()
+            .px(px(24.))
+            .flex()
+            .flex_col()
+            .children(self.kept);
         let footer = div()
             .flex_none()
             .pt(px(14.))
@@ -276,6 +291,7 @@ impl RenderOnce for Modal {
             })
             .child(header)
             .children(body)
+            .child(kept)
             .child(footer);
         if let Some(focus) = &focus {
             panel = panel.track_focus(focus);

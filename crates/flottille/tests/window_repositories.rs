@@ -926,6 +926,68 @@ fn the_dialog_of_a_repository_with_many_siblings_scrolls_in_a_small_window(
 }
 
 #[gpui_kit::test]
+fn a_refusal_stays_in_sight_when_the_dialog_is_scrolled_to_the_end(cx: &mut TestAppContext) {
+    let user = user();
+    trio(&user);
+    let mut text = std::fs::read_to_string(user.project_file("trio"))
+        .unwrap()
+        .replace(
+            "path = \"web\"\n",
+            "path = \"web\"\ndepends_on = [\"api\"]\n",
+        );
+    for n in 0..14 {
+        text.push_str(&format!("\n[[repositories]]\npath = \"extra-{n:02}\"\n"));
+    }
+    user.write_project_file("trio", &text);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_settings(&shell, "trio", cx);
+    cx.update(|window, cx| window.click("repository-api", cx));
+    settle(cx);
+    cx.simulate_resize(size(px(1280.), px(480.)));
+    settle(cx);
+    // `web` is the first of the siblings: switched on a little way down, then the dialog goes to
+    // its end, far from it.
+    cx.update(|window, cx| {
+        window.scroll(
+            "base-field-label",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-150.))),
+            cx,
+        )
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("depends-on-web", cx));
+    settle(cx);
+    cx.update(|window, cx| {
+        window.scroll(
+            "depends-on-extra-00",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-4000.))),
+            cx,
+        )
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("save-settings-modal", cx));
+    settle(cx);
+
+    let (panel, title, save, error) = cx.update(|window, _| {
+        (
+            window.find("settings-modal").bounds(),
+            window.find("settings-modal-title").bounds(),
+            window.find("save-settings-modal").bounds(),
+            window.find("settings-modal-error").bounds(),
+        )
+    });
+    assert!(
+        error.top() >= title.bottom() && error.bottom() <= save.top(),
+        "the refusal is between the title and the buttons, in sight: {error:?}"
+    );
+    assert!(
+        panel.top() >= px(0.) && panel.bottom() <= px(480.),
+        "{panel:?}"
+    );
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+}
+
+#[gpui_kit::test]
 fn a_dependency_cycle_is_refused_in_the_dialog(cx: &mut TestAppContext) {
     let user = user();
     trio(&user);
