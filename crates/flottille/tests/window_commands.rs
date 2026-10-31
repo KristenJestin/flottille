@@ -260,7 +260,7 @@ fn the_rail_lists_a_running_command_with_its_line_who_started_it_and_its_last_li
         "listening on 8080"
     );
     let who = label(cx, &format!("command-who-{run}")).unwrap();
-    assert!(who.starts_with("task server · "), "{who}");
+    assert_eq!(who, "task server", "the root does not name itself");
     assert!(
         cx.update(|window, _| window.try_find(format!("command-stop-{run}")).is_some()),
         "a running command has its Stop"
@@ -270,6 +270,25 @@ fn the_rail_lists_a_running_command_with_its_line_who_started_it_and_its_last_li
         label(cx, &format!("command-last-{run}")).is_some_and(|line| line.starts_with("tick"))
     });
     ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
+}
+
+#[gpui_kit::test]
+fn a_command_row_of_the_root_agent_does_not_say_the_conversation(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp, _) = lead(&user);
+    let run = start(&mcp, "fails");
+    let (shell, cx) = open_session(&user, &lead, cx);
+    let page = session_page(&shell, cx);
+
+    until(&shell, cx, "the command ended", |cx| {
+        commands(&page, cx)
+            .first()
+            .is_some_and(|row| !row.running())
+    });
+    settle(cx);
+
+    let who = label(cx, &format!("command-who-{run}")).unwrap_or_default();
+    assert!(!who.contains("the conversation"), "{who}");
 }
 
 #[gpui_kit::test]

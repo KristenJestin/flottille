@@ -25,7 +25,7 @@ use gpui_kit::{
 use serde_json::Value;
 
 use crate::conversation::{CommandCard, Ending};
-use crate::session::{SessionPage, seconds};
+use crate::session::{SessionPage, THE_CONVERSATION, seconds};
 use crate::shell::now_ms;
 use crate::tasks::ProjectTasks;
 
@@ -397,18 +397,21 @@ pub fn arrange(rows: &[CommandRow]) -> Arranged<'_> {
     }
 }
 
-/// Who started a command: the task, then the agent as `names` calls it, or the user.
-fn who(row: &CommandRow, names: &HashMap<String, String>) -> String {
+/// Who started a command: the task, then the agent as `names` calls it, or the user. The root
+/// agent is not named: its conversation is the page the rail is on, so the name says nothing.
+fn who(row: &CommandRow, names: &HashMap<String, String>) -> Option<String> {
     let agent = match row.agent.as_str() {
-        "" => "you".to_owned(),
+        "" => Some("you".to_owned()),
         agent => names
             .get(agent)
             .cloned()
-            .unwrap_or_else(|| format!("agent {agent}")),
-    };
-    match &row.name {
-        Some(name) => format!("task {name} · {agent}"),
-        None => agent,
+            .or_else(|| Some(format!("agent {agent}"))),
+    }
+    .filter(|name| name != THE_CONVERSATION);
+    match (&row.name, agent) {
+        (Some(name), Some(agent)) => Some(format!("task {name} · {agent}")),
+        (Some(name), None) => Some(format!("task {name}")),
+        (None, agent) => agent,
     }
 }
 
@@ -542,6 +545,7 @@ impl CommandList {
         };
         let last = ansi::strip(&row.last_line);
         let who = who(row, &self.names);
+        let has_who = who.is_some();
         let time = seconds(row.elapsed_ms(now));
         let line = |id: ElementId, text: String| {
             div()
@@ -614,7 +618,7 @@ impl CommandList {
                                 )
                                 .child("·")
                             })
-                            .child(
+                            .children(who.map(|who| {
                                 div()
                                     .id(id("who"))
                                     .min_w_0()
@@ -623,9 +627,9 @@ impl CommandList {
                                     .text_ellipsis()
                                     .aria_label(SharedString::from(who.clone()))
                                     .child(SharedString::from(who))
-                                    .test_support(),
-                            )
-                            .child("·")
+                                    .test_support()
+                            }))
+                            .children(has_who.then_some("·"))
                             .child(
                                 div()
                                     .id(id("time"))
@@ -1250,6 +1254,28 @@ mod tests {
             tail: Vec::new(),
             step: false,
         }
+    }
+
+    #[test]
+    fn the_root_agent_is_not_named_on_its_own_commands() {
+        let names = HashMap::from([
+            ("a".to_owned(), crate::session::THE_CONVERSATION.to_owned()),
+            ("b".to_owned(), "build the form".to_owned()),
+        ]);
+        let by = |agent: &str, task: Option<&str>| {
+            let mut run = row("r", "exited", 1, Some(2));
+            run.agent = agent.into();
+            run.name = task.map(str::to_owned);
+            who(&run, &names)
+        };
+        assert_eq!(by("a", None), None, "the root says nothing of itself");
+        assert_eq!(by("a", Some("build")).as_deref(), Some("task build"));
+        assert_eq!(by("b", None).as_deref(), Some("build the form"));
+        assert_eq!(
+            by("b", Some("build")).as_deref(),
+            Some("task build · build the form")
+        );
+        assert_eq!(by("", None).as_deref(), Some("you"));
     }
 
     fn runs(rows: &[&CommandRow]) -> Vec<String> {

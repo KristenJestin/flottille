@@ -678,9 +678,9 @@ fn runs_list_the_running_first_then_the_last_five_finished_with_how_they_ended(
         Some("exit 0"),
         "how it ended"
     );
-    // Who started it, as the rail names its agents: the root is the conversation.
+    // Who started it: the task; the root agent, whose conversation this is, is not named (#213).
     let who = label(format!("command-who-{server}"), cx).unwrap();
-    assert_eq!(who, "task server · the conversation");
+    assert_eq!(who, "task server");
     ok(mcp.call("run_status", json!({"run": server, "action": "stop"})));
 }
 

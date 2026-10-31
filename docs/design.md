@@ -649,9 +649,10 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   Flottille picked is said once in a notice, with Open Settings and Dismiss;
 - a session page: the root's conversation, live (messages, the user's own as selectable as the agent's, thoughts collapsed (their head says how long the thinking lasted, from the event before it
   to the one after it, and no time when it lasted less than a tenth of a second), tool calls with
-  their result, the children launched, a session started for the user as one line, "started session <title>" (it is no sub-agent), reports, diffs), one compact line for each command a
+  their result, the children launched, a session started for the user as one line, "started session <title>" (it is no sub-agent), reports and an edit's diff, each folded to one line until a click unfolds it), one compact line for each command a
   tool call ran (an icon, the line, how it ended, how long: a click opens the output panel the
-  rail opens, and the output itself is only there), one line for each request that reached the
+  rail opens, and the output itself is only there; the rail's own row for a command of the root
+  agent does not name it, the conversation being the page it is on), one line for each request that reached the
   user, neutral ("Request #1 · Run pnpm test", which lights its card in the rail, then, once
   answered, the outcome), each picture sent inside the bubble of its message, above its words, a
   message another session sent with `session_send` marked with its sender ("from <session>") and

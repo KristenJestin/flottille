@@ -208,3 +208,32 @@ fn every_gap_and_padding_of_the_window_is_a_step_of_the_scale() {
         found.join("\n")
     );
 }
+
+// ── The conversation's Markdown is drawn in the palette ────────────────────────────────────────
+
+/// The lines that build a Markdown view of the kit's own, which draws in the kit's light theme
+/// (dark ink on a dark window, white chips): Markdown is drawn by `MarkdownPiece`, which takes
+/// `markdown_style`.
+fn markdown_in_the_kit_theme(source: &str) -> Vec<(usize, String)> {
+    code(source)
+        .filter(|(_, line)| line.contains("TextView::markdown("))
+        .map(|(at, line)| (at, line.to_owned()))
+        .collect()
+}
+
+#[test]
+fn a_markdown_view_in_the_kit_theme_is_found() {
+    let sample = "TextView::markdown(id(\"report-markdown\"), text.clone())";
+    assert_eq!(markdown_in_the_kit_theme(sample).len(), 1);
+    assert!(markdown_in_the_kit_theme("TextView::new(&self.state).style(style)").is_empty());
+}
+
+#[test]
+fn every_markdown_of_the_window_is_drawn_in_the_palette() {
+    let found = offenders(markdown_in_the_kit_theme);
+    assert!(
+        found.is_empty(),
+        "Markdown is a `MarkdownPiece` in `markdown_view` (`markdown_style`: the palette's inks and surfaces):\n{}",
+        found.join("\n")
+    );
+}

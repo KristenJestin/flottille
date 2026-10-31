@@ -1793,7 +1793,7 @@ pub struct Row {
     block: Rc<Block>,
     /// When its block came.
     when: Option<u64>,
-    /// A thought or a report unfolded.
+    /// A thought, a report or an edit's diff unfolded.
     open: bool,
     /// The reply or the thought as Markdown, in the pieces [`markdown_pieces`] cuts: a piece
     /// streamed parses the last one again, never the whole reply.
@@ -1902,6 +1902,7 @@ impl Row {
                 | Block::Thought { .. }
                 | Block::Message { .. }
                 | Block::Relayed { .. }
+                | Block::Report { .. }
         )
         .then(|| rendered.collect())
     }
@@ -1976,7 +1977,9 @@ impl Row {
     }
 
     fn set_block(&mut self, block: Block, cx: &mut Context<Self>) {
-        if let Block::Text { text } | Block::Thought { text, .. } = &block {
+        if let Block::Text { text } | Block::Thought { text, .. } | Block::Report { text, .. } =
+            &block
+        {
             let muted = matches!(block, Block::Thought { .. });
             self.set_markdown(text, muted, cx);
         }
@@ -2072,16 +2075,30 @@ fn allowed_said(calls: &[Call]) -> String {
 }
 
 /// What the user typed, as the Markdown that draws it as typed: each mark is escaped, each line
-/// keeps its break and its indentation.
+/// keeps its break and its indentation. An address the renderer links by itself is left as typed:
+/// an escape inside it would be drawn, backslash and all.
 fn as_typed(text: &str) -> String {
     let line = |line: &str| {
         let indent = line.len() - line.trim_start_matches(' ').len();
         let mut out = "\u{a0}".repeat(indent);
-        for c in line[indent..].chars() {
+        let line = &line[indent..];
+        let mut at = 0;
+        let mut previous = None;
+        while at < line.len() {
+            let ahead = &line[at..];
+            if let Some(length) = address(previous, ahead) {
+                out.push_str(&ahead[..length]);
+                at += length;
+                previous = ahead[..length].chars().last();
+                continue;
+            }
+            let c = ahead.chars().next().unwrap_or_default();
             if "\\`*_{}[]()#+-.!|<>~&$".contains(c) {
                 out.push('\\');
             }
             out.push(c);
+            at += c.len_utf8();
+            previous = Some(c);
         }
         out
     };
@@ -2089,6 +2106,40 @@ fn as_typed(text: &str) -> String {
         .map(|paragraph| paragraph.lines().map(line).collect::<Vec<_>>().join("\\\n"))
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+/// How many bytes of `ahead` are an address the Markdown renderer links without a mark (GFM's
+/// autolink literal): `http://`, `https://` or `www.` after a character that does not continue a
+/// word, to the next space or `<`, less the punctuation that ends a sentence and a closing
+/// bracket nothing opened.
+fn address(previous: Option<char>, ahead: &str) -> Option<usize> {
+    let starts = |prefix: &str| {
+        ahead
+            .get(..prefix.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+    };
+    let linked = match previous {
+        Some(c) if c.is_alphabetic() => false,
+        _ => starts("http://") || starts("https://"),
+    } || (starts("www.")
+        && previous.is_none_or(|c| c.is_whitespace() || "(*_[]~".contains(c)));
+    if !linked {
+        return None;
+    }
+    let mut end = ahead
+        .find(|c: char| c.is_whitespace() || c == '<')
+        .unwrap_or(ahead.len());
+    while let Some(last) = ahead[..end].chars().next_back() {
+        let opened = ahead[..end].matches('(').count();
+        let closed = ahead[..end].matches(')').count();
+        match last {
+            '?' | '!' | '.' | ',' | ':' | ';' | '*' | '_' | '~' | '\'' | '"' => {}
+            ')' if closed > opened => {}
+            _ => break,
+        }
+        end -= last.len_utf8();
+    }
+    Some(end)
 }
 
 /// A reply or a thought, its Markdown pieces one under the other, in one text-cursor region: the
@@ -2760,7 +2811,7 @@ impl Render for Row {
                     .into_any_element()
             }
             // Folded to its one line until a click opens it.
-            Block::Report { text, .. } => {
+            Block::Report { .. } => {
                 let turn = turning(id("report-toggle"), self.open, window, cx);
                 div()
                     .id(id("report"))
@@ -2796,17 +2847,7 @@ impl Render for Row {
                                     .px(space::LG)
                                     .pt(space::MD)
                                     .pb(space::MD)
-                                    .child(
-                                        text_region(id("report-region"))
-                                            .child(
-                                                TextView::markdown(
-                                                    id("report-markdown"),
-                                                    text.clone(),
-                                                )
-                                                .image_source(no_image),
-                                            )
-                                            .test_support(),
-                                    )
+                                    .child(markdown_view(id("report-region"), &self.markdown))
                                     .test_support(),
                             )),
                     )
@@ -2823,43 +2864,67 @@ impl Render for Row {
                 .child(div().min_w_0().child(SharedString::from(text.clone())))
                 .test_support()
                 .into_any_element(),
+            // Folded to its path and its count until a click opens it.
             Block::Diff { path, lines } => {
                 let added = lines
                     .iter()
                     .filter(|l| matches!(l, DiffLine::Added(_)))
                     .count();
                 let removed = lines.len() - added;
+                let turn = turning(id("diff-toggle"), self.open, window, cx);
                 div()
                     .id(id("diff"))
                     .child(
                         Card::new()
-                            .title(
+                            .title(hoverable(
                                 div()
+                                    .id(id("diff-toggle"))
                                     .flex()
                                     .items_center()
                                     .gap(space::SM)
+                                    .cursor_pointer()
                                     .child(icon(Icon::Repository).text_color(p.faint))
+                                    .child(div().mono(12.5).child(SharedString::from(path.clone())))
                                     .child(
-                                        div().mono(12.5).child(SharedString::from(path.clone())),
-                                    ),
-                            )
+                                        icon(Icon::Chevron)
+                                            .size(px(12.))
+                                            .text_color(p.faint)
+                                            .with_transformation(Transformation::rotate(radians(
+                                                -FRAC_PI_2 * turn,
+                                            ))),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.open = !this.open;
+                                        cx.notify();
+                                    })),
+                                move |d, t| d.text_color(mix(p.mute, p.text, t)),
+                            ))
                             .meta(format!("+{added} −{removed}"))
-                            .child(div().py(space::SM).mono(12.).children(lines.iter().map(
-                                |line| {
-                                    let (text, bg, ink) = match line {
-                                        DiffLine::Removed(text) => {
-                                            (format!("- {text}"), p.del, p.fail)
-                                        }
-                                        DiffLine::Added(text) => (format!("+ {text}"), p.add, p.ok),
-                                    };
-                                    div()
-                                        .px(space::LG)
-                                        .bg(bg)
-                                        .text_color(ink)
-                                        .whitespace_nowrap()
-                                        .child(SharedString::from(text))
-                                },
-                            ))),
+                            .child(presence(
+                                id("diff-body"),
+                                self.open,
+                                div()
+                                    .id(id("diff-lines"))
+                                    .py(space::SM)
+                                    .mono(12.)
+                                    .children(lines.iter().map(|line| {
+                                        let (text, bg, ink) = match line {
+                                            DiffLine::Removed(text) => {
+                                                (format!("- {text}"), p.del, p.fail)
+                                            }
+                                            DiffLine::Added(text) => {
+                                                (format!("+ {text}"), p.add, p.ok)
+                                            }
+                                        };
+                                        div()
+                                            .px(space::LG)
+                                            .bg(bg)
+                                            .text_color(ink)
+                                            .whitespace_nowrap()
+                                            .child(SharedString::from(text))
+                                    }))
+                                    .test_support(),
+                            )),
                     )
                     .test_support()
                     .into_any_element()
@@ -5174,6 +5239,33 @@ mod tests {
             assert_eq!(style.code_background(), p.card2, "the header row");
             assert_eq!(style.border(), p.line);
         }
+    }
+
+    #[test]
+    fn a_typed_url_is_drawn_as_typed_and_the_marks_around_it_are_escaped() {
+        let url = "https://bitbucket.org/krinestt/flottille-sandbox/pull-requests/1";
+        assert_eq!(
+            as_typed(&format!("see {url} now")),
+            format!("see {url} now")
+        );
+        assert_eq!(
+            as_typed(&format!("*see* {url}.")),
+            format!("\\*see\\* {url}\\."),
+            "the full stop is the sentence's, not the address's"
+        );
+        assert_eq!(
+            as_typed(&format!("(a-b: {url}) and {url}")),
+            format!("\\(a\\-b: {url}\\) and {url}")
+        );
+        assert_eq!(
+            as_typed("https://en.wikipedia.org/wiki/Foo_(bar) a_b www.example.com/a-b_c"),
+            "https://en.wikipedia.org/wiki/Foo_(bar) a\\_b www.example.com/a-b_c"
+        );
+        assert_eq!(
+            as_typed("xhttps://a.b-c"),
+            "xhttps://a\\.b\\-c",
+            "a word that ends in a scheme is no address"
+        );
     }
 
     fn agent(parent: Option<&str>, state: &str) -> TreeAgent {

@@ -4186,6 +4186,11 @@ fn frame(cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
+/// How many frames the window still asks for: none at rest.
+fn pending_frames(cx: &mut VisualTestContext) -> usize {
+    cx.update(|window, cx| window.simulate_next_frame(cx))
+}
+
 const MARKDOWN: &str = "Here is **the plan**:\n\n- read the form\n- write the tests\n\n```rust\nfn main() {}\n```\n\nSee `cargo test` and [the docs](https://example.com/docs).";
 
 #[gpui_kit::test]
@@ -4441,6 +4446,178 @@ fn a_report_is_folded_until_clicked(cx: &mut TestAppContext) {
     cx.update(|window, _| assert!(window.try_find("row-0-report-text").is_some(), "folding"));
     settle(cx);
     cx.update(|window, _| assert!(window.try_find("row-0-report-text").is_none()));
+}
+
+/// A report whose text holds inline code, which the kit draws as a chip.
+const REPORT: &str = "[flottille:child-report]\nBoth `forge show` and `forge list` failed:\n\n- **PR**: see `sh test.sh`";
+
+/// Opens a session with an unfolded report, in a window of the palette `colors` describes (the
+/// default dark one when `None`): the solid backgrounds drawn inside the report's text, and the
+/// palette.
+fn drawn_report(
+    colors: Option<&str>,
+    cx: &mut TestAppContext,
+) -> (flottille_ui::Palette, Vec<gpui_kit::Hsla>) {
+    let user = team_user();
+    if let Some(colors) = colors {
+        std::fs::write(user.path("os-release"), "NAME=Test\nID=omarchy\n").unwrap();
+        let file = user.path("state/omarchy/current/theme/colors.toml");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, colors).unwrap();
+    }
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    settle(cx);
+    read_events(
+        &page,
+        vec![made_up(1, "agent.prompted", json!({"text": REPORT}))],
+        cx,
+    );
+    frame(cx);
+    cx.update(|window, cx| window.click("row-0-report-toggle", cx));
+    frame(cx);
+    settle(cx);
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+    let palette = cx.update(|_, cx| flottille_ui::palette(cx));
+    let quads = cx.update(|window, _| {
+        let body = window.find("row-0-report-text").bounds();
+        let (left, top) = (f32::from(body.origin.x), f32::from(body.origin.y));
+        let (right, bottom) = (
+            left + f32::from(body.size.width) + 1.,
+            top + f32::from(body.size.height) + 1.,
+        );
+        let scale = window.scale_factor();
+        window
+            .painted_quads()
+            .iter()
+            .filter(|q| {
+                let (x, y) = (q.bounds.origin.x.0 / scale, q.bounds.origin.y.0 / scale);
+                let (w, h) = (
+                    q.bounds.size.width.0 / scale,
+                    q.bounds.size.height.0 / scale,
+                );
+                x >= left && y >= top && x + w <= right && y + h <= bottom
+            })
+            .filter_map(|q| q.background.as_solid())
+            .collect()
+    });
+    (palette, quads)
+}
+
+/// The inline code's chips in the report are on the quiet surface of the palette: none of the
+/// kit's own (white) surface is left.
+fn assert_report_in_palette(p: &flottille_ui::Palette, quads: &[gpui_kit::Hsla]) {
+    assert!(
+        quads.contains(&p.card2),
+        "the code chips are the quiet surface: {quads:?}"
+    );
+    assert!(
+        quads.iter().all(|bg| *bg == p.card2 || bg.a < 1.0),
+        "nothing but the palette is drawn under the report's text: {quads:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn the_report_card_is_drawn_with_the_palette_on_the_dark_theme(cx: &mut TestAppContext) {
+    let (p, quads) = drawn_report(None, cx);
+    assert_report_in_palette(&p, &quads);
+    assert!(
+        quads.iter().all(|bg| bg.l < 0.9),
+        "no light chip on a dark theme: {quads:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn the_report_card_is_drawn_with_the_palette_on_a_light_theme(cx: &mut TestAppContext) {
+    let (p, quads) = drawn_report(
+        Some("background = \"#fafafa\"\nforeground = \"#1c1c1c\"\naccent = \"#2f5fd0\"\n"),
+        cx,
+    );
+    assert!(p.bg.l > 0.9, "the theme is light: {:?}", p.bg);
+    assert_report_in_palette(&p, &quads);
+}
+
+#[gpui_kit::test]
+fn an_edit_s_diff_is_folded_until_clicked(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    settle(cx);
+
+    read_events(
+        &page,
+        vec![
+            made_up(
+                1,
+                "agent.tool_call",
+                json!({"id": "e", "title": "fs_edit", "status": "in_progress",
+                    "raw_input": {"path": "src/a.rs", "edits": [{"old": "a\nb", "new": "c"}]}}),
+            ),
+            made_up(
+                2,
+                "agent.tool_call",
+                json!({"id": "e", "update": true, "status": "completed"}),
+            ),
+        ],
+        cx,
+    );
+    frame(cx);
+    let at = blocks(&page, cx)
+        .iter()
+        .position(|b| matches!(b, Block::Diff { .. }))
+        .expect("the edit's diff is a block");
+    let (toggle, lines) = (
+        format!("row-{at}-diff-toggle"),
+        format!("row-{at}-diff-lines"),
+    );
+
+    // The card is there, with its path and its count; its lines are not.
+    cx.update(|window, _| {
+        assert!(
+            window.try_find(toggle.clone()).is_some(),
+            "the card is there"
+        );
+        assert!(window.try_find(lines.clone()).is_none(), "folded");
+    });
+
+    // It unfolds and folds over a moment, and is drawn until it has.
+    cx.update(|window, cx| window.click(toggle.clone(), cx));
+    frame(cx);
+    cx.update(|window, _| assert!(window.try_find(lines.clone()).is_some()));
+    settle(cx);
+    cx.update(|window, _| assert!(window.find(lines.clone()).visible(), "unfolded"));
+
+    cx.update(|window, cx| window.click(toggle.clone(), cx));
+    frame(cx);
+    cx.update(|window, _| assert!(window.try_find(lines.clone()).is_some(), "folding"));
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find(lines.clone()).is_none()));
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+}
+
+#[gpui_kit::test]
+fn a_typed_url_is_drawn_as_typed_without_a_backslash(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    settle(cx);
+
+    let typed = "see https://bitbucket.org/krinestt/flottille-sandbox/pull-requests/1, *as* a_b.";
+    read_events(
+        &page,
+        vec![made_up(
+            1,
+            "agent.prompted",
+            json!({"text": format!("[flottille:user]\n{typed}")}),
+        )],
+        cx,
+    );
+    frame(cx);
+
+    assert_eq!(rendered(&page, 0, cx).trim(), typed);
 }
 
 #[gpui_kit::test]
