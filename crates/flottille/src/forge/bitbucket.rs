@@ -163,7 +163,7 @@ fn place(forge: &Forge) -> [&str; 4] {
     }
 }
 
-fn cloud(forge: &Forge) -> bool {
+pub(super) fn cloud(forge: &Forge) -> bool {
     matches!(forge, Forge::Bitbucket { host, .. } if host == "bitbucket.org")
 }
 
@@ -420,7 +420,8 @@ pub(super) async fn pull_numbered(
 /// A listed pull request with its checks, reviewers and comments.
 async fn detailed(forge: &Forge, context: &str, found: Listed) -> Result<Pull, String> {
     let id = found.id.to_string();
-    let checks = checks_of(forge, context, &id).await?;
+    let statuses = statuses_of(forge, context, &id).await?;
+    let checks: Vec<_> = statuses.iter().map(check_of).collect();
     let mergeable = mergeable(forge, context, &id).await;
     let (reviewers, comments) = if cloud(forge) {
         let base = cloud_page(forge, &id);
@@ -439,12 +440,16 @@ async fn detailed(forge: &Forge, context: &str, found: Listed) -> Result<Pull, S
         .await?;
         (found.reviewers, dc_comments(&activities))
     };
-    let jobs = checks
+    let jobs = statuses
         .iter()
-        .filter(|(_, state)| *state == "failing")
-        .map(|(name, _)| super::Job {
+        .zip(&checks)
+        .filter(|(_, (_, state))| *state == "failing")
+        .map(|(status, (name, _))| super::Job {
             name: name.clone(),
-            details: None,
+            details: status["url"]
+                .as_str()
+                .filter(|link| !link.is_empty())
+                .map(masked),
             log: None,
         })
         .collect();
@@ -472,11 +477,17 @@ async fn checks_of(
     context: &str,
     id: &str,
 ) -> Result<Vec<(String, &'static str)>, String> {
+    let statuses = statuses_of(forge, context, id).await?;
+    Ok(statuses.iter().map(check_of).collect())
+}
+
+/// The commit statuses of the pull request `id`, as `bkt pr checks --json` gives them.
+async fn statuses_of(forge: &Forge, context: &str, id: &str) -> Result<Vec<Value>, String> {
     let said = json(&command(forge, context, &["pr", "checks", id], &["--json"])).await?;
     match said.get("statuses") {
         // A commit with no status: `bkt` answers `null` (a nil Go slice), and no check ran.
         Some(Value::Null) => Ok(Vec::new()),
-        Some(Value::Array(statuses)) => Ok(statuses.iter().map(check_of).collect()),
+        Some(Value::Array(statuses)) => Ok(statuses.clone()),
         // Without its `statuses` (or in another shape), `bkt` said nothing about them.
         _ => Err(format!(
             "the checks of the pull request #{id} could not be read: `bkt pr checks --json` \
@@ -561,6 +572,79 @@ async fn allowed(
         .filter(|method| strategy(forge, method).is_some_and(|s| strategies.iter().any(|t| t == s)))
         .collect();
     Ok((methods, others))
+}
+
+/// The path of a Cloud repository, for `bkt api`.
+fn cloud_repository(forge: &Forge) -> String {
+    let Forge::Bitbucket { owner, name, .. } = forge else {
+        unreachable!()
+    };
+    format!("/repositories/{owner}/{name}")
+}
+
+/// The branch a pipeline of Bitbucket's API ran for: the branch's own (`ref_name`), or the source
+/// branch of the pull request.
+fn pipeline_branch(pipeline: &Value) -> Option<&str> {
+    let target = &pipeline["target"];
+    match target["type"].as_str()? {
+        "pipeline_pullrequest_target" => target["source"].as_str(),
+        _ => target["ref_name"].as_str(),
+    }
+}
+
+/// The build a check's link names: `https://bitbucket.org/<workspace>/<repo>/pipelines/results/<n>`
+/// of this very repository.
+pub(super) fn build_of(forge: &Forge, link: Option<&str>) -> Option<u64> {
+    let Forge::Bitbucket { owner, name, .. } = forge else {
+        return None;
+    };
+    let prefix = format!("https://bitbucket.org/{owner}/{name}/pipelines/results/").to_lowercase();
+    let link = link?.to_lowercase();
+    let rest = link.strip_prefix(&prefix)?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok().filter(|build| *build > 0)
+}
+
+/// The log of the first failed step of the build `build`: `bkt pipeline view` names the steps,
+/// `bkt pipeline logs --step` prints one. Masked.
+pub(super) async fn failed_step_log(
+    forge: &Forge,
+    context: &str,
+    build: u64,
+) -> Result<String, String> {
+    let build = build.to_string();
+    let seen = json(&command(
+        forge,
+        context,
+        &["pipeline", "view", &build],
+        &["--json"],
+    ))
+    .await?;
+    let failed = seen["steps"].as_array().into_iter().flatten().find(|step| {
+        matches!(
+            step["state"]["result"]["name"]
+                .as_str()
+                .or(step["result"]["name"].as_str()),
+            Some("FAILED" | "ERROR")
+        )
+    });
+    // The uuid goes to a command line: only what a uuid is made of.
+    let uuid = failed
+        .and_then(|step| step["uuid"].as_str())
+        .filter(|uuid| {
+            uuid.chars()
+                .all(|c| c.is_ascii_hexdigit() || "{}-".contains(c))
+        });
+    let Some(uuid) = uuid else {
+        return Err(format!("the pipeline #{build} has no failed step"));
+    };
+    text(&command(
+        forge,
+        context,
+        &["pipeline", "logs", &build],
+        &["--step", uuid],
+    ))
+    .await
 }
 
 /// The path of a Cloud pull request's own page, for `bkt api`.
@@ -848,23 +932,17 @@ pub(super) async fn write(
                      on a Data Center host: its builds are another tool's"
                 ));
             }
-            let pipelines = match json(&command(
-                forge,
-                context,
-                &["pipeline", "list"],
-                &["--limit", "50", "--json"],
-            ))
-            .await
-            {
-                Ok(pipelines) => pipelines,
+            let path = format!("{}/pipelines/?sort=-created_on", cloud_repository(forge));
+            let pipelines = match cloud_values(context, &path, PAGE).await {
+                Ok((pipelines, _)) => pipelines,
                 Err(why) => return Outcome::Failed(why),
             };
-            // The newest pipeline of the branch: `bkt` runs the branch again, not one pipeline.
-            let last = pipelines["pipelines"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|p| p["target"]["ref"]["name"].as_str() == Some(branch))
+            // The newest pipeline of the branch, whether it ran for a push or for a pull request:
+            // `bkt pipeline list` leaves the branch out (`target.ref.name` is always empty), the
+            // API's own targets name it.
+            let last = pipelines
+                .iter()
+                .filter(|p| pipeline_branch(p) == Some(branch))
                 .max_by_key(|p| p["build_number"].as_u64().unwrap_or(0));
             let Some(last) = last else {
                 return Outcome::Refused(format!(
@@ -881,14 +959,20 @@ pub(super) async fn write(
                      there is nothing to re-run"
                 ));
             }
-            match text(&command(
-                forge,
-                context,
-                &["pipeline", "run"],
-                &["--ref", branch],
-            ))
-            .await
-            {
+            // A pull request's pipeline is started again by its own selector.
+            let pattern = last["target"]["selector"]["pattern"]
+                .as_str()
+                .unwrap_or("**");
+            let mut flags = vec!["--ref", branch];
+            if last["target"]["type"] == "pipeline_pullrequest_target" {
+                flags.extend([
+                    "--selector-type",
+                    "pull-requests",
+                    "--selector-pattern",
+                    pattern,
+                ]);
+            }
+            match text(&command(forge, context, &["pipeline", "run"], &flags)).await {
                 Ok(_) => Outcome::Done(format!(
                     "The pipeline of {branch} was started again in {slug}, after #{number} \
                      failed."

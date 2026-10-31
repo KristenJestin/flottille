@@ -1416,51 +1416,52 @@ fn bitbucket_pr_merge_squash_merges_only_the_workspace_s_own_pull_request_into_i
     );
 }
 
-#[test]
-fn bitbucket_pipeline_rerun_starts_the_branch_s_pipeline_again_only_when_its_last_one_failed() {
+/// A pipeline as Bitbucket's own API answers it (`bkt api …/pipelines/`): a branch's carries
+/// `ref_name`, a pull request's `source`.
+fn branch_pipeline(number: u64, branch: &str, result: &str) -> Value {
+    json!({"uuid": format!("{{{number}}}"), "build_number": number,
+        "state": {"name": "COMPLETED", "result": {"name": result}},
+        "target": {"type": "pipeline_ref_target", "ref_type": "branch", "ref_name": branch,
+            "selector": {"type": "branches", "pattern": "**"}}})
+}
+
+fn pull_request_pipeline(number: u64, branch: &str, result: &str) -> Value {
+    json!({"uuid": format!("{{{number}}}"), "build_number": number,
+        "state": {"name": "COMPLETED", "result": {"name": result}},
+        "target": {"type": "pipeline_pullrequest_target", "source": branch,
+            "destination": "main", "pull_request": {"id": 12},
+            "selector": {"type": "pull-requests", "pattern": "**"}}})
+}
+
+/// A user on a Cloud repository whose branch `app/login` has a workspace, and the tool call that
+/// re-runs its checks.
+fn rerun_setup(pipelines: Value) -> (User, Mcp, Value) {
     let user = User::with_fake_agent().with_fake_bkt();
     on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
+    user.bkt_script(json!({"pipelines": {"acme/app": pipelines}}));
     command(&user, "rerun");
     let (_, mcp) = run(&user, "rerun");
-    let rerun = json!({"action": "checks", "repository": "."});
-    let pipeline = |number: u64, branch: &str, result: &str| {
-        json!({"uuid": format!("{{{number}}}"), "build_number": number,
-            "state": {"name": "COMPLETED", "result": {"name": result}},
-            "target": {"ref": {"name": branch}}})
-    };
-    let pipelines =
-        |pipelines: Value| user.bkt_script(json!({"pipelines": {"acme/app": pipelines}}));
+    (user, mcp, json!({"action": "checks", "repository": "."}))
+}
 
-    // None for the branch.
-    pipelines(json!([pipeline(9, "main", "FAILED")]));
-    let answer = write(&user, &mcp, rerun.clone());
-    assert!(answer.error, "{}", answer.text);
-    assert!(
-        answer.text.contains("no pipeline of app/login"),
-        "{}",
-        answer.text
-    );
-    // Its last one went through, after an older one that failed.
-    pipelines(json!([
-        pipeline(8, "app/login", "SUCCESSFUL"),
-        pipeline(7, "app/login", "FAILED")
+#[test]
+fn bitbucket_rerun_starts_the_branch_again_when_its_pipeline_failed() {
+    // `bkt pipeline list` says no branch for any of them (`target.ref.name` is empty): the
+    // pipelines are read from the API, whose targets name it.
+    let (user, mcp, rerun) = rerun_setup(json!([
+        branch_pipeline(9, "main", "SUCCESSFUL"),
+        branch_pipeline(8, "app/login", "FAILED"),
+        branch_pipeline(7, "app/login", "SUCCESSFUL")
     ]));
-    let answer = write(&user, &mcp, rerun.clone());
-    assert!(answer.error, "{}", answer.text);
-    assert!(answer.text.contains("nothing to re-run"), "{}", answer.text);
-    assert_eq!(bkt_calls_starting(&user, "pipeline run"), 0);
 
-    pipelines(json!([
-        pipeline(9, "main", "SUCCESSFUL"),
-        pipeline(8, "app/login", "FAILED"),
-        pipeline(7, "app/login", "SUCCESSFUL")
-    ]));
     let answer = write(&user, &mcp, rerun);
+
     assert!(!answer.error, "{}", answer.text);
     let calls = bkt_calls(&user);
     assert!(
         calls.contains(
-            &"pipeline list --context cloud --workspace acme --repo app --limit 50 --json"
+            &"api /repositories/acme/app/pipelines/?sort=-created_on --context cloud --param \
+              pagelen=50"
                 .to_owned()
         ),
         "{calls:?}"
@@ -1472,6 +1473,52 @@ fn bitbucket_pipeline_rerun_starts_the_branch_s_pipeline_again_only_when_its_las
         "{calls:?}"
     );
     assert_eq!(bkt_calls_starting(&user, "pipeline run"), 1);
+}
+
+#[test]
+fn bitbucket_rerun_runs_the_pull_request_pipeline_again_when_it_failed() {
+    let (user, mcp, rerun) = rerun_setup(json!([
+        branch_pipeline(9, "main", "SUCCESSFUL"),
+        pull_request_pipeline(8, "app/login", "FAILED"),
+        branch_pipeline(7, "app/login", "SUCCESSFUL")
+    ]));
+
+    let answer = write(&user, &mcp, rerun);
+
+    assert!(!answer.error, "{}", answer.text);
+    let calls = bkt_calls(&user);
+    assert!(
+        calls.contains(
+            &"pipeline run --context cloud --workspace acme --repo app --ref app/login \
+              --selector-type pull-requests --selector-pattern **"
+                .to_owned()
+        ),
+        "{calls:?}"
+    );
+    assert_eq!(bkt_calls_starting(&user, "pipeline run"), 1);
+}
+
+#[test]
+fn bitbucket_rerun_is_refused_when_nothing_of_the_branch_failed() {
+    let (user, mcp, rerun) = rerun_setup(json!([branch_pipeline(9, "main", "FAILED")]));
+    // None for the branch.
+    let answer = write(&user, &mcp, rerun.clone());
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("no pipeline of app/login"),
+        "{}",
+        answer.text
+    );
+
+    // Its last one went through, after an older one that failed.
+    user.bkt_script(json!({"pipelines": {"acme/app": [
+        pull_request_pipeline(8, "app/login", "SUCCESSFUL"),
+        branch_pipeline(7, "app/login", "FAILED")
+    ]}}));
+    let answer = write(&user, &mcp, rerun);
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains("nothing to re-run"), "{}", answer.text);
+    assert_eq!(bkt_calls_starting(&user, "pipeline run"), 0);
 }
 
 #[test]

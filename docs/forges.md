@@ -162,8 +162,10 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
 | `bkt api <path> --context C [--param k=v]` (GET) | the server's own JSON, unchanged | `pkg/cmd/api/api.go:23-48`, `:138-140` |
 | `bkt pr create --context C … --source <branch> --target <base> --title T --description D [--reviewer N]…` | `✓ Created pull request #<id>` | `pkg/cmd/pr/pr.go:597-615`, `:664`, `:696`; `--reviewer` at `:614`, sent as `{"username": N}` on Cloud (`pkg/bbcloud/pullrequests.go:232-237`) and `{"user": {"name": N}}` on Data Center (`pkg/bbdc/pullrequests.go:75-82`) |
 | `bkt pr merge <id> --context C … --strategy S --close-source=false` | the exit code | `pkg/cmd/pr/pr.go:1314-1334`; `pkg/bbcloud/pullrequests.go:351-388` (Cloud takes `merge_commit`, `squash` and `fast_forward` only, `:352-356`, `:363-365`); `pkg/bbdc/pullrequests.go:108-132` (`mergeStrategyId`, given as it is) |
-| `bkt pipeline list --context C --workspace W --repo R --limit 50 --json` | `pipelines[]`: `build_number`, `state.result.name`, `target.ref.name` | `pkg/cmd/pipeline/pipeline.go:177-210`; `pkg/bbcloud/client.go:100-120`, `:145` (newest first: `sort=-created_on`) |
-| `bkt pipeline run --context C --workspace W --repo R --ref <branch>` | the exit code | `pkg/cmd/pipeline/pipeline.go:60-91`, `:135-175`; `pkg/bbcloud/client.go:330-357` |
+| `bkt api /repositories/W/R/pipelines/?sort=-created_on --context C --param pagelen=50` (GET) | `values[]`: `build_number`, `state.result.name`, `target.type`, then `target.ref_name` (a branch's pipeline) or `target.source` (a pull request's: `pipeline_pullrequest_target`), `target.selector.pattern` | Atlassian's REST documentation (Pipelines, list pipelines). Not `bkt pipeline list`: it decodes `target.ref.name` (`pkg/bbcloud/client.go:140-152`) while the API sends `ref_name`, so every branch it prints is empty (seen live with v0.37.0), and a pull request's pipeline has no `ref` at all |
+| `bkt pipeline run --context C --workspace W --repo R --ref <branch> [--selector-type pull-requests --selector-pattern <p>]` | the exit code | `pkg/cmd/pipeline/pipeline.go:81-133` (v0.37.0; the selector flags at `:127-128`), `pkg/bbcloud/client.go:431-482` (`ref_type: branch`, `ref_name`, `selector`) |
+| `bkt pipeline view <build> --context C --workspace W --repo R --json` | `steps[]`: `uuid`, `state.result.name` | `pkg/cmd/pipeline/pipeline.go:416-480` (v0.37.0; `{pipeline, steps}`), `pkg/bbcloud/client.go:559-604` (`PipelineStep`) |
+| `bkt pipeline logs <build> --context C --workspace W --repo R --step <uuid>` | the step's log, as text | `pkg/cmd/pipeline/pipeline.go:679-726` (v0.37.0), `pkg/bbcloud/client.go:692-725` (Cloud only) |
 
 ### What is chosen, and why
 
@@ -263,10 +265,16 @@ the base the repository started from):
   request fails or runs, or while the review is `changes requested`
   (Data Center: a reviewer's `NEEDS_WORK` in the list; Cloud: a participant's `changes_requested`
   on the pull request's own page, read with `bkt api`), unless the user waives it.
-- `checks`: **Cloud only**; `bkt` has no re-run of one pipeline, only `pipeline run --ref
-  <branch>`, which runs the branch again. It is done when the newest pipeline of the branch (the
-  highest `build_number` whose `target.ref.name` is the branch) ended `FAILED` or `ERROR`;
-  otherwise it is refused. A Data Center repository is refused: it has no pipelines for `bkt`.
+- `checks`: **Cloud only**; `bkt` has no re-run of one pipeline, only `pipeline run`, which starts
+  one again. The newest 50 pipelines of the repository are read from the API (`sort=-created_on`,
+  see the table), and the branch's are the ones whose `target.ref_name` is the branch (pushed) or
+  whose `target.source` is (a pull request's). It is done when the newest of them (the highest
+  `build_number`) ended `FAILED` or `ERROR`; otherwise it is refused. A branch's pipeline is run
+  again with `--ref <branch>`; a pull request's with `--ref <branch> --selector-type pull-requests
+  --selector-pattern <its target.selector.pattern>` (`**` when it says none). **Assumed, and the
+  maintainer checks it**: that Bitbucket runs the pull request's pipeline for a branch trigger
+  with that selector. A branch whose pipelines are older than the 50 newest of the repository is
+  refused as having none. A Data Center repository is refused: it has no pipelines for `bkt`.
 - `comment` and `edit` of a pull request by its number: `bkt pr comment <id> --text <body>` and
   `bkt pr edit <id> [--title T] [--description D]` (`pkg/cmd/pr/pr.go:1654-1669` and `:719-762`,
   which print `✓ Commented on pull request #<id>` and `✓ Updated pull request #<id>`); `bkt pr
@@ -316,8 +324,15 @@ log, or why there is none:
   view --job <job> --log-failed -R github.com/owner/name`, which prints the failed steps of that
   job. A commit status of another CI, a check with no such link, and a log that `gh` cannot read
   (expired, not ready) say so (`no log: …`); the pull request is still shown.
-- **Bitbucket**: `no log: bkt gives no job logs, read it on Bitbucket`. The pinned `bkt` release
-  (above) has no command Flottille could test that prints a build's log, and none is invented.
+- **Bitbucket Cloud**: a failed check whose link is a Pipelines build of the repository
+  (`https://bitbucket.org/<workspace>/<repo>/pipelines/results/<build>`, the `url` of the commit
+  status) names the build number, which is all `bkt` needs. The first failed step is found with
+  `bkt pipeline view <build> --json` (`steps[].state.result.name` is `FAILED` or `ERROR`) and its
+  log is read with `bkt pipeline logs <build> --step <uuid>`. A status of another CI, or of
+  another repository, says so (`no log: it is not a Bitbucket Pipelines build, see …`). Its lines
+  have no names nor timestamp to drop.
+- **Bitbucket Data Center**: `no log: bkt gives no job logs, read it on Bitbucket`; `bkt` has no
+  pipelines there.
 - **Cleaned**: the job's and step's names and the timestamp that start every line, the colours and
   the carriage returns of a terminal are dropped; the empty lines at both ends too.
 - **Bounded**: the last 40 lines of a job, 4,000 bytes at most (the oldest lines go first, whole;

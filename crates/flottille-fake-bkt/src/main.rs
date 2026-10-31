@@ -19,6 +19,8 @@
 //!  "checks": {"acme/api": {"12": [{"state": "SUCCESSFUL", "name": "build"}]}},
 //!  "api": {"/repositories/acme/api/pullrequests/12/comments": {"values": []}},
 //!  "pipelines": {"acme/api": [{"uuid": "{…}", "build_number": 7, "…": "…"}]},
+//!  "steps": {"acme/api": {"7": [{"uuid": "{…}", "name": "test", "…": "…"}]}},
+//!  "logs": {"acme/api": {"7": {"{step uuid}": "the log"}}},
 //!  "fail": {"acme/api": "404 Not Found"}}
 //! ```
 //!
@@ -32,8 +34,13 @@
 //! script gives them), `checks` the `statuses`
 //! of `bkt pr checks <id> --json` (a pull request with no entry answers `null`, as a commit with
 //! no status does), `api` the body `bkt api <path>` prints (a path it does not hold
-//! is a 404), `pipelines` the `pipelines` of `bkt pipeline list --json`, and `fail` makes every
-//! call on that repository end with 1, saying its text.
+//! is a 404), `pipelines` the pipelines of a Cloud repository as Bitbucket's API gives them (newest
+//! first; `target.ref_name` for a branch's, `target.source` for a pull request's), which
+//! `bkt api /repositories/<w>/<r>/pipelines/` passes through and `bkt pipeline list --json`
+//! prints the way `bkt` models them, with an empty `target.ref.name` (it maps `ref.name` while the
+//! API says `ref_name`; seen with v0.37.0), `steps` the `steps` of `bkt pipeline view <build>
+//! --json` and `logs` what `bkt pipeline logs <build> [--step <uuid>]` prints (the last step's by
+//! default), and `fail` makes every call on that repository end with 1, saying its text.
 //!
 //! The writes answer as `bkt` does when they work: `pr create` prints `✓ Created pull request #N`
 //! (N is `created`, 1 by default), `pr merge` prints `✓ Merged pull request #N` and `pipeline run`
@@ -192,10 +199,44 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             }
         }
         ["pipeline", "list"] => {
-            payload["pipelines"] = match &script["pipelines"][&key] {
-                Value::Null => json!([]),
-                pipelines => pipelines.clone(),
+            // `bkt` decodes `target.ref.name`, which the API never sends: it is always empty.
+            payload["pipelines"] = script["pipelines"][&key]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|pipeline| {
+                    let mut listed = pipeline.clone();
+                    listed["target"] =
+                        json!({"type": pipeline["target"]["type"], "ref": {"name": ""}});
+                    listed
+                })
+                .collect();
+        }
+        ["pipeline", "view", build] => {
+            let Some(steps) = script["steps"][&key].get(*build) else {
+                eprintln!("Error: 404 Not Found: pipeline {build}");
+                return 1;
             };
+            payload["pipeline"] = json!({"build_number": build.parse::<u64>().unwrap_or(0)});
+            payload["steps"] = steps.clone();
+        }
+        ["pipeline", "logs", build] => {
+            let Some(logs) = script["logs"][&key][*build].as_object() else {
+                eprintln!("Error: 404 Not Found: pipeline {build}");
+                return 1;
+            };
+            let step = option("--step").map(str::to_owned).or_else(|| {
+                let steps = script["steps"][&key][*build].as_array()?;
+                Some(steps.last()?["uuid"].as_str()?.to_owned())
+            });
+            match step.as_deref().and_then(|step| logs.get(step)?.as_str()) {
+                Some(log) => print!("{log}"),
+                None => {
+                    eprintln!("Error: 404 Not Found: the log of that step");
+                    return 1;
+                }
+            }
+            return 0;
         }
         ["pr", "create"] => {
             println!(
@@ -261,6 +302,17 @@ fn answer(script: &Value, args: &[String]) -> i32 {
     0
 }
 
+/// The body the script holds for `path`: its `api`, else the `pipelines` of a Cloud repository.
+fn body_of(script: &Value, path: &str) -> Option<Value> {
+    if let Some(body) = script["api"].get(path) {
+        return Some(body.clone());
+    }
+    let repository = path
+        .strip_prefix("/repositories/")?
+        .strip_suffix("/pipelines/")?;
+    Some(json!({"values": script["pipelines"].get(repository)?}))
+}
+
 /// `bkt api <path>`: the script's body for that path, as the server answers it. A `next` link is
 /// followed as `bkt` does: an absolute URL has its host and the `/2.0` of the base path cut.
 fn api(script: &Value, path: &str, params: &[(&str, &str)]) -> i32 {
@@ -281,11 +333,10 @@ fn api(script: &Value, path: &str, params: &[(&str, &str)]) -> i32 {
             .find(|(key, _)| *key == name)
             .and_then(|(_, value)| value.parse::<usize>().ok())
     };
-    let Some(body) = script["api"].get(path) else {
+    let Some(mut body) = body_of(script, path) else {
         eprintln!("Error: 404 Not Found: {path}");
         return 1;
     };
-    let mut body = body.clone();
     let values = body["values"].as_array().cloned();
     if path.starts_with("/rest/api/") {
         // Data Center clamps a `limit` it does not take, and says where the next page starts.
