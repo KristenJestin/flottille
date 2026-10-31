@@ -4186,6 +4186,11 @@ fn frame(cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
+/// How many frames the window still asks for: none at rest.
+fn pending_frames(cx: &mut VisualTestContext) -> usize {
+    cx.update(|window, cx| window.simulate_next_frame(cx))
+}
+
 const MARKDOWN: &str = "Here is **the plan**:\n\n- read the form\n- write the tests\n\n```rust\nfn main() {}\n```\n\nSee `cargo test` and [the docs](https://example.com/docs).";
 
 #[gpui_kit::test]
@@ -4473,6 +4478,7 @@ fn drawn_report(
     cx.update(|window, cx| window.click("row-0-report-toggle", cx));
     frame(cx);
     settle(cx);
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
     let palette = cx.update(|_, cx| flottille_ui::palette(cx));
     let quads = cx.update(|window, _| {
         let body = window.find("row-0-report-text").bounds();
@@ -4588,6 +4594,7 @@ fn an_edit_s_diff_is_folded_until_clicked(cx: &mut TestAppContext) {
     cx.update(|window, _| assert!(window.try_find(lines.clone()).is_some(), "folding"));
     settle(cx);
     cx.update(|window, _| assert!(window.try_find(lines.clone()).is_none()));
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
 }
 
 #[gpui_kit::test]
