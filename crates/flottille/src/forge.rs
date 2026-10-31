@@ -1315,7 +1315,9 @@ async fn forge_list(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
             Err(Some(why)) => Err(why),
             Ok(forge @ Forge::GitHub { .. }) => match signed_in().await {
                 Err(problem) => Err(problem),
-                Ok(()) => gh_list(&forge, state, branch).await,
+                Ok(()) => gh_list(&forge, state, branch)
+                    .await
+                    .map(|pulls| (pulls, false)),
             },
             Ok(forge @ Forge::Bitbucket { .. }) => match contexts.of(&forge).await {
                 Err(problem) => Err(problem),
@@ -1324,15 +1326,24 @@ async fn forge_list(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
         };
         match listed {
             Err(why) => text.push_str(&format!("\n{}: {why}.\n", checkout.path)),
-            Ok(pulls) if pulls.is_empty() => {
-                text.push_str(&format!("\n{}: none.\n", checkout.path))
-            }
-            Ok(pulls) => {
-                text.push_str(&format!("\n{} ({}):\n", checkout.path, pulls.len()));
+            Ok((pulls, cut)) => {
+                if pulls.is_empty() {
+                    text.push_str(&format!("\n{}: none.\n", checkout.path));
+                } else {
+                    text.push_str(&format!("\n{} ({}):\n", checkout.path, pulls.len()));
+                }
                 for pull in pulls {
                     text.push_str(&format!(
                         "- #{} {}, {} into {}: {}  {}\n",
                         pull.number, pull.state, pull.branch, pull.base, pull.title, pull.url
+                    ));
+                }
+                // `bkt` lists one page, and the repository may hold more pull requests than it.
+                if cut {
+                    text.push_str(&format!(
+                        "Only the newest {} pull requests are read; older ones, if any, are not \
+                         listed.\n",
+                        bitbucket::PAGE
                     ));
                 }
             }

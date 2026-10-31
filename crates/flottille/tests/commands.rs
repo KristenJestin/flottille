@@ -1400,7 +1400,7 @@ fn bitbucket_pr_merge_squash_merges_only_the_workspace_s_own_pull_request_into_i
     let calls = bkt_calls(&user);
     assert!(
         calls.contains(
-            &"pr list --context cloud --workspace acme --repo app --state OPEN --limit 100 --json"
+            &"pr list --context cloud --workspace acme --repo app --state OPEN --limit 50 --json"
                 .to_owned()
         ),
         "{calls:?}"

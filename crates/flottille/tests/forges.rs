@@ -728,7 +728,7 @@ fn bitbucket_forge_show_prints_mergeable_review_and_checks() {
     }
     let calls = bkt_calls(&user);
     for call in [
-        "api /repositories/acme/api/pullrequests/12/diffstat --context cloud --param pagelen=500",
+        "api /repositories/acme/api/pullrequests/12/diffstat --context cloud --param pagelen=50",
         "api /rest/api/1.0/projects/APP/repos/web/pull-requests/7/merge --context work",
     ] {
         assert!(calls.contains(&call.to_owned()), "{call} in {calls:?}");
@@ -1098,10 +1098,10 @@ fn a_cloud_branch_shows_its_newest_own_pull_request_with_reviewers_checks_and_co
     let calls = bkt_calls(&user);
     for call in [
         "context list --json",
-        "pr list --context cloud --workspace acme --repo api --state all --limit 100 --json",
+        "pr list --context cloud --workspace acme --repo api --state all --limit 50 --json",
         "pr checks 12 --context cloud --workspace acme --repo api --json",
         "api /repositories/acme/api/pullrequests/12 --context cloud",
-        "api /repositories/acme/api/pullrequests/12/comments --context cloud --param pagelen=100",
+        "api /repositories/acme/api/pullrequests/12/comments --context cloud --param pagelen=50",
     ] {
         assert!(calls.contains(&call.to_owned()), "{call} in {calls:?}");
     }
@@ -1139,9 +1139,9 @@ fn a_data_center_branch_shows_its_pull_request_with_reviewers_checks_and_comment
     );
     let calls = bkt_calls(&user);
     for call in [
-        "pr list --context work --project APP --repo web --state all --limit 100 --json",
+        "pr list --context work --project APP --repo web --state all --limit 50 --json",
         "pr checks 7 --context work --project APP --repo web --json",
-        "api /rest/api/1.0/projects/APP/repos/web/pull-requests/7/activities --context work --param limit=100",
+        "api /rest/api/1.0/projects/APP/repos/web/pull-requests/7/activities --context work --param limit=50",
     ] {
         assert!(calls.contains(&call.to_owned()), "{call} in {calls:?}");
     }
@@ -1850,5 +1850,271 @@ fn a_forge_without_logs_says_so() {
         bkt_calls(&user).iter().all(|call| !call.contains("log")),
         "{:?}",
         bkt_calls(&user)
+    );
+}
+
+// Page sizes: Bitbucket Cloud refuses a `pagelen` above its endpoint's maximum (`400 Bad Request:
+// Invalid pagelen`), and the fake `bkt` does the same above 50 (#209).
+
+/// Adds the body `bkt api <path>` answers to the fake `bkt`'s script.
+fn bkt_api(user: &User, path: &str, body: Value) {
+    let mut script: Value =
+        serde_json::from_str(&std::fs::read_to_string(user.path("bkt/script.json")).unwrap())
+            .unwrap();
+    script["api"][path] = body;
+    user.bkt_script(script);
+}
+
+/// Every page size the daemon asked of `bkt`: `--limit`, `pagelen=` and `limit=`.
+fn page_sizes(user: &User) -> Vec<usize> {
+    bkt_calls(user)
+        .iter()
+        .flat_map(|call| call.split(' ').map(str::to_owned).collect::<Vec<_>>())
+        .filter_map(|word| {
+            word.strip_prefix("pagelen=")
+                .or_else(|| word.strip_prefix("limit="))
+                .and_then(|n| n.parse().ok())
+        })
+        .chain(bkt_calls(user).iter().filter_map(|call| {
+            let words: Vec<&str> = call.split(' ').collect();
+            let at = words.iter().position(|w| *w == "--limit")?;
+            words.get(at + 1)?.parse().ok()
+        }))
+        .collect()
+}
+
+fn cloud_comments(count: usize) -> Value {
+    let values: Vec<Value> = (1..=count)
+        .map(|n| {
+            json!({"content": {"raw": format!("Comment {n}")}, "user": {"display_name": "Alice"},
+                "deleted": false})
+        })
+        .collect();
+    json!({"values": values})
+}
+
+/// The pull request `workspace.forge` reads, the minute its cache holds having passed.
+fn the_pull_request_of(user: &User, name: &str) -> Value {
+    user.call("test.advance", json!({"ms": 61_000})).unwrap();
+    repository(&forge(user), name)["pull_request"].clone()
+}
+
+#[test]
+fn bitbucket_forge_list_answers_the_pull_requests_within_the_page_maximum() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    bitbucket_fixture(&user);
+    bitbucket_pull_requests(&user);
+    let (_, mcp) = agent_in(&user, None);
+
+    let answer = mcp.call("forge", json!({"action": "list"}));
+
+    assert!(!answer.error, "{}", answer.text);
+    for said in [
+        "- #12 open, app/login into main: Add the login page",
+        "- #13 open, app/other into main: Add the login page",
+        "- #7 open, app/login into main: Add the login form",
+    ] {
+        assert!(answer.text.contains(said), "{said} in {}", answer.text);
+    }
+    assert!(!answer.text.contains("Invalid pagelen"), "{}", answer.text);
+    assert!(
+        !answer.text.contains("Only the newest"),
+        "a short list is not cut: {}",
+        answer.text
+    );
+    assert!(
+        page_sizes(&user).iter().all(|n| *n <= 50),
+        "{:?}",
+        page_sizes(&user)
+    );
+}
+
+#[test]
+fn bitbucket_forge_list_says_when_the_repository_holds_more_than_the_newest_it_reads() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    bitbucket_fixture(&user);
+    bitbucket_pull_requests(&user);
+    let mut script: Value =
+        serde_json::from_str(&std::fs::read_to_string(user.path("bkt/script.json")).unwrap())
+            .unwrap();
+    script["pulls"]["acme/api"] = (1..=50)
+        .map(|id| cloud_pull(id, "app/login", "OPEN"))
+        .collect();
+    user.bkt_script(script);
+    let (_, mcp) = agent_in(&user, None);
+
+    let answer = mcp.call("forge", json!({"action": "list"}));
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains(
+            "Only the newest 50 pull requests are read; older ones, if any, are not listed."
+        ),
+        "{}",
+        answer.text
+    );
+    // Data Center holds two: its list is not cut.
+    assert_eq!(
+        answer.text.matches("Only the newest").count(),
+        1,
+        "{}",
+        answer.text
+    );
+}
+
+#[test]
+fn bitbucket_forge_show_of_a_pull_request_by_its_number_answers_it() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    bitbucket_fixture(&user);
+    bitbucket_pull_requests(&user);
+    let (_, mcp) = agent_in(&user, None);
+
+    let cloud = mcp.call(
+        "forge",
+        json!({"action": "show", "repository": "api", "number": 12}),
+    );
+    let data_center = mcp.call(
+        "forge",
+        json!({"action": "show", "repository": "web", "number": 7}),
+    );
+
+    assert!(!cloud.error, "{}", cloud.text);
+    assert!(
+        cloud
+            .text
+            .contains("pull request #12, open, app/login into main"),
+        "{}",
+        cloud.text
+    );
+    assert!(!data_center.error, "{}", data_center.text);
+    assert!(
+        data_center.text.contains("pull request #7, open"),
+        "{}",
+        data_center.text
+    );
+    assert!(
+        page_sizes(&user).iter().all(|n| *n <= 50),
+        "{:?}",
+        page_sizes(&user)
+    );
+}
+
+#[test]
+fn bitbucket_forge_subscribe_to_a_pull_request_is_accepted() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    bitbucket_fixture(&user);
+    bitbucket_pull_requests(&user);
+    let (_, mcp) = agent_in(&user, Some("login"));
+
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "subscribe", "repository": "api", "events": ["checks"]}),
+    );
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer.text.to_lowercase().contains("subscribed"),
+        "{}",
+        answer.text
+    );
+    assert!(
+        page_sizes(&user).iter().all(|n| *n <= 50),
+        "{:?}",
+        page_sizes(&user)
+    );
+}
+
+#[test]
+fn a_bitbucket_pull_request_with_more_comments_than_one_page_shows_them_all_up_to_the_total() {
+    let user = User::new()
+        .with_fake_bkt()
+        .with_env("FLOTTILLE_TEST_CLOCK", "1");
+    bitbucket_fixture(&user);
+    bitbucket_pull_requests(&user);
+    let comments = "/repositories/acme/api/pullrequests/12/comments";
+    let activities = "/rest/api/1.0/projects/APP/repos/web/pull-requests/7/activities";
+    let said = |count: usize| {
+        let activity = |n: usize| {
+            json!({"action": "COMMENTED", "comment": {"text": format!("Comment {n}"),
+                "author": {"displayName": "Carol"}, "comments": []}})
+        };
+        (
+            cloud_comments(count),
+            json!({"values": (1..=count).map(activity).collect::<Vec<_>>()}),
+        )
+    };
+
+    // Seventy comments take two pages of 50, and every one is shown.
+    let (cloud, dc) = said(70);
+    bkt_api(&user, comments, cloud);
+    bkt_api(&user, activities, dc);
+    let shown = (
+        the_pull_request_of(&user, "api")["comments"].clone(),
+        the_pull_request_of(&user, "web")["comments"].clone(),
+    );
+    assert_eq!(shown, (json!(70), json!(70)));
+    let calls = bkt_calls(&user);
+    for call in [
+        "api /repositories/acme/api/pullrequests/12/comments --context cloud --param pagelen=50",
+        "api /2.0/repositories/acme/api/pullrequests/12/comments?pagelen=50&page=2 --context cloud",
+        "api /rest/api/1.0/projects/APP/repos/web/pull-requests/7/activities --context work --param limit=50",
+        "api /rest/api/1.0/projects/APP/repos/web/pull-requests/7/activities --context work --param limit=50 --param start=50",
+    ] {
+        assert!(calls.contains(&call.to_owned()), "{call} in {calls:?}");
+    }
+
+    // Up to the 100 it read before, and no more.
+    let (cloud, dc) = said(150);
+    bkt_api(&user, comments, cloud);
+    bkt_api(&user, activities, dc);
+    let shown = (
+        the_pull_request_of(&user, "api")["comments"].clone(),
+        the_pull_request_of(&user, "web")["comments"].clone(),
+    );
+    assert_eq!(shown, (json!(100), json!(100)));
+    assert!(
+        page_sizes(&user).iter().all(|n| *n <= 50),
+        "{:?}",
+        page_sizes(&user)
+    );
+}
+
+#[test]
+fn a_cloud_conflict_on_a_later_page_of_the_diffstat_is_found_up_to_five_hundred_files() {
+    let user = User::new()
+        .with_fake_bkt()
+        .with_env("FLOTTILLE_TEST_CLOCK", "1");
+    bitbucket_fixture(&user);
+    bitbucket_pull_requests(&user);
+    let diffstat = "/repositories/acme/api/pullrequests/12/diffstat";
+    let files = |count: usize, conflict_at: Option<usize>| {
+        let file = |n: usize| {
+            let status = if Some(n) == conflict_at {
+                "merge conflict"
+            } else {
+                "modified"
+            };
+            json!({"status": status, "new": {"path": format!("src/{n}.rs")}})
+        };
+        json!({"values": (1..=count).map(file).collect::<Vec<_>>()})
+    };
+    let mergeable = |user: &User| the_pull_request_of(user, "api")["mergeable"].clone();
+
+    bkt_api(&user, diffstat, files(120, None));
+    let clean = mergeable(&user);
+    bkt_api(&user, diffstat, files(480, Some(470)));
+    let late_conflict = mergeable(&user);
+    // Past the 500 files it reads, with no conflict among them, nothing is known.
+    bkt_api(&user, diffstat, files(600, Some(550)));
+    let unknown = mergeable(&user);
+
+    assert_eq!(
+        (clean, late_conflict, unknown),
+        (json!(true), json!(false), Value::Null)
+    );
+    assert!(
+        page_sizes(&user).iter().all(|n| *n <= 50),
+        "{:?}",
+        page_sizes(&user)
     );
 }

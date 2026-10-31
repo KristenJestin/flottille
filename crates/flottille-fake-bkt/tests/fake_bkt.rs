@@ -301,3 +301,102 @@ fn checks_of_an_unreadable_shape_have_no_statuses() {
     assert!(checked.get("statuses").is_none(), "{checked}");
     assert_eq!(checked["pull_request"], 12);
 }
+
+#[test]
+fn a_cloud_page_size_above_the_maximum_is_refused_as_bitbucket_does() {
+    let dir = tempfile::tempdir().unwrap();
+    script(
+        dir.path(),
+        json!({"pulls": {"acme/api": [{"id": 12, "state": "OPEN"}]},
+            "api": {"/repositories/acme/api/pullrequests/12/comments": {"values": []}}}),
+    );
+    let list = |limit: &str| {
+        fake(dir.path())
+            .args(["pr", "list", "--limit", limit, "--json"])
+            .args(["--context", "cloud", "--workspace", "acme", "--repo", "api"])
+            .output()
+            .unwrap()
+    };
+    let comments = |pagelen: &str| {
+        fake(dir.path())
+            .args(["api", "/repositories/acme/api/pullrequests/12/comments"])
+            .args(["--context", "cloud", "--param", pagelen])
+            .output()
+            .unwrap()
+    };
+
+    let (list_50, list_51) = (list("50"), list("51"));
+    let (comments_50, comments_51) = (comments("pagelen=50"), comments("pagelen=51"));
+
+    assert!(list_50.status.success(), "{list_50:?}");
+    assert!(comments_50.status.success(), "{comments_50:?}");
+    for refused in [list_51, comments_51] {
+        assert_eq!(refused.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("400 Bad Request: Invalid pagelen"),
+            "{refused:?}"
+        );
+    }
+}
+
+#[test]
+fn a_body_with_more_values_than_a_page_is_served_page_by_page_through_next() {
+    let dir = tempfile::tempdir().unwrap();
+    let values: Vec<Value> = (1..=5).map(|id| json!({"id": id})).collect();
+    script(
+        dir.path(),
+        json!({"api": {
+            "/repositories/acme/api/pullrequests/12/comments": {"values": values},
+            "/rest/api/1.0/projects/APP/repos/web/pull-requests/7/activities": {"values": values}
+        }}),
+    );
+    let api = |path: &str, params: &[&str]| {
+        let mut command = fake(dir.path());
+        command.args(["api", path, "--context", "cloud"]);
+        for param in params {
+            command.args(["--param", param]);
+        }
+        json_of(command.output().unwrap())
+    };
+
+    let first = api(
+        "/repositories/acme/api/pullrequests/12/comments",
+        &["pagelen=2"],
+    );
+    let next = first["next"].as_str().unwrap().to_owned();
+    let second = api(&next, &[]);
+    let third = api(second["next"].as_str().unwrap(), &[]);
+    let dc_first = api(
+        "/rest/api/1.0/projects/APP/repos/web/pull-requests/7/activities",
+        &["limit=3"],
+    );
+    let dc_second = api(
+        "/rest/api/1.0/projects/APP/repos/web/pull-requests/7/activities",
+        &["limit=3", "start=3"],
+    );
+
+    let ids = |page: &Value| -> Vec<u64> {
+        page["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["id"].as_u64().unwrap())
+            .collect()
+    };
+    assert_eq!(ids(&first), [1, 2]);
+    assert_eq!(
+        next,
+        "https://api.bitbucket.org/2.0/repositories/acme/api/pullrequests/12/comments?pagelen=2&page=2"
+    );
+    assert_eq!(ids(&second), [3, 4]);
+    assert_eq!(ids(&third), [5]);
+    assert!(third["next"].is_null());
+    assert_eq!(
+        (ids(&dc_first), &dc_first["nextPageStart"]),
+        (vec![1, 2, 3], &json!(3))
+    );
+    assert_eq!(
+        (ids(&dc_second), &dc_second["isLastPage"]),
+        (vec![4, 5], &json!(true))
+    );
+}
