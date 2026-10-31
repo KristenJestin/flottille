@@ -298,8 +298,8 @@ const SERVED: [Definition; 26] = [
             workspace), or number's, with checks (the log's end of each failed job), review and comment \
             counts; detail full adds texts. Writes, judged, answered at once, the result maybe later: create, merge \
             (method, squash by default; refused with no check, while checks fail or a review \
-            asks for changes unless waive gives the user's words) and checks (re-run failed) act on a workspace's branch; comment \
-            and edit on number. subscribe: the next of events of a workspace's pull request \
+            asks for changes unless waive gives the user's words) and checks (re-run failed) act on a workspace's branch; comment, \
+            edit, close (comment first), reopen on number. subscribe: the next of events of a workspace's pull request \
             wakes you once, by a delivery (from people: no bot nor yours; minutes: 60 by \
             default); unsubscribe. {\"action\": \"create\", \"repository\": \"api\", \"title\": \
             \"fix: ...\", \"body\": \"...\"}",
@@ -308,7 +308,7 @@ const SERVED: [Definition; 26] = [
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "show", "subscribe", "unsubscribe", "create", "comment", "edit", "merge", "checks"]},
+                "action": {"type": "string", "enum": ["list", "show", "subscribe", "unsubscribe", "create", "comment", "edit", "merge", "checks", "close", "reopen"]},
                 "workspace": {"type": "string", "description": "Yours when left out; in main, name it."},
                 "repository": {"type": "string", "description": "By path; all of the place's when left out (list, show)."},
                 "number": {"type": "integer", "minimum": 1, "description": "show, comment, edit: a pull request."},
@@ -318,6 +318,8 @@ const SERVED: [Definition; 26] = [
                 "title": {"type": "string"},
                 "body": {"type": "string", "description": "create, edit: description; comment: text."},
                 "draft": {"type": "boolean"},
+                "comment": {"type": "string"},
+                "delete_branch": {"type": "boolean"},
                 "waive": {"type": "string", "description": "merge: the user's words letting a blocked pull request be merged; held for them."},
                 "method": {"type": "string", "enum": ["squash", "merge", "rebase"], "description": "merge: squash when left out."},
                 "events": {"type": "array", "items": {"enum": crate::forge::EVENTS}},
@@ -2117,6 +2119,7 @@ mod tests {
         // once `forge` subscribed to a pull request's events (#206). 28,801 once `tickets` wrote
         // Jira (#224). 28,990 once it set a GitHub issue's board status, closed for a reason and
         // edited labels and assignees (#225), the `tickets` texts shortened to stay under the cap.
+        // `forge` closed and reopened pull requests (#233) with its own text shortened: no more.
         assert!(chars < 29_000, "{chars} characters of definitions");
     }
 }

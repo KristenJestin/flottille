@@ -39,8 +39,8 @@
 //! (N is `created`, 1 by default), `pr merge` prints `✓ Merged pull request #N` and `pipeline run`
 //! `✓ Triggered pipeline …`. `pr comment <id> --text T` prints `✓ Commented on pull request #N`
 //! and `pr edit <id>` (`--title`, `--description`, at least one) `✓ Updated pull request #N`, as
-//! `pkg/cmd/pr/pr.go` does (`:1707`, `:829`); both need a pull request of `pulls`. With
-//! `strategies` (`{"acme/api": ["merge_commit"]}`), `pr merge` fails for a `--strategy` the
+//! `pkg/cmd/pr/pr.go` does (`:1707`, `:829`); both need a pull request of `pulls`, as does `pr decline <id>` (it prints `Declined pull
+//! request #N`, `pkg/cmd/pr/pr.go` v0.37.0). With `strategies` (`{"acme/api": ["merge_commit"]}`), `pr merge` fails for a `--strategy` the
 //! repository's list does not hold, as the server refuses it. A pull request whose `checks` is the
 //! string `"unreadable"` has a `bkt pr checks --json` answer without `statuses`, as a `bkt` whose
 //! output changed shape.
@@ -204,7 +204,7 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             );
             return 0;
         }
-        ["pr", verb @ ("comment" | "edit"), id] => {
+        ["pr", verb @ ("comment" | "edit" | "decline"), id] => {
             let held = script["pulls"][&key]
                 .as_array()
                 .into_iter()
@@ -214,7 +214,9 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 eprintln!("Error: 404 Not Found: pull request {id}");
                 return 1;
             }
-            if *verb == "comment" {
+            if *verb == "decline" {
+                println!("Declined pull request #{id}");
+            } else if *verb == "comment" {
                 if option("--text").is_none_or(str::is_empty) {
                     eprintln!("Error: --text is required");
                     return 1;

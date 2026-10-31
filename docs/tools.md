@@ -341,10 +341,21 @@ pending requests.
   least one of them (`gh pr comment`, `gh pr edit`; `bkt pr comment --text`, `bkt pr edit --title
   --description`). A `title` on `comment` is refused before anything is asked (`refused: forge
   comment takes no title: title is for edit and create`).
+- **`close {number, repository?, comment?, delete_branch?}`** closes a pull request of a
+  repository of the place (GitHub: `gh pr close`; Bitbucket: `bkt pr decline`), posting `comment`
+  first; **`reopen {number, repository?, comment?}`** opens a closed one again (`gh pr reopen`).
+  The pull request's state is read first: only an open one is closed, only a closed one reopened,
+  and the refusal says the state it has (`refused: the pull request #7 of acme/app is merged, not
+  open`). Bitbucket cannot reopen a declined pull request: `reopen` there is refused, saying so.
+  `delete_branch` (false by default) deletes the remote branch of the pull request, except when a
+  workspace of the project is still on it, or the pull request comes from a fork: the branch is
+  then left as it is, and the answer says so. Bitbucket Cloud's `bkt` cannot delete a source
+  branch when it declines: `delete_branch` there is refused before anything is declined. A
+  `title`, a `body` or a `method` on `close` and `reopen` is refused before anything is asked.
 
 `list`, `show`, `subscribe` and `unsubscribe` go through the gate like every call, which allows
 them in every mode; `create`, `comment`,
-`edit`, `merge` and `checks` are to judge, and a merge that waives the checks base. A write is
+`edit`, `merge`, `checks`, `close` and `reopen` are to judge, and a merge that waives the checks base. A write is
 done only once the repository's remote is checked to lead where its forge is declared. **What a
 write posts is shown whole**: its request says `Its title: …` and `Its body: …` in full (the
 arguments recorded are cut at 500 characters), and the judge is given them whole. A title or a
