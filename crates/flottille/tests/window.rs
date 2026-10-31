@@ -4444,6 +4444,64 @@ fn a_report_is_folded_until_clicked(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn an_edit_s_diff_is_folded_until_clicked(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    settle(cx);
+
+    read_events(
+        &page,
+        vec![
+            made_up(
+                1,
+                "agent.tool_call",
+                json!({"id": "e", "title": "fs_edit", "status": "in_progress",
+                    "raw_input": {"path": "src/a.rs", "edits": [{"old": "a\nb", "new": "c"}]}}),
+            ),
+            made_up(
+                2,
+                "agent.tool_call",
+                json!({"id": "e", "update": true, "status": "completed"}),
+            ),
+        ],
+        cx,
+    );
+    frame(cx);
+    let at = blocks(&page, cx)
+        .iter()
+        .position(|b| matches!(b, Block::Diff { .. }))
+        .expect("the edit's diff is a block");
+    let (toggle, lines) = (
+        format!("row-{at}-diff-toggle"),
+        format!("row-{at}-diff-lines"),
+    );
+
+    // The card is there, with its path and its count; its lines are not.
+    cx.update(|window, _| {
+        assert!(
+            window.try_find(toggle.clone()).is_some(),
+            "the card is there"
+        );
+        assert!(window.try_find(lines.clone()).is_none(), "folded");
+    });
+
+    // It unfolds and folds over a moment, and is drawn until it has.
+    cx.update(|window, cx| window.click(toggle.clone(), cx));
+    frame(cx);
+    cx.update(|window, _| assert!(window.try_find(lines.clone()).is_some()));
+    settle(cx);
+    cx.update(|window, _| assert!(window.find(lines.clone()).visible(), "unfolded"));
+
+    cx.update(|window, cx| window.click(toggle.clone(), cx));
+    frame(cx);
+    cx.update(|window, _| assert!(window.try_find(lines.clone()).is_some(), "folding"));
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find(lines.clone()).is_none()));
+}
+
+#[gpui_kit::test]
 fn a_typed_url_is_drawn_as_typed_without_a_backslash(cx: &mut TestAppContext) {
     let user = team_user();
     let (lead, _mcp, _) = lead_in_w(&user);

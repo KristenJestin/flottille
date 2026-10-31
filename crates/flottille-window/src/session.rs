@@ -1793,7 +1793,7 @@ pub struct Row {
     block: Rc<Block>,
     /// When its block came.
     when: Option<u64>,
-    /// A thought or a report unfolded.
+    /// A thought, a report or an edit's diff unfolded.
     open: bool,
     /// The reply or the thought as Markdown, in the pieces [`markdown_pieces`] cuts: a piece
     /// streamed parses the last one again, never the whole reply.
@@ -2871,43 +2871,67 @@ impl Render for Row {
                 .child(div().min_w_0().child(SharedString::from(text.clone())))
                 .test_support()
                 .into_any_element(),
+            // Folded to its path and its count until a click opens it.
             Block::Diff { path, lines } => {
                 let added = lines
                     .iter()
                     .filter(|l| matches!(l, DiffLine::Added(_)))
                     .count();
                 let removed = lines.len() - added;
+                let turn = turning(id("diff-toggle"), self.open, window, cx);
                 div()
                     .id(id("diff"))
                     .child(
                         Card::new()
-                            .title(
+                            .title(hoverable(
                                 div()
+                                    .id(id("diff-toggle"))
                                     .flex()
                                     .items_center()
                                     .gap(space::SM)
+                                    .cursor_pointer()
                                     .child(icon(Icon::Repository).text_color(p.faint))
+                                    .child(div().mono(12.5).child(SharedString::from(path.clone())))
                                     .child(
-                                        div().mono(12.5).child(SharedString::from(path.clone())),
-                                    ),
-                            )
+                                        icon(Icon::Chevron)
+                                            .size(px(12.))
+                                            .text_color(p.faint)
+                                            .with_transformation(Transformation::rotate(radians(
+                                                -FRAC_PI_2 * turn,
+                                            ))),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.open = !this.open;
+                                        cx.notify();
+                                    })),
+                                move |d, t| d.text_color(mix(p.mute, p.text, t)),
+                            ))
                             .meta(format!("+{added} −{removed}"))
-                            .child(div().py(space::SM).mono(12.).children(lines.iter().map(
-                                |line| {
-                                    let (text, bg, ink) = match line {
-                                        DiffLine::Removed(text) => {
-                                            (format!("- {text}"), p.del, p.fail)
-                                        }
-                                        DiffLine::Added(text) => (format!("+ {text}"), p.add, p.ok),
-                                    };
-                                    div()
-                                        .px(space::LG)
-                                        .bg(bg)
-                                        .text_color(ink)
-                                        .whitespace_nowrap()
-                                        .child(SharedString::from(text))
-                                },
-                            ))),
+                            .child(presence(
+                                id("diff-body"),
+                                self.open,
+                                div()
+                                    .id(id("diff-lines"))
+                                    .py(space::SM)
+                                    .mono(12.)
+                                    .children(lines.iter().map(|line| {
+                                        let (text, bg, ink) = match line {
+                                            DiffLine::Removed(text) => {
+                                                (format!("- {text}"), p.del, p.fail)
+                                            }
+                                            DiffLine::Added(text) => {
+                                                (format!("+ {text}"), p.add, p.ok)
+                                            }
+                                        };
+                                        div()
+                                            .px(space::LG)
+                                            .bg(bg)
+                                            .text_color(ink)
+                                            .whitespace_nowrap()
+                                            .child(SharedString::from(text))
+                                    }))
+                                    .test_support(),
+                            )),
                     )
                     .test_support()
                     .into_any_element()
