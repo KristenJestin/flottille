@@ -159,7 +159,9 @@ impl SubscriptionList {
             .child(
                 div()
                     .flex_none()
-                    .pt(px(2.))
+                    .h(px(18.))
+                    .flex()
+                    .items_center()
                     .child(icon(Icon::Clock).size(px(14.)).text_color(p.faint)),
             )
             .child(
