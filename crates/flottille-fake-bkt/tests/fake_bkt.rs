@@ -303,6 +303,36 @@ fn checks_of_an_unreadable_shape_have_no_statuses() {
 }
 
 #[test]
+fn checks_of_a_commit_without_a_status_answer_null_statuses() {
+    let dir = tempfile::tempdir().unwrap();
+    script(dir.path(), json!({}));
+
+    let checked = json_of(
+        fake(dir.path())
+            .args([
+                "pr",
+                "checks",
+                "12",
+                "--context",
+                "cloud",
+                "--workspace",
+                "acme",
+                "--repo",
+                "api",
+                "--json",
+            ])
+            .output()
+            .unwrap(),
+    );
+
+    // As `bkt` v0.37.0 does: a nil Go slice, `null`, and the key is there.
+    assert!(
+        checked.get("statuses").is_some_and(Value::is_null),
+        "{checked}"
+    );
+}
+
+#[test]
 fn a_cloud_page_size_above_the_maximum_is_refused_as_bitbucket_does() {
     let dir = tempfile::tempdir().unwrap();
     script(

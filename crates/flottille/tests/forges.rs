@@ -2025,6 +2025,94 @@ fn bitbucket_forge_subscribe_to_a_pull_request_is_accepted() {
 }
 
 #[test]
+fn bitbucket_forge_show_of_a_pull_request_with_no_build_status_answers_it_with_no_check() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    bitbucket_fixture(&user);
+    bitbucket_pull_requests(&user);
+    let mut script: Value =
+        serde_json::from_str(&std::fs::read_to_string(user.path("bkt/script.json")).unwrap())
+            .unwrap();
+    // The pull request 13 has no entry in `checks`: its commit has no status.
+    script["api"]["/repositories/acme/api/pullrequests/13"] = json!({"participants": []});
+    script["api"]["/repositories/acme/api/pullrequests/13/comments"] = json!({"values": []});
+    user.bkt_script(script);
+    let (_, mcp) = agent_in(&user, None);
+
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "show", "repository": "api", "number": 13}),
+    );
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("pull request #13, open"),
+        "{}",
+        answer.text
+    );
+    assert!(
+        answer
+            .text
+            .contains("checks: none ran on this pull request"),
+        "{}",
+        answer.text
+    );
+}
+
+#[test]
+fn bitbucket_forge_subscribe_to_a_pull_request_with_no_build_status_is_accepted() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    bitbucket_fixture(&user);
+    bitbucket_pull_requests(&user);
+    let mut script: Value =
+        serde_json::from_str(&std::fs::read_to_string(user.path("bkt/script.json")).unwrap())
+            .unwrap();
+    // The pull request 12 of `login` has no status either: its commit answers `null`.
+    script["checks"]["acme/api"] = json!({});
+    user.bkt_script(script);
+    let (_, mcp) = agent_in(&user, Some("login"));
+
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "subscribe", "repository": "api", "events": ["checks"]}),
+    );
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer.text.to_lowercase().contains("subscribed"),
+        "{}",
+        answer.text
+    );
+}
+
+#[test]
+fn bitbucket_forge_show_of_a_pull_request_whose_checks_cannot_be_read_is_refused() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    bitbucket_fixture(&user);
+    bitbucket_pull_requests(&user);
+    let mut script: Value =
+        serde_json::from_str(&std::fs::read_to_string(user.path("bkt/script.json")).unwrap())
+            .unwrap();
+    // `bkt` answers without its `statuses` key: that is not "no check ran".
+    script["checks"]["acme/api"]["12"] = json!("unreadable");
+    user.bkt_script(script);
+    let (_, mcp) = agent_in(&user, None);
+
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "show", "repository": "api", "number": 12}),
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("the checks of the pull request #12 could not be read"),
+        "{}",
+        answer.text
+    );
+}
+
+#[test]
 fn a_bitbucket_pull_request_with_more_comments_than_one_page_shows_them_all_up_to_the_total() {
     let user = User::new()
         .with_fake_bkt()

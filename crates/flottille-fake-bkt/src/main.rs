@@ -30,7 +30,8 @@
 //! prints in `pull_requests` (`--state` filters, `all` keeps every one; a Cloud pull request's
 //! `source.commit.hash` and a Data Center one's `fromRef.latestCommit` are passed through as the
 //! script gives them), `checks` the `statuses`
-//! of `bkt pr checks <id> --json`, `api` the body `bkt api <path>` prints (a path it does not hold
+//! of `bkt pr checks <id> --json` (a pull request with no entry answers `null`, as a commit with
+//! no status does), `api` the body `bkt api <path>` prints (a path it does not hold
 //! is a 404), `pipelines` the `pipelines` of `bkt pipeline list --json`, and `fail` makes every
 //! call on that repository end with 1, saying its text.
 //!
@@ -184,7 +185,8 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             payload["pull_request"] = json!(id.parse::<u64>().unwrap_or(0));
             payload["commit"] = json!("0123456789abcdef");
             match &script["checks"][&key][*id] {
-                Value::Null => payload["statuses"] = json!([]),
+                // A commit with no status: `bkt` answers `null` (a nil Go slice), not `[]`.
+                Value::Null => payload["statuses"] = Value::Null,
                 Value::String(shape) if shape == "unreadable" => {}
                 statuses => payload["statuses"] = statuses.clone(),
             }
