@@ -104,8 +104,10 @@ the wrong code first).
    Send, Allow), Secondary (transparent, bordered: a page's or a section's actions), Quiet (no
    border: Cancel, Deny, lesser actions), Danger (filled fail colour: only the action of a
    confirmation of something destructive). Every text button is 30 px high, 13 px medium; an icon
-   button is a 28 px square with a tooltip. **[test]** `Button` takes no size. A page header holds
-   at most two secondary buttons, on the title's line, and a "⋯" menu for the rest
+   button is a 28 px square with a tooltip, anchored to it (below, centred, above when there is no
+   room below, inside the window; never GPUI's `.tooltip(..)`, which opens under the pointer).
+   **[test]** `Button` takes no size, and `crates/flottille-ui/tests/tooltips.rs` holds the
+   tooltip. A page header holds at most two secondary buttons, on the title's line, and a "⋯" menu for the rest
    (**[test]** `PageHeader` refuses a third). A destructive action is never a visible button in a
    page or a row: it is a "Remove…" item of a "⋯" menu, last. A label never repeats a name the
    title already says.

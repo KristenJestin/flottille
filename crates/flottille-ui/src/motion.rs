@@ -14,6 +14,8 @@ pub const PANEL: Duration = Duration::from_millis(280);
 pub const COVER: Duration = Duration::from_millis(420);
 /// A hover background.
 pub const HOVER: Duration = Duration::from_millis(140);
+/// A tooltip waits for the pointer to rest on its element this long.
+pub const TOOLTIP: Duration = Duration::from_millis(500);
 /// A button pressed.
 pub const PRESS: Duration = Duration::from_millis(90);
 
