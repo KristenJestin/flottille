@@ -1902,6 +1902,7 @@ impl Row {
                 | Block::Thought { .. }
                 | Block::Message { .. }
                 | Block::Relayed { .. }
+                | Block::Report { .. }
         )
         .then(|| rendered.collect())
     }
@@ -1976,7 +1977,9 @@ impl Row {
     }
 
     fn set_block(&mut self, block: Block, cx: &mut Context<Self>) {
-        if let Block::Text { text } | Block::Thought { text, .. } = &block {
+        if let Block::Text { text } | Block::Thought { text, .. } | Block::Report { text, .. } =
+            &block
+        {
             let muted = matches!(block, Block::Thought { .. });
             self.set_markdown(text, muted, cx);
         }
@@ -2808,7 +2811,7 @@ impl Render for Row {
                     .into_any_element()
             }
             // Folded to its one line until a click opens it.
-            Block::Report { text, .. } => {
+            Block::Report { .. } => {
                 let turn = turning(id("report-toggle"), self.open, window, cx);
                 div()
                     .id(id("report"))
@@ -2844,17 +2847,7 @@ impl Render for Row {
                                     .px(space::LG)
                                     .pt(space::MD)
                                     .pb(space::MD)
-                                    .child(
-                                        text_region(id("report-region"))
-                                            .child(
-                                                TextView::markdown(
-                                                    id("report-markdown"),
-                                                    text.clone(),
-                                                )
-                                                .image_source(no_image),
-                                            )
-                                            .test_support(),
-                                    )
+                                    .child(markdown_view(id("report-region"), &self.markdown))
                                     .test_support(),
                             )),
                     )
