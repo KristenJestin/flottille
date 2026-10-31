@@ -204,11 +204,14 @@ is `tasks` with `action list`), and the store renamed them in the agents' fixed 
 pending requests.
 
 - **No shell, ever.** A line is split as `flottille_core::command` does (the setup's `run` steps
-  too): words on whitespace, a quoted part kept whole, a backslash literal. A newline, `|`, `&`,
-  `;`, a backtick, a redirection, `$(`, `${`, `$VAR` or `%VAR%` outside single quotes, and `*`,
-  `?`, a leading `~` or `[…]` outside any quotes are refused with: `Flottille runs a command
-  without a shell, and “T” is shell syntax: put it in a script of the repository and run the
-  script.` A line naming a shell as its program is split like any other; the gate judges the
+  too): words on whitespace, a quoted part kept whole, a backslash literal. What a shell expands
+  inside double quotes too (a newline, a backtick, `$(`, `${`, `$VAR`, `%VAR%`) is refused outside
+  single quotes; `|`, `&`, `;`, a redirection, `*`, `?`, a leading `~` or `[…]` only outside any
+  quotes, inside them they are the argument's text (`git commit -m "fix: a -> b"`). A backslash
+  before a quote (`\"`, `\'`) is refused anywhere: a shell reads it as an escaped quote, so the
+  line a shell runs with `-c` would not split as the gate reads it. Each is refused with:
+  `Flottille runs a command without a shell, and “T” is shell syntax: put it in a script of the
+  repository and run the script.` A line naming a shell as its program is split like any other; the gate judges the
   line a shell runs with `-c` (below).
 - **Waiting**: the call waits `timeout` seconds (30 by default) for the end. A task
   that keeps running (`serve`) answers at once, and one already running for the agent is joined.

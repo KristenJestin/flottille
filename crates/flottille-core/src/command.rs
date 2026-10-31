@@ -8,9 +8,10 @@
 /// The words of `line`, or the sentence refusing it.
 ///
 /// Words are separated by whitespace. A quoted part (`'…'` or `"…"`) is kept whole and its quotes
-/// are dropped; a backslash is an ordinary character. Refused outside single quotes: a newline,
-/// `|`, `&`, `;`, a backtick, a redirection (`>`, `2>&1`, `<<`…), `$(`, `${`, `$VAR`, `%VAR%`.
-/// Refused outside any quotes: `*`, `?`, a leading `~`, a `[…]` pattern.
+/// are dropped; a backslash is an ordinary character, but refused before a quote, which a shell
+/// reads as escaped. Refused outside single quotes, since a shell expands them inside double
+/// quotes too: a newline, a backtick, `$(`, `${`, `$VAR`, `%VAR%`. Refused outside any quotes:
+/// `|`, `&`, `;`, a redirection (`>`, `2>&1`, `<<`…), `*`, `?`, a leading `~`, a `[…]` pattern.
 pub fn split_line(line: &str) -> Result<Vec<String>, String> {
     let chars: Vec<char> = line.chars().collect();
     let mut words = Vec::new();
@@ -21,6 +22,12 @@ pub fn split_line(line: &str) -> Result<Vec<String>, String> {
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
+        // The gate splits here the line a `sh -c` runs, so both must see the same quotes.
+        if c == '\\'
+            && let Some(&q) = chars.get(i + 1).filter(|q| matches!(q, '"' | '\''))
+        {
+            return Err(refusal(&format!("\\{q}")));
+        }
         if quote == Some('\'') {
             if c == '\'' {
                 quote = None;
@@ -82,29 +89,7 @@ fn shell_syntax(chars: &[char], at: usize, quoted: bool, word_start: bool) -> Op
     let taken = |end: usize| chars[at..end].iter().collect::<String>();
     match c {
         '\n' | '\r' => return Some("a new line".into()),
-        '`' | ';' => return Some(c.into()),
-        '|' | '&' => return Some(taken(if next == Some(c) { at + 2 } else { at + 1 })),
-        '<' | '>' => {
-            // Digits right before it are the redirected descriptor (`2>`).
-            let mut start = at;
-            while start > 0 && chars[start - 1].is_ascii_digit() {
-                start -= 1;
-            }
-            let mut end = at + 1;
-            if chars.get(end) == Some(&c) {
-                end += 1;
-            }
-            if chars.get(end) == Some(&'&') {
-                end += 1;
-                while chars.get(end).is_some_and(char::is_ascii_digit) {
-                    end += 1;
-                }
-                if chars.get(end) == Some(&'-') {
-                    end += 1;
-                }
-            }
-            return Some(chars[start..end].iter().collect());
-        }
+        '`' => return Some(c.into()),
         '$' => match next {
             Some('(') | Some('{') => return Some(taken(at + 2)),
             Some(n) if n.is_ascii_alphabetic() || n == '_' => {
@@ -125,7 +110,29 @@ fn shell_syntax(chars: &[char], at: usize, quoted: bool, word_start: bool) -> Op
         return None;
     }
     match c {
-        '*' | '?' => Some(c.into()),
+        ';' | '*' | '?' => Some(c.into()),
+        '|' | '&' => Some(taken(if next == Some(c) { at + 2 } else { at + 1 })),
+        '<' | '>' => {
+            // Digits right before it are the redirected descriptor (`2>`).
+            let mut start = at;
+            while start > 0 && chars[start - 1].is_ascii_digit() {
+                start -= 1;
+            }
+            let mut end = at + 1;
+            if chars.get(end) == Some(&c) {
+                end += 1;
+            }
+            if chars.get(end) == Some(&'&') {
+                end += 1;
+                while chars.get(end).is_some_and(char::is_ascii_digit) {
+                    end += 1;
+                }
+                if chars.get(end) == Some(&'-') {
+                    end += 1;
+                }
+            }
+            Some(chars[start..end].iter().collect())
+        }
         '~' if word_start => Some(c.into()),
         '[' => chars[at + 1..]
             .iter()
@@ -196,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn pipes_lists_and_substitutions_are_refused_outside_single_quotes() {
+    fn pipes_lists_and_substitutions_are_refused_outside_quotes() {
         for (line, token) in [
             ("a | b", "|"),
             ("a || b", "||"),
@@ -209,7 +216,6 @@ mod tests {
             ("echo $HOME/x", "$HOME"),
             ("echo %PATH%", "%PATH%"),
             ("echo \"$HOME\"", "$HOME"),
-            ("echo \"a|b\"", "|"),
             ("a\nb", "a new line"),
         ] {
             assert_eq!(refused_for(line), token, "{line}");
@@ -255,6 +261,78 @@ mod tests {
             words("echo '$HOME | ; > `x` ${y} %Z%'"),
             ["echo", "$HOME | ; > `x` ${y} %Z%"]
         );
+    }
+
+    #[test]
+    fn a_pipe_inside_double_quotes_is_passed_as_text() {
+        assert_eq!(
+            words(r#"echo "a | b && c > d" "x;y" "2>&1 <in""#),
+            ["echo", "a | b && c > d", "x;y", "2>&1 <in"]
+        );
+        assert_eq!(
+            words(r#"git commit -m "fix: a -> b""#),
+            ["git", "commit", "-m", "fix: a -> b"]
+        );
+        assert_eq!(
+            words(r#"git log --grep "a|b""#),
+            ["git", "log", "--grep", "a|b"]
+        );
+    }
+
+    #[test]
+    fn and_and_a_redirection_inside_single_quotes_are_passed_as_text() {
+        assert_eq!(words("echo 'a && b > c'"), ["echo", "a && b > c"]);
+    }
+
+    #[test]
+    fn an_unquoted_pipe_is_refused() {
+        assert_eq!(refused_for(r#"echo "a" | cat"#), "|");
+        assert_eq!(refused_for(r#"echo "a"|"b""#), "|");
+    }
+
+    #[test]
+    fn an_unquoted_substitution_is_refused() {
+        assert_eq!(refused_for("echo $(id)"), "$(");
+        assert_eq!(refused_for(r#"echo "a"$(id)"#), "$(");
+    }
+
+    #[test]
+    fn what_a_shell_expands_inside_double_quotes_is_refused() {
+        for (line, token) in [
+            (r#"echo "$(id)""#, "$("),
+            (r#"echo "a `id` b""#, "`"),
+            (r#"echo "${HOME}""#, "${"),
+            (r#"echo "$HOME""#, "$HOME"),
+            (r#"echo "%PATH%""#, "%PATH%"),
+            ("echo \"a\nb\"", "a new line"),
+        ] {
+            assert_eq!(refused_for(line), token, "{line}");
+        }
+        assert_eq!(
+            words("echo '$(id) `id` $HOME'"),
+            ["echo", "$(id) `id` $HOME"]
+        );
+    }
+
+    #[test]
+    fn a_quoted_glob_is_not_expanded() {
+        assert_eq!(
+            words(r#"ls "*.rs" '?' "[ab]" "~/x""#),
+            ["ls", "*.rs", "?", "[ab]", "~/x"]
+        );
+    }
+
+    #[test]
+    fn a_backslash_before_a_quote_is_refused() {
+        // A shell reads it as a quote escaped, so the line would not split as it does here.
+        for (line, token) in [
+            (r#"echo \" | rm x \""#, r#"\""#),
+            (r#"echo "a\" | rm x \"""#, r#"\""#),
+            (r"echo \' | rm x \'", r"\'"),
+            (r"echo 'a\' '| rm x '\' '", r"\'"),
+        ] {
+            assert_eq!(refused_for(line), token, "{line}");
+        }
     }
 
     #[test]
