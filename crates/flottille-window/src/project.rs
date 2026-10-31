@@ -1082,12 +1082,14 @@ impl PlaceCard {
             if let Some(time) = step_time(&step, now) {
                 row = row.time(SharedString::from(time));
             }
-            // A step that ran or runs opens in the run drawer; one still to do, or skipped, did
-            // nothing yet to show.
-            if matches!(
-                step.state,
-                StepState::Running | StepState::Done | StepState::Failed
-            ) {
+            // A command that ran or runs opens in the run drawer, and so does a step that failed
+            // (the drawer says why); one still to do, or skipped, did nothing yet to show, and a
+            // copy or a link that went well has no output.
+            if match step.state {
+                StepState::Running | StepState::Done => step.runs,
+                StepState::Failed => true,
+                _ => false,
+            } {
                 let (tasks, workspace, position) =
                     (self.tasks.clone(), name.to_owned(), step.position);
                 row = row.on_click(move |_, _, cx| {

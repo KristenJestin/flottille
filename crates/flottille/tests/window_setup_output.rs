@@ -427,3 +427,80 @@ fn the_lines_a_setup_step_writes_unfold_as_they_arrive(cx: &mut TestAppContext) 
     // The first line was there when the drawer opened: it did not unfold.
     assert!(cx.update(|window, _| window.try_find("command-panel-item-0").is_none()));
 }
+
+/// Adds a setup step written as it is in the project's file.
+fn setup(user: &User, project: &str, toml: &str) {
+    let file = user.project_file(project);
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    text.push_str(&format!("\n[[setup]]\n{toml}\n"));
+    std::fs::write(file, text).unwrap();
+}
+
+fn position_of(
+    page: &Entity<ProjectPage>,
+    name: &str,
+    verb: &str,
+    state: StepState,
+    cx: &mut VisualTestContext,
+) -> Option<usize> {
+    card_of(page, name, cx).and_then(|card| {
+        card.read_with(cx, |c, _| {
+            c.data()
+                .steps
+                .iter()
+                .position(|s| s.verb == verb && s.state == state)
+        })
+    })
+}
+
+#[gpui_kit::test]
+fn a_setup_step_that_runs_no_command_opens_nothing_once_it_is_done(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    setup(&user, "atlas", "copy = [\"*.cfg\"]");
+    let go = user.path("go");
+    step(&user, "atlas", "hold", &wait_for(&go));
+    let (shell, cx) = window(&user, Arc::new(user.connector()), cx);
+    let page = open_project(&shell, "atlas", cx);
+    create(&user, "onboarding");
+    until(&shell, cx, "the copy is done", |cx| {
+        position_of(&page, "onboarding", "Copy", StepState::Done, cx).is_some()
+    });
+    settle(cx);
+
+    let at = position_of(&page, "onboarding", "Copy", StepState::Done, cx).unwrap();
+    cx.update(|window, cx| window.click(format!("setup-step-onboarding-{at}"), cx));
+    settle(cx);
+    let tasks = page.read_with(cx, |page, _| page.tasks().clone());
+    assert!(
+        tasks.read_with(cx, |t, cx| t.panel().read(cx).run().is_none()),
+        "a copy has no output to open"
+    );
+    assert!(cx.update(|window, _| window.try_find("run-drawer-panel").is_none()));
+    std::fs::write(&go, "").unwrap();
+}
+
+#[gpui_kit::test]
+fn a_failed_setup_step_that_runs_no_command_opens_to_say_why_it_failed(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    setup(&user, "atlas", "link = \"missing.env\"");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), cx);
+    let page = open_project(&shell, "atlas", cx);
+    create(&user, "onboarding");
+    until(&shell, cx, "the link failed", |cx| {
+        position_of(&page, "onboarding", "Link", StepState::Failed, cx).is_some()
+    });
+    let at = position_of(&page, "onboarding", "Link", StepState::Failed, cx).unwrap();
+    settle(cx);
+
+    cx.update(|window, cx| window.click(format!("setup-step-onboarding-{at}"), cx));
+    until(&shell, cx, "the drawer says why", |cx| {
+        shown_lines(&page, cx).is_some_and(|lines| !lines.is_empty())
+    });
+    assert!(
+        text_of("run-drawer-sub", cx).is_some_and(|sub| sub.starts_with("Setup step · failed")),
+        "{:?}",
+        text_of("run-drawer-sub", cx)
+    );
+}
