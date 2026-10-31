@@ -8,18 +8,18 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use flottille_ui::motion::{ENTER, HOVER, Motion, RISE};
 use flottille_ui::{
-    AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Side, StateIcon, Status, ToastStack,
-    Type, dismiss_on_navigate, dismiss_top_overlay, enter, forget_overlays, icon, open_overlay,
-    palette, space,
+    AgentState, Badge, Button, Card, Drawer, Icon, Item, ListRow, Listing, Side, StateIcon, Status,
+    ToastStack, Type, dismiss_on_navigate, dismiss_top_overlay, enter, forget_overlays, icon,
+    open_overlay, palette, presence, space,
 };
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Bounds, Context, ElementId, Entity, FocusHandle, InteractiveElement,
-    IntoElement, KeyDownEvent, Modifiers, MouseButton, NavigationDirection, ParentElement,
-    PathBuilder, Pixels, Render, SharedString, StatefulInteractiveElement, Styled, Subscription,
-    Task, TestSupportExt as _, WeakEntity, Window, canvas, div, point, px,
+    AnyElement, App, AppContext as _, Bounds, Context, ElementId, Entity, FocusHandle,
+    InteractiveElement, IntoElement, KeyDownEvent, Modifiers, MouseButton, NavigationDirection,
+    ParentElement, PathBuilder, Pixels, Render, SharedString, StatefulInteractiveElement, Styled,
+    Subscription, Task, TestSupportExt as _, WeakEntity, Window, canvas, div, point, px,
 };
 
 use crate::actions::{Actions, Command, Outcome, Pick};
@@ -27,7 +27,7 @@ use crate::add_project::AddProject;
 use crate::composer::{Choice, Composer, PlaceChoice};
 use crate::history::{History, Way};
 use crate::link::{self, Connect, Seen, Update};
-use crate::model::{BellItem, Place, Preparation, Snapshot};
+use crate::model::{BellItem, Forged, Place, Preparation, Snapshot};
 use crate::open::Opener;
 use crate::page::{MainArea, Page};
 use crate::project::{NewWorkspace, PlaceData, ProjectData, SessionLine};
@@ -104,6 +104,10 @@ pub struct Shell {
     /// The "Ended" group at the bottom of the tree, made when a session first ends.
     ended: Option<Entity<PlaceNode>>,
     sessions: HashMap<String, Entity<SessionRow>>,
+    /// The tickets and pull requests the sessions' agents created or changed, oldest first: each
+    /// marks its session's row and rings the bell until the session is opened. They live as long
+    /// as the window.
+    forged: Vec<Forged>,
     /// Each project's composer and new workspace form, made when its page first opens: a draft,
     /// a send and a name asked belong to their project.
     forms: HashMap<String, Forms>,
@@ -238,6 +242,7 @@ impl Shell {
             places: HashMap::new(),
             ended: None,
             sessions: HashMap::new(),
+            forged: Vec::new(),
             forms: HashMap::new(),
             actions,
             details_of: None,
@@ -389,7 +394,8 @@ impl Shell {
             open.update(cx, |open, cx| open.set_title(title, cx));
             return Some(open);
         }
-        let project = self.snapshot.session(id)?.project.clone();
+        let session = self.snapshot.session(id)?;
+        let (project, started_by) = (session.project.clone(), session.started_by.clone());
         let folder = match place {
             None => self
                 .snapshot
@@ -410,6 +416,7 @@ impl Shell {
             project,
             place: place.clone(),
             folder: folder.map(Into::into),
+            started_by,
         };
         let this = cx.entity().downgrade();
         let reply = self
@@ -568,6 +575,7 @@ impl Shell {
             Update::Providers(read, providers) => self.set_providers(read, providers, cx),
             Update::TextChanged { judge: true, .. } => self.actions.send(Command::JudgeRead),
             Update::DeveloperChanged => self.actions.send(Command::DeveloperRead),
+            Update::Forged(forged) => self.forged(forged, cx),
             Update::TextChanged { project, .. } => {
                 self.actions.send(Command::RulesRead { project })
             }
@@ -1213,11 +1221,6 @@ impl Shell {
             if row.read(cx).commands() != session.commands {
                 row.update(cx, |row, cx| row.set_commands(session.commands, cx));
             }
-            if row.read(cx).started_by() != session.started_by.as_deref() {
-                row.update(cx, |row, cx| {
-                    row.set_started_by(session.started_by.as_deref(), cx)
-                });
-            }
             // Ended, it sits among other projects' sessions: its row says whose it is.
             let scope = session.ended.then_some(session.project.as_str());
             row.update(cx, |row, cx| {
@@ -1304,33 +1307,13 @@ impl Shell {
                 .update(cx, |sidebar, cx| sidebar.set_projects(project_nodes, cx));
         }
 
-        let items: Vec<(BellItem, String)> = snapshot
-            .bell
-            .iter()
-            .map(|item| {
-                let title = snapshot
-                    .session(&item.session)
-                    .map(|s| match &s.started_by {
-                        Some(by) => format!("{} · started by {by}", s.title),
-                        None => s.title.clone(),
-                    })
-                    .unwrap_or_default();
-                (item.clone(), title)
-            })
-            .collect();
-        let count = items.len();
-        if self.top.read(cx).count != count {
-            self.top.update(cx, |top, cx| top.set_count(count, cx));
-        }
-        if self.bell.read(cx).items != items {
-            self.bell.update(cx, |bell, cx| bell.set(items, cx));
-        }
         self.forms
             .retain(|name, _| snapshot.projects.iter().any(|p| &p.name == name));
         self.replies
             .retain(|id, _| snapshot.sessions.iter().any(|s| &s.id == id));
         let edited = snapshot.project_changes != self.snapshot.project_changes;
         self.snapshot = snapshot;
+        self.ring(cx);
 
         // What was open is shown as it is now; the first project opens when nothing is.
         match self.selected.clone() {
@@ -1360,6 +1343,66 @@ impl Shell {
         if edited && let Some(page) = self.project_settings.clone() {
             let section = page.read(cx).repositories().clone();
             section.update(cx, |section, cx| section.read(cx));
+        }
+    }
+
+    /// A ticket or a pull request an agent changed: its session's row is marked and the bell
+    /// rings, unless the session is the one open, where it is in sight.
+    fn forged(&mut self, forged: Forged, cx: &mut Context<Self>) {
+        let session = self.snapshot.root_of(&forged.agent);
+        if self.selected == Some(Selection::Session(session)) {
+            return;
+        }
+        self.forged.push(forged);
+        self.ring(cx);
+    }
+
+    /// Brings the bell and the sessions' marks up to what waits for the user and what the
+    /// agents changed: each item says why it is there, a short excerpt, and its session.
+    fn ring(&mut self, cx: &mut Context<Self>) {
+        let snapshot = &self.snapshot;
+        let mut bell: Vec<BellItem> = snapshot.bell.clone();
+        let mut changed: HashMap<String, &str> = HashMap::new();
+        for forged in &self.forged {
+            let session = snapshot.root_of(&forged.agent);
+            changed.insert(session.clone(), &forged.said);
+            bell.push(BellItem {
+                key: match forged.ticket {
+                    true => format!("ticket-{}", forged.seq),
+                    false => format!("pull-{}", forged.seq),
+                },
+                session,
+                label: forged.said.clone(),
+                detail: forged.excerpt.clone(),
+                at: forged.at,
+            });
+        }
+        bell.sort_by_key(|item| item.at);
+        for (id, row) in &self.sessions {
+            let said = changed.get(id).copied();
+            if row.read(cx).changed() != said {
+                row.update(cx, |row, cx| row.set_changed(said, cx));
+            }
+        }
+        let items: Vec<(BellItem, String)> = bell
+            .into_iter()
+            .map(|item| {
+                let title = snapshot
+                    .session(&item.session)
+                    .map(|s| match &s.started_by {
+                        Some(by) => format!("{} · started by {by}", s.title),
+                        None => s.title.clone(),
+                    })
+                    .unwrap_or_default();
+                (item, title)
+            })
+            .collect();
+        let count = items.len();
+        if self.top.read(cx).count != count {
+            self.top.update(cx, |top, cx| top.set_count(count, cx));
+        }
+        if self.bell.read(cx).items != items {
+            self.bell.update(cx, |bell, cx| bell.set(items, cx));
         }
     }
 
@@ -1529,6 +1572,16 @@ impl Shell {
         {
             row.update(cx, |row, cx| row.set_selected(true, cx));
         }
+        // Opened, the session's changes are seen: its mark and its items in the bell go.
+        if let Selection::Session(id) = &selection {
+            let before = self.forged.len();
+            let snapshot = &self.snapshot;
+            self.forged
+                .retain(|forged| &snapshot.root_of(&forged.agent) != id);
+            if self.forged.len() != before {
+                self.ring(cx);
+            }
+        }
         // Opened, the page reads the providers again: the file is the user's to edit by hand.
         if selection == Selection::Settings && self.selected != Some(Selection::Settings) {
             self.actions.send(Command::ReadProviders);
@@ -1657,6 +1710,11 @@ impl Shell {
             .iter()
             .map(|(_, title)| title.clone())
             .collect()
+    }
+
+    /// The list the bell opens.
+    pub fn bell_list(&self) -> &Entity<BellList> {
+        &self.bell
     }
 
     pub fn bell_open(&self) -> bool {
@@ -1935,12 +1993,16 @@ impl Render for TopBar {
     }
 }
 
-/// The list the bell opens: what waits for the user, oldest first. Its marks exist only while it
-/// is open, so that a closed list asks for no frame.
+/// The list the bell opens: what waits for the user and what the agents changed, oldest first.
+/// Each item says why it is there, a short excerpt, and its session, each on one line cut with an
+/// ellipsis. Its marks exist only while it is open, so that a closed list asks for no frame.
 pub struct BellList {
     shell: WeakEntity<Shell>,
     items: Vec<(BellItem, String)>,
-    marks: Vec<Entity<StateIcon>>,
+    list: Listing<(BellItem, String)>,
+    /// The pulsing mark of each item that waits for the user, by its key.
+    marks: HashMap<String, Entity<StateIcon>>,
+    open: bool,
 }
 
 impl BellList {
@@ -1948,14 +2010,16 @@ impl BellList {
         Self {
             shell,
             items: Vec::new(),
-            marks: Vec::new(),
+            list: Listing::default(),
+            marks: HashMap::new(),
+            open: false,
         }
     }
 
     fn set(&mut self, items: Vec<(BellItem, String)>, cx: &mut Context<Self>) {
         if self.items != items {
             self.items = items;
-            if !self.marks.is_empty() {
+            if self.open {
                 self.show(true, cx);
             }
             cx.notify();
@@ -1963,24 +2027,54 @@ impl BellList {
     }
 
     fn show(&mut self, open: bool, cx: &mut Context<Self>) {
-        self.marks = if open {
-            self.items
-                .iter()
-                .map(|_| {
-                    let status = cx.new(|_| Status::new(AgentState::NeedsYou));
-                    cx.new(|cx| StateIcon::new(status, cx))
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        self.open = open;
+        if !open {
+            self.marks.clear();
+        }
+        for (item, _) in self.items.iter().filter(|(item, _)| waits(item)) {
+            if open && !self.marks.contains_key(&item.key) {
+                let status = cx.new(|_| Status::new(AgentState::NeedsYou));
+                let mark = cx.new(|cx| StateIcon::new(status, cx));
+                self.marks.insert(item.key.clone(), mark);
+            }
+        }
         cx.notify();
     }
+
+    /// The words of each item, in order: why it is there, its excerpt, its session.
+    pub fn said(&self) -> Vec<(String, String, String)> {
+        self.items
+            .iter()
+            .map(|(item, session)| (item.label.clone(), item.detail.clone(), session.clone()))
+            .collect()
+    }
+}
+
+/// Whether a bell item waits for the user's answer, rather than tells them of a change.
+fn waits(item: &BellItem) -> bool {
+    item.key.starts_with("request-") || item.key.starts_with("question-")
+}
+
+/// The element id of a bell item's line under its title, of its excerpt, of its session.
+pub fn bell_line_id(key: &str) -> ElementId {
+    ElementId::Name(format!("bell-{key}-line").into())
+}
+
+pub fn bell_session_id(key: &str) -> ElementId {
+    ElementId::Name(format!("bell-{key}-session").into())
 }
 
 impl Render for BellList {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
+        let at = cx.background_executor().now();
+        self.list.sync(
+            self.items
+                .iter()
+                .map(|(item, session)| (item.key.clone(), (item.clone(), session.clone()))),
+            at,
+            cx.reduce_motion(),
+        );
         let list = div()
             .id("bell-list")
             .occlude()
@@ -1998,37 +2092,72 @@ impl Render for BellList {
         let list = dismiss_on_navigate(list, move |_, cx| {
             shell.update(cx, |shell, cx| shell.set_bell(false, cx)).ok();
         });
-        if self.items.is_empty() {
-            return list
-                .child(
-                    div()
-                        .p(space::MD)
-                        .text_color(p.faint)
-                        .child("Nothing waits for you."),
-                )
-                .test_support()
-                .into_any_element();
-        }
-        list.children(
-            self.items
-                .iter()
-                .zip(&self.marks)
-                .map(|((item, title), mark)| {
-                    let shell = self.shell.clone();
-                    let key = item.key.clone();
-                    ListRow::new(
-                        ElementId::Name(format!("bell-{}", item.key).into()),
-                        SharedString::from(item.label.clone()),
-                    )
-                    .leading(mark.clone())
-                    .meta(SharedString::from(title.clone()))
-                    .on_click(move |_, window, cx| {
-                        shell
-                            .update(cx, |shell, cx| shell.choose(&key, window, cx))
-                            .ok();
+        let rows: Vec<AnyElement> = self
+            .list
+            .rows()
+            .map(|row| {
+                let (item, session) = row.value;
+                let shell = self.shell.clone();
+                let key = item.key.clone();
+                let leading = match self.marks.get(&item.key) {
+                    Some(mark) => mark.clone().into_any_element(),
+                    None => icon(match item.key.starts_with("ticket-") {
+                        true => Icon::Ticket,
+                        false => Icon::PullRequest,
                     })
-                }),
-        )
+                    .size(px(14.))
+                    .text_color(p.acc)
+                    .into_any_element(),
+                };
+                let line = |id: ElementId, text: &str, ink| {
+                    div()
+                        .id(id)
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(px(12.))
+                        .text_color(ink)
+                        .aria_label(SharedString::from(text.to_owned()))
+                        .child(SharedString::from(text.to_owned()))
+                        .test_support()
+                };
+                let below = div()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .when(!item.detail.is_empty(), |d| {
+                        d.child(line(bell_line_id(&item.key), &item.detail, p.mute))
+                    })
+                    .child(line(bell_session_id(&item.key), session, p.faint));
+                let content = ListRow::new(
+                    ElementId::Name(format!("bell-{}", item.key).into()),
+                    SharedString::from(item.label.clone()),
+                )
+                .leading(leading)
+                .below(below)
+                .on_click(move |_, window, cx| {
+                    shell
+                        .update(cx, |shell, cx| shell.choose(&key, window, cx))
+                        .ok();
+                });
+                Item::new(
+                    ElementId::Name(format!("bell-item-{}", row.key).into()),
+                    row.placement,
+                    content,
+                )
+                .into_any_element()
+            })
+            .collect();
+        list.child(presence(
+            "bell-empty",
+            self.list.is_empty(),
+            div()
+                .p(space::MD)
+                .text_color(p.faint)
+                .child("Nothing waits for you."),
+        ))
+        .children(rows)
         .test_support()
         .into_any_element()
     }

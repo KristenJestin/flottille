@@ -18,7 +18,7 @@ use flottille_window::conversation::Block;
 use flottille_window::link::Connect;
 use flottille_window::runs::KEPT_ENDED;
 use flottille_window::session::SessionPage;
-use flottille_window::tree::{ended_id, place_id, session_id, session_started_by_id};
+use flottille_window::tree::{ended_id, place_id, session_id};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Bounds, Entity, Pixels, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
@@ -806,9 +806,7 @@ fn docs_session(user: &User, lead: &str) -> String {
 }
 
 #[gpui_kit::test]
-fn a_session_an_agent_started_is_listed_under_its_workspace_with_started_by(
-    cx: &mut TestAppContext,
-) {
+fn a_session_an_agent_started_is_listed_under_its_workspace(cx: &mut TestAppContext) {
     let user = user();
     let (lead, _) = lead(&user);
     let docs = docs_session(&user, &lead);
@@ -836,14 +834,6 @@ fn a_session_an_agent_started_is_listed_under_its_workspace_with_started_by(
     let place = rect(place_id("app", &Some("w".to_owned())), cx);
     let row = rect(session_id(&docs), cx);
     assert!(row.origin.y > place.origin.y, "under its workspace's row");
-    let by = label(session_started_by_id(&docs), cx).unwrap();
-    assert!(by.starts_with("started by "), "{by}");
-    // On a line of its own under the title, which keeps the row's whole width.
-    let said = rect(session_started_by_id(&docs), cx);
-    assert!(
-        said.origin.y >= row.bottom() - px(1.),
-        "under the title: {said:?} below {row:?}"
-    );
 }
 
 #[gpui_kit::test]

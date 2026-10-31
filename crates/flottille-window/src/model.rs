@@ -20,6 +20,8 @@ pub struct Snapshot {
     /// How many `project.changed` events the link has seen: a project's file was edited when it
     /// grows.
     pub project_changes: u64,
+    /// The root of each agent's tree, by the agent's id: the session it belongs to.
+    pub roots: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -217,6 +219,87 @@ pub struct BellItem {
     pub at: u64,
 }
 
+/// A ticket or a pull request an agent created or changed: what `agent.tool_served` says of a
+/// write of `forge` or `tickets` that was done. The session's row and the bell say it until the
+/// session is opened.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Forged {
+    /// The event's number.
+    pub seq: u64,
+    pub agent: String,
+    /// A ticket's, rather than a pull request's.
+    pub ticket: bool,
+    /// What was done, in words: `Opened a pull request`.
+    pub said: String,
+    /// A short excerpt of what it posted: the title, the start of the comment.
+    pub excerpt: String,
+    pub at: u64,
+}
+
+/// The longest an excerpt of a ticket's or a pull request's text is kept, on one line.
+const EXCERPT: usize = 120;
+
+impl Forged {
+    /// What an event says was done to a ticket or a pull request, when it says it: a read, a
+    /// call refused, failed or held, and the re-run of a pull request's checks are none.
+    pub fn of(event: &flottille_core::protocol::Event) -> Option<Forged> {
+        let data = &event.data;
+        if event.name != "agent.tool_served" || data["outcome"] != "ok" {
+            return None;
+        }
+        let arguments = &data["arguments"];
+        let field = |name: &str| arguments[name].as_str().unwrap_or_default();
+        let number = arguments["number"]
+            .as_u64()
+            .map(|n| format!("#{n}"))
+            .unwrap_or_default();
+        let ticket = match field("ticket") {
+            "" => "its ticket",
+            key => key,
+        };
+        // What it acted on, then the words it posted when it did.
+        let on = |what: &str, words: &[&str]| {
+            std::iter::once(what)
+                .chain(words.iter().copied().find(|w| !w.trim().is_empty()))
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(": ")
+        };
+        let tool = data["tool"].as_str()?;
+        let (said, excerpt) = match (tool, field("action")) {
+            ("forge", "create") => ("Opened a pull request", field("title").to_owned()),
+            ("forge", "merge") => ("Merged a pull request", field("repository").to_owned()),
+            ("forge", "comment") => ("Commented on a pull request", on(&number, &[field("body")])),
+            ("forge", "edit") => (
+                "Edited a pull request",
+                on(&number, &[field("title"), field("body")]),
+            ),
+            ("tickets", "create") => ("Created a ticket", field("title").to_owned()),
+            ("tickets", "comment") => ("Commented on a ticket", on(ticket, &[field("body")])),
+            ("tickets", "edit") => (
+                "Edited a ticket",
+                on(ticket, &[field("title"), field("body")]),
+            ),
+            ("tickets", "close") => ("Closed a ticket", ticket.to_owned()),
+            ("tickets", "reopen") => ("Reopened a ticket", ticket.to_owned()),
+            _ => return None,
+        };
+        let excerpt = excerpt.split_whitespace().collect::<Vec<_>>().join(" ");
+        let excerpt = match excerpt.char_indices().nth(EXCERPT) {
+            Some((cut, _)) => format!("{}…", &excerpt[..cut]),
+            None => excerpt,
+        };
+        Some(Forged {
+            seq: event.seq,
+            agent: data["agent"].as_str()?.to_owned(),
+            ticket: tool == "tickets",
+            said: said.to_owned(),
+            excerpt,
+            at: event.at,
+        })
+    }
+}
+
 /// What the daemon answered, the raw results of each method.
 pub struct Answers<'a> {
     /// `project.list`
@@ -369,22 +452,17 @@ impl Snapshot {
             bell.push(BellItem {
                 key: format!("request-{n}"),
                 session: root_of(&parents, asker).to_owned(),
-                label: format!("Request #{n} · {}", text(request, "tool")),
-                detail: list(request, "reasons")
-                    .first()
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
+                label: format!("Request #{n} waits for you"),
+                detail: crate::session_link::Request::of(request).asked(),
                 at: number(request, "created_at"),
             });
         }
         for root in agents.iter().filter(|agent| asks_the_user(agent)) {
             let id = text(root, "id");
             let (question, at) = answers.questions.get(&id).cloned().unwrap_or_default();
-            let title = session_title(&id, answers.briefs.get(&id));
             bell.push(BellItem {
                 key: format!("question-{id}"),
-                label: format!("Question · {title}"),
+                label: "Asks you a question".into(),
                 detail: question,
                 at,
                 session: id,
@@ -510,7 +588,19 @@ impl Snapshot {
             workspaces,
             bell,
             project_changes: 0,
+            roots: parents
+                .keys()
+                .map(|id| ((*id).to_owned(), root_of(&parents, id).to_owned()))
+                .collect(),
         }
+    }
+
+    /// The session an agent belongs to: its tree's root, itself when it is not known.
+    pub fn root_of(&self, agent: &str) -> String {
+        self.roots
+            .get(agent)
+            .cloned()
+            .unwrap_or_else(|| agent.to_owned())
     }
 
     /// The sessions of one place, newest first.
@@ -593,6 +683,7 @@ mod tests {
             json!({"agents": [agent("r1", None, "idle", Some("login")),
                 agent("c1", Some("r1"), "idle", Some("login"))]}),
             json!({"requests": [{"number": 3, "agent": "c1", "tool": "fs_read",
+                "call": {"path": ".env"},
                 "reasons": [".env is a sensitive place (.env)"], "created_at": 30}]}),
             &["r1"],
         );
@@ -601,7 +692,78 @@ mod tests {
         assert_eq!(snapshot.sessions[0].title, "Fix the login");
         assert_eq!(snapshot.bell.len(), 1);
         assert_eq!(snapshot.bell[0].session, "r1");
-        assert_eq!(snapshot.bell[0].label, "Request #3 · fs_read");
+        assert_eq!(snapshot.bell[0].label, "Request #3 waits for you");
+        assert_eq!(snapshot.bell[0].detail, "Read .env");
+        assert_eq!(snapshot.root_of("c1"), "r1");
+    }
+
+    fn served(tool: &str, arguments: Value, outcome: &str) -> flottille_core::protocol::Event {
+        flottille_core::protocol::Event {
+            seq: 9,
+            at: 90,
+            name: "agent.tool_served".into(),
+            data: json!({"agent": "c1", "tool": tool, "arguments": arguments,
+                "outcome": outcome}),
+        }
+    }
+
+    #[test]
+    fn a_ticket_or_a_pull_request_written_is_said_with_an_excerpt() {
+        let said = |tool: &str, arguments: Value| {
+            Forged::of(&served(tool, arguments, "ok")).map(|f| (f.said, f.excerpt, f.ticket))
+        };
+        assert_eq!(
+            said(
+                "forge",
+                json!({"action": "create", "title": "Add the login page"})
+            ),
+            Some((
+                "Opened a pull request".into(),
+                "Add the login page".into(),
+                false
+            ))
+        );
+        assert_eq!(
+            said(
+                "forge",
+                json!({"action": "comment", "number": 12, "body": "Fixed\n  the  test"})
+            ),
+            Some((
+                "Commented on a pull request".into(),
+                "#12: Fixed the test".into(),
+                false
+            ))
+        );
+        assert_eq!(
+            said("tickets", json!({"action": "close"})),
+            Some(("Closed a ticket".into(), "its ticket".into(), true))
+        );
+        assert_eq!(
+            said(
+                "tickets",
+                json!({"action": "comment", "ticket": "#4", "body": ""})
+            ),
+            Some(("Commented on a ticket".into(), "#4".into(), true))
+        );
+        let long = "word ".repeat(60);
+        let (_, excerpt, _) = said("tickets", json!({"action": "create", "title": long})).unwrap();
+        assert!(
+            excerpt.ends_with('…') && excerpt.chars().count() == 121,
+            "{excerpt}"
+        );
+    }
+
+    #[test]
+    fn a_read_a_held_call_and_a_re_run_of_checks_are_no_change() {
+        let none = |tool: &str, action: &str, outcome: &str| {
+            Forged::of(&served(tool, json!({"action": action}), outcome)).is_none()
+        };
+        assert!(none("forge", "show", "ok"));
+        assert!(none("tickets", "list", "ok"));
+        assert!(none("forge", "create", "held"));
+        assert!(none("forge", "create", "refused"));
+        assert!(none("forge", "checks", "ok"));
+        assert!(none("fs_write", "", "ok"));
     }
 
     #[test]

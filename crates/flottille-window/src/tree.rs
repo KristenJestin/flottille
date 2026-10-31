@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use flottille_ui::motion::PANEL;
 use flottille_ui::rows::TreeLevel;
 use flottille_ui::{
-    AgentState, Button, Fold, Icon, Item, Listing, Menu, Modal, StateIcon, Status, TreeRow, enter,
+    AgentState, Button, Fold, Icon, Item, Listing, Menu, Modal, StateIcon, Status, TreeRow, fade,
     meta, palette, presence, presence_of, section_label, space, tree_children,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -72,12 +72,13 @@ pub fn project_commands_id(name: &str) -> ElementId {
     ElementId::Name(format!("commands-project-{name}").into())
 }
 
-/// The element id of the icon that says a command runs in a session.
-/// The element id of the small text a session started by an agent says it with.
-pub fn session_started_by_id(id: &str) -> ElementId {
-    ElementId::Name(format!("started-by-session-{id}").into())
+/// The element id of the mark a session's row shows while a ticket or a pull request it changed
+/// waits to be seen; its label says what changed.
+pub fn session_changed_id(id: &str) -> ElementId {
+    ElementId::Name(format!("changed-session-{id}").into())
 }
 
+/// The element id of the icon that says a command runs in a session.
 pub fn session_commands_id(id: &str) -> ElementId {
     ElementId::Name(format!("commands-session-{id}").into())
 }
@@ -771,8 +772,11 @@ pub struct SessionRow {
     mark: Mark,
     /// How many commands its agents run now.
     commands: usize,
-    /// The agent that started the session for the user, when one did.
-    started_by: Option<SharedString>,
+    /// What its agents did to a ticket or a pull request since it was last opened, the last of it
+    /// in words: a small mark on the row says it until the session is opened.
+    changed: Option<SharedString>,
+    /// The words of the mark, kept while it folds away.
+    said_changed: SharedString,
     active_at: u64,
     ago: SharedString,
     selected: bool,
@@ -801,7 +805,8 @@ impl SessionRow {
             title: SharedString::default(),
             mark: Mark::new(cx),
             commands: 0,
-            started_by: None,
+            changed: None,
+            said_changed: SharedString::default(),
             active_at: 0,
             ago: SharedString::default(),
             selected: false,
@@ -871,21 +876,22 @@ impl SessionRow {
         self.commands
     }
 
-    /// The agent that started the session, as the row says it.
-    pub fn started_by(&self) -> Option<&str> {
-        self.started_by.as_deref()
-    }
-
-    pub fn set_started_by(&mut self, by: Option<&str>, cx: &mut Context<Self>) {
-        if self.started_by() != by {
-            self.started_by = by.map(|by| SharedString::from(by.to_owned()));
+    pub fn set_commands(&mut self, commands: usize, cx: &mut Context<Self>) {
+        if self.commands != commands {
+            self.commands = commands;
             cx.notify();
         }
     }
 
-    pub fn set_commands(&mut self, commands: usize, cx: &mut Context<Self>) {
-        if self.commands != commands {
-            self.commands = commands;
+    /// What its agents changed of a ticket or a pull request since it was last opened, as its
+    /// mark says it.
+    pub fn changed(&self) -> Option<&str> {
+        self.changed.as_deref()
+    }
+
+    pub fn set_changed(&mut self, changed: Option<&str>, cx: &mut Context<Self>) {
+        if self.changed() != changed {
+            self.changed = changed.map(|said| SharedString::from(said.to_owned()));
             cx.notify();
         }
     }
@@ -967,7 +973,7 @@ impl SessionRow {
 }
 
 impl Render for SessionRow {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
         let shell = self.shell.clone();
         let id = self.id.clone();
@@ -989,10 +995,35 @@ impl Render for SessionRow {
             None => self.ago.clone(),
         };
         let id = session_commands_id(&self.id);
+        // A ticket or a pull request changed: a dot that widens in and fades, and folds away
+        // once the session is opened. It keeps the last words it said while it does.
+        if let Some(said) = &self.changed {
+            self.said_changed = said.clone();
+        }
+        let shown = fade(
+            ElementId::Name(format!("session-changed-fade-{}", self.id).into()),
+            self.changed.is_some(),
+            PANEL,
+            window,
+            cx,
+        );
+        let p = palette(cx);
+        let changed = (shown > 0.0).then(|| {
+            div()
+                .id(session_changed_id(&self.id))
+                .flex_none()
+                .w(px(14. * shown))
+                .overflow_hidden()
+                .opacity(shown)
+                .aria_label(self.said_changed.clone())
+                .child(div().size(px(6.)).rounded_full().bg(p.acc))
+                .test_support()
+        });
         // The mark and the time take each other's place: one folds away as the other comes.
         let last = div()
             .flex()
             .items_center()
+            .children(changed)
             .child(self.mark.icon(&self.id))
             .child(presence(
                 ElementId::Name(format!("meta-{}", self.id).into()),
@@ -1000,23 +1031,6 @@ impl Render for SessionRow {
                 meta(when, cx),
             ))
             .into_any_element();
-        let row = row.trailing(trailing(id, self.commands, last, cx));
-        // A session an agent started says so, small, on a line under its title, which keeps the
-        // row's width; it comes in like the rest of the tree's rows.
-        let by = self.started_by.as_ref().map(|by| {
-            let said = SharedString::from(format!("started by {by}"));
-            let text = div()
-                .id(session_started_by_id(&self.id))
-                .pl(space::SM)
-                .pb(space::XS)
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .aria_label(said.clone())
-                .child(meta(said, cx))
-                .test_support();
-            enter(format!("started-by-enter-{}", self.id), 0, text)
-        });
-        div().flex().flex_col().child(row).children(by)
+        row.trailing(trailing(id, self.commands, last, cx))
     }
 }

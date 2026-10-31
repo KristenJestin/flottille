@@ -129,7 +129,7 @@ pub struct Request {
 }
 
 impl Request {
-    fn of(request: &Value) -> Request {
+    pub(crate) fn of(request: &Value) -> Request {
         let text = |value: &Value| value.as_str().unwrap_or_default().to_owned();
         Request {
             number: request["number"].as_u64().unwrap_or(0),
