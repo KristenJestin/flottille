@@ -12,6 +12,7 @@ pub mod dropdown;
 pub mod field;
 pub mod icons;
 mod interact;
+pub mod layer;
 pub mod lines;
 pub mod listing;
 pub mod menu;
@@ -42,7 +43,7 @@ pub use field::Field;
 pub use icons::{Icon, Icons, icon};
 pub use interact::{
     Hoverable, dismiss_on_navigate, dismiss_top_overlay, fade, forget_overlays, hoverable,
-    open_overlay, selectable, tint,
+    open_overlay, selectable, text_region, tint,
 };
 pub use lines::{
     CardHead, Chip, FlatRow, FooterAction, LINE_GAP, LabelledLine, StepRow, StepTone, caption,

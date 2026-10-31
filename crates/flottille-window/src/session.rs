@@ -26,7 +26,8 @@ use flottille_ui::motion::{HOVER, Motion, PANEL};
 use flottille_ui::{
     AgentState, Badge, Button, Card, Drawer, Icon, LabelledLine, ListRow, Menu, Modal, Palette,
     Pill, PulsingLabel, Side, StateIcon, Status, Toast, Type, enter, fade, fold_frame, hoverable,
-    icon, palette, presence, presence_of, section_label, selectable, space, toast, turning,
+    icon, palette, presence, presence_of, section_label, selectable, space, text_region, toast,
+    turning,
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{
@@ -2090,13 +2091,15 @@ fn as_typed(text: &str) -> String {
         .join("\n\n")
 }
 
-/// A reply or a thought, its Markdown pieces one under the other.
-fn markdown_view(pieces: &[Entity<MarkdownPiece>]) -> impl IntoElement {
-    div()
+/// A reply or a thought, its Markdown pieces one under the other, in one text-cursor region: the
+/// pointer keeps the I-beam from its first line to its last, gaps between the pieces included.
+fn markdown_view(id: ElementId, pieces: &[Entity<MarkdownPiece>]) -> impl IntoElement {
+    text_region(id)
         .flex()
         .flex_col()
         .gap(TextViewStyle::default().paragraph_gap())
         .children(pieces.iter().cloned())
+        .test_support()
 }
 
 /// One piece of a reply's or a thought's Markdown, its own view: a piece streamed draws the last
@@ -2333,7 +2336,7 @@ impl Render for Row {
                                         .id(id("message-text"))
                                         .px(space::SM)
                                         .py(space::XS)
-                                        .child(markdown_view(&self.markdown))
+                                        .child(markdown_view(id("message-region"), &self.markdown))
                                         .test_support(),
                                 )
                             })
@@ -2393,7 +2396,9 @@ impl Render for Row {
                 // Another session's message is folded to its first line and who sent it, until a
                 // click opens it: a report can be long. What this one sent is its own words.
                 let bubble = match sent {
-                    true => bubble.child(from).child(markdown_view(&self.markdown)),
+                    true => bubble
+                        .child(from)
+                        .child(markdown_view(id("relayed-region"), &self.markdown)),
                     false => {
                         let turn = turning(id("relayed-toggle"), self.open, window, cx);
                         let first = SharedString::from(
@@ -2445,7 +2450,7 @@ impl Render for Row {
                                 self.open,
                                 div()
                                     .id(id("relayed-text"))
-                                    .child(markdown_view(&self.markdown))
+                                    .child(markdown_view(id("relayed-region"), &self.markdown))
                                     .test_support(),
                             ))
                     }
@@ -2520,7 +2525,7 @@ impl Render for Row {
                             .border_color(p.line)
                             .text_size(px(13.))
                             .text_color(p.mute)
-                            .child(markdown_view(&self.markdown))
+                            .child(markdown_view(id("thought-region"), &self.markdown))
                             .test_support(),
                     ))
                     .test_support()
@@ -2562,7 +2567,10 @@ impl Render for Row {
                                 .child(div().id(id("author")).child(me).test_support()),
                         )
                     })
-                    .child(markdown_view(&self.markdown[..self.markdown.len().min(1)]))
+                    .child(markdown_view(
+                        id("text-region"),
+                        &self.markdown[..self.markdown.len().min(1)],
+                    ))
                     .test_support();
                 // A long reply's other pieces are items of the list: the last one carries it.
                 match self.markdown.len() > 1 {
@@ -2789,8 +2797,15 @@ impl Render for Row {
                                     .pt(space::MD)
                                     .pb(space::MD)
                                     .child(
-                                        TextView::markdown(id("report-markdown"), text.clone())
-                                            .image_source(no_image),
+                                        text_region(id("report-region"))
+                                            .child(
+                                                TextView::markdown(
+                                                    id("report-markdown"),
+                                                    text.clone(),
+                                                )
+                                                .image_source(no_image),
+                                            )
+                                            .test_support(),
                                     )
                                     .test_support(),
                             )),

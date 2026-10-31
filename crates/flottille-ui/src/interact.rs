@@ -10,12 +10,21 @@ use std::time::Duration;
 
 use gpui_kit::{
     App, Context, Div, Element, ElementId, Entity, Global, Hsla, InteractiveElement, IntoElement,
-    MouseButton, NavigationDirection, RenderOnce, Stateful, StatefulInteractiveElement,
-    TestSupportExt, Window,
+    MouseButton, NavigationDirection, RenderOnce, Stateful, StatefulInteractiveElement, Styled,
+    TestSupportExt, Window, div,
 };
 
 use crate::color::mix;
 use crate::motion::{HOVER, Motion, PANEL, PRESS, PRESSED};
+
+/// The one place of a selectable text where the pointer is the I-beam: every paragraph, list and
+/// gap of a message sits inside it. A text view sets the I-beam over its own lines alone, so the
+/// pointer crossing the space between two of them (or between two views) fell back to the arrow
+/// and back at once, which flickered; here it keeps the I-beam from the first line to the last,
+/// and is the arrow everywhere else. A link inside still shows its hand.
+pub fn text_region(id: impl Into<ElementId>) -> Stateful<Div> {
+    div().id(id).cursor_text()
+}
 
 /// The mouse's back and forward buttons dismiss what `element` belongs to, as a click outside
 /// it does: an open list, a modal, a drawer. The window's history does not see them.

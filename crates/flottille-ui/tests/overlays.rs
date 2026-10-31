@@ -4,7 +4,7 @@ mod common;
 
 use common::{Desktop, advance, init, pending_frames};
 use flottille_ui::motion::{ENTER, HOVER, MODAL};
-use flottille_ui::{Align, Dropdown, MenuItem, Modal};
+use flottille_ui::{Align, Dropdown, MenuItem, Modal, Select, SelectOption};
 use gpui_kit::base::input::{Input, InputState};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
@@ -528,4 +528,113 @@ fn a_short_modal_does_not_scroll_and_keeps_its_height(cx: &mut TestAppContext) {
         cx.update(|window, _| window.find("dialog-title").bounds()),
         title
     );
+}
+
+/// A modal holding a select whose list is taller than the room left under the field.
+struct Form {
+    chosen: usize,
+    scrim_closed: usize,
+}
+
+impl Render for Form {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.entity().downgrade();
+        let close = this.clone();
+        Modal::new("form", "Tracker")
+            .child(
+                Select::new(
+                    "kind",
+                    ["none", "github", "jira"].map(|key| SelectOption::new(key, key)),
+                    self.chosen,
+                )
+                .on_choose(move |index, _, cx| {
+                    this.update(cx, |form, cx| {
+                        form.chosen = index;
+                        cx.notify();
+                    })
+                    .ok();
+                }),
+            )
+            .on_close(move |_, cx| {
+                close.update(cx, |form, _| form.scrim_closed += 1).ok();
+            })
+    }
+}
+
+/// Where, in the order the scene is drawn, the quad of exactly these bounds comes.
+fn drawn_at(window: &Window, bounds: gpui_kit::Bounds<gpui_kit::Pixels>) -> usize {
+    let scale = window.scale_factor();
+    let near =
+        |a: gpui_kit::ScaledPixels, b: gpui_kit::Pixels| (a.0 / scale - f32::from(b)).abs() < 0.5;
+    window
+        .painted_quads()
+        .iter()
+        .position(|quad| {
+            near(quad.bounds.origin.x, bounds.origin.x)
+                && near(quad.bounds.origin.y, bounds.origin.y)
+                && near(quad.bounds.size.width, bounds.size.width)
+                && near(quad.bounds.size.height, bounds.size.height)
+        })
+        .unwrap_or_else(|| panic!("nothing is drawn at {bounds:?}"))
+}
+
+#[gpui_kit::test]
+fn a_select_opened_in_a_modal_is_drawn_above_the_modal(cx: &mut TestAppContext) {
+    init(cx, Desktop::new(false).env());
+    let (_, cx) = cx.add_window_view(|_, _| Form {
+        chosen: 0,
+        scrim_closed: 0,
+    });
+    cx.simulate_resize(size(px(900.), px(700.)));
+    advance(cx, MODAL * 2);
+    cx.update(|window, cx| window.click("kind", cx));
+    advance(cx, ENTER * 2);
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        let (dialog, list) = (
+            window.find("form").bounds(),
+            window.find("kind-menu").bounds(),
+        );
+        assert!(
+            dialog.intersects(&list),
+            "the list opens over the dialog: {list:?} on {dialog:?}"
+        );
+        assert!(
+            drawn_at(window, list) > drawn_at(window, dialog),
+            "the list is drawn after the dialog, so over it and its scrim"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn a_select_opened_in_a_modal_hangs_from_its_field_and_its_options_can_be_chosen(
+    cx: &mut TestAppContext,
+) {
+    init(cx, Desktop::new(false).env());
+    let (form, cx) = cx.add_window_view(|_, _| Form {
+        chosen: 0,
+        scrim_closed: 0,
+    });
+    cx.simulate_resize(size(px(900.), px(700.)));
+    advance(cx, MODAL * 2);
+    cx.update(|window, cx| window.click("kind", cx));
+    advance(cx, ENTER * 2);
+    let (field, menu, option) = cx.update(|window, cx| {
+        window.render_frame(cx);
+        (
+            window.find("kind").bounds(),
+            window.find("kind-menu").bounds(),
+            window.find("kind-jira").bounds(),
+        )
+    });
+    assert!(
+        menu.top() >= field.bottom() && menu.left() == field.left(),
+        "the list hangs from its field: {menu:?} under {field:?}"
+    );
+    assert!(menu.contains(&option.center()));
+    cx.update(|window, cx| window.click("kind-jira", cx));
+    form.read_with(cx, |f, _| {
+        assert_eq!(f.chosen, 2, "the option over the dialog is chosen");
+        assert_eq!(f.scrim_closed, 0, "and the dialog is still open");
+    });
 }

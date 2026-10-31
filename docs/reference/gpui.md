@@ -183,6 +183,13 @@ The components that hold them:
   `uniform_list` do not stretch: `.w_full()`. Rounded images: put `.rounded(..)` on the `img`
   itself.
 - An `absolute` layer with buttons lets clicks through to what is below: `.occlude()`.
+- GPUI Fast draws every `deferred` layer in one list sorted by priority, a layer opened from inside
+  another included: a list nested in a dialog with a lower priority is drawn under the dialog. The
+  window's priorities live in `flottille_ui::layer` (dialog, list, toast); a new floating layer
+  takes one there, never a number of its own.
+- A text view sets the I-beam over its own lines only, so a pointer crossing the gap between two
+  paragraphs (or two views) flickers between I-beam and arrow. A selectable text sits in a
+  `text_region(id)`, one region that keeps the I-beam from its first line to its last.
 - Keys: GPUI tries key bindings first, then `on_key_down` from the root down, then gives the
   character to the input. A global shortcut on Space or `/` on the root swallows typing: check
   first whether the input has focus.

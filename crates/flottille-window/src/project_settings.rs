@@ -1188,8 +1188,13 @@ impl ProjectSettingsPage {
                                 div()
                                     .id(id("forge"))
                                     .aria_label(SharedString::from(said.clone()))
+                                    .flex_1()
+                                    .min_w_0()
                                     .mono(12.)
                                     .text_color(p.run)
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
                                     .child(SharedString::from(said))
                                     .test_support(),
                             )
@@ -1197,6 +1202,7 @@ impl ProjectSettingsPage {
                                 div()
                                     .id(id("use"))
                                     .aria_label("Use")
+                                    .flex_none()
                                     .px(space::SM)
                                     .rounded(px(5.))
                                     .border_1()
@@ -1525,9 +1531,11 @@ impl ProjectSettingsPage {
             .on_click(move |_, window, cx| {
                 this.update(cx, |this, cx| this.add_base(window, cx)).ok();
             });
+        // The gap is the parent's: the blocks that come and go take theirs with them.
         let control = div()
             .flex()
             .flex_col()
+            .gap(space::SM)
             .child(presence("base-list-block", !self.bases.is_empty(), list).gap(space::SM))
             .child(
                 presence(

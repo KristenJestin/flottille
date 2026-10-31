@@ -3,7 +3,8 @@
 //! The list is drawn after everything else (`deferred`), on the opaque card colour with a border
 //! and a shadow, so that nothing of the page shows through it or takes its clicks. It stays inside
 //! the window (`anchored`): it opens upward when there is no room below. While it is open, a
-//! click anywhere outside it closes it and goes no further.
+//! click anywhere outside it closes it and goes no further. Opened from a dialog, it is drawn
+//! above the dialog ([`layer`](crate::layer)).
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -18,6 +19,7 @@ use gpui_kit::{
 use crate::color::mix;
 use crate::icons::{Icon, icon};
 use crate::interact::{dismiss_on_navigate, hoverable, open_overlay};
+use crate::layer;
 use crate::motion::{ENTER, HOVER, Motion, RISE};
 use crate::theme::palette;
 use crate::typography::Type;
@@ -269,7 +271,7 @@ pub(crate) fn list_overlay(
             Align::Start => d.left_0(),
             Align::End => d.right_0(),
         })
-        .child(deferred(div().children(backdrop).child(list)).priority(1))
+        .child(deferred(div().children(backdrop).child(list)).priority(layer::LIST))
 }
 
 fn id_text(id: &ElementId) -> String {

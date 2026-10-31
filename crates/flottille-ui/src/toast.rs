@@ -19,6 +19,7 @@ use gpui_kit::{
 use crate::color::mix;
 use crate::icons::{Icon, icon};
 use crate::interact::hoverable;
+use crate::layer;
 use crate::listing::{Item, Listing};
 use crate::theme::palette;
 use crate::typography::Type;
@@ -327,7 +328,7 @@ impl Render for ToastStack {
                     ),
             ),
         )
-        .priority(3)
+        .priority(layer::TOAST)
         .into_any_element()
     }
 }
