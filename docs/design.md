@@ -409,13 +409,17 @@ a malformed call, a login printed, the daemon driven from a command.
 ### 7.1 The mode and the judge
 
 Each session is in **Ask**, **Auto** or **Full**, a small three-choice control in the composer's
-bar. A new session starts in Auto, and no session ever starts in Full. A tree has one mode, its
+bar. A session the user starts starts in Auto, never in Full. A tree has one mode, its
 root's, stored with the root and read at each call: a switch reaches every agent of the tree at
 once, children included. Only the user changes it, in the window or with
 `flottille agent mode <agent> ask|auto|full` (`agent.mode`, which switches the tree's root
 whatever agent of it is named); no tool of an agent does, and a session an agent starts for the
-user (`agent_launch` with `root`) takes the tree's mode, Auto when the tree is in Full. It is kept
-when the session resumes.
+user (`agent_launch` with `root`) takes the mode of the tree that started it, Full included, never
+above it: an agent in Full can already do what the session would do, the session caps still apply,
+and the rules refused in every mode stay refused in it. Each tree keeps its own mode afterwards: a
+switch of the launcher's tree does not reach it. It is kept when the session resumes. An agent
+reads its mode, never sets it: `session_read` of its own session answers with its tree's mode,
+and the text Flottille starts every session with says so.
 
 - In **Ask**, a call to judge is a card for the user.
 - In **Auto**, it goes to the **judge**, which allows it or asks the user: it cannot refuse, and
@@ -777,9 +781,9 @@ The plan is cut into GitHub milestones; each ends on something the user can use.
 - Children cap 12 per project, no depth, quiet interval 20 min.
 - Claude reached through Flottille's own bridge; `claude` checked at a pinned version, another one
   only warned about.
-- A new session starts in Auto, and a tree has one mode, its root's, read at each call; Auto
+- A session the user starts starts in Auto, and a tree has one mode, its root's, read at each call; Auto
   without a judge asks the user as Ask does. Full is chosen by the user for a session already
-  started, never at its start; a session an agent starts from a tree in Full starts in Auto. A user who never chose a judge gets the smallest model
+  started, never at its start; a session an agent starts takes its launcher's mode, Full included. A user who never chose a judge gets the smallest model
   of the first provider installed and signed in, among those listed (Claude's `haiku`); one that is
   not listed gets nothing picked.
 - One judge process per judgement, stopped after it, rather than one kept warm: nothing of a

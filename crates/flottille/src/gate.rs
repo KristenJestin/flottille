@@ -333,6 +333,8 @@ pub fn decide(call: &Call) -> Verdict {
         "tickets" => tickets(call),
         "agent_launch" if call.args["root"] == true => root_launch(call.grant, call.args),
         "session_send" => session_send(call.grant, call.args),
+        // Its own session is no other's conversation: the answer says the tree's mode.
+        "session_read" if call.args["session"] == call.grant.agent.as_str() => Verdict::Allow,
         "session_read" => {
             let mut found = Found::default();
             found.judge(SESSION_READ.into());

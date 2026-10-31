@@ -493,8 +493,8 @@ pub struct New {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
-    /// Ask or Auto, never Full: a child's is its parent's; `None` for a new root, which starts in
-    /// Auto.
+    /// A child's is its parent's, a root an agent starts its launcher's tree's; `None` for the
+    /// user's new root, which starts in Auto.
     pub gate_mode: Option<GateMode>,
     /// The agent that starts this root for the user; `None` for a child or the user's own root.
     pub launched_by: Option<String>,

@@ -1,6 +1,7 @@
 //! The scenarios of Full, the third mode (`docs/design.md` §7.1): every call the gate would hold
 //! passes without a request, base calls included, while every refusal of bare mode stays; a
-//! session never starts in it, and no agent can put a session in it. The agents and the judge are
+//! session the user starts never starts in it, one an agent starts takes its launcher's mode, and
+//! no agent can put a session in it, though it reads its own. The agents and the judge are
 //! fake ACP agents (`crates/flottille-fake-agent`), in throwaway repositories and temporary XDG
 //! folders.
 
@@ -303,26 +304,123 @@ fn an_agent_cannot_set_full_on_itself_or_a_session_it_starts() {
     );
     assert!(refused.error, "{}", refused.text);
     assert_eq!(mode_of(&user, &id), "auto");
+}
 
-    // A session it starts for the user, from a tree in Full, starts in Auto.
-    set_mode(&user, &id, "full");
-    let launched = done(mcp.call(
-        "agent_launch",
-        json!({"title": "Docs", "brief": "Write the docs.", "root": true}),
-    ));
-    assert!(
-        launched.contains("Started a session for the user"),
-        "{launched}"
-    );
+/// The session titled `title` the agent of `mcp` started for the user: its id, once the launch
+/// was answered.
+fn started(user: &User, title: &str) -> String {
     let started = user.call("agent.list", json!({})).unwrap()["agents"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|a| a["title"] == "Docs")
+        .find(|a| a["title"] == title)
         .cloned()
         .unwrap();
     assert_eq!(started["parent"], Value::Null);
-    assert_eq!(mode_of(&user, started["id"].as_str().unwrap()), "auto");
+    started["id"].as_str().unwrap().to_owned()
+}
+
+fn launch_root(mcp: &Mcp, title: &str) -> Answer {
+    mcp.call(
+        "agent_launch",
+        json!({"title": title, "brief": "Write the docs.", "root": true}),
+    )
+}
+
+#[test]
+fn a_session_started_by_an_agent_in_a_full_tree_starts_in_full() {
+    let user = User::with_fake_agent().with_fake_launchers();
+    let (id, mcp, _) = session(&user);
+    set_mode(&user, &id, "full");
+
+    let launched = done(launch_root(&mcp, "Docs"));
+
+    assert!(
+        launched.contains("Started a session for the user"),
+        "{launched}"
+    );
+    assert_eq!(mode_of(&user, &started(&user, "Docs")), "full");
+}
+
+#[test]
+fn a_session_started_by_an_agent_in_an_ask_tree_starts_in_ask() {
+    let user = User::with_fake_agent().with_fake_launchers();
+    let (id, mcp, _) = session(&user);
+    set_mode(&user, &id, "ask");
+
+    let answer = launch_root(&mcp, "Docs");
+    let number = answer
+        .text
+        .strip_prefix("Waiting for the user's approval, request #")
+        .and_then(|rest| rest.split_once('.'))
+        .map(|(number, _)| number.parse::<u64>().unwrap())
+        .unwrap_or_else(|| panic!("not held: {}", answer.text));
+    user.call("approval.approve", json!({"number": number}))
+        .unwrap();
+    eventually("the session", || {
+        user.call("agent.list", json!({})).unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["title"] == "Docs")
+    });
+
+    // Never above its launcher's mode.
+    assert_eq!(mode_of(&user, &started(&user, "Docs")), "ask");
+}
+
+#[test]
+fn a_session_the_user_starts_starts_in_auto() {
+    let user = User::with_fake_agent().with_fake_launchers();
+    let (id, _, _) = session(&user);
+    set_mode(&user, &id, "full");
+
+    let answer = user
+        .call(
+            "agent.run",
+            json!({"project": "app", "workspace": "w", "message": "write the docs"}),
+        )
+        .unwrap();
+
+    assert_eq!(
+        mode_of(&user, answer["agent"]["id"].as_str().unwrap()),
+        "auto"
+    );
+}
+
+#[test]
+fn session_read_of_its_own_session_says_the_tree_s_mode() {
+    let user = User::with_fake_agent().with_fake_launchers();
+    let (id, mcp, _) = session(&user);
+    for mode in ["ask", "auto", "full"] {
+        set_mode(&user, &id, mode);
+
+        let read = done(mcp.call("session_read", json!({"session": id})));
+
+        assert!(
+            read.contains(&format!("Your session's tree is in {mode} mode")),
+            "{read}"
+        );
+        assert!(read.contains("Only the user changes it"), "{read}");
+        assert!(
+            no_request(&user),
+            "{mode}: reading its own mode is asked of nobody"
+        );
+    }
+}
+
+#[test]
+fn a_switch_of_the_launcher_s_mode_afterwards_leaves_the_session_it_started() {
+    let user = User::with_fake_agent().with_fake_launchers();
+    let (id, mcp, _) = session(&user);
+    set_mode(&user, &id, "full");
+    done(launch_root(&mcp, "Docs"));
+    let docs = started(&user, "Docs");
+
+    set_mode(&user, &id, "auto");
+    assert_eq!(mode_of(&user, &docs), "full");
+    set_mode(&user, &docs, "ask");
+    assert_eq!(mode_of(&user, &id), "auto");
 }
 
 #[test]
