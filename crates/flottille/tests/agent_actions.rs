@@ -277,6 +277,196 @@ fn a_settings_change_says_what_changes_and_keeps_the_file_s_comments() {
     assert!(file(&user).contains("[tracker]"));
 }
 
+/// A second repository `lib` in the project `app`'s file, with a commit, no remote: enough for the
+/// dependencies between repositories.
+fn with_lib(user: &User, folder: &std::path::Path) {
+    let lib = folder.join("lib");
+    user.git_init(&lib);
+    std::fs::write(lib.join("README.md"), "lib\n").unwrap();
+    user.git(&lib, &["add", "."]);
+    user.git(&lib, &["commit", "--quiet", "-m", "start"]);
+    let text = format!("{}\n[[repositories]]\npath = \"lib\"\n", file(user));
+    std::fs::write(user.project_file("app"), text).unwrap();
+}
+
+#[test]
+fn an_agent_changes_a_repository_s_base_branches_and_the_next_workspace_uses_them() {
+    let user = User::with_fake_agent();
+    let folder = project(&user);
+    user.git(&folder, &["branch", "develop"]);
+    user.git(&folder, &["push", "--quiet", "origin", "develop"]);
+    let (_, mcp) = root(&user, None);
+
+    let number = held(mcp.call(
+        "project",
+        json!({"action": "set_settings",
+            "repositories": [{"path": ".", "base": ["develop", "main"]}]}),
+    ));
+    // Judged as the settings changes it already makes are: not base, not for the tree.
+    assert_eq!(request(&user, number)["class"], "judge");
+    assert_eq!(
+        request(&user, number)["says"],
+        json!(["Set the base branches of . to develop, main"])
+    );
+    cli(&user, &["approve", &number.to_string()]).unwrap();
+    let body = settled(&user, number).body;
+    assert!(body.contains("Saved."), "{body}");
+
+    let text = file(&user);
+    assert!(text.contains("base = [\"develop\", \"main\"]"), "{text}");
+    assert!(text.starts_with("# The user's own words.\n"), "{text}");
+    user.call(
+        "workspace.create",
+        json!({"project": "app", "name": "next"}),
+    )
+    .unwrap();
+    let shown = user
+        .call("workspace.show", json!({"project": "app", "name": "next"}))
+        .unwrap();
+    assert_eq!(
+        shown["repositories"][0]["base"]["branch"], "develop",
+        "{shown}"
+    );
+}
+
+#[test]
+fn in_full_an_agent_s_base_branches_are_changed_at_once_and_checked_all_the_same() {
+    let user = User::with_fake_agent();
+    let folder = project(&user);
+    user.git(&folder, &["branch", "develop"]);
+    user.git(&folder, &["push", "--quiet", "origin", "develop"]);
+    let (id, mcp) = root(&user, None);
+    cli(&user, &["agent", "mode", &id, "full"]).unwrap();
+
+    let said = done(mcp.call(
+        "project",
+        json!({"action": "set_settings", "repositories": [{"path": ".", "base": ["develop"]}]}),
+    ));
+    assert!(said.contains("Saved."), "{said}");
+    assert!(
+        file(&user).contains("base = [\"develop\"]"),
+        "{}",
+        file(&user)
+    );
+
+    // Full lets the call pass; the daemon's check still refuses a branch the remote lacks.
+    let said = refused(mcp.call(
+        "project",
+        json!({"action": "set_settings", "repositories": [{"path": ".", "base": ["trunk"]}]}),
+    ));
+    assert!(
+        said.contains("trunk is not a branch of the remote origin; nothing was saved"),
+        "{said}"
+    );
+    assert!(
+        file(&user).contains("base = [\"develop\"]"),
+        "{}",
+        file(&user)
+    );
+}
+
+#[test]
+fn a_base_branch_missing_on_the_remote_given_by_an_agent_is_refused_with_its_reason() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (_, mcp) = root(&user, None);
+    let before = file(&user);
+
+    let number = held(mcp.call(
+        "project",
+        json!({"action": "set_settings",
+            "repositories": [{"path": ".", "base": ["trunk"]}]}),
+    ));
+    cli(&user, &["approve", &number.to_string()]).unwrap();
+    let body = settled(&user, number).body;
+    assert!(
+        body.contains(".: trunk is not a branch of the remote origin; nothing was saved"),
+        "{body}"
+    );
+    assert_eq!(file(&user), before, "nothing was written");
+}
+
+#[test]
+fn a_dependency_cycle_given_by_an_agent_is_refused_with_its_reason() {
+    let user = User::with_fake_agent();
+    let folder = project(&user);
+    with_lib(&user, &folder);
+    let (_, mcp) = root(&user, None);
+    let before = file(&user);
+
+    let number = held(mcp.call(
+        "project",
+        json!({"action": "set_settings", "repositories": [
+            {"path": ".", "depends_on": ["lib"]},
+            {"path": "lib", "depends_on": ["."]}]}),
+    ));
+    assert_eq!(
+        request(&user, number)["says"],
+        json!(["Make . depend on lib", "Make lib depend on ."])
+    );
+    cli(&user, &["approve", &number.to_string()]).unwrap();
+    let body = settled(&user, number).body;
+    assert!(body.contains("cycle . -> lib -> ."), "{body}");
+    assert!(body.contains("nothing was saved"), "{body}");
+    assert_eq!(file(&user), before, "nothing was written");
+}
+
+#[test]
+fn a_repository_that_depends_on_itself_given_by_an_agent_is_refused_with_its_reason() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (_, mcp) = root(&user, None);
+    let before = file(&user);
+
+    let number = held(mcp.call(
+        "project",
+        json!({"action": "set_settings",
+            "repositories": [{"path": ".", "depends_on": ["."]}]}),
+    ));
+    cli(&user, &["approve", &number.to_string()]).unwrap();
+    let body = settled(&user, number).body;
+    assert!(body.contains("nothing was saved"), "{body}");
+    assert!(body.contains("itself"), "{body}");
+    assert_eq!(file(&user), before, "nothing was written");
+}
+
+#[test]
+fn an_agent_declares_what_a_repository_depends_on_and_none_removes_it() {
+    let user = User::with_fake_agent();
+    let folder = project(&user);
+    with_lib(&user, &folder);
+    let (_, mcp) = root(&user, None);
+
+    let number = held(mcp.call(
+        "project",
+        json!({"action": "set_settings",
+            "repositories": [{"path": "lib", "depends_on": ["."]}]}),
+    ));
+    cli(&user, &["approve", &number.to_string()]).unwrap();
+    assert!(settled(&user, number).body.contains("Saved."));
+    assert!(
+        file(&user).contains("depends_on = [\".\"]"),
+        "{}",
+        file(&user)
+    );
+
+    let number = held(mcp.call(
+        "project",
+        json!({"action": "set_settings",
+            "repositories": [{"path": "lib", "depends_on": []}]}),
+    ));
+    assert_eq!(
+        request(&user, number)["says"],
+        json!(["Make lib depend on nothing"])
+    );
+    cli(&user, &["approve", &number.to_string()]).unwrap();
+    settled(&user, number);
+    // `lib` is the table written last; the project's own repository keeps its empty list.
+    let text = file(&user);
+    let lib = text.split("path = \"lib\"").nth(1).unwrap();
+    assert!(!lib.contains("depends_on"), "{text}");
+}
+
 #[test]
 fn an_old_agent_actions_table_lets_nothing_run_on_its_own() {
     let user = User::with_fake_agent();

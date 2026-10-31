@@ -3971,6 +3971,24 @@ mod tests {
     }
 
     #[test]
+    fn to_judge_the_base_branches_and_dependencies_an_agent_sets_are_judged_not_base() {
+        let fixture = Fixture::main();
+        for repositories in [
+            json!([{"path": ".", "base": ["develop", "main"]}]),
+            json!([{"path": ".", "depends_on": []}]),
+            json!([{"path": ".", "forge": null, "base": ["main"], "depends_on": ["lib"]}]),
+        ] {
+            let verdict = fixture.judge(
+                "project",
+                json!({"action": "set_settings", "repositories": repositories}),
+                Some(&fixture.never),
+            );
+            assert!(to_judge(&verdict), "{repositories}: {verdict:?}");
+            assert!(!base_class(&verdict), "{repositories}: {verdict:?}");
+        }
+    }
+
+    #[test]
     fn a_line_a_task_or_a_setup_step_sets_is_judged_as_a_run_of_it() {
         let fixture = Fixture::workspace().command("build", "cargo build", |_| {});
         let task = |line: &str| json!({"action": "add", "name": "build", "line": line});

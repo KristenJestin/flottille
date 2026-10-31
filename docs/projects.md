@@ -35,6 +35,8 @@ switch each) and its forge. The remote is git's, shown read-only. Saving asks `p
 which refuses, with its reason and nothing written, a base branch the remote does not have, a
 dependency on the repository itself or a cycle; the refusal stays in the dialog and a save is a
 toast. The workspaces created after a save take the new bases; the ones already made keep theirs.
+An agent does the same with the `project` tool's `set_settings` (`docs/tools.md`): the same daemon code
+checks it, so the same refusals come back to it, and the gate judges it like the other settings changes.
 
 The window does the same from the sidebar's **+** beside "Projects" (or the empty window's "Add a
 project"): a folder, typed or picked, the repositories detected in it shown before anything is
