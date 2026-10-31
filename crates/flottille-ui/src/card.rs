@@ -24,6 +24,7 @@ use crate::typography::Type;
 pub struct Block {
     children: Vec<AnyElement>,
     presence: Option<(ElementId, bool)>,
+    bottom: bool,
 }
 
 impl Block {
@@ -36,6 +37,13 @@ impl Block {
     /// folds. Built on every frame, also while absent.
     pub fn present(mut self, id: impl Into<ElementId>, present: bool) -> Self {
         self.presence = Some((id.into(), present));
+        self
+    }
+
+    /// Pushed to the card's bottom when the card is taller than its content (the cards of a row
+    /// of a grid share a height): "New session in …" stays on the last line.
+    pub fn at_bottom(mut self) -> Self {
+        self.bottom = true;
         self
     }
 
@@ -186,9 +194,24 @@ impl RenderOnce for Card {
         let mut above = !parts.is_empty();
         for block in self.blocks {
             let empty = !block.has_content();
+            let bottom = block.bottom;
             let content = div().flex().flex_col().children(block.children);
             match block.presence {
                 None if empty => {}
+                None if bottom => {
+                    // The line goes with the block to the card's bottom.
+                    let line = above.then(&mut separator);
+                    parts.push(
+                        div()
+                            .mt_auto()
+                            .flex()
+                            .flex_col()
+                            .children(line)
+                            .child(content)
+                            .into_any_element(),
+                    );
+                    above = true;
+                }
                 None => {
                     if above {
                         parts.push(separator());
