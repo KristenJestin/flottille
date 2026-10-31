@@ -135,7 +135,7 @@ fn remote_has(user: &User, branch: &str) -> bool {
 
 #[test]
 fn the_user_puts_a_session_in_full_from_the_command_line() {
-    let user = User::with_fake_agent();
+    let user = User::with_fake_agent().with_fake_launchers();
     let (id, _, _) = session(&user);
 
     let output = user.run(&["agent", "mode", &id, "full"]);
@@ -156,7 +156,9 @@ fn the_user_puts_a_session_in_full_from_the_command_line() {
 
 #[test]
 fn in_full_a_call_that_always_asks_in_auto_is_allowed_without_a_request() {
-    let user = User::with_fake_agent().with_allowing_judge();
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
     let (id, mcp, _) = session(&user);
     set_mode(&user, &id, "full");
 
@@ -173,7 +175,9 @@ fn in_full_a_call_that_always_asks_in_auto_is_allowed_without_a_request() {
 
 #[test]
 fn in_full_a_call_to_judge_is_allowed_without_the_judge() {
-    let user = User::with_fake_agent().with_allowing_judge();
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
     let (id, mcp, folder) = session(&user);
     set_mode(&user, &id, "full");
 
@@ -186,7 +190,7 @@ fn in_full_a_call_to_judge_is_allowed_without_the_judge() {
 
 #[test]
 fn in_full_removing_a_workspace_with_work_in_it_is_allowed_without_a_request() {
-    let user = User::with_fake_agent();
+    let user = User::with_fake_agent().with_fake_launchers();
     session(&user);
     let other = workspace(&user, "spike");
     std::fs::write(other.join("draft.txt"), "uncommitted work\n").unwrap();
@@ -208,7 +212,9 @@ fn in_full_removing_a_workspace_with_work_in_it_is_allowed_without_a_request() {
 
 #[test]
 fn in_full_a_shell_line_is_still_refused() {
-    let user = User::with_fake_agent().with_allowing_judge();
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
     let (id, mcp, folder) = session(&user);
     set_mode(&user, &id, "full");
 
@@ -237,7 +243,7 @@ fn in_full_a_shell_line_is_still_refused() {
 
 #[test]
 fn a_call_allowed_by_full_is_recorded_as_allowed_by_full_mode() {
-    let user = User::with_fake_agent();
+    let user = User::with_fake_agent().with_fake_launchers();
     let (id, mcp, _) = session(&user);
     let output = user.run(&["developer", "on"]);
     assert!(output.status.success());
@@ -260,7 +266,7 @@ fn a_call_allowed_by_full_is_recorded_as_allowed_by_full_mode() {
 
 #[test]
 fn a_session_starts_in_ask_or_auto_never_full() {
-    let user = User::with_fake_agent();
+    let user = User::with_fake_agent().with_fake_launchers();
     let (id, _, _) = session(&user);
     assert_eq!(mode_of(&user, &id), "auto");
 
@@ -274,7 +280,7 @@ fn a_session_starts_in_ask_or_auto_never_full() {
 
 #[test]
 fn an_agent_cannot_set_full_on_itself_or_a_session_it_starts() {
-    let user = User::with_fake_agent();
+    let user = User::with_fake_agent().with_fake_launchers();
     let (id, mcp, _) = session(&user);
 
     // No tool of an agent sets a mode, nor any tool of the pilot door.
@@ -321,7 +327,7 @@ fn an_agent_cannot_set_full_on_itself_or_a_session_it_starts() {
 
 #[test]
 fn in_full_a_child_s_call_is_allowed_without_asking_its_parent() {
-    let user = User::with_fake_agent();
+    let user = User::with_fake_agent().with_fake_launchers();
     let (lead, mcp, _) = session(&user);
     set_mode(&user, &lead, "full");
     let opened = user.received_requests("session/new").len();
@@ -399,7 +405,9 @@ fn always_refused(user: &User, id: &str) -> Vec<(&'static str, Value)> {
 
 #[test]
 fn in_full_reading_a_credential_file_is_refused() {
-    let user = User::with_fake_agent().with_allowing_judge();
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
     let (id, mcp, _) = session(&user);
     set_mode(&user, &id, "full");
     let login = credential(&user);
@@ -417,7 +425,9 @@ fn in_full_reading_a_credential_file_is_refused() {
 
 #[test]
 fn in_full_writing_to_flottille_s_store_or_config_is_refused() {
-    let user = User::with_fake_agent().with_allowing_judge();
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
     let (id, mcp, _) = session(&user);
     set_mode(&user, &id, "full");
     let providers = user.path("config/flottille/providers.toml");
@@ -444,7 +454,9 @@ fn in_full_writing_to_flottille_s_store_or_config_is_refused() {
 
 #[test]
 fn in_full_writing_bashrc_is_refused() {
-    let user = User::with_fake_agent().with_allowing_judge();
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
     let (id, mcp, _) = session(&user);
     set_mode(&user, &id, "full");
     let bashrc = user.path("home/.bashrc");
@@ -468,7 +480,9 @@ fn in_full_writing_bashrc_is_refused() {
 
 #[test]
 fn in_full_systemd_run_and_tmux_are_refused() {
-    let user = User::with_fake_agent().with_allowing_judge();
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
     let (id, mcp, _) = session(&user);
     set_mode(&user, &id, "full");
 
@@ -484,12 +498,15 @@ fn in_full_systemd_run_and_tmux_are_refused() {
     }
     assert!(no_request(&user));
     assert_eq!(mode_of(&user, &id), "full");
+    assert!(user.launches().is_empty(), "{:?}", user.launches());
 }
 
 #[test]
 fn in_ask_and_auto_the_same_calls_are_refused_not_held() {
     for mode in ["ask", "auto"] {
-        let user = User::with_fake_agent().with_allowing_judge();
+        let user = User::with_fake_agent()
+            .with_allowing_judge()
+            .with_fake_launchers();
         let (id, mcp, _) = session(&user);
         set_mode(&user, &id, mode);
 
@@ -500,12 +517,15 @@ fn in_ask_and_auto_the_same_calls_are_refused_not_held() {
         assert_eq!(judge_prompts(&user), 0, "{mode}: the judge was asked");
         assert!(!user.path("home/.bashrc").exists());
         assert_eq!(mode_of(&user, &id), mode);
+        assert!(user.launches().is_empty(), "{:?}", user.launches());
     }
 }
 
 #[test]
 fn in_full_inline_interpreter_code_passes() {
-    let user = User::with_fake_agent().with_allowing_judge();
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
     let (id, mcp, _) = session(&user);
     set_mode(&user, &id, "full");
 
@@ -514,4 +534,204 @@ fn in_full_inline_interpreter_code_passes() {
     assert!(ran.contains("exited with code 0"), "{ran}");
     assert!(no_request(&user));
     assert_eq!(judge_prompts(&user), 0, "the judge was asked");
+}
+
+#[test]
+fn the_test_daemon_reaches_no_session_bus_nor_a_real_launcher() {
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
+    let (id, mcp, _) = session(&user);
+    set_mode(&user, &id, "full");
+
+    let bus = done(mcp.call("run", json!({"line": "printenv DBUS_SESSION_BUS_ADDRESS"})));
+    assert!(
+        bus.contains("exited with code 1"),
+        "the session bus is reachable"
+    );
+    let tmux = done(mcp.call("run", json!({"line": "printenv TMUX_TMPDIR"})));
+    assert!(
+        tmux.contains(user.path("runtime").to_str().unwrap()),
+        "tmux's sockets are the machine's"
+    );
+    for launcher in ["systemd-run", "tmux", "docker", "systemctl", "ssh"] {
+        let found = done(mcp.call("run", json!({"line": format!("which {launcher}")})));
+        assert!(
+            found.contains(user.path("launcher-bin").to_str().unwrap()),
+            "{launcher} is not the fake one"
+        );
+    }
+}
+
+#[test]
+fn in_full_writing_bashrc_through_the_daemon_s_folder_in_proc_is_refused() {
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
+    let (id, mcp, _) = session(&user);
+    set_mode(&user, &id, "full");
+    let bashrc = user.path("home/.bashrc");
+
+    // The daemon runs in `/`: its folder in /proc leads to any path of the disk.
+    let said = refused(mcp.call(
+        "fs_write",
+        json!({
+            "path": format!("/proc/self/cwd{}", bashrc.display()),
+            "content": format!("flottille agent mode {id} ask\n"),
+        }),
+    ));
+    assert!(said.contains("/proc/self/cwd"), "{said}");
+    let daemon = daemon_pid(&user);
+    let said = refused(mcp.call(
+        "run",
+        json!({"line": format!("cp README.md /proc/{daemon}/cwd{}", bashrc.display())}),
+    ));
+    assert!(said.contains("/cwd"), "{said}");
+    assert!(!bashrc.exists(), "~/.bashrc was written");
+    assert!(no_request(&user));
+}
+
+/// The test daemon's process: Flottille's, with this user's state folder.
+fn daemon_pid(user: &User) -> u32 {
+    let program = std::fs::canonicalize(env!("CARGO_BIN_EXE_flottille")).unwrap();
+    let state = format!("XDG_STATE_HOME={}", user.path("state").display());
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
+        .find(|pid| {
+            std::fs::read_link(format!("/proc/{pid}/exe")).is_ok_and(|exe| exe == program)
+                && std::fs::read(format!("/proc/{pid}/environ")).is_ok_and(|environ| {
+                    environ
+                        .split(|byte| *byte == 0)
+                        .any(|variable| variable == state.as_bytes())
+                })
+                && std::fs::read(format!("/proc/{pid}/cmdline"))
+                    .is_ok_and(|line| line.split(|b| *b == 0).any(|word| word == b"daemon"))
+        })
+        .expect("the test daemon is running")
+}
+
+#[test]
+fn in_full_a_container_mounting_a_login_is_refused() {
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
+    let (id, mcp, _) = session(&user);
+    set_mode(&user, &id, "full");
+    let keys = user.path("home/.ssh");
+    std::fs::create_dir_all(&keys).unwrap();
+    let keys = keys.display();
+
+    for line in [
+        format!("docker run -v {keys}:/k alpine cat /k/id_ed25519"),
+        format!("podman run --mount type=bind,source={keys},target=/k alpine true"),
+    ] {
+        let said = refused(mcp.call("run", json!({ "line": line })));
+        assert!(said.contains(".ssh"), "{line}: {said}");
+    }
+    assert!(user.launches().is_empty(), "{:?}", user.launches());
+    assert!(no_request(&user));
+}
+
+#[test]
+fn in_full_git_config_and_systemctl_that_run_later_are_refused() {
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
+    let (id, mcp, place) = session(&user);
+    set_mode(&user, &id, "full");
+    let hooks = place.join("hooks");
+
+    for line in [
+        format!("git config --global core.hooksPath {}", hooks.display()),
+        format!("git config core.hooksPath {}", hooks.display()),
+        "git config alias.x '!touch y'".into(),
+        format!(
+            "systemctl --user link {}",
+            place.join("x.service").display()
+        ),
+        "systemctl --user start x".into(),
+        "loginctl enable-linger".into(),
+    ] {
+        refused(mcp.call("run", json!({ "line": line })));
+    }
+    let config = std::fs::read_to_string(user.path("work/app/.git/config")).unwrap();
+    assert!(!config.contains("hooksPath"), "{config}");
+    assert!(user.launches().is_empty(), "{:?}", user.launches());
+    assert!(no_request(&user));
+}
+
+#[test]
+fn in_full_a_program_that_prints_a_login_is_refused() {
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
+    let (id, mcp, _) = session(&user);
+    set_mode(&user, &id, "full");
+
+    for line in [
+        "aws configure get aws_secret_access_key",
+        "kubectl config view --raw",
+        "gcloud auth print-access-token",
+        "secret-tool lookup service x",
+        "pass show web/x",
+        "op read op://vault/item/password",
+        "bw get password x",
+    ] {
+        let said = refused(mcp.call("run", json!({ "line": line })));
+        assert!(said.contains("login"), "{line}: {said}");
+    }
+    assert!(user.launches().is_empty(), "{:?}", user.launches());
+    assert!(no_request(&user));
+}
+
+#[test]
+fn in_full_a_launcher_behind_a_wrapper_a_runner_or_a_desktop_is_refused() {
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
+    let (id, mcp, _) = session(&user);
+    set_mode(&user, &id, "full");
+
+    for line in [
+        "ionice -c3 at -f job now",
+        "uv run ssh localhost true",
+        "hyprctl dispatch exec true",
+        "swaymsg exec true",
+        "rsync -a README.md localhost:x",
+        "git -c core.sshCommand=true fetch",
+        "git fetch --upload-pack=true origin",
+    ] {
+        let said = refused(mcp.call("run", json!({ "line": line })));
+        assert!(
+            said.contains("outside") || said.contains("remote"),
+            "{line}: {said}"
+        );
+    }
+    assert!(user.launches().is_empty(), "{:?}", user.launches());
+    assert!(no_request(&user));
+}
+
+#[test]
+fn in_ask_a_text_word_or_a_launcher_s_name_as_an_argument_is_held_not_refused() {
+    let user = User::with_fake_agent().with_fake_launchers();
+    let (id, mcp, _) = session(&user);
+    set_mode(&user, &id, "ask");
+
+    for line in [
+        "awk -F/ '{print}' README.md",
+        "cut -d/ -f1 README.md",
+        "tr / _",
+        "cargo test tmux --lib",
+        "git commit -m ssh -m body",
+    ] {
+        let answer = mcp.call("run", json!({ "line": line }));
+        assert!(!answer.error, "{line}: {}", answer.text);
+        assert!(
+            answer.text.starts_with("Waiting for"),
+            "{line}: {}",
+            answer.text
+        );
+    }
+    assert!(user.launches().is_empty(), "{:?}", user.launches());
 }

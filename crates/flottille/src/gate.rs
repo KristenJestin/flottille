@@ -161,7 +161,7 @@ const SENSITIVE: [&str; 18] = [
 const SYSTEM_SENSITIVE: [&str; 3] = ["/etc/shadow", "/etc/sudoers", "/etc/sudoers.d"];
 /// What runs at the user's next login or command, or starts a process later, from the home
 /// folder (`docs/design.md` §7.1): an agent never writes it.
-const STARTUP: [&str; 14] = [
+const STARTUP: [&str; 20] = [
     ".bashrc",
     ".bash_profile",
     ".bash_login",
@@ -176,12 +176,27 @@ const STARTUP: [&str; 14] = [
     ".config/autostart",
     ".config/systemd/user",
     ".config/environment.d",
+    ".config/hypr",
+    ".config/sway",
+    ".config/niri",
+    ".local/share/systemd/user",
+    ".local/bin",
+    "bin",
 ];
 /// What is read from the user's configuration folder, wherever it is: [`STARTUP`]'s.
-const CONFIG_STARTUP: [&str; 5] = ["fish", "git", "autostart", "systemd/user", "environment.d"];
+const CONFIG_STARTUP: [&str; 8] = [
+    "fish",
+    "git",
+    "autostart",
+    "systemd/user",
+    "environment.d",
+    "hypr",
+    "sway",
+    "niri",
+];
 /// Programs that start a process outside the daemon's tree of processes, or later, or on another
 /// host: what it runs escapes the gate and the daemon's ancestry check, as the user.
-const LAUNCHERS: [&str; 16] = [
+const LAUNCHERS: [&str; 20] = [
     "systemd-run",
     "tmux",
     "screen",
@@ -198,10 +213,15 @@ const LAUNCHERS: [&str; 16] = [
     "ssh",
     "scp",
     "sftp",
+    "loginctl",
+    "hyprctl",
+    "swaymsg",
+    "i3-msg",
 ];
-/// Of them, those that are often an ordinary word too (`git commit -m at`): refused only as a
-/// program a line or a wrapper the gate knows runs.
-const LAUNCHER_WORDS: [&str; 3] = ["at", "batch", "screen"];
+/// Programs whose words are text, never a file they write (`tr / _`).
+const TEXT: [&str; 4] = ["tr", "printf", "expr", "seq"];
+/// Password managers and keyrings: whatever they do, they read or write the user's logins.
+const KEYRINGS: [&str; 6] = ["pass", "gopass", "secret-tool", "op", "bw", "rbw"];
 /// What makes a `.env.*` file a template, free to read and write.
 const TEMPLATES: [&str; 4] = [".example", ".sample", ".template", ".dist"];
 
@@ -713,20 +733,26 @@ fn run(call: &Call) -> Verdict {
     if let Some(why) = layers.iter().find_map(|layer| refusal(layer)) {
         return Verdict::Deny(why);
     }
-    // A word inside a line may start a program the gate does not know runs it: a launcher there
-    // is refused as well, but for a lone word, or one that is often an ordinary word.
-    let launched = layers
+    // What a runner runs (`uv run`, `cargo run --`) is a program too: a launcher there is
+    // refused. Anywhere else a launcher's name is only a word (`cargo test tmux`).
+    if let Some(why) = layers
         .iter()
-        .flat_map(|layer| suffixes(layer))
-        .filter(|(at, suffix)| *at > 0 && suffix.len() > 1)
-        .find_map(|(_, suffix)| {
-            let program = base(&suffix[0]);
-            (!LAUNCHER_WORDS.contains(&program))
-                .then(|| launches(program))
-                .flatten()
-        });
-    if let Some(why) = launched {
+        .filter_map(|layer| runs(layer))
+        .find_map(|program| launches(base(program)))
+    {
         return Verdict::Deny(why);
+    }
+    // A container's bind mount gives it the folder of the host it names, to read and to write.
+    if let Some(folder) = call.paths.first() {
+        let home = call.grant.place.home.as_deref();
+        if let Some(why) = layers
+            .iter()
+            .flat_map(|layer| mounts(layer))
+            .map(|source| call.grant.place.resolve(&folder.path, source))
+            .find_map(|path| forbidden(call.own, home, &path, true))
+        {
+            return Verdict::Deny(why);
+        }
     }
     let main = call.grant.place.workspace.is_none();
     let mut found = Found::default();
@@ -771,7 +797,7 @@ fn run(call: &Call) -> Verdict {
     reached.extend(
         named
             .iter()
-            .map(|(_, path)| path)
+            .map(|(_, path, _)| path)
             .filter(|path| !call.paths.contains(path))
             .cloned(),
     );
@@ -792,8 +818,8 @@ fn run(call: &Call) -> Verdict {
         if unmade || path.up_from_missing {
             let word = named
                 .iter()
-                .find(|(_, named)| named == path)
-                .map_or(path.shown.as_str(), |(word, _)| word);
+                .find(|(_, named, _)| named == path)
+                .map_or(path.shown.as_str(), |(word, _, _)| word);
             found.judge(format!(
                 "{word} {}{}",
                 Unfollowed::UpFromMissing,
@@ -884,7 +910,7 @@ fn run(call: &Call) -> Verdict {
     // where it works, not what it takes away. A line that does not only read may write any path
     // it names.
     if !reads {
-        for (_, path) in &named {
+        for (_, path, soft) in &named {
             let written;
             let path = if path.unfollowed == Some(Unfollowed::UpFromMissing) {
                 written = as_written(path);
@@ -892,6 +918,15 @@ fn run(call: &Call) -> Verdict {
             } else {
                 path
             };
+            // An option's value or a text's word (`awk -F/`, `tr / _`) is seldom a path the line
+            // writes: naming a folder above Flottille's there is held, as any base call.
+            if *soft
+                && credential(path).is_none()
+                && let Some(why) = above_own(call.own, path)
+            {
+                found.base(why);
+                continue;
+            }
             if let Some(why) = forbidden(call.own, call.grant.place.home.as_deref(), path, true) {
                 return Verdict::Deny(why);
             }
@@ -1069,6 +1104,19 @@ fn refusal(layer: &[String]) -> Option<String> {
     if let Some(why) = launches(program) {
         return Some(why);
     }
+    if KEYRINGS.contains(&program)
+        || program.starts_with("docker-credential-")
+        || program.starts_with("git-credential-")
+        || prints_login(program, args)
+    {
+        return Some(format!(
+            "refused: {} reads or prints a login, and agents never see one, in any mode",
+            shown_words(layer)
+        ));
+    }
+    if let Some(why) = drives_later(program, args) {
+        return Some(why);
+    }
     match program {
         "flottille" => Some(
             "refused: flottille drives the daemon, and agents act only through their tools: \
@@ -1079,16 +1127,304 @@ fn refusal(layer: &[String]) -> Option<String> {
             "refused: {program} auth prints a login token, and agents never see one: auth status \
              says whether a login exists"
         )),
-        "git" => rebase_execs(args).into_iter().find_map(|line| {
-            flottille_core::command::split_line(line).err().map(|why| {
-                format!(
-                    "refused: git rebase --exec runs its line through a shell, and Flottille \
-                     reads that line: it cannot be split without a shell: {why}"
-                )
+        "git" => git_refusal(args).or_else(|| {
+            rebase_execs(args).into_iter().find_map(|line| {
+                flottille_core::command::split_line(line).err().map(|why| {
+                    format!(
+                        "refused: git rebase --exec runs its line through a shell, and Flottille \
+                         reads that line: it cannot be split without a shell: {why}"
+                    )
+                })
             })
         }),
         _ => None,
     }
+}
+
+/// The words of a line that are not options, in order: a command line's commands, an option's
+/// value among them.
+fn plain(args: &[String]) -> Vec<&str> {
+    args.iter()
+        .map(String::as_str)
+        .filter(|word| !word.starts_with('-'))
+        .collect()
+}
+
+/// Whether a cloud's or a cluster's command line prints a login it holds.
+fn prints_login(program: &str, args: &[String]) -> bool {
+    let words = plain(args);
+    let pair = |a: &str, b: &[&str]| words.windows(2).any(|w| w[0] == a && b.contains(&w[1]));
+    match program {
+        "aws" => {
+            pair("configure", &["get", "export-credentials"])
+                || pair("ecr", &["get-login-password", "get-login"])
+                || pair("ecr-public", &["get-login-password"])
+                || pair("sts", &["get-session-token"])
+                || pair("codeartifact", &["get-authorization-token"])
+        }
+        "kubectl" => {
+            (pair("config", &["view"]) && args.iter().any(|w| w == "--raw"))
+                || pair("create", &["token"])
+        }
+        "gcloud" => {
+            (words.contains(&"auth")
+                && words
+                    .iter()
+                    .any(|w| w.starts_with("print-") && w.ends_with("token")))
+                || pair("config", &["config-helper"])
+        }
+        "az" => pair("account", &["get-access-token"]),
+        _ => false,
+    }
+}
+
+/// The refusal of what makes the user's own session start a program later or elsewhere: a
+/// service manager's unit, a desktop's or a terminal's remote control.
+fn drives_later(program: &str, args: &[String]) -> Option<String> {
+    let driven = match program {
+        "systemctl" => {
+            const READS: [&str; 20] = [
+                "status",
+                "show",
+                "cat",
+                "help",
+                "list-units",
+                "list-unit-files",
+                "list-sockets",
+                "list-timers",
+                "list-jobs",
+                "list-dependencies",
+                "list-automounts",
+                "list-paths",
+                "list-machines",
+                "is-active",
+                "is-enabled",
+                "is-failed",
+                "is-system-running",
+                "show-environment",
+                "get-default",
+                "whoami",
+            ];
+            const VALUED: [&str; 12] = [
+                "-t",
+                "--type",
+                "-p",
+                "--property",
+                "-H",
+                "--host",
+                "-M",
+                "--machine",
+                "-n",
+                "--lines",
+                "-o",
+                "--output",
+            ];
+            let verb = args
+                .iter()
+                .enumerate()
+                .find(|(at, word)| {
+                    !word.starts_with('-') && (*at == 0 || !VALUED.contains(&args[at - 1].as_str()))
+                })
+                .map(|(_, word)| word.as_str());
+            verb.is_some_and(|verb| !READS.contains(&verb))
+        }
+        "niri" => args.first().is_some_and(|w| w == "msg"),
+        "kitty" | "kitten" => args.first().is_some_and(|w| w.starts_with('@')),
+        "wezterm" => args.first().is_some_and(|w| w == "cli"),
+        "rsync" => {
+            // A host's path (`host:path`, `user@host:path`) goes over ssh, which runs a line as
+            // the user there; `-e` and `--rsync-path` name what runs.
+            args.iter().any(|w| {
+                abbreviates(w, "rsh", 3) || abbreviates(w, "rsync-path", 3) || {
+                    !w.starts_with('-')
+                        && w.split_once(':')
+                            .is_some_and(|(host, _)| !host.is_empty() && !host.contains('/'))
+                }
+            }) || shorts(args).any(|w| w.contains('e'))
+        }
+        _ => false,
+    };
+    driven.then(|| {
+        format!(
+            "refused: {} starts a program outside Flottille's tree of processes, later or on a \
+             host, where the gate sees nothing of it: an agent runs its programs itself, in any \
+             mode",
+            shown_words(
+                &std::iter::once(program.to_owned())
+                    .chain(args.iter().cloned())
+                    .collect::<Vec<_>>()
+            )
+        )
+    })
+}
+
+/// What git does, refused in every mode: a configuration that runs a program later, as the user
+/// (the user's own, the system's, or a key that runs one), a program named to run on a remote.
+fn git_refusal(args: &[String]) -> Option<String> {
+    let (at, globals) = git_globals(args);
+    for (option, value) in &globals {
+        let key = value.unwrap_or_default();
+        let key = key.split_once('=').map_or(key, |(key, _)| key);
+        if matches!(*option, "-c" | "--config-env") && key.eq_ignore_ascii_case("core.sshCommand") {
+            return Some(format!(
+                "refused: git {option} {key} names a program git runs for a remote, outside the \
+                 gate: an agent never names one, in any mode"
+            ));
+        }
+    }
+    let command = args.get(at).map(String::as_str)?;
+    let rest = args.get(at + 1..).unwrap_or_default();
+    if command == "credential" || command.starts_with("credential-") {
+        return Some(format!(
+            "refused: git {command} reads or prints a login, and agents never see one, in any mode"
+        ));
+    }
+    if command == "config" && !config_reads(rest) {
+        if let Some(scope) = rest
+            .iter()
+            .find(|w| ["--global", "--system"].contains(&w.as_str()))
+        {
+            return Some(format!(
+                "refused: git config {scope} writes the user's or the system's own \
+                 configuration, which every git the user runs reads: an agent never writes it, \
+                 in any mode"
+            ));
+        }
+        let removes = rest
+            .iter()
+            .any(|w| ["--unset", "--unset-all", "--remove-section"].contains(&w.as_str()))
+            || plain(rest)
+                .first()
+                .is_some_and(|w| ["unset", "remove-section"].contains(w));
+        if let Some(key) = config_keys(rest)
+            .1
+            .into_iter()
+            .find(|key| !removes && runs_later(key))
+        {
+            return Some(format!(
+                "refused: git config writes {key}, which runs a program or brings in a file the \
+                 next time the user's own git runs, outside the gate: an agent never writes it, \
+                 in any mode"
+            ));
+        }
+    }
+    if [
+        "clone",
+        "fetch",
+        "pull",
+        "push",
+        "send-pack",
+        "ls-remote",
+        "archive",
+    ]
+    .contains(&command)
+    {
+        let named = rest.iter().take_while(|w| *w != "--").find(|w| {
+            abbreviates(w, "upload-pack", 3)
+                || abbreviates(w, "receive-pack", 4)
+                || (command != "fetch" && command != "pull" && abbreviates(w, "exec", 2))
+                || (command == "clone" && (*w == "-u" || w.starts_with("-u")))
+        });
+        if let Some(word) = named {
+            return Some(format!(
+                "refused: git {command} {word} names the program it runs on the remote, which \
+                 may be this machine, outside the gate: an agent never names one, in any mode"
+            ));
+        }
+    }
+    None
+}
+
+/// Whether git's configuration under `key` runs a program, or brings in a file, the next time git
+/// runs: hooks, aliases, includes, drivers. Where pushes go is base, not refused.
+fn runs_later(key: &str) -> bool {
+    let section = key.split('.').next().unwrap_or(key).to_ascii_lowercase();
+    let name = key
+        .rsplit_once('.')
+        .map(|(_, name)| name.to_ascii_lowercase());
+    match section.as_str() {
+        "remote" | "url" | "push" => false,
+        "core" => name.is_some_and(|name| {
+            [
+                "hookspath",
+                "fsmonitor",
+                "sshcommand",
+                "editor",
+                "pager",
+                "askpass",
+                "gitproxy",
+            ]
+            .contains(&name.as_str())
+        }),
+        _ => risky_setting(key).is_some(),
+    }
+}
+
+/// What a container's command line gives it of the host: each bind mount's source that names a
+/// path (`-v /x:/y`, `--mount type=bind,source=/x`), not a named volume.
+fn mounts(layer: &[String]) -> Vec<&str> {
+    if !["docker", "podman", "nerdctl"].contains(&base(&layer[0])) {
+        return Vec::new();
+    }
+    let args = &layer[1..];
+    let Some(at) = args.iter().position(|w| w == "run" || w == "create") else {
+        return Vec::new();
+    };
+    let mut sources = Vec::new();
+    let mut words = args[at + 1..].iter().map(String::as_str);
+    while let Some(word) = words.next() {
+        let (volume, mount) = match word {
+            "-v" | "--volume" => (words.next(), None),
+            "--mount" => (None, words.next()),
+            _ => (
+                word.strip_prefix("--volume=")
+                    .or_else(|| word.strip_prefix("-v").filter(|v| !v.is_empty())),
+                word.strip_prefix("--mount="),
+            ),
+        };
+        if let Some(volume) = volume {
+            sources.push(volume.split(':').next().unwrap_or(volume));
+        }
+        if let Some(mount) = mount {
+            sources.extend(mount.split(',').filter_map(|pair| {
+                pair.strip_prefix("source=")
+                    .or_else(|| pair.strip_prefix("src="))
+            }));
+        }
+    }
+    sources.retain(|source| source.starts_with('/') || source.starts_with('.'));
+    sources
+}
+
+/// The program a runner runs: what follows `uv run`, `poetry run`, `npm exec`…, or what follows
+/// `--` of `cargo run`.
+fn runs(layer: &[String]) -> Option<&str> {
+    let program = base(&layer[0]);
+    let args = &layer[1..];
+    let command = args.iter().position(|w| !w.starts_with('-'))?;
+    let verb = args[command].as_str();
+    let after = &args[command + 1..];
+    let runner = match program {
+        "cargo" => {
+            return (verb == "run")
+                .then(|| after.iter().skip_while(|w| *w != "--").nth(1))
+                .flatten()
+                .map(String::as_str);
+        }
+        "uv" | "poetry" | "pipenv" | "pdm" | "hatch" | "rye" | "pixi" | "conda" | "mamba" => {
+            verb == "run"
+        }
+        "npm" | "pnpm" | "yarn" | "bundle" | "mise" => verb == "exec" || verb == "x",
+        "bun" => verb == "x",
+        _ => false,
+    };
+    if !runner {
+        return None;
+    }
+    after
+        .iter()
+        .find(|w| !w.starts_with('-'))
+        .map(String::as_str)
 }
 
 /// The refusal of a program that starts what it runs outside the daemon's tree of processes, or
@@ -1883,6 +2219,22 @@ fn safety_net(layer: &[String]) -> String {
 /// `git config` that writes: base for a setting that runs programs or leads pushes, to judge
 /// otherwise.
 fn config_writes(rest: &[String]) -> Line {
+    let (edit, keys) = config_keys(rest);
+    if edit {
+        return Line::Base(
+            "git config --edit opens the whole configuration to change, whatever it sets".into(),
+        );
+    }
+    for key in keys {
+        if let Some(why) = risky_setting(key) {
+            return Line::Base(format!("git config writes {key}: it {why}"));
+        }
+    }
+    Line::Judge("git config changes git's configuration".into())
+}
+
+/// Whether a `git config` that writes opens the whole configuration, and the keys it writes.
+fn config_keys(rest: &[String]) -> (bool, Vec<&str>) {
     let mut positional = Vec::new();
     let mut edit = false;
     let mut renames = false;
@@ -1911,17 +2263,7 @@ fn config_writes(rest: &[String]) -> Line {
         _ if renames => positional.iter().take(2).copied().collect(),
         _ => positional.first().copied().into_iter().collect(),
     };
-    if edit {
-        return Line::Base(
-            "git config --edit opens the whole configuration to change, whatever it sets".into(),
-        );
-    }
-    for key in keys {
-        if let Some(why) = risky_setting(key) {
-            return Line::Base(format!("git config writes {key}: it {why}"));
-        }
-    }
-    Line::Judge("git config changes git's configuration".into())
+    (edit, keys)
 }
 
 /// `git remote` that writes: changing a remote's URL or the remotes themselves is base, since a
@@ -2247,7 +2589,24 @@ fn inner(words: &[String]) -> Result<Option<Vec<String>>, String> {
         )),
         "doas" => from(skip(args, &["-u", "-C"], false)),
         "nice" => from(skip(args, &["-n", "--adjustment"], false)),
-        "nohup" | "command" => from(skip(args, &[], false)),
+        "ionice" => from(skip(args, &["-c", "--class", "-n", "--classdata"], false)),
+        // The priority, or the CPUs' mask, comes before the program.
+        "chrt" => from(
+            skip(
+                args,
+                &[
+                    "-T",
+                    "--sched-runtime",
+                    "-P",
+                    "--sched-period",
+                    "-D",
+                    "--sched-deadline",
+                ],
+                false,
+            ) + 1,
+        ),
+        "taskset" => from(skip(args, &[], false) + 1),
+        "nohup" | "command" | "chronic" => from(skip(args, &[], false)),
         "exec" => from(skip(args, &["-a"], false)),
         // Its first word is the duration.
         "timeout" => from(skip(args, &["-s", "--signal", "-k", "--kill-after"], false) + 1),
@@ -2447,20 +2806,25 @@ fn split(
 
 /// The paths a run's words name: every word of every layer that can name one, resolved from the
 /// folder it runs in (its program is wherever it is installed), but the run's own streams; each
-/// with the word that names it.
-fn named<'a>(call: &Call, layers: &'a [Vec<String>]) -> Vec<(&'a str, Resolved)> {
-    let mut named = Vec::new();
+/// with the word that names it, and whether only an option's value or a text's word names it.
+fn named<'a>(call: &Call, layers: &'a [Vec<String>]) -> Vec<(&'a str, Resolved, bool)> {
+    let mut named: Vec<(&str, Resolved, bool)> = Vec::new();
     let Some(folder) = call.paths.first().filter(|_| call.tool == "run") else {
         return named;
     };
-    for word in layers.iter().flat_map(|layer| &layer[1..]) {
-        for word in named_paths(word)
-            .into_iter()
-            .filter(|word| !STREAMS.contains(word))
-        {
-            let path = call.grant.place.resolve(&folder.path, word);
-            if !named.iter().any(|(_, named)| *named == path) {
-                named.push((word, path));
+    for layer in layers {
+        let text = TEXT.contains(&base(&layer[0]));
+        for whole in &layer[1..] {
+            let soft = text || whole.starts_with('-');
+            for word in named_paths(whole)
+                .into_iter()
+                .filter(|word| !STREAMS.contains(word))
+            {
+                let path = call.grant.place.resolve(&folder.path, word);
+                match named.iter_mut().find(|(_, named, _)| *named == path) {
+                    Some((_, _, was)) => *was &= soft,
+                    None => named.push((word, path, soft)),
+                }
             }
         }
     }
@@ -2866,7 +3230,8 @@ pub fn sensitive(own: &[PathBuf], path: &Resolved) -> Option<String> {
 }
 
 /// Why a call that reaches a path is refused in every mode, Full included (`docs/design.md`
-/// §7.1): a login read or written, Flottille's own folders or a startup file written.
+/// §7.1): a login read or written, Flottille's own folders or a startup file written. `own` names
+/// the data folder first.
 pub fn forbidden(
     own: &[PathBuf],
     home: Option<&Path>,
@@ -2879,16 +3244,40 @@ pub fn forbidden(
     if !write {
         return None;
     }
-    // A project's workspaces may sit in Flottille's data folder: they are the project's, not
-    // Flottille's.
+    // Where a process's folder in `/proc` leads is anywhere on the disk: the daemon's own runs in
+    // `/`.
+    if let Some(Unfollowed::Through(process)) = &path.unfollowed {
+        return Some(format!(
+            "refused: {} goes through {}, which leads anywhere on the disk, Flottille's own \
+             folders and the user's startup files included: an agent never writes through it, in \
+             any mode; nothing was done",
+            path.shown,
+            process.display()
+        ));
+    }
+    if let Ok(program) = std::env::current_exe() {
+        let program = [place::real_path(&program).ok(), Some(program)];
+        if seen(path)
+            .iter()
+            .any(|path| program.iter().flatten().any(|program| program == path))
+        {
+            return Some(format!(
+                "refused: {} is Flottille's own program: an agent never writes it, in any mode; \
+                 nothing was done",
+                path.shown
+            ));
+        }
+    }
+    // A project's workspaces may sit in Flottille's data folder, the first of its own: they are
+    // the project's, not Flottille's.
     let folders = own_folders(own);
+    let data = own_folders(&own[..own.len().min(1)]);
     let flottille_s = |path: &Path| {
-        folders.iter().any(|own| {
-            path.starts_with(own)
-                && path
-                    .strip_prefix(own.join("workspaces"))
-                    .map_or(true, |rest| rest.components().count() < 2)
-        })
+        folders.iter().any(|own| path.starts_with(own))
+            && !data.iter().any(|data| {
+                path.strip_prefix(data.join("workspaces"))
+                    .is_ok_and(|rest| rest.components().count() >= 2)
+            })
     };
     if seen(path).iter().any(|path| flottille_s(path)) {
         return Some(format!(
@@ -2912,7 +3301,7 @@ pub fn forbidden(
 
 /// A path as written and where it leads, each also without a leading `/proc/<process>/root`
 /// (or `/proc/<process>/task/<thread>/root`), which is `/` again for a program the kernel never
-/// asks (a path taken as written).
+/// asks (a path taken as written), or `cwd`, which is `/` for the daemon.
 fn seen(path: &Resolved) -> Vec<PathBuf> {
     let mut seen = vec![path.written.clone(), path.path.clone()];
     for path in [&path.written, &path.path] {
@@ -2925,7 +3314,10 @@ fn seen(path: &Resolved) -> Vec<PathBuf> {
         } else {
             3
         };
-        if parts.get(root).is_some_and(|part| *part == "root") {
+        if parts
+            .get(root)
+            .is_some_and(|part| *part == "root" || *part == "cwd")
+        {
             seen.push(Path::new("/").join(parts[root + 1..].iter().collect::<PathBuf>()));
         }
     }
@@ -2972,6 +3364,10 @@ fn startup(home: Option<&Path>, path: &Resolved) -> Option<String> {
                 .iter()
                 .map(|entry| (config.join(entry), config.join(entry).display().to_string())),
         );
+    }
+    if let Some(data) = std::env::var_os("XDG_DATA_HOME").filter(|d| !d.is_empty()) {
+        let units = PathBuf::from(data).join("systemd/user");
+        files.push((units.clone(), units.display().to_string()));
     }
     seen(path).iter().find_map(|path| {
         files
@@ -3977,7 +4373,6 @@ mod tests {
         let fixture = Fixture::workspace();
         for line in [
             "git -c core.pager=cat log",
-            "git -c core.sshCommand=x fetch",
             "git -c alias.st=!x st",
             "git -c remote.origin.url=x fetch",
             "git -c url.x.insteadOf=y fetch",
@@ -3992,6 +4387,8 @@ mod tests {
             let verdict = fixture.run(line);
             assert!(base_class(&verdict), "{line}: {verdict:?}");
         }
+        // The program git runs for a remote, which may be this machine, is refused.
+        assert!(denied(&fixture.run("git -c core.sshCommand=x fetch")));
     }
 
     #[test]
@@ -4055,10 +4452,25 @@ mod tests {
     }
 
     #[test]
+    fn a_workspaces_folder_in_flottille_s_configuration_or_state_is_flottille_s() {
+        let mut fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        // The data folder first, as the daemon names them.
+        fixture.own = vec![
+            base.join("xdg/data/flottille"),
+            base.join("xdg/config/flottille"),
+        ];
+        let path = base.join("xdg/config/flottille/workspaces/app/w/notes.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let verdict = fixture.file("fs_write", &path.display().to_string());
+        assert!(denied(&verdict), "{verdict:?}");
+    }
+
+    #[test]
     fn an_unlisted_wrapper_cannot_turn_base_into_judge() {
         let workspace = Fixture::workspace();
         for line in [
-            "chronic git push -f",
+            "unbuffer git push -f",
             "ionice -c3 git push --force",
             "taskset 1 git push -f",
             "flock /tmp/lock git push -f",
@@ -4068,11 +4480,11 @@ mod tests {
             "watch git push -f",
             "watch -n 5 'git push -f'",
             "strace -f git push -f",
-            "chronic cargo publish",
-            "chronic rm -rf .git",
-            "chronic rm -rf .",
-            "chronic deploy now",
-            "chronic ./git push -f",
+            "unbuffer cargo publish",
+            "unbuffer rm -rf .git",
+            "unbuffer rm -rf .",
+            "unbuffer deploy now",
+            "unbuffer ./git push -f",
         ] {
             let verdict = workspace.run(line);
             assert!(base_class(&verdict), "{line}: {verdict:?}");
@@ -4080,7 +4492,7 @@ mod tests {
         // A launcher out of the daemon's tree is refused outright.
         assert!(denied(&workspace.run("setsid git push -f")));
         let main = Fixture::main();
-        for line in ["chronic git reset --hard", "flock x git checkout -- ."] {
+        for line in ["unbuffer git reset --hard", "flock x git checkout -- ."] {
             let verdict = main.run(line);
             assert!(base_class(&verdict), "{line}: {verdict:?}");
         }
@@ -4107,17 +4519,23 @@ mod tests {
     #[test]
     fn writing_a_sensitive_git_setting_is_base() {
         for fixture in [Fixture::main(), Fixture::workspace()] {
+            // What runs later as the user, or the user's own configuration, is refused.
             for line in [
                 "git config core.hooksPath x",
                 "git config set alias.x y",
-                "git config --add remote.origin.pushurl x",
                 "git config --global url.x.insteadOf y",
+                "git config --replace-all credential.helper x",
+                "git config include.path x",
+            ] {
+                let verdict = fixture.run(line);
+                assert!(denied(&verdict), "{line}: {verdict:?}");
+            }
+            for line in [
+                "git config --add remote.origin.pushurl x",
                 "git config --unset push.default",
                 "git config unset push.default",
-                "git config --replace-all credential.helper x",
                 "git config --rename-section remote.a remote.b",
                 "git config --remove-section credential",
-                "git config include.path x",
                 "git config --file .git/config core.x y",
                 "git config -e",
                 "git remote set-url origin x",
@@ -4283,7 +4701,7 @@ mod tests {
     }
 
     #[test]
-    fn a_path_through_a_process_s_root_cwd_or_files_in_proc_is_base() {
+    fn a_path_through_a_process_s_root_cwd_or_files_in_proc_is_base_to_read_and_refused_to_write() {
         let mut fixture = Fixture::workspace();
         let own = fixture.own[0].clone();
         std::fs::create_dir_all(&own).unwrap();
@@ -4304,8 +4722,8 @@ mod tests {
         ] {
             for tool in ["fs_write", "fs_edit", "fs_read"] {
                 let verdict = fixture.file(tool, &path);
-                // Writing Flottille's own folder through a root is refused.
-                if WRITES.contains(&tool) && path.contains("/root") {
+                // Writing through any of them is refused.
+                if WRITES.contains(&tool) {
                     assert!(denied(&verdict), "{tool} {path}: {verdict:?}");
                 } else {
                     assert!(base_class(&verdict), "{tool} {path}: {verdict:?}");
@@ -4474,7 +4892,7 @@ mod tests {
     }
 
     #[test]
-    fn a_link_into_proc_under_another_name_is_base() {
+    fn a_link_into_proc_under_another_name_is_base_to_read_and_refused_to_write() {
         let fixture = Fixture::workspace();
         let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
         std::fs::create_dir_all(base.join("elsewhere")).unwrap();
@@ -4484,7 +4902,12 @@ mod tests {
         for path in ["/dev/fd/3", "/dev/stdin", &here, "src/here/judge.md"] {
             for tool in FS_TOOLS {
                 let verdict = fixture.file(tool, path);
-                assert!(base_class(&verdict), "{tool} {path}: {verdict:?}");
+                // Writing through it is refused.
+                if WRITES.contains(&tool) {
+                    assert!(denied(&verdict), "{tool} {path}: {verdict:?}");
+                } else {
+                    assert!(base_class(&verdict), "{tool} {path}: {verdict:?}");
+                }
             }
             // A run's own streams are its own (`the_run_s_own_streams_are_harmless_words`).
             if path != "/dev/stdin" {
@@ -4628,7 +5051,8 @@ mod tests {
             assert!(!base_class(&verdict), "{line}: {verdict:?}");
             assert!(!reasons(&verdict).contains(stream), "{line}: {verdict:?}");
         }
-        assert!(base_class(&fixture.run("tee /dev/fd/3")));
+        // Another of its open files may be anything: read, held; written, refused.
+        assert!(denied(&fixture.run("tee /dev/fd/3")));
         assert!(base_class(&fixture.run("cat /dev/fd/3")));
     }
 
@@ -4690,7 +5114,7 @@ mod tests {
     }
 
     #[test]
-    fn dot_dot_below_proc_is_base() {
+    fn dot_dot_below_proc_is_base_to_read_and_refused_to_write() {
         let fixture = Fixture::workspace();
         let own = fixture.own[0].clone();
         std::fs::create_dir_all(&own).unwrap();
@@ -4701,17 +5125,20 @@ mod tests {
             format!("/proc/net/../../self/root{judge}"),
             format!("/proc/thread-self/../../../self/root{judge}"),
         ] {
-            for line in [
-                format!("cat {path}"),
-                format!("tee {path}"),
-                format!("cp notes.md {path}"),
-            ] {
+            let verdict = fixture.run(&format!("cat {path}"));
+            assert!(base_class(&verdict), "cat {path}: {verdict:?}");
+            // Writing through it is refused.
+            for line in [format!("tee {path}"), format!("cp notes.md {path}")] {
                 let verdict = fixture.run(&line);
-                assert!(base_class(&verdict), "{line}: {verdict:?}");
+                assert!(denied(&verdict), "{line}: {verdict:?}");
             }
             for tool in FS_TOOLS {
                 let verdict = fixture.file(tool, &path);
-                assert!(base_class(&verdict), "{tool} {path}: {verdict:?}");
+                if WRITES.contains(&tool) {
+                    assert!(denied(&verdict), "{tool} {path}: {verdict:?}");
+                } else {
+                    assert!(base_class(&verdict), "{tool} {path}: {verdict:?}");
+                }
             }
         }
     }
@@ -4918,7 +5345,7 @@ mod tests {
     }
 
     #[test]
-    fn a_git_setting_whose_value_git_runs_is_base() {
+    fn a_git_setting_whose_value_git_runs_is_base_and_refused_to_write() {
         let keys = [
             "diff.external",
             "Diff.External",
@@ -4959,11 +5386,17 @@ mod tests {
                     format!("git -c{key}=x log"),
                     format!("git --config-env {key}=VALUE diff"),
                     format!("git --config-env={key}=VALUE diff"),
+                ] {
+                    let verdict = fixture.run(&line);
+                    assert!(base_class(&verdict), "{line}: {verdict:?}");
+                }
+                // Written, git runs it later, as the user: refused.
+                for line in [
                     format!("git config {key} x"),
                     format!("git config set {key} x"),
                 ] {
                     let verdict = fixture.run(&line);
-                    assert!(base_class(&verdict), "{line}: {verdict:?}");
+                    assert!(denied(&verdict), "{line}: {verdict:?}");
                 }
             }
             for line in [
@@ -4993,7 +5426,7 @@ mod tests {
     }
 
     #[test]
-    fn a_push_with_a_receive_pack_or_exec_is_base() {
+    fn a_push_with_a_receive_pack_or_exec_is_refused() {
         for fixture in [Fixture::main(), Fixture::workspace()] {
             for line in [
                 "git push --receive-pack=x origin HEAD",
@@ -5005,7 +5438,7 @@ mod tests {
                 "git send-pack --receive-pack=x ../r HEAD",
             ] {
                 let verdict = fixture.run(line);
-                assert!(base_class(&verdict), "{line}: {verdict:?}");
+                assert!(denied(&verdict), "{line}: {verdict:?}");
             }
             let verdict = fixture.run("git push --repo=origin");
             assert!(to_judge(&verdict), "{verdict:?}");
@@ -5132,5 +5565,283 @@ mod tests {
         assert!(base_class(&verdict), "{verdict:?}");
         assert!(matches!(&verdict, Verdict::Ask(ask) if ask.kind == Kind::Action));
         assert!(reasons(&verdict).contains("every agent created after"));
+    }
+
+    #[test]
+    fn writing_through_a_process_s_cwd_fd_or_exe_in_proc_is_refused() {
+        let mut fixture = Fixture::workspace();
+        let me = std::process::id();
+        fixture.groups = vec![unsafe { libc::getpgid(0) } as u32];
+        let home = fixture.grant.place.home.clone().unwrap();
+        // The daemon's folder is `/`: through it, any path of the disk.
+        let through_cwd = format!("/proc/self/cwd{}", home.join(".bashrc").display());
+        for path in [
+            through_cwd.clone(),
+            format!("/proc/1/cwd{}", home.join("notes").display()),
+            format!("/proc/{me}/cwd/judge.md"),
+            "/proc/self/fd/3".into(),
+            format!("/proc/{me}/exe"),
+            format!("/proc/{me}/map_files/x"),
+        ] {
+            for tool in WRITES {
+                let verdict = fixture.file(tool, &path);
+                assert!(denied(&verdict), "{tool} {path}: {verdict:?}");
+            }
+            // Reading there stays base.
+            let verdict = fixture.file("fs_read", &path);
+            assert!(base_class(&verdict), "{path}: {verdict:?}");
+        }
+        let verdict = fixture.run(&format!("cp README.md {through_cwd}"));
+        assert!(denied(&verdict), "{verdict:?}");
+        let verdict = fixture.run(&format!("cat {through_cwd}"));
+        assert!(base_class(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn git_config_global_or_a_setting_that_runs_a_program_later_is_refused() {
+        let workspace = Fixture::workspace();
+        for line in [
+            "git config --global user.name x",
+            "git config --system core.editor vi",
+            "git config core.hooksPath /ws/h",
+            "git config set core.hooksPath /ws/h",
+            "git config alias.x '!touch y'",
+            "git config include.path /ws/x",
+            "git config includeIf.gitdir:/ws/.path /ws/x",
+            "git config core.fsmonitor /ws/x",
+            "git config core.sshCommand /ws/x",
+            "git config credential.helper /ws/x",
+            "git config diff.x.textconv /ws/x",
+            "git config filter.x.clean /ws/x",
+            "git --git-dir=.git config core.pager /ws/x",
+        ] {
+            assert!(denied(&workspace.run(line)), "{line}");
+        }
+        // Reading it, and settings that run nothing, are what they were.
+        assert!(!denied(
+            &workspace.run("git config --global --get user.name")
+        ));
+        assert!(to_judge(
+            &workspace.run("git config user.email a@example.invalid")
+        ));
+        assert!(base_class(
+            &workspace.run("git config remote.origin.url /x")
+        ));
+    }
+
+    #[test]
+    fn systemctl_and_loginctl_that_install_or_start_a_unit_are_refused() {
+        let workspace = Fixture::workspace();
+        for line in [
+            "systemctl --user link /ws/x.service",
+            "systemctl --user start x",
+            "systemctl --user enable --now x",
+            "systemctl --user edit x",
+            "systemctl --user set-environment A=b",
+            "systemctl --user import-environment",
+            "systemctl --user restart flottille",
+            "loginctl enable-linger",
+        ] {
+            assert!(denied(&workspace.run(line)), "{line}");
+        }
+        for line in [
+            "systemctl --user status x",
+            "systemctl is-active x",
+            "systemctl --user list-units",
+        ] {
+            assert!(!denied(&workspace.run(line)), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_container_s_bind_mount_of_a_login_or_flottille_s_folders_is_refused() {
+        let workspace = Fixture::workspace();
+        let home = workspace.grant.place.home.clone().unwrap();
+        let ssh = home.join(".ssh").display().to_string();
+        let own = workspace.own[0].display().to_string();
+        let bashrc = home.join(".bashrc").display().to_string();
+        for line in [
+            format!("docker run -v {ssh}:/k alpine cat /k/id_ed25519"),
+            format!("docker run --volume {ssh}:/k:ro alpine true"),
+            format!("docker run --volume={ssh}:/k alpine true"),
+            format!("docker run -v{ssh}:/k alpine true"),
+            format!("docker run --mount type=bind,source={ssh},target=/k alpine true"),
+            format!("docker run --mount=type=bind,src={ssh},dst=/k alpine true"),
+            format!("docker container create -v {ssh}:/k alpine"),
+            format!("podman run -v {own}:/x alpine true"),
+            format!("nerdctl run -v {bashrc}:/x alpine true"),
+            "docker run -v /:/host alpine true".into(),
+        ] {
+            assert!(denied(&workspace.run(&line)), "{line}");
+        }
+        // Containers themselves are not refused.
+        for line in [
+            "docker run -v data:/x alpine true",
+            "docker run -v ./src:/src alpine ls /src",
+            "docker ps",
+        ] {
+            assert!(!denied(&workspace.run(line)), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_program_that_prints_a_login_is_refused() {
+        let workspace = Fixture::workspace();
+        for line in [
+            "aws configure get aws_secret_access_key",
+            "aws configure export-credentials",
+            "kubectl config view --raw",
+            "gcloud auth print-access-token",
+            "gcloud auth application-default print-access-token",
+            "gcloud config config-helper",
+            "az account get-access-token",
+            "secret-tool search --all service x",
+            "secret-tool lookup service x",
+            "pass show web/x",
+            "pass web/x",
+            "gopass show web/x",
+            "op read op://vault/item/password",
+            "bw get password x",
+            "rbw get x",
+            "git credential fill",
+            "docker-credential-pass get",
+        ] {
+            assert!(denied(&workspace.run(line)), "{line}");
+        }
+        for line in ["aws s3 ls", "kubectl config view", "gcloud auth list"] {
+            assert!(!denied(&workspace.run(line)), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_launcher_behind_any_known_wrapper_is_refused() {
+        let workspace = Fixture::workspace();
+        for line in [
+            "ionice -c3 at -f job now",
+            "ionice -c 3 batch",
+            "chrt 10 at now",
+            "chrt -f 10 at now",
+            "taskset 1 at now",
+            "taskset -c 0,1 at now",
+            "chronic at now",
+            "timeout 5 batch",
+            "stdbuf -o0 at now",
+            "nohup at now",
+            "nice -n 5 at now",
+            "env A=b at now",
+        ] {
+            assert!(denied(&workspace.run(line)), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_desktop_or_terminal_that_starts_a_program_is_refused() {
+        let workspace = Fixture::workspace();
+        for line in [
+            "hyprctl dispatch exec touch x",
+            "swaymsg exec touch x",
+            "i3-msg exec touch x",
+            "niri msg action spawn -- touch x",
+            "kitty @ launch touch x",
+            "kitten @ launch touch x",
+            "wezterm cli spawn touch x",
+        ] {
+            assert!(denied(&workspace.run(line)), "{line}");
+        }
+    }
+
+    #[test]
+    fn writing_the_user_s_programs_or_desktop_configuration_is_refused() {
+        let workspace = Fixture::workspace();
+        let home = workspace.grant.place.home.clone().unwrap();
+        for entry in [
+            ".local/bin/x",
+            "bin/x",
+            ".local/share/systemd/user/x.service",
+            ".config/hypr/hyprland.conf",
+            ".config/sway/config",
+            ".config/niri/config.kdl",
+        ] {
+            let path = home.join(entry).display().to_string();
+            let verdict = workspace.file("fs_write", &path);
+            assert!(denied(&verdict), "{entry}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains("startup"),
+                "{entry}: {verdict:?}"
+            );
+            assert!(
+                denied(&workspace.run(&format!("cp README.md {path}"))),
+                "{entry}"
+            );
+        }
+        // The daemon's own executable, wherever it is.
+        let exe = std::env::current_exe().unwrap().display().to_string();
+        assert!(denied(&workspace.file("fs_write", &exe)));
+        assert!(denied(&workspace.run(&format!("cp README.md {exe}"))));
+    }
+
+    #[test]
+    fn copying_to_a_host_or_naming_git_s_remote_programs_is_refused() {
+        let workspace = Fixture::workspace();
+        for line in [
+            "rsync -a src/ localhost:backup",
+            "rsync -a user@host:/x src/",
+            "rsync -e /ws/x -a src/ dst/",
+            "rsync --rsh=/ws/x src/ dst/",
+            "rsync --rsync-path=/ws/x src/ dst/",
+            "git clone --upload-pack=/ws/x /r y",
+            "git clone -u /ws/x /r y",
+            "git fetch --upload-pack /ws/x origin",
+            "git push --receive-pack=/ws/x origin",
+            "git push --exec=/ws/x origin",
+            "git archive --remote=/r --exec=/ws/x HEAD",
+            "git -c core.sshCommand=/ws/x fetch",
+        ] {
+            assert!(denied(&workspace.run(line)), "{line}");
+        }
+        assert!(!denied(&workspace.run("rsync -a src/ dst/")));
+    }
+
+    #[test]
+    fn an_option_s_value_or_a_text_word_naming_the_root_is_held_not_refused() {
+        let workspace = Fixture::workspace();
+        for line in [
+            "awk -F/ '{print $1}' src/a",
+            "cut -d/ -f1 src/a",
+            "tr / _",
+            "tool --base=/",
+        ] {
+            let verdict = workspace.run(line);
+            assert!(base_class(&verdict), "{line}: {verdict:?}");
+        }
+        // Naming the root to write there is still refused.
+        for line in ["rm -rf /", "find / -delete", "chmod -R 000 /"] {
+            assert!(denied(&workspace.run(line)), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_launcher_word_is_refused_only_where_it_would_run() {
+        let workspace = Fixture::workspace();
+        for line in [
+            "cargo test tmux --lib",
+            "git commit -m ssh -m body",
+            "git commit -m at",
+            "cargo run --example screen --release",
+            "cargo test -- ssh",
+            "grep -r systemd-run src",
+        ] {
+            assert!(!denied(&workspace.run(line)), "{line}");
+        }
+        for line in [
+            "cargo run -- systemd-run --user true",
+            "uv run ssh localhost true",
+            "uv run at now",
+            "poetry run tmux new-session -d true",
+            "npm exec -- ssh localhost",
+            "nice systemd-run --user true",
+        ] {
+            assert!(denied(&workspace.run(line)), "{line}");
+        }
     }
 }

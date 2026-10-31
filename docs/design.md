@@ -404,7 +404,9 @@ when the session resumes.
   colour, so that it is never on by mistake. A request made before the switch stays the user's to
   answer. **Its limit:** code the agent runs (an interpreter's inline code, a script it wrote) acts
   with the user's rights, and the gate does not see what that code touches; only a sandbox would
-  close that.
+  close that. The refusals below protect the user from an agent's direct or accidental use of
+  what must never be touched; they are **not a sandbox**: a program the agent runs may still do
+  any of it on its own.
 
 What becomes of a call, by what the gate says of it and the tree's mode:
 
@@ -413,18 +415,21 @@ What becomes of a call, by what the gate says of it and the tree's mode:
 | Harmless | passes | passes | passes |
 | To judge | a card for the user | the judge allows it, else a card | passes, recorded as allowed by Full mode |
 | Base (a forced push, a `.env`, a read of Flottille's own folders…) | a card, with a strong warning | a card, with a strong warning | passes, recorded as allowed by Full mode |
-| Refused (a login's place, a write of Flottille's own folders or of a startup file, a launcher out of the tree…) | refused | refused | refused |
+| Refused (a login's place, a write of Flottille's own folders or of a startup file, a launcher out of the tree, a git setting that runs later…) | refused | refused | refused |
 
 **Refused**, in every mode, is a call that cannot be made as it is, or that bare mode does not
 have: shell syntax (in a line, a task's or a setup step's line, a `git rebase --exec`), a
 malformed call or an unknown action, a tool the agent does not have (a child's
-`agent_launch` with `root`, a child's `workspace`, a tool of its provider), a login printed,
+`agent_launch` with `root`, a child's `workspace`, a tool of its provider), a login printed (`gh
+auth token`, `aws configure get`, `kubectl config view --raw`, `gcloud auth print-access-token`,
+`git credential fill`, a password manager or a keyring: `pass`, `gopass`, `op`, `bw`, `rbw`,
+`secret-tool`, `docker-credential-*`),
 the daemon driven from a command (`flottille`), a brief, a title or a body longer than the judge
 is given whole, a path that goes up out of a folder that is not there, a text the call does not take, a project write that cannot be done
 as asked, the removal of the agent's own workspace or of one another agent works in, and a call
 of an agent that was replaced. It is also what would let an agent reach the user's logins, or
 drive Flottille later or from outside its tree of processes, through a file tool or any path a
-line names, every suffix of a line included:
+line names, every program a wrapper or a runner runs included:
 
 - **a login's place**, read or written: `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`,
   `~/.config/gcloud`, `~/.kube`, `~/.docker/config.json`, `~/.config/gh`, `~/.netrc`, `~/.npmrc`,
@@ -432,22 +437,45 @@ line names, every suffix of a line included:
   own (`~/.claude`, `~/.claude.json`, `~/.codex`, `~/.local/share/opencode`), wherever they are
   along a path, and `/etc/shadow`, `/etc/sudoers`, `/etc/sudoers.d`;
 - **a write in or above Flottille's own folders** (its configuration, data, state and runtime:
-  the store, `providers.toml`, `developer.toml`, the socket). Reading them stays base: a card in
-  Ask and Auto, allowed in Full, since what they hold has its secrets masked and the user may want
-  an agent to read a log;
+  the store, `providers.toml`, `developer.toml`, the socket), or of Flottille's own program.
+  Reading them stays base: a card in Ask and Auto, allowed in Full, since what they hold has its
+  secrets masked and the user may want an agent to read a log;
+- **any write through a process's folder in `/proc`** that leads elsewhere (`/proc/<pid>/cwd`,
+  `root`, `fd`, `exe`, `map_files`, `/dev/fd/3`): the daemon runs in `/`, so through it any path
+  of the disk. Reading there stays base;
 - **a write of a startup file**, or of a folder above one: `~/.bashrc`, `~/.bash_profile`,
   `~/.bash_login`, `~/.profile`, `~/.zshrc`, `~/.zshenv`, `~/.zprofile`, `~/.zlogin`,
   `~/.config/fish`, `~/.gitconfig`, `~/.config/git`, `~/.config/autostart`,
-  `~/.config/systemd/user`, `~/.config/environment.d` (and the same under `XDG_CONFIG_HOME`);
+  `~/.config/systemd/user`, `~/.config/environment.d`, the desktop's `~/.config/hypr`,
+  `~/.config/sway`, `~/.config/niri` (and the same under `XDG_CONFIG_HOME`),
+  `~/.local/share/systemd/user` (and under `XDG_DATA_HOME`), and the user's programs,
+  `~/.local/bin` and `~/bin`;
+- **a git setting that runs a program later**, as the user: `git config --global` or `--system`
+  (the user's and the system's own configuration), and in the repository's a key that runs a
+  program or brings in a file (`core.hooksPath`, `core.fsmonitor`, `core.sshCommand`,
+  `core.editor`, `core.pager`, any `alias.*`, `include.path`, `includeIf.*`, `credential.*`, a
+  diff or merge driver, a filter, `protocol.allow`…). Removing such a key is not refused; where
+  pushes go (`remote.*`, `url.*`, `push.*`) stays base. A program named to run for a remote,
+  which may be this machine, is refused too: `--upload-pack`, `--receive-pack`, `--exec`,
+  `git clone -u`, `git -c core.sshCommand`;
 - **a launcher** that starts what it runs outside the daemon's tree, later or on a host:
   `systemd-run`, `tmux`, `screen`, `zellij`, `dtach`, `abduco`, `setsid`, `at`, `batch`,
-  `crontab`, `dbus-send`, `gdbus`, `busctl`, and `ssh`, `scp`, `sftp` to any host (`ssh` to this
-  machine runs a line through the user's shell, and an alias may be this machine). Inside a line,
-  as a word an unknown wrapper may run, each is refused when words follow it, but `at`, `batch`
-  and `screen`, which are often plain words.
+  `crontab`, `dbus-send`, `gdbus`, `busctl`, `loginctl`, `systemctl` but for its reads (`status`,
+  `show`, `cat`, `list-*`, `is-*`…), a desktop's or a terminal's remote control (`hyprctl`,
+  `swaymsg`, `i3-msg`, `niri msg`, `kitty @`, `wezterm cli`), `ssh`, `scp`, `sftp` and `rsync`
+  to any host or with `-e`/`--rsync-path` (`ssh` to this machine runs a line through the user's
+  shell, and an alias may be this machine). It is refused as a line's program, behind any wrapper
+  the gate unwraps (`nice`, `ionice`, `chrt`, `taskset`, `chronic`, `env`, `timeout`, `stdbuf`,
+  `nohup`…), and as what a runner runs (`uv run`, `poetry run`, `npm exec`…, what follows `--`
+  of `cargo run`). Anywhere else its name is only a word (`cargo test tmux`, `git commit -m ssh`);
+- **a container's bind mount** (`docker`, `podman`, `nerdctl` `run` or `create`, `-v`,
+  `--volume`, `--mount type=bind,source=…`) of any place above: the container reads and writes
+  the host's folder it names. A container itself, and a named volume, are not refused.
 
 A line that does not only read may write any path it names: for the writes above, any path such
-a line names counts. **Held** is everything else the gate does not let pass: in Full it passes.
+a line names counts. An option's value (`awk -F/`, `--base=/`) or a word of a program whose words
+are text (`tr`, `printf`, `expr`, `seq`) that names a folder above Flottille's own is held as base
+instead, as it was: such a word is seldom a path the line writes. **Held** is everything else the gate does not let pass: in Full it passes.
 
 The judge is an agent of a provider the user chose in Settings ("Auto judge": provider and
 model, `provider.set_judge`), run in bare mode **with no tool at all**: no Flottille tool, no MCP

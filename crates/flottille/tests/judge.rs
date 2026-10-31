@@ -733,8 +733,11 @@ fn a_write_into_flottille_s_config_through_proc_or_a_link_is_refused_in_auto() {
         )
     };
 
-    // Another process's folder in /proc is base: it leads anywhere.
-    base_in_auto(&user, &mcp, &[write("/proc/self/cwd/judge.md".into())]);
+    // Writing through a process's folder in /proc is refused: it leads anywhere.
+    let (tool, args) = write("/proc/self/cwd/judge.md".into());
+    let answer = mcp.call(tool, args);
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains("/proc/self/cwd"), "{}", answer.text);
     for (tool, args) in [
         write(format!("/proc/self/root{}", judge.display())),
         write(format!("/proc/thread-self/root{}", judge.display())),
@@ -767,7 +770,7 @@ fn line(text: &str) -> (&'static str, Value) {
 }
 
 #[test]
-fn a_git_setting_whose_value_git_runs_is_base() {
+fn a_git_setting_whose_value_git_runs_is_base_and_refused_to_write() {
     let user = User::with_fake_agent().with_allowing_judge();
     let (_, mcp, _) = session(&user, false);
 
@@ -777,27 +780,44 @@ fn a_git_setting_whose_value_git_runs_is_base() {
         &[
             line("git -c diff.external=./x diff"),
             line("git -c pager.log=./x log"),
-            line("git config sequence.editor ./x"),
-            line("git config filter.x.smudge ./x"),
             line("git --config-env gpg.program=X log --show-signature"),
             line("env GIT_EXTERNAL_DIFF=./x git diff"),
         ],
     );
+    // Written, git runs it later, as the user, outside the gate.
+    for (tool, args) in [
+        line("git config sequence.editor ./x"),
+        line("git config filter.x.smudge ./x"),
+    ] {
+        let answer = mcp.call(tool, args.clone());
+        assert!(answer.error, "{args}: {}", answer.text);
+        assert!(
+            answer.text.starts_with("refused: "),
+            "{args}: {}",
+            answer.text
+        );
+    }
+    assert!(judge_prompts(&user).is_empty(), "the judge was asked");
 }
 
 #[test]
-fn a_push_with_a_receive_pack_or_exec_is_base() {
+fn a_push_with_a_receive_pack_or_exec_is_refused() {
     let user = User::with_fake_agent().with_allowing_judge();
     let (_, mcp, _) = session(&user, false);
 
-    base_in_auto(
-        &user,
-        &mcp,
-        &[
-            line("git push --receive-pack=./x origin HEAD"),
-            line("git push --exec ./x origin HEAD"),
-        ],
-    );
+    for (tool, args) in [
+        line("git push --receive-pack=./x origin HEAD"),
+        line("git push --exec ./x origin HEAD"),
+    ] {
+        let answer = mcp.call(tool, args.clone());
+        assert!(answer.error, "{args}: {}", answer.text);
+        assert!(
+            answer.text.starts_with("refused: "),
+            "{args}: {}",
+            answer.text
+        );
+    }
+    assert!(judge_prompts(&user).is_empty(), "the judge was asked");
 }
 
 #[test]

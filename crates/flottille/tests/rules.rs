@@ -632,6 +632,26 @@ fn the_enforced_text_matches_the_gate_s_rules() {
         "{}",
         startup.text
     );
+    claim("any write through a process's folder in `/proc`");
+    let through = mcp.call(
+        "fs_write",
+        json!({
+            "path": format!("/proc/self/cwd{}", user.path("home/.profile").display()),
+            "content": "x\n",
+        }),
+    );
+    assert!(
+        through.error && through.text.starts_with("refused: "),
+        "{}",
+        through.text
+    );
+    claim("a git setting that runs a program later");
+    let later = mcp.call("run", json!({"line": "git config core.hooksPath hooks"}));
+    assert!(
+        later.error && later.text.starts_with("refused: "),
+        "{}",
+        later.text
+    );
     claim("a launcher that runs a program outside Flottille's tree, later or on a host");
     let launcher = mcp.call("run", json!({"line": "setsid -f touch away.txt"}));
     assert!(
