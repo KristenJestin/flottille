@@ -626,19 +626,19 @@ fn an_agent_can_never_change_its_mode_nor_choose_the_judge() {
         let said = refused(mcp.call("project", args.clone()));
         assert!(said.contains("the arguments do not fit"), "{args}: {said}");
     }
-    // Nor through a command line: the daemon's own command is refused, and Flottille's own
-    // folder is base, which only the user allows.
+    // Nor through a command line: the daemon's own command is refused, and so is a write in
+    // Flottille's own folder, in every mode.
     let said = refused(mcp.call(
         "run",
         json!({"line": format!("flottille agent mode {id} ask")}),
     ));
     assert!(said.contains("flottille drives the daemon"), "{said}");
     let settings = user.path("config/flottille/providers.toml");
-    let number = held(mcp.call(
+    let said = refused(mcp.call(
         "fs_write",
         json!({"path": settings, "content": "[judge]\nprovider = \"claude\"\n"}),
     ));
-    assert_eq!(request(&user, number)["class"], "base");
+    assert!(said.contains("Flottille's own folders"), "{said}");
     assert_eq!(
         user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["gate_mode"],
         "auto"

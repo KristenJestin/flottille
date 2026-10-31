@@ -84,11 +84,22 @@ pub struct Context<'a> {
 
 impl Context<'_> {
     /// The path the call names, resolved and decided.
-    fn path(&self, repository: Option<&str>, named: &str) -> Result<Resolved, Outcome> {
+    fn path(
+        &self,
+        repository: Option<&str>,
+        named: &str,
+        write: bool,
+    ) -> Result<Resolved, Outcome> {
         let (_, base) = self.place.base(repository).map_err(Outcome::Refused)?;
         let resolved = self.place.resolve(base, named);
         if let Some(refusal) = never_opened(&resolved) {
             return Err(refusal);
+        }
+        // Refused in every mode: checked again where the path now leads, whoever allowed it.
+        if let Some(why) =
+            gate::forbidden(&self.own(), self.place.home.as_deref(), &resolved, write)
+        {
+            return Err(Outcome::Refused(why));
         }
         if self.approved == Some(Class::Judge)
             && !resolved.inside
@@ -107,18 +118,23 @@ impl Context<'_> {
 
     /// Why the gate would now hold a path outside the place for the user, if it would.
     fn base_now(&self, path: &Resolved) -> Option<String> {
-        let paths = &self.daemon.paths;
-        let own = [
-            paths.data.clone(),
-            paths.config.clone(),
-            paths.state.clone(),
-            paths.runtime.clone(),
-        ];
+        let own = self.own();
         let groups = crate::runs::groups_of(self.daemon, self.agent);
         gate::process(&groups, path).or_else(|| {
             gate::sensitive(&own, path)
                 .map(|place| format!("{} is a sensitive place ({place})", path.shown))
         })
+    }
+
+    /// Flottille's own folders.
+    fn own(&self) -> [PathBuf; 4] {
+        let paths = &self.daemon.paths;
+        [
+            paths.data.clone(),
+            paths.config.clone(),
+            paths.state.clone(),
+            paths.runtime.clone(),
+        ]
     }
 
     fn key(path: &Path) -> String {
@@ -319,7 +335,7 @@ pub fn fs_read(cx: &Context, args: Value) -> Outcome {
         Ok(page) => page,
         Err(refusal) => return refusal,
     };
-    let path = match cx.path(args.repository.as_deref(), &args.path) {
+    let path = match cx.path(args.repository.as_deref(), &args.path, false) {
         Ok(path) => path,
         Err(refusal) => return refusal,
     };
@@ -473,7 +489,7 @@ pub fn fs_list(cx: &Context, args: Value) -> Outcome {
             "refused: depth must be 1 to {LIST_DEPTH_MAX}: list a folder below to go deeper"
         ));
     }
-    match cx.path(args.repository.as_deref(), &args.path) {
+    match cx.path(args.repository.as_deref(), &args.path, false) {
         Ok(path) => list_path(&path, depth),
         Err(refusal) => refusal,
     }
@@ -608,7 +624,7 @@ pub fn search(cx: &Context, args: Value) -> Outcome {
     if args.pattern.is_empty() {
         return Outcome::Refused("refused: the pattern is empty: name the text to find".into());
     }
-    match cx.path(args.repository.as_deref(), ".") {
+    match cx.path(args.repository.as_deref(), ".", false) {
         Ok(base) => search_in(cx.place, &base, &args),
         Err(refusal) => refusal,
     }
@@ -882,7 +898,7 @@ pub fn fs_write(cx: &Context, args: Value) -> Outcome {
         Ok(args) => args,
         Err(refusal) => return refusal,
     };
-    let path = match cx.path(args.repository.as_deref(), &args.path) {
+    let path = match cx.path(args.repository.as_deref(), &args.path, true) {
         Ok(path) => path,
         Err(refusal) => return refusal,
     };
@@ -916,7 +932,7 @@ pub fn fs_edit(cx: &Context, args: Value) -> Outcome {
             n + 1
         ));
     }
-    let path = match cx.path(args.repository.as_deref(), &args.path) {
+    let path = match cx.path(args.repository.as_deref(), &args.path, true) {
         Ok(path) => path,
         Err(refusal) => return refusal,
     };

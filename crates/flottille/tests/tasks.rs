@@ -458,7 +458,7 @@ fn never(user: &User, never: &str) {
 }
 
 #[test]
-fn an_agent_in_auto_setting_a_line_that_copies_a_home_key_is_base_for_a_task_and_a_step() {
+fn an_agent_in_auto_setting_a_line_that_copies_a_home_key_is_refused_for_a_task_and_a_step() {
     let user = judged_user();
     project(&user);
     let key = user.path("home/.ssh/id_ed25519");
@@ -467,19 +467,20 @@ fn an_agent_in_auto_setting_a_line_that_copies_a_home_key_is_base_for_a_task_and
     let line = format!("cp {} k.txt", key.display());
     let (_, mcp) = root(&user);
 
-    base_held(
-        &user,
+    for answer in [
         mcp.call("setup", json!({"action": "add", "step": {"run": line}})),
-        ".ssh",
-    );
-    base_held(
-        &user,
         mcp.call(
             "tasks",
             json!({"action": "add", "name": "steal", "line": line}),
         ),
-        ".ssh",
-    );
+    ] {
+        assert!(answer.error, "not refused: {}", answer.text);
+        assert!(
+            answer.text.starts_with("refused: ") && answer.text.contains(".ssh"),
+            "{}",
+            answer.text
+        );
+    }
     assert!(!file(&user).contains("id_ed25519"), "{}", file(&user));
     assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
 }

@@ -394,13 +394,17 @@ when the session resumes.
 - In **Ask**, a call to judge is a card for the user.
 - In **Auto**, it goes to the **judge**, which allows it or asks the user: it cannot refuse, and
   base calls never reach it.
-- In **Full**, nothing is asked: every call the gate would hold passes at once, base calls
-  included (a forced push, a workspace removed with what it would lose, a sensitive place), with
-  no request and no judge. Bare mode stays: the agent has only Flottille's tools, and every
-  refusal below stays a refusal. Each call it let through is recorded as allowed by Full mode
-  (`gate` `full` in its `agent.tool_served` event and in the developer log), and its step in the
-  session says "allowed by Full mode". The control draws Full in the alarm colour, so that it is
-  never on by mistake. A request made before the switch stays the user's to answer.
+- In **Full**, nothing is asked: the agent acts as the user. Every call the gate would hold
+  passes at once, base calls included (a forced push, a workspace removed with what it would
+  lose, inline interpreter code, a script the agent wrote), with no request and no judge. Bare mode
+  stays: the agent has only Flottille's tools, and every refusal below stays a refusal, those that
+  keep the user's logins and Flottille itself included. Each call it let through is recorded as
+  allowed by Full mode (`gate` `full` in its `agent.tool_served` event and in the developer log),
+  and its step in the session says "allowed by Full mode". The control draws Full in the alarm
+  colour, so that it is never on by mistake. A request made before the switch stays the user's to
+  answer. **Its limit:** code the agent runs (an interpreter's inline code, a script it wrote) acts
+  with the user's rights, and the gate does not see what that code touches; only a sandbox would
+  close that.
 
 What becomes of a call, by what the gate says of it and the tree's mode:
 
@@ -408,8 +412,8 @@ What becomes of a call, by what the gate says of it and the tree's mode:
 |---|---|---|---|
 | Harmless | passes | passes | passes |
 | To judge | a card for the user | the judge allows it, else a card | passes, recorded as allowed by Full mode |
-| Base | a card, with a strong warning | a card, with a strong warning | passes, recorded as allowed by Full mode |
-| Refused | refused | refused | refused |
+| Base (a forced push, a `.env`, a read of Flottille's own folders…) | a card, with a strong warning | a card, with a strong warning | passes, recorded as allowed by Full mode |
+| Refused (a login's place, a write of Flottille's own folders or of a startup file, a launcher out of the tree…) | refused | refused | refused |
 
 **Refused**, in every mode, is a call that cannot be made as it is, or that bare mode does not
 have: shell syntax (in a line, a task's or a setup step's line, a `git rebase --exec`), a
@@ -418,8 +422,32 @@ malformed call or an unknown action, a tool the agent does not have (a child's
 the daemon driven from a command (`flottille`), a brief, a title or a body longer than the judge
 is given whole, a path that goes up out of a folder that is not there, a text the call does not take, a project write that cannot be done
 as asked, the removal of the agent's own workspace or of one another agent works in, and a call
-of an agent that was replaced. **Held** is everything else the gate does not let pass: in Full it
-passes.
+of an agent that was replaced. It is also what would let an agent reach the user's logins, or
+drive Flottille later or from outside its tree of processes, through a file tool or any path a
+line names, every suffix of a line included:
+
+- **a login's place**, read or written: `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`,
+  `~/.config/gcloud`, `~/.kube`, `~/.docker/config.json`, `~/.config/gh`, `~/.netrc`, `~/.npmrc`,
+  `~/.pypirc`, `~/.git-credentials`, `~/.local/share/keyrings`, `~/Library/Keychains`, the agents'
+  own (`~/.claude`, `~/.claude.json`, `~/.codex`, `~/.local/share/opencode`), wherever they are
+  along a path, and `/etc/shadow`, `/etc/sudoers`, `/etc/sudoers.d`;
+- **a write in or above Flottille's own folders** (its configuration, data, state and runtime:
+  the store, `providers.toml`, `developer.toml`, the socket). Reading them stays base: a card in
+  Ask and Auto, allowed in Full, since what they hold has its secrets masked and the user may want
+  an agent to read a log;
+- **a write of a startup file**, or of a folder above one: `~/.bashrc`, `~/.bash_profile`,
+  `~/.bash_login`, `~/.profile`, `~/.zshrc`, `~/.zshenv`, `~/.zprofile`, `~/.zlogin`,
+  `~/.config/fish`, `~/.gitconfig`, `~/.config/git`, `~/.config/autostart`,
+  `~/.config/systemd/user`, `~/.config/environment.d` (and the same under `XDG_CONFIG_HOME`);
+- **a launcher** that starts what it runs outside the daemon's tree, later or on a host:
+  `systemd-run`, `tmux`, `screen`, `zellij`, `dtach`, `abduco`, `setsid`, `at`, `batch`,
+  `crontab`, `dbus-send`, `gdbus`, `busctl`, and `ssh`, `scp`, `sftp` to any host (`ssh` to this
+  machine runs a line through the user's shell, and an alias may be this machine). Inside a line,
+  as a word an unknown wrapper may run, each is refused when words follow it, but `at`, `batch`
+  and `screen`, which are often plain words.
+
+A line that does not only read may write any path it names: for the writes above, any path such
+a line names counts. **Held** is everything else the gate does not let pass: in Full it passes.
 
 The judge is an agent of a provider the user chose in Settings ("Auto judge": provider and
 model, `provider.set_judge`), run in bare mode **with no tool at all**: no Flottille tool, no MCP

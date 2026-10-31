@@ -579,6 +579,9 @@ fn the_enforced_text_matches_the_gate_s_rules() {
     done(mcp.call("fs_read", json!({"path": ".env"})));
     assert_eq!(pending(&user), held, "Full held a call");
     assert_eq!(judged(&user), 1, "Full reached the judge");
+    claim(
+        "In Full, code you run (an interpreter's inline code, a script you wrote) acts with the user's rights and the gate does not see what it touches: only a sandbox would close that",
+    );
 
     claim("What is refused is a call that cannot be made as it is: a command with shell syntax");
     let refused = mcp.call("run", json!({"line": "ls | cat"}));
@@ -607,6 +610,34 @@ fn the_enforced_text_matches_the_gate_s_rules() {
         daemon.error && daemon.text.starts_with("refused: "),
         "{}",
         daemon.text
+    );
+    claim(
+        "a login's place (`~/.ssh`, `~/.config/gh`, `~/.git-credentials`, an agent's login, `/etc/shadow`…), read or written",
+    );
+    let key = user.path("home/.ssh/id_ed25519");
+    let login = mcp.call("run", json!({"line": format!("cat {}", key.display())}));
+    assert!(
+        login.error && login.text.starts_with("refused: "),
+        "{}",
+        login.text
+    );
+    claim("a write in or above Flottille's own folders");
+    claim("a write of a startup file");
+    let startup = mcp.call(
+        "fs_write",
+        json!({"path": user.path("home/.profile"), "content": "x\n"}),
+    );
+    assert!(
+        startup.error && startup.text.starts_with("refused: "),
+        "{}",
+        startup.text
+    );
+    claim("a launcher that runs a program outside Flottille's tree, later or on a host");
+    let launcher = mcp.call("run", json!({"line": "setsid -f touch away.txt"}));
+    assert!(
+        launcher.error && launcher.text.starts_with("refused: "),
+        "{}",
+        launcher.text
     );
     assert_eq!(judged(&user), 1, "a refused call reached the judge");
 

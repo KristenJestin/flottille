@@ -159,6 +159,49 @@ const SENSITIVE: [&str; 18] = [
 ];
 /// Sensitive from the top of the file system only.
 const SYSTEM_SENSITIVE: [&str; 3] = ["/etc/shadow", "/etc/sudoers", "/etc/sudoers.d"];
+/// What runs at the user's next login or command, or starts a process later, from the home
+/// folder (`docs/design.md` §7.1): an agent never writes it.
+const STARTUP: [&str; 14] = [
+    ".bashrc",
+    ".bash_profile",
+    ".bash_login",
+    ".profile",
+    ".zshrc",
+    ".zshenv",
+    ".zprofile",
+    ".zlogin",
+    ".config/fish",
+    ".gitconfig",
+    ".config/git",
+    ".config/autostart",
+    ".config/systemd/user",
+    ".config/environment.d",
+];
+/// What is read from the user's configuration folder, wherever it is: [`STARTUP`]'s.
+const CONFIG_STARTUP: [&str; 5] = ["fish", "git", "autostart", "systemd/user", "environment.d"];
+/// Programs that start a process outside the daemon's tree of processes, or later, or on another
+/// host: what it runs escapes the gate and the daemon's ancestry check, as the user.
+const LAUNCHERS: [&str; 16] = [
+    "systemd-run",
+    "tmux",
+    "screen",
+    "zellij",
+    "dtach",
+    "abduco",
+    "setsid",
+    "at",
+    "batch",
+    "crontab",
+    "dbus-send",
+    "gdbus",
+    "busctl",
+    "ssh",
+    "scp",
+    "sftp",
+];
+/// Of them, those that are often an ordinary word too (`git commit -m at`): refused only as a
+/// program a line or a wrapper the gate knows runs.
+const LAUNCHER_WORDS: [&str; 3] = ["at", "batch", "screen"];
 /// What makes a `.env.*` file a template, free to read and write.
 const TEMPLATES: [&str; 4] = [".example", ".sample", ".template", ".dist"];
 
@@ -307,6 +350,14 @@ fn files(call: &Call) -> Verdict {
         return Verdict::Deny(why);
     }
     let write = WRITES.contains(&call.tool);
+    let home = call.grant.place.home.as_deref();
+    if let Some(why) = call
+        .paths
+        .iter()
+        .find_map(|path| forbidden(call.own, home, path, write))
+    {
+        return Verdict::Deny(why);
+    }
     let mut found = Found::default();
     for path in call.paths {
         if write && in_git(path) {
@@ -315,9 +366,6 @@ fn files(call: &Call) -> Verdict {
                  repository or run code at its next command",
                 path.shown
             ));
-        }
-        if write && let Some(why) = above_own(call.own, path) {
-            found.base(why);
         }
         if let Some(why) = process(call.groups, path) {
             found.base(why);
@@ -665,6 +713,21 @@ fn run(call: &Call) -> Verdict {
     if let Some(why) = layers.iter().find_map(|layer| refusal(layer)) {
         return Verdict::Deny(why);
     }
+    // A word inside a line may start a program the gate does not know runs it: a launcher there
+    // is refused as well, but for a lone word, or one that is often an ordinary word.
+    let launched = layers
+        .iter()
+        .flat_map(|layer| suffixes(layer))
+        .filter(|(at, suffix)| *at > 0 && suffix.len() > 1)
+        .find_map(|(_, suffix)| {
+            let program = base(&suffix[0]);
+            (!LAUNCHER_WORDS.contains(&program))
+                .then(|| launches(program))
+                .flatten()
+        });
+    if let Some(why) = launched {
+        return Verdict::Deny(why);
+    }
     let main = call.grant.place.workspace.is_none();
     let mut found = Found::default();
     match call.never {
@@ -741,6 +804,9 @@ fn run(call: &Call) -> Verdict {
                 }
             ));
         }
+        if let Some(why) = credential(path) {
+            return Verdict::Deny(why);
+        }
         if in_git(path) {
             found.base(format!(
                 "{} is in a .git folder, which git keeps",
@@ -815,7 +881,8 @@ fn run(call: &Call) -> Verdict {
         ));
     }
     // The words only: a run's own folder holding Flottille's (a project in the home folder) is
-    // where it works, not what it takes away.
+    // where it works, not what it takes away. A line that does not only read may write any path
+    // it names.
     if !reads {
         for (_, path) in &named {
             let written;
@@ -825,8 +892,8 @@ fn run(call: &Call) -> Verdict {
             } else {
                 path
             };
-            if let Some(why) = above_own(call.own, path) {
-                found.base(why);
+            if let Some(why) = forbidden(call.own, call.grant.place.home.as_deref(), path, true) {
+                return Verdict::Deny(why);
             }
         }
     }
@@ -849,8 +916,7 @@ fn run(call: &Call) -> Verdict {
                 (Untracked::Worktree, None) => top(&runs_in),
             };
             if let Some(why) = above_own(call.own, &place.at(&taken)) {
-                found.base(why);
-                break;
+                return Verdict::Deny(format!("refused: {why}; nothing was done"));
             }
         }
     }
@@ -995,10 +1061,14 @@ impl Line {
 }
 
 /// What is refused, whatever the user would say: a login printed, the daemon driven from a
-/// command. These are not permissions; such a call cannot be made at all.
+/// command, a process started outside the daemon's tree. These are not permissions; such a call
+/// cannot be made at all.
 fn refusal(layer: &[String]) -> Option<String> {
     let program = base(&layer[0]);
     let args = &layer[1..];
+    if let Some(why) = launches(program) {
+        return Some(why);
+    }
     match program {
         "flottille" => Some(
             "refused: flottille drives the daemon, and agents act only through their tools: \
@@ -1019,6 +1089,18 @@ fn refusal(layer: &[String]) -> Option<String> {
         }),
         _ => None,
     }
+}
+
+/// The refusal of a program that starts what it runs outside the daemon's tree of processes, or
+/// later, or on a host (`ssh localhost` is this machine, as the user, through its shell).
+fn launches(program: &str) -> Option<String> {
+    LAUNCHERS.contains(&program).then(|| {
+        format!(
+            "refused: {program} starts what it runs outside Flottille's tree of processes, later \
+             or on a host, where the gate sees nothing of it: an agent runs its programs itself, \
+             in any mode"
+        )
+    })
 }
 
 /// Whether a forge's command line prints its login.
@@ -2783,6 +2865,122 @@ pub fn sensitive(own: &[PathBuf], path: &Resolved) -> Option<String> {
     sensitive_names(&path.written).or_else(|| sensitive_names(&path.path))
 }
 
+/// Why a call that reaches a path is refused in every mode, Full included (`docs/design.md`
+/// §7.1): a login read or written, Flottille's own folders or a startup file written.
+pub fn forbidden(
+    own: &[PathBuf],
+    home: Option<&Path>,
+    path: &Resolved,
+    write: bool,
+) -> Option<String> {
+    if let Some(why) = credential(path) {
+        return Some(why);
+    }
+    if !write {
+        return None;
+    }
+    // A project's workspaces may sit in Flottille's data folder: they are the project's, not
+    // Flottille's.
+    let folders = own_folders(own);
+    let flottille_s = |path: &Path| {
+        folders.iter().any(|own| {
+            path.starts_with(own)
+                && path
+                    .strip_prefix(own.join("workspaces"))
+                    .map_or(true, |rest| rest.components().count() < 2)
+        })
+    };
+    if seen(path).iter().any(|path| flottille_s(path)) {
+        return Some(format!(
+            "refused: {} is in Flottille's own folders (its configuration, its data, its state, \
+             its socket): an agent never writes there, in any mode; nothing was done",
+            path.shown
+        ));
+    }
+    if let Some(why) = above_own(own, path) {
+        return Some(format!("refused: {why}; nothing was done"));
+    }
+    startup(home, path).map(|entry| {
+        format!(
+            "refused: {} is or holds a startup file ({entry}): what it holds runs at the user's \
+             next login or command, or starts a process later, outside the gate: an agent never \
+             writes there, in any mode; nothing was done",
+            path.shown
+        )
+    })
+}
+
+/// A path as written and where it leads, each also without a leading `/proc/<process>/root`
+/// (or `/proc/<process>/task/<thread>/root`), which is `/` again for a program the kernel never
+/// asks (a path taken as written).
+fn seen(path: &Resolved) -> Vec<PathBuf> {
+    let mut seen = vec![path.written.clone(), path.path.clone()];
+    for path in [&path.written, &path.path] {
+        let parts: Vec<&std::ffi::OsStr> = path.iter().collect();
+        if parts.get(1).is_none_or(|part| *part != "proc") {
+            continue;
+        }
+        let root = if parts.get(3).is_some_and(|part| *part == "task") {
+            5
+        } else {
+            3
+        };
+        if parts.get(root).is_some_and(|part| *part == "root") {
+            seen.push(Path::new("/").join(parts[root + 1..].iter().collect::<PathBuf>()));
+        }
+    }
+    seen
+}
+
+/// The refusal of a path in a login's place: an agent's, the user's, the system's secrets.
+fn credential(path: &Resolved) -> Option<String> {
+    let place = if path.inside {
+        credential_names(Path::new(&path.shown))
+    } else {
+        let seen = seen(path);
+        seen.iter()
+            .find_map(|path| SYSTEM_SENSITIVE.iter().find(|s| path.starts_with(s)))
+            .map(|system| (*system).to_owned())
+            .or_else(|| seen.iter().find_map(|path| credential_names(path)))
+    }?;
+    Some(format!(
+        "refused: {} is in a login's place ({place}): an agent never reads nor writes a login, \
+         in any mode; nothing was done",
+        path.shown
+    ))
+}
+
+/// The startup file a path is, is in or holds, if any: from the home folder, and from the user's
+/// configuration folder.
+fn startup(home: Option<&Path>, path: &Resolved) -> Option<String> {
+    let mut files: Vec<(PathBuf, String)> = Vec::new();
+    for home in home
+        .into_iter()
+        .flat_map(|home| [Some(home.to_owned()), place::real_path(home).ok()])
+        .flatten()
+    {
+        files.extend(
+            STARTUP
+                .iter()
+                .map(|entry| (home.join(entry), format!("~/{entry}"))),
+        );
+    }
+    if let Some(config) = std::env::var_os("XDG_CONFIG_HOME").filter(|c| !c.is_empty()) {
+        let config = PathBuf::from(config);
+        files.extend(
+            CONFIG_STARTUP
+                .iter()
+                .map(|entry| (config.join(entry), config.join(entry).display().to_string())),
+        );
+    }
+    seen(path).iter().find_map(|path| {
+        files
+            .iter()
+            .find(|(file, _)| path.starts_with(file) || file.starts_with(path))
+            .map(|(_, entry)| entry.clone())
+    })
+}
+
 /// Flottille's own folders, as named and as they are on the disk.
 fn own_folders(own: &[PathBuf]) -> Vec<PathBuf> {
     own.iter()
@@ -2809,26 +3007,37 @@ fn above_own(own: &[PathBuf], path: &Resolved) -> Option<String> {
 
 /// The sensitive place a path names along its parts, if any.
 fn sensitive_names(path: &Path) -> Option<String> {
-    let parts: Vec<String> = path
-        .components()
-        .map(|part| part.as_os_str().to_string_lossy().into_owned())
-        .collect();
-    for (at, part) in parts.iter().enumerate() {
+    let parts = parts_of(path);
+    (0..parts.len()).find_map(|at| {
+        let part = &parts[at];
         if part == ".env"
             || (part.starts_with(".env.") && !TEMPLATES.iter().any(|t| part.ends_with(t)))
         {
             return Some(".env".into());
         }
-        for place in SENSITIVE {
-            let names: Vec<&str> = place.split('/').collect();
-            if parts.len() - at >= names.len()
-                && names.iter().zip(&parts[at..]).all(|(n, p)| n == p)
-            {
-                return Some(format!("~/{place}"));
-            }
-        }
-    }
-    None
+        credential_at(&parts, at)
+    })
+}
+
+/// The login's place a path names along its parts, if any.
+fn credential_names(path: &Path) -> Option<String> {
+    let parts = parts_of(path);
+    (0..parts.len()).find_map(|at| credential_at(&parts, at))
+}
+
+fn parts_of(path: &Path) -> Vec<String> {
+    path.components()
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect()
+}
+
+/// The login's place the parts name from `at`, if any.
+fn credential_at(parts: &[String], at: usize) -> Option<String> {
+    SENSITIVE.iter().find_map(|place| {
+        let names: Vec<&str> = place.split('/').collect();
+        (parts.len() - at >= names.len() && names.iter().zip(&parts[at..]).all(|(n, p)| n == p))
+            .then(|| format!("~/{place}"))
+    })
 }
 
 /// Whether the paths are inside the place. This is the place's own invariant, not a policy: the
@@ -3387,10 +3596,6 @@ mod tests {
             ("setup", step("sudo apt-get install jq")),
             ("tasks", task("git push --force")),
             ("setup", step("deploy --prod")),
-            (
-                "tasks",
-                json!({"action": "edit", "name": "build", "line": "rm -rf /"}),
-            ),
         ] {
             let verdict = fixture.judge(tool, args, Some(&fixture.never));
             assert!(base_class(&verdict), "{tool}: {verdict:?}");
@@ -3399,6 +3604,12 @@ mod tests {
                 "{verdict:?}"
             );
         }
+        // What a run of it refuses is refused to set.
+        assert!(denied(&fixture.judge(
+            "tasks",
+            json!({"action": "edit", "name": "build", "line": "rm -rf /"}),
+            Some(&fixture.never)
+        )));
         // Shell syntax is refused, as a run of it is.
         assert!(denied(&fixture.judge(
             "setup",
@@ -3525,12 +3736,10 @@ mod tests {
             fixture.file("fs_write", ".git/hooks/pre-commit"),
             fixture.file("fs_read", ".env"),
             fixture.file("fs_write", ".env.local"),
-            fixture.file("fs_read", "../../home/.ssh/id_ed25519"),
             fixture.file("fs_read", "../../xdg/data/flottille/store.db"),
             fixture.run("rm -rf .git"),
             fixture.run("rm -r ."),
             fixture.run("cat .git/config"),
-            fixture.run("cat ../../home/.aws/credentials"),
             fixture.run("cargo publish"),
             fixture.run("npm publish"),
             fixture.run("gem push x.gem"),
@@ -3547,6 +3756,13 @@ mod tests {
             assert!(base_class(&verdict), "{verdict:?}");
         }
         assert_eq!(fixture.file("fs_read", ".env.example"), Verdict::Allow);
+        // A login's place is refused, in every mode.
+        for verdict in [
+            fixture.file("fs_read", "../../home/.ssh/id_ed25519"),
+            fixture.run("cat ../../home/.aws/credentials"),
+        ] {
+            assert!(denied(&verdict), "{verdict:?}");
+        }
     }
 
     #[test]
@@ -3803,10 +4019,46 @@ mod tests {
     }
 
     #[test]
+    fn a_launcher_inside_a_line_is_refused_but_not_an_ordinary_word() {
+        let workspace = Fixture::workspace();
+        for line in [
+            "cargo run -- systemd-run --user touch x",
+            "chronic tmux new-session -d true",
+            "uv run ssh localhost true",
+            "nice at now",
+        ] {
+            assert!(denied(&workspace.run(line)), "{line}");
+        }
+        for line in [
+            "git commit -m at",
+            "cargo test -p flottille --lib",
+            "cargo run --example screen --release",
+            "cargo test ssh",
+        ] {
+            assert!(!denied(&workspace.run(line)), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_workspace_in_flottille_s_data_folder_is_the_project_s() {
+        let mut fixture = Fixture::workspace();
+        let data = fixture.root.parent().unwrap().to_owned();
+        fixture.own = vec![data.clone()];
+        let ws = data.join("workspaces/app/w");
+        std::fs::create_dir_all(&ws).unwrap();
+        fixture.root = ws.clone();
+        fixture.grant.place.root = ws.clone();
+        fixture.grant.place.repositories = vec![(".".into(), ws)];
+        assert_eq!(fixture.file("fs_write", "notes.md"), Verdict::Allow);
+        // The folder that holds every workspace is Flottille's.
+        assert!(denied(&fixture.run("rm -r ../../../workspaces")));
+    }
+
+    #[test]
     fn an_unlisted_wrapper_cannot_turn_base_into_judge() {
         let workspace = Fixture::workspace();
         for line in [
-            "setsid git push -f",
+            "chronic git push -f",
             "ionice -c3 git push --force",
             "taskset 1 git push -f",
             "flock /tmp/lock git push -f",
@@ -3816,17 +4068,19 @@ mod tests {
             "watch git push -f",
             "watch -n 5 'git push -f'",
             "strace -f git push -f",
-            "setsid cargo publish",
-            "setsid rm -rf .git",
-            "setsid rm -rf .",
-            "setsid deploy now",
-            "setsid ./git push -f",
+            "chronic cargo publish",
+            "chronic rm -rf .git",
+            "chronic rm -rf .",
+            "chronic deploy now",
+            "chronic ./git push -f",
         ] {
             let verdict = workspace.run(line);
             assert!(base_class(&verdict), "{line}: {verdict:?}");
         }
+        // A launcher out of the daemon's tree is refused outright.
+        assert!(denied(&workspace.run("setsid git push -f")));
         let main = Fixture::main();
-        for line in ["setsid git reset --hard", "flock x git checkout -- ."] {
+        for line in ["chronic git reset --hard", "flock x git checkout -- ."] {
             let verdict = main.run(line);
             assert!(base_class(&verdict), "{line}: {verdict:?}");
         }
@@ -4050,7 +4304,12 @@ mod tests {
         ] {
             for tool in ["fs_write", "fs_edit", "fs_read"] {
                 let verdict = fixture.file(tool, &path);
-                assert!(base_class(&verdict), "{tool} {path}: {verdict:?}");
+                // Writing Flottille's own folder through a root is refused.
+                if WRITES.contains(&tool) && path.contains("/root") {
+                    assert!(denied(&verdict), "{tool} {path}: {verdict:?}");
+                } else {
+                    assert!(base_class(&verdict), "{tool} {path}: {verdict:?}");
+                }
             }
         }
         let verdict = fixture.run(&format!("cat /proc/self/root{judge}"));
@@ -4058,7 +4317,7 @@ mod tests {
     }
 
     #[test]
-    fn flottille_s_own_folder_reached_through_a_link_is_base() {
+    fn flottille_s_own_folder_reached_through_a_link_is_base_to_read_and_refused_to_write() {
         let mut fixture = Fixture::workspace();
         let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
         // `XDG_CONFIG_HOME` (or `~/.config`) is a link: Flottille names its folder through it.
@@ -4084,7 +4343,11 @@ mod tests {
         ] {
             for tool in ["fs_write", "fs_edit", "fs_read"] {
                 let verdict = fixture.file(tool, &path);
-                assert!(base_class(&verdict), "{tool} {path}: {verdict:?}");
+                if WRITES.contains(&tool) {
+                    assert!(denied(&verdict), "{tool} {path}: {verdict:?}");
+                } else {
+                    assert!(base_class(&verdict), "{tool} {path}: {verdict:?}");
+                }
                 assert!(
                     reasons(&verdict).contains("Flottille's own folder"),
                     "{tool} {path}: {verdict:?}"
@@ -4095,7 +4358,7 @@ mod tests {
         std::fs::create_dir_all(base.join("home/.ssh")).unwrap();
         std::os::unix::fs::symlink(base.join("home/.ssh"), base.join("elsewhere/keys")).unwrap();
         let path = base.join("elsewhere/keys/id_ed25519").display().to_string();
-        assert!(base_class(&fixture.file("fs_read", &path)));
+        assert!(denied(&fixture.file("fs_read", &path)));
     }
 
     const FS_TOOLS: [&str; 4] = ["fs_read", "fs_list", "fs_write", "fs_edit"];
@@ -4135,14 +4398,23 @@ mod tests {
         ] {
             for tool in FS_TOOLS {
                 let verdict = fixture.file(tool, &path);
-                assert!(base_class(&verdict), "{tool} {path}: {verdict:?}");
+                // A login's place is refused; Flottille's own folder is base to read only.
+                if place.starts_with('~') || WRITES.contains(&tool) {
+                    assert!(denied(&verdict), "{tool} {path}: {verdict:?}");
+                } else {
+                    assert!(base_class(&verdict), "{tool} {path}: {verdict:?}");
+                }
                 assert!(
                     reasons(&verdict).contains(place),
                     "{tool} {path}: {verdict:?}"
                 );
             }
             let verdict = fixture.run(&format!("cat {path}"));
-            assert!(base_class(&verdict), "cat {path}: {verdict:?}");
+            if place.starts_with('~') {
+                assert!(denied(&verdict), "cat {path}: {verdict:?}");
+            } else {
+                assert!(base_class(&verdict), "cat {path}: {verdict:?}");
+            }
             assert!(reasons(&verdict).contains(place), "cat {path}: {verdict:?}");
         }
         // What the tools open is what the gate checked: where the link leads.
@@ -4178,7 +4450,12 @@ mod tests {
 
         for tool in FS_TOOLS {
             let verdict = fixture.file(tool, &long);
-            assert!(base_class(&verdict), "{tool}: {verdict:?}");
+            // Reading Flottille's own folder is base; writing there is refused.
+            if WRITES.contains(&tool) {
+                assert!(denied(&verdict), "{tool}: {verdict:?}");
+            } else {
+                assert!(base_class(&verdict), "{tool}: {verdict:?}");
+            }
             assert!(
                 reasons(&verdict).contains("Flottille's own folder"),
                 "{tool}: {verdict:?}"
@@ -4220,7 +4497,7 @@ mod tests {
     }
 
     #[test]
-    fn moving_or_removing_a_folder_above_flottille_s_own_is_base() {
+    fn moving_or_removing_a_folder_above_flottille_s_own_is_refused() {
         let mut fixture = Fixture::workspace();
         let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
         let config = base.join("home/.config");
@@ -4234,7 +4511,7 @@ mod tests {
             format!("rm -r {shown}/../.config"),
         ] {
             let verdict = fixture.run(&line);
-            assert!(base_class(&verdict), "{line}: {verdict:?}");
+            assert!(denied(&verdict), "{line}: {verdict:?}");
             assert!(
                 reasons(&verdict).contains("Flottille's own folders"),
                 "{line}: {verdict:?}"
@@ -4242,7 +4519,7 @@ mod tests {
         }
         for path in [config.display().to_string(), "~/.config".to_owned()] {
             let verdict = fixture.file("fs_write", &path);
-            assert!(base_class(&verdict), "{path}: {verdict:?}");
+            assert!(denied(&verdict), "{path}: {verdict:?}");
         }
         // Reading it is not taking it away.
         assert!(to_judge(&fixture.run(&format!("ls {shown}"))));
@@ -4326,7 +4603,7 @@ mod tests {
             "rm -r .".to_owned(),
         ] {
             let verdict = fixture.run(&line);
-            assert!(base_class(&verdict), "{line}: {verdict:?}");
+            assert!(denied(&verdict), "{line}: {verdict:?}");
             assert!(
                 reasons(&verdict).contains("Flottille's own folders"),
                 "{line}: {verdict:?}"
@@ -4403,10 +4680,10 @@ mod tests {
         rustix::fs::symlinkat(base.join("home/.ssh"), &at, "x").unwrap();
 
         let verdict = fixture.run("cat src/a/b/c/x/id");
-        assert!(base_class(&verdict), "{verdict:?}");
+        assert!(denied(&verdict), "{verdict:?}");
         assert!(reasons(&verdict).contains(".ssh"), "{verdict:?}");
         let verdict = fixture.file("fs_read", "src/a/b/c/x/id");
-        assert!(base_class(&verdict), "{verdict:?}");
+        assert!(denied(&verdict), "{verdict:?}");
         // One name too long is still only a word.
         let verdict = fixture.run(&format!("git commit -m '{}'", "w".repeat(300)));
         assert!(!base_class(&verdict), "{verdict:?}");
@@ -4460,7 +4737,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_untracked_files_in_a_folder_above_flottille_s_is_base() {
+    fn deleting_untracked_files_in_a_folder_above_flottille_s_is_refused() {
         let mut fixture = Fixture::workspace();
         fixture.own = vec![fixture.root.join("sub/flottille")];
         std::fs::create_dir_all(&fixture.own[0]).unwrap();
@@ -4473,7 +4750,7 @@ mod tests {
             "git stash --all",
         ] {
             let verdict = fixture.run(line);
-            assert!(base_class(&verdict), "{line}: {verdict:?}");
+            assert!(denied(&verdict), "{line}: {verdict:?}");
             assert!(
                 reasons(&verdict).contains("Flottille's own folders"),
                 "{line}: {verdict:?}"
@@ -4507,10 +4784,12 @@ mod tests {
             "install -D -t m/../../../home/.ssh notes.md".into(),
             "install -D --target-directory=m/../../../home/.ssh notes.md".into(),
         ] {
+            // Where it leads is a login's place or Flottille's own folder: refused.
             let verdict = fixture.run(&line);
-            assert!(base_class(&verdict), "{line}: {verdict:?}");
+            assert!(denied(&verdict), "{line}: {verdict:?}");
+            let why = reasons(&verdict);
             assert!(
-                reasons(&verdict).contains("names a folder that does not exist"),
+                why.contains(".ssh") || why.contains("Flottille's own folders"),
                 "{line}: {verdict:?}"
             );
         }
@@ -4539,7 +4818,7 @@ mod tests {
             "git clean -fdx -- :(top,exclude)x",
         ] {
             let verdict = fixture.run(line);
-            assert!(base_class(&verdict), "{line}: {verdict:?}");
+            assert!(denied(&verdict), "{line}: {verdict:?}");
             assert!(
                 reasons(&verdict).contains("Flottille's own folders"),
                 "{line}: {verdict:?}"
@@ -4569,11 +4848,22 @@ mod tests {
             format!("python3 -m zipfile -e a.zip {long}/../../../{own_word}"),
         ] {
             let verdict = fixture.run(&line);
-            assert!(base_class(&verdict), "{line}: {verdict:?}");
-            assert!(
-                reasons(&verdict).contains("names a folder that does not exist"),
-                "{line}: {verdict:?}"
-            );
+            // As written it is a `.env`, base; a login's place or Flottille's own folder,
+            // refused.
+            if line.contains(".env") {
+                assert!(base_class(&verdict), "{line}: {verdict:?}");
+                assert!(
+                    reasons(&verdict).contains("names a folder that does not exist"),
+                    "{line}: {verdict:?}"
+                );
+            } else {
+                assert!(denied(&verdict), "{line}: {verdict:?}");
+                let why = reasons(&verdict);
+                assert!(
+                    why.contains(".ssh") || why.contains("Flottille's own folders"),
+                    "{line}: {verdict:?}"
+                );
+            }
         }
         let verdict = fixture.run("git commit -m 'fix foo/../bar'");
         assert!(to_judge(&verdict), "{verdict:?}");
@@ -4594,7 +4884,7 @@ mod tests {
             "curl -om/../../../home/.ssh/authorized_keys https://x",
         ] {
             let verdict = fixture.run(line);
-            assert!(base_class(&verdict), "{line}: {verdict:?}");
+            assert!(denied(&verdict), "{line}: {verdict:?}");
             assert!(reasons(&verdict).contains(".ssh"), "{line}: {verdict:?}");
         }
     }
@@ -4619,7 +4909,7 @@ mod tests {
             format!("git --work-tree={} stash --all", home.display()),
         ] {
             let verdict = fixture.run(&line);
-            assert!(base_class(&verdict), "{line}: {verdict:?}");
+            assert!(denied(&verdict), "{line}: {verdict:?}");
             assert!(
                 reasons(&verdict).contains("Flottille's own folders"),
                 "{line}: {verdict:?}"

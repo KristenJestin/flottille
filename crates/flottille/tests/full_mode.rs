@@ -344,3 +344,174 @@ fn in_full_a_child_s_call_is_allowed_without_asking_its_parent() {
     let store = Store::open(&user.path("state/flottille/flottille.db")).unwrap();
     assert!(store.request(1).unwrap().is_none(), "a request was made");
 }
+
+fn refused(answer: Answer) -> String {
+    assert!(answer.error, "not refused: {}", answer.text);
+    assert!(answer.text.starts_with("refused: "), "{}", answer.text);
+    answer.text
+}
+
+/// A fake login of an agent in the throwaway home: its path.
+fn credential(user: &User) -> PathBuf {
+    let login = user.path("home/.codex/auth.json");
+    std::fs::create_dir_all(login.parent().unwrap()).unwrap();
+    std::fs::write(&login, "{\"token\": \"fake-login\"}\n").unwrap();
+    login
+}
+
+/// Launchers out of the daemon's tree, with what they run harmless: a gate that let one pass
+/// would start it on the machine's own user manager or tmux.
+const LAUNCHED: [&str; 2] = [
+    "systemd-run --user flottille --version",
+    "tmux -L flottille-test new-session -d true",
+];
+
+/// The calls refused in every mode (`docs/design.md` §7.1), whatever the user would say: a
+/// login read, Flottille's own folders written, what drives Flottille later or from outside the
+/// daemon's tree.
+fn always_refused(user: &User, id: &str) -> Vec<(&'static str, Value)> {
+    let login = credential(user);
+    let store = user.path("state/flottille/flottille.db");
+    let providers = user.path("config/flottille/providers.toml");
+    let bashrc = user.path("home/.bashrc");
+    vec![
+        ("fs_read", json!({"path": login})),
+        ("run", json!({"line": format!("cat {}", login.display())})),
+        (
+            "fs_write",
+            json!({"path": providers, "content": "[judge]\nprovider = \"claude\"\n"}),
+        ),
+        (
+            "run",
+            json!({"line": format!(
+                "sqlite3 {} \"update agents set gate_mode = 'full'\"",
+                store.display()
+            )}),
+        ),
+        (
+            "fs_write",
+            json!({"path": bashrc, "content": format!("flottille agent mode {id} full\n")}),
+        ),
+        ("run", json!({"line": LAUNCHED[0]})),
+        ("run", json!({"line": LAUNCHED[1]})),
+    ]
+}
+
+#[test]
+fn in_full_reading_a_credential_file_is_refused() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (id, mcp, _) = session(&user);
+    set_mode(&user, &id, "full");
+    let login = credential(&user);
+
+    for (tool, args) in [
+        ("fs_read", json!({"path": login})),
+        ("run", json!({"line": format!("cat {}", login.display())})),
+    ] {
+        let said = refused(mcp.call(tool, args.clone()));
+        assert!(said.contains("login"), "{args}: {said}");
+        assert!(!said.contains("fake-login"), "{said}");
+    }
+    assert!(no_request(&user));
+}
+
+#[test]
+fn in_full_writing_to_flottille_s_store_or_config_is_refused() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (id, mcp, _) = session(&user);
+    set_mode(&user, &id, "full");
+    let providers = user.path("config/flottille/providers.toml");
+    let before = std::fs::read(&providers).ok();
+    let store = user.path("state/flottille/flottille.db");
+
+    let said = refused(mcp.call(
+        "fs_write",
+        json!({"path": providers, "content": "[judge]\nprovider = \"claude\"\n"}),
+    ));
+    assert!(said.contains("Flottille's own folders"), "{said}");
+    let said = refused(mcp.call(
+        "run",
+        json!({"line": format!(
+            "sqlite3 {} \"update agents set title = 'changed'\"",
+            store.display()
+        )}),
+    ));
+    assert!(said.contains("Flottille's own folders"), "{said}");
+
+    assert_eq!(std::fs::read(&providers).ok(), before);
+    assert!(no_request(&user));
+}
+
+#[test]
+fn in_full_writing_bashrc_is_refused() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (id, mcp, _) = session(&user);
+    set_mode(&user, &id, "full");
+    let bashrc = user.path("home/.bashrc");
+
+    for (tool, args) in [
+        (
+            "fs_write",
+            json!({"path": bashrc, "content": format!("flottille agent mode {id} ask\n")}),
+        ),
+        (
+            "run",
+            json!({"line": format!("cp README.md {}", bashrc.display())}),
+        ),
+    ] {
+        let said = refused(mcp.call(tool, args.clone()));
+        assert!(said.contains("startup"), "{args}: {said}");
+    }
+    assert!(!bashrc.exists(), "~/.bashrc was written");
+    assert!(no_request(&user));
+}
+
+#[test]
+fn in_full_systemd_run_and_tmux_are_refused() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (id, mcp, _) = session(&user);
+    set_mode(&user, &id, "full");
+
+    for line in [
+        LAUNCHED[0],
+        LAUNCHED[1],
+        // Inside a line a wrapper the gate does not know runs, too.
+        "nice -n 5 tmux -L flottille-test new-session -d true",
+        "cargo run -- systemd-run --user flottille --version",
+    ] {
+        let said = refused(mcp.call("run", json!({ "line": line })));
+        assert!(said.contains("outside"), "{line}: {said}");
+    }
+    assert!(no_request(&user));
+    assert_eq!(mode_of(&user, &id), "full");
+}
+
+#[test]
+fn in_ask_and_auto_the_same_calls_are_refused_not_held() {
+    for mode in ["ask", "auto"] {
+        let user = User::with_fake_agent().with_allowing_judge();
+        let (id, mcp, _) = session(&user);
+        set_mode(&user, &id, mode);
+
+        for (tool, args) in always_refused(&user, &id) {
+            refused(mcp.call(tool, args.clone()));
+        }
+        assert!(no_request(&user), "{mode}: a call was held");
+        assert_eq!(judge_prompts(&user), 0, "{mode}: the judge was asked");
+        assert!(!user.path("home/.bashrc").exists());
+        assert_eq!(mode_of(&user, &id), mode);
+    }
+}
+
+#[test]
+fn in_full_inline_interpreter_code_passes() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (id, mcp, _) = session(&user);
+    set_mode(&user, &id, "full");
+
+    let ran = done(mcp.call("run", json!({"line": "python3 -c \"print(1)\""})));
+
+    assert!(ran.contains("exited with code 0"), "{ran}");
+    assert!(no_request(&user));
+    assert_eq!(judge_prompts(&user), 0, "the judge was asked");
+}

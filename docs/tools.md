@@ -619,7 +619,35 @@ says who answers a call to judge (`docs/design.md` §7.1).
    - a login printed: `gh auth token`, `glab auth token`, `auth status` with `--show-token` (`-t`);
    - `flottille` itself: it drives the daemon, and agents act only through their tools. A copy
      of it under another name, or any program that speaks to the socket, is refused by the
-     daemon itself (`docs/protocol.md`, "Transport").
+     daemon itself (`docs/protocol.md`, "Transport");
+   - a login's place, read or written, by a file tool or as any path a line names: `.ssh`,
+     `.gnupg`, `.aws`, `.azure`, `.config/gcloud`, `.kube`, `.docker/config.json`, `.config/gh`,
+     `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, `.local/share/keyrings`,
+     `Library/Keychains` and the agents' logins (`.claude`, `.claude.json`, `.codex`,
+     `.local/share/opencode`) wherever they sit along the path, `/etc/shadow`, `/etc/sudoers`,
+     `/etc/sudoers.d`. Inside the place only what sits below it counts; a path outside is checked
+     as written and where it leads, and without a leading `/proc/<process>/root`;
+   - a write in Flottille's own folders (data, configuration, state, runtime; a project's
+     workspaces that sit in its data folder are the project's), or of a folder above one
+     (`mv ~/.config ~/c.bak`, `rm -r` of it, `fs_write` over it): by a file tool that writes, or
+     by a run that is not known to only read and names it as a word (the folder a run starts in
+     may hold Flottille's: a project in the home folder). What deletes the untracked files
+     without naming where counts the folder it takes them from: the folder it runs in (after its
+     `-C`s) for a `git clean`, the top of its worktree for a `git stash` with `-u`,
+     `--include-untracked`, `-a` or `--all`, and for a `git clean` of a pathspec from the top
+     (`:/`, `:(top)`, `:(top,…)`). That top is the `--work-tree` it names, else found on the disk
+     as git finds it: the nearest folder holding a `.git`, up from the one it runs in, inside the
+     place or not (a home folder that is a repository);
+   - a write of a startup file, or of a folder above one, the same ways: `~/.bashrc`,
+     `~/.bash_profile`, `~/.bash_login`, `~/.profile`, `~/.zshrc`, `~/.zshenv`, `~/.zprofile`,
+     `~/.zlogin`, `~/.config/fish`, `~/.gitconfig`, `~/.config/git`, `~/.config/autostart`,
+     `~/.config/systemd/user`, `~/.config/environment.d`, and the same under `XDG_CONFIG_HOME`:
+     what they hold runs at the user's next login or command, outside the gate;
+   - a launcher, which starts what it runs outside the daemon's tree of processes, later or on a
+     host: `systemd-run`, `tmux`, `screen`, `zellij`, `dtach`, `abduco`, `setsid`, `at`,
+     `batch`, `crontab`, `dbus-send`, `gdbus`, `busctl`, `ssh`, `scp`, `sftp`, as a line's
+     program or a wrapper's; and as any word of a line followed by others (a wrapper the gate
+     does not know may run it), but `at`, `batch` and `screen`, often plain words.
 2. **Base**: a card for the user in every mode, never the judge's, with a strong warning.
    - the project's `never` list: an entry matches a line's words from any position (its first
      word is a program, in any folder), or a task by its name, and then every task and line of
@@ -633,21 +661,12 @@ says who answers a call to judge (`docs/design.md` §7.1).
      `.config/gcloud`, `.kube`, `.docker/config.json`, `.config/gh`, `.netrc`, `.npmrc`,
      `.pypirc`, `.git-credentials`, `.local/share/keyrings`, `Library/Keychains` and the agents'
      logins (`.claude`, `.claude.json`, `.codex`, `.local/share/opencode`) wherever they sit along
-     the path, `/etc/shadow`, `/etc/sudoers`, `/etc/sudoers.d`, and Flottille's own folders (data,
-     configuration, state, runtime). Inside the place only what sits below it counts. A path
+     the path, `/etc/shadow`, `/etc/sudoers`, `/etc/sudoers.d` (all refused above, read or
+     written), and Flottille's own folders (data, configuration, state, runtime), which are
+     base to read and refused to write. Inside the place only what sits below it counts. A path
      outside is checked as written and where it leads (a link anyone made, a configuration
      folder that is a link, a `..` after a link), against Flottille's folders as named and
      resolved;
-   - a write, a move or a removal of a folder above Flottille's own (`mv ~/.config ~/c.bak`, `rm
-     -r` of it, `fs_write` over it), which would take its configuration or data away: by a file
-     tool that writes, or by a run that is not known to only read and names it as a word (the
-     folder a run starts in may hold Flottille's: a project in the home folder). What deletes the
-     untracked files without naming where counts the folder it takes them from: the folder it
-     runs in (after its `-C`s) for a `git clean`, the top of its worktree for a `git stash` with
-     `-u`, `--include-untracked`, `-a` or `--all`, and for a `git clean` of a pathspec from the
-     top (`:/`, `:(top)`, `:(top,…)`). That top is the `--work-tree` it names, else found on the
-     disk as git finds it: the nearest folder holding a `.git`, up from the one it runs in,
-     inside the place or not (a home folder that is a repository);
    - a path in `/proc` through what of any process leads elsewhere on the disk: its `root`,
      `cwd`, `fd`, `exe` or `map_files` (`/proc/self/root/…`, `/proc/<pid>/cwd/…`), under any
      name it is reached by (`/dev/fd/3`, a link to `/proc/self/cwd`; `/dev/stdin` for a file

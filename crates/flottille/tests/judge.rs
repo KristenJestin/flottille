@@ -716,7 +716,7 @@ fn base_in_auto(user: &User, mcp: &Mcp, calls: &[(&str, Value)]) {
 }
 
 #[test]
-fn a_write_into_flottille_s_config_through_proc_or_a_link_is_base_in_auto() {
+fn a_write_into_flottille_s_config_through_proc_or_a_link_is_refused_in_auto() {
     let user = User::with_fake_agent().with_allowing_judge();
     // `XDG_CONFIG_HOME` is a link: Flottille names its folder through it.
     std::fs::rename(user.path("config"), user.path("real-config")).unwrap();
@@ -733,26 +733,32 @@ fn a_write_into_flottille_s_config_through_proc_or_a_link_is_base_in_auto() {
         )
     };
 
-    base_in_auto(
-        &user,
-        &mcp,
-        &[
-            write(format!("/proc/self/root{}", judge.display())),
-            write(format!("/proc/thread-self/root{}", judge.display())),
-            write(format!("/proc/1/root{}", judge.display())),
-            write("/proc/self/cwd/judge.md".into()),
-            write(
-                user.path("real-config/flottille/judge.md")
-                    .display()
-                    .to_string(),
-            ),
-            write(user.path("elsewhere/link/judge.md").display().to_string()),
-            (
-                "fs_edit",
-                json!({"path": user.path("elsewhere/link/providers.toml"), "edits": [{"old": "opencode", "new": "claude"}]}),
-            ),
-        ],
-    );
+    // Another process's folder in /proc is base: it leads anywhere.
+    base_in_auto(&user, &mcp, &[write("/proc/self/cwd/judge.md".into())]);
+    for (tool, args) in [
+        write(format!("/proc/self/root{}", judge.display())),
+        write(format!("/proc/thread-self/root{}", judge.display())),
+        write(format!("/proc/1/root{}", judge.display())),
+        write(
+            user.path("real-config/flottille/judge.md")
+                .display()
+                .to_string(),
+        ),
+        write(user.path("elsewhere/link/judge.md").display().to_string()),
+        (
+            "fs_edit",
+            json!({"path": user.path("elsewhere/link/providers.toml"), "edits": [{"old": "opencode", "new": "claude"}]}),
+        ),
+    ] {
+        let answer = mcp.call(tool, args.clone());
+        assert!(answer.error, "{args}: {}", answer.text);
+        assert!(
+            answer.text.contains("Flottille's own folders"),
+            "{args}: {}",
+            answer.text
+        );
+    }
+    assert!(judge_prompts(&user).is_empty(), "the judge was asked");
     assert!(!judge.exists());
 }
 
@@ -1363,9 +1369,10 @@ fn a_folder_swapped_for_a_link_to_flottille_s_folder_after_the_approval_is_refus
         });
         mcp.call("fs_write", write(&folder))
     });
+    // Checked again where it now leads, the path is refused: Flottille's own folder.
     assert!(swapped.error, "{}", swapped.text);
     assert!(
-        swapped.text.contains("changed since it was allowed"),
+        swapped.text.contains("Flottille's own folders"),
         "{}",
         swapped.text
     );
@@ -1387,7 +1394,7 @@ fn a_folder_swapped_for_a_link_to_flottille_s_folder_after_the_approval_is_refus
     eventually("the answer", || store().delivery(&id).unwrap().is_some());
     let text = store().delivery(&id).unwrap().unwrap().body;
     assert!(!text.contains("and Flottille has now done it"), "{text}");
-    assert!(text.contains("changed since"), "{text}");
+    assert!(text.contains("Flottille's own folders"), "{text}");
     assert!(!judge.exists());
 }
 

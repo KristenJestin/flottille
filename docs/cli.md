@@ -650,7 +650,11 @@ Sets the mode of a session (`docs/design.md` §7): in `ask`, every call to judge
 request; in `auto`, the judge chosen in the window's Settings decides it, and what it does not
 allow comes to you. Base calls come to you in both. In `full`, nothing comes to you: every call to
 judge and every base call passes at once, recorded as allowed by Full mode, and what the gate
-refuses (shell syntax, a malformed call, `flottille` run as a command…) stays refused. A session
+refuses (shell syntax, a malformed call, `flottille` run as a command, a login's place, a write
+of Flottille's own folders or of a startup file, a launcher such as `systemd-run` or `tmux`…)
+stays refused. In `full`, code the agent runs (an interpreter's inline code, a script it wrote)
+acts with your rights, and the gate does not see what it touches: only a sandbox would close
+that. A session
 never starts in `full`. A tree has one mode, its root's: naming a
 child switches its root, and every agent of the tree follows at once. A new session starts in
 `auto`; the mode is kept when the session is resumed. Only you set it: no tool of an agent does.
