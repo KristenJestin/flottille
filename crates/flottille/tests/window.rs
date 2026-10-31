@@ -6871,18 +6871,24 @@ fn atlas_on_github<'a>(
     &'a mut VisualTestContext,
     Entity<ProjectSettingsPage>,
 ) {
+    atlas_on(user, "git@github.com:acme/atlas.git", 1280., cx)
+}
+
+/// A project `atlas` whose remote is `remote`, its settings open in a tall window `width` wide.
+fn atlas_on<'a>(
+    user: &User,
+    remote: &str,
+    width: f32,
+    cx: &'a mut TestAppContext,
+) -> (
+    Entity<Shell>,
+    &'a mut VisualTestContext,
+    Entity<ProjectSettingsPage>,
+) {
     let folder = project(user, "atlas");
-    user.git(
-        &folder,
-        &[
-            "remote",
-            "set-url",
-            "origin",
-            "git@github.com:acme/atlas.git",
-        ],
-    );
-    let (shell, cx) = window(user, Arc::new(user.connector()), 1280., cx);
-    cx.simulate_resize(size(px(1280.), px(3200.)));
+    user.git(&folder, &["remote", "set-url", "origin", remote]);
+    let (shell, cx) = window(user, Arc::new(user.connector()), width, cx);
+    cx.simulate_resize(size(px(width), px(3200.)));
     let page = open_project_settings(&shell, "atlas", cx);
     until(&shell, cx, "every section is read", |cx| {
         page.read_with(cx, |page, cx| page.has_read(cx))
@@ -6938,6 +6944,41 @@ fn the_forge_is_suggested_from_a_github_remote_and_filled_by_use(cx: &mut TestAp
         Some("GitHub · acme/atlas")
     );
     assert!(cx.update(|window, _| window.try_find("repository-use-.").is_none()));
+}
+
+#[gpui_kit::test]
+fn the_use_button_of_a_forge_proposal_stays_inside_its_repository_card(cx: &mut TestAppContext) {
+    // The narrowest width that still has the tree beside the page, then a window narrower than
+    // the layouts: a long proposal must never push the button out of the card.
+    let long = "git@bitbucket.org:an-organisation-with-a-very-long-name/a-repository-whose-name-is-\
+                longer-than-any-column-of-the-row.git";
+    for (width, remote) in [
+        (860., "git@bitbucket.org:krinestt/flottille-sandbox.git"),
+        (860., long),
+        (480., "git@bitbucket.org:krinestt/flottille-sandbox.git"),
+        (480., long),
+    ] {
+        let user = user();
+        let (_, cx, _) = atlas_on(&user, remote, width, cx);
+        let (card, row, forge, button) = cx.update(|window, _| {
+            (
+                window.find("repository-list").bounds(),
+                window.find("repository-atlas").bounds(),
+                window.find("repository-forge-.").bounds(),
+                window.find("repository-use-.").bounds(),
+            )
+        });
+        for (what, inside) in [("card", card), ("row", row)] {
+            assert!(
+                button.left() >= inside.left() && button.right() <= inside.right(),
+                "the Use button {button:?} leaves its {what} {inside:?} at {width}px for {remote}"
+            );
+        }
+        assert!(
+            forge.right() <= button.left(),
+            "the proposal {forge:?} and the button {button:?} do not overlap at {width}px"
+        );
+    }
 }
 
 #[gpui_kit::test]
