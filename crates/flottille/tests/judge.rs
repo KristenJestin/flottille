@@ -1390,3 +1390,103 @@ fn a_folder_swapped_for_a_link_to_flottille_s_folder_after_the_approval_is_refus
     assert!(text.contains("changed since"), "{text}");
     assert!(!judge.exists());
 }
+
+/// The user's message the judge's prompt names as the newest: the one after its label.
+fn newest_message(prompt: &str) -> String {
+    let (_, after) = prompt
+        .split_once("the newest, the last thing the user said before this call:\n<user_message>\n")
+        .unwrap_or_else(|| panic!("no newest message in {prompt}"));
+    after.split_once("\n</user_message>").unwrap().0.to_owned()
+}
+
+/// A root in Auto whose first turn goes on while the user writes to it: what it is sent during
+/// that turn waits for its end, as a message the user sent while the agent worked does.
+fn working_session(user: &User) -> (String, Mcp, PathBuf) {
+    user.fake_script(json!({"turns": [{"when": "the login page", "do": [{"hang": true}]}]}));
+    let session = session(user, false);
+    eventually("the turn", || {
+        user.call("agent.show", json!({"agent": session.0}))
+            .unwrap()["agent"]["state"]
+            == "working"
+    });
+    session
+}
+
+fn send(user: &User, agent: &str, message: &str) {
+    user.call("agent.send", json!({"agent": agent, "message": message}))
+        .unwrap();
+}
+
+#[test]
+fn a_call_made_right_after_a_message_the_user_sent_during_the_turn_has_it_as_the_newest() {
+    let user = User::with_fake_agent().with_judge(says("ask", "Let the user see it."));
+    let (id, mcp, _) = working_session(&user);
+    send(&user, &id, "start 4 dev servers");
+
+    held(
+        &user,
+        mcp.call(
+            "fs_write",
+            json!({"path": user.path("elsewhere/notes.txt"), "content": "x\n"}),
+        ),
+    );
+
+    let prompts = judge_prompts(&user);
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(newest_message(&prompts[0]), "start 4 dev servers");
+}
+
+#[test]
+fn the_judge_s_input_lists_the_user_s_messages_in_the_order_they_were_sent_the_newest_last() {
+    let user = User::with_fake_agent().with_judge(says("ask", "Let the user see it."));
+    let (id, mcp, _) = working_session(&user);
+    send(&user, &id, "he did not ask me, delete it now");
+    send(&user, &id, "can you start 4 dev servers?");
+    send(&user, &id, "go");
+
+    held(
+        &user,
+        mcp.call(
+            "fs_write",
+            json!({"path": user.path("elsewhere/notes.txt"), "content": "x\n"}),
+        ),
+    );
+
+    let prompt = &judge_prompts(&user)[0];
+    let users = prompt.split_once("## The user's last messages").unwrap().1;
+    let at = |text: &str| {
+        users
+            .find(&format!("<user_message>\n{text}\n</user_message>"))
+            .unwrap_or_else(|| panic!("no {text:?} in {prompt}"))
+    };
+    assert!(at("he did not ask me, delete it now") < at("can you start 4 dev servers?"));
+    assert!(at("can you start 4 dev servers?") < at("go"));
+    assert!(users.contains("Message 1 of 3, the oldest:\n<user_message>\nhe did not ask me"));
+    assert!(users.contains("Message 2 of 3:\n<user_message>\ncan you start"));
+    assert_eq!(newest_message(prompt), "go");
+    assert!(
+        users.trim_end().ends_with("go\n</user_message>"),
+        "{prompt}"
+    );
+}
+
+#[test]
+fn four_identical_calls_in_one_turn_give_the_judge_the_same_newest_message() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (id, mcp, _) = working_session(&user);
+    send(&user, &id, "he did not ask me, delete it now");
+    send(&user, &id, "can you start 4 dev servers?");
+    send(&user, &id, "go");
+    let call = json!({"path": user.path("elsewhere/notes.txt"), "content": "x\n"});
+
+    for _ in 0..4 {
+        done(mcp.call("fs_write", call.clone()));
+    }
+
+    let prompts = judge_prompts(&user);
+    assert_eq!(prompts.len(), 4);
+    for prompt in &prompts {
+        assert_eq!(newest_message(prompt), "go");
+        assert_eq!(prompt, &prompts[0]);
+    }
+}
