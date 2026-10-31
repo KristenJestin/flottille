@@ -154,7 +154,7 @@ and the 2026 practice around it:
      `workspace_remove` had until #141; the old names are still served under the new ones for
      one release.
 
-   A root lead has 22 tools, a leaf worker 12; one more each when the project's repositories
+   A root lead has 23 tools, a leaf worker 12; one more each when the project's repositories
    declare a forge (`forge`), one more when it declares a tracker (`tickets`).
 
    **The budget.** Every tool loads upfront (rule 7), so the definitions must stay under
@@ -188,7 +188,7 @@ and the 2026 practice around it:
    | `setup` | `list` (each step whole) | `list` | `list` | `add` | `edit`, `remove`, `move` | A `show` of one step: `list` gives each whole. |
    | `project` | — | — | `settings`, `rules` | — | `set_settings`, `set_rules` | Listing, creating or removing projects: an agent works in its own project only, and another project is the user's to register. |
    | `run`, `run_status` | — | — | `run_status` `output` | `run` | `run_status` `stop` | A list of the agent's runs: each run's id is in the answer that started it and in the delivery that says it ended, and the window lists them for the user. |
-   | `agent_*` | `agent_status` (every child) | — | `agent_status` (one, or `conversation`) | `agent_launch` (a child in the caller's place, or a session for the user with `root`, in a workspace) | `agent_send`, `agent_stop`, `session_send` (a session the caller started, or the one that started it) | Changing a child's model or mode: a child keeps what it was launched with, and only the user sets a mode. |
+   | `agent_*` | `agent_status` (every child) | — | `agent_status` (one, or `conversation`), `session_read` (another session of the project, a page) | `agent_launch` (a child in the caller's place, or a session for the user with `root`, in a workspace) | `agent_send`, `agent_stop`, `session_send` (a session the caller started, or the one that started it) | Changing a child's model or mode: a child keeps what it was launched with, and only the user sets a mode. |
 
 10. **The idempotency key** of a call is read from the call's `_meta` (`claudecode/toolUseId` for
     Claude). `claude` calls Flottille's server itself and sends it with every call; the bridge

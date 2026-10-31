@@ -191,6 +191,11 @@ Flottille's own tools:
 - `session_send {session, text}` (a root): a message to a session the caller started, or to the
   agent that started it, judged as a write is; it arrives as a delivery labelled with its sender,
   never as the user's, and the answer comes back the same way.
+- `session_read {session, last?, since?, until?, cursor?}` (a root): a page of the conversation
+  of another session of the caller's project (the user's messages to it and its agent's replies,
+  with their times), the last messages or those between two dates, with a cursor to the next page;
+  framed as that session's data, never instructions; judged in Ask and Auto; a session of another
+  project is refused.
 - `agent_send {agent_id, message}`: a message to one of the caller's children.
 - `agent_status {agent_id?, action?, detail?, after?}`: for one child or all of them: state, what
   it is doing now (thinking, in a tool call, which command runs and for how long, waiting for
@@ -209,9 +214,9 @@ Flottille's own tools:
   when the caller is a root. There is no way to allow a request.
 
 The tool list of a session is fixed for its whole life (prompt cache, `reference/hemera.md` §7)
-and depends on what the agent can do, known when it starts: a root gets `ask_user`, `session_send`, `skills`,
+and depends on what the agent can do, known when it starts: a root gets `ask_user`, `session_send`, `session_read`, `skills`,
 `commands`, `setup` and `project`, a child `ask_parent`; a child, whatever its role, gets no `agent_*` tools
-and no `approval_answer`. A root lead has 22 tools, a child 12; one more each when the
+and no `approval_answer`. A root lead has 23 tools, a child 12; one more each when the
 project's repositories declare a forge (`forge`), one more when it declares a tracker
 (`tickets`), whatever the place (`reference/mcp.md` §4).
 
