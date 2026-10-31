@@ -419,6 +419,14 @@ fn no_escalation(user: &User) {
     assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
 }
 
+/// The requests waiting for the user.
+fn pending(user: &User) -> usize {
+    user.call("approval.list", json!({})).unwrap()["requests"]
+        .as_array()
+        .unwrap()
+        .len()
+}
+
 /// How many prompts the judge was given.
 fn judged(user: &User) -> usize {
     user.judge_received()
@@ -496,7 +504,7 @@ fn the_enforced_text_matches_the_gate_s_rules() {
         mcp.names()
     );
 
-    claim("Base calls are always held for the user, in both modes, and never reach the judge");
+    claim("Base calls are always held for the user in Ask and Auto, and never reach the judge");
     claim("a sensitive place (`.env` files");
     for mode in ["ask", "auto"] {
         set_mode(&user, &agent, mode);
@@ -561,6 +569,20 @@ fn the_enforced_text_matches_the_gate_s_rules() {
     assert_eq!(judged(&user), 1, "a base call reached the judge");
     no_escalation(&user);
 
+    claim(
+        "In Full nothing is held: every call to judge and every base call passes at once, and is recorded; what is refused stays refused.",
+    );
+    set_mode(&user, &agent, "full");
+    let held = pending(&user);
+    done(mcp.call("run", json!({"line": "touch full.txt"})));
+    assert!(workspace.join("full.txt").exists());
+    done(mcp.call("fs_read", json!({"path": ".env"})));
+    assert_eq!(pending(&user), held, "Full held a call");
+    assert_eq!(judged(&user), 1, "Full reached the judge");
+    claim(
+        "In Full, code you run (an interpreter's inline code, a script you wrote) acts with the user's rights and the gate does not see what it touches: only a sandbox would close that",
+    );
+
     claim("What is refused is a call that cannot be made as it is: a command with shell syntax");
     let refused = mcp.call("run", json!({"line": "ls | cat"}));
     assert!(
@@ -588,6 +610,54 @@ fn the_enforced_text_matches_the_gate_s_rules() {
         daemon.error && daemon.text.starts_with("refused: "),
         "{}",
         daemon.text
+    );
+    claim(
+        "a login's place (`~/.ssh`, `~/.config/gh`, `~/.git-credentials`, an agent's login, `/etc/shadow`…), read or written",
+    );
+    let key = user.path("home/.ssh/id_ed25519");
+    let login = mcp.call("run", json!({"line": format!("cat {}", key.display())}));
+    assert!(
+        login.error && login.text.starts_with("refused: "),
+        "{}",
+        login.text
+    );
+    claim("a write in or above Flottille's own folders");
+    claim("a write of a startup file");
+    let startup = mcp.call(
+        "fs_write",
+        json!({"path": user.path("home/.profile"), "content": "x\n"}),
+    );
+    assert!(
+        startup.error && startup.text.starts_with("refused: "),
+        "{}",
+        startup.text
+    );
+    claim("any write through a process's folder in `/proc`");
+    let through = mcp.call(
+        "fs_write",
+        json!({
+            "path": format!("/proc/self/cwd{}", user.path("home/.profile").display()),
+            "content": "x\n",
+        }),
+    );
+    assert!(
+        through.error && through.text.starts_with("refused: "),
+        "{}",
+        through.text
+    );
+    claim("a git setting that runs a program later");
+    let later = mcp.call("run", json!({"line": "git config core.hooksPath hooks"}));
+    assert!(
+        later.error && later.text.starts_with("refused: "),
+        "{}",
+        later.text
+    );
+    claim("a launcher that runs a program outside Flottille's tree, later or on a host");
+    let launcher = mcp.call("run", json!({"line": "setsid -f touch away.txt"}));
+    assert!(
+        launcher.error && launcher.text.starts_with("refused: "),
+        "{}",
+        launcher.text
     );
     assert_eq!(judged(&user), 1, "a refused call reached the judge");
 

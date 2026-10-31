@@ -287,7 +287,7 @@ activity.
 | `tool` | The tool's name, without the `mcp__flottille__` prefix. |
 | `call_key` | The call's key (`claudecode/toolUseId`), `null` when the call had none. |
 | `arguments` | The arguments, every text cut at 500 characters and masked. |
-| `gate` | The gate's verdict on the call: `allow` (harmless, or allowed by the user), `judged` (to judge, allowed by the judge in Auto), `deny` or `ask`; `null` for a call refused before it, because the agent has no such tool. |
+| `gate` | The gate's verdict on the call: `allow` (harmless, or allowed by the user), `judged` (to judge, allowed by the judge in Auto), `full` (to judge or base, allowed by Full mode), `deny` or `ask`; `null` for a call refused before it, because the agent has no such tool. |
 | `judgement` | The judge's verdict when one was asked, `{"by", "verdict", "reason"}` (`docs/protocol.md`, `approval.list`); else `null`. |
 | `outcome` | `ok`, `refused`, `failed`, or `held` for a call the gate held (`docs/tools.md`, "The gate"). |
 | `duration_ms` | How long it took. |
@@ -412,12 +412,12 @@ reported. Its process and its runs are stopped; what was queued for it is supers
 
 #### `agent.gate_mode_changed`
 
-The user put the agent's session in Ask or Auto (`agent.mode`, `docs/protocol.md`).
+The user put the agent's session in Ask, Auto or Full (`agent.mode`, `docs/protocol.md`).
 
 | Field | |
 |---|---|
 | `agent` | |
-| `mode` | `ask` or `auto`. |
+| `mode` | `ask`, `auto` or `full`. |
 
 #### `agent.resumed`
 

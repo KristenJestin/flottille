@@ -619,7 +619,65 @@ says who answers a call to judge (`docs/design.md` §7.1).
    - a login printed: `gh auth token`, `glab auth token`, `auth status` with `--show-token` (`-t`);
    - `flottille` itself: it drives the daemon, and agents act only through their tools. A copy
      of it under another name, or any program that speaks to the socket, is refused by the
-     daemon itself (`docs/protocol.md`, "Transport").
+     daemon itself (`docs/protocol.md`, "Transport");
+   - a login's place, read or written, by a file tool or as any path a line names: `.ssh`,
+     `.gnupg`, `.aws`, `.azure`, `.config/gcloud`, `.kube`, `.docker/config.json`, `.config/gh`,
+     `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, `.local/share/keyrings`,
+     `Library/Keychains` and the agents' logins (`.claude`, `.claude.json`, `.codex`,
+     `.local/share/opencode`) wherever they sit along the path, `/etc/shadow`, `/etc/sudoers`,
+     `/etc/sudoers.d`. Inside the place only what sits below it counts; a path outside is checked
+     as written and where it leads, and without a leading `/proc/<process>/root` or `cwd`;
+   - a program that reads or prints a login: `gh`/`glab auth token`, `aws configure get` or
+     `export-credentials`, `aws ecr get-login-password`, `aws sts get-session-token`,
+     `kubectl config view --raw`, `kubectl create token`, `gcloud auth print-*token`,
+     `gcloud config config-helper`, `az account get-access-token`, `git credential`, any
+     `git-credential-*` or `docker-credential-*`, and password managers and keyrings whole:
+     `pass`, `gopass`, `op`, `bw`, `rbw`, `secret-tool`;
+   - any write through a process's folder in `/proc` that leads elsewhere (`cwd`, `root`, `fd`,
+     `exe`, `map_files`, under any name: `/dev/fd/3`), by a file tool or a line naming it;
+   - a write of Flottille's own program (the daemon's executable, as named and where it leads);
+   - a write in Flottille's own folders (data, configuration, state, runtime; a project's
+     workspaces that sit in its data folder are the project's), or of a folder above one
+     (`mv ~/.config ~/c.bak`, `rm -r` of it, `fs_write` over it): by a file tool that writes, or
+     by a run that is not known to only read and names it as a word (the folder a run starts in
+     may hold Flottille's: a project in the home folder). What deletes the untracked files
+     without naming where counts the folder it takes them from: the folder it runs in (after its
+     `-C`s) for a `git clean`, the top of its worktree for a `git stash` with `-u`,
+     `--include-untracked`, `-a` or `--all`, and for a `git clean` of a pathspec from the top
+     (`:/`, `:(top)`, `:(top,…)`). That top is the `--work-tree` it names, else found on the disk
+     as git finds it: the nearest folder holding a `.git`, up from the one it runs in, inside the
+     place or not (a home folder that is a repository);
+   - a write of a startup file, or of a folder above one, the same ways: `~/.bashrc`,
+     `~/.bash_profile`, `~/.bash_login`, `~/.profile`, `~/.zshrc`, `~/.zshenv`, `~/.zprofile`,
+     `~/.zlogin`, `~/.config/fish`, `~/.gitconfig`, `~/.config/git`, `~/.config/autostart`,
+     `~/.config/systemd/user`, `~/.config/environment.d`, `~/.config/hypr`, `~/.config/sway`,
+     `~/.config/niri`, and the same under `XDG_CONFIG_HOME`; `~/.local/share/systemd/user` and
+     the same under `XDG_DATA_HOME`; `~/.local/bin` and `~/bin`: what they hold runs at the
+     user's next login or command, outside the gate. An option's value or a word of `tr`,
+     `printf`, `expr`, `seq` naming a folder above Flottille's own is base instead (`awk -F/`,
+     `tr / _`);
+   - a git setting that runs a program later: `git config --global` or `--system`, and a write
+     (not a removal) of a key that runs a program or brings in a file: `core.hooksPath`,
+     `core.fsmonitor`, `core.sshCommand`, `core.editor`, `core.pager`, `core.askPass`,
+     `core.gitProxy`, and every key of git's settings that run programs below but `remote.*`,
+     `url.*`, `push.*` (any `alias.*`, `include.path`, `includeIf.*`, `credential.*`, drivers,
+     filters, `protocol.allow`…); a program named for a remote: `--upload-pack`,
+     `--receive-pack`, `--exec` of `clone`, `fetch`, `pull`, `push`, `send-pack`, `ls-remote`,
+     `archive`, `git clone -u`, `git -c core.sshCommand`;
+   - a launcher, which starts what it runs outside the daemon's tree of processes, later or on a
+     host: `systemd-run`, `tmux`, `screen`, `zellij`, `dtach`, `abduco`, `setsid`, `at`,
+     `batch`, `crontab`, `dbus-send`, `gdbus`, `busctl`, `ssh`, `scp`, `sftp`, `loginctl`,
+     `hyprctl`, `swaymsg`, `i3-msg`; `systemctl` but its reads (`status`, `show`, `cat`,
+     `help`, `list-*`, `is-*`, `show-environment`, `get-default`, `whoami`); `niri msg`,
+     `kitty @`, `kitten @`, `wezterm cli`; `rsync` with a host's path (`host:path`) or `-e`,
+     `--rsh`, `--rsync-path`. As a line's program, a wrapper's (`nice`, `ionice`, `chrt`,
+     `taskset`, `chronic`, `env`, `timeout`, `stdbuf`, `nohup`, `xargs`…), or what a runner runs
+     (the first word after `uv`, `poetry`, `pipenv`, `pdm`, `hatch`, `rye`, `pixi`, `conda`,
+     `mamba` `run`; `npm`, `pnpm`, `yarn`, `bundle`, `mise` `exec` or `x`; `bun x`; after `--`
+     of `cargo run`). Anywhere else its name is a plain word;
+   - a container's bind mount: the source of each `-v`, `--volume`, `--mount` (`source=`,
+     `src=`) of `docker`, `podman` or `nerdctl` `run` or `create` that names a path is a path the
+     line writes, refused as above. A named volume, and a container itself, are not.
 2. **Base**: a card for the user in every mode, never the judge's, with a strong warning.
    - the project's `never` list: an entry matches a line's words from any position (its first
      word is a program, in any folder), or a task by its name, and then every task and line of
@@ -633,21 +691,12 @@ says who answers a call to judge (`docs/design.md` §7.1).
      `.config/gcloud`, `.kube`, `.docker/config.json`, `.config/gh`, `.netrc`, `.npmrc`,
      `.pypirc`, `.git-credentials`, `.local/share/keyrings`, `Library/Keychains` and the agents'
      logins (`.claude`, `.claude.json`, `.codex`, `.local/share/opencode`) wherever they sit along
-     the path, `/etc/shadow`, `/etc/sudoers`, `/etc/sudoers.d`, and Flottille's own folders (data,
-     configuration, state, runtime). Inside the place only what sits below it counts. A path
+     the path, `/etc/shadow`, `/etc/sudoers`, `/etc/sudoers.d` (all refused above, read or
+     written), and Flottille's own folders (data, configuration, state, runtime), which are
+     base to read and refused to write. Inside the place only what sits below it counts. A path
      outside is checked as written and where it leads (a link anyone made, a configuration
      folder that is a link, a `..` after a link), against Flottille's folders as named and
      resolved;
-   - a write, a move or a removal of a folder above Flottille's own (`mv ~/.config ~/c.bak`, `rm
-     -r` of it, `fs_write` over it), which would take its configuration or data away: by a file
-     tool that writes, or by a run that is not known to only read and names it as a word (the
-     folder a run starts in may hold Flottille's: a project in the home folder). What deletes the
-     untracked files without naming where counts the folder it takes them from: the folder it
-     runs in (after its `-C`s) for a `git clean`, the top of its worktree for a `git stash` with
-     `-u`, `--include-untracked`, `-a` or `--all`, and for a `git clean` of a pathspec from the
-     top (`:/`, `:(top)`, `:(top,…)`). That top is the `--work-tree` it names, else found on the
-     disk as git finds it: the nearest folder holding a `.git`, up from the one it runs in,
-     inside the place or not (a home folder that is a repository);
    - a path in `/proc` through what of any process leads elsewhere on the disk: its `root`,
      `cwd`, `fd`, `exe` or `map_files` (`/proc/self/root/…`, `/proc/<pid>/cwd/…`), under any
      name it is reached by (`/dev/fd/3`, a link to `/proc/self/cwd`; `/dev/stdin` for a file
@@ -662,9 +711,8 @@ says who answers a call to judge (`docs/design.md` §7.1).
      target`);
    - a push forced or that deletes: `--force`, `-f`, `--force-with-lease`, `--force-if-includes`,
      `--mirror`, `--delete`, `-d`, `--prune` (or any start of their names, as git takes them:
-     `--forc`, `--mirr`), a `+refspec` or a `:branch`; and a push naming the program that
-     receives it (`--receive-pack`, `--exec`), which runs on this machine for a remote that is a
-     path;
+     `--forc`, `--mirr`), a `+refspec` or a `:branch` (a push naming the program that receives
+     it, `--receive-pack` or `--exec`, is refused);
    - git settings that run programs, lead pushes elsewhere or bring in other files: a key of
      `core.*`, `alias.*`, `remote.*`, `url.*`, `push.*`, `credential.*` or `include*`, or a key
      whose value git runs (`diff.external`, `diff.*.command` and `textconv`, `difftool.*`,
@@ -674,8 +722,9 @@ says who answers a call to judge (`docs/design.md` §7.1).
      `interactive.diffFilter`, `submodule.*.update`, `uploadpack.packObjectsHook`,
      `imap.tunnel`, `tar.*.command`, `web.browser`, `trailer.*.command` and `cmd`, and
      `protocol.allow` and `protocol.*.allow`, which can let `ext::` URLs run programs) given to
-     `git -c` or `--config-env`, or written by `git config` in any write form (`--edit`
-     included); `git remote add`, `rename`, `remove`, `set-url` and `set-branches`; git's
+     `git -c` or `--config-env` (but `core.sshCommand`, refused), or written by `git config` in
+     a write form that is not refused (`--edit`, a removal, a key of `remote.*`, `url.*`,
+     `push.*`, another key of `core.*`); `git remote add`, `rename`, `remove`, `set-url` and `set-branches`; git's
      configuration set or cleared through the environment (`GIT_CONFIG*=…`, `env -i`, `env -u
      GIT_CONFIG…`), which would lift the wall on pushes and hooks; and a program git runs named
      through the environment (`GIT_EXTERNAL_DIFF`, `GIT_PAGER`, `GIT_EDITOR`,
@@ -787,6 +836,10 @@ what follows each letter of short options, whose value may be attached as in `-D
 an `allow` performs it at once, recorded as an `agent.tool_served` whose `gate` is `judged` and
 whose `judgement` says who judged and why; an `ask`, a failure or a silence makes the request
 below, the judgement in it. A base call, and every call in Ask, makes the request directly.
+**In Full**, a call to judge and a base call are performed at once, with no request and no judge,
+recorded as an `agent.tool_served` whose `gate` is `full`; a workspace removed in Full is removed
+with what it would lose, as the user's answer to discard would. What the gate refuses stays
+refused (`docs/design.md` §7.1).
 
 **A held call** is written as a request (`flottille approvals`, `docs/protocol.md`) and
 answered at once, not as an error; a root is answered:

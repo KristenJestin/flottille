@@ -17,6 +17,8 @@ pub const USER: &str = "you";
 const LAUNCHED: &str = " started this session for the user with this message:";
 /// Who allowed a call the Auto judge let through, as a card says it.
 pub const JUDGE: &str = "the judge";
+/// Who allowed a call Full mode let through, as a card says it.
+pub const FULL: &str = "Full mode";
 
 /// What one row of the conversation shows.
 #[derive(Clone, Debug, PartialEq)]
@@ -112,7 +114,8 @@ pub struct CommandCard {
     /// The lines of its output the answer held, as the program wrote them (masked): colours
     /// included, for the card to draw or strip.
     pub lines: Vec<String>,
-    /// Who allowed the call: the user when it came back through an approval, or the Auto judge.
+    /// Who allowed the call: the user when it came back through an approval, the Auto judge, or
+    /// Full mode.
     pub allowed_by: Option<String>,
 }
 
@@ -141,7 +144,7 @@ pub struct Call {
     pub state: CallState,
     pub since: u64,
     pub until: Option<u64>,
-    /// Who allowed it when it was not harmless: the Auto judge.
+    /// Who allowed it when it was not harmless: the Auto judge, or Full mode.
     pub allowed_by: Option<String>,
 }
 
@@ -228,8 +231,8 @@ pub struct Conversation {
     /// Requests asked by another agent, each with when it was asked, the soonest first: each
     /// gets its row before the first event that came after it.
     pending_approvals: VecDeque<(u64, u64)>,
-    /// The calls the Auto judge let through, by their id.
-    judged: HashSet<String>,
+    /// The calls the Auto judge or Full mode let through, by their id: who did.
+    judged: HashMap<String, &'static str>,
     /// The text of each `session_send` call, by its id, then, once held, by its request.
     sends: HashMap<String, String>,
     held_sends: HashMap<u64, String>,
@@ -262,7 +265,7 @@ impl Conversation {
             running: HashSet::new(),
             approvals: HashSet::new(),
             pending_approvals: VecDeque::new(),
-            judged: HashSet::new(),
+            judged: HashMap::new(),
             sends: HashMap::new(),
             held_sends: HashMap::new(),
             ended_lines: HashSet::new(),
@@ -456,7 +459,7 @@ impl Conversation {
                     state: call_state(data["status"].as_str()),
                     since: event.at,
                     until: None,
-                    allowed_by: self.judged.contains(&text("id")).then(|| JUDGE.into()),
+                    allowed_by: self.judged.get(&text("id")).map(|by| (*by).into()),
                 };
                 let call = Call {
                     until: (call.state != CallState::Running).then_some(event.at),
@@ -513,13 +516,15 @@ impl Conversation {
                 changes
             }
             "agent.tool_served" => {
-                let Some(key) = data["call_key"]
-                    .as_str()
-                    .filter(|_| data["gate"] == "judged")
-                else {
+                let by = match data["gate"].as_str() {
+                    Some("judged") => JUDGE,
+                    Some("full") => FULL,
+                    _ => return Vec::new(),
+                };
+                let Some(key) = data["call_key"].as_str() else {
                     return Vec::new();
                 };
-                self.judged.insert(key.to_owned());
+                self.judged.insert(key.to_owned(), by);
                 // The call is shown already: its step says who let it through.
                 let Some(&at) = self.calls.get(key) else {
                     return Vec::new();
@@ -529,7 +534,7 @@ impl Conversation {
                 };
                 match calls.iter_mut().find(|call| call.id == key) {
                     Some(call) => {
-                        call.allowed_by = Some(JUDGE.into());
+                        call.allowed_by = Some(by.into());
                         vec![Change::Changed(at)]
                     }
                     None => Vec::new(),
@@ -692,8 +697,8 @@ impl Conversation {
             let mut texts = Vec::new();
             strings(&data["raw_output"], &mut texts);
             if let Some(mut card) = texts.into_iter().find_map(command_card) {
-                if self.judged.contains(&call.id) {
-                    card.allowed_by = Some(JUDGE.into());
+                if let Some(by) = self.judged.get(&call.id) {
+                    card.allowed_by = Some((*by).into());
                 }
                 changes.extend(self.push(Block::Command(card)));
             }
@@ -2227,6 +2232,27 @@ mod tests {
         assert_eq!(allowed, [Some(JUDGE), Some(JUDGE), None]);
         // The verdict draws its row again: it came after the call was shown.
         assert!(changes.contains(&Change::Changed(0)), "{changes:?}");
+    }
+
+    #[test]
+    fn every_step_full_mode_allowed_says_it() {
+        let mut c = root();
+        for (seq, id, tool, gate) in [
+            (1, "r", "run", "full"),
+            (4, "t", "tickets", "judged"),
+            (7, "f", "fs_read", "allow"),
+        ] {
+            for step in judged_step(seq, id, tool, gate) {
+                c.apply(&step);
+            }
+        }
+
+        let Block::Steps { calls } = &c.blocks()[0] else {
+            panic!("{:?}", c.blocks())
+        };
+        let allowed: Vec<Option<&str>> = calls.iter().map(|c| c.allowed_by.as_deref()).collect();
+        assert_eq!(allowed, [Some(FULL), Some(JUDGE), None]);
+        assert_eq!(FULL, "Full mode");
     }
 
     #[test]

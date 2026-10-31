@@ -277,7 +277,7 @@ pub enum Command {
     Interrupt {
         session: String,
     },
-    /// Puts the session in Ask or Auto (`ask`, `auto`): the user's alone to change.
+    /// Puts the session in Ask, Auto or Full (`ask`, `auto`, `full`): the user's alone to change.
     SetMode {
         session: String,
         mode: String,

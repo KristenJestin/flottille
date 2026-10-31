@@ -195,7 +195,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 Failure::new(
                     "invalid-params",
                     format!(
-                        "there is no mode {}: the modes are ask and auto",
+                        "there is no mode {}: the modes are ask, auto and full",
                         asked.mode
                     ),
                 )
@@ -493,7 +493,8 @@ pub struct New {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
-    /// Ask or Auto: a child's is its parent's; `None` for a new root, which starts in Auto.
+    /// Ask or Auto, never Full: a child's is its parent's; `None` for a new root, which starts in
+    /// Auto.
     pub gate_mode: Option<GateMode>,
     /// The agent that starts this root for the user; `None` for a child or the user's own root.
     pub launched_by: Option<String>,

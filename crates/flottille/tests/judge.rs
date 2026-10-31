@@ -716,7 +716,7 @@ fn base_in_auto(user: &User, mcp: &Mcp, calls: &[(&str, Value)]) {
 }
 
 #[test]
-fn a_write_into_flottille_s_config_through_proc_or_a_link_is_base_in_auto() {
+fn a_write_into_flottille_s_config_through_proc_or_a_link_is_refused_in_auto() {
     let user = User::with_fake_agent().with_allowing_judge();
     // `XDG_CONFIG_HOME` is a link: Flottille names its folder through it.
     std::fs::rename(user.path("config"), user.path("real-config")).unwrap();
@@ -733,26 +733,35 @@ fn a_write_into_flottille_s_config_through_proc_or_a_link_is_base_in_auto() {
         )
     };
 
-    base_in_auto(
-        &user,
-        &mcp,
-        &[
-            write(format!("/proc/self/root{}", judge.display())),
-            write(format!("/proc/thread-self/root{}", judge.display())),
-            write(format!("/proc/1/root{}", judge.display())),
-            write("/proc/self/cwd/judge.md".into()),
-            write(
-                user.path("real-config/flottille/judge.md")
-                    .display()
-                    .to_string(),
-            ),
-            write(user.path("elsewhere/link/judge.md").display().to_string()),
-            (
-                "fs_edit",
-                json!({"path": user.path("elsewhere/link/providers.toml"), "edits": [{"old": "opencode", "new": "claude"}]}),
-            ),
-        ],
-    );
+    // Writing through a process's folder in /proc is refused: it leads anywhere.
+    let (tool, args) = write("/proc/self/cwd/judge.md".into());
+    let answer = mcp.call(tool, args);
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains("/proc/self/cwd"), "{}", answer.text);
+    for (tool, args) in [
+        write(format!("/proc/self/root{}", judge.display())),
+        write(format!("/proc/thread-self/root{}", judge.display())),
+        write(format!("/proc/1/root{}", judge.display())),
+        write(
+            user.path("real-config/flottille/judge.md")
+                .display()
+                .to_string(),
+        ),
+        write(user.path("elsewhere/link/judge.md").display().to_string()),
+        (
+            "fs_edit",
+            json!({"path": user.path("elsewhere/link/providers.toml"), "edits": [{"old": "opencode", "new": "claude"}]}),
+        ),
+    ] {
+        let answer = mcp.call(tool, args.clone());
+        assert!(answer.error, "{args}: {}", answer.text);
+        assert!(
+            answer.text.contains("Flottille's own folders"),
+            "{args}: {}",
+            answer.text
+        );
+    }
+    assert!(judge_prompts(&user).is_empty(), "the judge was asked");
     assert!(!judge.exists());
 }
 
@@ -761,7 +770,7 @@ fn line(text: &str) -> (&'static str, Value) {
 }
 
 #[test]
-fn a_git_setting_whose_value_git_runs_is_base() {
+fn a_git_setting_whose_value_git_runs_is_base_and_refused_to_write() {
     let user = User::with_fake_agent().with_allowing_judge();
     let (_, mcp, _) = session(&user, false);
 
@@ -771,27 +780,44 @@ fn a_git_setting_whose_value_git_runs_is_base() {
         &[
             line("git -c diff.external=./x diff"),
             line("git -c pager.log=./x log"),
-            line("git config sequence.editor ./x"),
-            line("git config filter.x.smudge ./x"),
             line("git --config-env gpg.program=X log --show-signature"),
             line("env GIT_EXTERNAL_DIFF=./x git diff"),
         ],
     );
+    // Written, git runs it later, as the user, outside the gate.
+    for (tool, args) in [
+        line("git config sequence.editor ./x"),
+        line("git config filter.x.smudge ./x"),
+    ] {
+        let answer = mcp.call(tool, args.clone());
+        assert!(answer.error, "{args}: {}", answer.text);
+        assert!(
+            answer.text.starts_with("refused: "),
+            "{args}: {}",
+            answer.text
+        );
+    }
+    assert!(judge_prompts(&user).is_empty(), "the judge was asked");
 }
 
 #[test]
-fn a_push_with_a_receive_pack_or_exec_is_base() {
+fn a_push_with_a_receive_pack_or_exec_is_refused() {
     let user = User::with_fake_agent().with_allowing_judge();
     let (_, mcp, _) = session(&user, false);
 
-    base_in_auto(
-        &user,
-        &mcp,
-        &[
-            line("git push --receive-pack=./x origin HEAD"),
-            line("git push --exec ./x origin HEAD"),
-        ],
-    );
+    for (tool, args) in [
+        line("git push --receive-pack=./x origin HEAD"),
+        line("git push --exec ./x origin HEAD"),
+    ] {
+        let answer = mcp.call(tool, args.clone());
+        assert!(answer.error, "{args}: {}", answer.text);
+        assert!(
+            answer.text.starts_with("refused: "),
+            "{args}: {}",
+            answer.text
+        );
+    }
+    assert!(judge_prompts(&user).is_empty(), "the judge was asked");
 }
 
 #[test]
@@ -1363,9 +1389,10 @@ fn a_folder_swapped_for_a_link_to_flottille_s_folder_after_the_approval_is_refus
         });
         mcp.call("fs_write", write(&folder))
     });
+    // Checked again where it now leads, the path is refused: Flottille's own folder.
     assert!(swapped.error, "{}", swapped.text);
     assert!(
-        swapped.text.contains("changed since it was allowed"),
+        swapped.text.contains("Flottille's own folders"),
         "{}",
         swapped.text
     );
@@ -1387,7 +1414,7 @@ fn a_folder_swapped_for_a_link_to_flottille_s_folder_after_the_approval_is_refus
     eventually("the answer", || store().delivery(&id).unwrap().is_some());
     let text = store().delivery(&id).unwrap().unwrap().body;
     assert!(!text.contains("and Flottille has now done it"), "{text}");
-    assert!(text.contains("changed since"), "{text}");
+    assert!(text.contains("Flottille's own folders"), "{text}");
     assert!(!judge.exists());
 }
 

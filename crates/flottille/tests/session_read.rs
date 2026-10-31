@@ -352,6 +352,28 @@ fn in_auto_the_read_is_judged() {
 }
 
 #[test]
+fn in_full_the_read_passes_without_a_request() {
+    let user = user();
+    project(&user, "app");
+    let (reader, mcp) = root(&user, "app", "lead the work");
+    let (session, _) = root(&user, "app", "M1");
+    user.call("agent.mode", json!({"agent": reader, "mode": "full"}))
+        .unwrap();
+    let judged = judge_prompts(&user);
+
+    let page = ok(mcp.call("session_read", json!({"session": session})));
+
+    assert_eq!(messages(&page), ["M1", "R1"], "{page}");
+    assert_eq!(judge_prompts(&user), judged, "the judge was asked");
+    let served = store(&user)
+        .last_agent_events(&reader, "agent.tool_served", 1)
+        .unwrap()
+        .remove(0);
+    assert_eq!(served.data["gate"], "full", "{}", served.data);
+    assert!(no_request(&user));
+}
+
+#[test]
 fn in_ask_the_read_is_a_card_that_names_the_session_and_the_page() {
     let user = user();
     project(&user, "app");

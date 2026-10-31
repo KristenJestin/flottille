@@ -2257,8 +2257,9 @@ fn the_mode_is_a_compact_ask_auto_control_with_a_warning_icon_when_auto_has_no_j
             "an icon, not a sentence"
         );
         let control = window.find("reply-mode").bounds();
+        // Three short words, Ask | Auto | Full.
         assert!(
-            control.size.width < px(120.),
+            control.size.width < px(170.),
             "a compact control: {control:?}"
         );
     });
@@ -2293,6 +2294,54 @@ fn the_mode_is_a_compact_ask_auto_control_with_a_warning_icon_when_auto_has_no_j
     until(&shell, cx, "the control follows the daemon", |cx| {
         mode_shown(&shell, cx).0.as_deref() == Some("auto")
     });
+}
+
+#[gpui_kit::test]
+fn the_composer_shows_full_in_the_alarm_colour(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, _mcp, shell, cx) = lead_in_main(&user, cx);
+    until(&shell, cx, "a new session shows Auto", |cx| {
+        mode_shown(&shell, cx).0.as_deref() == Some("auto")
+    });
+    settle(cx);
+    cx.update(|window, _| {
+        assert_eq!(window.find("reply-mode-full").selected(), Some(false));
+        assert_eq!(window.find("reply-mode-full").label(), Some("Full"));
+    });
+    let alarm = |cx: &mut VisualTestContext| {
+        let page = session_page(&shell, cx);
+        page.read_with(cx, |page, cx| {
+            page.reply().unwrap().read(cx).mode.read(cx).alarm()
+        })
+    };
+    assert!(!alarm(cx), "Auto is not drawn in the alarm colour");
+
+    // The user chooses Full: the session is in Full, drawn in the alarm colour.
+    cx.update(|window, cx| window.click("reply-mode-full", cx));
+    eventually("the daemon puts the session in Full", || {
+        user.call("agent.show", json!({"agent": lead})).unwrap()["agent"]["gate_mode"] == "full"
+    });
+    until(&shell, cx, "the control shows Full", |cx| {
+        mode_shown(&shell, cx) == (Some("full".into()), false)
+    });
+    settle(cx);
+    cx.update(|window, _| {
+        assert_eq!(window.find("reply-mode-full").selected(), Some(true));
+        let control = window.find("reply-mode").bounds();
+        assert!(
+            control.size.width < px(170.),
+            "a compact control: {control:?}"
+        );
+    });
+    assert!(alarm(cx), "Full is drawn in the alarm colour");
+
+    // Back to Ask, from the command line: the alarm goes.
+    user.call("agent.mode", json!({"agent": lead, "mode": "ask"}))
+        .unwrap();
+    until(&shell, cx, "the control follows the daemon", |cx| {
+        mode_shown(&shell, cx).0.as_deref() == Some("ask")
+    });
+    assert!(!alarm(cx));
 }
 
 #[gpui_kit::test]

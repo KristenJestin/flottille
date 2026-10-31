@@ -26,6 +26,48 @@ const GIT_ENV: [(&str, &str); 6] = [
     ("GIT_COMMITTER_EMAIL", "test@example.invalid"),
 ];
 
+/// What a test names that would reach the machine outside the test's folders if it ran: faked by
+/// `User::with_fake_launchers`.
+const LAUNCHERS: [&str; 37] = [
+    "systemd-run",
+    "systemctl",
+    "loginctl",
+    "tmux",
+    "screen",
+    "zellij",
+    "dtach",
+    "abduco",
+    "setsid",
+    "at",
+    "batch",
+    "crontab",
+    "dbus-send",
+    "gdbus",
+    "busctl",
+    "ssh",
+    "scp",
+    "sftp",
+    "rsync",
+    "docker",
+    "podman",
+    "nerdctl",
+    "hyprctl",
+    "swaymsg",
+    "i3-msg",
+    "niri",
+    "kitty",
+    "wezterm",
+    "aws",
+    "kubectl",
+    "gcloud",
+    "secret-tool",
+    "pass",
+    "op",
+    "bw",
+    "uv",
+    "ionice",
+];
+
 /// The variables and folders the providers take a sign-in from.
 const SIGN_INS: [&str; 7] = [
     "ANTHROPIC_API_KEY",
@@ -314,6 +356,55 @@ impl User {
             assert_eq!(found, Some(bin.join(name)), "{name} is not the fake one");
         }
         self.with_env("PATH", &path)
+    }
+
+    /// This user with a fake of every program that starts a process outside the daemon's tree,
+    /// later or on a host, or reads a login, first in its `PATH`: each writes a line in a marker
+    /// file and exits 1. A test that sends one of them to the gate checks `launches` is empty
+    /// afterwards: a gate that let the call run would start a fake, never the machine's own user
+    /// manager, tmux server, container engine or desktop.
+    pub fn with_fake_launchers(self) -> User {
+        let bin = self.path("launcher-bin");
+        std::fs::create_dir(&bin).unwrap();
+        let marker = self.path("launcher-ran");
+        for name in LAUNCHERS {
+            let program = bin.join(name);
+            std::fs::write(
+                &program,
+                format!(
+                    "#!/bin/sh\necho \"{name} $*\" >> '{}'\nexit 1\n",
+                    marker.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            self.env
+                .iter()
+                .rev()
+                .find(|(name, _)| name == "PATH")
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default())
+        );
+        // Looked up, never run: the real programs must be unreachable by name.
+        for name in LAUNCHERS {
+            let found = path
+                .split(':')
+                .map(|folder| Path::new(folder).join(name))
+                .find(|candidate| candidate.is_file());
+            assert_eq!(found, Some(bin.join(name)), "{name} is not the fake one");
+        }
+        self.with_env("PATH", &path)
+    }
+
+    /// What the fake launchers ran, the first first. Empty when the gate refused every call.
+    pub fn launches(&self) -> Vec<String> {
+        std::fs::read_to_string(self.path("launcher-ran"))
+            .map(|text| text.lines().map(str::to_owned).collect())
+            .unwrap_or_default()
     }
 
     /// The calls the fake escalating programs received, the first first: what ran of `sudo`,
@@ -652,7 +743,11 @@ fn command_for(program: &Path, dir: &Path, env: &[(String, String)], args: &[&st
         .env("XDG_CONFIG_HOME", dir.join("config"))
         .env("XDG_DATA_HOME", dir.join("data"))
         // Codex's machine settings are the test's own, not the machine's `/etc/codex`.
-        .env("FLOTTILLE_CODEX_MACHINE_SETTINGS", dir.join("etc-codex"));
+        .env("FLOTTILLE_CODEX_MACHINE_SETTINGS", dir.join("etc-codex"))
+        // No way to the machine's own session: its bus, its tmux server.
+        .env("TMUX_TMPDIR", dir.join("runtime"))
+        .env_remove("DBUS_SESSION_BUS_ADDRESS")
+        .env_remove("TMUX");
     // No sign-in of the machine: a provider is signed in only where a test says so, and the
     // daemon picks no Auto judge on the strength of the developer's own.
     for name in SIGN_INS {

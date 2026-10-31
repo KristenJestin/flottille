@@ -74,10 +74,11 @@ pub enum AgentAction {
         json: bool,
     },
     /// Set a session's mode: in ask, every call to judge comes to you; in auto, the judge you
-    /// chose in Settings decides it (`docs/design.md` §7)
+    /// chose in Settings decides it; in full, nothing is asked: every call the gate would hold
+    /// passes, and what it refuses stays refused (`docs/design.md` §7)
     Mode {
         agent: String,
-        /// ask or auto
+        /// ask, auto or full
         mode: String,
         #[arg(long)]
         json: bool,

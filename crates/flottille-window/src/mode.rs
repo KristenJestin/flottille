@@ -1,6 +1,7 @@
-//! The session's mode in the composer's bar: a small Ask | Auto control, which only the user
-//! changes (`agent.mode`). In Auto without a judge chosen, calls to judge come to the user as in
-//! Ask: a warning icon beside the control says so in a tooltip and leads to Settings.
+//! The session's mode in the composer's bar: a small Ask | Auto | Full control, which only the
+//! user changes (`agent.mode`). In Auto without a judge chosen, calls to judge come to the user as
+//! in Ask: a warning icon beside the control says so in a tooltip and leads to Settings. Full, where
+//! nothing is asked, is drawn in the alarm colour so that it is never on by mistake.
 
 use flottille_ui::motion::PANEL;
 use flottille_ui::{Button, Icon, Segmented, enter, fade, palette, space};
@@ -18,11 +19,16 @@ use crate::shell::{Selection, Shell};
 pub const NO_JUDGE: &str =
     "Auto has no judge, so every call to judge comes to you, as in Ask. Choose one in Settings.";
 
+/// The modes, in the control's order.
+const MODES: [(&str, &str); 3] = [("ask", "Ask"), ("auto", "Auto"), ("full", "Full")];
+/// Full's place in [`MODES`].
+const FULL: usize = 2;
+
 pub struct ModeSwitch {
     shell: WeakEntity<Shell>,
     /// The root agent, whose mode its whole tree takes at its start.
     session: String,
-    /// `ask` or `auto`, as the tree last said it; `None` until it is read.
+    /// `ask`, `auto` or `full`, as the tree last said it; `None` until it is read.
     mode: Option<String>,
     /// A flip sent and not yet seen in the tree: what it asked for.
     pending: Option<String>,
@@ -51,6 +57,11 @@ impl ModeSwitch {
     /// What the daemon said when it refused the last change, shown beside the control.
     pub fn said(&self) -> Option<String> {
         self.refused.clone()
+    }
+
+    /// Full is shown: the control is drawn in the alarm colour.
+    pub fn alarm(&self) -> bool {
+        self.mode() == Some("full")
     }
 
     /// Auto is shown and no judge is chosen: the warning icon is there.
@@ -86,7 +97,7 @@ impl ModeSwitch {
         cx.notify();
     }
 
-    /// The user chose `wanted` (`ask` or `auto`) in the control.
+    /// The user chose `wanted` (`ask`, `auto` or `full`) in the control.
     pub fn choose(&mut self, wanted: &str, cx: &mut Context<Self>) {
         if self.pending.is_some() || self.mode.as_deref().is_none_or(|mode| mode == wanted) {
             return;
@@ -107,21 +118,20 @@ impl ModeSwitch {
 impl Render for ModeSwitch {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let auto = self.mode() == Some("auto");
-        let control = Segmented::new(
-            "reply-mode",
-            "Mode",
-            [("ask", "Ask"), ("auto", "Auto")],
-            usize::from(auto),
-        )
-        .disabled(self.mode.is_none() || self.pending.is_some())
-        .on_choose({
-            let this = cx.entity().downgrade();
-            move |index, _, cx| {
-                let wanted = ["ask", "auto"][index];
-                this.update(cx, |this, cx| this.choose(wanted, cx)).ok();
-            }
-        });
+        let chosen = MODES
+            .iter()
+            .position(|(mode, _)| self.mode() == Some(*mode))
+            .unwrap_or(0);
+        let control = Segmented::new("reply-mode", "Mode", MODES, chosen)
+            .alarm(FULL)
+            .disabled(self.mode.is_none() || self.pending.is_some())
+            .on_choose({
+                let this = cx.entity().downgrade();
+                move |index, _, cx| {
+                    let wanted = MODES[index].0;
+                    this.update(cx, |this, cx| this.choose(wanted, cx)).ok();
+                }
+            });
         // The warning comes and goes beside the control: its room opens and its icon fades in.
         let warn = fade(
             "reply-mode-warning-shown",

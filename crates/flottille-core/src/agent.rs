@@ -59,7 +59,8 @@ pub struct Agent {
     pub reopens: bool,
     /// Its agent takes images in a prompt, as it said when it last started; `None` before it did.
     pub images: Option<bool>,
-    /// Ask or Auto: what becomes of a call to judge (`docs/design.md` §7). Only the user sets it.
+    /// Ask, Auto or Full: what becomes of a call the gate holds (`docs/design.md` §7). Only the
+    /// user sets it.
     #[serde(default)]
     pub gate_mode: GateMode,
     /// The agent that started this root for the user (`agent_launch` with `root`); `None` for a
@@ -73,13 +74,16 @@ pub struct Agent {
 }
 
 /// A session's mode (`docs/design.md` §7): in Ask a call to judge comes to the user; in Auto the
-/// judge decides it. A new session starts in Auto, a child in its parent's mode.
+/// judge decides it; in Full every call the gate would hold passes, base ones too, and what the
+/// gate refuses stays refused. A new session starts in Auto, a child in its parent's mode, and no
+/// session ever starts in Full: only the user puts one in it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GateMode {
     Ask,
     #[default]
     Auto,
+    Full,
 }
 
 impl GateMode {
@@ -87,6 +91,7 @@ impl GateMode {
         match self {
             GateMode::Ask => "ask",
             GateMode::Auto => "auto",
+            GateMode::Full => "full",
         }
     }
 
@@ -94,6 +99,7 @@ impl GateMode {
         match text {
             "ask" => Some(GateMode::Ask),
             "auto" => Some(GateMode::Auto),
+            "full" => Some(GateMode::Full),
             _ => None,
         }
     }
