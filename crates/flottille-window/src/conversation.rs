@@ -2290,6 +2290,7 @@ mod tests {
             ended_at: (state != "running").then_some(4_500),
             last_line: tail.last().copied().unwrap_or_default().into(),
             tail: tail.iter().map(|l| (*l).to_owned()).collect(),
+            step: false,
         }
     }
 

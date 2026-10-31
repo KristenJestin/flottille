@@ -6,13 +6,15 @@
 
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui_kit::{
-    App, Context, Div, Element, ElementId, Entity, Global, InteractiveElement, IntoElement,
+    App, Context, Div, Element, ElementId, Entity, Global, Hsla, InteractiveElement, IntoElement,
     MouseButton, NavigationDirection, RenderOnce, Stateful, StatefulInteractiveElement,
     TestSupportExt, Window,
 };
 
+use crate::color::mix;
 use crate::motion::{HOVER, Motion, PANEL, PRESS, PRESSED};
 
 /// The mouse's back and forward buttons dismiss what `element` belongs to, as a click outside
@@ -182,6 +184,48 @@ pub fn fade(
         window.request_animation_frame();
     }
     motion.value(now)
+}
+
+/// The ink of a state (or any colour) that moves to `target` over `duration` when it changes:
+/// a step of a setup going from to do to running to done. `id` keeps the colour; one first drawn
+/// is simply there.
+pub fn tint(
+    id: impl Into<ElementId>,
+    target: Hsla,
+    duration: std::time::Duration,
+    window: &mut Window,
+    cx: &mut App,
+) -> Hsla {
+    let key = ElementId::NamedChild(Arc::new(id.into()), "tint".into());
+    let state = window.use_keyed_state(key, cx, move |_, _| Tint {
+        from: target,
+        to: target,
+        motion: Motion::settled(1.0),
+    });
+    let now = cx.background_executor().now();
+    let reduce = cx.reduce_motion();
+    let (color, running) = state.update(cx, |tint, _| {
+        if tint.to != target {
+            tint.from = mix(tint.from, tint.to, tint.motion.value(now));
+            tint.to = target;
+            tint.motion
+                .play(0.0, 1.0, Duration::ZERO, duration, now, reduce);
+        }
+        (
+            mix(tint.from, tint.to, tint.motion.value(now)),
+            tint.motion.is_running(now),
+        )
+    });
+    if running {
+        window.request_animation_frame();
+    }
+    color
+}
+
+struct Tint {
+    from: Hsla,
+    to: Hsla,
+    motion: Motion,
 }
 
 /// Moves a choice button toward `chosen` over [`PANEL`] and says how far it is now (0 to 1). A

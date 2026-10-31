@@ -63,6 +63,8 @@ pub struct SetupLine {
     /// Its place in the preparation: the same step keeps it while the list changes.
     pub position: u32,
     pub verb: String,
+    /// Whether it runs a command: only such a step has an output to open.
+    pub runs: bool,
     /// What it acts on, in the mono face.
     pub object: Option<String>,
     pub state: StepState,
@@ -87,6 +89,7 @@ impl SetupLine {
         SetupLine {
             position: step.position,
             verb: verb.to_owned(),
+            runs: matches!(step.action, Action::Run { .. }),
             object,
             state: step.state,
             started_at: step.started_at,

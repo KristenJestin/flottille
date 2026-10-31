@@ -29,6 +29,13 @@ write the file where it stands, its comments kept (`project.add_repository`,
 `project.remove_repository`), and are refused, nothing written, when the file would no longer be
 one the daemon can use.
 
+A click on a repository's row in the project's Settings opens its dialog: its base branches (a list
+in order of preference, moved, removed and added there), the other repositories it depends on (one
+switch each) and its forge. The remote is git's, shown read-only. Saving asks `project.set_settings`,
+which refuses, with its reason and nothing written, a base branch the remote does not have, a
+dependency on the repository itself or a cycle; the refusal stays in the dialog and a save is a
+toast. The workspaces created after a save take the new bases; the ones already made keep theirs.
+
 The window does the same from the sidebar's **+** beside "Projects" (or the empty window's "Add a
 project"): a folder, typed or picked, the repositories detected in it shown before anything is
 registered, then the new project's Settings, where it can be checked again or removed.

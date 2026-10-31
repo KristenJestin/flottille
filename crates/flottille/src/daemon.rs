@@ -143,6 +143,9 @@ pub struct Daemon {
     pub projects: Mutex<Projects>,
     /// The workspaces being prepared or removed: one at a time for each.
     pub preparing: Mutex<HashSet<i64>>,
+    /// What the setup steps running write, by workspace and step: they are read while they run
+    /// and kept in the store once they ended.
+    pub step_outputs: Mutex<HashMap<(i64, u32), Arc<workspaces::StepLive>>>,
     /// The agents that have a task, and so maybe a process.
     pub agents: Live,
     /// The agents' MCP server: its tokens, and what its tools keep (reads, runs).
@@ -302,6 +305,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         }),
         projects: Mutex::new(projects),
         preparing: Mutex::new(HashSet::new()),
+        step_outputs: Mutex::new(HashMap::new()),
         agents: Live::default(),
         mcp: mcp::Server::new(tools.local_addr()?.port()),
         notes: deliveries::Notes::default(),

@@ -241,13 +241,22 @@ replaces it. Nothing is asked of a forge.
 
 #### `project.set_settings`
 
-`{"name", "repositories": [{"path", "forge"}], "tracker"}`. Writes each listed repository's `forge`
-(removed when `null`; a repository left out is unchanged) and the project's `[tracker]` (removed
-when `null` or left out) in its file, where they stand, what is around them kept, and answers as
-`project.settings`. `refused`, with nothing written, when a path is not one of the project's, a
-forge or the tracker cannot be used (naming its key), or a forge is not where its repository's
+`{"name", "repositories": [{"path", "forge", "base", "depends_on"}], "tracker"}`. Writes each listed
+repository's `forge` (removed when `null`; a repository left out is unchanged), its `base` (the base
+branches in order of preference, one at least) and its `depends_on` (the paths of the repositories it
+depends on, `[]` for none) when they are given, and the project's `[tracker]` (removed when `null`
+or left out) in its file, where they stand, what is around them kept, and answers as
+`project.settings`. A `base` or a `depends_on` left out keeps the file's: a client that knows only
+the forge is not affected. A change of base is used by the workspaces created after it; the ones
+already made keep theirs. `refused`, with nothing written, when a path is not one of the project's,
+a forge or the tracker cannot be used (naming its key), a forge is not where its repository's
 remote leads (`api cannot be declared on GitHub acme/api: its remote origin: it leads to
-github.com/other/api, not to GitHub acme/api; nothing was saved`).
+github.com/other/api, not to GitHub acme/api; nothing was saved`), a base branch is not on the
+remote (`web: trunk is not a branch of the remote origin; nothing was saved`, read with `git
+ls-remote`; from the tracking refs last fetched when the remote cannot be read, from the repository's
+own branches when it has no such remote), or a dependency is on the repository itself, on one the
+project lacks or closes a cycle (`projects/app.toml: repositories[0].depends_on: cycle web -> api
+-> web; nothing was saved`).
 
 #### `project.ticket`
 
@@ -457,6 +466,26 @@ worktrees inside it left out), each `null` when its worktree is not there.
 `ready_at` is when its last preparation ended, the time of its newest `workspace.ready` event
 (`docs/events.md`), kept with the workspace; `null` while it is not `ready`. `workspace.list`
 leaves it out too.
+
+#### `workspace.step_output`
+
+`{"project", "name", "position"}`. One step of the workspace's preparation (`position` as in its
+`steps`) and what it wrote, for the window to open from the project page in the run drawer:
+
+```json
+{"project": "app", "workspace": "login", "position": 3, "repository": "api", "kind": "run",
+ "line": "npm install (in api)", "folder": "/work/app-work/login/api", "state": "running",
+ "started_at": 1792843731200, "ended_at": null, "output": "added 212 packages", "earlier": false}
+```
+
+`line` is what the step does (the `doing` of a failure), `folder` where it does it, `state` and the
+times are the step's. `output` is the last 1000 lines of what the step wrote, standard output and
+error together, masked and as the program wrote it, and `earlier` says whether lines before them
+were left out. It is kept as a run's output is (the last 64 KiB, cut at a line's start), read while
+the step runs and kept in the store once it ended, masked before it is stored. A step that fails
+without a program to speak (a `link` whose target is missing) has its reason as its output; a `run`
+that wrote nothing has `it ended with exit N`. A step that never ran has none. `not-found` when the
+project, the workspace or the step does not exist.
 
 #### `workspace.forge`
 

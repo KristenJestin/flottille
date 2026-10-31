@@ -3,7 +3,7 @@
 //! compositor.
 //!
 //! ```text
-//! cargo run -p flottille-window --example shell [--features frames] -- [--project <name>] [--add-project <folder>] [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace] [--add-command] [--edit-command <name>] [--add-skill] [--edit-skill <name>] [--edit-task <name>] [--edit-setup <number>] [--run-task <name>] [--card-menu <workspace>] [--remove <workspace>] [--slash <text>] [--attach <picture>] [--end] [--ended] [--open-run <text of its line>] [--details] [--workspace-menu] [--project-settings <project> [--repository <path>] [--tracker] [--section <n>] [--use-forge <path>] [--remove-repository <path>] [--remove-project]] [--how] [--size <w>x<h>]
+//! cargo run -p flottille-window --example shell [--features frames] -- [--project <name>] [--add-project <folder>] [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace] [--add-command] [--edit-command <name>] [--add-skill] [--edit-skill <name>] [--edit-task <name>] [--edit-setup <number>] [--run-task <name>] [--open-step <workspace> <position>] [--card-menu <workspace>] [--remove <workspace>] [--slash <text>] [--attach <picture>] [--end] [--ended] [--open-run <text of its line>] [--details] [--workspace-menu] [--project-settings <project> [--repository <path>] [--tracker] [--section <n>] [--use-forge <path>] [--remove-repository <path>] [--remove-project]] [--how] [--size <w>x<h>]
 //! ```
 //!
 //! `--project` opens a project's page, `--add-project` the "Add a project" modal with the
@@ -13,7 +13,8 @@
 //! pickers, `--new-workspace` the project page's new-workspace modal, `--add-command`,
 //! `--edit-command`, `--add-skill` and `--edit-skill` the modals of the Commands and Skills
 //! sections, `--edit-task` and `--edit-setup` those of the Tasks and Setup sections, `--run-task`
-//! runs a task of the open project's page and opens its output, `--card-menu` opens a workspace card's "⋯" menu and `--remove` its removal confirmation, `--slash` types a text in the open session's composer (its `/` list), `--attach` attaches a picture file to it, `--end` opens the open
+//! runs a task of the open project's page and opens its output, `--open-step` opens a step of a
+//! workspace's setup (its position as `workspace.show` gives it) in the same drawer, `--card-menu` opens a workspace card's "⋯" menu and `--remove` its removal confirmation, `--slash` types a text in the open session's composer (its `/` list), `--attach` attaches a picture file to it, `--end` opens the open
 //! session's "End the session?" confirmation, `--ended` unfolds the "Ended" group at the bottom of the
 //! left tree, `--open-run` opens the detail of the open session's first run whose line holds the text, in its drawer,
 //! `--details` unfolds the details of the first request waiting in the rail, `--workspace-menu` opens the
@@ -43,6 +44,7 @@ fn main() {
     let (mut details, mut workspace_menu) = (false, false);
     let mut open_run = None::<String>;
     let (mut edit_task, mut edit_setup, mut run_task) = (None, None, None);
+    let mut open_step = None::<(String, u32)>;
     let (mut card_menu, mut remove) = (None::<String>, None::<String>);
     let (mut repository, mut tracker, mut section, mut use_forge) = (None, false, None, None);
     let (mut remove_repository, mut remove_project, mut how) = (None, false, false);
@@ -71,6 +73,11 @@ fn main() {
             "--card-menu" => card_menu = Some(args.next().expect("a workspace")),
             "--remove" => remove = Some(args.next().expect("a workspace")),
             "--run-task" => run_task = Some(args.next().expect("a task")),
+            "--open-step" => {
+                let workspace = args.next().expect("a workspace");
+                let position = args.next().and_then(|n| n.parse().ok());
+                open_step = Some((workspace, position.expect("a step position")));
+            }
             "--repository" => repository = Some(args.next().expect("a repository's path")),
             "--tracker" => tracker = true,
             "--section" => {
@@ -344,6 +351,21 @@ fn main() {
                         })
                         .ok();
                 }
+            }
+            // A step of a workspace's setup, opened in the drawer once the page is read.
+            if let Some((workspace, position)) = open_step {
+                cx.background_executor()
+                    .timer(Duration::from_millis(1500))
+                    .await;
+                window
+                    .update(cx, |_, _, cx| {
+                        let page = shell.read(cx).main().read(cx).project_page().cloned();
+                        if let Some(page) = page {
+                            let tasks = page.read(cx).tasks().clone();
+                            tasks.update(cx, |t, cx| t.open_step(&workspace, position, cx));
+                        }
+                    })
+                    .ok();
             }
             // A run's detail, once the rail has listed it.
             if open_run.is_some() {

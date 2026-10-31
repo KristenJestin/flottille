@@ -46,7 +46,7 @@ const LINE_CHARS: usize = 2000;
 /// What the lines shown may hold, in bytes: the answer stays under 40,000 characters.
 const SHOWN_BUDGET: usize = 30_000;
 /// The end of the output kept, with a margin before it is cut back.
-const OUTPUT_KEPT: usize = 64 * 1024;
+pub(crate) const OUTPUT_KEPT: usize = 64 * 1024;
 const OUTPUT_MARGIN: usize = 16 * 1024;
 /// A run asked to stop has this long before its group is killed.
 const STOP_GRACE: Duration = Duration::from_secs(5);
@@ -104,11 +104,12 @@ enum Phase {
     Over,
 }
 
+/// What a program wrote, bounded to its end from a line's start: a run's, and a setup step's.
 #[derive(Default)]
-struct Output {
-    kept: Vec<u8>,
+pub(crate) struct Output {
+    pub(crate) kept: Vec<u8>,
     /// Bytes cut from its start.
-    cut: u64,
+    pub(crate) cut: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -119,7 +120,7 @@ struct End {
 }
 
 impl Output {
-    fn push(&mut self, read: &[u8]) {
+    pub(crate) fn push(&mut self, read: &[u8]) {
         self.kept.extend_from_slice(read);
         if self.kept.len() > OUTPUT_KEPT + OUTPUT_MARGIN {
             let mut drop = self.kept.len() - OUTPUT_KEPT;
