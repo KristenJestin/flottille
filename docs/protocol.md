@@ -241,13 +241,22 @@ replaces it. Nothing is asked of a forge.
 
 #### `project.set_settings`
 
-`{"name", "repositories": [{"path", "forge"}], "tracker"}`. Writes each listed repository's `forge`
-(removed when `null`; a repository left out is unchanged) and the project's `[tracker]` (removed
-when `null` or left out) in its file, where they stand, what is around them kept, and answers as
-`project.settings`. `refused`, with nothing written, when a path is not one of the project's, a
-forge or the tracker cannot be used (naming its key), or a forge is not where its repository's
+`{"name", "repositories": [{"path", "forge", "base", "depends_on"}], "tracker"}`. Writes each listed
+repository's `forge` (removed when `null`; a repository left out is unchanged), its `base` (the base
+branches in order of preference, one at least) and its `depends_on` (the paths of the repositories it
+depends on, `[]` for none) when they are given, and the project's `[tracker]` (removed when `null`
+or left out) in its file, where they stand, what is around them kept, and answers as
+`project.settings`. A `base` or a `depends_on` left out keeps the file's: a client that knows only
+the forge is not affected. A change of base is used by the workspaces created after it; the ones
+already made keep theirs. `refused`, with nothing written, when a path is not one of the project's,
+a forge or the tracker cannot be used (naming its key), a forge is not where its repository's
 remote leads (`api cannot be declared on GitHub acme/api: its remote origin: it leads to
-github.com/other/api, not to GitHub acme/api; nothing was saved`).
+github.com/other/api, not to GitHub acme/api; nothing was saved`), a base branch is not on the
+remote (`web: trunk is not a branch of the remote origin; nothing was saved`, read with `git
+ls-remote`; from the tracking refs last fetched when the remote cannot be read, from the repository's
+own branches when it has no such remote), or a dependency is on the repository itself, on one the
+project lacks or closes a cycle (`projects/app.toml: repositories[0].depends_on: cycle web -> api
+-> web; nothing was saved`).
 
 #### `project.ticket`
 

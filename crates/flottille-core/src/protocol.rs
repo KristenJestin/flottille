@@ -91,8 +91,8 @@ pub struct ProjectTicket {
 }
 
 /// The parameters of `project.set_settings`: the forge declared for each repository named (none
-/// to declare none; a repository left out keeps its own), and the project's tracker (none for
-/// none).
+/// to declare none; a repository left out keeps its own), its base branches and dependencies
+/// when given, and the project's tracker (none for none).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectSettings {
@@ -109,6 +109,13 @@ pub struct RepositorySetting {
     pub path: String,
     #[serde(default)]
     pub forge: Option<crate::declared::RepositoryForge>,
+    /// The base branches in order of preference; those the file has when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<Vec<String>>,
+    /// The paths of the repositories it depends on, none for none; those the file has when left
+    /// out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depends_on: Option<Vec<String>>,
 }
 
 /// The parameters of `workspace.create`.

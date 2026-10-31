@@ -572,6 +572,7 @@ fn a_lead_lists_the_agent_tools_ask_user_and_approval_answer_and_a_worker_none_o
         "report",
         "ask_user",
         "session_send",
+        "session_read",
         "approval_answer",
     ] {
         assert!(names.iter().any(|n| n == tool), "{tool} in {names:?}");
@@ -587,7 +588,7 @@ fn a_lead_lists_the_agent_tools_ask_user_and_approval_answer_and_a_worker_none_o
     for family in ["skills", "commands", "setup", "project", "workspace"] {
         assert!(names.iter().any(|n| n == family), "{family}");
     }
-    assert_eq!(names.len(), 22);
+    assert_eq!(names.len(), 23);
 
     let names = worker.names();
     assert_eq!(names.len(), 12, "{names:?}");
@@ -595,6 +596,7 @@ fn a_lead_lists_the_agent_tools_ask_user_and_approval_answer_and_a_worker_none_o
     assert!(!names.iter().any(|n| n == "approval_answer"));
     assert!(!names.iter().any(|n| n == "ask_user"));
     assert!(!names.iter().any(|n| n == "session_send"));
+    assert!(!names.iter().any(|n| n == "session_read"));
     assert!(
         !names
             .iter()
@@ -750,9 +752,10 @@ fn a_sub_agent_has_no_agent_launching_tool_whatever_its_role() {
         let child = titled(&user, &title);
         let names = child.names();
         assert!(
-            !names
-                .iter()
-                .any(|n| n.starts_with("agent_") || n == "session_send" || n == "approval_answer"),
+            !names.iter().any(|n| n.starts_with("agent_")
+                || n == "session_send"
+                || n == "session_read"
+                || n == "approval_answer"),
             "{role}: {names:?}"
         );
         let text = refused(child.call(

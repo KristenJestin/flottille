@@ -270,6 +270,11 @@ pub fn decide(call: &Call) -> Verdict {
         "tickets" => tickets(call),
         "agent_launch" if call.args["root"] == true => root_launch(call.grant, call.args),
         "session_send" => session_send(call.grant, call.args),
+        "session_read" => {
+            let mut found = Found::default();
+            found.judge(SESSION_READ.into());
+            found.verdict(Kind::Action)
+        }
         "agent_launch" => match too_long("brief", &call.args["brief"]) {
             Some(refused) => refused,
             None => Verdict::Allow,
@@ -357,6 +362,10 @@ pub fn root_launch(grant: &Grant, args: &Value) -> Verdict {
 /// Why the gate holds `session_send`.
 pub const SESSION_SEND: &str = "it writes to another session, the user's, as this agent: what it \
     sends steers that session's work";
+
+/// Why the gate holds `session_read`: each read of another session is judged.
+pub const SESSION_READ: &str = "it reads another session's conversation: what the user said to \
+    that session's agent, and what that agent answered, which this agent was not told";
 
 /// `session_send`: a message into a session of the user's, which acts on it with a root's tools.
 /// Its text is shown whole to the user and to the judge.

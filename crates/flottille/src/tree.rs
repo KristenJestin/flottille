@@ -29,7 +29,7 @@ use crate::roles;
 use crate::workspaces;
 
 /// The tree's tools, served with the others.
-pub const TOOLS: [&str; 9] = [
+pub const TOOLS: [&str; 10] = [
     "agent_launch",
     "agent_send",
     "agent_status",
@@ -39,6 +39,7 @@ pub const TOOLS: [&str; 9] = [
     "ask_parent",
     "approval_answer",
     "session_send",
+    "session_read",
 ];
 
 /// What `agent_status` shows of a conversation at once, at most, in characters: under the result
@@ -69,6 +70,7 @@ pub async fn call(daemon: &Arc<Daemon>, grant: &Arc<Grant>, tool: &str, args: Va
         "ask_user" | "ask_parent" => ask(daemon, &caller, tool, args),
         "approval_answer" => answer(daemon, &caller, args),
         "session_send" => session_send(daemon, &caller, args),
+        "session_read" => Ok(crate::session_read::read(daemon, grant, args)),
         other => Err(Outcome::Failed(format!("{other} is not served"))),
     };
     done.unwrap_or_else(|outcome| outcome)

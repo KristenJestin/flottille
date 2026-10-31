@@ -169,6 +169,7 @@ fn the_exact_claude_code_options_are_sent() {
         "report",
         "ask_user",
         "session_send",
+        "session_read",
         "approval_answer",
     ]
     .map(|tool| format!("mcp__flottille__{tool}"));

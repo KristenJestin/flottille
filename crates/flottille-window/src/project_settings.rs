@@ -15,8 +15,8 @@ use std::collections::HashMap;
 use flottille_core::declared::{ProjectTracker, RepositoryForge};
 use flottille_ui::{
     Button, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, PageHeader, PageIndex,
-    Section, Select, SelectOption, Toast, Type, hoverable, icon, palette, presence, presence_of,
-    space, toast,
+    Section, Select, SelectOption, Switch, Toast, Type, hoverable, icon, palette, presence,
+    presence_of, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEditorStyle, InputEvent, InputState};
 use gpui_kit::{
@@ -199,6 +199,8 @@ impl TrackerKind {
 pub struct RepositoryForm {
     pub path: String,
     pub remote: String,
+    /// Its base branches, in order of preference.
+    pub base: Vec<String>,
     /// The paths of the repositories it depends on.
     pub depends_on: Vec<String>,
     /// Its remote's address, credentials taken out; none without that remote.
@@ -275,11 +277,17 @@ pub fn forge_said(forge: &RepositoryForge) -> String {
 }
 
 /// A base rule in words: `develop, then main`.
+fn base_rule(base: &[String]) -> String {
+    match base {
+        [one] => one.clone(),
+        many => many.join(", then "),
+    }
+}
+
 fn base_said(info: &RepositoryInfo) -> String {
     match info.base.as_slice() {
         [] => info.branch.clone().unwrap_or_else(|| "none".to_owned()),
-        [one] => one.clone(),
-        many => many.join(", then "),
+        base => base_rule(base),
     }
 }
 
@@ -305,11 +313,14 @@ enum Saving {
 }
 
 /// The dialogs' fields, made once a window is at hand.
+#[derive(Clone)]
 struct Fields {
     host: Entity<InputState>,
     repository: Entity<InputState>,
     site: Entity<InputState>,
     keys: Entity<InputState>,
+    /// The base branch to add.
+    branch: Entity<InputState>,
 }
 
 /// A row of the Repositories section: a repository of the project, or one found in its folder.
@@ -366,6 +377,11 @@ pub struct ProjectSettingsPage {
     forge_kind: ForgeKind,
     tracker_kind: TrackerKind,
     tracker_repository: Option<String>,
+    /// The repository dialog's base branches and dependencies, as edited and not yet saved.
+    bases: Vec<String>,
+    base_rows: Listing<String>,
+    base_error: Option<SharedString>,
+    depends: Vec<String>,
     fields: Option<Fields>,
     dialog_error: Option<SharedString>,
     saving: Option<Saving>,
@@ -444,6 +460,10 @@ impl ProjectSettingsPage {
             forge_kind: ForgeKind::None,
             tracker_kind: TrackerKind::None,
             tracker_repository: None,
+            bases: Vec::new(),
+            base_rows: Listing::default(),
+            base_error: None,
+            depends: Vec::new(),
             fields: None,
             dialog_error: None,
             saving: None,
@@ -627,13 +647,8 @@ impl ProjectSettingsPage {
             .map(|repository| RepositoryForm {
                 path: repository["path"].as_str().unwrap_or_default().to_owned(),
                 remote: repository["remote"].as_str().unwrap_or("origin").to_owned(),
-                depends_on: repository["depends_on"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .map(|path| repository_label(&self.name, path))
-                    .collect(),
+                base: strings(&repository["base"]),
+                depends_on: strings(&repository["depends_on"]),
                 url: repository["url"].as_str().map(str::to_owned),
                 declared: forge(&repository["forge"]),
                 proposal: forge(&repository["proposal"]),
@@ -662,6 +677,15 @@ impl ProjectSettingsPage {
                     .and_then(|r| {
                         serde_json::from_value::<RepositoryForge>(r["forge"].clone()).ok()
                     });
+                let bases = settings["repositories"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|r| r["path"] == path.as_str())
+                    .map(|r| strings(&r["base"]))
+                    .filter(|bases| !bases.is_empty() && !used)
+                    .map(|bases| format!(" New workspaces start from {}.", base_rule(&bases)))
+                    .unwrap_or_default();
                 match declared {
                     Some(forge) if used => {
                         let remote = self
@@ -677,12 +701,13 @@ impl ProjectSettingsPage {
                     }
                     Some(forge) => {
                         Toast::success(format!("Repository {label} saved")).detail(format!(
-                            "Flottille reads its pull requests on {} from now on.",
+                            "Flottille reads its pull requests on {} from now on.{bases}",
                             ForgeKind::of(&forge).label()
                         ))
                     }
-                    None => Toast::success(format!("Repository {label} saved"))
-                        .detail("No forge: Flottille reads and writes nothing for it."),
+                    None => Toast::success(format!("Repository {label} saved")).detail(format!(
+                        "No forge: Flottille reads and writes nothing for it.{bases}"
+                    )),
                 }
             }
             Some(Saving::Tracker) => {
@@ -709,6 +734,7 @@ impl ProjectSettingsPage {
     fn params(
         &self,
         forge: Option<(&str, Option<RepositoryForge>)>,
+        lists: Option<(&str, &[String], &[String])>,
         tracker: Option<Option<ProjectTracker>>,
     ) -> Value {
         let repositories: Vec<Value> = self
@@ -719,7 +745,13 @@ impl ProjectSettingsPage {
                     Some((path, ref chosen)) if path == form.path => chosen.clone(),
                     _ => form.declared.clone(),
                 };
-                json!({"path": form.path, "forge": declared})
+                match lists {
+                    Some((path, base, depends_on)) if path == form.path => {
+                        json!({"path": form.path, "forge": declared, "base": base,
+                            "depends_on": depends_on})
+                    }
+                    _ => json!({"path": form.path, "forge": declared}),
+                }
             })
             .collect();
         json!({
@@ -753,7 +785,7 @@ impl ProjectSettingsPage {
         else {
             return;
         };
-        let settings = self.params(Some((path, Some(proposal))), None);
+        let settings = self.params(Some((path, Some(proposal))), None, None);
         let saving = Saving::Forge {
             path: path.to_owned(),
             used: true,
@@ -771,7 +803,21 @@ impl ProjectSettingsPage {
                 repository: line("acme/api", window, cx),
                 site: line("acme.atlassian.net", window, cx),
                 keys: line("ABC, DEF", window, cx),
+                branch: line("develop", window, cx),
             };
+            self._subscriptions.push(cx.subscribe_in(
+                &fields.branch,
+                window,
+                |this, _, event, window, cx| match event {
+                    InputEvent::Change => {
+                        if this.base_error.take().is_some() | this.dialog_error.take().is_some() {
+                            cx.notify();
+                        }
+                    }
+                    InputEvent::PressEnter { .. } => this.add_base(window, cx),
+                    _ => {}
+                },
+            ));
             for field in [&fields.host, &fields.repository, &fields.site, &fields.keys] {
                 self._subscriptions
                     .push(cx.subscribe(field, |this, _, event, cx| {
@@ -804,10 +850,89 @@ impl ProjectSettingsPage {
         let (host_field, repository_field) = (fields.host.clone(), fields.repository.clone());
         host_field.update(cx, |f, cx| f.set_value(host, window, cx));
         repository_field.update(cx, |f, cx| f.set_value(repository, window, cx));
+        let branch_field = self.fields(window, cx).branch.clone();
+        branch_field.update(cx, |f, cx| f.set_value("", window, cx));
         self.forge_kind = shown.as_ref().map_or(ForgeKind::None, ForgeKind::of);
+        self.bases = form.base.clone();
+        self.depends = form.depends_on.clone();
+        // The rows of another repository's dialog are not this one's to fold away.
+        self.base_rows = Listing::default();
+        self.base_error = None;
         self.dialog = Some(Dialog::Repository(path.to_owned()));
         self.dialog_error = None;
         cx.notify();
+    }
+
+    /// The branch typed, added last to the base branches.
+    pub fn add_base(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(field) = self.fields.as_ref().map(|f| f.branch.clone()) else {
+            return;
+        };
+        let branch = field.read(cx).value().trim().to_owned();
+        self.base_error = if branch.is_empty() {
+            Some("Type the name of a branch first.".into())
+        } else if branch.contains(char::is_whitespace) {
+            Some("A branch name has no space.".into())
+        } else if self.bases.contains(&branch) {
+            Some(format!("{branch} is already in the list.").into())
+        } else {
+            None
+        };
+        if self.base_error.is_none() {
+            self.bases.push(branch);
+            self.dialog_error = None;
+            field.update(cx, |f, cx| f.set_value("", window, cx));
+        }
+        cx.notify();
+    }
+
+    /// The base branch at `from`, moved to `to`.
+    pub fn move_base(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        if from < self.bases.len() && to < self.bases.len() && from != to {
+            let branch = self.bases.remove(from);
+            self.bases.insert(to, branch);
+            self.dialog_error = None;
+            cx.notify();
+        }
+    }
+
+    pub fn remove_base(&mut self, at: usize, cx: &mut Context<Self>) {
+        if at < self.bases.len() {
+            self.bases.remove(at);
+            self.dialog_error = None;
+            cx.notify();
+        }
+    }
+
+    /// The base branches the dialog holds, in order.
+    pub fn bases(&self) -> &[String] {
+        &self.bases
+    }
+
+    /// The repositories the dialog's repository depends on.
+    pub fn depends(&self) -> &[String] {
+        &self.depends
+    }
+
+    /// The branch field's refusal, under its field.
+    pub fn base_error(&self) -> Option<&str> {
+        self.base_error.as_deref()
+    }
+
+    /// Whether the dialog's repository depends on `path`, flipped.
+    pub fn toggle_dependency(&mut self, path: &str, cx: &mut Context<Self>) {
+        match self.depends.iter().position(|d| d == path) {
+            Some(at) => {
+                self.depends.remove(at);
+            }
+            None => self.depends.push(path.to_owned()),
+        }
+        self.dialog_error = None;
+        cx.notify();
+    }
+
+    pub fn branch_field(&self) -> Option<&Entity<InputState>> {
+        self.fields.as_ref().map(|f| &f.branch)
     }
 
     /// A click on the tracker's row: its dialog, on what the file declares.
@@ -886,7 +1011,8 @@ impl ProjectSettingsPage {
                         repository,
                     }),
                 };
-                let settings = self.params(Some((&path, forge)), None);
+                let lists = (&path[..], &self.bases[..], &self.depends[..]);
+                let settings = self.params(Some((&path, forge)), Some(lists), None);
                 self.send(settings, Saving::Forge { path, used: false }, cx);
             }
             Some(Dialog::Tracker) => {
@@ -922,7 +1048,7 @@ impl ProjectSettingsPage {
                             .collect(),
                     }),
                 };
-                let settings = self.params(None, Some(tracker));
+                let settings = self.params(None, None, Some(tracker));
                 self.send(settings, Saving::Tracker, cx);
             }
             None => {}
@@ -1112,7 +1238,7 @@ impl ProjectSettingsPage {
             .flex()
             .gap(space::LG)
             .child(value(id("base"), "Base branch", base_said(info), 0.22))
-            .child(value(id("remote"), "Remote", remote, 0.37))
+            .child(value(id("remote"), "Remote, from git", remote, 0.37))
             .child(forge)
     }
 
@@ -1138,7 +1264,14 @@ impl ProjectSettingsPage {
                     .forms
                     .iter()
                     .find(|form| form.path == info.path)
-                    .map(|form| form.depends_on.join(", "))
+                    .map(|form| {
+                        let labels: Vec<_> = form
+                            .depends_on
+                            .iter()
+                            .map(|path| repository_label(&self.name, path))
+                            .collect();
+                        labels.join(", ")
+                    })
                     .unwrap_or_default();
                 if !depends_on.is_empty() {
                     row = row.detail(SharedString::from(format!("depends on {depends_on}")));
@@ -1279,6 +1412,167 @@ impl ProjectSettingsPage {
             .child(ListCard::new("tracker-list").row(row))
     }
 
+    /// The base branches of the repository's dialog: a list of branches in order of preference
+    /// (moved, removed, and added from the line under it).
+    fn base_field(&mut self, branch: &Entity<InputState>, cx: &mut Context<Self>) -> Field {
+        let now = cx.background_executor().now();
+        self.base_rows.sync(
+            self.bases.iter().map(|base| (base.clone(), base.clone())),
+            now,
+            cx.reduce_motion(),
+        );
+        let drawn: Vec<_> = self
+            .base_rows
+            .rows()
+            .map(|row| (row.key.to_owned(), row.placement, row.value.clone()))
+            .collect();
+        let p = palette(cx);
+        let this = cx.entity().downgrade();
+        let last = self.bases.len().saturating_sub(1);
+        let mut list = ListCard::new("base-list");
+        for (key, placement, branch_name) in drawn {
+            let at = self.bases.iter().position(|base| *base == key);
+            let button = |id: &str, glyph: Icon, tooltip: &'static str, enabled: bool| {
+                Button::icon(format!("base-{id}-{branch_name}"), glyph, tooltip).disabled(!enabled)
+            };
+            let (up, down, remove) = (this.clone(), this.clone(), this.clone());
+            let buttons = div()
+                .flex()
+                .items_center()
+                .gap(space::XS)
+                .child(
+                    button(
+                        "up",
+                        Icon::ChevronUp,
+                        "Move up",
+                        at.is_some_and(|at| at > 0),
+                    )
+                    .on_click(move |_, _, cx| {
+                        up.update(cx, |this, cx| {
+                            if let Some(at) = at {
+                                this.move_base(at, at.saturating_sub(1), cx)
+                            }
+                        })
+                        .ok();
+                    }),
+                )
+                .child(
+                    button(
+                        "down",
+                        Icon::Chevron,
+                        "Move down",
+                        at.is_some_and(|at| at < last),
+                    )
+                    .on_click(move |_, _, cx| {
+                        down.update(cx, |this, cx| {
+                            if let Some(at) = at {
+                                this.move_base(at, at + 1, cx)
+                            }
+                        })
+                        .ok();
+                    }),
+                )
+                .child(
+                    button("remove", Icon::Close, "Remove", at.is_some()).on_click(
+                        move |_, _, cx| {
+                            remove
+                                .update(cx, |this, cx| {
+                                    if let Some(at) = at {
+                                        this.remove_base(at, cx)
+                                    }
+                                })
+                                .ok();
+                        },
+                    ),
+                );
+            let row = ListRow::new(
+                ElementId::Name(format!("base-row-{branch_name}").into()),
+                SharedString::from(branch_name.clone()),
+            )
+            .mono()
+            .leading(icon(Icon::Branch).size(px(15.)).text_color(p.faint))
+            .detail(if at == Some(0) {
+                "first choice"
+            } else {
+                "if none above"
+            })
+            .trailing(buttons);
+            list = list.item(
+                ElementId::Name(format!("base-item-{key}").into()),
+                placement,
+                row,
+            );
+        }
+        let this = cx.entity().downgrade();
+        let add = Button::secondary("base-add", "Add")
+            .leading(Icon::Plus)
+            .on_click(move |_, window, cx| {
+                this.update(cx, |this, cx| this.add_base(window, cx)).ok();
+            });
+        let control = div()
+            .flex()
+            .flex_col()
+            .child(presence("base-list-block", !self.bases.is_empty(), list).gap(space::SM))
+            .child(
+                presence(
+                    "base-empty-block",
+                    self.bases.is_empty(),
+                    EmptyLine::new(
+                        "base-empty",
+                        Icon::Branch,
+                        "No base branch: add one, a workspace starts from it.",
+                    ),
+                )
+                .gap(space::SM),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(space::SM)
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(boxed("base-branch", Input::new(branch), cx)),
+                    )
+                    .child(add),
+            );
+        Field::new("base-field", "Base branches", control)
+            .hint(
+                "A workspace's branch starts from the first of these that the remote has: \
+                 develop, then main.",
+            )
+            .error(self.base_error.clone())
+    }
+
+    /// The other repositories of the project, each a switch: the ones this repository depends on.
+    fn depends_field(&self, path: &str, this: WeakEntity<Self>) -> Field {
+        let others: Vec<_> = self.forms.iter().filter(|form| form.path != path).collect();
+        let mut control = div().flex().flex_col().gap(space::MD);
+        for form in &others {
+            let label = repository_label(&self.name, &form.path);
+            let remote = match &form.url {
+                Some(url) => short_remote(url, &self.folder),
+                None => "local only".to_owned(),
+            };
+            let (key, on) = (form.path.clone(), self.depends.contains(&form.path));
+            let switch = Switch::new(format!("depends-on-{label}"), on, label).hint(remote);
+            let this = this.clone();
+            control = control.child(switch.on_click(move |_, _, cx| {
+                this.update(cx, |this, cx| this.toggle_dependency(&key, cx))
+                    .ok();
+            }));
+        }
+        let hint = match others.is_empty() {
+            true => "The project has no other repository.",
+            false => {
+                "Prepared and merged first. A repository never depends on itself or on one \
+                      that depends on it."
+            }
+        };
+        Field::new("depends-field", "Depends on", control).hint(hint)
+    }
+
     fn dialog_modal(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let this = cx.entity().downgrade();
@@ -1297,7 +1591,7 @@ impl ProjectSettingsPage {
                         remote,
                         ..
                     }) => format!(
-                        "; its remote {remote} is {}",
+                        "; its remote {remote} is {}, read from git",
                         short_remote(url, &self.folder)
                     ),
                     Some(form) => format!("; it has no remote {}", form.remote),
@@ -1316,8 +1610,16 @@ impl ProjectSettingsPage {
             .on_close(move |_, cx| {
                 this.update(cx, |this, cx| this.close_dialog(cx)).ok();
             });
-        let Some(fields) = &self.fields else {
+        let Some(fields) = self.fields.clone() else {
             return modal;
+        };
+        // Made before the lines that borrow `cx` for as long as they live.
+        let lists = match self.dialog.clone() {
+            Some(Dialog::Repository(path)) => {
+                let bases = self.base_field(&fields.branch, cx);
+                Some((bases, self.depends_field(&path, cx.entity().downgrade())))
+            }
+            _ => None,
         };
         let error = problem_line(
             "settings-modal-error",
@@ -1361,7 +1663,10 @@ impl ProjectSettingsPage {
                     format!("As {}.", self.forge_kind.shape())
                 };
                 let disagrees = form.as_ref().and_then(|form| form.disagrees.clone());
+                let (bases, depends) = lists.expect("made for a repository's dialog");
                 modal
+                    .child(bases)
+                    .child(depends)
                     .child(Field::new("forge-kind-field", "Forge", select))
                     .child(
                         presence(
