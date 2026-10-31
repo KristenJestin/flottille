@@ -772,8 +772,16 @@ is the only thing that wakes an agent.
   a note whose delivery a prompt took meanwhile is dropped and cancels nothing. The others wait
   for the turn's end.
 - **A turn that fails** gives back what it was sent: those deliveries are queued again.
-- States: `queued`, `sending` (in a prompt), `sent`, `superseded` (its agent ended first). Each
-  move is an event (`delivery.*`, `docs/events.md`).
+- **A message the user wrote to the root, while it waits** (`queued` in `agent.tree`), can be
+  taken back (`agent.unqueue`: the root never reads it; its text and pictures come back, so that
+  the window can put them in the composer to be changed) or sent now (`agent.send_now`: it becomes
+  a `redirect`, the turn that runs is cancelled, and the next prompt is this message alone, ahead
+  of the others, which stay queued in their order for the prompt after it). Both are checked and
+  written in one store transaction: a message a prompt took first is refused, "already read by the
+  agent", and left as it was.
+- States: `queued`, `sending` (in a prompt), `sent`, `superseded` (its agent ended first),
+  `withdrawn` (the user took it back before the agent read it). Each move is an event
+  (`delivery.*`, `docs/events.md`).
 
 A child that ends a turn without reporting, with nothing to wait for (no request, no question
 held), is reminded once (`reminder`); after a second such turn its parent is told it went idle

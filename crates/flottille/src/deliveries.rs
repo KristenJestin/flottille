@@ -13,11 +13,14 @@ use std::sync::{Arc, Mutex};
 use flottille_core::agent::{AgentState, new_id};
 use flottille_core::approval::{self, Delivery};
 use flottille_core::paths::Paths;
+use flottille_core::protocol::Event;
 use flottille_core::secrets;
 use flottille_core::store::{AgentChange, now_ms};
+use serde_json::{Value, json};
 
 use crate::agents::{self, Order};
 use crate::daemon::Daemon;
+use crate::projects::Failure;
 
 /// A note pinned this long and not taken cancels the turn, to be sent as a prompt.
 pub const NOTE_FALLBACK_MS: u64 = 30_000;
@@ -283,6 +286,58 @@ pub fn ring(daemon: &Arc<Daemon>, agent: &str) {
     agents::order(daemon, agent, Order::Ring);
 }
 
+/// Why a message of the user's cannot be taken back or sent now: the root read it first, or it
+/// was never one that waits.
+fn not_waiting(daemon: &Daemon, agent: &str, id: &str) -> Failure {
+    match daemon.read(|store| store.delivery(id)) {
+        Ok(Some(d)) if d.agent == agent && d.kind == "user" && d.state == "withdrawn" => {
+            Failure::refused("that message was withdrawn already")
+        }
+        Ok(Some(d)) if d.agent == agent && d.kind == "user" => {
+            Failure::refused("already read by the agent")
+        }
+        _ => Failure::new(
+            "not-found",
+            format!("no message {id} waits for agent {agent}"),
+        ),
+    }
+}
+
+/// Takes back a message the user wrote to the root while it still waits: the root never reads it.
+/// Checked and written in one transaction, so one the root took first is refused ("already read by
+/// the agent") and left as it was. Its text, and its pictures when `images`, come back, so that the
+/// user can change it and send it again; its picture files go either way.
+pub fn withdraw(daemon: &Daemon, agent: &str, id: &str, images: bool) -> Result<Value, Failure> {
+    let taken = daemon.write(|store| store.withdraw(agent, id))?;
+    let Some(delivery) = taken else {
+        return Err(not_waiting(daemon, agent, id));
+    };
+    let pictures: Vec<Value> = if images {
+        delivery
+            .images
+            .iter()
+            .filter_map(|name| read_image(daemon, agent, name))
+            .map(|(mime, data)| json!({"mime": mime, "data": data}))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    discard_images(&daemon.paths, agent, &delivery.images);
+    Ok(json!({"agent": agent, "delivery": id, "text": delivery.body, "images": pictures}))
+}
+
+/// Hands the root a message that waits, at once: its turn is cancelled (the ACP cancel, as the
+/// window's Stop does), and the prompt that follows is this message alone, ahead of the other
+/// waiting ones, which stay queued in their order. Refused as `withdraw` is when the root took it.
+pub fn send_now(daemon: &Arc<Daemon>, agent: &str, id: &str) -> Result<Value, Failure> {
+    if !daemon.write(|store| Ok((store.redirect(agent, id)?, None::<Event>)))? {
+        return Err(not_waiting(daemon, agent, id));
+    }
+    // A redirect cancels the turn that runs and rings the agent, which pumps it.
+    ring(daemon, agent);
+    Ok(json!({"agent": agent, "delivery": id}))
+}
+
 /// A prompt as it is sent: the text of the deliveries taken, and the images they carry.
 pub struct Prompt {
     pub text: String,
@@ -310,6 +365,11 @@ pub fn pump(daemon: &Daemon, agent: &str) -> Option<Prompt> {
         _ => 3,
     };
     queued.sort_by_key(|d| rank(&d.kind));
+    // A message sent now is the whole prompt (after what starts a session): the others wait for
+    // the next one, in their order.
+    if queued.iter().any(|d| d.urgency == approval::REDIRECT) {
+        queued.retain(|d| d.urgency == approval::REDIRECT || rank(&d.kind) < 3);
+    }
     daemon.notes.unpin(agent);
     queued.truncate(fitting_images(daemon, agent, &queued));
     let ids: Vec<String> = queued.iter().map(|d| d.id.clone()).collect();

@@ -87,6 +87,13 @@ pub fn follow(
                 );
                 return Ok(ExitCode::FAILURE);
             }
+            "delivery.withdrawn" if mentions(data, awaited.as_deref()) => {
+                eprintln!(
+                    "{}: your message to agent {agent} was taken back before it read it",
+                    program::name()
+                );
+                return Ok(ExitCode::FAILURE);
+            }
             "agent.message" if playing && !json && data["replay"] != true => {
                 write!(out, "{}", text(data, "text"))?;
                 out.flush()?;

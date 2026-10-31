@@ -807,6 +807,25 @@ agent turns out to take no images, none is sent and the text of the turn ends wi
 10 MiB at most (the first message is always whole); the others wait for the next turn. The
 images of an agent go with it: when it ends for good, or 7 days after a root that can be resumed.
 
+#### `agent.unqueue`
+
+`{"agent", "delivery", "images"?}`. Takes back a message the user wrote to a root that still waits
+for the root to read it (`queued` of `agent.tree`): `{"agent", "delivery", "text", "images"}`. The
+root never reads it, and `delivery.withdrawn` is its event (`docs/events.md`). `text` is the
+message as it is stored (masked); `images` are its pictures, `{"mime", "data"}` as `agent.send`
+takes them, when the request says `"images": true`, else empty (the picture files are deleted
+either way). The check and the withdrawal are one transaction: `refused` with "already read by
+the agent" when the root took the message first (nothing changes), "that message was withdrawn
+already", or for a child; `not-found` when no such message waits for the agent. Only the user's
+messages (`kind` `user`) can be taken back.
+
+#### `agent.send_now`
+
+`{"agent", "delivery"}`. Hands the root a message that waits, at once: `{"agent", "delivery"}`.
+The message becomes a `redirect` (`docs/agents.md`, "Deliveries"): the turn that runs is cancelled
+(an ACP cancel, the process lives), and the next prompt is this message alone, ahead of the other
+waiting messages, which stay queued in their order. Refused and not found as `agent.unqueue` is.
+
 #### `agent.image`
 
 `{"agent", "name"}`. An image of the agent's, by a name `agent.prompted` gave: `{"mime", "data"}`.
