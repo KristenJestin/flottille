@@ -1165,7 +1165,7 @@ async fn forge_subscribe(
     let target = events::target(&workspace, &path, pull.number);
     for old in crate::subscriptions::of(daemon, agent) {
         if old.target == target {
-            crate::subscriptions::end(daemon, &old);
+            crate::subscriptions::end(daemon, &old, "cancelled");
         }
     }
     let now = now_ms();
@@ -1184,7 +1184,7 @@ async fn forge_subscribe(
         return Outcome::Failed(error);
     }
     if !hold(daemon, &subscription) {
-        crate::subscriptions::end(daemon, &subscription);
+        crate::subscriptions::end(daemon, &subscription, "unavailable");
         return Outcome::Failed(format!("the workspace {name} is gone"));
     }
     let from = match from {
@@ -1216,7 +1216,7 @@ fn forge_unsubscribe(daemon: &Daemon, agent: &str, asked: ForgeCall) -> Outcome 
     }
     let mut text = "Cancelled your subscriptions:\n".to_owned();
     for subscription in cancelled {
-        crate::subscriptions::end(daemon, &subscription);
+        crate::subscriptions::end(daemon, &subscription, "cancelled");
         text.push_str(&format!("- {}\n", target_named(&subscription.target)));
     }
     Outcome::Done(text)
@@ -1513,7 +1513,7 @@ async fn forge_note(daemon: &Daemon, agent: &str, place: &Place, asked: ForgeCal
             events::posted(
                 daemon,
                 agent,
-                &checkout.path,
+                (&place.project, &checkout.path),
                 numbered,
                 body.unwrap_or_default(),
             );

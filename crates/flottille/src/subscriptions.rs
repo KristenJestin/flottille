@@ -12,10 +12,12 @@ use flottille_core::agent::new_id;
 use flottille_core::approval;
 use flottille_core::store::{Store, now_ms};
 use flottille_core::subscription::Subscription;
-use serde_json::Value;
+use serde::Deserialize;
+use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
 use crate::deliveries;
+use crate::projects::Failure;
 
 /// How long a subscription waits when the agent says nothing.
 pub const DEFAULT_MINUTES: u64 = 60;
@@ -57,7 +59,38 @@ fn matches(subscription: &Subscription, event: &Event) -> bool {
 pub fn subscribe(daemon: &Daemon, subscription: &Subscription) -> Result<(), String> {
     daemon
         .write(|store| Ok((store.subscribe(subscription)?, None)))
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    let _ = daemon.emit(
+        "subscription.opened",
+        json!({"agent": subscription.agent, "subscription": subscription.id,
+            "source": subscription.source, "named": named(subscription),
+            "events": subscription.events}),
+    );
+    Ok(())
+}
+
+/// What an agent between turns waits for, in a few words (`waiting for #12: checks, review`);
+/// none when it has no open subscription.
+pub fn waiting_for(daemon: &Daemon, agent: &str) -> Option<String> {
+    let waits: Vec<String> = of(daemon, agent)
+        .iter()
+        .map(|s| {
+            format!(
+                "#{}: {}",
+                s.target["number"].as_u64().unwrap_or_default(),
+                s.events.join(", ")
+            )
+        })
+        .collect();
+    (!waits.is_empty()).then(|| format!("waiting for {}", waits.join("; ")))
+}
+
+/// What the subscription watches, as the agent and the window read it.
+fn named(subscription: &Subscription) -> String {
+    match subscription.source.as_str() {
+        "forge" => crate::forge::target_named(&subscription.target),
+        source => source.to_owned(),
+    }
 }
 
 /// A new id for a subscription.
@@ -77,11 +110,20 @@ pub fn all(daemon: &Daemon) -> Vec<Subscription> {
     daemon.read(Store::subscriptions).unwrap_or_default()
 }
 
-/// Ends a subscription without a word: its source stops watching for it.
-pub fn end(daemon: &Daemon, subscription: &Subscription) {
-    let _ = daemon.read(|store| store.unsubscribe(&subscription.id));
+/// Ends a subscription without a word: its source stops watching for it, and `subscription.ended`
+/// says `why` once (`docs/events.md`).
+pub fn end(daemon: &Daemon, subscription: &Subscription, why: &str) {
+    let was_open = daemon
+        .read(|store| store.unsubscribe(&subscription.id))
+        .unwrap_or(false);
     if subscription.source == "forge" {
         crate::forge::release(daemon, &subscription.id);
+    }
+    if was_open {
+        let _ = daemon.emit(
+            "subscription.ended",
+            json!({"agent": subscription.agent, "subscription": subscription.id, "why": why}),
+        );
     }
 }
 
@@ -115,11 +157,11 @@ pub fn offer(
         ));
     }
     body.push_str("\nSubscribe again for the next one.");
-    deliver(daemon, subscription, &body);
+    deliver(daemon, subscription, &body, "delivered");
 }
 
-fn deliver(daemon: &Arc<Daemon>, subscription: &Subscription, body: &str) {
-    end(daemon, subscription);
+fn deliver(daemon: &Arc<Daemon>, subscription: &Subscription, body: &str, why: &str) {
+    end(daemon, subscription, why);
     deliveries::deliver(
         daemon,
         &subscription.agent,
@@ -140,7 +182,7 @@ pub fn sweep(daemon: &Arc<Daemon>) {
     for subscription in subscriptions {
         let agent = daemon.read(|store| store.agent(&subscription.agent));
         if !matches!(&agent, Ok(Some(agent)) if !agent.state.is_final()) {
-            end(daemon, &subscription);
+            end(daemon, &subscription, "agent-ended");
         } else if subscription.expires_at <= now {
             let minutes = (subscription.expires_at - subscription.created_at) / 60_000;
             let body = format!(
@@ -149,7 +191,7 @@ pub fn sweep(daemon: &Arc<Daemon>) {
                 subscription.events.join(", "),
                 crate::forge::target_named(&subscription.target)
             );
-            deliver(daemon, &subscription, &body);
+            deliver(daemon, &subscription, &body, "expired");
         }
     }
 }
@@ -157,7 +199,7 @@ pub fn sweep(daemon: &Arc<Daemon>) {
 /// The agent ended: its subscriptions go with it.
 pub fn ended(daemon: &Daemon, agent: &str) {
     for subscription in of(daemon, agent) {
-        end(daemon, &subscription);
+        end(daemon, &subscription, "agent-ended");
     }
 }
 
@@ -165,8 +207,76 @@ pub fn ended(daemon: &Daemon, agent: &str) {
 pub fn resume_at_start(daemon: &Arc<Daemon>) {
     for subscription in all(daemon) {
         if subscription.source == "forge" && !crate::forge::hold(daemon, &subscription) {
-            end(daemon, &subscription);
+            end(daemon, &subscription, "unavailable");
         }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct List {
+    /// A root, or any agent of its tree.
+    tree: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Cancel {
+    subscription: String,
+}
+
+/// A subscription as the user's clients read it (`docs/protocol.md`, "The subscription methods").
+fn listed(subscription: &Subscription) -> Value {
+    json!({"id": subscription.id, "agent": subscription.agent, "source": subscription.source,
+        "named": named(subscription), "target": subscription.target,
+        "events": subscription.events, "from": subscription.from,
+        "created_at": subscription.created_at, "expires_at": subscription.expires_at})
+}
+
+/// `subscription.list` and `subscription.cancel`: what the window shows of what the agents wait
+/// for, and the user's way to end it, the same as the agent's `forge unsubscribe`.
+pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failure> {
+    let params = if params.is_null() { json!({}) } else { params };
+    match method {
+        "subscription.list" => {
+            let List { tree } = serde_json::from_value(params)?;
+            let ids = match tree {
+                None => None,
+                Some(agent) => {
+                    if daemon.read(|store| store.agent(&agent))?.is_none() {
+                        return Err(Failure::new(
+                            "not-found",
+                            format!("there is no agent {agent}"),
+                        ));
+                    }
+                    Some(crate::tree::ids(
+                        daemon,
+                        &crate::tree::root_of(daemon, &agent),
+                    )?)
+                }
+            };
+            let subscriptions: Vec<Value> = all(daemon)
+                .iter()
+                .filter(|s| ids.as_ref().is_none_or(|ids| ids.contains(&s.agent)))
+                .map(listed)
+                .collect();
+            Ok(json!({"subscriptions": subscriptions}))
+        }
+        "subscription.cancel" => {
+            let Cancel { subscription } = serde_json::from_value(params)?;
+            let Some(found) = all(daemon).into_iter().find(|s| s.id == subscription) else {
+                return Err(Failure::new(
+                    "not-found",
+                    format!("there is no open subscription {subscription}"),
+                ));
+            };
+            end(daemon, &found, "cancelled");
+            Ok(json!({"subscription": listed(&found)}))
+        }
+        method => Err(Failure::new(
+            "unknown-method",
+            format!("unknown method `{method}`"),
+        )),
     }
 }
 

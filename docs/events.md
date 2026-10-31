@@ -526,3 +526,30 @@ The user dismissed a command that ended (`run.dismiss`): it is no longer listed.
 | Field | |
 |---|---|
 | `agent`, `run` | |
+
+### The events of a subscription
+
+A subscription (`docs/design.md` §5.6) opens and ends; each event has `agent`, the agent it wakes,
+and `subscription`, its id. What it delivers is a `delivery.queued` of kind `subscription`.
+
+#### `subscription.opened`
+
+An agent subscribed (`forge` `subscribe`). Subscribing again to the same target replaces the
+agent's subscription: the old one ends first, `cancelled`.
+
+| Field | |
+|---|---|
+| `agent`, `subscription` | |
+| `source` | What produces its events: `forge`. |
+| `named` | What it watches in a few words, as the agent reads it (`pull request #12 of api, workspace login`). |
+| `events` | The events it waits for. |
+
+#### `subscription.ended`
+
+A subscription is over, once.
+
+| Field | |
+|---|---|
+| `agent`, `subscription` | |
+| `why` | `delivered` (an event it waited for, or the end of its target, was delivered), `expired` (its time was up, said to the agent), `cancelled` (the agent's `unsubscribe`, the user's `subscription.cancel`, or a new subscription to the same target), `agent-ended` (its agent ended), `unavailable` (the daemon could not watch its target again after a restart). Only the first two wake the agent. |
+

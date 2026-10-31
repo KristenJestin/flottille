@@ -882,7 +882,8 @@ whether the process of an agent that ended is still stopping; `images`: as in th
 form); `doing` a sentence of what it does
 (`working`, `idle`, `running \`cargo test\` for 12 min`, `waiting for approval #3`, `failed: …`);
 `waiting_on` `parent` for a child whose request or question waits for its parent, `user` for a
-root whose own does, else `null`; `needs_user`, for the root, whether a request of its tree or its
+root whose own does, `subscription` for an agent between turns that has an open subscription (`doing` then
+says `waiting for #12: checks`), else `null`; `needs_user`, for the root, whether a request of its tree or its
 own question waits for the user; `context`, how much of its context the agent used at its last
 report (`agent.usage`), in percent, `null` before one; `queued`, for the root, the messages the
 user wrote to it that wait for it to read them between its turns, the oldest first, each
@@ -989,6 +990,27 @@ already ended is answered as it is. `not-found` when there is no such run.
 
 `{"run"}`. `{"run"}`: a command that ended is no longer listed with `ended`, and `run.dismissed` is
 emitted. `refused` while it runs; `not-found` when there is no such run.
+
+### The subscription methods
+
+What an agent waits for (`docs/design.md` §5.6), as the window's rail shows it and lets the user end
+it. The agent's own way is the `forge` tool (`docs/tools.md`).
+
+#### `subscription.list`
+
+`{"tree"?}`. `{"subscriptions": [...]}`, the open ones, the oldest first. With `tree`, an agent's id,
+those of the agents of its root's tree (`not-found` when it names no agent); without, every one. Each
+is `{"id", "agent", "source", "named", "target", "events", "from", "created_at", "expires_at"}`: `named`
+says what it watches (`pull request #12 of api, workspace login`, a repository that is the project's
+folder named by the project), `target` is the source's own (`forge`: `project`, `workspace`,
+`repository`, `number`), `from` is `anyone` or `people`, the times are in milliseconds since the Unix
+epoch.
+
+#### `subscription.cancel`
+
+`{"subscription"}`. `{"subscription": {...}}`: the subscription ends as the agent's `forge unsubscribe`
+ends it, without a word to the agent, and `subscription.ended` is emitted with `why` `cancelled`.
+`not-found` when it is not open.
 
 ### `provider.list`
 
