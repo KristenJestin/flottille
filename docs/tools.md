@@ -388,7 +388,7 @@ reasons.
 
 | Tool | |
 |---|---|
-| `tickets {action, ticket?, workspace?, query?, state?, label?, assignee?, detail?, title?, body?, labels?, status?, project?, type?}` | The tickets of the project's tracker, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
+| `tickets {action, ticket?, workspace?, query?, state?, label?, assignee?, detail?, title?, body?, labels?, reason?, remove_labels?, assignees?, remove_assignees?, status?, project?, type?}` | The tickets of the project's tracker, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
 
 - **`list {state?, label?, assignee?}`**: every ticket of a state, in one call, a line each (`-
   #12 open: The login fails [bug] (ana)  <link>`): `state` is `open` (the default), `closed` or
@@ -415,9 +415,12 @@ reasons.
   is linked to no ticket: …`). An unreadable ticket (`gh` or `acli` missing or signed out, no such
   ticket) is an error saying why and what to do.
 - **The writes**, on every tracker: `create {title, body?, labels?}`, `comment {ticket?, body}`,
-  `edit {ticket?, title?, body?}` (at least one), `close {ticket?}`, `reopen {ticket?}` and, on
-  Jira, `status {ticket?, status}`, the ticket named as for `show`. On GitHub, `gh issue create`,
-  `comment`, `edit`, `close`, `reopen`. On Jira, once `acli` is checked to be signed in to the
+  `edit {ticket?, title?, body?, labels?, remove_labels?, assignees?, remove_assignees?}` (at least
+  one), `close {ticket?, reason?}`, `reopen {ticket?}` and `status {ticket?, status, project?}`, the
+  ticket named as for `show`. On GitHub, `gh issue create`, `comment`, `edit` (`labels` and
+  `assignees` add, as on `create`: `--add-label`, `--remove-label`, `--add-assignee`,
+  `--remove-assignee`), `close` (`reason` is `completed` or `not planned`, `--reason`; left out,
+  GitHub's own default), `reopen`, and a `status` below. On Jira, once `acli` is checked to be signed in to the
   tracker's site (as for a read), `acli jira workitem create --project <P> --summary <title>
   [--description <body>] [--type <type>] [--label a,b] --json` in `project {project?, type?}`,
   one of the tracker's projects (it may be left out when the tracker has one), the type the
@@ -426,12 +429,26 @@ reasons.
   `reopen` and `status` as `acli jira workitem transition --key <K> --status <name> --yes` to a
   status found among the statuses of the work item's project, never a guessed name
   ([`tickets.md`](tickets.md), "Jira's writes"). A ticket or a project the tracker does not take,
-  a `status` with no name, or `status` on GitHub (#225), is refused before anything is asked. A
+  a `status` with no name, a `reason` that is neither value, and, for an argument of another action
+  (`reason` is for close, `remove_labels`, `assignees` and `remove_assignees` for edit) or of the
+  other tracker (on Jira, a label, an assignee or a reason), is refused before anything is asked. A
   `title` on `comment`, `close`, `reopen` or `status` is refused before anything is asked
   (`refused: tickets comment takes no title: title is for edit and create`). The request shows
   the title and the body whole, and a long one or one holding a secret is refused or base, as
   for the forge's writes ("The forge"). Locks, a project or a tracker kept read only, are
   planned as their own feature.
+- **`status` on GitHub**: sets the Status of the issue on the GitHub Projects (v2) board it is on,
+  like Todo, In Progress or Done. The option is found by its name, in any case, among those of the
+  board's Status field. The daemon reads the issue's boards (`gh issue view <n> -R … --json
+  projectItems`), finds the board among those of the repository's owner (`gh project list
+  --owner`), reads its fields (`gh project field-list`) and sets the option (`gh project item-edit
+  --id … --project-id … --field-id … --single-select-option-id …`): only the item of this issue,
+  with ids read from it, so nothing but this issue's status is reached. An issue on no board says
+  so (`#1 of acme/app is on no project board: it has no status to set`); a status the board does
+  not have is refused with its statuses; an issue on several boards names them and asks for
+  `project`, a board's title in any case. `gh project` needs the `project` scope: when `gh` says
+  it is missing, the answer says how the user adds it (`gh auth refresh -s project`), which
+  Flottille never runs. A board of an owner other than the repository's is not reached.
 
 Reads go through the gate like every call, which allows them; a write is to judge. How a ticket
 is read, Jira's text turned into plain text, and what is assumed of `acli`'s output, is in

@@ -316,7 +316,7 @@ const SERVED: [Definition; 26] = [
                 "branch": {"type": "string", "description": "list: its source branch."},
                 "detail": {"type": "string", "enum": ["short", "full"]},
                 "title": {"type": "string"},
-                "body": {"type": "string", "description": "create, edit: description; comment: the comment."},
+                "body": {"type": "string", "description": "create, edit: description; comment: text."},
                 "draft": {"type": "boolean"},
                 "waive": {"type": "string", "description": "merge: the user's words letting a blocked pull request be merged; held for them."},
                 "method": {"type": "string", "enum": ["squash", "merge", "rebase"], "description": "merge: squash when left out."},
@@ -334,7 +334,7 @@ const SERVED: [Definition; 26] = [
             ticket of a state (open by default), by label and assignee, in one call; search: \
             the same, with words; show: a workspace's linked ticket (yours; in main, name \
             workspace) or ticket, detail full adds the comments. Writes, judged, answered at \
-            once, the result maybe later: create, comment, edit, close, reopen, status (Jira). \
+            once, the result maybe later: create, comment, edit, close, reopen, status. \
             {\"action\": \"comment\", \"ticket\": \"#12\", \"body\": \"...\"}",
         read_only: false,
         idempotent: false,
@@ -342,7 +342,7 @@ const SERVED: [Definition; 26] = [
         schema: || {
             json!({"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["list", "search", "show", "create", "comment", "edit", "close", "reopen", "status"]},
-                "ticket": {"type": "string", "description": "#123 or ABC-123; the workspace's when left out."},
+                "ticket": {"type": "string", "description": "#123 or ABC-123; default: the workspace's."},
                 "workspace": {"type": "string"},
                 "query": {"type": "string", "description": "search: words."},
                 "state": {"type": "string", "enum": ["open", "closed", "all"]},
@@ -351,9 +351,13 @@ const SERVED: [Definition; 26] = [
                 "detail": {"type": "string", "enum": ["short", "full"]},
                 "title": {"type": "string"},
                 "body": {"type": "string", "description": "create, edit: description; comment: the comment."},
-                "labels": {"type": "array", "items": {"type": "string"}, "description": "create: labels."},
+                "labels": {"type": "array", "items": {"type": "string"}},
+                "reason": {"enum": ["completed", "not planned"]},
+                "remove_labels": {"type": "array", "items": {"type": "string"}},
+                "assignees": {"type": "array", "items": {"type": "string"}},
+                "remove_assignees": {"type": "array", "items": {"type": "string"}},
                 "status": {"type": "string", "description": "status: its name."},
-                "project": {"type": "string", "description": "create on Jira: the tracker's project."},
+                "project": {"type": "string", "description": "create on Jira: the tracker's project; status: the board."},
                 "type": {"type": "string", "description": "create on Jira: work item type."}
             }, "required": ["action"], "additionalProperties": false})
         },
@@ -2111,7 +2115,8 @@ mod tests {
         // descriptions shortened. 28,224 once `project` took the base branches and dependencies
         // (#198): the cap is 29,000, still under 9,700 tokens at 3 characters a token. 28,600
         // once `forge` subscribed to a pull request's events (#206). 28,801 once `tickets` wrote
-        // Jira (#224).
+        // Jira (#224). 28,990 once it set a GitHub issue's board status, closed for a reason and
+        // edited labels and assignees (#225), the `tickets` texts shortened to stay under the cap.
         assert!(chars < 29_000, "{chars} characters of definitions");
     }
 }

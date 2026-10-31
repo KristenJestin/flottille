@@ -57,7 +57,16 @@
 //! title or body hold its words (a simplification of GitHub's search), newest first, at most
 //! `--limit`. `issue create` prints the new issue's URL (numbered `created_issue`, 1 by default);
 //! `issue comment`, `edit`, `close` and `reopen` need an issue the script holds and print its
-//! URL.
+//! URL; `issue close --reason` takes `completed` or `not planned` only.
+//!
+//! The boards of GitHub Projects: an issue of the script holds `projectItems` (`gh issue view
+//! --json projectItems`: `[{"id": "PVTI_1", "project": {"id": "PVT_a", "title": "Roadmap"},
+//! "status": {"optionId": "o1", "name": "Todo"}}]`); `projects` gives, by owner, what `gh project
+//! list --owner` lists (`{"acme": [{"id": "PVT_a", "number": 3, "title": "Roadmap"}]}`);
+//! `project_fields` gives, by `owner/number`, what `gh project field-list` lists (`{"acme/3":
+//! [{"id": "F_s", "name": "Status", "options": [{"id": "o1", "name": "Todo"}]}]}`); `project
+//! item-edit` answers nothing. `missing_scope: true` makes every `project` call, and an `issue
+//! view` asking `projectItems`, fail as `gh` does without the `project` scope.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -129,7 +138,53 @@ fn answer(script: &Value, args: &[String]) -> i32 {
         },
     });
     let repository = repository.as_deref();
+    let asks_boards = words.starts_with(&["issue", "view"])
+        && option("--json").is_some_and(|fields| fields.contains("projectItems"));
+    if script["missing_scope"] == true && (words.first() == Some(&"project") || asks_boards) {
+        eprintln!(
+            "error: your authentication token is missing required scopes [read:project]\n\
+             To request it, run:  gh auth refresh -s read:project"
+        );
+        return 1;
+    }
     match words.as_slice() {
+        ["project", "list", ..] => {
+            let projects = &script["projects"][option("--owner").unwrap_or_default()];
+            let projects = projects.as_array().cloned().unwrap_or_default();
+            println!(
+                "{}",
+                json!({"projects": projects, "totalCount": projects.len()})
+            );
+            0
+        }
+        ["project", "field-list", number, ..] => {
+            let key = format!("{}/{number}", option("--owner").unwrap_or_default());
+            match script["project_fields"][&key].as_array() {
+                Some(fields) => {
+                    println!("{}", json!({"fields": fields, "totalCount": fields.len()}));
+                    0
+                }
+                None => {
+                    eprintln!(
+                        "GraphQL: Could not resolve to a ProjectV2 with the number {number}."
+                    );
+                    1
+                }
+            }
+        }
+        ["project", "item-edit", ..] => {
+            let flags = [
+                "--id",
+                "--project-id",
+                "--field-id",
+                "--single-select-option-id",
+            ];
+            if flags.iter().any(|flag| option(flag).is_none()) {
+                eprintln!("fake gh: item-edit needs --id, --project-id, --field-id and an option");
+                return 2;
+            }
+            0
+        }
         ["auth", "status", ..] => {
             if script["signed_in"] == false {
                 eprintln!(
@@ -221,6 +276,12 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             };
             if let Some(failure) = script["fail"][repository].as_str() {
                 eprintln!("{failure}");
+                return 1;
+            }
+            if words[1] == "close"
+                && option("--reason").is_some_and(|r| !["completed", "not planned"].contains(&r))
+            {
+                eprintln!("invalid argument for \"--reason\": expected completed or not planned");
                 return 1;
             }
             let number = match words[1] {
