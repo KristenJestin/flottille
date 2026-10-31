@@ -15,12 +15,20 @@ use super::{
 };
 use crate::mcp::Outcome;
 
-/// How many pull requests one list asks for: the newest ones.
-const LISTED: &str = "100";
-/// How many comments one read asks for.
-const COMMENTS: &str = "100";
-/// How many changed files one read of a Cloud pull request's conflicts asks for.
-const DIFFSTAT: &str = "500";
+/// The size of every page asked of Bitbucket: its pull request list takes 50 at most (`bkt` v0.37.0
+/// passes `--limit` as `pagelen`, and Cloud answers `400 Bad Request: Invalid pagelen` above it),
+/// while Atlassian's REST documentation gives 100 as the global maximum, says "some APIs" differ
+/// and names none for the comments and the diffstat
+/// (<https://developer.atlassian.com/cloud/bitbucket/rest/intro/#pagination>): 50 is the size no
+/// endpoint refuses.
+pub(super) const PAGE: usize = 50;
+/// How many pull requests one list asks for: the newest ones. `bkt` follows `next` only up to its
+/// `--limit`, which is the page size, so one page is all it can read.
+const LISTED: usize = PAGE;
+/// How many comments (Data Center: activities) one read follows the pages up to.
+const COMMENTS: usize = 100;
+/// How many changed files one read of a Cloud pull request's conflicts follows the pages up to.
+const DIFFSTAT: usize = 500;
 
 /// `bkt <args>`: whether it succeeded, its output and its errors.
 async fn bkt(args: &[&str]) -> Result<(bool, String, String), Gh> {
@@ -265,13 +273,69 @@ fn person(user: &Value, keys: &[&str]) -> String {
         .map_or_else(|| "someone".to_owned(), masked)
 }
 
+/// The values of a Cloud collection read through `bkt api`, `PAGE` at a time: the following pages
+/// are asked by the `next` link the server gives, up to `total` values. Whether the collection
+/// goes on past what was read.
+async fn cloud_values(
+    context: &str,
+    path: &str,
+    total: usize,
+) -> Result<(Vec<Value>, bool), String> {
+    let size = format!("pagelen={PAGE}");
+    let mut page = json(&["api", path, "--context", context, "--param", &size]).await?;
+    let mut values = Vec::new();
+    loop {
+        values.extend(page["values"].as_array().into_iter().flatten().cloned());
+        let Some(next) = page["next"].as_str() else {
+            return Ok((values, false));
+        };
+        if values.len() >= total {
+            values.truncate(total);
+            return Ok((values, true));
+        }
+        // The link is followed on the API's own host only: `bkt api` sends the sign-in to any
+        // address it is given.
+        let Some(rest) = next.strip_prefix("https://api.bitbucket.org/") else {
+            return Ok((values, true));
+        };
+        page = json(&["api", &format!("/{rest}"), "--context", context]).await?;
+    }
+}
+
+/// The activities of a Data Center pull request, `PAGE` at a time up to `total`, from where each
+/// page says the next starts.
+async fn dc_values(context: &str, path: &str, total: usize) -> Result<Vec<Value>, String> {
+    let size = format!("limit={PAGE}");
+    let mut values = Vec::new();
+    let mut start = 0;
+    loop {
+        let from = format!("start={start}");
+        let mut args = vec!["api", path, "--context", context, "--param", &size];
+        if start > 0 {
+            args.extend(["--param", &from]);
+        }
+        let page = json(&args).await?;
+        let read = page["values"].as_array().map_or(0, |values| values.len());
+        values.extend(page["values"].as_array().into_iter().flatten().cloned());
+        match page["nextPageStart"].as_u64() {
+            Some(next) if page["isLastPage"] != true && read > 0 && values.len() < total => {
+                start = next as usize
+            }
+            _ => break,
+        }
+    }
+    values.truncate(total);
+    Ok(values)
+}
+
 /// The pull requests in `state` (`all`, `OPEN`…), the newest `LISTED`.
 async fn pulls(forge: &Forge, context: &str, state: &str) -> Result<Vec<Listed>, String> {
+    let limit = LISTED.to_string();
     let args = command(
         forge,
         context,
         &["pr", "list"],
-        &["--state", state, "--limit", LISTED, "--json"],
+        &["--state", state, "--limit", &limit, "--json"],
     );
     let said = json(&args).await?;
     Ok(said["pull_requests"]
@@ -283,22 +347,24 @@ async fn pulls(forge: &Forge, context: &str, state: &str) -> Result<Vec<Listed>,
 }
 
 /// `forge list` of a Bitbucket repository: its newest pull requests in `state`, of `branch` when
-/// given. `bkt` filters by state and not by branch, so the branch is picked from them; it has no
-/// draft and no state for `closed` and `merged` together.
+/// given, and whether the repository may hold older ones `bkt` did not list. `bkt` filters by
+/// state and not by branch, so the branch is picked from them; it has no draft and no state for
+/// `closed` and `merged` together.
 pub(super) async fn pulls_in(
     forge: &Forge,
     context: &str,
     state: &str,
     branch: Option<&str>,
-) -> Result<Vec<super::Listed>, String> {
+) -> Result<(Vec<super::Listed>, bool), String> {
     let asked = match state {
         "open" => "OPEN",
         "merged" => "MERGED",
         "closed" => "DECLINED",
         _ => "all",
     };
-    Ok(pulls(forge, context, asked)
-        .await?
+    let all = pulls(forge, context, asked).await?;
+    let cut = all.len() >= LISTED;
+    let listed = all
         .into_iter()
         .filter(|pull| branch.is_none_or(|branch| pull.branch == branch))
         .map(|pull| super::Listed {
@@ -309,7 +375,8 @@ pub(super) async fn pulls_in(
             base: pull.base,
             url: pull.url,
         })
-        .collect())
+        .collect();
+    Ok((listed, cut))
 }
 
 /// The pull request of `branch`, the newest when there are several; none when there is none.
@@ -331,18 +398,21 @@ pub(super) async fn pull_of(
     }
 }
 
-/// The pull request numbered `number`, among the newest; none when they do not hold it.
+/// The pull request numbered `number`, among the newest; none when they do not hold it, and an
+/// error when they may not, since `bkt` lists no more of them.
 pub(super) async fn pull_numbered(
     forge: &Forge,
     context: &str,
     number: u64,
 ) -> Result<Option<Pull>, String> {
-    let found = pulls(forge, context, "all")
-        .await?
-        .into_iter()
-        .find(|pull| pull.id == number);
-    match found {
+    let all = pulls(forge, context, "all").await?;
+    let cut = all.len() >= LISTED;
+    match all.into_iter().find(|pull| pull.id == number) {
         Some(found) => detailed(forge, context, found).await.map(Some),
+        None if cut => Err(format!(
+            "the pull request #{number} is not among the newest {LISTED} of {}, the most `bkt`              lists: it may be older",
+            forge.slug()
+        )),
         None => Ok(None),
     }
 }
@@ -355,28 +425,17 @@ async fn detailed(forge: &Forge, context: &str, found: Listed) -> Result<Pull, S
     let (reviewers, comments) = if cloud(forge) {
         let base = cloud_page(forge, &id);
         let pull = json(&["api", &base, "--context", context]).await?;
-        let comments = json(&[
-            "api",
-            &format!("{base}/comments"),
-            "--context",
-            context,
-            "--param",
-            &format!("pagelen={COMMENTS}"),
-        ])
-        .await?;
+        let (comments, _) = cloud_values(context, &format!("{base}/comments"), COMMENTS).await?;
         (cloud_reviewers(&pull), cloud_comments(&comments))
     } else {
         let Forge::Bitbucket { owner, name, .. } = forge else {
             unreachable!()
         };
-        let activities = json(&[
-            "api",
-            &format!("/rest/api/1.0/projects/{owner}/repos/{name}/pull-requests/{id}/activities"),
-            "--context",
+        let activities = dc_values(
             context,
-            "--param",
-            &format!("limit={COMMENTS}"),
-        ])
+            &format!("/rest/api/1.0/projects/{owner}/repos/{name}/pull-requests/{id}/activities"),
+            COMMENTS,
+        )
         .await?;
         (found.reviewers, dc_comments(&activities))
     };
@@ -425,25 +484,21 @@ async fn checks_of(
 }
 
 /// Whether the pull request `id` merges without conflict: on Cloud, no file of its diffstat is
-/// `merge conflict` (a page that has a next one, and no conflict, says nothing); on Data Center,
-/// its merge's page is not `conflicted`. None when it cannot be read: the rest of the pull request
-/// is still shown.
+/// `merge conflict` (a diffstat that goes on past the `DIFFSTAT` files read, and no conflict among
+/// them, says nothing); on Data Center, its merge's page is not `conflicted`. None when it cannot
+/// be read: the rest of the pull request is still shown.
 async fn mergeable(forge: &Forge, context: &str, id: &str) -> Option<bool> {
     let Forge::Bitbucket { owner, name, .. } = forge else {
         unreachable!()
     };
     if cloud(forge) {
         let path = format!("{}/diffstat", cloud_page(forge, id));
-        let pagelen = format!("pagelen={DIFFSTAT}");
-        let page = json(&["api", &path, "--context", context, "--param", &pagelen])
-            .await
-            .ok()?;
-        let files = page["values"].as_array()?;
+        let (files, more) = cloud_values(context, &path, DIFFSTAT).await.ok()?;
         if files.iter().any(|file| file["status"] == "merge conflict") {
             return Some(false);
         }
-        // Another page may hold the conflict: without it, nothing is known.
-        return page["next"].is_null().then_some(true);
+        // More files may hold the conflict: without it, nothing is known.
+        return (!more).then_some(true);
     }
     let path = format!("/rest/api/1.0/projects/{owner}/repos/{name}/pull-requests/{id}/merge");
     let page = json(&["api", &path, "--context", context]).await.ok()?;
@@ -569,11 +624,9 @@ fn cloud_reviewers(pull: &Value) -> Vec<(String, &'static str)> {
 }
 
 /// The comments of a Cloud pull request, the deleted ones left out.
-fn cloud_comments(page: &Value) -> Vec<Comment> {
-    page["values"]
-        .as_array()
-        .into_iter()
-        .flatten()
+fn cloud_comments(comments: &[Value]) -> Vec<Comment> {
+    comments
+        .iter()
         .filter(|c| c["deleted"] != true)
         .map(|c| Comment {
             author: person(&c["user"], &["display_name", "nickname"]),
@@ -586,7 +639,7 @@ fn cloud_comments(page: &Value) -> Vec<Comment> {
 }
 
 /// The comments among a Data Center pull request's activities, replies after what they answer.
-fn dc_comments(page: &Value) -> Vec<Comment> {
+fn dc_comments(activities: &[Value]) -> Vec<Comment> {
     fn walk(comment: &Value, out: &mut Vec<Comment>) {
         out.push(Comment {
             author: person(&comment["author"], &["displayName", "name"]),
@@ -599,7 +652,7 @@ fn dc_comments(page: &Value) -> Vec<Comment> {
         }
     }
     let mut comments = Vec::new();
-    for activity in page["values"].as_array().into_iter().flatten() {
+    for activity in activities {
         if activity["action"] == "COMMENTED" {
             walk(&activity["comment"], &mut comments);
         }

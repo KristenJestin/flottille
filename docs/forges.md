@@ -157,7 +157,7 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
 | What Flottille runs | What it reads of the answer | Source |
 |---|---|---|
 | `bkt context list --json` | `contexts[].name`, `.host`, `.active` (no secret in it) | `pkg/cmd/context/context.go:169-262` |
-| `bkt pr list --context C --workspace W --repo R --state all --limit 100 --json` (Cloud), `--project P` instead of `--workspace` (Data Center) | `pull_requests[]`: Cloud `id`, `title`, `state`, `source.branch.name`, `source.commit.hash`, `source.repository.full_name`, `destination.branch.name`, `destination.repository.full_name`, `links.html.href`; Data Center `id`, `title`, `state`, `fromRef.displayId`, `fromRef.latestCommit`, `fromRef.repository.slug` and `.project.key`, `toRef` the same, `participants[]` (`user`, `role`, `status`, `approved`), `links.self[0].href` | `pkg/cmd/pr/pr.go:78-91` (flags), `:153` and `:218` (`pull_requests`); `pkg/bbcloud/pullrequests.go:14-60` (shape, `source.commit.hash` at `:41-43`), `:87` (`state=all` is no filter); `pkg/bbdc/client.go:96-122` and `pkg/bbdc/pullrequests.go:17-22` (shape, `Ref.LatestCommit` at `client.go:117-123`), `pkg/bbdc/client.go:265-267` (`state` as given, uppercased) |
+| `bkt pr list --context C --workspace W --repo R --state all --limit 50 --json` (Cloud), `--project P` instead of `--workspace` (Data Center) | `pull_requests[]`: Cloud `id`, `title`, `state`, `source.branch.name`, `source.commit.hash`, `source.repository.full_name`, `destination.branch.name`, `destination.repository.full_name`, `links.html.href`; Data Center `id`, `title`, `state`, `fromRef.displayId`, `fromRef.latestCommit`, `fromRef.repository.slug` and `.project.key`, `toRef` the same, `participants[]` (`user`, `role`, `status`, `approved`), `links.self[0].href` | `pkg/cmd/pr/pr.go:78-91` (flags), `:153` and `:218` (`pull_requests`); `pkg/bbcloud/pullrequests.go:14-60` (shape, `source.commit.hash` at `:41-43`), `:87` (`state=all` is no filter); `pkg/bbdc/client.go:96-122` and `pkg/bbdc/pullrequests.go:17-22` (shape, `Ref.LatestCommit` at `client.go:117-123`), `pkg/bbdc/client.go:265-267` (`state` as given, uppercased) |
 | `bkt pr checks <id> --context C … --json` | `statuses[]`: `state`, `name`, `key` | `pkg/cmd/pr/pr.go:1754-1809` (flags), `:1998` (`statuses`), `:2198` (the states); `pkg/types/commit_status.go:5-11` |
 | `bkt api <path> --context C [--param k=v]` (GET) | the server's own JSON, unchanged | `pkg/cmd/api/api.go:23-48`, `:138-140` |
 | `bkt pr create --context C … --source <branch> --target <base> --title T --description D [--reviewer N]…` | `✓ Created pull request #<id>` | `pkg/cmd/pr/pr.go:597-615`, `:664`, `:696`; `--reviewer` at `:614`, sent as `{"username": N}` on Cloud (`pkg/bbcloud/pullrequests.go:232-237`) and `{"user": {"name": N}}` on Data Center (`pkg/bbdc/pullrequests.go:75-82`) |
@@ -184,10 +184,21 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
   says what to do: `bkt auth login https://<host>`, then `bkt context create <name> --host
   <host>`. Flottille reads no token, never runs `bkt auth`, and never prints `bkt`'s
   configuration.
-- **There is no branch filter.** `bkt pr list` filters by state alone, so the 100 newest pull
+- **A page is 50 at most.** Bitbucket Cloud answers `400 Bad Request: Invalid pagelen` to a
+  `pagelen` above the maximum of an endpoint, and its pull request list takes 50 (seen with `bkt`
+  v0.37.0, which passes `--limit` as `pagelen`, follows `next` only up to that limit, and so can
+  read no more than one page of 50). Atlassian's REST documentation gives 100 as the global
+  maximum, says "some APIs" differ, and names none for the comments and the diffstat
+  (<https://developer.atlassian.com/cloud/bitbucket/rest/intro/#pagination>): every page Flottille
+  asks of Bitbucket is 50, and where it needs more it follows the `next` link of Cloud (to
+  `api.bitbucket.org` only) or the `nextPageStart` of Data Center, up to the totals below. The
+  fake `bkt` of the tests refuses a Cloud `pagelen` above 50 as Bitbucket does.
+- **There is no branch filter.** `bkt pr list` filters by state alone, so the 50 newest pull
   requests are listed (`--state all`) and the workspace's branch is picked among them, the
-  highest id when there are several. A branch whose pull request is older than the hundred newest
-  of its repository is shown as having none.
+  highest id when there are several. A branch whose pull request is older than the fifty newest
+  of its repository is shown as having none, `forge list` says its list may be cut (`Only the
+  newest 50 pull requests are read…`), and `forge show` of a number they do not hold says the
+  pull request may be older instead of saying it does not exist.
 - **The head commit is the source commit.** `source.commit.hash` (Cloud, which may say it cut short:
   Atlassian's own examples show twelve characters, so the shape is assumed) and `fromRef.latestCommit` (Data Center) are read from the list, and
   kept only as a hex hash of at least 7 characters, as GitHub's `headRefOid` is: it is given to
@@ -198,15 +209,15 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
   comment and, on Cloud, no participant. They are read with `bkt api`, which passes the server's
   answer through, from Atlassian's REST documentation: Cloud
   `/repositories/{workspace}/{repo}/pullrequests/{id}` (`participants[]`: `role`, `approved`,
-  `state`, `user.display_name`) and its `/comments?pagelen=100` (`values[]`: `content.raw`,
+  `state`, `user.display_name`) and its `/comments?pagelen=50` (`values[]`: `content.raw`,
   `user.display_name`, `deleted`); Data Center
-  `/rest/api/1.0/projects/{key}/repos/{repo}/pull-requests/{id}/activities?limit=100`
+  `/rest/api/1.0/projects/{key}/repos/{repo}/pull-requests/{id}/activities?limit=50`
   (`values[]` whose `action` is `COMMENTED`: `comment.text`, `comment.author.displayName`,
   replies in `comment.comments`). **These shapes are assumed, and the maintainer checks them**:
-  nothing in `bkt`'s source prints them. Only the first 100 comments are read.
+  nothing in `bkt`'s source prints them. Only the first 100 comments (Data Center: activities) are read, two pages of 50.
 - **Mergeable is read the same way, assumed too**: on Cloud, the pull request has a conflict when
-  a file of its `/diffstat?pagelen=500` (`values[].status`) is `merge conflict`, and when that
-  page has a `next` and no conflict, it is not known (only the first page is read); on Data
+  a file of its `/diffstat?pagelen=50` (`values[].status`) is `merge conflict`, and when its
+  first 500 files (ten pages of 50) have a `next` still and no conflict, it is not known; on Data
   Center, when its `/rest/api/1.0/projects/{key}/repos/{repo}/pull-requests/{id}/merge` says
   `conflicted`. When that read fails, it is not known, and the rest of the pull request is shown.
 - **The review is the reviewers' verdicts as one**: `changes requested` when one reviewer asks
@@ -260,7 +271,7 @@ the base the repository started from):
   which print `✓ Commented on pull request #<id>` and `✓ Updated pull request #<id>`); `bkt pr
   edit` refuses a call with neither, and Flottille refuses it before.
 - `list`: `bkt pr list --state OPEN | MERGED | DECLINED | all` (`closed` is `DECLINED`), the
-  newest 100, the branch picked from them; `show` with a number finds it among them.
+  newest 50, the branch picked from them; `show` with a number finds it among them.
 
 ### Agents never run `bkt`
 

@@ -301,7 +301,8 @@ pending requests.
 - **`list {repository?, state?, branch?}`**: the pull requests of each repository, or of the one
   named, a line each (`- #12 open, app/login into main: Add the login page  <link>`): `state` is
   `open` (the default), `closed`, `merged` or `all`, `branch` keeps those of one source branch;
-  the newest 100 of each. Bitbucket lists by state and the branch is picked from them
+  the newest 100 of each (on Bitbucket, the newest 50, and the answer says when a list may be
+  cut). Bitbucket lists by state and the branch is picked from them
   ([`forges.md`](forges.md), "Bitbucket").
 - **`show {workspace?, repository?, detail?}`**: the pull request of a workspace's branch in each
   of its repositories, or the one named (`workspace` names the workspace: the agent's own when

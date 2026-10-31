@@ -43,11 +43,28 @@
 //! repository's list does not hold, as the server refuses it. A pull request whose `checks` is the
 //! string `"unreadable"` has a `bkt pr checks --json` answer without `statuses`, as a `bkt` whose
 //! output changed shape.
+//!
+//! # Page sizes
+//!
+//! Bitbucket Cloud refuses a `pagelen` above the maximum of the endpoint (`400 Bad Request:
+//! Invalid pagelen`, seen with `bkt` v0.37.0: its pull request list takes 50 at most), and
+//! Atlassian's REST documentation names no maximum for the other endpoints Flottille reads, so the
+//! fake refuses above `MAX_PAGELEN` (50, the value safe everywhere) on `pr list --limit` and on a
+//! Cloud `bkt api` `pagelen`. A Cloud `api` body that holds more `values` than the `pagelen` asked
+//! is served page by page, `next` an absolute link as the server gives it (`?page=2&pagelen=…`);
+//! a Data Center body is served by `limit` and `start` (`isLastPage`, `nextPageStart`). A body
+//! that says its own `next` or `isLastPage` is passed through as it is.
 
 use std::io::Write;
 use std::path::PathBuf;
 
 use serde_json::{Map, Value, json};
+
+/// The largest `pagelen` the fake accepts: Bitbucket Cloud's pull request list takes 50 at most.
+const MAX_PAGELEN: usize = 50;
+
+/// What Bitbucket Cloud answers to a `pagelen` it does not take, as `bkt` prints it.
+const INVALID_PAGELEN: &str = "400 Bad Request: Invalid pagelen";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -122,9 +139,15 @@ fn answer(script: &Value, args: &[String]) -> i32 {
         false => ("--project", "project"),
     };
     let is_api = positional.first() == Some(&"api");
+    // Every `--param key=value` of `bkt api`.
+    let params: Vec<(&str, &str)> = words
+        .windows(2)
+        .filter(|pair| pair[0] == "--param")
+        .filter_map(|pair| pair[1].split_once('='))
+        .collect();
     let (Some(owner), Some(repo)) = (option(owner_flag), option("--repo")) else {
         if is_api {
-            return api(script, positional[1]);
+            return api(script, positional[1], &params);
         }
         eprintln!(
             "Error: context must supply workspace and repo; use --workspace/--repo if needed"
@@ -139,6 +162,14 @@ fn answer(script: &Value, args: &[String]) -> i32 {
     let mut payload = json!({owner_key: owner, "repo": repo});
     match positional.as_slice() {
         ["pr", "list"] => {
+            if cloud
+                && option("--limit")
+                    .and_then(|limit| limit.parse::<usize>().ok())
+                    .is_some_and(|limit| limit > MAX_PAGELEN)
+            {
+                eprintln!("{INVALID_PAGELEN}");
+                return 1;
+            }
             let state = option("--state").unwrap_or("OPEN").to_uppercase();
             let pulls: Vec<Value> = script["pulls"][&key]
                 .as_array()
@@ -228,16 +259,67 @@ fn answer(script: &Value, args: &[String]) -> i32 {
     0
 }
 
-/// `bkt api <path>`: the script's body for that path, as the server answers it.
-fn api(script: &Value, path: &str) -> i32 {
-    match script["api"].get(path) {
-        Some(body) => {
-            println!("{body}");
-            0
+/// `bkt api <path>`: the script's body for that path, as the server answers it. A `next` link is
+/// followed as `bkt` does: an absolute URL has its host and the `/2.0` of the base path cut.
+fn api(script: &Value, path: &str, params: &[(&str, &str)]) -> i32 {
+    let relative = path
+        .strip_prefix("https://api.bitbucket.org")
+        .unwrap_or(path)
+        .trim_start_matches("/2.0");
+    let (path, query) = relative.split_once('?').unwrap_or((relative, ""));
+    let mut asked: Vec<(&str, &str)> = query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .collect();
+    asked.extend(params);
+    let get = |name: &str| {
+        asked
+            .iter()
+            .rev()
+            .find(|(key, _)| *key == name)
+            .and_then(|(_, value)| value.parse::<usize>().ok())
+    };
+    let Some(body) = script["api"].get(path) else {
+        eprintln!("Error: 404 Not Found: {path}");
+        return 1;
+    };
+    let mut body = body.clone();
+    let values = body["values"].as_array().cloned();
+    if path.starts_with("/rest/api/") {
+        // Data Center clamps a `limit` it does not take, and says where the next page starts.
+        if let (Some(values), Some(limit)) = (values, get("limit"))
+            && body.get("isLastPage").is_none()
+        {
+            let start = get("start").unwrap_or(0);
+            let end = (start + limit).min(values.len());
+            body["values"] = Value::from(values[start.min(end)..end].to_vec());
+            body["isLastPage"] = json!(end >= values.len());
+            if end < values.len() {
+                body["nextPageStart"] = json!(end);
+            }
         }
-        None => {
-            eprintln!("Error: 404 Not Found: {path}");
-            1
+    } else if let Some(pagelen) = get("pagelen") {
+        if pagelen > MAX_PAGELEN {
+            eprintln!("{INVALID_PAGELEN}");
+            return 1;
+        }
+        if let Some(values) = values
+            && body.get("next").is_none()
+        {
+            let page = get("page").unwrap_or(1);
+            let (from, to) = ((page - 1) * pagelen, page * pagelen);
+            body["values"] =
+                Value::from(values[from.min(values.len())..to.min(values.len())].to_vec());
+            body["pagelen"] = json!(pagelen);
+            body["page"] = json!(page);
+            if to < values.len() {
+                body["next"] = json!(format!(
+                    "https://api.bitbucket.org/2.0{path}?pagelen={pagelen}&page={}",
+                    page + 1
+                ));
+            }
         }
     }
+    println!("{body}");
+    0
 }

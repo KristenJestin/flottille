@@ -378,7 +378,7 @@ fn forge_list_comment_and_edit_go_through_bkt_on_bitbucket() {
     let calls = calls();
     assert!(
         calls.contains(
-            &"pr list --context cloud --workspace acme --repo app --state OPEN --limit 100 --json"
+            &"pr list --context cloud --workspace acme --repo app --state OPEN --limit 50 --json"
                 .to_owned()
         )
     );
