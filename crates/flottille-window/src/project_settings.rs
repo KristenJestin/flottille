@@ -1,5 +1,5 @@
-//! A project's settings: everything that configures the project, once, on one page with a sticky
-//! index (`docs/projects.md`). Its repositories (with their forge, `docs/projects.md`, "Forges
+//! A project's settings: everything that configures the project, once, on one page of tabs, one
+//! section shown at a time (`docs/projects.md`). Its repositories (with their forge, `docs/projects.md`, "Forges
 //! and tracker"), its tracker, then its Skills, Commands, Tasks and Setup (`docs/skills.md`,
 //! `docs/commands.md`), then its rules. The project page only shows and runs.
 //!
@@ -15,8 +15,8 @@ use std::collections::HashMap;
 use flottille_core::declared::{ProjectTracker, RepositoryForge};
 use flottille_core::project::cycle_sentence;
 use flottille_ui::{
-    Button, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, PageHeader, PageIndex,
-    Section, Select, SelectOption, Switch, Toast, Type, hoverable, icon, palette, presence,
+    Button, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, PageHeader, Section,
+    Select, SelectOption, Switch, Tabs, Toast, Type, enter, hoverable, icon, palette, presence,
     presence_of, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEditorStyle, InputEvent, InputState};
@@ -32,7 +32,6 @@ use crate::commands::{CommandsSection, boxed, menu_of, problem_line};
 use crate::project::repository_label;
 use crate::repositories::{ProjectRepositories, RepositoryInfo};
 use crate::rules::RulesEditor;
-use crate::sections::Sections;
 use crate::setup::SetupSection;
 use crate::shell::Shell;
 use crate::skills::SkillsSection;
@@ -357,8 +356,8 @@ pub struct ProjectSettingsPage {
     shell: WeakEntity<Shell>,
     /// Where it was opened at, when it was.
     revealed: Option<Reveal>,
-    /// On its way to the section it was opened at.
-    revealing: bool,
+    /// The tab chosen: the index of its section in [`SECTIONS`]. Kept while the page is open.
+    tab: usize,
     name: String,
     folder: String,
     /// The daemon answered once.
@@ -390,7 +389,6 @@ pub struct ProjectSettingsPage {
     removing: bool,
     removed: Option<String>,
     narrow: bool,
-    sections: Sections,
     /// This project's own rules (`docs/projects.md`, "Rules").
     rules: Entity<RulesEditor>,
     skills: Entity<SkillsSection>,
@@ -441,11 +439,18 @@ impl ProjectSettingsPage {
                 },
             )
         });
+        // A count in the tabs follows its list.
         let observed = cx.observe(&repositories, |_, _, cx| cx.notify());
+        let counted = [
+            cx.observe(&skills, |_, _, cx| cx.notify()),
+            cx.observe(&commands, |_, _, cx| cx.notify()),
+            cx.observe(&tasks, |_, _, cx| cx.notify()),
+            cx.observe(&setup, |_, _, cx| cx.notify()),
+        ];
         Self {
             shell,
             revealed: None,
-            revealing: false,
+            tab: 0,
             name,
             folder: String::new(),
             loaded: false,
@@ -472,13 +477,12 @@ impl ProjectSettingsPage {
             removing: false,
             removed: None,
             narrow: false,
-            sections: Sections::default(),
             rules,
             skills,
             commands,
             tasks,
             setup,
-            _subscriptions: vec![observed],
+            _subscriptions: [observed].into_iter().chain(counted).collect(),
         }
     }
 
@@ -1878,22 +1882,42 @@ impl ProjectSettingsPage {
         self.revealed.as_ref()
     }
 
-    /// Opened at a repository or at the tasks: their section scrolls up under the index.
+    /// Opened at a repository or at the tasks: their tab is the one chosen.
     pub fn reveal(&mut self, at: Reveal, cx: &mut Context<Self>) {
+        self.tab = at.entry();
         self.revealed = Some(at);
-        self.revealing = true;
         cx.notify();
     }
 
-    /// The index entry of the section in sight.
-    pub fn current_section(&self) -> usize {
-        self.sections.current(SECTIONS.len())
+    /// What each tab counts, once its list is read: the repositories, the skills, the commands,
+    /// the tasks and the setup steps.
+    fn counts(&self, cx: &App) -> [Option<usize>; 7] {
+        [
+            self.repositories
+                .read(cx)
+                .repositories()
+                .map(|read| read.listed.len()),
+            None,
+            self.skills.read(cx).skills().map(<[_]>::len),
+            self.commands.read(cx).commands().map(<[_]>::len),
+            self.tasks.read(cx).tasks().map(<[_]>::len),
+            self.setup.read(cx).steps().map(<[_]>::len),
+            None,
+        ]
     }
 
-    /// Scrolls the section of that index entry to the top, under the index.
-    pub fn go_to(&mut self, entry: usize, cx: &mut Context<Self>) {
-        self.sections.go_to(entry, cx);
-        cx.notify();
+    /// The tab chosen: the index of its section in [`SECTIONS`].
+    pub fn tab(&self) -> usize {
+        self.tab
+    }
+
+    /// Chooses the tab of that section: it shows alone.
+    pub fn choose(&mut self, entry: usize, cx: &mut Context<Self>) {
+        let entry = entry.min(SECTIONS.len() - 1);
+        if self.tab != entry {
+            self.tab = entry;
+            cx.notify();
+        }
     }
 }
 
@@ -1919,16 +1943,7 @@ fn shown_folder(folder: &str) -> String {
 }
 
 impl Render for ProjectSettingsPage {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Opened at a section: once what is above it is read, it scrolls up to it, and again
-        // while what is above still unfolds.
-        if self.revealing && self.has_read(cx) {
-            let entry = self.revealed.as_ref().map_or(0, Reveal::entry);
-            self.revealing = !self.sections.arrive_at(entry, cx);
-        }
-        if self.revealing {
-            window.request_animation_frame();
-        }
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let pad = if self.narrow { space::LG } else { space::XXL };
         let crumb = {
@@ -1986,43 +2001,81 @@ impl Render for ProjectSettingsPage {
                         .into_any_element()
                 },
             ));
-        let sections: Vec<(&'static str, gpui_kit::AnyElement)> = vec![
-            (
-                "repositories",
-                self.repositories_section(cx).into_any_element(),
-            ),
-            ("tracker", self.tracker_section(cx).into_any_element()),
-            ("skills", self.skills.clone().into_any_element()),
-            ("commands", self.commands.clone().into_any_element()),
-            ("tasks", self.tasks.clone().into_any_element()),
-            ("setup", self.setup.clone().into_any_element()),
-            ("rules", self.rules.clone().into_any_element()),
+        // Every section is built on each frame, so what it keeps (its rows' places) stays up to
+        // date while it is not the one shown.
+        let counts = self.counts(cx);
+        let mut sections: Vec<gpui_kit::AnyElement> = vec![
+            self.repositories_section(cx).into_any_element(),
+            self.tracker_section(cx).into_any_element(),
+            self.skills.clone().into_any_element(),
+            self.commands.clone().into_any_element(),
+            self.tasks.clone().into_any_element(),
+            self.setup.clone().into_any_element(),
+            self.rules.clone().into_any_element(),
         ];
+        let chosen = self.tab.min(sections.len() - 1);
+        let shown = sections.swap_remove(chosen);
         let this = cx.entity().downgrade();
-        let index = move |id: ElementId, current: usize| {
-            let this = this.clone();
-            PageIndex::new(id, SECTIONS)
-                .current(current)
-                .on_pick(move |entry, _, cx| {
-                    this.update(cx, |this, cx| this.go_to(entry, cx)).ok();
-                })
+        let tabs = SECTIONS
+            .iter()
+            .zip(counts)
+            .fold(
+                Tabs::new("project-settings-tabs", "Sections", chosen),
+                |tabs, ((key, label), count)| match count {
+                    Some(count) => tabs.counted(*key, *label, count.to_string()),
+                    None => tabs.tab(*key, *label),
+                },
+            )
+            .on_choose(move |entry, _, cx| {
+                this.update(cx, |this, cx| this.choose(entry, cx)).ok();
+            });
+        let project = self.name.clone();
+        let key = |part: &str| ElementId::Name(format!("enter-settings-{project}-{part}").into());
+        let column = |element: gpui_kit::AnyElement| {
+            div()
+                .w_full()
+                .max_w(space::COLUMN)
+                .flex_none()
+                .child(element)
         };
-        let key = format!("settings-{}", self.name);
         let modal = self.dialog_modal(cx).into_any_element();
         let confirm = self.confirm(cx);
-        let page = self.sections.page(
-            "project-settings-page",
-            &key,
-            pad,
-            header.into_any_element(),
-            index,
-            sections,
-            window,
-            cx,
-        );
+        // The header and the tabs stay in place; the section under them scrolls.
+        let top = div()
+            .w_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .items_center()
+            .px(pad)
+            .pt(space::XXL)
+            .child(column(
+                enter(key("header"), 0, div().pb(space::LG).child(header)).into_any_element(),
+            ))
+            .child(column(enter(key("tabs"), 1, tabs).into_any_element()));
+        // Each section enters as it is shown (its state is dropped while it is not drawn, so it
+        // plays again), after the tabs.
+        let page = div()
+            .id("project-settings-page")
+            .w_full()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .items_center()
+            .px(pad)
+            .pt(space::XL)
+            .pb(space::XXXL)
+            .child(column(
+                enter(key(SECTIONS[chosen].0), 2, shown).into_any_element(),
+            ));
         div()
             .size_full()
+            .flex()
+            .flex_col()
             .text_color(p.text)
+            .child(top)
             .child(page)
             .child(modal)
             .child(self.repositories.clone())

@@ -166,6 +166,7 @@ The components that hold them:
 | `Drawer::detail(id, view, cx)` | a run's detail: 520 px from the right, no scrim, Escape closes; `.show(window, cx)` |
 | `Card::new().id(id).block(Block)` | a card whose separators are drawn only between blocks with content |
 | `ListCard::new(id).row(ListRow)` | rule 7's list; `ListRow` has `.mono()`, `.tag(t)`, `.line(l)`, `.more(Entity<Menu>)` (its clicks stay its own), `.below(el)` (labelled values, a reason under the title); `.item(id, placement, row)` draws a row of a `Listing` in its `Item` |
+| `Tabs::new(id, label, chosen).tab(key, words)`, `.counted(key, words, count)`, `.on_choose(f)` | a page of sections shown one at a time (the project's settings): as many tabs as sections, a count after the name of a list, the marker slides to the tab chosen over `PANEL`; the page draws the chosen section alone, inside an `enter` that plays again as it is chosen again |
 | `PageIndex::new(id, entries).current(i).on_pick(f)` | a settings page's index of sections, the one in sight lit; the window's `sections::Sections` keeps it at the top once the page scrolls past it |
 | `EmptyLine::new(id, Icon, text)` | an empty list; `.action(Button)` |
 | `space::{XS, SM, MD, LG, XL, XXL, XXXL}`, `COLUMN`, `DIALOG`, `DIALOG_WIDE` | rule 9 |
