@@ -27,7 +27,7 @@ use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line};
 use crate::conversation::Ending;
 use crate::project::repository_label;
 use crate::project_settings::Reveal;
-use crate::runs::{CommandList, CommandOutput, CommandPanel, CommandRow, arrange};
+use crate::runs::{CommandList, CommandOutput, CommandPanel, CommandRow, Watch, arrange};
 use crate::session::seconds;
 use crate::shell::{Shell, now_ms};
 
@@ -699,8 +699,8 @@ pub struct ProjectTasks {
     /// The drawer a run's detail slides in with, drawn by the page over all of it.
     drawer: Entity<Drawer>,
     _drawer: Subscription,
-    /// The run whose output is open.
-    watching: Option<String>,
+    /// The run, or the setup step, whose output is open.
+    watching: Option<Watch>,
     /// Reads the runs again each second while one runs or its output is open.
     ticker: Option<Task<()>>,
     _commands: Subscription,
@@ -867,10 +867,26 @@ impl ProjectTasks {
 
     /// Opens a run's detail in the drawer, its output followed live.
     pub fn open_command(&mut self, run: &str, cx: &mut Context<Self>) {
-        self.watching = Some(run.to_owned());
+        self.open_watch(Watch::Run(run.to_owned()), cx);
+    }
+
+    /// Opens a step of a workspace's setup in the same drawer: what it runs and what it writes.
+    pub fn open_step(&mut self, workspace: &str, position: u32, cx: &mut Context<Self>) {
+        self.open_watch(
+            Watch::Step {
+                workspace: workspace.to_owned(),
+                position,
+            },
+            cx,
+        );
+    }
+
+    fn open_watch(&mut self, watch: Watch, cx: &mut Context<Self>) {
+        let key = watch.key();
+        self.watching = Some(watch);
         let rows = self.commands.read(cx).rows().to_vec();
         self.panel.update(cx, |panel, cx| {
-            panel.open(run, cx);
+            panel.open(&key, cx);
             panel.set_rows(&rows, cx);
         });
         self.drawer.update(cx, |drawer, cx| drawer.open(cx));

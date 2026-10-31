@@ -106,6 +106,29 @@ pub struct CommandRow {
     /// The last lines of its output, as the program wrote them: what the card of its result
     /// shows, while it runs as once it ended.
     pub tail: Vec<String>,
+    /// A step of a workspace's setup, not a command: the daemon starts it, nobody stops it from
+    /// here, and its end is `done` or `failed`.
+    pub step: bool,
+}
+
+/// What the drawer follows: a command, or a step of a workspace's setup.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Watch {
+    Run(String),
+    Step { workspace: String, position: u32 },
+}
+
+impl Watch {
+    /// The key the drawer holds it under.
+    pub fn key(&self) -> String {
+        match self {
+            Watch::Run(run) => run.clone(),
+            Watch::Step {
+                workspace,
+                position,
+            } => format!("step:{workspace}:{position}"),
+        }
+    }
 }
 
 impl CommandRow {
@@ -129,6 +152,38 @@ impl CommandRow {
                 .flatten()
                 .filter_map(|line| line.as_str().map(str::to_owned))
                 .collect(),
+            step: false,
+        }
+    }
+
+    /// A step of a setup as `workspace.step_output` gives it, held under `key`.
+    pub fn of_step(value: &Value, key: &str) -> CommandRow {
+        let place = match value["repository"].as_str() {
+            Some(repository) => format!(
+                "{} · {repository}",
+                value["workspace"].as_str().unwrap_or_default()
+            ),
+            None => value["workspace"].as_str().unwrap_or_default().to_owned(),
+        };
+        let (state, exit_code) = match value["state"].as_str() {
+            Some("running") => ("running", None),
+            Some("failed") => ("exited", Some(1)),
+            _ => ("exited", Some(0)),
+        };
+        CommandRow {
+            run: key.to_owned(),
+            agent: String::new(),
+            name: None,
+            workspace: Some(place),
+            line: value["line"].as_str().unwrap_or_default().to_owned(),
+            state: state.to_owned(),
+            exit_code,
+            signal: None,
+            started_at: value["started_at"].as_u64().unwrap_or(0),
+            ended_at: value["ended_at"].as_u64(),
+            last_line: String::new(),
+            tail: Vec::new(),
+            step: true,
         }
     }
 
@@ -162,6 +217,14 @@ pub struct CommandOutput {
 }
 
 impl CommandOutput {
+    /// A step's output as `workspace.step_output` gives it, held under `key`.
+    pub fn of_step(value: &Value, key: &str) -> CommandOutput {
+        CommandOutput {
+            row: CommandRow::of_step(value, key),
+            ..CommandOutput::of(value)
+        }
+    }
+
     pub fn of(value: &Value) -> CommandOutput {
         CommandOutput {
             row: CommandRow::of(value),
@@ -667,6 +730,10 @@ pub struct CommandPanel {
     focus: Option<FocusHandle>,
     focused: bool,
     renders: usize,
+    /// How many lines the output had when it was first read: they are there as the drawer
+    /// opens, the ones that follow unfold as they arrive.
+    base: Option<usize>,
+    arrivals: Listing<String>,
 }
 
 impl CommandPanel {
@@ -682,6 +749,8 @@ impl CommandPanel {
             focus: None,
             focused: false,
             renders: 0,
+            base: None,
+            arrivals: Listing::default(),
         }
     }
 
@@ -702,6 +771,8 @@ impl CommandPanel {
         if self.run.as_deref() != Some(run) {
             self.shown = None;
             self.row = None;
+            self.base = None;
+            self.arrivals = Listing::default();
         }
         self.run = Some(run.to_owned());
         self.focused = false;
@@ -720,6 +791,9 @@ impl CommandPanel {
             || self.shown.as_ref() == Some(&output)
         {
             return;
+        }
+        if self.base.is_none() {
+            self.base = Some(output.lines.len());
         }
         self.shown = Some(output);
         self.scroll.scroll_to_bottom();
@@ -822,8 +896,16 @@ impl Render for CommandPanel {
         let now = now_ms();
         let running = row.running();
         let (_, color, said) = mark_of(row.ending(), &p);
+        // A step of a setup ends `done` or `failed`, not with an exit code.
+        let said = match (row.step, row.ending()) {
+            (true, Ending::Exited(0)) => "done".to_owned(),
+            (true, Ending::Exited(_)) => "failed".to_owned(),
+            _ => said,
+        };
         let time = seconds(row.elapsed_ms(now));
         let sub = match (&row.name, running) {
+            _ if row.step && running => format!("Setup step · running for {time}"),
+            _ if row.step => format!("Setup step · {said} after {time}"),
             (Some(task), true) => format!("Task {task} · running for {time}"),
             (None, true) => format!("Running for {time}"),
             (Some(task), false) => format!("Task {task} · {said} after {time}"),
@@ -869,7 +951,7 @@ impl Render for CommandPanel {
                             .test_support(),
                     ),
             )
-            .when(running, |d| {
+            .when(running && !row.step, |d| {
                 let (page, run) = (self.page.clone(), row.run.clone());
                 d.child(
                     Button::secondary("run-drawer-stop", "Stop")
@@ -882,6 +964,7 @@ impl Render for CommandPanel {
                     .on_click(move |_, _, cx| page.close(cx)),
             );
         let by = match row.agent.as_str() {
+            _ if row.step => "the workspace's setup".to_owned(),
             "" => "you".to_owned(),
             agent => {
                 let name = self
@@ -977,80 +1060,116 @@ impl Render for CommandPanel {
                 );
             })
         };
-        let output = div()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .gap(space::SM)
-            .pl(space::XL)
-            .pr(space::MD)
-            .pt(space::SM)
-            .pb(space::LG)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(space::SM)
-                    .child(div().text_size(px(12.5)).medium().child("Output"))
-                    .child(
-                        div()
-                            .flex_1()
-                            .mono(11.)
-                            .text_color(p.faint)
-                            .child("follows the end"),
-                    )
-                    .child(copy),
-            )
-            .child(
-                div()
-                    .id("command-panel-output")
-                    .flex_1()
-                    .min_h_0()
-                    .py(space::SM)
-                    .px(space::MD)
-                    .rounded(px(8.))
-                    .bg(p.field)
-                    .border_1()
-                    .border_color(p.line)
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .flex()
-                    .flex_col()
-                    .when_some(self.shown.as_ref(), |d, shown| {
-                        d.when(shown.earlier, |d| {
-                            d.child(
-                                div()
-                                    .mono(11.)
-                                    .text_color(p.faint)
-                                    .child("(earlier lines are left out)"),
-                            )
+        // The lines there when it was first read are drawn as they are; each one that follows
+        // unfolds as it arrives.
+        let (at, reduce) = (cx.background_executor().now(), cx.reduce_motion());
+        let base = match (&self.shown, self.base) {
+            (Some(shown), Some(base)) => base.min(shown.lines.len()),
+            _ => 0,
+        };
+        if let Some(shown) = &self.shown {
+            self.arrivals.sync(
+                shown
+                    .lines
+                    .iter()
+                    .enumerate()
+                    .skip(base)
+                    .map(|(i, line)| (i.to_string(), line.clone())),
+                at,
+                reduce,
+            );
+        }
+        let arrived: Vec<AnyElement> = self
+            .arrivals
+            .rows()
+            .map(|row| {
+                let i = row.key;
+                Item::new(
+                    ElementId::Name(format!("command-panel-item-{i}").into()),
+                    row.placement,
+                    coloured_line(
+                        ElementId::Name(format!("command-panel-line-{i}").into()),
+                        row.value,
+                        p.mute,
+                        &p,
+                    ),
+                )
+                .into_any_element()
+            })
+            .collect();
+        let output =
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .gap(space::SM)
+                .pl(space::XL)
+                .pr(space::MD)
+                .pt(space::SM)
+                .pb(space::LG)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(space::SM)
+                        .child(div().text_size(px(12.5)).medium().child("Output"))
+                        .child(
+                            div()
+                                .flex_1()
+                                .mono(11.)
+                                .text_color(p.faint)
+                                .child("follows the end"),
+                        )
+                        .child(copy),
+                )
+                .child(
+                    div()
+                        .id("command-panel-output")
+                        .flex_1()
+                        .min_h_0()
+                        .py(space::SM)
+                        .px(space::MD)
+                        .rounded(px(8.))
+                        .bg(p.field)
+                        .border_1()
+                        .border_color(p.line)
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll)
+                        .flex()
+                        .flex_col()
+                        .when_some(self.shown.as_ref(), |d, shown| {
+                            d.when(shown.earlier, |d| {
+                                d.child(
+                                    div()
+                                        .mono(11.)
+                                        .text_color(p.faint)
+                                        .child("(earlier lines are left out)"),
+                                )
+                            })
+                            .children(shown.lines.iter().enumerate().take(base).map(|(i, line)| {
+                                coloured_line(
+                                    ElementId::Name(format!("command-panel-line-{i}").into()),
+                                    line,
+                                    p.mute,
+                                    &p,
+                                )
+                            }))
+                            .children(arrived)
                         })
-                        .children(shown.lines.iter().enumerate().map(|(i, line)| {
-                            coloured_line(
-                                ElementId::Name(format!("command-panel-line-{i}").into()),
-                                line,
-                                p.mute,
-                                &p,
-                            )
-                        }))
-                    })
-                    .when(
-                        self.shown.as_ref().is_none_or(|s| s.lines.is_empty()),
-                        |d| {
-                            d.child(
-                                div()
-                                    .mono(11.5)
-                                    .text_color(p.faint)
-                                    .child(match self.shown {
+                        .when(
+                            self.shown.as_ref().is_none_or(|s| s.lines.is_empty()),
+                            |d| {
+                                d.child(div().mono(11.5).text_color(p.faint).child(
+                                    match self.shown {
                                         Some(_) => "(no output yet)",
                                         None => "Reading…",
-                                    }),
-                            )
-                        },
-                    )
-                    .test_support(),
-            );
+                                    },
+                                ))
+                            },
+                        )
+                        .test_support(),
+                );
         root.child(header).child(facts).child(output)
     }
 }
@@ -1082,6 +1201,7 @@ mod tests {
             ended_at,
             last_line: String::new(),
             tail: Vec::new(),
+            step: false,
         }
     }
 

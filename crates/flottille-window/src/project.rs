@@ -266,7 +266,8 @@ impl ProjectPage {
                     let shell = self.shell.clone();
                     let project = self.name.clone();
                     let first = place.clone();
-                    cx.new(|cx| PlaceCard::new(shell, project, first, cx))
+                    let tasks = self.tasks.downgrade();
+                    cx.new(|cx| PlaceCard::new(shell, project, tasks, first, cx))
                 }
             };
             if card.read(cx).data != place {
@@ -549,6 +550,8 @@ fn step_time(step: &SetupLine, now: u64) -> Option<String> {
 pub struct PlaceCard {
     shell: WeakEntity<Shell>,
     project: String,
+    /// The page's runs and their drawer, which a setup step opens in.
+    tasks: WeakEntity<ProjectTasks>,
     data: PlaceData,
     facts: Facts,
     /// The removal's confirmation is open.
@@ -579,6 +582,7 @@ impl PlaceCard {
     fn new(
         shell: WeakEntity<Shell>,
         project: String,
+        tasks: WeakEntity<ProjectTasks>,
         data: PlaceData,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -618,6 +622,7 @@ impl PlaceCard {
         let mut card = Self {
             shell,
             project,
+            tasks,
             data: PlaceData {
                 sessions: Vec::new(),
                 ..data.clone()
@@ -1076,6 +1081,20 @@ impl PlaceCard {
             }
             if let Some(time) = step_time(&step, now) {
                 row = row.time(SharedString::from(time));
+            }
+            // A step that ran or runs opens in the run drawer; one still to do, or skipped, did
+            // nothing yet to show.
+            if matches!(
+                step.state,
+                StepState::Running | StepState::Done | StepState::Failed
+            ) {
+                let (tasks, workspace, position) =
+                    (self.tasks.clone(), name.to_owned(), step.position);
+                row = row.on_click(move |_, _, cx| {
+                    tasks
+                        .update(cx, |tasks, cx| tasks.open_step(&workspace, position, cx))
+                        .ok();
+                });
             }
             Item::new(
                 ElementId::Name(format!("step-item-{name}-{}", step.position).into()),
