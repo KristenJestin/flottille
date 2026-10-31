@@ -260,6 +260,9 @@ pub async fn prepared(
     if tool == "session_send" {
         return session_says(daemon, grant, args);
     }
+    if tool == "session_read" {
+        return crate::session_read::says(daemon, grant, args);
+    }
     if tool == "tickets" {
         let project = own(daemon, grant)?;
         return match crate::tickets::unwritable(&project, args) {
