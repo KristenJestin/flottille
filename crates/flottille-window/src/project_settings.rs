@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 
 use flottille_core::declared::{ProjectTracker, RepositoryForge};
+use flottille_core::project::cycle_sentence;
 use flottille_ui::{
     Button, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, PageHeader, PageIndex,
     Section, Select, SelectOption, Switch, Toast, Type, hoverable, icon, palette, presence,
@@ -1011,6 +1012,21 @@ impl ProjectSettingsPage {
                         repository,
                     }),
                 };
+                // Said here as a sentence: the daemon would refuse the same cycle in the file's
+                // words, which are for the command line.
+                let graph: Vec<(String, Vec<String>)> = self
+                    .forms
+                    .iter()
+                    .map(|form| match form.path == path {
+                        true => (path.clone(), self.depends.clone()),
+                        false => (form.path.clone(), form.depends_on.clone()),
+                    })
+                    .collect();
+                if let Some(sentence) = cycle_sentence(&graph, &path) {
+                    self.dialog_error = Some(sentence.into());
+                    cx.notify();
+                    return;
+                }
                 let lists = (&path[..], &self.bases[..], &self.depends[..]);
                 let settings = self.params(Some((&path, forge)), Some(lists), None);
                 self.send(settings, Saving::Forge { path, used: false }, cx);
@@ -1624,7 +1640,7 @@ impl ProjectSettingsPage {
         let error = problem_line(
             "settings-modal-error",
             self.dialog_error.clone(),
-            space::LG,
+            px(0.),
             cx,
         );
         let save = Button::primary("save-settings-modal", "Save")
@@ -1713,7 +1729,7 @@ impl ProjectSettingsPage {
                         )
                         .gap(space::LG),
                     )
-                    .child(error)
+                    .kept(error)
                     .action(save)
             }
             Some(Dialog::Tracker) => {
@@ -1819,7 +1835,7 @@ impl ProjectSettingsPage {
                         )
                         .gap(space::LG),
                     )
-                    .child(error)
+                    .kept(error)
                     .action(save)
             }
         }

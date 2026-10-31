@@ -1017,6 +1017,51 @@ fn cycle_among<'a>(repositories: &'a [Repository], left: &[usize]) -> (usize, Ve
     }
 }
 
+/// The sentence a person reads when `edited`, with the dependencies it is given, would close a
+/// cycle among `repositories` (each with what it depends on, `edited` as the edit leaves it):
+/// "api cannot depend on web: web already depends on api." The file's own words for the same
+/// refusal are [`validate`]'s.
+pub fn cycle_sentence(repositories: &[(String, Vec<String>)], edited: &str) -> Option<String> {
+    let on = |path: &str| -> &[String] {
+        repositories
+            .iter()
+            .find(|(name, _)| name == path)
+            .map_or(&[], |(_, on)| &on[..])
+    };
+    on(edited).iter().find_map(|dependency| {
+        // The shortest way back from the dependency to `edited`, found breadth first.
+        let mut ways: Vec<Vec<&str>> = vec![vec![dependency]];
+        let mut seen = vec![dependency.as_str()];
+        let mut next = 0;
+        while next < ways.len() {
+            let way = ways[next].clone();
+            next += 1;
+            let last = way[way.len() - 1];
+            if last == edited {
+                let through = &way[1..way.len() - 1];
+                let through = match through {
+                    [] => String::new(),
+                    [one] => format!(", through {one}"),
+                    [first @ .., last] => format!(", through {} and {last}", first.join(", ")),
+                };
+                return Some(format!(
+                    "{edited} cannot depend on {dependency}: {dependency} already depends on \
+                     {edited}{through}."
+                ));
+            }
+            for step in on(last) {
+                if !seen.contains(&step.as_str()) {
+                    seen.push(step);
+                    let mut longer = way.clone();
+                    longer.push(step);
+                    ways.push(longer);
+                }
+            }
+        }
+        None
+    })
+}
+
 /// What a name may be made of: it is a file name, a folder name and a word on the command line.
 pub fn valid_name(name: &str) -> bool {
     let mut chars = name.chars();
@@ -1266,6 +1311,66 @@ mod tests {
         );
         assert!(refusal(&text.replace("13", "0")).contains("max_children"));
         assert!(parse(&text.replace("13", "12")).is_ok());
+    }
+
+    fn graph(edges: &[(&str, &[&str])]) -> Vec<(String, Vec<String>)> {
+        edges
+            .iter()
+            .map(|(path, on)| {
+                (
+                    (*path).to_owned(),
+                    on.iter().map(|d| (*d).to_owned()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_cycle_between_two_repositories_is_said_as_a_sentence() {
+        let repositories = graph(&[("api", &["web"]), ("web", &["api"]), ("lib", &[])]);
+
+        assert_eq!(
+            cycle_sentence(&repositories, "api").as_deref(),
+            Some("api cannot depend on web: web already depends on api.")
+        );
+    }
+
+    #[test]
+    fn a_longer_cycle_names_the_repositories_it_goes_through() {
+        let one = graph(&[("web", &["api"]), ("api", &["lib"]), ("lib", &["web"])]);
+        let two = graph(&[
+            ("web", &["api"]),
+            ("api", &["db"]),
+            ("db", &["lib"]),
+            ("lib", &["web"]),
+        ]);
+
+        assert_eq!(
+            cycle_sentence(&one, "lib").as_deref(),
+            Some("lib cannot depend on web: web already depends on lib, through api.")
+        );
+        assert_eq!(
+            cycle_sentence(&two, "lib").as_deref(),
+            Some("lib cannot depend on web: web already depends on lib, through api and db.")
+        );
+    }
+
+    #[test]
+    fn a_dependency_that_closes_no_cycle_has_no_sentence() {
+        let repositories = graph(&[("api", &["lib"]), ("web", &["api"]), ("lib", &[])]);
+
+        assert_eq!(cycle_sentence(&repositories, "api"), None);
+        assert_eq!(cycle_sentence(&repositories, "unknown"), None);
+    }
+
+    #[test]
+    fn the_sentence_names_the_dependency_that_closes_the_cycle_not_the_first_one() {
+        let repositories = graph(&[("api", &["lib", "web"]), ("web", &["api"]), ("lib", &[])]);
+
+        assert_eq!(
+            cycle_sentence(&repositories, "api").as_deref(),
+            Some("api cannot depend on web: web already depends on api.")
+        );
     }
 
     #[test]
