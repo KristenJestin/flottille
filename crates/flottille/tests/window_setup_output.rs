@@ -504,3 +504,61 @@ fn a_failed_setup_step_that_runs_no_command_opens_to_say_why_it_failed(cx: &mut 
         text_of("run-drawer-sub", cx)
     );
 }
+
+#[gpui_kit::test]
+fn the_lines_past_the_cap_of_a_chatty_setup_step_still_unfold_as_they_arrive(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    let go = user.path("go");
+    step(
+        &user,
+        "atlas",
+        "chatty",
+        &format!(
+            "i=1\nwhile [ $i -le 1005 ]; do echo \"line $i\"; i=$((i+1)); done\n{}\
+             for i in a b c d e; do echo \"late $i\"; done\n",
+            wait_for(&go)
+        ),
+    );
+    let (shell, cx) = window(&user, Arc::new(user.connector()), cx);
+    let page = open_project(&shell, "atlas", cx);
+    create(&user, "onboarding");
+    until(&shell, cx, "the step runs", |cx| {
+        run_row(&page, "onboarding", StepState::Running, cx).is_some()
+    });
+    let at = run_row(&page, "onboarding", StepState::Running, cx).unwrap();
+    settle(cx);
+    cx.update(|window, cx| window.click(format!("setup-step-onboarding-{at}"), cx));
+    until(&shell, cx, "the last 1000 lines are shown", |cx| {
+        shown_lines(&page, cx).is_some_and(|lines| {
+            lines.len() == 1000 && lines.last().is_some_and(|l| l == "line 1005")
+        })
+    });
+    settle(cx);
+
+    std::fs::write(&go, "").unwrap();
+    until(&shell, cx, "the window slid to the late lines", |cx| {
+        shown_lines(&page, cx).is_some_and(|lines| lines.last().is_some_and(|l| l == "late e"))
+    });
+    // The drawer numbers the lines from the first one it read: that was "line 6", number 0, so
+    // the late lines are 1000 to 1004.
+    let height = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| {
+            window
+                .try_find("command-panel-item-1004")
+                .map(|item| f32::from(item.bounds().size.height))
+        })
+    };
+    run_for(Duration::from_millis(32), cx);
+    let unfolding = height(cx).expect("the late line is drawn in its frame");
+    settle(cx);
+    let unfolded = height(cx).unwrap();
+    assert!(
+        unfolding < unfolded - 1.0,
+        "the line was part way ({unfolding}) before its full height ({unfolded})"
+    );
+    // A line the drawer showed when it opened does not unfold because the window slid.
+    assert!(cx.update(|window, _| window.try_find("command-panel-item-999").is_none()));
+}

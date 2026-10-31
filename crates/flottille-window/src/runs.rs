@@ -207,6 +207,17 @@ impl CommandRow {
     }
 }
 
+/// How many lines the window of the last lines slid by between two readings: the smallest shift
+/// that leaves what stayed of `before` at the start of `after`.
+fn slid(before: &[String], after: &[String]) -> usize {
+    (0..=before.len())
+        .find(|&shift| {
+            let stayed = &before[shift..];
+            after.len() >= stayed.len() && after[..stayed.len()] == *stayed
+        })
+        .unwrap_or(before.len())
+}
+
 /// A command's output: the last lines the daemon gave, as the program wrote them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CommandOutput {
@@ -730,9 +741,13 @@ pub struct CommandPanel {
     focus: Option<FocusHandle>,
     focused: bool,
     renders: usize,
-    /// How many lines the output had when it was first read: they are there as the drawer
+    /// How many lines the output had when it was first read, counted from the first line read
+    /// (the daemon does not say how many it left out before it): they are there as the drawer
     /// opens, the ones that follow unfold as they arrive.
     base: Option<usize>,
+    /// The number of the first line of `shown`, counted the same way: the daemon gives the last
+    /// lines only, so it moves on as the output grows past what it gives.
+    first: usize,
     arrivals: Listing<String>,
 }
 
@@ -750,6 +765,7 @@ impl CommandPanel {
             focused: false,
             renders: 0,
             base: None,
+            first: 0,
             arrivals: Listing::default(),
         }
     }
@@ -772,6 +788,7 @@ impl CommandPanel {
             self.shown = None;
             self.row = None;
             self.base = None;
+            self.first = 0;
             self.arrivals = Listing::default();
         }
         self.run = Some(run.to_owned());
@@ -794,6 +811,9 @@ impl CommandPanel {
         }
         if self.base.is_none() {
             self.base = Some(output.lines.len());
+        }
+        if let Some(before) = &self.shown {
+            self.first += slid(&before.lines, &output.lines);
         }
         self.shown = Some(output);
         self.scroll.scroll_to_bottom();
@@ -1063,9 +1083,11 @@ impl Render for CommandPanel {
         // The lines there when it was first read are drawn as they are; each one that follows
         // unfolds as it arrives.
         let (at, reduce) = (cx.background_executor().now(), cx.reduce_motion());
-        let base = match (&self.shown, self.base) {
-            (Some(shown), Some(base)) => base.min(shown.lines.len()),
-            _ => 0,
+        let (first, base) = (self.first, self.base.unwrap_or(0));
+        // The lines of `shown` before this index were there when it opened (or are gone).
+        let opened = match &self.shown {
+            Some(shown) => base.saturating_sub(first).min(shown.lines.len()),
+            None => 0,
         };
         if let Some(shown) = &self.shown {
             self.arrivals.sync(
@@ -1073,8 +1095,8 @@ impl Render for CommandPanel {
                     .lines
                     .iter()
                     .enumerate()
-                    .skip(base)
-                    .map(|(i, line)| (i.to_string(), line.clone())),
+                    .skip(opened)
+                    .map(|(i, line)| ((first + i).to_string(), line.clone())),
                 at,
                 reduce,
             );
@@ -1147,14 +1169,18 @@ impl Render for CommandPanel {
                                         .child("(earlier lines are left out)"),
                                 )
                             })
-                            .children(shown.lines.iter().enumerate().take(base).map(|(i, line)| {
-                                coloured_line(
-                                    ElementId::Name(format!("command-panel-line-{i}").into()),
-                                    line,
-                                    p.mute,
-                                    &p,
-                                )
-                            }))
+                            .children(shown.lines.iter().enumerate().take(opened).map(
+                                |(i, line)| {
+                                    coloured_line(
+                                        ElementId::Name(
+                                            format!("command-panel-line-{}", first + i).into(),
+                                        ),
+                                        line,
+                                        p.mute,
+                                        &p,
+                                    )
+                                },
+                            ))
                             .children(arrived)
                         })
                         .when(
@@ -1186,6 +1212,27 @@ fn capitalized(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lines(range: std::ops::RangeInclusive<u32>) -> Vec<String> {
+        range.map(|i| format!("line {i}")).collect()
+    }
+
+    #[test]
+    fn a_window_of_lines_that_only_grows_has_not_slid() {
+        assert_eq!(slid(&lines(1..=3), &lines(1..=5)), 0);
+        assert_eq!(slid(&lines(1..=3), &lines(1..=3)), 0);
+    }
+
+    #[test]
+    fn a_window_that_dropped_its_first_lines_says_by_how_many() {
+        assert_eq!(slid(&lines(1..=5), &lines(3..=8)), 2);
+        assert_eq!(slid(&lines(1..=5), &lines(6..=10)), 5);
+    }
+
+    #[test]
+    fn a_window_with_nothing_in_common_slid_past_all_of_what_it_had() {
+        assert_eq!(slid(&lines(1..=3), &lines(50..=52)), 3);
+    }
 
     fn row(run: &str, state: &str, started_at: u64, ended_at: Option<u64>) -> CommandRow {
         CommandRow {
