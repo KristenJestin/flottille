@@ -333,15 +333,15 @@ const SERVED: [Definition; 26] = [
             through the user's own gh or acli (no sign-in here: never run them). list: every \
             ticket of a state (open by default), by label and assignee, in one call; search: \
             the same, with words; show: a workspace's linked ticket (yours; in main, name \
-            workspace) or ticket, detail full adds the comments. Writes, GitHub only (Jira is \
-            read only), judged, answered at once, the result maybe later: create, comment, edit, \
-            close, reopen. {\"action\": \"comment\", \"ticket\": \"#12\", \"body\": \"...\"}",
+            workspace) or ticket, detail full adds the comments. Writes, judged, answered at \
+            once, the result maybe later: create, comment, edit, close, reopen, status (Jira). \
+            {\"action\": \"comment\", \"ticket\": \"#12\", \"body\": \"...\"}",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "search", "show", "create", "comment", "edit", "close", "reopen"]},
+                "action": {"type": "string", "enum": ["list", "search", "show", "create", "comment", "edit", "close", "reopen", "status"]},
                 "ticket": {"type": "string", "description": "#123 or ABC-123; the workspace's when left out."},
                 "workspace": {"type": "string"},
                 "query": {"type": "string", "description": "search: words."},
@@ -351,7 +351,10 @@ const SERVED: [Definition; 26] = [
                 "detail": {"type": "string", "enum": ["short", "full"]},
                 "title": {"type": "string"},
                 "body": {"type": "string", "description": "create, edit: description; comment: the comment."},
-                "labels": {"type": "array", "items": {"type": "string"}, "description": "create: labels."}
+                "labels": {"type": "array", "items": {"type": "string"}, "description": "create: labels."},
+                "status": {"type": "string", "description": "status: its name."},
+                "project": {"type": "string", "description": "create on Jira: the tracker's project."},
+                "type": {"type": "string", "description": "create on Jira: work item type."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -2107,7 +2110,8 @@ mod tests {
         // 23 after, the forge, ticket and removal tools merged into families and the
         // descriptions shortened. 28,224 once `project` took the base branches and dependencies
         // (#198): the cap is 29,000, still under 9,700 tokens at 3 characters a token. 28,600
-        // once `forge` subscribed to a pull request's events (#206).
+        // once `forge` subscribed to a pull request's events (#206). 28,801 once `tickets` wrote
+        // Jira (#224).
         assert!(chars < 29_000, "{chars} characters of definitions");
     }
 }

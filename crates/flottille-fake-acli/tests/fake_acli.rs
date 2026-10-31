@@ -82,3 +82,45 @@ fn a_search_answers_the_scripted_items_up_to_its_limit_and_needs_its_jql() {
     assert_eq!(items, json!([{"key": "ABC-2"}]));
     assert_eq!(without_jql.status.code(), Some(2));
 }
+
+#[test]
+fn the_writes_follow_the_script_and_change_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        json!({"items": {"ABC-1": {"key": "ABC-1"}}, "created": "ABC-7",
+            "transitions": {"ABC-1": ["In Progress"]}})
+        .to_string(),
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        let mut all = vec!["jira", "workitem"];
+        all.extend(args);
+        fake(dir.path()).args(all).output().unwrap()
+    };
+
+    let created = run(&["create", "--project", "ABC", "--summary", "S", "--json"]);
+    let commented = run(&["comment", "create", "--key", "ABC-1", "--body", "b"]);
+    let elsewhere = run(&["comment", "create", "--key", "ABC-2", "--body", "b"]);
+    let edited = run(&["edit", "--key", "ABC-1", "--summary", "S", "--yes"]);
+    let moved = run(&[
+        "transition",
+        "--key",
+        "ABC-1",
+        "--status",
+        "in progress",
+        "--yes",
+    ]);
+    let not_moved = run(&["transition", "--key", "ABC-1", "--status", "Done", "--yes"]);
+
+    assert_eq!(
+        serde_json::from_slice::<Value>(&created.stdout).unwrap()["key"],
+        "ABC-7"
+    );
+    assert!(commented.status.success());
+    assert_eq!(elsewhere.status.code(), Some(1));
+    assert!(edited.status.success());
+    assert!(moved.status.success());
+    assert_eq!(not_moved.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&not_moved.stderr).contains("no transition to status Done"));
+}

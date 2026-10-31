@@ -1,9 +1,10 @@
 //! The complete families of the agents' tools (#141, `docs/tools.md`, "The forge", "The tickets",
 //! "Sessions for the user"): every read of `forge` and `tickets` answers at once, every write is
 //! held for the user and done once they allow it, `tickets list` gives every open ticket in one
-//! call, Jira is read only, and a root starts a session for the user that is the user's. The
-//! forge and the trackers are the fake `gh`, `bkt` and `acli`; the remotes are throwaway bare
-//! repositories; the escalating programs are fakes, first on the daemon's `PATH`, and none runs.
+//! call, Jira is written as GitHub is, and a root starts a session for the user that is the
+//! user's. The forge and the trackers are the fake `gh`, `bkt` and `acli`; the remotes are
+//! throwaway bare repositories; the escalating programs are fakes, first on the daemon's `PATH`,
+//! and none runs.
 
 mod common;
 
@@ -764,10 +765,217 @@ fn acli_signed_in_to_another_site_reads_nothing_for_a_listing_a_search_or_a_show
     );
 }
 
-#[test]
-fn tickets_writes_on_jira_are_refused_before_anything_is_asked() {
+/// `item` in the status `name`, of Jira's status category `category` (`new`, `indeterminate`,
+/// `done`).
+fn in_status(mut item: Value, name: &str, category: &str) -> Value {
+    item["fields"]["status"] = json!({"name": name, "statusCategory": {"key": category}});
+    item
+}
+
+/// The work items `acli` holds for the Jira tracker: ABC-1 to do, ABC-2 in progress, ABC-3 done,
+/// what each can move to, and the key a creation answers.
+fn jira_items(user: &User) {
+    let site = "example.atlassian.net";
+    let todo = in_status(work_item("ABC-1", "The login fails", site), "To Do", "new");
+    let progress = in_status(
+        work_item("ABC-2", "Add search", site),
+        "In Progress",
+        "indeterminate",
+    );
+    let done = in_status(work_item("ABC-3", "Shipped", site), "Done", "done");
+    user.acli_script(json!({
+        "items": {"ABC-1": todo, "ABC-2": progress, "ABC-3": done},
+        "search": [todo, progress, done],
+        "transitions": {"ABC-1": ["In Progress", "Done"], "ABC-3": ["To Do"]},
+        "created": "DEF-7",
+    }));
+}
+
+/// A write of `tickets` on Jira, held for the user then done once allowed: what it answered, and
+/// the calls of `acli` that started with `verb`.
+fn jira_written(args: Value, verb: &str) -> (String, Vec<String>) {
     let user = user();
     on_jira(&user);
+    jira_items(&user);
+    let (_, mcp) = root_in(&user, None);
+    let calls = || words(user.acli_received());
+    let done = judged_then_done(&user, mcp.call("tickets", args), calls, verb);
+    let asked = calls()
+        .into_iter()
+        .filter(|c| c.starts_with(verb))
+        .collect();
+    // Every write is checked to go to the tracker's site first.
+    assert_eq!(calls()[0], "jira auth status");
+    (done, asked)
+}
+
+/// The search that finds the statuses of the work items of ABC.
+const STATUSES_OF_ABC: &str = "jira workitem search --jql project = \"ABC\" ORDER BY updated \
+    DESC --fields key,status --json --limit 200";
+
+#[test]
+fn create_a_jira_work_item_in_a_tracker_s_project() {
+    let (done, asked) = jira_written(
+        json!({"action": "create", "project": "def", "title": "Add a logout",
+            "body": "Users stay signed in", "type": "Story", "labels": ["feature", "auth"]}),
+        "jira workitem create",
+    );
+    assert!(
+        done.contains(
+            "The ticket DEF-7 was opened in DEF: https://example.atlassian.net/browse/DEF-7"
+        ),
+        "{done}"
+    );
+    assert_eq!(
+        asked,
+        [
+            "jira workitem create --project DEF --summary Add a logout --description Users stay \
+             signed in --type Story --label feature,auth --json"
+        ]
+    );
+}
+
+#[test]
+fn comment_on_a_jira_work_item() {
+    let (done, asked) = jira_written(
+        json!({"action": "comment", "ticket": "abc-1", "body": "Fixed on app/login"}),
+        "jira workitem comment",
+    );
+    assert!(done.contains("The comment was posted on ABC-1."), "{done}");
+    assert_eq!(
+        asked,
+        ["jira workitem comment create --key ABC-1 --body Fixed on app/login"]
+    );
+}
+
+#[test]
+fn edit_a_jira_work_item_s_summary_and_description() {
+    let (done, asked) = jira_written(
+        json!({"action": "edit", "ticket": "ABC-1", "title": "The logout fails",
+            "body": "It hangs"}),
+        "jira workitem edit",
+    );
+    assert!(done.contains("ABC-1 was changed."), "{done}");
+    assert_eq!(
+        asked,
+        [
+            "jira workitem edit --key ABC-1 --summary The logout fails --description It hangs \
+             --yes"
+        ]
+    );
+}
+
+#[test]
+fn close_a_jira_work_item_moves_it_to_a_done_transition() {
+    let (done, asked) = jira_written(
+        json!({"action": "close", "ticket": "ABC-1"}),
+        "jira workitem transition",
+    );
+    assert!(done.contains("ABC-1 was closed: moved to Done."), "{done}");
+    assert_eq!(
+        asked,
+        ["jira workitem transition --key ABC-1 --status Done --yes"]
+    );
+}
+
+#[test]
+fn reopen_a_jira_work_item() {
+    let (done, asked) = jira_written(
+        json!({"action": "reopen", "ticket": "ABC-3"}),
+        "jira workitem transition",
+    );
+    assert!(
+        done.contains("ABC-3 was reopened: moved to To Do."),
+        "{done}"
+    );
+    assert_eq!(
+        asked,
+        ["jira workitem transition --key ABC-3 --status To Do --yes"]
+    );
+}
+
+#[test]
+fn move_a_jira_work_item_to_a_named_status() {
+    let user = user();
+    on_jira(&user);
+    jira_items(&user);
+    let (_, mcp) = root_in(&user, None);
+    let calls = || words(user.acli_received());
+
+    let done = judged_then_done(
+        &user,
+        mcp.call(
+            "tickets",
+            json!({"action": "status", "ticket": "ABC-1", "status": "in progress"}),
+        ),
+        calls,
+        "jira workitem transition",
+    );
+
+    assert!(done.contains("ABC-1 was moved to In Progress."), "{done}");
+    assert_eq!(
+        calls(),
+        [
+            "jira auth status",
+            STATUSES_OF_ABC,
+            "jira workitem transition --key ABC-1 --status In Progress --yes"
+        ]
+    );
+}
+
+#[test]
+fn an_unknown_status_is_refused_with_the_statuses_it_can_move_to() {
+    let user = user();
+    on_jira(&user);
+    jira_items(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    let number = held(&mcp.call(
+        "tickets",
+        json!({"action": "status", "ticket": "ABC-1", "status": "Blocked"}),
+    ));
+    let answer = allow(&user, number);
+
+    assert!(
+        answer.contains(
+            "refused: Blocked is not a status of ABC's work items, which are To Do, In Progress \
+             and Done; nothing was written"
+        ),
+        "{answer}"
+    );
+    // A status the work item has no transition to: acli's refusal, and the statuses again.
+    let number = held(&mcp.call(
+        "tickets",
+        json!({"action": "status", "ticket": "ABC-3", "status": "In Progress"}),
+    ));
+    let answer = allow(&user, number);
+    assert!(
+        answer.contains("acli could not move ABC-3 to In Progress"),
+        "{answer}"
+    );
+    assert!(
+        answer.contains("the statuses of ABC's work items are To Do, In Progress and Done"),
+        "{answer}"
+    );
+    assert!(
+        !words(user.acli_received())
+            .iter()
+            .any(|call| call.contains("--status Blocked")),
+        "{:?}",
+        user.acli_received()
+    );
+}
+
+#[test]
+fn a_write_with_acli_signed_in_to_another_site_writes_nothing() {
+    let user = user();
+    fixture(
+        &user,
+        "git@github.com:acme/app.git",
+        json!({"kind": "github", "repository": "acme/app"}),
+        json!({"kind": "jira", "site": "other.atlassian.net", "projects": ["ABC"]}),
+    );
+    jira_items(&user);
     let (_, mcp) = root_in(&user, None);
 
     for args in [
@@ -775,22 +983,93 @@ fn tickets_writes_on_jira_are_refused_before_anything_is_asked() {
         json!({"action": "comment", "ticket": "ABC-1", "body": "x"}),
         json!({"action": "edit", "ticket": "ABC-1", "title": "x"}),
         json!({"action": "close", "ticket": "ABC-1"}),
-        json!({"action": "reopen", "ticket": "ABC-1"}),
+        json!({"action": "reopen", "ticket": "ABC-3"}),
+        json!({"action": "status", "ticket": "ABC-1", "status": "Done"}),
     ] {
-        let action = args["action"].as_str().unwrap().to_owned();
-        let refused = mcp.call("tickets", args);
-        assert!(refused.error, "{}", refused.text);
+        let number = held(&mcp.call("tickets", args.clone()));
+        let answer = allow(&user, number);
         assert!(
-            refused.text.starts_with(&format!(
-                "refused: tickets {action} is not supported on Jira: Flottille reads Jira \
-                 tickets and writes nothing to Jira"
-            )),
-            "{}",
-            refused.text
+            answer.contains(
+                "acli is signed in to example.atlassian.net, and this project's tracker is Jira \
+                 on other.atlassian.net: nothing was written"
+            ),
+            "{args}: {answer}"
         );
+    }
+    assert!(
+        user.acli_received()
+            .iter()
+            .all(|call| call["args"] == json!(["jira", "auth", "status"])),
+        "{:?}",
+        user.acli_received()
+    );
+}
+
+#[test]
+fn a_write_to_a_key_of_a_project_outside_the_tracker_is_refused() {
+    let user = user();
+    on_jira(&user);
+    jira_items(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    for (args, said) in [
+        (
+            json!({"action": "comment", "ticket": "XYZ-1", "body": "x"}),
+            "refused: XYZ-1 is not in a Jira project of this project's tracker",
+        ),
+        (
+            json!({"action": "status", "ticket": "XYZ-1", "status": "Done"}),
+            "refused: XYZ-1 is not in a Jira project of this project's tracker",
+        ),
+        (
+            json!({"action": "create", "project": "XYZ", "title": "x"}),
+            "refused: XYZ is not a project of this project's tracker (Jira on \
+             example.atlassian.net (ABC, DEF))",
+        ),
+        (
+            json!({"action": "create", "title": "x"}),
+            "refused: tickets create on Jira needs project, one of the tracker's: ABC, DEF",
+        ),
+    ] {
+        let refused = mcp.call("tickets", args.clone());
+        assert!(refused.error, "{args}: {}", refused.text);
+        assert!(refused.text.starts_with(said), "{args}: {}", refused.text);
     }
     assert!(no_request(&user));
     assert!(user.acli_received().is_empty());
+}
+
+#[test]
+fn in_ask_mode_a_jira_write_is_held_like_a_github_write() {
+    let request_of = |user: &User, mcp: &Mcp, ticket: &str| {
+        held(&mcp.call(
+            "tickets",
+            json!({"action": "comment", "ticket": ticket, "body": "Fixed"}),
+        ));
+        let request = user.call("approval.list", json!({})).unwrap()["requests"][0].clone();
+        (request["class"].clone(), request["reasons"].clone())
+    };
+    let github = user();
+    on_github(&github);
+    many_issues(&github);
+    let (_, mcp) = root_in(&github, None);
+    let held_on_github = request_of(&github, &mcp, "#1");
+    let jira = user();
+    on_jira(&jira);
+    jira_items(&jira);
+    let (_, mcp) = root_in(&jira, None);
+
+    let held_on_jira = request_of(&jira, &mcp, "ABC-1");
+
+    assert_eq!(held_on_jira, held_on_github);
+    assert_eq!(held_on_jira.0, "judge");
+    assert!(
+        !words(jira.acli_received())
+            .iter()
+            .any(|call| call.starts_with("jira workitem")),
+        "{:?}",
+        jira.acli_received()
+    );
 }
 
 // Sessions for the user.

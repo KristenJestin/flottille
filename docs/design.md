@@ -172,8 +172,8 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
   card saying what would be lost;
 - skills: `skill_read`, one of the project's skills, texts read when relevant (`skills.md`);
 - tickets (every agent of a project that declares a tracker, in `main` as in a workspace):
-  `tickets`, which lists, searches and reads the tracker's tickets, and writes GitHub issues,
-  each write a call to judge; Jira is read only (`tickets.md`);
+  `tickets`, which lists, searches, reads and writes the tracker's tickets, GitHub issues or Jira
+  work items, each write a call to judge (`tickets.md`);
 - the project (a root): `skills` and `commands` (list, show, add, edit, remove), `setup` (its
   steps, numbered) and `project` (its settings, its forges and tracker, its rules), and the writes
   of `tasks`, what the window does, each change a call to judge, a change of the tracker or of the
@@ -765,7 +765,7 @@ The plan is cut into GitHub milestones; each ends on something the user can use.
 2. **The window**: the same piece of work followed and answered in the window.
 3. **More agents**: Codex and OpenCode in bare mode.
 4. **Forges and tickets**: GitHub and Bitbucket (pull requests, checks, pipelines),
-   issue trackers (GitHub issues, Jira read-only), linked to workspaces; commands (open the pull
+   issue trackers (GitHub issues, Jira), linked to workspaces; commands (open the pull
    requests of a workspace, merge a stack in dependency order, close a workspace). Reading a workspace's GitHub pull requests and checks is in
    [`forges.md`](forges.md), and its ticket (a GitHub issue or a Jira work item) in
    [`tickets.md`](tickets.md).
