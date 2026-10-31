@@ -30,7 +30,7 @@ pub struct Command {
 
 /// What is said of a command's `grants` or `children`.
 pub const OBSOLETE_GRANTS: &str = "no longer read: a command grants nothing; its agent's calls \
-     go through the gate's classes, and Ask or Auto decides what comes to you";
+     go through the gate's classes, and the session's mode decides what comes to you";
 
 impl Command {
     /// A command of these words.

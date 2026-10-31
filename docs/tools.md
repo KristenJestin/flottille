@@ -787,6 +787,10 @@ what follows each letter of short options, whose value may be attached as in `-D
 an `allow` performs it at once, recorded as an `agent.tool_served` whose `gate` is `judged` and
 whose `judgement` says who judged and why; an `ask`, a failure or a silence makes the request
 below, the judgement in it. A base call, and every call in Ask, makes the request directly.
+**In Full**, a call to judge and a base call are performed at once, with no request and no judge,
+recorded as an `agent.tool_served` whose `gate` is `full`; a workspace removed in Full is removed
+with what it would lose, as the user's answer to discard would. What the gate refuses stays
+refused (`docs/design.md` §7.1).
 
 **A held call** is written as a request (`flottille approvals`, `docs/protocol.md`) and
 answered at once, not as an error; a root is answered:

@@ -320,7 +320,7 @@ pub const OBSOLETE_FORGES: &str = "forges: no longer read: each repository decla
 
 /// What is said of an `[agent_actions]` table, which let agents' window actions run on their own.
 pub const OBSOLETE_AGENT_ACTIONS: &str = "agent_actions: no longer read: an agent's window \
-     actions go through the gate's classes, and Ask or Auto decides what comes to you";
+     actions go through the gate's classes, and the session's mode decides what comes to you";
 
 /// What `projects/<name>.toml` holds: the keys as written, before the defaults and the checks.
 #[derive(Deserialize)]

@@ -946,6 +946,27 @@ pub async fn remove_discarding(
     .await
 }
 
+/// `workspace` `remove` in Full: removed even with what it loses, which is what the user's answer
+/// to discard would cover, found now.
+pub async fn remove_losing(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcome {
+    let call: WorkspaceCall = match arguments("workspace", args) {
+        Ok(call) => call,
+        Err(refused) => return refused,
+    };
+    let losses = match removal_losses(daemon, grant, &call).await {
+        Ok((_, losses)) => losses,
+        Err(refused) => return refused,
+    };
+    crate::workspaces::workspace_remove(
+        daemon,
+        &grant.agent,
+        &grant.place,
+        call.name.as_deref(),
+        Some(&losses),
+    )
+    .await
+}
+
 /// Performs a call the gate let through: on the agent's own project, always.
 pub async fn perform(daemon: &Arc<Daemon>, grant: &Grant, tool: &str, args: Value) -> Outcome {
     match performed(daemon, grant, tool, args).await {

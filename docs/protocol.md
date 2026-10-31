@@ -811,11 +811,13 @@ whose session was forgotten (7 days after it ended), one whose workspace or proj
 
 #### `agent.mode`
 
-`{"agent", "mode"}`, `mode` `ask` or `auto`. Puts the agent's tree in that mode (`docs/design.md`
-§7.1): how the gate answers its calls to judge from then on. A tree has one mode, its root's: a
+`{"agent", "mode"}`, `mode` `ask`, `auto` or `full`. Puts the agent's tree in that mode
+(`docs/design.md` §7.1): how the gate answers the calls it holds from then on; in `full` every
+call to judge and every base call passes without a request, and what the gate refuses stays
+refused. A tree has one mode, its root's: a
 child named switches its root, and every agent of the tree reads the root's mode at each call
-(an agent's `gate_mode` is its root's). A new session starts in `auto`, and the mode is kept when
-it resumes. Answers `{"agent"}`, the root, with its `gate_mode`, and emits
+(an agent's `gate_mode` is its root's). A new session starts in `auto`, never `full` (a session an
+agent starts from a tree in `full` starts in `auto`), and the mode is kept when it resumes. Answers `{"agent"}`, the root, with its `gate_mode`, and emits
 `agent.gate_mode_changed` for the root (`docs/events.md`).
 `invalid-params` for another mode, `not-found` for an agent that does not exist. The user's door
 alone reaches it: no tool of an agent changes a mode.

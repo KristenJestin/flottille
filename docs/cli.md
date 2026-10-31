@@ -644,11 +644,14 @@ $ flottille agent resume bd7ed8152969
 Resumed agent bd7ed8152969 on its own session; it is idle now. Its next message starts it.
 ```
 
-### `flottille agent mode <agent> ask|auto`
+### `flottille agent mode <agent> ask|auto|full`
 
 Sets the mode of a session (`docs/design.md` §7): in `ask`, every call to judge comes to you as a
 request; in `auto`, the judge chosen in the window's Settings decides it, and what it does not
-allow comes to you. Base calls come to you in both. A tree has one mode, its root's: naming a
+allow comes to you. Base calls come to you in both. In `full`, nothing comes to you: every call to
+judge and every base call passes at once, recorded as allowed by Full mode, and what the gate
+refuses (shell syntax, a malformed call, `flottille` run as a command…) stays refused. A session
+never starts in `full`. A tree has one mode, its root's: naming a
 child switches its root, and every agent of the tree follows at once. A new session starts in
 `auto`; the mode is kept when the session is resumed. Only you set it: no tool of an agent does.
 `--json` prints `{"agent": {...}}`, the root.

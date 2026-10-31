@@ -359,7 +359,8 @@ says what kind of call it is, and the session's **mode** says who answers it.
 - **To judge** is everything else: writing in `main`, reading outside the project, a line the
   rules do not know or whose program is the agent's own file, an option of a reading program
   that runs one, a commit, a push, a forge write, a change of the project an agent asks for.
-- **Base** calls always come to the user, in every mode, with a strong warning: a push forced
+- **Base** calls always come to the user in Ask and Auto, with a strong warning, and pass only in
+  Full, the mode the user chose for that: a push forced
   (with a lease or not), rewriting history that is on a remote, discarding work in `main` or
   moving the branch it has checked out, removing git's reflog or unreachable objects, `.git`
   folders, git settings that run programs or lead pushes (`core`, `alias`, `remote`, `url`,
@@ -373,7 +374,7 @@ says what kind of call it is, and the session's **mode** says who answers it.
   calls to judge.
 
 Only a push the gate read and let through goes out: every run's environment rewrites push URLs
-to nowhere, but a run that is itself a `git push` the user or the judge allowed (`docs/tools.md`,
+to nowhere, but a run that is itself a `git push` the user, the judge or Full mode allowed (`docs/tools.md`,
 "Tasks and runs").
 
 What stays **refused** is not a permission but a call that cannot be made as it is: shell syntax,
@@ -381,16 +382,44 @@ a malformed call, a login printed, the daemon driven from a command.
 
 ### 7.1 The mode and the judge
 
-Each session is in **Ask** or **Auto**, a small two-choice control in the composer's bar. A new session starts in
-Auto. A tree has one mode, its root's, stored with the root and read at each call: a switch
-reaches every agent of the tree at once, children included. Only the user changes it, in the
-window or with `flottille agent mode <agent> ask|auto` (`agent.mode`, which switches the tree's
-root whatever agent of it is named); no tool of an agent does. It is kept when the session
-resumes.
+Each session is in **Ask**, **Auto** or **Full**, a small three-choice control in the composer's
+bar. A new session starts in Auto, and no session ever starts in Full. A tree has one mode, its
+root's, stored with the root and read at each call: a switch reaches every agent of the tree at
+once, children included. Only the user changes it, in the window or with
+`flottille agent mode <agent> ask|auto|full` (`agent.mode`, which switches the tree's root
+whatever agent of it is named); no tool of an agent does, and a session an agent starts for the
+user (`agent_launch` with `root`) takes the tree's mode, Auto when the tree is in Full. It is kept
+when the session resumes.
 
 - In **Ask**, a call to judge is a card for the user.
 - In **Auto**, it goes to the **judge**, which allows it or asks the user: it cannot refuse, and
   base calls never reach it.
+- In **Full**, nothing is asked: every call the gate would hold passes at once, base calls
+  included (a forced push, a workspace removed with what it would lose, a sensitive place), with
+  no request and no judge. Bare mode stays: the agent has only Flottille's tools, and every
+  refusal below stays a refusal. Each call it let through is recorded as allowed by Full mode
+  (`gate` `full` in its `agent.tool_served` event and in the developer log), and its step in the
+  session says "allowed by Full mode". The control draws Full in the alarm colour, so that it is
+  never on by mistake. A request made before the switch stays the user's to answer.
+
+What becomes of a call, by what the gate says of it and the tree's mode:
+
+| The gate says | Ask | Auto | Full |
+|---|---|---|---|
+| Harmless | passes | passes | passes |
+| To judge | a card for the user | the judge allows it, else a card | passes, recorded as allowed by Full mode |
+| Base | a card, with a strong warning | a card, with a strong warning | passes, recorded as allowed by Full mode |
+| Refused | refused | refused | refused |
+
+**Refused**, in every mode, is a call that cannot be made as it is, or that bare mode does not
+have: shell syntax (in a line, a task's or a setup step's line, a `git rebase --exec`), a
+malformed call or an unknown action, a tool the agent does not have (a child's
+`agent_launch` with `root`, a child's `workspace`, a tool of its provider), a login printed,
+the daemon driven from a command (`flottille`), a brief, a title or a body longer than the judge
+is given whole, a path that goes up out of a folder that is not there, a text the call does not take, a project write that cannot be done
+as asked, the removal of the agent's own workspace or of one another agent works in, and a call
+of an agent that was replaced. **Held** is everything else the gate does not let pass: in Full it
+passes.
 
 The judge is an agent of a provider the user chose in Settings ("Auto judge": provider and
 model, `provider.set_judge`), run in bare mode **with no tool at all**: no Flottille tool, no MCP
@@ -553,7 +582,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   conversation, above the composer, drawn as waiting (quieter, "Sent when the agent finishes its
   step"), until the root reads it between its turns and it is a message like the others (the
   queued deliveries of `agent.tree`); and a composer that writes to the root, with the session's mode
-  (an Ask | Auto control, with a warning icon when Auto has no judge) in its bar, whose Stop
+  (an Ask | Auto | Full control, with a warning icon when Auto has no judge, its highlight in the
+  alarm colour on Full, each step Full let through saying "allowed by Full mode") in its bar, whose Stop
   button, in Send's place while a turn runs and Send has nothing to send (the two cross-fade), and
   `Escape` interrupt the turn that runs (the agent stays), which grows with its lines up to
   about ten and then scrolls, and takes pictures (pasted from the clipboard, dropped from a file or
@@ -665,7 +695,8 @@ The plan is cut into GitHub milestones; each ends on something the user can use.
 - Claude reached through Flottille's own bridge; `claude` checked at a pinned version, another one
   only warned about.
 - A new session starts in Auto, and a tree has one mode, its root's, read at each call; Auto
-  without a judge asks the user as Ask does. A user who never chose a judge gets the smallest model
+  without a judge asks the user as Ask does. Full is chosen by the user for a session already
+  started, never at its start; a session an agent starts from a tree in Full starts in Auto. A user who never chose a judge gets the smallest model
   of the first provider installed and signed in, among those listed (Claude's `haiku`); one that is
   not listed gets nothing picked.
 - One judge process per judgement, stopped after it, rather than one kept warm: nothing of a

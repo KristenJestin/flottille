@@ -1323,7 +1323,8 @@ async fn played(
                         }
                         // In Auto, the judge decides a call to judge; base never reaches it, and
                         // without a judge chosen Auto asks as Ask does.
-                        let judged = match (ask.class, judge::mode(daemon, &grant.agent)) {
+                        let mode = judge::mode(daemon, &grant.agent);
+                        let judged = match (ask.class, mode) {
                             (gate::Class::Judge, GateMode::Auto) => {
                                 match judge::chosen(daemon).await {
                                     Some(chosen) => {
@@ -1349,6 +1350,17 @@ async fn played(
                         };
                         judgement = judged.clone();
                         match judged {
+                            // In Full, what the gate holds passes, base included: what it
+                            // refuses was refused above.
+                            _ if mode == GateMode::Full => {
+                                verdict = Some("full");
+                                if removes_a_workspace(tool, &args) {
+                                    crate::actions::remove_losing(daemon, grant, args).await
+                                } else {
+                                    let approved = Some(ask.class);
+                                    perform(daemon, grant, tool, args, cancelled, approved).await
+                                }
+                            }
                             Some(judged) if judged.verdict == "allow" => {
                                 verdict = Some("judged");
                                 let approved = Some(gate::Class::Judge);
@@ -1439,12 +1451,27 @@ fn log_call(
     daemon.developer.write(
         "call",
         json!({"agent": grant.agent, "tool": tool, "call_key": key, "arguments": recorded,
-            "gate": verdict, "class": class, "reasons": reasons, "judge": judge,
+            "gate": verdict, "allowed_by": allowed_by(verdict), "class": class,
+            "reasons": reasons, "judge": judge,
             "outcome": outcome.word(), "request": request, "error": error,
             "result_chars": text.chars().count(),
             "duration_ms": started.elapsed().as_millis() as u64}),
         &grant.place.secret_values(),
     );
+}
+
+/// Who let a call the gate held through without the user: the Auto judge, or Full mode.
+fn allowed_by(verdict: Option<&str>) -> Option<&'static str> {
+    match verdict {
+        Some("judged") => Some("the judge"),
+        Some("full") => Some("Full mode"),
+        _ => None,
+    }
+}
+
+/// Whether a call removes a workspace, whose losses Full discards as the user's answer would.
+fn removes_a_workspace(tool: &str, args: &Value) -> bool {
+    tool == "workspace" && args["action"] == "remove"
 }
 
 /// The gate's verdict on a call of one of the agent's tools.

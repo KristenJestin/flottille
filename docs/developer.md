@@ -48,7 +48,8 @@ outcome.
 | `tool` | The tool's name, without the `mcp__flottille__` prefix. |
 | `call_key` | The call's key (`claudecode/toolUseId`), `null` when the call had none. |
 | `arguments` | The arguments, each text cut at 500 characters. |
-| `gate` | `allow`, `judged` (to judge, allowed by the judge), `deny` or `ask`; `null` for a call refused before the gate (the agent has no such tool, or was replaced). |
+| `gate` | `allow`, `judged` (to judge, allowed by the judge), `full` (to judge or base, allowed by Full mode), `deny` or `ask`; `null` for a call refused before the gate (the agent has no such tool, or was replaced). |
+| `allowed_by` | Who let a held call through without the user: `the judge` or `Full mode`; else `null`. |
 | `class` | For a call the gate held: `judge` or `base`; else `null`. |
 | `reasons` | Why the gate held it, one sentence each; empty when it did not. |
 | `judge` | When the Auto judge was asked: `{"by", "provider", "model", "input", "answer", "verdict", "reason", "duration_ms"}`; else `null`. `input` is the whole prompt it was given (`null` when it could not be asked, for a line or a path too long), `answer` what it said, whole (`null` when it said nothing in time or failed), `verdict` `allow`, `ask` or `failed`, `model` `null` for the provider's default. |

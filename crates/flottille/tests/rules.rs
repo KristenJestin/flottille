@@ -419,6 +419,14 @@ fn no_escalation(user: &User) {
     assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
 }
 
+/// The requests waiting for the user.
+fn pending(user: &User) -> usize {
+    user.call("approval.list", json!({})).unwrap()["requests"]
+        .as_array()
+        .unwrap()
+        .len()
+}
+
 /// How many prompts the judge was given.
 fn judged(user: &User) -> usize {
     user.judge_received()
@@ -496,7 +504,7 @@ fn the_enforced_text_matches_the_gate_s_rules() {
         mcp.names()
     );
 
-    claim("Base calls are always held for the user, in both modes, and never reach the judge");
+    claim("Base calls are always held for the user in Ask and Auto, and never reach the judge");
     claim("a sensitive place (`.env` files");
     for mode in ["ask", "auto"] {
         set_mode(&user, &agent, mode);
@@ -560,6 +568,17 @@ fn the_enforced_text_matches_the_gate_s_rules() {
     claim("a change of the project's tracker or rules");
     assert_eq!(judged(&user), 1, "a base call reached the judge");
     no_escalation(&user);
+
+    claim(
+        "In Full nothing is held: every call to judge and every base call passes at once, and is recorded; what is refused stays refused.",
+    );
+    set_mode(&user, &agent, "full");
+    let held = pending(&user);
+    done(mcp.call("run", json!({"line": "touch full.txt"})));
+    assert!(workspace.join("full.txt").exists());
+    done(mcp.call("fs_read", json!({"path": ".env"})));
+    assert_eq!(pending(&user), held, "Full held a call");
+    assert_eq!(judged(&user), 1, "Full reached the judge");
 
     claim("What is refused is a call that cannot be made as it is: a command with shell syntax");
     let refused = mcp.call("run", json!({"line": "ls | cat"}));

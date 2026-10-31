@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::sync::Arc;
 
-use flottille_core::agent::{Agent, AgentState};
+use flottille_core::agent::{Agent, AgentState, GateMode};
 use flottille_core::approval::{self, Decision, Request};
 use flottille_core::protocol::AgentTrees;
 use flottille_core::secrets;
@@ -270,8 +270,12 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             model: asked.model,
             effort: asked.effort,
             // A child's is not read: a tree runs in its root's mode (`judge::mode`). A new root
-            // takes the mode of the tree that started it, never a looser one of its own.
-            gate_mode: Some(crate::judge::mode(daemon, &caller.id)),
+            // takes the mode of the tree that started it, never a looser one of its own, and
+            // never Full: only the user puts a session in it, so a tree in Full starts one in Auto.
+            gate_mode: Some(match crate::judge::mode(daemon, &caller.id) {
+                GateMode::Full => GateMode::Auto,
+                mode => mode,
+            }),
             launched_by: asked.root.then(|| caller.id.clone()),
         },
     )
