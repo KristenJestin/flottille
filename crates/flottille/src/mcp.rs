@@ -299,14 +299,16 @@ const SERVED: [Definition; 26] = [
             counts; detail full adds texts. Writes, judged, answered at once, the result maybe later: create, merge \
             (method, squash by default; refused with no check, while checks fail or a review \
             asks for changes unless waive gives the user's words) and checks (re-run failed) act on a workspace's branch; comment \
-            and edit on number. {\"action\": \"create\", \"repository\": \"api\", \"title\": \
+            and edit on number. subscribe: the next of events of a workspace's pull request \
+            wakes you once, by a delivery (from people: no bot nor yours; minutes: 60 by \
+            default); unsubscribe. {\"action\": \"create\", \"repository\": \"api\", \"title\": \
             \"fix: ...\", \"body\": \"...\"}",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "show", "create", "comment", "edit", "merge", "checks"]},
+                "action": {"type": "string", "enum": ["list", "show", "subscribe", "unsubscribe", "create", "comment", "edit", "merge", "checks"]},
                 "workspace": {"type": "string", "description": "Yours when left out; in main, name it."},
                 "repository": {"type": "string", "description": "By path; all of the place's when left out (list, show)."},
                 "number": {"type": "integer", "minimum": 1, "description": "show, comment, edit: a pull request."},
@@ -317,7 +319,10 @@ const SERVED: [Definition; 26] = [
                 "body": {"type": "string", "description": "create, edit: description; comment: the comment."},
                 "draft": {"type": "boolean"},
                 "waive": {"type": "string", "description": "merge: the user's words letting a blocked pull request be merged; held for them."},
-                "method": {"type": "string", "enum": ["squash", "merge", "rebase"], "description": "merge: squash when left out."}
+                "method": {"type": "string", "enum": ["squash", "merge", "rebase"], "description": "merge: squash when left out."},
+                "events": {"type": "array", "items": {"enum": crate::forge::EVENTS}},
+                "from": {"enum": crate::subscriptions::FROM},
+                "minutes": {"type": "integer", "minimum": 1, "maximum": crate::subscriptions::LONGEST_MINUTES}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -1792,7 +1797,7 @@ async fn perform(
             .await
         }
         "run_status" => runs::run_status(daemon, &grant.agent, args).await,
-        "forge" => crate::forge::forge(daemon, &grant.place, args).await,
+        "forge" => crate::forge::forge(daemon, &grant.agent, &grant.place, args).await,
         "tickets" => crate::tickets::tickets(daemon, &grant.place, args).await,
         tool if tree::TOOLS.contains(&tool) => tree::call(daemon, grant, tool, args).await,
         tool if crate::actions::TOOLS.contains(&tool) => {
@@ -2101,7 +2106,8 @@ mod tests {
         // 26,889 characters in 25 tools before the families were completed (#141); 25,236 in
         // 23 after, the forge, ticket and removal tools merged into families and the
         // descriptions shortened. 28,224 once `project` took the base branches and dependencies
-        // (#198): the cap is 29,000, still under 9,700 tokens at 3 characters a token.
+        // (#198): the cap is 29,000, still under 9,700 tokens at 3 characters a token. 28,600
+        // once `forge` subscribed to a pull request's events (#206).
         assert!(chars < 29_000, "{chars} characters of definitions");
     }
 }

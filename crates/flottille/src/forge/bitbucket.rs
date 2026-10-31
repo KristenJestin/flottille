@@ -579,6 +579,8 @@ fn cloud_comments(page: &Value) -> Vec<Comment> {
             author: person(&c["user"], &["display_name", "nickname"]),
             state: None,
             body: masked(c["content"]["raw"].as_str().unwrap_or_default()),
+            // What says a Bitbucket bot is not read: every author is taken for a person.
+            bot: false,
         })
         .collect()
 }
@@ -590,6 +592,7 @@ fn dc_comments(page: &Value) -> Vec<Comment> {
             author: person(&comment["author"], &["displayName", "name"]),
             state: None,
             body: masked(comment["text"].as_str().unwrap_or_default()),
+            bot: false,
         });
         for reply in comment["comments"].as_array().into_iter().flatten() {
             walk(reply, out);

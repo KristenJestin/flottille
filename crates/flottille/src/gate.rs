@@ -498,7 +498,7 @@ fn untexted(tool: &str, action: &str, args: &Value, keys: &[&str]) -> Result<(),
     Ok(())
 }
 
-/// `forge`: its reads are harmless; a malformed call is refused; merging what the checks or a
+/// `forge`: its reads are harmless, and so is waiting for what happens to a pull request; a malformed call is refused; merging what the checks or a
 /// review block is base, since it is the user's own decision; the other writes are to judge.
 fn forge(call: &Call) -> Verdict {
     let action = call.args["action"].as_str().unwrap_or_default();
@@ -522,7 +522,7 @@ fn forge(call: &Call) -> Verdict {
     };
     let merged = format!("it merges a pull request on the forge, by {by}");
     let said = match action {
-        "list" | "show" => return Verdict::Allow,
+        "list" | "show" | "subscribe" | "unsubscribe" => return Verdict::Allow,
         "create" => "it opens a pull request on the forge",
         "comment" => "it comments on a pull request on the forge",
         "edit" => "it changes the title or the description of a pull request on the forge",
@@ -570,7 +570,8 @@ fn forge(call: &Call) -> Verdict {
 }
 
 /// The actions of `forge`, as a refusal names them.
-pub const FORGE_ACTIONS: &str = "list, show, create, comment, edit, merge and checks";
+pub const FORGE_ACTIONS: &str =
+    "list, show, subscribe, unsubscribe, create, comment, edit, merge and checks";
 /// The actions of `tickets`, as a refusal names them.
 pub const TICKET_ACTIONS: &str = "list, search, show, create, comment, edit, close and reopen";
 
@@ -3673,6 +3674,8 @@ mod tests {
             for (tool, action) in [
                 ("forge", "list"),
                 ("forge", "show"),
+                ("forge", "subscribe"),
+                ("forge", "unsubscribe"),
                 ("tickets", "list"),
                 ("tickets", "search"),
                 ("tickets", "show"),
