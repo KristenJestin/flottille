@@ -1585,6 +1585,21 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The agent's last deliveries of `kind`, newest first.
+    pub fn last_deliveries_of(
+        &self,
+        agent: &str,
+        kind: &str,
+        limit: usize,
+    ) -> Result<Vec<Delivery>> {
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {DELIVERY_COLUMNS} FROM deliveries WHERE agent = ?1 AND kind = ?2 \
+             ORDER BY created_at DESC, rowid DESC LIMIT ?3"
+        ))?;
+        let rows = statement.query_map(params![agent, kind, limit as u64], delivery_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Moves the agent's deliveries of these ids from `from` to `to` (`sending` or `sent`), with
     /// a `delivery.sent` event saying `how` when they are sent; the ids moved. A delivery that
     /// left `from` meanwhile is not moved.
@@ -3399,6 +3414,31 @@ mod tests {
         );
         assert!(store.supersede(agent).unwrap().is_none());
         assert_eq!(store.last_deliveries(agent, 1).unwrap()[0].id, "d2");
+    }
+
+    #[test]
+    fn the_user_s_last_messages_are_found_past_any_number_of_other_deliveries() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .create_agent(&an_agent(), ("agent.created", json!({})))
+            .unwrap();
+        let agent = "0123456789ab";
+        for id in ["u1", "u2", "u3"] {
+            store.deliver(&a_delivery(id, "user")).unwrap();
+        }
+        for n in 0..40 {
+            store
+                .deliver(&a_delivery(&format!("r{n}"), "child-report"))
+                .unwrap();
+        }
+
+        let ids: Vec<String> = store
+            .last_deliveries_of(agent, "user", 2)
+            .unwrap()
+            .into_iter()
+            .map(|delivery| delivery.id)
+            .collect();
+        assert_eq!(ids, ["u3", "u2"]);
     }
 
     #[test]
