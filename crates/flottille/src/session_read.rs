@@ -8,7 +8,7 @@
 //! and its cursor names the event it stopped at, so new messages never move it.
 
 use base64::Engine as _;
-use flottille_core::agent::Agent;
+use flottille_core::agent::{Agent, GateMode};
 use flottille_core::protocol::Event;
 use flottille_core::secrets;
 use serde::Deserialize;
@@ -67,7 +67,7 @@ fn failed(error: impl std::fmt::Display) -> Outcome {
 }
 
 /// The session `session_read` reads, or the refusal: a root of the caller's project, other than
-/// the caller.
+/// the caller (whose own is answered with its mode, `own_mode`).
 pub fn session_of(daemon: &Daemon, caller: &Agent, id: &str) -> Result<Agent, Outcome> {
     let session = daemon
         .read(|store| store.agent(id))
@@ -79,12 +79,6 @@ pub fn session_of(daemon: &Daemon, caller: &Agent, id: &str) -> Result<Agent, Ou
              the sessions of its own project",
             session.project, caller.project
         )));
-    }
-    if session.id == caller.id {
-        return Err(refused(
-            "refused: that is your own session: session_read reads another session's \
-             conversation, and yours is already yours",
-        ));
     }
     if session.parent.is_some() {
         return Err(refused(format!(
@@ -155,6 +149,9 @@ fn asked(read: &SessionRead) -> Result<Asked, Outcome> {
 pub fn says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<String>, Outcome> {
     let read: SessionRead = arguments("session_read", args.clone())?;
     let caller = caller_of(daemon, grant)?;
+    if read.session == caller.id {
+        return Ok(Vec::new());
+    }
     let session = session_of(daemon, &caller, &read.session)?;
     let page = asked(&read)?;
     let which = match &page.reading {
@@ -191,6 +188,9 @@ pub fn read(daemon: &Daemon, grant: &Grant, args: Value) -> Outcome {
 fn page(daemon: &Daemon, grant: &Grant, args: Value) -> Result<String, Outcome> {
     let read: SessionRead = arguments("session_read", args)?;
     let caller = caller_of(daemon, grant)?;
+    if read.session == caller.id {
+        return Ok(own_mode(daemon, &caller));
+    }
     let session = session_of(daemon, &caller, &read.session)?;
     let asked = asked(&read)?;
     // Each message is masked of the secrets of the session's place and of the reader's before it
@@ -245,6 +245,24 @@ fn page(daemon: &Daemon, grant: &Grant, args: Value) -> Result<String, Outcome> 
         Next::End => "\nThat is all of it up to until.".to_owned(),
     });
     Ok(text)
+}
+
+/// What `session_read` of the caller's own session answers: its tree's mode, read now, so that
+/// the agent can say beforehand which of its calls will be held.
+fn own_mode(daemon: &Daemon, caller: &Agent) -> String {
+    let mode = crate::judge::mode(daemon, &caller.id);
+    let means = match mode {
+        GateMode::Ask => "a call to judge comes to the user as a request",
+        GateMode::Auto => "a call to judge goes to the judge, which allows it or asks the user",
+        GateMode::Full => "a call the gate would hold passes without a request",
+    };
+    format!(
+        "This is your own session, {}: its conversation is already yours. Your session's tree is \
+         in {} mode: {means}; a base call comes to the user in Ask and Auto, and what the gate \
+         refuses stays refused in every mode. Only the user changes it.",
+        named(caller),
+        mode.as_str()
+    )
 }
 
 /// Where a page leaves the reading.
