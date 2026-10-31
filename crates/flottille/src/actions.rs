@@ -12,6 +12,7 @@ use std::sync::Arc;
 use flottille_core::commands::{self, Command};
 use flottille_core::declared::{ProjectTracker, RepositoryForge};
 use flottille_core::project::{Project, SetupStep, Skill, StepKind, Task, check_skill, check_task};
+use flottille_core::protocol;
 use flottille_core::workspace::{Action, State, Step, StepState, Workspace};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
@@ -102,12 +103,39 @@ struct WorkspaceCall {
     ticket: Option<Option<String>>,
 }
 
-#[derive(Clone, Deserialize, serde::Serialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RepositorySetting {
     path: String,
-    /// `null` removes it.
-    forge: Option<RepositoryForge>,
+    /// Left out: kept; `null`: removed.
+    #[serde(default, deserialize_with = "present")]
+    forge: Option<Option<RepositoryForge>>,
+    /// The base branches in order of preference; left out: unchanged.
+    base: Option<Vec<String>>,
+    /// The paths of the repositories it depends on, none for none; left out: unchanged.
+    depends_on: Option<Vec<String>>,
+}
+
+impl RepositorySetting {
+    /// What `project.set_settings` is given for it, where a forge left out is the one the project
+    /// declares (the daemon removes the forge of a repository it is given none for), and the
+    /// base branches and dependencies are checked by the daemon alone.
+    fn declared(&self, project: &Project) -> protocol::RepositorySetting {
+        let forge = match &self.forge {
+            Some(forge) => forge.clone(),
+            None => project
+                .repositories
+                .iter()
+                .find(|r| r.path == self.path)
+                .and_then(|r| r.forge.clone()),
+        };
+        protocol::RepositorySetting {
+            path: self.path.clone(),
+            forge,
+            base: self.base.clone(),
+            depends_on: self.depends_on.clone(),
+        }
+    }
 }
 
 /// A field given, `null` included.
@@ -1257,10 +1285,12 @@ async fn performed(
                         Some(tracker) => tracker,
                         None => project.tracker.clone(),
                     };
+                    let repositories: Vec<_> = (call.repositories.iter().flatten())
+                        .map(|setting| setting.declared(&project))
+                        .collect();
                     let settings = projects::set_settings(
                         daemon.clone(),
-                        json!({"name": name, "repositories": call.repositories.unwrap_or_default(),
-                            "tracker": tracker}),
+                        json!({"name": name, "repositories": repositories, "tracker": tracker}),
                     )
                     .await
                     .map_err(refusal)?;
@@ -1792,16 +1822,32 @@ fn settings_says(project: &Project, call: &ProjectCall) -> Result<Vec<String>, O
                 listed(project.repositories.iter().map(|r| &r.path))
             )));
         }
-        says.push(match &setting.forge {
-            Some(forge) => {
+        match &setting.forge {
+            Some(Some(forge)) => {
                 let mut checked = forge.clone();
                 checked.check().map_err(|error| {
                     Outcome::Refused(format!("refused: the forge of {}{error}", setting.path))
                 })?;
-                format!("Declare {} on {}", setting.path, checked.said())
+                says.push(format!("Declare {} on {}", setting.path, checked.said()));
             }
-            None => format!("Remove the forge of {}", setting.path),
-        });
+            Some(None) => says.push(format!("Remove the forge of {}", setting.path)),
+            None => {}
+        }
+        // Whether a branch is on the remote, or a dependency a cycle, is the daemon's to judge
+        // when the call is done: the same refusal as the window's, nothing saved.
+        if let Some(base) = &setting.base {
+            says.push(format!(
+                "Set the base branches of {} to {}",
+                setting.path,
+                listed(base.iter())
+            ));
+        }
+        if let Some(paths) = &setting.depends_on {
+            says.push(match paths.is_empty() {
+                true => format!("Make {} depend on nothing", setting.path),
+                false => format!("Make {} depend on {}", setting.path, listed(paths.iter())),
+            });
+        }
     }
     match &call.tracker {
         Some(Some(tracker)) => {
@@ -1816,7 +1862,8 @@ fn settings_says(project: &Project, call: &ProjectCall) -> Result<Vec<String>, O
     }
     if says.is_empty() {
         return Err(Outcome::Refused(
-            "refused: set_settings changes nothing: give repositories, tracker or both, \
+            "refused: set_settings changes nothing: give repositories (forge, base, depends_on), \
+             tracker or both, \
              {\"action\": \"set_settings\", \"repositories\": [{\"path\": \"api\", \"forge\": \
              {\"kind\": \"github\", \"repository\": \"acme/api\"}}]}"
                 .into(),
@@ -2013,6 +2060,64 @@ mod tests {
             assert_eq!(call(tool, action), None, "{tool} {action}");
         }
         assert_eq!(family("commands", &json!({})), None);
+    }
+
+    fn project_with(forge: Option<RepositoryForge>) -> Project {
+        let mut project = Project::new(
+            "app",
+            "/work/app".into(),
+            vec!["api".into()],
+            std::path::Path::new("/data"),
+        );
+        project.repositories[0].forge = forge;
+        project
+    }
+
+    #[test]
+    fn a_forge_left_out_is_kept_null_removes_it_and_one_given_replaces_it() {
+        let github = RepositoryForge::Github {
+            repository: "acme/api".into(),
+        };
+        let project = project_with(Some(github.clone()));
+        let setting = |value: Value| serde_json::from_value::<RepositorySetting>(value).unwrap();
+
+        let kept = setting(json!({"path": "api", "base": ["develop"]})).declared(&project);
+        assert_eq!(kept.forge, Some(github));
+        assert_eq!(kept.base, Some(vec!["develop".to_owned()]));
+        assert_eq!(kept.depends_on, None);
+
+        let removed = setting(json!({"path": "api", "forge": null})).declared(&project);
+        assert_eq!(removed.forge, None);
+
+        let replaced = setting(json!({"path": "api",
+            "forge": {"kind": "github", "repository": "acme/other"}}))
+        .declared(&project);
+        assert_eq!(
+            replaced.forge,
+            Some(RepositoryForge::Github {
+                repository: "acme/other".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_repository_with_nothing_to_change_changes_nothing_and_each_list_is_said() {
+        let project = project_with(None);
+        let call = |value: Value| serde_json::from_value::<ProjectCall>(value).unwrap();
+
+        let only_a_path =
+            call(json!({"action": "set_settings", "repositories": [{"path": "api"}]}));
+        assert!(settings_says(&project, &only_a_path).is_err());
+
+        let lists = call(json!({"action": "set_settings", "repositories": [
+            {"path": "api", "base": ["develop", "main"], "depends_on": []}]}));
+        assert_eq!(
+            settings_says(&project, &lists).ok().unwrap(),
+            [
+                "Set the base branches of api to develop, main",
+                "Make api depend on nothing"
+            ]
+        );
     }
 
     #[test]

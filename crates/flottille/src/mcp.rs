@@ -415,12 +415,14 @@ const SERVED: [Definition; 26] = [
         name: "project",
         title: "The project's settings",
         description: "This project's settings. settings reads each repository's forge and the \
-            tracker; set_settings declares them (null removes one; a tracker left out is kept). \
-            rules reads how agents are told to work; set_rules replaces them, for the agents \
-            created after. A change is done once the judge or the user allows it, of the \
-            tracker or of the rules only once the user does: you are answered at once, the \
-            result may come later. {\"action\": \"set_settings\", \"repositories\": [{\"path\": \
-            \"api\", \"forge\": {\"kind\": \"github\", \"repository\": \"acme/api\"}}]}.",
+            tracker; set_settings declares them (null removes one; a tracker left out is kept), \
+            and a repository's base branches and dependencies; what is left out is kept, a \
+            refused change saves nothing. rules reads how agents are told to work; set_rules \
+            replaces them, for the agents created after. A change is done once the judge or the \
+            user allows it, of the tracker or of the rules only once the user does: you are \
+            answered at once, the result may come later. {\"action\": \"set_settings\", \
+            \"repositories\": [{\"path\": \"api\", \"base\": [\"develop\", \"main\"], \
+            \"depends_on\": [\"lib\"]}]}.",
         read_only: false,
         idempotent: false,
         destructive: true,
@@ -429,8 +431,10 @@ const SERVED: [Definition; 26] = [
                 "action": {"type": "string", "enum": ["settings", "set_settings", "rules", "set_rules"]},
                 "repositories": {"type": "array", "items": {"type": "object", "properties": {
                     "path": {"type": "string"},
-                    "forge": {"type": ["object", "null"], "description": "{kind: github | bitbucket-cloud, repository} or {kind: bitbucket-data-center, host, repository}."}
-                }, "required": ["path", "forge"], "additionalProperties": false}},
+                    "forge": {"type": ["object", "null"], "description": "{kind: github | bitbucket-cloud, repository} or {kind: bitbucket-data-center, host, repository}."},
+                    "base": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "In order of preference, each on the remote."},
+                    "depends_on": {"type": "array", "items": {"type": "string"}, "description": "Repository paths, [] for none; no cycle."}
+                }, "required": ["path"], "additionalProperties": false}},
                 "tracker": {"type": ["object", "null"], "description": "{kind: github, repository: <path>} or {kind: jira, site, projects}."},
                 "text": {"type": "string", "description": "set_rules: the rules, whole, at most 8000 characters; they replace the project's current ones."}
             }, "required": ["action"], "additionalProperties": false})
@@ -2084,8 +2088,8 @@ mod tests {
     fn the_biggest_list_stays_far_under_the_threshold_of_tool_search() {
         // Anthropic suggests tool search past 10 tools or 10k tokens of definitions
         // (`docs/reference/mcp.md` §3); every tool loads upfront here, so the list stays under
-        // the tokens. JSON schemas tokenize densely, about 3 characters a token at worst: 28,000
-        // characters is under 9,400 tokens then, and about 7,000 at the usual 4.
+        // the tokens. JSON schemas tokenize densely, about 3 characters a token at worst: 29,000
+        // characters is under 9,700 tokens then, and about 7,250 at the usual 4.
         let biggest = claude::PROVIDER.tools(true, false, true, true);
         let chars: usize = served(&claude::PROVIDER, &biggest)
             .into_iter()
@@ -2096,7 +2100,8 @@ mod tests {
             .sum();
         // 26,889 characters in 25 tools before the families were completed (#141); 25,236 in
         // 23 after, the forge, ticket and removal tools merged into families and the
-        // descriptions shortened.
-        assert!(chars < 28_000, "{chars} characters of definitions");
+        // descriptions shortened. 28,224 once `project` took the base branches and dependencies
+        // (#198): the cap is 29,000, still under 9,700 tokens at 3 characters a token.
+        assert!(chars < 29_000, "{chars} characters of definitions");
     }
 }
