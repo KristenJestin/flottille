@@ -293,7 +293,7 @@ pending requests.
 
 | Tool | |
 |---|---|
-| `forge {action, workspace?, repository?, number?, state?, branch?, detail?, title?, body?, draft?, waive?, method?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
+| `forge {action, workspace?, repository?, number?, state?, branch?, detail?, title?, body?, draft?, waive?, method?, events?, from?, minutes?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
 
 - **The repositories** are those of the agent's place: its workspace's, or the project's in
   `main`. One the place does not take is refused (`refused: X is not a repository of this
@@ -315,6 +315,20 @@ pending requests.
   "show", "workspace": "login", "detail": "full"}`); `detail full` gives their texts, cut and
   under the result limit. **`show {number, repository?, detail?}`**: that pull request of a
   repository of the place, the same way; `repository` is needed when the place has several.
+  `show` ends with the agent's subscriptions, when it has some (`Your subscriptions:` then `- pull
+  request #12 of api, workspace login: checks, review, for 52 min more`).
+- **`subscribe {workspace?, repository?, events, from?, minutes?}`**: the next of `events`
+  (`checks`, `review`, `comment`, `merged`, `closed`) of the pull request of a workspace's branch
+  wakes the agent once, as a `subscription` delivery (`docs/design.md` §5.6). The call answers at
+  once; what is so already (checks that already ended) is no event, `show` reads it. `from` is
+  `anyone` (the default) or `people`: no bot, nor a comment the agent posted. `minutes` is how
+  long it waits, 60 by default, 1,440 at most. `checks` delivers how many passed and failed, with
+  the end of each failed job's log as `show` gives it; `review` and `comment` their author, their
+  state and an excerpt (300 characters). A merged or closed pull request ends any subscription,
+  said; so does its time, said. Subscribing again to the same pull request replaces the agent's
+  subscription. A pull request merged or closed, a repository with no forge or no pull request,
+  and `number` are refused. **`unsubscribe {workspace?, repository?}`** cancels the agent's
+  subscriptions to them, every one when it names none.
 - **`create`, `merge`, `checks` `{workspace?, repository, …}`**: opens the pull request of a
   workspace's branch (`title`, `body`, `draft`, with the project's reviewers), merges it by
   `method`, `squash` (the default), `merge` or `rebase` (refused when no check ran on it or all were skipped, while its
@@ -327,7 +341,8 @@ pending requests.
   --description`). A `title` on `comment` is refused before anything is asked (`refused: forge
   comment takes no title: title is for edit and create`).
 
-`list` and `show` go through the gate like every call, which allows them; `create`, `comment`,
+`list`, `show`, `subscribe` and `unsubscribe` go through the gate like every call, which allows
+them in every mode; `create`, `comment`,
 `edit`, `merge` and `checks` are to judge, and a merge that waives the checks base. A write is
 done only once the repository's remote is checked to lead where its forge is declared. **What a
 write posts is shown whole**: its request says `Its title: …` and `Its body: …` in full (the

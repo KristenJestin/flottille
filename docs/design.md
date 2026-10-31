@@ -299,6 +299,32 @@ calls fail, the replacement limit (2 in 30 min; then a child fails and its paren
 `child-failed`, and a root asks the user), and the rebuild at daemon start follow
 `reference/hemera.md` §5.
 
+### 5.6 Subscriptions: waking on what happens outside
+
+An agent that waits for something outside Flottille (the end of a pull request's checks, a
+review) subscribes to it instead of reading again and again. Four parts, each its own:
+
+- **A source** watches a target and turns its reads into **events**, by comparing a read with
+  what was seen before; a state already there when it was seen is no event. The only source now
+  is the forge watch of a workspace's pull request (`docs/forges.md`, "Subscriptions"): its events
+  are `checks` (all ended), `review`, `comment`, `merged` and `closed`. A source reads only while
+  a subscription or a client needs it.
+- **A subscription** is (agent, source, target, the events chosen, whose events count, an
+  expiry), stored with what its source last saw of the target, so that it survives a restart of
+  the daemon and nothing that happened meanwhile is lost (`crates/flottille/src/subscriptions.rs`).
+  The agent subscribes itself (`forge` `subscribe`, `docs/tools.md`); nothing subscribes it.
+- **One shot.** The first read that holds an event the subscription waits for is delivered, every
+  such event of that read in one delivery, and the subscription is over. It also ends when the
+  target ends (a pull request merged or closed, said when that was not what it waited for), when
+  its time is up (an hour by default, said), when the agent ends, or when the agent unsubscribes.
+  Nothing is delivered of what does not change: each delivery costs the agent a turn.
+- **Delivering** is the existing path (§5.2): a `subscription` delivery, masked, its forge texts
+  framed as data and not instructions, wakes the agent as a child's report does.
+
+Left for later: a daemon-wide reading of the forge and the tickets for the whole app, which other
+sources plug into without changing subscriptions; a ticket source; relaunching an agent that has
+ended when an event comes. The window does not show subscriptions yet.
+
 ## 6. Projects and workspaces
 
 ### 6.1 Projects
