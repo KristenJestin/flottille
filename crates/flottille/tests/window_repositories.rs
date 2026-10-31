@@ -822,6 +822,172 @@ fn a_base_branch_missing_on_the_remote_is_refused_in_the_dialog(cx: &mut TestApp
 }
 
 #[gpui_kit::test]
+fn a_longer_dependency_cycle_is_said_through_the_repositories_it_crosses(cx: &mut TestAppContext) {
+    let user = user();
+    trio(&user);
+    let text = std::fs::read_to_string(user.project_file("trio"))
+        .unwrap()
+        .replace(
+            "path = \"web\"\n",
+            "path = \"web\"\ndepends_on = [\"lib\"]\n",
+        )
+        .replace(
+            "path = \"lib\"\n",
+            "path = \"lib\"\ndepends_on = [\"api\"]\n",
+        );
+    user.write_project_file("trio", &text);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_settings(&shell, "trio", cx);
+    let page = settings_page(&shell, cx);
+    cx.update(|window, cx| window.click("repository-api", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("depends-on-web", cx));
+    cx.update(|window, cx| window.click("save-settings-modal", cx));
+    settle(cx);
+
+    page.read_with(cx, |page, _| {
+        assert_eq!(
+            page.dialog_error(),
+            Some("api cannot depend on web: web already depends on api, through lib.")
+        );
+    });
+    assert_eq!(
+        std::fs::read_to_string(user.project_file("trio")).unwrap(),
+        text,
+        "nothing was written"
+    );
+}
+
+#[gpui_kit::test]
+fn the_dialog_of_a_repository_with_many_siblings_scrolls_in_a_small_window(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    trio(&user);
+    let mut text = std::fs::read_to_string(user.project_file("trio")).unwrap();
+    for n in 0..14 {
+        text.push_str(&format!("\n[[repositories]]\npath = \"extra-{n:02}\"\n"));
+    }
+    user.write_project_file("trio", &text);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_settings(&shell, "trio", cx);
+    cx.update(|window, cx| window.click("repository-api", cx));
+    settle(cx);
+    cx.simulate_resize(size(px(1280.), px(480.)));
+    settle(cx);
+
+    let bounds = |id: &str, cx: &mut VisualTestContext| {
+        let id = id.to_owned();
+        cx.update(|window, _| window.find(id).bounds())
+    };
+    let viewport = cx.update(|window, _| window.viewport_size());
+    let (panel, title, save, cancel, last) = (
+        bounds("settings-modal", cx),
+        bounds("settings-modal-title", cx),
+        bounds("save-settings-modal", cx),
+        bounds("settings-modal-cancel", cx),
+        bounds("depends-on-extra-13", cx),
+    );
+    assert!(
+        panel.top() >= px(0.) && panel.bottom() <= viewport.height,
+        "the dialog fits the window: {panel:?} in {viewport:?}"
+    );
+    assert!(
+        title.top() >= panel.top()
+            && save.bottom() <= panel.bottom()
+            && cancel.bottom() <= panel.bottom(),
+        "title and buttons are in it: {title:?} {save:?} {cancel:?}"
+    );
+    assert!(
+        last.top() > panel.bottom(),
+        "the last sibling is further down"
+    );
+
+    cx.update(|window, cx| {
+        window.scroll(
+            "base-field-label",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-4000.))),
+            cx,
+        )
+    });
+    settle(cx);
+    assert_eq!(bounds("settings-modal-title", cx), title, "the title stays");
+    assert_eq!(bounds("save-settings-modal", cx), save, "Save stays");
+    let last = bounds("depends-on-extra-13", cx);
+    assert!(
+        last.bottom() <= save.top() && last.top() >= title.bottom(),
+        "the last sibling is now between the title and the buttons: {last:?}"
+    );
+    cx.update(|window, cx| window.click("depends-on-extra-13", cx));
+    let page = settings_page(&shell, cx);
+    page.read_with(cx, |page, _| assert_eq!(page.depends(), ["extra-13"]));
+    settle(cx);
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+}
+
+#[gpui_kit::test]
+fn a_refusal_stays_in_sight_when_the_dialog_is_scrolled_to_the_end(cx: &mut TestAppContext) {
+    let user = user();
+    trio(&user);
+    let mut text = std::fs::read_to_string(user.project_file("trio"))
+        .unwrap()
+        .replace(
+            "path = \"web\"\n",
+            "path = \"web\"\ndepends_on = [\"api\"]\n",
+        );
+    for n in 0..14 {
+        text.push_str(&format!("\n[[repositories]]\npath = \"extra-{n:02}\"\n"));
+    }
+    user.write_project_file("trio", &text);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_settings(&shell, "trio", cx);
+    cx.update(|window, cx| window.click("repository-api", cx));
+    settle(cx);
+    cx.simulate_resize(size(px(1280.), px(480.)));
+    settle(cx);
+    // `web` is the first of the siblings: switched on a little way down, then the dialog goes to
+    // its end, far from it.
+    cx.update(|window, cx| {
+        window.scroll(
+            "base-field-label",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-150.))),
+            cx,
+        )
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("depends-on-web", cx));
+    settle(cx);
+    cx.update(|window, cx| {
+        window.scroll(
+            "depends-on-extra-00",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-4000.))),
+            cx,
+        )
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("save-settings-modal", cx));
+    settle(cx);
+
+    let (panel, title, save, error) = cx.update(|window, _| {
+        (
+            window.find("settings-modal").bounds(),
+            window.find("settings-modal-title").bounds(),
+            window.find("save-settings-modal").bounds(),
+            window.find("settings-modal-error").bounds(),
+        )
+    });
+    assert!(
+        error.top() >= title.bottom() && error.bottom() <= save.top(),
+        "the refusal is between the title and the buttons, in sight: {error:?}"
+    );
+    assert!(
+        panel.top() >= px(0.) && panel.bottom() <= px(480.),
+        "{panel:?}"
+    );
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+}
+
+#[gpui_kit::test]
 fn a_dependency_cycle_is_refused_in_the_dialog(cx: &mut TestAppContext) {
     let user = user();
     trio(&user);
@@ -854,8 +1020,10 @@ fn a_dependency_cycle_is_refused_in_the_dialog(cx: &mut TestAppContext) {
     page.read_with(cx, |page, _| {
         assert!(page.dialog().is_some());
         let why = page.dialog_error().unwrap();
-        assert!(why.contains("cycle api -> web -> api"), "{why}");
-        assert!(why.ends_with("nothing was saved"), "{why}");
+        assert_eq!(
+            why, "api cannot depend on web: web already depends on api.",
+            "a sentence, not the file's words"
+        );
     });
     assert_eq!(
         std::fs::read_to_string(user.project_file("trio")).unwrap(),
