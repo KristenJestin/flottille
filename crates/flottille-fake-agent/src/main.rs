@@ -68,6 +68,7 @@
 //! | `{"mcp": {"tool": "fs_list", "arguments": {}}}` | calls the tool on the session's first HTTP MCP server (initialize, then `tools/call`), as a tool call; the answer recorded |
 //! | `{"mcp": {"tool": "agent_launch", "arguments": {…}, "keep": "w1"}}` | the same, and keeps the first agent id (12 hexadecimal digits) of the answer's text under that name |
 //! | `{"mcp": {"tool": "fs_list", "arguments": {}, "quiet": true}}` | the same without its tool call's session updates: an MCP call that lands before the updates around it |
+//! | `{"mcp": {"tool": "fs_list", "arguments": {}, "keyed": true}}` | the same, the call carrying its tool call's id as its call key (`_meta`, `claudecode/toolUseId`), as Claude Code's do |
 //!
 //! In the texts of an `mcp` step's arguments, `{kept:w1}` is replaced by the value kept under
 //! `w1`, `{prompt:request}` by the first request number (`#3`) of the turn's prompt (a number
@@ -548,7 +549,10 @@ impl Agent {
             .find(|s| s["type"] == "http");
         let outcome = match server {
             None => Err("the session has no HTTP MCP server".to_owned()),
-            Some(server) => mcp_call(server, tool, &call["arguments"]),
+            Some(server) => {
+                let key = (call["keyed"] == true).then_some(call_id.as_str());
+                mcp_call(server, tool, &call["arguments"], key)
+            }
         };
         let (status, body) = match &outcome {
             Ok((status, body)) => (*status, body.clone()),
@@ -687,7 +691,12 @@ fn agent_id(text: &str) -> Option<String> {
 
 /// An MCP tool call over streamable HTTP: `initialize`, `notifications/initialized`, then
 /// `tools/call`; the status and the JSON answer of the last one.
-fn mcp_call(server: &Value, tool: &str, arguments: &Value) -> Result<(u16, Value), String> {
+fn mcp_call(
+    server: &Value,
+    tool: &str,
+    arguments: &Value,
+    key: Option<&str>,
+) -> Result<(u16, Value), String> {
     let url = server["url"].as_str().ok_or("the MCP server has no url")?;
     let mut headers: Vec<(String, String)> = server["headers"]
         .as_array()
@@ -715,11 +724,14 @@ fn mcp_call(server: &Value, tool: &str, arguments: &Value) -> Result<(u16, Value
         &headers,
         &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
     )?;
+    let mut params = json!({"name": tool, "arguments": arguments});
+    if let Some(key) = key {
+        params["_meta"] = json!({"claudecode/toolUseId": key});
+    }
     let (status, body, _) = post(
         url,
         &headers,
-        &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-            "params": {"name": tool, "arguments": arguments}}),
+        &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": params}),
     )?;
     Ok((status, body))
 }
