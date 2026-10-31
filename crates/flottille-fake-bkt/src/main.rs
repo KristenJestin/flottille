@@ -33,7 +33,8 @@
 //! of `bkt pr checks <id> --json` (a pull request with no entry answers `null`, as a commit with
 //! no status does), `api` the body `bkt api <path>` prints (a path it does not hold
 //! is a 404), `pipelines` the `pipelines` of `bkt pipeline list --json`, and `fail` makes every
-//! call on that repository end with 1, saying its text.
+//! call on that repository end with 1, saying its text. `pipeline_fail` makes `pipeline list`
+//! alone fail that way.
 //!
 //! The writes answer as `bkt` does when they work: `pr create` prints `✓ Created pull request #N`
 //! (N is `created`, 1 by default), `pr merge` prints `✓ Merged pull request #N` and `pipeline run`
@@ -192,6 +193,10 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             }
         }
         ["pipeline", "list"] => {
+            if let Some(failure) = script["pipeline_fail"][&key].as_str() {
+                eprintln!("{failure}");
+                return 1;
+            }
             payload["pipelines"] = match &script["pipelines"][&key] {
                 Value::Null => json!([]),
                 pipelines => pipelines.clone(),

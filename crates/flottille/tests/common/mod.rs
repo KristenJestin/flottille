@@ -908,3 +908,34 @@ pub fn snapshot(folder: &Path) -> Vec<String> {
     out.sort();
     out
 }
+
+/// A time `seconds` after 2026-03-01T10:00:00, as the forges print it.
+fn stamp(seconds: u64) -> String {
+    let at = 10 * 3600 + seconds;
+    format!(
+        "2026-03-{:02}T{:02}:{:02}:{:02}Z",
+        1 + at / 86_400,
+        at % 86_400 / 3600,
+        at % 3600 / 60,
+        at % 60
+    )
+}
+
+/// A run of `gh run list --json conclusion,startedAt,updatedAt` that took `seconds`.
+pub fn gh_run(conclusion: &str, seconds: u64) -> Value {
+    json!({"status": "completed", "conclusion": conclusion,
+        "startedAt": stamp(0), "updatedAt": stamp(seconds)})
+}
+
+/// A pipeline of `bkt pipeline list --json` that took `seconds`, ended `result` (`SUCCESSFUL`,
+/// `FAILED`, `ERROR`, `STOPPED`) or still running (`state.name` `IN_PROGRESS`) when it is empty;
+/// its times as Bitbucket prints them, with microseconds and an offset.
+pub fn bkt_pipeline(result: &str, seconds: u64) -> Value {
+    let stamp = |seconds| stamp(seconds).replace('Z', ".500000+00:00");
+    if result.is_empty() {
+        return json!({"build_number": 1, "state": {"name": "IN_PROGRESS", "result": {"name": ""}},
+            "target": {"ref": {"name": "main"}}, "created_on": stamp(0), "completed_on": ""});
+    }
+    json!({"build_number": 1, "state": {"name": "COMPLETED", "result": {"name": result}},
+        "target": {"ref": {"name": "main"}}, "created_on": stamp(0), "completed_on": stamp(seconds)})
+}

@@ -295,13 +295,13 @@ const SERVED: [Definition; 26] = [
         description: "The pull requests of the project's repositories on their forge, through \
             the user's own gh or bkt (no forge sign-in here: never run them). list: by state \
             (open by default) and branch. show: a workspace's branch's (yours; in main, name \
-            workspace), or number's, with checks (the log's end of each failed job), review and comment \
+            workspace), or number's, with checks (each failed job's log end), review and comment \
             counts; detail full adds texts. Writes, judged, answered at once, the result maybe later: create, merge \
             (method, squash by default; refused with no check, while checks fail or a review \
             asks for changes unless waive gives the user's words) and checks (re-run failed) act on a workspace's branch; comment \
             and edit on number. subscribe: the next of events of a workspace's pull request \
-            wakes you once, by a delivery (from people: no bot nor yours; minutes: 60 by \
-            default); unsubscribe. {\"action\": \"create\", \"repository\": \"api\", \"title\": \
+            wakes you once, by a delivery (from people: no bot nor yours; minutes: sized by \
+            CI, else 60); unsubscribe. {\"action\": \"create\", \"repository\": \"api\", \"title\": \
             \"fix: ...\", \"body\": \"...\"}",
         read_only: false,
         idempotent: false,

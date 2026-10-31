@@ -162,7 +162,7 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
 | `bkt api <path> --context C [--param k=v]` (GET) | the server's own JSON, unchanged | `pkg/cmd/api/api.go:23-48`, `:138-140` |
 | `bkt pr create --context C … --source <branch> --target <base> --title T --description D [--reviewer N]…` | `✓ Created pull request #<id>` | `pkg/cmd/pr/pr.go:597-615`, `:664`, `:696`; `--reviewer` at `:614`, sent as `{"username": N}` on Cloud (`pkg/bbcloud/pullrequests.go:232-237`) and `{"user": {"name": N}}` on Data Center (`pkg/bbdc/pullrequests.go:75-82`) |
 | `bkt pr merge <id> --context C … --strategy S --close-source=false` | the exit code | `pkg/cmd/pr/pr.go:1314-1334`; `pkg/bbcloud/pullrequests.go:351-388` (Cloud takes `merge_commit`, `squash` and `fast_forward` only, `:352-356`, `:363-365`); `pkg/bbdc/pullrequests.go:108-132` (`mergeStrategyId`, given as it is) |
-| `bkt pipeline list --context C --workspace W --repo R --limit 50 --json` | `pipelines[]`: `build_number`, `state.result.name`, `target.ref.name` | `pkg/cmd/pipeline/pipeline.go:177-210`; `pkg/bbcloud/client.go:100-120`, `:145` (newest first: `sort=-created_on`) |
+| `bkt pipeline list --context C --workspace W --repo R --limit 50 --json` | `pipelines[]`: `build_number`, `state.result.name`, `target.ref.name`, and for the CI durations `created_on`, `completed_on` (`pkg/bbcloud/client.go:139-152`; the list has no duration field) | `pkg/cmd/pipeline/pipeline.go:177-210`; `pkg/bbcloud/client.go:100-120`, `:145` (newest first: `sort=-created_on`) |
 | `bkt pipeline run --context C --workspace W --repo R --ref <branch>` | the exit code | `pkg/cmd/pipeline/pipeline.go:60-91`, `:135-175`; `pkg/bbcloud/client.go:330-357` |
 
 ### What is chosen, and why
@@ -327,6 +327,46 @@ log, or why there is none:
 - **Masked** like every output, before it is kept or shown.
 - **Only `forge` `show` asks for it.** The state the window watches (`workspace.forge`, `workspace
   show`) holds no log and calls `gh` no more than before.
+
+## How long CI takes
+
+An agent that subscribes to its pull request picks a duration blind. So `forge` `show` of a pull
+request (the workspace's branch's or one by its number) and the answer of `forge` `subscribe` carry
+one line about the repository's recent CI runs, when there are finished ones to measure:
+
+```
+Recent CI runs of acme/app took 4 min on average (3 to 6 min, last 5).
+```
+
+- **GitHub**: `gh run list -R github.com/owner/name --status completed --limit 20 --json
+  conclusion,startedAt,updatedAt`. A run counts when its conclusion is `success` or `failure`
+  (cancelled, skipped, timed out and the like measure nothing) and its time is `updatedAt` minus
+  `startedAt`, the nearest `gh` gives to a run's end.
+- **Bitbucket Cloud**: `bkt pipeline list --limit 50 --json` (the page maximum, "A page is 50
+  at most"). `bkt` v0.37.0 prints no duration, only `created_on` and `completed_on`
+  (`pkg/cmd/pipeline/pipeline.go:357-386`, `pkg/bbcloud/client.go:139-152`); a pipeline counts when
+  its `state.result.name` is `SUCCESSFUL`, `FAILED` or `ERROR` (`STOPPED` and one still running
+  do not) and its time runs from creation to completion, so a wait in the queue is part of it,
+  which is what an agent waits for.
+- **Bitbucket Data Center** has no CI API in common: nothing is said and nothing is asked.
+- The **last 5** finished runs of the repository, any branch, newest first; the average, the
+  shortest and the longest are rounded to the minute (1 at least). A run of no time is left out.
+- **One read**, made only when `forge` `show` or `forge` `subscribe` runs, never by the watch of
+  a subscription nor of a client. **A read that fails** (`gh` or `bkt` failing, an answer in a
+  shape not expected) is not an error: `show` and `subscribe` answer without the line.
+
+**`forge` `subscribe` without `minutes`** is sized by those runs: twice their average, rounded up
+to the minute, from 15 minutes (`SHORTEST_MINUTES` in `forge/ci.rs`) to the longest allowed
+(`subscriptions::LONGEST_MINUTES`); with no run to measure by it stays
+`subscriptions::DEFAULT_MINUTES`, 60. The answer says which duration was taken and why:
+
+```
+Duration: 25 min, twice the average of the recent CI runs.
+Duration: 15 min, the shortest: twice the average of the recent CI runs is 4 min.
+Duration: 60 min, the default: no recent CI run to measure it by.
+```
+
+With `minutes`, the agent's choice is kept and the answer carries the line about the runs alone.
 
 ## Subscriptions
 

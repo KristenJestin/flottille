@@ -47,6 +47,9 @@
 //! drafts included; `closed`, `merged`, `all`) and of `--head` when given, newest first, at most
 //! `--limit`; each with the fields `--json` asks that it has, `headRefName` being its branch.
 //!
+//! `run_fail` (`{"acme/app": "HTTP 502: Bad Gateway"}`) makes `run list` alone fail that way, the
+//! pull request calls still working.
+//!
 //! `run view --job <id> --log-failed` prints the log `logs` holds for that job of the repository
 //! (`{"logs": {"acme/app": {"456": "build\tRun tests\t2026-01-01T00:00:00.0000000Z …\n"}}}`),
 //! as `gh` prints a failed job's steps; a job it does not hold is a log `gh` cannot find. Any
@@ -380,6 +383,12 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 return 2;
             };
             if let Some(failure) = script["fail"][repository].as_str() {
+                eprintln!("{failure}");
+                return 1;
+            }
+            if words[..2] == ["run", "list"]
+                && let Some(failure) = script["run_fail"][repository].as_str()
+            {
                 eprintln!("{failure}");
                 return 1;
             }

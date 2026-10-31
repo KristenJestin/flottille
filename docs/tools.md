@@ -312,7 +312,10 @@ pending requests.
   mergeable (`mergeable: yes, no conflict with main`, `no, it conflicts with main`, or `not known
   yet` while the forge computes it), review (`none` when there is none), each check with its state
   (`checks: none ran on this pull request` when none did), **for each failed check the end of its
-  log, or why there is none** ([`forges.md`](forges.md), "Why a check failed"), and how many comments and reviews it has (`comments: 2, read them with forge {"action":
+  log, or why there is none** ([`forges.md`](forges.md), "Why a check failed"), one line on how long the
+  repository's recent CI runs took (`Recent CI runs of acme/app took 4 min on average (3 to 6 min,
+  last 5).`, nothing when there is no finished run to measure; [`forges.md`](forges.md), "How long
+  CI takes"), and how many comments and reviews it has (`comments: 2, read them with forge {"action":
   "show", "workspace": "login", "detail": "full"}`); `detail full` gives their texts, cut and
   under the result limit. **`show {number, repository?, detail?}`**: that pull request of a
   repository of the place, the same way; `repository` is needed when the place has several.
@@ -323,7 +326,11 @@ pending requests.
   wakes the agent once, as a `subscription` delivery (`docs/design.md` §5.6). The call answers at
   once; what is so already (checks that already ended) is no event, `show` reads it. `from` is
   `anyone` (the default) or `people`: no bot, nor a comment the agent posted. `minutes` is how
-  long it waits, 60 by default, 240 (4 hours) at most. `checks` delivers how many passed and failed, with
+  long it waits, 60 by default, 240 (4 hours) at most. Without `minutes` the wait is sized by the
+  repository's CI instead, and the answer says the duration taken and why: twice the average of
+  its recent runs, from 15 minutes to the longest, 60 when there is no run to measure by
+  ([`forges.md`](forges.md), "How long CI takes"); the answer carries the line `show` gives about
+  the runs, with `minutes` too. `checks` delivers how many passed and failed, with
   the end of each failed job's log as `show` gives it; `review` and `comment` their author, their
   state and an excerpt (300 characters). A merged or closed pull request ends any subscription,
   said; so does its time, said. Subscribing again to the same pull request replaces the agent's

@@ -163,8 +163,34 @@ fn place(forge: &Forge) -> [&str; 4] {
     }
 }
 
-fn cloud(forge: &Forge) -> bool {
+pub(super) fn cloud(forge: &Forge) -> bool {
     matches!(forge, Forge::Bitbucket { host, .. } if host == "bitbucket.org")
+}
+
+/// The seconds the newest finished pipelines of a Cloud repository took, newest first: from the
+/// moment each was created to the moment it completed, among the 50 `bkt pipeline list` gives. A
+/// stopped pipeline, one still running and one with no end measure nothing.
+pub(super) async fn pipelines(forge: &Forge, context: &str) -> Result<Vec<u64>, String> {
+    let limit = LISTED.to_string();
+    let listed = json(&command(
+        forge,
+        context,
+        &["pipeline", "list"],
+        &["--limit", &limit, "--json"],
+    ))
+    .await?;
+    Ok(listed["pipelines"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| {
+            matches!(
+                p["state"]["result"]["name"].as_str(),
+                Some("SUCCESSFUL" | "FAILED" | "ERROR")
+            )
+        })
+        .filter_map(|p| super::ci::between(&p["created_on"], &p["completed_on"]))
+        .collect())
 }
 
 /// `head`, then the context and the repository's flags, then `tail`.
@@ -463,6 +489,7 @@ async fn detailed(forge: &Forge, context: &str, found: Listed) -> Result<Pull, S
         reviews: Vec::new(),
         reviewers,
         jobs,
+        ci: None,
     })
 }
 
