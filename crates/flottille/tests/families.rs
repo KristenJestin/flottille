@@ -683,6 +683,88 @@ fn tickets_list_on_jira_is_one_search_of_the_tracker_s_projects() {
 }
 
 #[test]
+fn tickets_list_keeps_the_items_answered_from_an_atlassian_host() {
+    let user = user();
+    on_jira(&user);
+    // With an OAuth sign-in, `acli` answers `self` links on Atlassian hosts, not on the site.
+    let mut paas = work_item("ABC-2", "The login fails", "example.atlassian.net");
+    paas["self"] = json!("https://jira-prod-xx-1-1.prod.atl-paas.net/rest/api/3/issue/2");
+    let mut gateway = work_item("DEF-1", "Add search", "example.atlassian.net");
+    gateway["self"] = json!(
+        "https://api.atlassian.com/ex/jira/0f1e2d3c-aaaa-4bbb-8ccc-123456789abc/rest/api/3/issue/3"
+    );
+    user.acli_script(json!({"search": [
+        paas,
+        gateway,
+        work_item("XYZ-9", "Elsewhere", "other.atlassian.net"),
+    ]}));
+    let (_, mcp) = root_in(&user, None);
+
+    let listed = read(&user, mcp.call("tickets", json!({"action": "list"})));
+
+    assert!(
+        listed.contains(
+            "- ABC-2 To Do: The login fails [bug] (Ana)  \
+             https://example.atlassian.net/browse/ABC-2"
+        ),
+        "{listed}"
+    );
+    assert!(
+        listed.contains(
+            "- DEF-1 To Do: Add search [bug] (Ana)  https://example.atlassian.net/browse/DEF-1"
+        ),
+        "{listed}"
+    );
+    assert!(!listed.contains("XYZ-9"), "{listed}");
+    assert!(listed.contains("1 answered from another site"), "{listed}");
+}
+
+#[test]
+fn acli_signed_in_to_another_site_reads_nothing_for_a_listing_a_search_or_a_show() {
+    let user = user();
+    fixture(
+        &user,
+        "git@github.com:acme/app.git",
+        json!({"kind": "github", "repository": "acme/app"}),
+        json!({"kind": "jira", "site": "other.atlassian.net", "projects": ["ABC"]}),
+    );
+    // What acli would answer, signed in to example.atlassian.net, on an Atlassian host that does
+    // not name the site: it must never be asked.
+    let mut item = work_item("ABC-2", "Of the wrong site", "example.atlassian.net");
+    item["self"] = json!("https://jira-prod-xx-1-1.prod.atl-paas.net/rest/api/3/issue/2");
+    user.acli_script(json!({"items": {"ABC-2": item.clone()}, "search": [item]}));
+    let (_, mcp) = root_in(&user, None);
+
+    for args in [
+        json!({"action": "list"}),
+        json!({"action": "search", "query": "login"}),
+        json!({"action": "show", "ticket": "ABC-2"}),
+    ] {
+        let answer = mcp.call("tickets", args.clone());
+        assert!(
+            answer.text.contains(
+                "acli is signed in to example.atlassian.net, and this project's tracker is \
+                 Jira on other.atlassian.net: nothing was read"
+            ),
+            "{args}: {}",
+            answer.text
+        );
+        assert!(
+            !answer.text.contains("Of the wrong site"),
+            "{}",
+            answer.text
+        );
+    }
+    assert!(
+        user.acli_received()
+            .iter()
+            .all(|call| call["args"] == json!(["jira", "auth", "status"])),
+        "{:?}",
+        user.acli_received()
+    );
+}
+
+#[test]
 fn tickets_writes_on_jira_are_refused_before_anything_is_asked() {
     let user = user();
     on_jira(&user);

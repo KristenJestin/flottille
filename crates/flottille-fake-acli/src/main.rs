@@ -6,6 +6,8 @@
 //! The shape of what it prints is **assumed**, from Atlassian's documentation of
 //! `acli jira workitem view` (which gives its flags and not its output): the work item as Jira's
 //! REST API gives it. The maintainer checks it against the real `acli` (`docs/tickets.md`).
+//! Its `self` link is the test's to write: on the site's own host (an API-token sign-in) or on an
+//! Atlassian host that names no site (an OAuth sign-in, as the real `acli` answers then).
 //!
 //! # Its folder
 //!
