@@ -177,7 +177,11 @@ Refused while the workspace is being prepared. Then nothing is touched unless:
   on no remote, on its branch <branch>: <hash> <subject>, …`); in a repository with no remote at
   all, no commit is on no other branch (`git log HEAD --not --exclude=<branch> --branches`:
   `<repository> has commits on no other branch, on its branch <branch>: …`), since its work stays
-  on its own branches;
+  on its own branches. Commits on no remote are no loss when the repository's forge says the
+  branch's pull request is merged and every one of them is in the commit it merged (its head, as
+  the forge gives it: GitHub's): a squash-merged branch whose remote branch the forge deleted and
+  a fetch pruned. A commit made after, a pull request not merged, a forge that cannot be read or
+  none declared still refuse;
 - outside the worktrees made, the workspace folder holds nothing but the links Flottille made and
   folders holding nothing else (`<path> is in no worktree`): no `git status` sees a file written in
   the folder of a workspace that does not take the root repository, nor in a repository folder
@@ -195,8 +199,8 @@ and why (`docs/protocol.md`, `workspace.remove`):
 - it holds no commit of its own: every commit of it is in its base (`git merge-base
   --is-ancestor`), and the forge is not asked;
 - or the repository's forge says its pull request is merged (a squash merge included, whose
-  commits git never finds in the base), and none of its commits is on no remote: a commit made
-  after the merge and never pushed keeps it.
+  commits git never finds in the base), and each of its commits is on a remote or in the commit
+  the pull request merged: a commit made after the merge and never pushed keeps it.
 
 Anything else keeps it, said: its pull request open, a draft or closed, none, no forge declared,
 or a forge that cannot be read (Flottille never deletes on a guess). **The remote branch is never

@@ -1468,10 +1468,10 @@ pub async fn losses(daemon: &Daemon, project: &str, name: &str) -> Result<Vec<St
         name: name.to_owned(),
     };
     let workspace = find(daemon, &asked)?;
-    Ok(checked(&workspace).await?.problems)
+    Ok(checked(daemon, &workspace).await?.problems)
 }
 
-async fn checked(workspace: &Workspace) -> Result<Checked<'_>, Failure> {
+async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checked<'a>, Failure> {
     let made: Vec<&Worktree> = workspace
         .repositories
         .iter()
@@ -1486,6 +1486,7 @@ async fn checked(workspace: &Workspace) -> Result<Checked<'_>, Failure> {
             .map_err(Failure::refused)?
     };
     let mut ours = Vec::new();
+    let mut read = None;
     for worktree in &made {
         let dir = workspace.folder_of(&worktree.path);
         let status = git::output(
@@ -1541,7 +1542,24 @@ async fn checked(workspace: &Workspace) -> Result<Checked<'_>, Failure> {
             .await
             .map_err(|error| cannot_check(&worktree.path, &error))?;
         let commits: Vec<&str> = commits.lines().filter(|line| !line.is_empty()).collect();
-        if !commits.is_empty() {
+        // A squash-merged branch whose remote branch the forge deleted and a fetch pruned: its
+        // commits are on no remote, yet they are what the merged pull request took.
+        let mut merged = false;
+        if !commits.is_empty() && !remotes.trim().is_empty() {
+            let read = match &mut read {
+                Some(read) => read,
+                None => read.insert(forge_read(daemon, workspace).await),
+            };
+            if let Some(head) =
+                merged_pull(read, &worktree.path).and_then(|p| p.head_commit.as_deref())
+            {
+                let beyond = [&log[..], &[head]].concat();
+                merged = git::output(&dir, &beyond, Class::Read)
+                    .await
+                    .is_ok_and(|beyond| beyond.trim().is_empty());
+            }
+        }
+        if !commits.is_empty() && !merged {
             problems.push(format!(
                 "{} has commits on {nowhere}, on its branch {}: {}",
                 worktree.path,
@@ -1566,7 +1584,7 @@ async fn remove_held(
         made,
         problems,
         ours,
-    } = checked(workspace).await?;
+    } = checked(daemon, workspace).await?;
     // The user discards what they were shown, not what appeared since.
     let (allowed, changed) = match approved {
         None => (problems.is_empty(), ""),
@@ -1705,9 +1723,7 @@ async fn landed(daemon: &Daemon, workspace: &Workspace) -> Vec<Value> {
         }
     }
     if !unsure.is_empty() {
-        let project = projects::load_project(daemon, &workspace.project).ok();
-        let checkouts = forge::repositories_of(workspace, project.as_ref());
-        let read = forge::read(&checkouts, &workspace.branch, false).await;
+        let read = forge_read(daemon, workspace).await;
         for (worktree, main) in unsure {
             let said = read.repositories.iter().find(|r| r.path == worktree.path);
             let merged = match said {
@@ -1740,15 +1756,16 @@ async fn landed(daemon: &Daemon, workspace: &Workspace) -> Vec<Value> {
                 }) => Err(format!("no forge says whether it is merged: {note}")),
                 _ => Err("it has no pull request".to_owned()),
             };
-            // Merged as it was pushed: a commit made since, on no remote, would be lost.
+            // Merged as it was pushed: a commit made since, on no remote nor in what the pull
+            // request merged, would be lost.
+            let head = merged_pull(&read, &worktree.path).and_then(|p| p.head_commit.as_deref());
+            let since = [
+                &["log", "--format=%h", &local, "--not", "--remotes"][..],
+                head.as_slice(),
+            ]
+            .concat();
             let merged = match merged {
-                Ok(why) => match git::output(
-                    &main,
-                    &["log", "--format=%h", &local, "--not", "--remotes"],
-                    Class::Read,
-                )
-                .await
-                {
+                Ok(why) => match git::output(&main, &since, Class::Read).await {
                     Ok(commits) if commits.trim().is_empty() => Ok(why),
                     Ok(_) => Err(format!("{why}, but it holds commits on no remote")),
                     Err(error) => Err(format!("{why}, but git cannot read it: {error}")),
@@ -1782,6 +1799,23 @@ async fn landed(daemon: &Daemon, workspace: &Workspace) -> Vec<Value> {
         branches.push(json!({"repository": worktree.path, "deleted": deleted, "why": why}));
     }
     branches
+}
+
+/// The workspace's forges, read for its branch.
+async fn forge_read(daemon: &Daemon, workspace: &Workspace) -> forge::Read {
+    let project = projects::load_project(daemon, &workspace.project).ok();
+    let checkouts = forge::repositories_of(workspace, project.as_ref());
+    forge::read(&checkouts, &workspace.branch, false).await
+}
+
+/// The pull request of the repository at `path` when the forge says it is merged.
+fn merged_pull<'a>(read: &'a forge::Read, path: &str) -> Option<&'a forge::Pull> {
+    read.repositories
+        .iter()
+        .find(|r| r.path == path)?
+        .pull
+        .as_ref()
+        .filter(|pull| pull.state == "merged")
 }
 
 /// What a removal's `branches` say of the workspace's `branch`, as sentences each led by a space:

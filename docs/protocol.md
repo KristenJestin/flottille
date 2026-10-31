@@ -550,8 +550,8 @@ was deleted because its work landed and why (`"it has no commit of its own"`, `"
 #12 is merged"`), or why it is kept (`"its pull request #12 is open, not merged"`, `"the forge
 cannot say whether it is merged: …"`); the remote branch is never deleted (`docs/workspaces.md`,
 "Removal"). `refused`, with nothing touched, while it is being prepared, or when a worktree holds a
-changed or untracked file or a commit on no remote: the message names every one, and the branch
-that holds the commit.
+changed or untracked file or a commit on no remote, unless the forge says the branch's pull
+request merged it: the message names every one, and the branch that holds the commit.
 
 ### The command methods
 

@@ -388,6 +388,7 @@ async fn detailed(forge: &Forge, context: &str, found: Listed) -> Result<Pull, S
         title: found.title,
         state: found.state,
         head: found.branch,
+        head_commit: None,
         base: found.base,
         url: found.url,
         mergeable,

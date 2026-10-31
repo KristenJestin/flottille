@@ -1503,6 +1503,31 @@ impl Fixture {
             }}}}));
     }
 
+    /// The pull request of `app/login` on `acme/lib`, in that state, its head at `head`.
+    fn lib_pull_at(&self, state: &str, head: &str) {
+        self.user
+            .gh_script(json!({"pulls": {"acme/lib": {"app/login": {
+                "number": 12, "title": "Add the feature", "state": state, "headRefOid": head,
+                "baseRefName": "main", "url": "https://github.com/acme/lib/pull/12"
+            }}}}));
+    }
+
+    /// `lib`'s commit pushed, then its remote branch deleted, as the forge does on a merge, and
+    /// pruned from the main checkout by a fetch: its full hash.
+    fn lib_pushed_then_pruned(&self) -> String {
+        self.commit_in("lib", true);
+        let head = self.git(&self.workspace("login").join("lib"), &["rev-parse", "HEAD"]);
+        self.user.git(
+            &self.remote("lib"),
+            &["branch", "--quiet", "-D", "app/login"],
+        );
+        self.user.git(
+            &self.folder.join("lib"),
+            &["fetch", "--quiet", "--prune", "origin"],
+        );
+        head
+    }
+
     fn has_branch(&self, repository: &Path) -> bool {
         self.git(repository, &["branch", "--list", "app/login"])
             .contains("app/login")
@@ -1656,4 +1681,102 @@ fn the_command_line_says_which_branches_it_deleted_and_which_it_kept() {
          deleted in web, api: it has no commit of its own. It is kept in lib: its pull request \
          #12 is open, not merged.\n"
     );
+}
+
+#[test]
+fn a_squash_merged_branch_whose_remote_was_pruned_is_removed_and_deleted_locally() {
+    let fixture = landing();
+    let head = fixture.lib_pushed_then_pruned();
+    fixture.lib_on_github();
+    fixture.lib_pull_at("MERGED", &head);
+
+    let removed = fixture.remove("login").unwrap();
+
+    assert!(!fixture.workspace("login").exists());
+    assert!(!fixture.has_branch(&fixture.folder.join("lib")));
+    assert_eq!(
+        Fixture::fate(&removed, "lib"),
+        (true, "its pull request #12 is merged".to_owned())
+    );
+}
+
+#[test]
+fn a_pruned_branch_whose_pull_request_is_not_merged_still_makes_the_removal_ask() {
+    let fixture = landing();
+    let head = fixture.lib_pushed_then_pruned();
+    fixture.lib_on_github();
+    fixture.lib_pull_at("OPEN", &head);
+
+    let (code, message) = fixture.remove("login").unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert!(
+        message.contains("lib has commits on no remote, on its branch app/login: "),
+        "{message}"
+    );
+    assert!(fixture.has_branch(&fixture.folder.join("lib")));
+}
+
+#[test]
+fn a_pruned_branch_the_forge_cannot_say_merged_still_makes_the_removal_ask() {
+    let fixture = landing();
+    fixture.lib_pushed_then_pruned();
+    fixture.lib_on_github();
+    fixture
+        .user
+        .gh_script(json!({"fail": {"acme/lib": "HTTP 502: Bad Gateway"}}));
+
+    let (code, message) = fixture.remove("login").unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert!(
+        message.contains("lib has commits on no remote"),
+        "{message}"
+    );
+    assert!(fixture.has_branch(&fixture.folder.join("lib")));
+}
+
+#[test]
+fn a_commit_made_after_the_merge_of_a_pruned_branch_still_makes_the_removal_ask() {
+    let fixture = landing();
+    let head = fixture.lib_pushed_then_pruned();
+    let lib = fixture.workspace("login").join("lib");
+    std::fs::write(lib.join("later.rs"), "fn later() {}\n").unwrap();
+    fixture.user.git(&lib, &["add", "."]);
+    fixture
+        .user
+        .git(&lib, &["commit", "--quiet", "-m", "after the merge"]);
+    let later = fixture.git(&lib, &["rev-parse", "--short", "HEAD"]);
+    fixture.lib_on_github();
+    fixture.lib_pull_at("MERGED", &head);
+
+    let (code, message) = fixture.remove("login").unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert!(
+        message.contains(&format!(
+            "lib has commits on no remote, on its branch app/login: {later} after the merge"
+        )),
+        "{message}"
+    );
+    assert!(fixture.has_branch(&fixture.folder.join("lib")));
+}
+
+#[test]
+fn an_uncommitted_file_still_refuses_the_removal_of_a_merged_pruned_branch() {
+    let fixture = landing();
+    let head = fixture.lib_pushed_then_pruned();
+    fixture.lib_on_github();
+    fixture.lib_pull_at("MERGED", &head);
+    std::fs::write(fixture.workspace("login").join("lib/draft.txt"), "draft\n").unwrap();
+
+    let (code, message) = fixture.remove("login").unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert!(
+        message.contains("lib/draft.txt holds work that is not committed"),
+        "{message}"
+    );
+    assert!(!message.contains("on no remote"), "{message}");
+    assert!(fixture.has_branch(&fixture.folder.join("lib")));
 }

@@ -44,8 +44,8 @@ const SSH_TIME: Duration = Duration::from_secs(5);
 /// What `forge show` shows of one comment at most.
 const COMMENT_CHARS: usize = 2000;
 /// What `gh pr view` is asked for.
-const FIELDS: &str = "number,title,state,isDraft,headRefName,baseRefName,url,mergeable,\
-    reviewDecision,statusCheckRollup,comments,reviews";
+const FIELDS: &str = "number,title,state,isDraft,headRefName,headRefOid,baseRefName,url,\
+    mergeable,reviewDecision,statusCheckRollup,comments,reviews";
 /// The ways `forge` `merge` merges a pull request, the first by default.
 pub const MERGE_METHODS: [&str; 3] = ["squash", "merge", "rebase"];
 
@@ -266,6 +266,8 @@ pub struct Pull {
     pub state: &'static str,
     /// The branch it merges.
     pub head: String,
+    /// The commit its branch was at, as a hash, when the forge says it (GitHub).
+    pub head_commit: Option<String>,
     pub base: String,
     pub url: String,
     /// Whether it merges into its base without conflict; none while the forge does not know.
@@ -383,6 +385,11 @@ impl Pull {
                 _ => "open",
             },
             head: text(&value["headRefName"]),
+            // Given to git as a revision: a hash, never anything that could read as an option.
+            head_commit: value["headRefOid"]
+                .as_str()
+                .filter(|oid| oid.len() >= 7 && oid.chars().all(|c| c.is_ascii_hexdigit()))
+                .map(str::to_owned),
             base: text(&value["baseRefName"]),
             url: text(&value["url"]),
             mergeable: match value["mergeable"].as_str() {
