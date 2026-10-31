@@ -526,8 +526,16 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   rail opens, and the output itself is only there), one line for each request that reached the
   user, neutral ("Request #1 · Run pnpm test", which lights its card in the rail, then, once
   answered, the outcome), each picture sent inside the bubble of its message, above its words, a
-  message another session sent with `session_send` marked with its sender ("from <session>"), and
-  the same message in the sender's conversation marked with whom it went to, never as the user's, and a composer that writes to the root, with the session's mode
+  message another session sent with `session_send` marked with its sender ("from <session>") and
+  folded to its first line until a click unfolds it, and
+  the same message in the sender's conversation marked with whom it went to, never as the user's;
+  a hover on a message (the user's, the agent's, another session's) shows, under it, its date and
+  time and a Copy icon button (a toast says it is copied); each step the Auto judge let through
+  says "allowed by the judge" (a ticket or a pull request created included), and the folded line
+  of its steps says it too; a message the user sent while the root works stays under the
+  conversation, above the composer, drawn as waiting (quieter, "Sent when the agent finishes its
+  step"), until the root reads it between its turns and it is a message like the others (the
+  queued deliveries of `agent.tree`); and a composer that writes to the root, with the session's mode
   (an Ask | Auto control, with a warning icon when Auto has no judge) in its bar, whose Stop
   button, in Send's place while a turn runs and Send has nothing to send (the two cross-fade), and
   `Escape` interrupt the turn that runs (the agent stays), which grows with its lines up to

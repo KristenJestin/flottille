@@ -25,8 +25,8 @@ use flottille_ui::color::mix;
 use flottille_ui::motion::{HOVER, Motion, PANEL};
 use flottille_ui::{
     AgentState, Badge, Button, Card, Drawer, Icon, LabelledLine, ListRow, Menu, Modal, Palette,
-    Pill, PulsingLabel, Side, StateIcon, Status, Type, enter, fade, fold_frame, hoverable, icon,
-    palette, presence, presence_of, section_label, selectable, space, turning,
+    Pill, PulsingLabel, Side, StateIcon, Status, Toast, Type, enter, fade, fold_frame, hoverable,
+    icon, palette, presence, presence_of, section_label, selectable, space, toast, turning,
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{
@@ -50,6 +50,7 @@ use crate::link::{Connect, Update};
 use crate::mode::ModeSwitch;
 use crate::model::Place;
 use crate::open::Opener;
+use crate::queued::QueuedMessages;
 use crate::runs::{self, CommandList, CommandPanel, rail_label};
 use crate::session_link::{
     self, PlaceFacts, PullRequest, RepositoryFacts, Request, SessionLink, SessionUpdate, TreeAgent,
@@ -130,6 +131,49 @@ pub fn seconds(ms: u64) -> String {
     }
 }
 
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// When a message was said, in the machine's local time: `31 Oct 2026, 14:05`.
+pub fn said_at(ms: u64) -> String {
+    said_at_offset(ms, local_offset(ms))
+}
+
+/// [`said_at`] at `offset` seconds east of UTC.
+pub fn said_at_offset(ms: u64, offset: i64) -> String {
+    let seconds = (ms / 1000) as i64 + offset;
+    let (days, time) = (seconds.div_euclid(86_400), seconds.rem_euclid(86_400));
+    // The civil date of a count of days since 1970 (Howard Hinnant's `civil_from_days`).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{day} {} {year}, {:02}:{:02}",
+        MONTHS[(month - 1) as usize],
+        time / 3600,
+        time % 3600 / 60
+    )
+}
+
+/// How far east of UTC the machine's clock was at `ms`, in seconds.
+fn local_offset(ms: u64) -> i64 {
+    let time = (ms / 1000) as libc::time_t;
+    // SAFETY: `localtime_r` writes only into `tm`, which outlives the call; a zeroed `tm` is a
+    // valid one.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    match unsafe { libc::localtime_r(&time, &mut tm) }.is_null() {
+        true => 0,
+        false => tm.tm_gmtoff,
+    }
+}
+
 /// What the page needs of the shell to follow a session.
 #[derive(Clone)]
 pub struct Follow {
@@ -169,6 +213,8 @@ pub struct SessionPage {
     rail: Entity<SessionRail>,
     drawer: Entity<Drawer>,
     reply: Entity<Reply>,
+    /// What the user wrote to the root while it worked, waiting under the conversation.
+    queued: Entity<QueuedMessages>,
     /// The detail of one run, which follows its output.
     command_panel: Entity<CommandPanel>,
     /// The drawer the detail of a run slides in with.
@@ -250,6 +296,7 @@ impl SessionPage {
             rail,
             drawer,
             reply,
+            queued: cx.new(|_| QueuedMessages::default()),
             command_panel,
             run_drawer,
             watching: None,
@@ -357,6 +404,11 @@ impl SessionPage {
     }
 
     /// The composer; `None` while a sub-agent is read: nothing writes to it.
+    /// The messages that wait for the root to finish its step.
+    pub fn queued(&self) -> &Entity<QueuedMessages> {
+        &self.queued
+    }
+
     pub fn reply(&self) -> Option<&Entity<Reply>> {
         (self.shown == self.opened.id).then_some(&self.reply)
     }
@@ -897,6 +949,8 @@ impl SessionPage {
             mode.update(cx, |mode, cx| mode.set_mode(gate_mode, cx));
             let running = root.state == "working";
             let images = root.images;
+            let queued = root.queued.clone();
+            self.queued.update(cx, |list, cx| list.set(queued, cx));
             self.reply.update(cx, |reply, cx| {
                 reply.set_images(images);
                 reply.set_running(running, cx)
@@ -1194,7 +1248,7 @@ impl Render for SessionPage {
             .px(if narrow { space::MD } else { space::XXL })
             .pb(if narrow { space::MD } else { space::XL })
             .map(|d| match (root, self.ended_line()) {
-                (true, None) => d.child(self.reply.clone()),
+                (true, None) => d.child(self.queued.clone()).child(self.reply.clone()),
                 (true, Some(ended)) => d.child(self.ended_bar(ended, cx)),
                 (false, _) => d.child(self.read_only(cx)),
             });
@@ -1454,6 +1508,11 @@ impl ConversationView {
         self.model.blocks()
     }
 
+    /// When the block at this index came.
+    pub fn at(&self, index: usize) -> Option<u64> {
+        self.model.at(index)
+    }
+
     /// How many times a row was looked at or changed so far.
     pub fn touched(&self) -> usize {
         self.touched
@@ -1503,7 +1562,8 @@ impl ConversationView {
         }
         let me = self.model.me().to_owned();
         let root = self.id == page.id();
-        let row = Row::view(at, block, me, root, page, self.page.clone(), cx);
+        let when = self.model.at(at);
+        let row = Row::view(at, block, when, me, root, page, self.page.clone(), cx);
         self.rows.push(row);
         self.more.push(0);
         self.touched += 1;
@@ -1595,8 +1655,15 @@ impl ConversationView {
             return div().into_any_element();
         }
         if piece > 0 {
-            let piece = row.read(cx).more_pieces().get(piece - 1).cloned();
-            return centred(column.children(piece));
+            let row = row.read(cx);
+            let shown = row.more_pieces().get(piece - 1).cloned();
+            // The last piece of a long reply carries its time and Copy.
+            if piece == more {
+                let p = palette(cx);
+                let said = row.said_text(div().children(shown), p);
+                return centred(column.child(said));
+            }
+            return centred(column.children(shown));
         }
         centred(column.child(enter(
             ElementId::Name(format!("enter-row-{}-{at}", self.id).into()),
@@ -1706,6 +1773,8 @@ pub struct Row {
     page: WeakEntity<SessionPage>,
     /// Shared with nothing: a piece streamed is appended to it in place.
     block: Rc<Block>,
+    /// When its block came.
+    when: Option<u64>,
     /// A thought or a report unfolded.
     open: bool,
     /// The reply or the thought as Markdown, in the pieces [`markdown_pieces`] cuts: a piece
@@ -1721,9 +1790,11 @@ pub struct Row {
 }
 
 impl Row {
+    #[allow(clippy::too_many_arguments)]
     fn view(
         at: usize,
         block: Block,
+        when: Option<u64>,
         me: String,
         root: bool,
         page: &SessionPage,
@@ -1747,6 +1818,7 @@ impl Row {
                 block: Rc::new(Block::Text {
                     text: String::new(),
                 }),
+                when,
                 open: false,
                 markdown: Vec::new(),
                 thinking: None,
@@ -2072,6 +2144,67 @@ pub fn no_image(_: &SharedUri) -> ImageSource {
     }))
 }
 
+/// What Copy puts on the clipboard, and the toast says.
+pub const COPIED: &str = "Copied";
+
+/// A message with what a hover shows under it: when it was said, and Copy, which puts its text
+/// on the clipboard and says it in a toast. Both fade in with the hover, in a line of their own
+/// that is always there, so that nothing moves around them. `end`: on the right, under the user's
+/// bubble.
+fn said(
+    id: String,
+    content: impl IntoElement,
+    end: bool,
+    when: Option<u64>,
+    text: String,
+    p: Palette,
+) -> impl IntoElement {
+    let part = move |part: &str| ElementId::Name(format!("{id}-{part}").into());
+    let (meta, time, copy) = (part("meta"), part("time"), part("copy"));
+    hoverable(
+        div()
+            .id(part("said"))
+            .flex()
+            .flex_col()
+            .when(end, |d| d.items_end())
+            .child(content),
+        move |d, t| {
+            let line = div()
+                .id(meta)
+                .flex_none()
+                .h(px(28.))
+                .mt(space::XS)
+                .flex()
+                .items_center()
+                .gap(space::SM)
+                .opacity(t)
+                // Hidden, it holds nothing to click.
+                .when(t > 0.0, |d| {
+                    d.children(when.map(|ms| {
+                        let said = SharedString::from(said_at(ms));
+                        div()
+                            .id(time)
+                            .mono(11.)
+                            .text_color(p.faint)
+                            .aria_label(said.clone())
+                            .child(said)
+                            .test_support()
+                    }))
+                    .child(
+                        Button::icon(copy, Icon::Copy, "Copy").on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                text.clone(),
+                            ));
+                            toast(Toast::success(COPIED), cx);
+                        }),
+                    )
+                })
+                .test_support();
+            d.child(line)
+        },
+    )
+}
+
 fn call_state(call: &Call) -> AgentState {
     match call.state {
         CallState::Running => AgentState::Running,
@@ -2127,7 +2260,7 @@ impl Render for Row {
                         }))
                         .test_support()
                 });
-                div()
+                let message = div()
                     .id(id("message"))
                     .flex()
                     .flex_col()
@@ -2171,61 +2304,133 @@ impl Render for Row {
                             })
                             .test_support(),
                     )
-                    .test_support()
-                    .into_any_element()
+                    .test_support();
+                said(
+                    format!("row-{}", self.at),
+                    message,
+                    true,
+                    self.when,
+                    text.clone(),
+                    p,
+                )
+                .into_any_element()
             }
             // Another session's words, or what this one sent it: the agent's side, marked with
             // who it is from or to, never drawn as the user's.
-            Block::Relayed { peer, sent, .. } => {
+            Block::Relayed { peer, sent, text } => {
                 let named = self
                     .page
                     .upgrade()
                     .map(|page| page.read(cx).peer_named(peer, cx))
                     .unwrap_or_else(|| peer.clone());
-                let said = SharedString::from(match sent {
+                let said_by = SharedString::from(match sent {
                     true => format!("to {named}"),
                     false => format!("from {named}"),
                 });
-                div()
+                let from = div()
+                    .id(id("relayed-from"))
+                    .flex()
+                    .items_center()
+                    .gap(space::SM)
+                    .mono(11.5)
+                    .text_color(p.faint)
+                    .aria_label(said_by.clone())
+                    .child(
+                        icon(if *sent { Icon::Send } else { Icon::Agents })
+                            .size(px(12.))
+                            .text_color(p.faint),
+                    )
+                    .child(said_by)
+                    .test_support();
+                let bubble = div()
+                    .max_w(px(540.))
+                    .flex()
+                    .flex_col()
+                    .gap(space::XS)
+                    .border_1()
+                    .border_color(p.line2)
+                    .rounded_tl(px(14.))
+                    .rounded_tr(px(14.))
+                    .rounded_br(px(14.))
+                    .rounded_bl(px(4.))
+                    .px(space::LG)
+                    .py(space::MD);
+                // Another session's message is folded to its first line and who sent it, until a
+                // click opens it: a report can be long. What this one sent is its own words.
+                let bubble = match sent {
+                    true => bubble.child(from).child(markdown_view(&self.markdown)),
+                    false => {
+                        let turn = turning(id("relayed-toggle"), self.open, window, cx);
+                        let first = SharedString::from(
+                            text.lines()
+                                .map(str::trim)
+                                .find(|line| !line.is_empty())
+                                .unwrap_or_default()
+                                .to_owned(),
+                        );
+                        bubble
+                            .child(hoverable(
+                                div()
+                                    .id(id("relayed-toggle"))
+                                    .flex()
+                                    .items_center()
+                                    .gap(space::SM)
+                                    .cursor_pointer()
+                                    .child(from)
+                                    .child(
+                                        icon(Icon::Chevron)
+                                            .size(px(12.))
+                                            .text_color(p.faint)
+                                            .with_transformation(Transformation::rotate(radians(
+                                                -FRAC_PI_2 * turn,
+                                            ))),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.open = !this.open;
+                                        cx.notify();
+                                    })),
+                                move |d, t| d.text_color(mix(p.faint, p.mute, t)),
+                            ))
+                            .child(presence(
+                                id("relayed-line"),
+                                !self.open,
+                                div()
+                                    .id(id("relayed-first"))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(13.5))
+                                    .text_color(p.mute)
+                                    .aria_label(first.clone())
+                                    .child(first)
+                                    .test_support(),
+                            ))
+                            .child(presence(
+                                id("relayed-body"),
+                                self.open,
+                                div()
+                                    .id(id("relayed-text"))
+                                    .child(markdown_view(&self.markdown))
+                                    .test_support(),
+                            ))
+                    }
+                };
+                let relayed = div()
                     .id(id("relayed"))
                     .flex()
                     .flex_col()
                     .items_start()
-                    .child(
-                        div()
-                            .max_w(px(540.))
-                            .flex()
-                            .flex_col()
-                            .gap(space::XS)
-                            .border_1()
-                            .border_color(p.line2)
-                            .rounded_tl(px(14.))
-                            .rounded_tr(px(14.))
-                            .rounded_br(px(14.))
-                            .rounded_bl(px(4.))
-                            .px(space::LG)
-                            .py(space::MD)
-                            .child(
-                                div()
-                                    .id(id("relayed-from"))
-                                    .flex()
-                                    .items_center()
-                                    .gap(space::SM)
-                                    .mono(11.5)
-                                    .text_color(p.faint)
-                                    .aria_label(said.clone())
-                                    .child(
-                                        icon(if *sent { Icon::Send } else { Icon::Agents })
-                                            .size(px(12.))
-                                            .text_color(p.faint),
-                                    )
-                                    .child(said)
-                                    .test_support(),
-                            )
-                            .child(markdown_view(&self.markdown)),
-                    )
-                    .test_support()
-                    .into_any_element()
+                    .child(bubble)
+                    .test_support();
+                said(
+                    format!("row-{}", self.at),
+                    relayed,
+                    false,
+                    self.when,
+                    text.clone(),
+                    p,
+                )
+                .into_any_element()
             }
             Block::Thought { text, since, until } => {
                 let (label, timer) = self.thinking.clone().expect("a thought has its timer");
@@ -2294,7 +2499,7 @@ impl Render for Row {
                         SharedString::from(letter),
                     )
                 });
-                div()
+                let reply = div()
                     .id(id("text"))
                     .max_w(px(680.))
                     .when_some(author, |d, (me, letter)| {
@@ -2323,8 +2528,12 @@ impl Render for Row {
                         )
                     })
                     .child(markdown_view(&self.markdown[..self.markdown.len().min(1)]))
-                    .test_support()
-                    .into_any_element()
+                    .test_support();
+                // A long reply's other pieces are items of the list: the last one carries it.
+                match self.markdown.len() > 1 {
+                    true => reply.into_any_element(),
+                    false => self.said_text(reply, p).into_any_element(),
+                }
             }
             Block::Steps { calls } => {
                 let running = calls
@@ -2360,6 +2569,24 @@ impl Render for Row {
                                                 .gap(space::SM)
                                                 .mono(12.5)
                                                 .child(SharedString::from(call.name.clone()))
+                                                .children(call.allowed_by.as_ref().map(|by| {
+                                                    let said = SharedString::from(format!(
+                                                        "allowed by {by}"
+                                                    ));
+                                                    div()
+                                                        .id(ElementId::Name(
+                                                            format!(
+                                                                "step-{}-{at}-allowed",
+                                                                self.at
+                                                            )
+                                                            .into(),
+                                                        ))
+                                                        .text_size(px(11.5))
+                                                        .text_color(p.faint)
+                                                        .aria_label(said.clone())
+                                                        .child(said)
+                                                        .test_support()
+                                                }))
                                                 .when(call.state == CallState::Interrupted, |d| {
                                                     d.child(
                                                         div()
@@ -2403,10 +2630,16 @@ impl Render for Row {
                 // would push the conversation down. The line and the card fold into each other.
                 let last = calls.last().expect("a block of steps holds a call");
                 let count = calls.len();
+                let judged = calls.iter().filter(|c| c.allowed_by.is_some()).count();
                 let line = SharedString::from(format!(
-                    "{count} {} · {}",
+                    "{count} {} · {}{}",
                     if count == 1 { "step" } else { "steps" },
-                    last.name
+                    last.name,
+                    match judged {
+                        0 => String::new(),
+                        n if n == count => format!(" · allowed by {}", crate::conversation::JUDGE),
+                        n => format!(" · {n} allowed by {}", crate::conversation::JUDGE),
+                    }
                 ));
                 let folded = hoverable(
                     div()
@@ -2601,6 +2834,22 @@ impl Render for Row {
 }
 
 impl Row {
+    /// The reply with its time and Copy under it, its whole text copied.
+    pub(crate) fn said_text(&self, content: impl IntoElement, p: Palette) -> impl IntoElement {
+        let text = match &*self.block {
+            Block::Text { text } => text.clone(),
+            _ => String::new(),
+        };
+        said(
+            format!("row-{}", self.at),
+            content,
+            false,
+            self.when,
+            text,
+            p,
+        )
+    }
+
     /// A request in the conversation is one neutral line where it happened, "Request #1 · Read
     /// .env", which lights its card in the rail; once answered, the record of the outcome. The
     /// card, with Allow and Deny, is in the rail: the page says that the user is needed there,
@@ -4870,6 +5119,7 @@ mod tests {
             images: None,
             gate_mode: Some("auto".into()),
             context: None,
+            queued: Vec::new(),
         }
     }
 
@@ -5000,6 +5250,18 @@ mod tests {
             ..card
         };
         assert_eq!(pending.record(), None);
+    }
+
+    #[test]
+    fn a_message_s_time_is_its_date_and_its_time_in_the_local_zone() {
+        assert_eq!(said_at_offset(1_793_455_500_000, 0), "31 Oct 2026, 14:05");
+        assert_eq!(
+            said_at_offset(1_793_455_500_000, 3600),
+            "31 Oct 2026, 15:05"
+        );
+        assert_eq!(said_at_offset(1_709_251_140_000, 0), "29 Feb 2024, 23:59");
+        assert_eq!(said_at_offset(1_709_251_140_000, 60), "1 Mar 2024, 00:00");
+        assert_eq!(said_at_offset(0, -60), "31 Dec 1969, 23:59");
     }
 
     #[test]

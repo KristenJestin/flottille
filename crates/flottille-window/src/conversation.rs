@@ -141,6 +141,8 @@ pub struct Call {
     pub state: CallState,
     pub since: u64,
     pub until: Option<u64>,
+    /// Who allowed it when it was not harmless: the Auto judge.
+    pub allowed_by: Option<String>,
 }
 
 impl Call {
@@ -187,6 +189,10 @@ const NOTE_START: &str = "<flottille-note";
 
 pub struct Conversation {
     blocks: Vec<Block>,
+    /// When each block came: the event that made it.
+    times: Vec<u64>,
+    /// When the event being folded came.
+    now: u64,
     /// The number of the last event applied: an event read twice (history, then live) is applied
     /// once.
     last_seq: u64,
@@ -232,6 +238,8 @@ impl Conversation {
     pub fn new(me: String, parent: Option<String>) -> Self {
         Self {
             blocks: Vec::new(),
+            times: Vec::new(),
+            now: 0,
             last_seq: 0,
             last_at: None,
             me,
@@ -261,6 +269,11 @@ impl Conversation {
 
     pub fn blocks(&self) -> &[Block] {
         &self.blocks
+    }
+
+    /// When the block at this index came, in milliseconds since the epoch.
+    pub fn at(&self, index: usize) -> Option<u64> {
+        self.times.get(index).copied()
     }
 
     /// The agent shown, as the page names it.
@@ -338,6 +351,8 @@ impl Conversation {
         self.has_sub_agents = true;
         self.launched = false;
         self.blocks.insert(0, Block::SubAgents);
+        self.times
+            .insert(0, self.times.first().copied().unwrap_or(self.now));
         let shift = |at: &mut usize| *at += 1;
         self.calls.values_mut().for_each(shift);
         self.running = self.running.iter().map(|at| at + 1).collect();
@@ -350,6 +365,7 @@ impl Conversation {
             return Vec::new();
         }
         self.last_seq = event.seq;
+        self.now = event.at;
         let mut changes = Vec::new();
         while let Some(&(at, number)) = self.pending_approvals.front()
             && at <= event.at
@@ -430,6 +446,7 @@ impl Conversation {
                     state: call_state(data["status"].as_str()),
                     since: event.at,
                     until: None,
+                    allowed_by: self.judged.contains(&text("id")).then(|| JUDGE.into()),
                 };
                 let call = Call {
                     until: (call.state != CallState::Running).then_some(event.at),
@@ -486,12 +503,27 @@ impl Conversation {
                 changes
             }
             "agent.tool_served" => {
-                if data["gate"] == "judged"
-                    && let Some(key) = data["call_key"].as_str()
-                {
-                    self.judged.insert(key.to_owned());
+                let Some(key) = data["call_key"]
+                    .as_str()
+                    .filter(|_| data["gate"] == "judged")
+                else {
+                    return Vec::new();
+                };
+                self.judged.insert(key.to_owned());
+                // The call is shown already: its step says who let it through.
+                let Some(&at) = self.calls.get(key) else {
+                    return Vec::new();
+                };
+                let Some(Block::Steps { calls }) = self.blocks.get_mut(at) else {
+                    return Vec::new();
+                };
+                match calls.iter_mut().find(|call| call.id == key) {
+                    Some(call) => {
+                        call.allowed_by = Some(JUDGE.into());
+                        vec![Change::Changed(at)]
+                    }
+                    None => Vec::new(),
                 }
-                Vec::new()
             }
             "agent.reported" => {
                 let mut changes = self.close(Some(event.at));
@@ -530,6 +562,7 @@ impl Conversation {
 
     fn push(&mut self, block: Block) -> Vec<Change> {
         self.blocks.push(block);
+        self.times.push(self.now);
         vec![Change::Added]
     }
 
@@ -2021,6 +2054,71 @@ mod tests {
             .map(|card| card.allowed_by.as_deref())
             .collect();
         assert_eq!(allowed, [Some("the judge"), None]);
+    }
+
+    fn judged_step(seq: u64, id: &str, tool: &str, gate: &str) -> [Event; 3] {
+        [
+            event(
+                seq,
+                "agent.tool_call",
+                json!({"id": id, "title": format!("mcp__flottille__{tool}"),
+                    "status": "in_progress", "raw_input": {"action": "create"}}),
+            ),
+            event(
+                seq + 1,
+                "agent.tool_served",
+                json!({"tool": tool, "call_key": id, "gate": gate}),
+            ),
+            event(
+                seq + 2,
+                "agent.tool_call",
+                json!({"id": id, "update": true, "status": "completed"}),
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_step_the_judge_allowed_says_it_a_ticket_created_included() {
+        let mut c = root();
+        let mut changes = Vec::new();
+        for (seq, id, tool, gate) in [
+            (1, "t", "tickets", "judged"),
+            (4, "p", "forge", "judged"),
+            (7, "r", "fs_read", "allow"),
+        ] {
+            for step in judged_step(seq, id, tool, gate) {
+                changes.extend(c.apply(&step));
+            }
+        }
+
+        let Block::Steps { calls } = &c.blocks()[0] else {
+            panic!("{:?}", c.blocks())
+        };
+        let allowed: Vec<Option<&str>> = calls.iter().map(|c| c.allowed_by.as_deref()).collect();
+        assert_eq!(allowed, [Some(JUDGE), Some(JUDGE), None]);
+        // The verdict draws its row again: it came after the call was shown.
+        assert!(changes.contains(&Change::Changed(0)), "{changes:?}");
+    }
+
+    #[test]
+    fn each_block_keeps_when_it_came() {
+        let mut c = root();
+        c.apply(&event(1, "agent.prompted", json!({"text": "hello"})));
+        c.apply(&event(2, "agent.message", json!({"text": "Hi"})));
+        c.apply(&event(3, "agent.message", json!({"text": " there"})));
+        c.apply(&event(
+            4,
+            "agent.prompted",
+            json!({"text": "[flottille:session]\nlead (a1) wrote to this session:\n\nDone."}),
+        ));
+
+        assert_eq!(c.blocks().len(), 3);
+        let times: Vec<Option<u64>> = (0..3).map(|at| c.at(at)).collect();
+        // A reply streamed in pieces came with its first.
+        assert_eq!(times, [Some(100), Some(200), Some(400)]);
+        assert_eq!(c.at(3), None);
+        c.prepend_sub_agents();
+        assert_eq!(c.at(1), Some(100), "the rows moved down keep their time");
     }
 
     fn row(state: &str, exit_code: Option<i32>, tail: &[&str]) -> CommandRow {
