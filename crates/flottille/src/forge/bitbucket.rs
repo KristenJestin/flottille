@@ -410,7 +410,7 @@ pub(super) async fn pull_numbered(
     match all.into_iter().find(|pull| pull.id == number) {
         Some(found) => detailed(forge, context, found).await.map(Some),
         None if cut => Err(format!(
-            "the pull request #{number} is not among the newest {LISTED} of {}, the most `bkt`              lists: it may be older",
+            "the pull request #{number} is not among the newest {LISTED} of {}, the most `bkt` lists: it may be older",
             forge.slug()
         )),
         None => Ok(None),
