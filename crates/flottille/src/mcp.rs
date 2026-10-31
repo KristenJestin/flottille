@@ -1268,6 +1268,11 @@ async fn played(
     let recorded = record_of(&args, &grant.place);
     let mut verdict = None;
     let mut judgement = None;
+    // What the developer log says of the call, gathered only while it is on.
+    let logging = daemon.developer.on();
+    let mut held: Option<(&'static str, Vec<String>)> = None;
+    let mut judged_log = None;
+    let mut request = None;
     let replaced = daemon
         .read(|store| store.agent(&grant.agent))
         .ok()
@@ -1289,18 +1294,37 @@ async fn played(
                     }
                     gate::Verdict::Deny(why) => Outcome::Refused(why),
                     gate::Verdict::Ask(ask) => {
+                        if logging {
+                            let class = match ask.class {
+                                gate::Class::Base => "base",
+                                gate::Class::Judge => "judge",
+                            };
+                            held = Some((class, ask.reasons.clone()));
+                        }
                         // In Auto, the judge decides a call to judge; base never reaches it, and
                         // without a judge chosen Auto asks as Ask does.
                         let judged = match (ask.class, judge::mode(daemon, &grant.agent)) {
-                            (gate::Class::Judge, GateMode::Auto) => match judge::chosen(daemon)
-                                .await
-                            {
-                                Some(chosen) => Some(
-                                    judge::judge(daemon, &chosen, grant, tool, &args, &ask.reasons)
-                                        .await,
-                                ),
-                                None => None,
-                            },
+                            (gate::Class::Judge, GateMode::Auto) => {
+                                match judge::chosen(daemon).await {
+                                    Some(chosen) => {
+                                        let judged = judge::judge(
+                                            daemon,
+                                            &chosen,
+                                            grant,
+                                            tool,
+                                            &args,
+                                            &ask.reasons,
+                                        )
+                                        .await;
+                                        let judgement = judged.judgement.clone();
+                                        if logging {
+                                            judged_log = Some((chosen, judged));
+                                        }
+                                        Some(judgement)
+                                    }
+                                    None => None,
+                                }
+                            }
                             _ => None,
                         };
                         judgement = judged.clone();
@@ -1311,7 +1335,11 @@ async fn played(
                                 perform(daemon, grant, tool, args, cancelled, approved).await
                             }
                             judged => {
-                                approvals::ask(daemon, grant, tool, &args, key, ask, says, judged)
+                                let (outcome, number) = approvals::ask(
+                                    daemon, grant, tool, &args, key, ask, says, judged,
+                                );
+                                request = number;
+                                outcome
                             }
                         }
                     }
@@ -1326,6 +1354,12 @@ async fn played(
             grant.tools.join(", ")
         ))
     };
+    if logging {
+        log_call(
+            daemon, grant, tool, key, &recorded, verdict, held, judged_log, &outcome, request,
+            started,
+        );
+    }
     record(
         daemon,
         grant,
@@ -1350,6 +1384,47 @@ async fn played(
         )
     };
     (with_notes(text, &notes), error)
+}
+
+/// The developer log's line for a call (`docs/developer.md`, "call"): what the gate decided and
+/// why, what the judge was given and answered, the request it made, and the size of the result.
+#[allow(clippy::too_many_arguments)]
+fn log_call(
+    daemon: &Daemon,
+    grant: &Grant,
+    tool: &str,
+    key: Option<&str>,
+    recorded: &Value,
+    verdict: Option<&str>,
+    held: Option<(&str, Vec<String>)>,
+    judged: Option<(flottille_core::provider::Judge, judge::Judged)>,
+    outcome: &Outcome,
+    request: Option<u64>,
+    started: Instant,
+) {
+    let (class, reasons) = match held {
+        Some((class, reasons)) => (Some(class), reasons),
+        None => (None, Vec::new()),
+    };
+    let judge = judged.map(|(chosen, judged)| {
+        json!({"by": judged.judgement.by, "provider": chosen.provider, "model": chosen.model,
+            "input": judged.input, "answer": judged.answer, "verdict": judged.judgement.verdict,
+            "reason": judged.judgement.reason,
+            "duration_ms": judged.duration.as_millis() as u64})
+    });
+    let (text, error) = match outcome {
+        Outcome::Done(text) | Outcome::Held(text) => (text, None),
+        Outcome::Refused(text) | Outcome::Failed(text) => (text, Some(text)),
+    };
+    daemon.developer.write(
+        "call",
+        json!({"agent": grant.agent, "tool": tool, "call_key": key, "arguments": recorded,
+            "gate": verdict, "class": class, "reasons": reasons, "judge": judge,
+            "outcome": outcome.word(), "request": request, "error": error,
+            "result_chars": text.chars().count(),
+            "duration_ms": started.elapsed().as_millis() as u64}),
+        &grant.place.secret_values(),
+    );
 }
 
 /// The gate's verdict on a call of one of the agent's tools.

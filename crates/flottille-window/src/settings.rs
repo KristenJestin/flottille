@@ -2,7 +2,8 @@
 //! in, and whether its agents can run here, as the daemon says it (`provider.list`). The window
 //! never writes `providers.toml` itself: a switch asks the daemon (`provider.enable`,
 //! `provider.disable`), and the page follows what the daemon lists next. The Auto judge is
-//! chosen here too (`provider.set_judge`), and its guidance edited (`judge.set`).
+//! chosen here too (`provider.set_judge`), and its guidance edited (`judge.set`). Last, the
+//! developer mode is switched (`developer.set`), its log's path beside the switch.
 
 use std::collections::HashMap;
 
@@ -24,12 +25,27 @@ use crate::sections::Sections;
 use crate::shell::Shell;
 
 /// The sections of the page, in order: each index entry's key and label.
-pub const SECTIONS: [(&str, &str); 4] = [
+pub const SECTIONS: [(&str, &str); 5] = [
     ("judge", "Auto judge"),
     ("providers", "Providers"),
     ("guidance", "Judge guidance"),
     ("rules", "Rules"),
+    ("developer", "Developer mode"),
 ];
+
+/// The developer mode as the daemon says it (`developer.show`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Developer {
+    /// Whether the daemon logs what it decides.
+    pub log: bool,
+    /// Where.
+    pub file: String,
+}
+
+/// What the developer mode's switch logs, under its label.
+pub const DEVELOPER_HINT: &str = "Each gate decision with its reasons, the judge's input and \
+     answer, requests, deliveries and agent processes, one JSON object per line, every secret \
+     masked.";
 
 pub struct SettingsPage {
     shell: WeakEntity<Shell>,
@@ -51,6 +67,10 @@ pub struct SettingsPage {
     judge_refused: Option<String>,
     /// "How Auto works" is unfolded.
     how: bool,
+    /// The developer mode, once the daemon said it.
+    developer: Option<Developer>,
+    /// The developer mode's switch flipped, until the daemon answers: what it was asked to become.
+    developer_pending: Option<bool>,
     sections: Sections,
 }
 
@@ -95,6 +115,8 @@ impl SettingsPage {
             judge_pending: false,
             judge_refused: None,
             how: false,
+            developer: None,
+            developer_pending: None,
             sections: Sections::default(),
         }
     }
@@ -319,6 +341,106 @@ impl SettingsPage {
         }
         self.judge_refused = refused;
         cx.notify();
+    }
+
+    /// The developer mode as the daemon last said it.
+    pub fn developer(&self) -> Option<&Developer> {
+        self.developer.as_ref()
+    }
+
+    /// Whether the developer mode's switch shows it on: what it was asked to become while the
+    /// daemon has not answered.
+    pub fn developer_on(&self) -> bool {
+        self.developer_pending
+            .unwrap_or_else(|| self.developer.as_ref().is_some_and(|d| d.log))
+    }
+
+    fn flip_developer(&mut self, cx: &mut Context<Self>) {
+        if self.developer_pending.is_some() || self.developer.is_none() {
+            return;
+        }
+        let log = !self.developer_on();
+        self.developer_pending = Some(log);
+        self.shell
+            .update(cx, |shell, _| shell.perform(Command::DeveloperSet { log }))
+            .ok();
+        cx.notify();
+    }
+
+    /// The daemon's answer to a read or a switch: a switch refused goes back, and a toast says
+    /// why.
+    pub fn developer_answered(
+        &mut self,
+        shown: Result<Developer, String>,
+        written: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if written {
+            self.developer_pending = None;
+        }
+        match shown {
+            Ok(developer) => self.developer = Some(developer),
+            Err(why) if written => toast(
+                Toast::failure("Developer mode was not switched").detail(why),
+                cx,
+            ),
+            Err(_) => {}
+        }
+        cx.notify();
+    }
+
+    fn developer_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let switch = Switch::new(
+            "developer-switch",
+            self.developer_on(),
+            "Log what Flottille decides",
+        )
+        .hint(DEVELOPER_HINT)
+        .disabled(self.developer.is_none() || self.developer_pending.is_some())
+        .on_click(cx.listener(|this, _, _, cx| this.flip_developer(cx)));
+        let file = self
+            .developer
+            .as_ref()
+            .map(|d| SharedString::from(d.file.clone()));
+        let card = div()
+            .id("developer")
+            .p(space::LG)
+            .flex()
+            .flex_col()
+            .rounded(px(12.))
+            .bg(p.card)
+            .border_1()
+            .border_color(p.line)
+            .child(switch)
+            .child(
+                presence_of("developer-file-line", file, move |file| {
+                    div()
+                        .id("developer-file")
+                        .aria_label(file.clone())
+                        .flex()
+                        .gap(space::SM)
+                        .text_size(px(12.5))
+                        .child(div().flex_none().text_color(p.mute).child("Log"))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .font_family(flottille_ui::typography::MONO)
+                                .text_color(p.faint)
+                                .child(file),
+                        )
+                        .test_support()
+                        .into_any_element()
+                })
+                .gap(space::MD),
+            )
+            .test_support();
+        Section::new("developer", "Developer mode")
+            .sentence(
+                "A log for working on Flottille: why each call was allowed, held or refused. Off, \
+                 nothing more is written.",
+            )
+            .child(card)
     }
 
     /// Whether "How Auto works" is unfolded.
@@ -570,6 +692,7 @@ impl Render for SettingsPage {
             ("providers", providers),
             ("guidance", self.judge_guidance.clone().into_any_element()),
             ("rules", self.rules.clone().into_any_element()),
+            ("developer", self.developer_section(cx).into_any_element()),
         ];
         let this = cx.entity().downgrade();
         let index = move |id: ElementId, current: usize| {

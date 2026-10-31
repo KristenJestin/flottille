@@ -9109,3 +9109,41 @@ fn remove_opens_a_confirmation_disabled_with_its_reason_when_work_would_be_lost(
         last_toast(cx)
     );
 }
+
+#[gpui_kit::test]
+fn the_developer_mode_is_switched_in_settings_with_its_log_s_path_beside_the_switch(
+    cx: &mut TestAppContext,
+) {
+    let user = User::new();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_settings(&shell, cx);
+    let file = user.path("state/flottille/developer.log");
+    until(&shell, cx, "the page knows the developer mode", |cx| {
+        page.read_with(cx, |page, _| page.developer().is_some())
+    });
+    settle(cx);
+    assert!(!page.read_with(cx, |page, _| page.developer_on()));
+    cx.update(|window, _| {
+        assert!(window.find("developer-switch-label").visible());
+        assert!(window.find("developer-file").visible());
+    });
+    assert_eq!(
+        page.read_with(cx, |page, _| page.developer().unwrap().file.clone()),
+        file.to_str().unwrap()
+    );
+
+    cx.update(|window, cx| window.click("developer-switch", cx));
+    until(&shell, cx, "the daemon says it is on", |cx| {
+        page.read_with(cx, |page, _| page.developer().is_some_and(|d| d.log))
+    });
+    let config = std::fs::read_to_string(user.path("config/flottille/developer.toml")).unwrap();
+    assert!(config.contains("log = true"), "{config}");
+
+    // Switched from elsewhere, the page follows.
+    let output = user.run(&["developer", "off"]);
+    assert!(output.status.success());
+    until(&shell, cx, "the page shows it off", |cx| {
+        page.read_with(cx, |page, _| !page.developer_on())
+    });
+    settle(cx);
+}

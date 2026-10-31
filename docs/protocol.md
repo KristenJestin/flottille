@@ -297,6 +297,20 @@ calls never do) nor of what its answer may be (`allow` or `ask`).
 
 Each emits `judge.changed`. The user's door alone reaches them: no tool of an agent does.
 
+### The developer methods
+
+`developer.show` and `developer.set` read and switch the developer mode (`docs/developer.md`): a
+log of what the daemon decides and why, `log = true` in `developer.toml` of Flottille's
+configuration folder.
+
+- `developer.show` answers `{"log", "file"}`: whether the log is written, as the file says now
+  (read again, the daemon follows it), and the log's path. `invalid-config` when the file cannot be
+  read, or its `log` is not `true` or `false`.
+- `developer.set {log}` writes the file and answers as `developer.show`.
+
+`developer.set` emits `developer.changed`. The user's door alone reaches them: no tool of an agent
+does.
+
 ### The skill methods
 
 A project's skills (`docs/skills.md`). The daemon edits the project's file in place, the rest of it

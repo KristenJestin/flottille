@@ -23,6 +23,7 @@ use crate::agents::{self, Live};
 use crate::approvals;
 use crate::commands;
 use crate::deliveries;
+use crate::developer;
 use crate::forge;
 use crate::inbox;
 use crate::judge;
@@ -157,6 +158,8 @@ pub struct Daemon {
     pub launching: Mutex<HashMap<String, usize>>,
     /// What the forges said of each workspace, and who watches them.
     pub forges: forge::Forges,
+    /// The developer mode's log (`docs/developer.md`).
+    pub developer: developer::Log,
     /// Becomes true when the daemon stops.
     stopping: watch::Sender<bool>,
 }
@@ -179,6 +182,7 @@ impl Daemon {
     pub fn emit(&self, name: &str, data: Value) -> Result<Event> {
         let events = self.events.lock().unwrap();
         let event = events.store.append_event(name, data)?;
+        self.developer.event(&event);
         if let Some(bus) = &events.bus {
             let _ = bus.send(event.clone());
         }
@@ -201,8 +205,11 @@ impl Daemon {
     ) -> flottille_core::Result<T> {
         let mut events = self.events.lock().unwrap();
         let (value, event) = write(&mut events.store)?;
-        if let (Some(bus), Some(event)) = (&events.bus, event.into()) {
-            let _ = bus.send(event);
+        if let Some(event) = event.into() {
+            self.developer.event(&event);
+            if let Some(bus) = &events.bus {
+                let _ = bus.send(event);
+            }
         }
         Ok(value)
     }
@@ -214,6 +221,9 @@ impl Daemon {
     ) -> flottille_core::Result<T> {
         let mut events = self.events.lock().unwrap();
         let (value, written) = write(&mut events.store)?;
+        for event in &written {
+            self.developer.event(event);
+        }
         if let Some(bus) = &events.bus {
             for event in written {
                 let _ = bus.send(event);
@@ -299,6 +309,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         judge_chose_none: Mutex::new(None),
         launching: Mutex::new(HashMap::new()),
         forges: forge::Forges::default(),
+        developer: developer::Log::open(paths),
         stopping: watch::Sender::new(false),
     });
     let mut terminate = signal(SignalKind::terminate())?;
@@ -666,6 +677,13 @@ fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) 
         }
         method if method.starts_with("inbox.") => (
             match inbox::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+            },
+            None,
+        ),
+        method if method.starts_with("developer.") => (
+            match developer::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => Message::error(Some(id), failure.code, failure.message),
             },

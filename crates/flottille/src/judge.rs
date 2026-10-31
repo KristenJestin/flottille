@@ -287,6 +287,17 @@ pub fn mode(daemon: &Daemon, agent: &str) -> GateMode {
         .unwrap_or(GateMode::Ask)
 }
 
+/// A judgement, and for the developer log (`docs/developer.md`) what the judge was given and
+/// what it answered, as they were: nothing is put together for it.
+pub struct Judged {
+    pub judgement: Judgement,
+    /// Its prompt; none when it was not asked.
+    pub input: Option<String>,
+    /// What it said; none when it said nothing in time, or could not be asked.
+    pub answer: Option<String>,
+    pub duration: Duration,
+}
+
 /// The judgement of a call to judge: what the judge said, or why it could not decide (which
 /// asks).
 pub async fn judge(
@@ -296,41 +307,51 @@ pub async fn judge(
     tool: &str,
     args: &Value,
     reasons: &[String],
-) -> Judgement {
+) -> Judged {
+    let started = std::time::Instant::now();
     let failed = |why: String| Judgement {
         by: judge.who(),
         verdict: "failed".into(),
         reason: format!("the judge could not decide: {why}"),
+    };
+    let judged = |judgement, input, answer| Judged {
+        judgement,
+        input,
+        answer,
+        duration: started.elapsed(),
     };
     if let Some(key) = WHOLE.iter().find(|key| {
         args[**key]
             .as_str()
             .is_some_and(|text| text.chars().count() > WHOLE_CHARS)
     }) {
-        return failed(format!(
+        let judgement = failed(format!(
             "it was not asked, since the {key} is longer than the {WHOLE_CHARS} characters it is \
              given whole"
         ));
+        return judged(judgement, None, None);
     }
     let prompt = prompt(daemon, grant, tool, args, reasons);
     let answer = match tokio::time::timeout(timeout(), ask(daemon, judge, &prompt)).await {
         Err(_) => {
-            return failed(format!(
+            let judgement = failed(format!(
                 "it gave no answer within {} seconds",
                 timeout().as_secs_f32()
             ));
+            return judged(judgement, Some(prompt), None);
         }
-        Ok(Err(why)) => return failed(why),
+        Ok(Err(why)) => return judged(failed(why), Some(prompt), None),
         Ok(Ok(answer)) => answer,
     };
-    match verdict(&answer) {
+    let judgement = match verdict(&answer) {
         Some((verdict, reason)) => Judgement {
             by: judge.who(),
             verdict,
             reason: mcp::masked(&reason, &grant.place),
         },
         None => failed("its answer was not the JSON verdict it is asked for".into()),
-    }
+    };
+    judged(judgement, Some(prompt), Some(answer))
 }
 
 /// The verdict and the reason of the judge's answer: one JSON object, `allow` or `ask`, possibly

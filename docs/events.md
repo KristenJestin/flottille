@@ -94,6 +94,14 @@ one for a user who never chose (`"picked": true`), or the user saw the notice of
 The user edited the Auto judge's guidance, or reset it to the default (`judge.set`,
 `judge.reset`). It has no field: `judge.show` says the text.
 
+### `developer.changed`
+
+The user switched the developer mode (`developer.set`, `docs/developer.md`).
+
+| Field | |
+|---|---|
+| `log` | Whether the log is written now. |
+
 ### `workspace.created`
 
 A workspace was written, before anything is made on disk (`docs/workspaces.md`). Every event of a

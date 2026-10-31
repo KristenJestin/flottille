@@ -567,6 +567,7 @@ impl Shell {
             Update::Done(outcome) => self.done(outcome, window, cx),
             Update::Providers(read, providers) => self.set_providers(read, providers, cx),
             Update::TextChanged { judge: true, .. } => self.actions.send(Command::JudgeRead),
+            Update::DeveloperChanged => self.actions.send(Command::DeveloperRead),
             Update::TextChanged { project, .. } => {
                 self.actions.send(Command::RulesRead { project })
             }
@@ -827,6 +828,10 @@ impl Shell {
                     let section = page.read(cx).commands().clone();
                     section.update(cx, |section, cx| section.written(refused, cx));
                 }
+            }
+            Outcome::Developer { written, shown } => {
+                self.settings
+                    .update(cx, |page, cx| page.developer_answered(shown, written, cx));
             }
             Outcome::JudgeGuidance { written, shown } => {
                 let editor = self.settings.read(cx).judge_guidance().clone();
@@ -1529,6 +1534,7 @@ impl Shell {
             self.actions.send(Command::ReadProviders);
             self.actions.send(Command::RulesRead { project: None });
             self.actions.send(Command::JudgeRead);
+            self.actions.send(Command::DeveloperRead);
         }
         let page = self.page_of(&selection, cx);
         self.selected = Some(selection);

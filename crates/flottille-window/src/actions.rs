@@ -88,6 +88,12 @@ pub enum Command {
     },
     /// Reads the providers again: `providers.toml` is the user's to edit by hand too.
     ReadProviders,
+    /// The developer mode (`developer.show`).
+    DeveloperRead,
+    /// Switches the developer mode (`developer.set`).
+    DeveloperSet {
+        log: bool,
+    },
     /// The user saw the notice of the Auto judge Flottille picked (`provider.judge_noticed`);
     /// the providers are read again.
     JudgeNoticed,
@@ -558,6 +564,11 @@ pub enum Outcome {
         name: String,
         read: Result<SkillInfo, String>,
     },
+    /// The developer mode as the daemon says it, after a read (`written` false) or a switch.
+    Developer {
+        written: bool,
+        shown: Result<crate::settings::Developer, String>,
+    },
     /// The judge's guidance as the daemon says it, after a read (`written` false) or a save or
     /// a reset.
     JudgeGuidance {
@@ -872,6 +883,19 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 shown: shown.and_then(|shown| shown).map(|shown| Shown::of(&shown)),
                 written: true,
             }
+        }
+        Command::DeveloperRead | Command::DeveloperSet { .. } => {
+            let (method, params, written) = match command {
+                Command::DeveloperSet { log } => ("developer.set", json!({"log": log}), true),
+                _ => ("developer.show", json!({}), false),
+            };
+            let shown = answer(ask_alone(connect, method, params, bounds.quick)).map(|shown| {
+                crate::settings::Developer {
+                    log: shown["log"] == true,
+                    file: shown["file"].as_str().unwrap_or_default().to_owned(),
+                }
+            });
+            Outcome::Developer { written, shown }
         }
         Command::ReadProviders => {
             let read = crate::providers::next_read();
