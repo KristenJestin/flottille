@@ -67,8 +67,8 @@ user's), so that the user's own sign-in works; a call is cut after 30 s.
   only for a `tickets` call the gate let through, and the tests look at every call the fake
   received. Of `gh`, the reads are `gh issue view <n> -R github.com/owner/name --json
   number,title,state,body,comments,url` and `gh issue list` (`docs/tools.md`, "The tickets"); its
-  writes (`issue create`, `comment`, `edit`, `close`, `reopen`) run only for a `tickets` call the
-  gate let through. A key is parsed first, so it is a number or `ABC-123`, and a JQL filter is
+  writes (`issue create`, `comment`, `edit`, `close`, `reopen`, and for a status `project list`,
+  `field-list` and `item-edit`) run only for a `tickets` call the gate let through. A key is parsed first, so it is a number or `ABC-123`, and a JQL filter is
   quoted, never spliced. A text written is passed as one argument, never through a shell.
 - **Agents never get that sign-in.** An agent's own command runs have the forge tokens emptied and
   `GH_CONFIG_DIR` pointed at an empty folder (`docs/tools.md`), so `gh` has no login there.
@@ -187,8 +187,9 @@ or why the ticket is not taken, before anything is created.
 
 `tickets {action, …}` (`docs/tools.md`, "The tickets"): `list` every ticket of a state in one call
 (by label and assignee), `search` with words, `show` the workspace's ticket or another of the
-project's tracker by its key; `create`, `comment`, `edit`, `close`, `reopen` and, on Jira,
-`status`, each to judge, held in Ask and allowed in Full as the other writes are. A key the
+project's tracker by its key; `create`, `comment`, `edit` (on GitHub also labels and assignees), `close` (on
+GitHub, completed or not planned), `reopen` and `status` (on GitHub, the Status of the issue on its
+Projects board, `docs/tools.md`), each to judge, held in Ask and allowed in Full as the other writes are. A key the
 tracker does not take, or a creation in a Jira project that is not one of the tracker's, is
 refused, and nothing is asked of any tracker. A GitHub search stays in the tracker's repository:
 a query holding `repo:`, `org:`, `user:`, `is:pr` or `type:pr` is refused, and only the issues
@@ -244,7 +245,8 @@ projects. The maintainer checks it on their work machine
 ## Tests
 
 Tests never call GitHub or Jira nor use anyone's sign-in: a fake `gh` (`crates/flottille-fake-gh`,
-which answers `issue view`, `issue list` and the issue writes too) and a fake `acli`
+which answers `issue view`, `issue list`, the issue writes, the `gh project` calls of a status and the
+missing `project` scope too) and a fake `acli`
 (`crates/flottille-fake-acli`, `workitem view`, `workitem search` and the writes), first on the
 `PATH` of the test's daemon, answer from a script and record every call; the repositories are
 throwaway ones whose `origin` is set to a GitHub URL after their workspace is made, and whose

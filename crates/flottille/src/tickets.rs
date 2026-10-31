@@ -639,6 +639,10 @@ struct TicketsCall {
     project: Option<String>,
     #[serde(rename = "type")]
     kind: Option<String>,
+    reason: Option<String>,
+    remove_labels: Option<Vec<String>>,
+    assignees: Option<Vec<String>>,
+    remove_assignees: Option<Vec<String>>,
 }
 
 /// The writes of `tickets`.
@@ -664,13 +668,20 @@ pub fn unwritable(project: &Project, args: &Value) -> Option<String> {
                 .err()
                 .map(|why| format!("refused: {why}"))
         }
-        ProjectTracker::Jira { .. } if action == "status" && !named => {
+        _ if action == "status" && !named => {
             Some("refused: tickets status needs status, the name of the status to move to".into())
         }
-        ProjectTracker::Github { .. } if action == "status" => Some(
-            "refused: tickets status moves a Jira work item; a GitHub issue is closed or reopened"
-                .into(),
-        ),
+        // What `acli` is never given: a label, an assignee and a close reason are GitHub's.
+        ProjectTracker::Jira { .. } => [
+            "reason",
+            "labels",
+            "remove_labels",
+            "assignees",
+            "remove_assignees",
+        ]
+        .into_iter()
+        .find(|key| action != "create" && !args[key].is_null())
+        .map(|key| format!("refused: tickets {action} on Jira takes no {key}: it is GitHub's")),
         _ => None,
     }
 }
@@ -723,7 +734,10 @@ pub async fn tickets(daemon: &Daemon, place: &Place, args: Value) -> Outcome {
                 Ok(key) => key,
                 Err(refusal) => return refusal,
             };
-            write(&project, &asked, &key).await
+            match asked.action.as_str() {
+                "status" => status(&project, &asked, &key).await,
+                _ => write(&project, &asked, &key).await,
+            }
         }
         action => Outcome::Refused(format!(
             "refused: tickets has no action {action:?}: its actions are {}",
@@ -1134,13 +1148,26 @@ async fn write(project: &Project, asked: &TicketsCall, key: &Key) -> Outcome {
     let action = asked.action.as_str();
     let body = asked.body.as_deref().filter(|b| !b.trim().is_empty());
     let title = asked.title.as_deref().filter(|t| !t.trim().is_empty());
+    let named = |list: &'_ Option<Vec<String>>| -> Vec<String> {
+        list.iter()
+            .flatten()
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty())
+            .collect()
+    };
+    let flagged = [
+        ("--add-label", named(&asked.labels)),
+        ("--remove-label", named(&asked.remove_labels)),
+        ("--add-assignee", named(&asked.assignees)),
+        ("--remove-assignee", named(&asked.remove_assignees)),
+    ];
     match (action, body, title) {
         ("comment", None, _) => {
             return Outcome::Refused("refused: tickets comment needs body, the comment".into());
         }
-        ("edit", None, None) => {
+        ("edit", None, None) if flagged.iter().all(|(_, names)| names.is_empty()) => {
             return Outcome::Refused(
-                "refused: tickets edit needs title, body or both: what changes".into(),
+                "refused: tickets edit needs title, body, labels or assignees: what changes".into(),
             );
         }
         _ => {}
@@ -1168,12 +1195,26 @@ async fn write(project: &Project, asked: &TicketsCall, key: &Key) -> Outcome {
     if let Some(body) = body.filter(|_| action == "comment" || action == "edit") {
         args.extend(["--body", body]);
     }
+    if action == "edit" {
+        for (flag, names) in &flagged {
+            for name in names {
+                args.extend([*flag, name.as_str()]);
+            }
+        }
+    }
+    let reason = asked.reason.as_deref().filter(|_| action == "close");
+    if let Some(reason) = reason {
+        args.extend(["--reason", reason]);
+    }
     let slug = forge.slug();
     match forge::gh_text(&args).await {
         Ok(_) => Outcome::Done(match action {
             "comment" => format!("The comment was posted on #{number} of {slug}."),
             "edit" => format!("#{number} of {slug} was changed."),
-            "close" => format!("#{number} of {slug} was closed."),
+            "close" => match reason {
+                Some(reason) => format!("#{number} of {slug} was closed as {reason}."),
+                None => format!("#{number} of {slug} was closed."),
+            },
             _ => format!("#{number} of {slug} was reopened."),
         }),
         Err(why) => Outcome::Failed(why),
@@ -1432,6 +1473,173 @@ async fn transition(site: &str, key: &str, asked: &TicketsCall) -> Outcome {
             "acli could not move {key} to {target}: {why}; the statuses of {project}'s work \
              items are {known}"
         )),
+    }
+}
+
+/// What `gh` says without the `project` scope, which `gh project` and the project items of an
+/// issue need: how the user adds it. Flottille never runs it.
+fn scoped(why: String) -> String {
+    if why.contains("missing required scope") {
+        "gh has no project scope: run `gh auth refresh -s project` yourself, then ask again \
+         (Flottille never runs it)"
+            .into()
+    } else {
+        why
+    }
+}
+
+/// `tickets status`: the Status of an issue on one of the GitHub Projects boards it is on, set
+/// through `gh project item-edit` with the ids read from the issue and the board's fields.
+async fn status(project: &Project, asked: &TicketsCall, key: &Key) -> Outcome {
+    let Some(wanted) = asked
+        .status
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Outcome::Refused(
+            "refused: tickets status needs status, the name of a column of the board".into(),
+        );
+    };
+    let Key::Issue(number) = key else {
+        return write(project, asked, key).await;
+    };
+    let forge = match issues_of(project).await {
+        Ok(forge) => forge,
+        Err(refusal) => return refusal,
+    };
+    if let Err(problem) = forge::signed_in().await {
+        return Outcome::Failed(problem);
+    }
+    let (repo, slug, number) = (forge.gh_repository(), forge.slug(), number.to_string());
+    let owner = slug
+        .split_once('/')
+        .map_or(slug.as_str(), |(owner, _)| owner);
+    let viewed = match forge::gh_json(&[
+        "issue",
+        "view",
+        &number,
+        "-R",
+        &repo,
+        "--json",
+        "projectItems",
+    ])
+    .await
+    {
+        Ok(viewed) => viewed,
+        Err(why) => return Outcome::Failed(scoped(why)),
+    };
+    let items = viewed["projectItems"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let title = |item: &Value| said(&item["project"]["title"]);
+    let boards = items.iter().map(title).collect::<Vec<_>>().join(", ");
+    let item = match (items.len(), asked.project.as_deref().map(str::trim)) {
+        (0, _) => {
+            return Outcome::Refused(format!(
+                "refused: #{number} of {slug} is on no project board: it has no status to set"
+            ));
+        }
+        (1, None) => &items[0],
+        (count, None) => {
+            return Outcome::Refused(format!(
+                "refused: #{number} of {slug} is on {count} project boards: {boards}: name one \
+                 with project"
+            ));
+        }
+        (_, Some(named)) => {
+            let Some(item) = items.iter().find(|item| {
+                title(item).eq_ignore_ascii_case(named) || item["project"]["id"] == named
+            }) else {
+                return Outcome::Refused(format!(
+                    "refused: #{number} of {slug} is not on a project board named {named}: its \
+                     boards are {boards}"
+                ));
+            };
+            item
+        }
+    };
+    let (board, board_id, item_id) = (title(item), said(&item["project"]["id"]), said(&item["id"]));
+    // `gh project` takes a board's number and its owner; the issue only says the board's id, so
+    // the repository's owner's boards are searched for it.
+    let listed = match forge::gh_json(&[
+        "project", "list", "--owner", owner, "--format", "json", "--limit", "100",
+    ])
+    .await
+    {
+        Ok(listed) => listed,
+        Err(why) => return Outcome::Failed(scoped(why)),
+    };
+    let Some(at) = listed["projects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|p| p["id"] == board_id.as_str())
+        .and_then(|p| p["number"].as_u64())
+    else {
+        return Outcome::Failed(format!(
+            "the board {board} is not one of {owner}'s: gh project cannot set a status on a \
+             board of another owner"
+        ));
+    };
+    let at = at.to_string();
+    let fields = match forge::gh_json(&[
+        "project",
+        "field-list",
+        &at,
+        "--owner",
+        owner,
+        "--format",
+        "json",
+        "--limit",
+        "100",
+    ])
+    .await
+    {
+        Ok(fields) => fields,
+        Err(why) => return Outcome::Failed(scoped(why)),
+    };
+    let Some(field) = fields["fields"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|f| said(&f["name"]).eq_ignore_ascii_case("status") && f["options"].is_array())
+    else {
+        return Outcome::Failed(format!("the board {board} has no Status field to set"));
+    };
+    let options = field["options"].as_array().cloned().unwrap_or_default();
+    let Some(option) = options
+        .iter()
+        .find(|o| said(&o["name"]).eq_ignore_ascii_case(wanted))
+    else {
+        let names: Vec<String> = options.iter().map(|o| said(&o["name"])).collect();
+        return Outcome::Refused(format!(
+            "refused: {wanted} is no status of {board}: its statuses are {}",
+            names.join(", ")
+        ));
+    };
+    let (field_id, option_id, now) = (
+        said(&field["id"]),
+        said(&option["id"]),
+        said(&option["name"]),
+    );
+    match forge::gh_text(&[
+        "project",
+        "item-edit",
+        "--id",
+        &item_id,
+        "--project-id",
+        &board_id,
+        "--field-id",
+        &field_id,
+        "--single-select-option-id",
+        &option_id,
+    ])
+    .await
+    {
+        Ok(_) => Outcome::Done(format!("#{number} of {slug} is now {now} on {board}.")),
+        Err(why) => Outcome::Failed(scoped(why)),
     }
 }
 

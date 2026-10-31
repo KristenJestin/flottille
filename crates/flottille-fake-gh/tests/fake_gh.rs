@@ -348,3 +348,116 @@ fn a_failed_job_s_log_is_printed_from_the_script_and_one_it_does_not_hold_is_not
     assert!(!gone.status.success());
     assert!(String::from_utf8_lossy(&gone.stderr).contains("log not found"));
 }
+
+#[test]
+fn the_boards_of_an_owner_their_fields_and_an_item_edit_answer_from_the_script() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        json!({"projects": {"acme": [{"id": "PVT_a", "number": 3, "title": "Roadmap"}]},
+               "project_fields": {"acme/3": [{"id": "F_s", "name": "Status",
+                   "options": [{"id": "o1", "name": "Todo"}]}]}})
+        .to_string(),
+    )
+    .unwrap();
+    let run = |args: &[&str]| fake(dir.path()).args(args).output().unwrap();
+    let json_of = |output: std::process::Output| -> Value {
+        assert!(output.status.success(), "{output:?}");
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+
+    let projects = json_of(run(&[
+        "project", "list", "--owner", "acme", "--format", "json",
+    ]));
+    let fields = json_of(run(&[
+        "project",
+        "field-list",
+        "3",
+        "--owner",
+        "acme",
+        "--format",
+        "json",
+    ]));
+    let unknown = run(&[
+        "project",
+        "field-list",
+        "9",
+        "--owner",
+        "acme",
+        "--format",
+        "json",
+    ]);
+    let edited = run(&[
+        "project",
+        "item-edit",
+        "--id",
+        "PVTI_1",
+        "--project-id",
+        "PVT_a",
+        "--field-id",
+        "F_s",
+        "--single-select-option-id",
+        "o1",
+    ]);
+
+    assert_eq!(projects["projects"][0]["number"], 3);
+    assert_eq!(fields["fields"][0]["options"][0]["name"], "Todo");
+    assert!(!unknown.status.success());
+    assert!(edited.status.success());
+}
+
+#[test]
+fn a_missing_project_scope_fails_every_project_call_as_gh_does() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        json!({"missing_scope": true,
+               "issues": {"acme/api": {"1": {"number": 1, "projectItems": []}}}})
+        .to_string(),
+    )
+    .unwrap();
+    let run = |args: &[&str]| fake(dir.path()).args(args).output().unwrap();
+
+    let listed = run(&["project", "list", "--owner", "acme", "--format", "json"]);
+    let viewed = run(&[
+        "issue",
+        "view",
+        "1",
+        "-R",
+        "acme/api",
+        "--json",
+        "projectItems",
+    ]);
+    let plain = run(&["issue", "view", "1", "-R", "acme/api", "--json", "title"]);
+
+    for output in [listed, viewed] {
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("missing required scopes"),
+            "{output:?}"
+        );
+    }
+    assert!(plain.status.success());
+}
+
+#[test]
+fn an_issue_closes_for_a_reason_gh_knows_only() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        json!({"issues": {"acme/api": {"1": {"number": 1, "state": "OPEN"}}}}).to_string(),
+    )
+    .unwrap();
+    let close = |reason: &str| {
+        fake(dir.path())
+            .args(["issue", "close", "1", "-R", "acme/api", "--reason", reason])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    };
+
+    assert!(close("completed"));
+    assert!(close("not planned"));
+    assert!(!close("done"));
+}

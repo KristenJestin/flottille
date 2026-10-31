@@ -623,6 +623,334 @@ fn tickets_reopen_is_judged_and_reopens_the_issue_once_allowed() {
     assert_eq!(asked, ["issue reopen 41 -R github.com/acme/app"]);
 }
 
+/// A write of `tickets` on GitHub whose boards (`projectItems` of #1) and fields are scripted:
+/// held, then what the agent is handed once the user allows it, and the calls `gh` received.
+fn status_asked(items: Value, args: Value) -> (String, Vec<String>) {
+    let user = user();
+    on_github(&user);
+    let mut issues = serde_json::Map::new();
+    let mut ticket = issue(1, "The login fails", "OPEN", &[], &[]);
+    ticket["projectItems"] = items;
+    issues.insert("1".into(), ticket);
+    let status = |options: &[&str]| {
+        json!([{"id": "F_t", "name": "Title", "type": "ProjectV2Field"},
+            {"id": "F_s", "name": "Status", "type": "ProjectV2SingleSelectField",
+             "options": options.iter().enumerate()
+                .map(|(at, name)| json!({"id": format!("o{at}"), "name": name}))
+                .collect::<Vec<_>>()}])
+    };
+    user.gh_script(json!({"issues": {"acme/app": issues},
+        "projects": {"acme": [
+            {"id": "PVT_a", "number": 3, "title": "Roadmap"},
+            {"id": "PVT_b", "number": 4, "title": "Bugs"}]},
+        "project_fields": {
+            "acme/3": status(&["Todo", "In Progress", "Done"]),
+            "acme/4": status(&["Triage", "Fixing", "Done"])}}));
+    let (_, mcp) = root_in(&user, None);
+    let answer = mcp.call("tickets", args);
+    let number = held(&answer);
+    let done = allow(&user, number);
+    (done, words(user.gh_received()))
+}
+
+fn on_board(item: &str, board: &str, id: &str, status: &str) -> Value {
+    json!({"id": item, "project": {"id": id, "title": board},
+        "status": {"optionId": "o0", "name": status}})
+}
+
+fn edits(calls: &[String]) -> Vec<&String> {
+    calls
+        .iter()
+        .filter(|call| call.starts_with("project item-edit"))
+        .collect()
+}
+
+#[test]
+fn tickets_status_sets_the_status_of_an_issue_on_its_board() {
+    let (done, calls) = status_asked(
+        json!([on_board("PVTI_1", "Roadmap", "PVT_a", "Todo")]),
+        json!({"action": "status", "ticket": "#1", "status": "in progress"}),
+    );
+
+    assert!(
+        done.contains("#1 of acme/app is now In Progress on Roadmap"),
+        "{done}"
+    );
+    assert_eq!(
+        edits(&calls),
+        [
+            "project item-edit --id PVTI_1 --project-id PVT_a --field-id F_s \
+          --single-select-option-id o1"
+        ]
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|call| call == "issue view 1 -R github.com/acme/app --json projectItems"),
+        "{calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.starts_with("project list --owner acme")),
+        "{calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.starts_with("project field-list 3 --owner acme")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn tickets_status_that_is_no_option_of_the_board_is_refused_with_the_options() {
+    let (done, calls) = status_asked(
+        json!([on_board("PVTI_1", "Roadmap", "PVT_a", "Todo")]),
+        json!({"action": "status", "ticket": "#1", "status": "Blocked"}),
+    );
+
+    assert!(
+        done.contains("Blocked is no status of Roadmap: its statuses are Todo, In Progress, Done"),
+        "{done}"
+    );
+    assert!(edits(&calls).is_empty(), "{calls:?}");
+}
+
+#[test]
+fn tickets_status_of_an_issue_on_no_board_says_it_has_no_status_to_set() {
+    let (done, calls) = status_asked(
+        json!([]),
+        json!({"action": "status", "ticket": "#1", "status": "Done"}),
+    );
+
+    assert!(
+        done.contains("#1 of acme/app is on no project board: it has no status to set"),
+        "{done}"
+    );
+    assert!(edits(&calls).is_empty(), "{calls:?}");
+}
+
+#[test]
+fn tickets_status_of_an_issue_on_two_boards_without_project_lists_the_boards() {
+    let items = json!([
+        on_board("PVTI_1", "Roadmap", "PVT_a", "Todo"),
+        on_board("PVTI_9", "Bugs", "PVT_b", "Triage")
+    ]);
+
+    let (done, calls) = status_asked(
+        items.clone(),
+        json!({"action": "status", "ticket": "#1", "status": "Done"}),
+    );
+    assert!(
+        done.contains(
+            "#1 of acme/app is on 2 project boards: Roadmap, Bugs: name one with project"
+        ),
+        "{done}"
+    );
+    assert!(edits(&calls).is_empty(), "{calls:?}");
+
+    let (done, calls) = status_asked(
+        items,
+        json!({"action": "status", "ticket": "#1", "status": "Fixing", "project": "bugs"}),
+    );
+    assert!(
+        done.contains("#1 of acme/app is now Fixing on Bugs"),
+        "{done}"
+    );
+    assert_eq!(
+        edits(&calls),
+        [
+            "project item-edit --id PVTI_9 --project-id PVT_b --field-id F_s \
+          --single-select-option-id o1"
+        ]
+    );
+}
+
+#[test]
+fn tickets_status_with_a_board_the_issue_is_not_on_lists_its_boards() {
+    let (done, calls) = status_asked(
+        json!([on_board("PVTI_1", "Roadmap", "PVT_a", "Todo")]),
+        json!({"action": "status", "ticket": "#1", "status": "Done", "project": "Nowhere"}),
+    );
+
+    assert!(
+        done.contains(
+            "#1 of acme/app is not on a project board named Nowhere: its boards are Roadmap"
+        ),
+        "{done}"
+    );
+    assert!(edits(&calls).is_empty(), "{calls:?}");
+}
+
+#[test]
+fn tickets_status_without_the_project_scope_says_how_to_add_it() {
+    let user = user();
+    on_github(&user);
+    user.gh_script(json!({"missing_scope": true,
+        "issues": {"acme/app": {"1": issue(1, "The login fails", "OPEN", &[], &[])}}}));
+    let (_, mcp) = root_in(&user, None);
+
+    let number = held(&mcp.call(
+        "tickets",
+        json!({"action": "status", "ticket": "#1", "status": "Done"}),
+    ));
+    let done = allow(&user, number);
+
+    assert!(done.contains("nothing was done"), "{done}");
+    assert!(
+        done.contains("gh has no project scope: run `gh auth refresh -s project` yourself"),
+        "{done}"
+    );
+    assert!(
+        words(user.gh_received())
+            .iter()
+            .all(|call| !call.starts_with("auth refresh") && !call.starts_with("project item-edit")),
+        "{:?}",
+        user.gh_received()
+    );
+}
+
+#[test]
+fn tickets_close_as_not_planned_is_judged_and_closes_for_that_reason() {
+    let (done, asked) = ticket_written(
+        json!({"action": "close", "ticket": "#3", "reason": "not planned"}),
+        "issue close",
+    );
+
+    assert!(
+        done.contains("#3 of acme/app was closed as not planned."),
+        "{done}"
+    );
+    assert_eq!(
+        asked,
+        ["issue close 3 -R github.com/acme/app --reason not planned"]
+    );
+}
+
+#[test]
+fn tickets_edit_adds_and_removes_labels_and_assignees() {
+    let (done, asked) = ticket_written(
+        json!({"action": "edit", "ticket": "#2", "labels": ["bug", "p1"],
+            "remove_labels": ["wontfix"], "assignees": ["ana"],
+            "remove_assignees": ["bob"]}),
+        "issue edit",
+    );
+
+    assert!(done.contains("#2 of acme/app was changed."), "{done}");
+    assert_eq!(
+        asked,
+        [
+            "issue edit 2 -R github.com/acme/app --add-label bug --add-label p1 --remove-label \
+          wontfix --add-assignee ana --remove-assignee bob"
+        ]
+    );
+}
+
+#[test]
+fn tickets_arguments_of_another_action_are_refused_before_anything_is_asked() {
+    let user = user();
+    on_github(&user);
+    many_issues(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    for (args, refusal) in [
+        (
+            json!({"action": "edit", "ticket": "#1", "reason": "completed", "title": "x"}),
+            "refused: tickets edit takes no reason: reason is for close",
+        ),
+        (
+            json!({"action": "close", "ticket": "#1", "remove_labels": ["bug"]}),
+            "refused: tickets close takes no remove_labels: remove_labels is for edit",
+        ),
+        (
+            json!({"action": "status", "ticket": "#1"}),
+            "refused: tickets status needs status, the name of the status to move to",
+        ),
+        (
+            json!({"action": "close", "ticket": "#1", "reason": "duplicate"}),
+            "refused: tickets close has no reason \"duplicate\": its reasons are completed and \
+             not planned",
+        ),
+    ] {
+        let refused = mcp.call("tickets", args.clone());
+        assert!(refused.error, "{args}: {}", refused.text);
+        assert!(
+            refused.text.starts_with(refusal),
+            "{args}: {}",
+            refused.text
+        );
+    }
+    assert!(no_request(&user));
+    assert!(user.gh_received().is_empty(), "{:?}", user.gh_received());
+}
+
+#[test]
+fn tickets_arguments_that_are_github_s_are_refused_on_jira_before_anything_is_asked() {
+    let user = user();
+    on_jira(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    for (args, key) in [
+        (
+            json!({"action": "close", "ticket": "ABC-1", "reason": "completed"}),
+            "reason",
+        ),
+        (
+            json!({"action": "edit", "ticket": "ABC-1", "labels": ["bug"]}),
+            "labels",
+        ),
+        (
+            json!({"action": "edit", "ticket": "ABC-1", "assignees": ["ana"]}),
+            "assignees",
+        ),
+    ] {
+        let refused = mcp.call("tickets", args.clone());
+        assert!(refused.error, "{args}: {}", refused.text);
+        assert!(
+            refused.text.starts_with(&format!(
+                "refused: tickets {} on Jira takes no {key}",
+                args["action"].as_str().unwrap()
+            )),
+            "{args}: {}",
+            refused.text
+        );
+    }
+    assert!(no_request(&user));
+    assert!(user.acli_received().is_empty());
+}
+
+#[test]
+fn tickets_edit_that_changes_nothing_is_refused_once_allowed_and_asks_nothing_of_gh() {
+    for (args, refusal) in [
+        (
+            json!({"action": "edit", "ticket": "#1"}),
+            "refused: tickets edit needs title, body, labels or assignees: what changes",
+        ),
+        (
+            json!({"action": "edit", "ticket": "#1", "labels": [" "]}),
+            "refused: tickets edit needs title, body, labels or assignees: what changes",
+        ),
+    ] {
+        let user = user();
+        on_github(&user);
+        many_issues(&user);
+        let (_, mcp) = root_in(&user, None);
+
+        let number = held(&mcp.call("tickets", args.clone()));
+        let done = allow(&user, number);
+
+        assert!(done.contains(refusal), "{args}: {done}");
+        assert!(
+            words(user.gh_received())
+                .iter()
+                .all(|call| !call.starts_with("issue edit") && !call.starts_with("project")),
+            "{:?}",
+            user.gh_received()
+        );
+    }
+}
+
 /// A work item of Jira, from `site`.
 fn work_item(key: &str, summary: &str, site: &str) -> Value {
     json!({"key": key, "self": format!("https://{site}/rest/api/3/issue/1"),

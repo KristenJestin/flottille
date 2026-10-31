@@ -577,6 +577,15 @@ pub const FORGE_ACTIONS: &str =
 /// The actions of `tickets`, as a refusal names them.
 pub const TICKET_ACTIONS: &str =
     "list, search, show, create, comment, edit, close, reopen and status";
+/// What `tickets close` closes for, as `gh issue close --reason` names it.
+pub const CLOSE_REASONS: [&str; 2] = ["completed", "not planned"];
+/// The arguments of `tickets` that belong to `edit` or `close` alone.
+const TICKET_ONLY: [(&str, &str); 4] = [
+    ("reason", "close"),
+    ("remove_labels", "edit"),
+    ("assignees", "edit"),
+    ("remove_assignees", "edit"),
+];
 
 /// `tickets`: its reads are harmless, its writes to the tracker to judge.
 fn tickets(call: &Call) -> Verdict {
@@ -585,7 +594,10 @@ fn tickets(call: &Call) -> Verdict {
         "list" | "search" | "show" => return Verdict::Allow,
         "create" => "it opens a ticket on the tracker",
         "comment" => "it comments on a ticket on the tracker",
-        "edit" => "it changes the title or the description of a ticket on the tracker",
+        "edit" => {
+            "it changes the title, the description, the labels or the assignees of a ticket on \
+             the tracker"
+        }
         "close" => "it closes a ticket on the tracker",
         "reopen" => "it reopens a ticket on the tracker",
         "status" => "it moves a ticket to another status on the tracker",
@@ -603,9 +615,29 @@ fn tickets(call: &Call) -> Verdict {
     if let Err(refused) = untexted("tickets", action, call.args, none) {
         return refused;
     }
+    for (key, takers) in TICKET_ONLY {
+        if takers != action && call.args.get(key).is_some_and(|value| !value.is_null()) {
+            return Verdict::Deny(format!(
+                "refused: tickets {action} takes no {key}: {key} is for {takers}"
+            ));
+        }
+    }
+    if let Some(reason) = call.args["reason"].as_str()
+        && !CLOSE_REASONS.contains(&reason)
+    {
+        return Verdict::Deny(format!(
+            "refused: tickets close has no reason {reason:?}: its reasons are completed and not \
+             planned"
+        ));
+    }
     let mut found = Found::default();
     found.judge(said.into());
-    if let Err(refused) = texts(call.grant, call.args, &["title", "body"], &mut found) {
+    if let Err(refused) = texts(
+        call.grant,
+        call.args,
+        &["title", "body", "status"],
+        &mut found,
+    ) {
         return refused;
     }
     found.verdict(Kind::Call)
@@ -3830,7 +3862,7 @@ mod tests {
     #[test]
     fn to_judge_ticket_writes_are_judged_and_an_unknown_action_refused() {
         let fixture = Fixture::main();
-        for action in ["create", "comment", "edit", "close", "reopen"] {
+        for action in ["create", "comment", "edit", "close", "reopen", "status"] {
             let verdict = fixture.judge(
                 "tickets",
                 json!({"action": action, "ticket": "#1"}),
