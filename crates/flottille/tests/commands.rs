@@ -1142,7 +1142,7 @@ fn close_leaves_the_removal_to_main_which_stops_on_unpushed_work_and_deletes_emp
     );
     std::fs::remove_file(&uncommitted).unwrap();
 
-    // Pushed (and its pull request merged on the forge): removed, the empty branches deleted.
+    // Pushed, with no forge to say it merged: removed, the empty branches deleted, api's kept.
     user.git(
         &workspace.join("api"),
         &["push", "--quiet", "origin", "app/login"],
@@ -1152,7 +1152,7 @@ fn close_leaves_the_removal_to_main_which_stops_on_unpushed_work_and_deletes_emp
     assert!(
         answer
             .text
-            .contains("Its branch app/login, empty, was deleted in lib, web."),
+            .contains("Its branch app/login was deleted in lib, web: it has no commit of its own."),
         "{}",
         answer.text
     );

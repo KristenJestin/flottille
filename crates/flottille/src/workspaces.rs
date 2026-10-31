@@ -1543,8 +1543,9 @@ async fn checked(workspace: &Workspace) -> Result<Checked<'_>, Failure> {
         let commits: Vec<&str> = commits.lines().filter(|line| !line.is_empty()).collect();
         if !commits.is_empty() {
             problems.push(format!(
-                "{} has commits on {nowhere}: {}",
+                "{} has commits on {nowhere}, on its branch {}: {}",
                 worktree.path,
+                workspace.branch,
                 commits.join(", ")
             ));
         }
@@ -1666,7 +1667,153 @@ async fn remove_held(
             .remove_workspace(workspace.id, ("workspace.removed", event))
             .map(|event| ((), event))
     })?;
-    Ok(json!({"removed": workspace.name, "project": workspace.project}))
+    let branches = landed(daemon, workspace).await;
+    Ok(json!({
+        "removed": workspace.name,
+        "project": workspace.project,
+        "branch": workspace.branch,
+        "branches": branches,
+    }))
+}
+
+/// Deletes, in each repository, the workspace's local branch once its work has landed: it holds
+/// no commit of its own (every commit of it is in its base), or the forge says its pull request
+/// is merged, which a squash merge leaves git unable to see, and none of its commits is on no
+/// remote. The remote branch is never touched, and nothing is deleted on a guess: a forge that
+/// cannot be read keeps it. Each repository's branch as `{repository, deleted, why}`, none where
+/// it is gone already.
+async fn landed(daemon: &Daemon, workspace: &Workspace) -> Vec<Value> {
+    let local = format!("refs/heads/{}", workspace.branch);
+    let mut fates = Vec::new();
+    let mut unsure = Vec::new();
+    for worktree in &workspace.repositories {
+        let main = main_checkout(&workspace.project_folder, &worktree.path);
+        let exists = ["show-ref", "--verify", "--quiet", &local];
+        if git::output(&main, &exists, Class::Read).await.is_err() {
+            continue;
+        }
+        let in_base = [
+            "merge-base",
+            "--is-ancestor",
+            "--end-of-options",
+            &local,
+            &worktree.base.reference,
+        ];
+        match git::output(&main, &in_base, Class::Read).await {
+            Ok(_) => fates.push((worktree, main, Ok("it has no commit of its own".to_owned()))),
+            Err(_) => unsure.push((worktree, main)),
+        }
+    }
+    if !unsure.is_empty() {
+        let project = projects::load_project(daemon, &workspace.project).ok();
+        let checkouts = forge::repositories_of(workspace, project.as_ref());
+        let read = forge::read(&checkouts, &workspace.branch, false).await;
+        for (worktree, main) in unsure {
+            let said = read.repositories.iter().find(|r| r.path == worktree.path);
+            let merged = match said {
+                Some(forge::Repository {
+                    pull: Some(pull), ..
+                }) if pull.state == "merged" => {
+                    Ok(format!("its pull request #{} is merged", pull.number))
+                }
+                Some(forge::Repository {
+                    pull: Some(pull), ..
+                }) => Err(format!(
+                    "its pull request #{} is {}, not merged",
+                    pull.number,
+                    match pull.state {
+                        "draft" => "a draft",
+                        state => state,
+                    }
+                )),
+                Some(forge::Repository {
+                    error: Some(error), ..
+                }) => Err(format!(
+                    "the forge cannot say whether it is merged: {error}"
+                )),
+                Some(forge::Repository { blocked: true, .. }) => Err(format!(
+                    "the forge cannot say whether it is merged: {}",
+                    read.problem.as_deref().unwrap_or("it was not read")
+                )),
+                Some(forge::Repository {
+                    note: Some(note), ..
+                }) => Err(format!("no forge says whether it is merged: {note}")),
+                _ => Err("it has no pull request".to_owned()),
+            };
+            // Merged as it was pushed: a commit made since, on no remote, would be lost.
+            let merged = match merged {
+                Ok(why) => match git::output(
+                    &main,
+                    &["log", "--format=%h", &local, "--not", "--remotes"],
+                    Class::Read,
+                )
+                .await
+                {
+                    Ok(commits) if commits.trim().is_empty() => Ok(why),
+                    Ok(_) => Err(format!("{why}, but it holds commits on no remote")),
+                    Err(error) => Err(format!("{why}, but git cannot read it: {error}")),
+                },
+                not => not,
+            };
+            fates.push((worktree, main, merged));
+        }
+    }
+    let mut branches = Vec::new();
+    for worktree in &workspace.repositories {
+        let Some((_, main, fate)) = fates.iter().find(|(w, ..)| w.path == worktree.path) else {
+            continue;
+        };
+        let (deleted, why) = match fate {
+            Ok(why) => match git::output(
+                main,
+                &["branch", "-D", "--end-of-options", &workspace.branch],
+                Class::Work,
+            )
+            .await
+            {
+                Ok(_) => (true, why.clone()),
+                Err(error) => (
+                    false,
+                    format!("{why}, but git could not delete it: {error}"),
+                ),
+            },
+            Err(why) => (false, why.clone()),
+        };
+        branches.push(json!({"repository": worktree.path, "deleted": deleted, "why": why}));
+    }
+    branches
+}
+
+/// What a removal's `branches` say of the workspace's `branch`, as sentences each led by a space:
+/// the repositories grouped by what became of it and why, the deleted ones first.
+pub fn branches_said(branch: &str, branches: &Value) -> String {
+    let mut groups: Vec<(bool, &str, Vec<&str>)> = Vec::new();
+    for fate in branches.as_array().into_iter().flatten() {
+        let deleted = fate["deleted"].as_bool().unwrap_or(false);
+        let why = fate["why"].as_str().unwrap_or_default();
+        let repository = fate["repository"].as_str().unwrap_or_default();
+        match groups.iter_mut().find(|g| g.0 == deleted && g.1 == why) {
+            Some(group) => group.2.push(repository),
+            None => groups.push((deleted, why, vec![repository])),
+        }
+    }
+    groups.sort_by_key(|group| !group.0);
+    let mut said = String::new();
+    for (at, (deleted, why, repositories)) in groups.iter().enumerate() {
+        let subject = match at {
+            0 => format!("Its branch {branch}"),
+            _ => "It".to_owned(),
+        };
+        let fate = match deleted {
+            true => "was deleted",
+            false => "is kept",
+        };
+        said.push_str(&format!(
+            " {subject} {fate} in {}: {why}.",
+            repositories.join(", ")
+        ));
+    }
+    said
 }
 
 /// The workspace an agent's `workspace` `remove` names: one of the project's, never the one the
@@ -1690,8 +1837,8 @@ pub fn removed_named(
 
 /// `workspace` `remove`, once the user allowed it: the workspace named removed as
 /// `workspace.remove` removes it, even what would be lost when the user's answer said to discard
-/// it and `approved` is exactly what would be lost (the losses the answer covered), then the branches of it that hold no commit of their own deleted from their
-/// repositories (`docs/commands.md`).
+/// it and `approved` is exactly what would be lost (the losses the answer covered), its landed
+/// branches deleted as that removal deletes them.
 pub async fn workspace_remove(
     daemon: &Arc<Daemon>,
     agent: &str,
@@ -1724,34 +1871,28 @@ pub async fn workspace_remove(
             used.join("; ")
         ));
     }
-    if let Err(failure) = removed(daemon.clone(), asked, approved).await {
-        return match failure.code {
-            // What would be lost, which the user's answer did not say to discard.
-            "refused"
-                if failure
-                    .message
-                    .starts_with(&format!("workspace {} of", workspace.name)) =>
-            {
-                Outcome::Refused(format!(
-                    "refused: {}; this request is decided: to remove it all the same, call \
+    let removed = match removed(daemon.clone(), asked, approved).await {
+        Ok(removed) => removed,
+        Err(failure) => {
+            return match failure.code {
+                // What would be lost, which the user's answer did not say to discard.
+                "refused"
+                    if failure
+                        .message
+                        .starts_with(&format!("workspace {} of", workspace.name)) =>
+                {
+                    Outcome::Refused(format!(
+                        "refused: {}; this request is decided: to remove it all the same, call \
                      workspace remove again, and the user may answer that new request with \
                      discard (flottille approve <n> --discard)",
-                    failure.message
-                ))
-            }
-            "refused" => Outcome::Refused(format!("refused: {}", failure.message)),
-            _ => Outcome::Failed(failure.message),
-        };
-    }
-    let (mut deleted, mut kept, mut failed) = (Vec::new(), Vec::new(), Vec::new());
-    for worktree in &workspace.repositories {
-        let main = main_checkout(&workspace.project_folder, &worktree.path);
-        match delete_if_empty(&main, &workspace.branch, &worktree.base.reference).await {
-            Ok(true) => deleted.push(worktree.path.as_str()),
-            Ok(false) => kept.push(worktree.path.as_str()),
-            Err(error) => failed.push(format!("{}: {error}", worktree.path)),
+                        failure.message
+                    ))
+                }
+                "refused" => Outcome::Refused(format!("refused: {}", failure.message)),
+                _ => Outcome::Failed(failure.message),
+            };
         }
-    }
+    };
     let mut said = format!(
         "Workspace {} of project {} is removed: its worktrees and its folder are gone.",
         workspace.name, workspace.project
@@ -1759,57 +1900,8 @@ pub async fn workspace_remove(
     if approved.is_some() {
         said.push_str(" The user said to discard what would be lost: it was discarded.");
     }
-    if !deleted.is_empty() {
-        said.push_str(&format!(
-            " Its branch {}, empty, was deleted in {}.",
-            workspace.branch,
-            deleted.join(", ")
-        ));
-    }
-    if !kept.is_empty() {
-        said.push_str(&format!(
-            " Its branch {}, which holds commits of its own, is kept in {}.",
-            workspace.branch,
-            kept.join(", ")
-        ));
-    }
-    if !failed.is_empty() {
-        said.push_str(&format!(
-            " Its empty branch could not be deleted in {}.",
-            failed.join("; ")
-        ));
-    }
+    said.push_str(&branches_said(&workspace.branch, &removed["branches"]));
     Outcome::Done(said)
-}
-
-/// Deletes the branch from the repository when every commit of it is in its base (`git branch
-/// -D` once `merge-base --is-ancestor` said so, since a squash merge leaves `-d` unsure); true when
-/// it did.
-async fn delete_if_empty(main: &Path, branch: &str, base: &str) -> Result<bool, String> {
-    let local = format!("refs/heads/{branch}");
-    let empty = git::output(
-        main,
-        &[
-            "merge-base",
-            "--is-ancestor",
-            "--end-of-options",
-            &local,
-            base,
-        ],
-        Class::Read,
-    )
-    .await
-    .is_ok();
-    if !empty {
-        return Ok(false);
-    }
-    git::output(
-        main,
-        &["branch", "-D", "--end-of-options", branch],
-        Class::Work,
-    )
-    .await?;
-    Ok(true)
 }
 
 fn cannot_check(repository: &str, error: &str) -> Failure {

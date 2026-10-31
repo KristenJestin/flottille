@@ -196,9 +196,10 @@ pub fn run(paths: &Paths, action: WorkspaceAction) -> Result<ExitCode> {
         } => {
             let removed = ask("workspace.remove", named(project, name)?)?;
             let text = format!(
-                "Removed workspace {} of {}: its worktrees and its folder. Its branches are kept.\n",
+                "Removed workspace {} of {}: its worktrees and its folder.{}\n",
                 text(&removed, "removed"),
-                text(&removed, "project")
+                text(&removed, "project"),
+                crate::workspaces::branches_said(text(&removed, "branch"), &removed["branches"])
             );
             (removed, (json, text))
         }
