@@ -787,6 +787,26 @@ fn shell_syntax_is_refused_with_the_sentence() {
 }
 
 #[test]
+fn shell_syntax_inside_quotes_reaches_the_program_as_its_text() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (mcp, folder) = session(&user);
+
+    let answer = ok(mcp.call(
+        "run",
+        json!({"line": r#"printf "[%s]\n" "a | b && c > d" 'e; f >> g' "*""#}),
+    ));
+    assert!(answer.contains("exited with code 0"), "{answer}");
+    let output = ok(mcp.call("run_status", json!({"run": run_id(&answer)})));
+    assert!(
+        output.contains("[a | b && c > d]\n[e; f >> g]\n[*]"),
+        "{output}"
+    );
+    for written in ["d", "g"] {
+        assert!(!folder.join(written).exists(), "{written}");
+    }
+}
+
+#[test]
 fn a_long_command_answers_after_its_timeout_with_it_keeps_going_and_stop_ends_its_tree() {
     let user = User::with_fake_agent().with_allowing_judge();
     let (mcp, folder) = session(&user);

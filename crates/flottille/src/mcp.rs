@@ -224,9 +224,10 @@ const SERVED: [Definition; 25] = [
     Definition {
         name: "run",
         title: "Run a task or a line",
-        description: "Runs one of the project's tasks or one line, without a shell: a pipe, a \
-            redirection, a variable, a glob or && is refused, put them in a script of the \
-            repository. Waits up to timeout seconds (30 by default, 600 at most) and answers \
+        description: "Runs one of the project's tasks or one line, without a shell: an \
+            unquoted pipe, redirection, glob or &&, and a variable or $( even in double quotes, \
+            is refused, put them in a script of the repository; quoted, the others are text. \
+            Waits up to timeout seconds (30 by default, 600 at most) and answers \
             with the end of the output; a longer run keeps going under its run id. Give task or \
             line: {\"task\": \"test\"}, or {\"line\": \"cargo test -p core\", \
             \"repository\": \"api\", \"timeout\": 120}.",

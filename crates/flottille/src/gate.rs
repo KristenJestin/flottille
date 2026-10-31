@@ -3583,6 +3583,33 @@ mod tests {
     }
 
     #[test]
+    fn a_shell_line_hiding_a_pipe_behind_an_escaped_quote_is_refused() {
+        let fixture = Fixture::workspace();
+        for line in [
+            r#"sh -c 'echo \" | git push --force \"'"#,
+            r#"sh -c 'echo \'"'"' | git push --force \'"'""#,
+            r#"fish -c "'a\' '| git push --force '\' '""#,
+            r#"sh -c 'echo "$(git push --force)"'"#,
+        ] {
+            let verdict = fixture.run(line);
+            assert!(
+                matches!(&verdict, Verdict::Deny(why) if why.contains("is shell syntax")),
+                "{line}: {verdict:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pipe_quoted_in_a_shell_line_is_its_text() {
+        let fixture = Fixture::workspace();
+        let verdict = fixture.run(r#"sh -c 'echo "a | b"'"#);
+        assert!(!denied(&verdict), "{verdict:?}");
+        assert!(base_class(
+            &fixture.run(r#"bash -c 'git push --force "a | b"'"#)
+        ));
+    }
+
+    #[test]
     fn the_wrappers_are_unwrapped_and_judged_as_what_they_run() {
         let fixture = Fixture::workspace();
         for line in [
