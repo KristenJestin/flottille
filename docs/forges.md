@@ -257,8 +257,9 @@ the base the repository started from):
   **assumed shapes**) and, when the method is not among them, the refusal names the methods they
   allow, then the strategies it allows that no method reaches (`ff`, `squash-ff-only`,
   `fast_forward`…) as it names them; otherwise the server's own refusal is the result. Before it, as for GitHub, it is refused
-  when no check ran on the pull request (`bkt pr checks` lists none; an answer without `statuses`
-  is not that: the checks could not be read, and nothing is merged), while a check of the pull
+  when no check ran on the pull request (`bkt pr checks` lists none, or answers `"statuses": null`
+  for a commit with no status; an answer without `statuses` is not that: the checks could not be
+  read, and nothing is merged), while a check of the pull
   request fails or runs, or while the review is `changes requested`
   (Data Center: a reviewer's `NEEDS_WORK` in the list; Cloud: a participant's `changes_requested`
   on the pull request's own page, read with `bkt api`), unless the user waives it.

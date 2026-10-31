@@ -472,15 +472,17 @@ async fn checks_of(
     context: &str,
     id: &str,
 ) -> Result<Vec<(String, &'static str)>, String> {
-    let statuses = json(&command(forge, context, &["pr", "checks", id], &["--json"])).await?;
-    // An answer without its `statuses` is not "no check ran": `bkt` said nothing about them.
-    let Some(statuses) = statuses["statuses"].as_array() else {
-        return Err(format!(
+    let said = json(&command(forge, context, &["pr", "checks", id], &["--json"])).await?;
+    match said.get("statuses") {
+        // A commit with no status: `bkt` answers `null` (a nil Go slice), and no check ran.
+        Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(statuses)) => Ok(statuses.iter().map(check_of).collect()),
+        // Without its `statuses` (or in another shape), `bkt` said nothing about them.
+        _ => Err(format!(
             "the checks of the pull request #{id} could not be read: `bkt pr checks --json` \
              answered without `statuses`"
-        ));
-    };
-    Ok(statuses.iter().map(check_of).collect())
+        )),
+    }
 }
 
 /// Whether the pull request `id` merges without conflict: on Cloud, no file of its diffstat is
