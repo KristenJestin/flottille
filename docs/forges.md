@@ -277,6 +277,37 @@ It never reaches a repository outside the agent's place, and is listed to every 
 project whose repository declares a forge, in `main` as in a workspace. Until #141 it was
 `forge_read` and `forge_write`.
 
+## Why a check failed
+
+A pull request that is "failing" tells an agent nothing it can fix. So `forge` `show`, of a
+workspace's branch as of a number, says after the checks, for **each failed check**, the end of its
+log, or why there is none:
+
+```
+  failed jobs (1):
+  - test: the last 5 of 212 lines of its log:
+    test login::form ... FAILED
+    …
+  - ci/outside: no log: it is not a GitHub Actions job, see https://ci.example.com/builds/5
+```
+
+- **GitHub**: a failed check run whose link is a GitHub Actions job
+  (`…/actions/runs/<run>/job/<job>`, `detailsUrl` of `statusCheckRollup`) is read with `gh run
+  view --job <job> --log-failed -R github.com/owner/name`, which prints the failed steps of that
+  job. A commit status of another CI, a check with no such link, and a log that `gh` cannot read
+  (expired, not ready) say so (`no log: …`); the pull request is still shown.
+- **Bitbucket**: `no log: bkt gives no job logs, read it on Bitbucket`. The pinned `bkt` release
+  (above) has no command Flottille could test that prints a build's log, and none is invented.
+- **Cleaned**: the job's and step's names and the timestamp that start every line, the colours and
+  the carriage returns of a terminal are dropped; the empty lines at both ends too.
+- **Bounded**: the last 40 lines of a job, 4,000 bytes at most (the oldest lines go first, whole;
+  one line longer than that keeps its end), the logs of 5 jobs at most and 12,000 bytes in all.
+  What is left out is said (`the last 40 of 212 lines`, `no log: at most 5 logs and 12000 bytes
+  are given`), never silently dropped.
+- **Masked** like every output, before it is kept or shown.
+- **Only `forge` `show` asks for it.** The state the window watches (`workspace.forge`, `workspace
+  show`) holds no log and calls `gh` no more than before.
+
 ## Tickets
 
 The issues of GitHub and Jira, linked to a workspace and read the same way (the user's own command

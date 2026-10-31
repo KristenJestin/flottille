@@ -374,6 +374,15 @@ async fn detailed(forge: &Forge, context: &str, found: Listed) -> Result<Pull, S
         .await?;
         (found.reviewers, dc_comments(&activities))
     };
+    let jobs = checks
+        .iter()
+        .filter(|(_, state)| *state == "failing")
+        .map(|(name, _)| super::Job {
+            name: name.clone(),
+            details: None,
+            log: None,
+        })
+        .collect();
     Ok(Pull {
         number: found.id,
         title: found.title,
@@ -387,6 +396,7 @@ async fn detailed(forge: &Forge, context: &str, found: Listed) -> Result<Pull, S
         comments,
         reviews: Vec::new(),
         reviewers,
+        jobs,
     })
 }
 

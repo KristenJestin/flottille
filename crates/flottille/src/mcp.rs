@@ -295,8 +295,8 @@ const SERVED: [Definition; 25] = [
         description: "The pull requests of the project's repositories on their forge, through \
             the user's own gh or bkt (no forge sign-in here: never run them). list: by state \
             (open by default) and branch. show: a workspace's branch's (yours; in main, name \
-            workspace), or number's, with checks, review and comment counts; detail full adds \
-            texts. Writes, judged, answered at once, the result maybe later: create, merge \
+            workspace), or number's, with checks (the log's end of each failed job), review and comment \
+            counts; detail full adds texts. Writes, judged, answered at once, the result maybe later: create, merge \
             (method, squash by default; refused with no check, while checks fail or a review \
             asks for changes unless waive gives the user's words) and checks (re-run failed) act on a workspace's branch; comment \
             and edit on number. {\"action\": \"create\", \"repository\": \"api\", \"title\": \

@@ -312,3 +312,39 @@ fn a_view_can_lose_the_fields_the_script_omits() {
     assert_eq!(viewed["title"], "Login");
     assert!(viewed.get("number").is_none(), "{viewed}");
 }
+
+#[test]
+fn a_failed_job_s_log_is_printed_from_the_script_and_one_it_does_not_hold_is_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        json!({"logs": {"acme/app": {"456": "test\tRun tests\t2026-01-01T00:00:00.0000000Z boom\n"}}})
+            .to_string(),
+    )
+    .unwrap();
+    let view = |job: &str| {
+        fake(dir.path())
+            .args([
+                "run",
+                "view",
+                "--job",
+                job,
+                "--log-failed",
+                "-R",
+                "github.com/acme/app",
+            ])
+            .output()
+            .unwrap()
+    };
+
+    let held = view("456");
+    let gone = view("457");
+
+    assert!(held.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&held.stdout),
+        "test\tRun tests\t2026-01-01T00:00:00.0000000Z boom\n"
+    );
+    assert!(!gone.status.success());
+    assert!(String::from_utf8_lossy(&gone.stderr).contains("log not found"));
+}

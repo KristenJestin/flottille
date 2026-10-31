@@ -47,6 +47,11 @@
 //! drafts included; `closed`, `merged`, `all`) and of `--head` when given, newest first, at most
 //! `--limit`; each with the fields `--json` asks that it has, `headRefName` being its branch.
 //!
+//! `run view --job <id> --log-failed` prints the log `logs` holds for that job of the repository
+//! (`{"logs": {"acme/app": {"456": "build\tRun tests\t2026-01-01T00:00:00.0000000Z …\n"}}}`),
+//! as `gh` prints a failed job's steps; a job it does not hold is a log `gh` cannot find. Any
+//! other `run view` is not a command Flottille runs.
+//!
 //! `issue list` keeps the issues of `--state` (`open` by default), with a `--label` and an
 //! `--assignee` (`labels[].name`, `assignees[].login`) when given and, for `--search`, those whose
 //! title or body hold its words (a simplification of GitHub's search), newest first, at most
@@ -287,6 +292,26 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                  (mergePullRequest)"
             );
             1
+        }
+        ["run", "view", ..] if words.contains(&"--log-failed") => {
+            let (Some(repository), Some(job)) = (repository, option("--job")) else {
+                eprintln!("fake gh: run view needs -R and --job");
+                return 2;
+            };
+            if let Some(failure) = script["fail"][repository].as_str() {
+                eprintln!("{failure}");
+                return 1;
+            }
+            match script["logs"][repository][job].as_str() {
+                Some(log) => {
+                    print!("{log}");
+                    0
+                }
+                None => {
+                    eprintln!("failed to get run log: log not found");
+                    1
+                }
+            }
         }
         ["pr", "create" | "merge", ..] | ["run", "list" | "rerun", ..] => {
             let Some(repository) = repository else {

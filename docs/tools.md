@@ -310,7 +310,8 @@ pending requests.
   that names another is refused): number, state, its branch and base, link, whether it is
   mergeable (`mergeable: yes, no conflict with main`, `no, it conflicts with main`, or `not known
   yet` while the forge computes it), review (`none` when there is none), each check with its state
-  (`checks: none ran on this pull request` when none did), and how many comments and reviews it has (`comments: 2, read them with forge {"action":
+  (`checks: none ran on this pull request` when none did), **for each failed check the end of its
+  log, or why there is none** ([`forges.md`](forges.md), "Why a check failed"), and how many comments and reviews it has (`comments: 2, read them with forge {"action":
   "show", "workspace": "login", "detail": "full"}`); `detail full` gives their texts, cut and
   under the result limit. **`show {number, repository?, detail?}`**: that pull request of a
   repository of the place, the same way; `repository` is needed when the place has several.
