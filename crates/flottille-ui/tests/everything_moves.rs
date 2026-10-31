@@ -11,7 +11,8 @@ use std::time::Duration;
 use common::{Desktop, advance, init, pending_frames};
 use flottille_ui::motion::{ENTER, HOVER, MAX_STAGGER, PANEL, RISE, STAGGER};
 use flottille_ui::{
-    Button, Item, Listing, Segmented, StepRow, StepTone, enter, presence, presence_of, selectable,
+    Button, Item, Listing, Segmented, StepRow, StepTone, Tabs, enter, presence, presence_of,
+    selectable,
 };
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
@@ -251,6 +252,107 @@ fn a_segmented_control_fills_its_alarm_choice_in_the_alarm_colour_and_fades_to_i
     let half = highlight(&p, Some(2), 1.5);
     assert!(!close(half, (p.acc, p.on_acc)));
     assert!(!close(half, (p.fail, p.on_fail)));
+}
+
+struct Pages {
+    chosen: usize,
+    picked: Rc<Cell<Option<usize>>>,
+}
+
+impl Render for Pages {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let picked = self.picked.clone();
+        div().size_full().child(
+            Tabs::new("pages", "Pages", self.chosen)
+                .tab("one", "One")
+                .counted("two", "Two", "3")
+                .tab("three", "Three")
+                .on_choose(move |index, _, _| picked.set(Some(index))),
+        )
+    }
+}
+
+fn pages(
+    cx: &mut TestAppContext,
+) -> (
+    gpui_kit::Entity<Pages>,
+    Rc<Cell<Option<usize>>>,
+    &mut VisualTestContext,
+) {
+    init(cx, Desktop::new(false).env());
+    let picked = Rc::new(Cell::new(None));
+    let seen = picked.clone();
+    let (view, cx) = cx.add_window_view(move |_, _| Pages {
+        chosen: 0,
+        picked: seen,
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+    (view, picked, cx)
+}
+
+#[gpui_kit::test]
+fn tabs_report_the_tab_clicked_and_their_chosen_one_is_selected(cx: &mut TestAppContext) {
+    let (view, picked, cx) = pages(cx);
+    cx.update(|window, _| {
+        assert_eq!(window.find("pages-one").selected(), Some(true));
+        assert_eq!(window.find("pages-two").selected(), Some(false));
+    });
+    // The chosen tab is not a click; another one is.
+    cx.update(|window, cx| window.click("pages-one", cx));
+    assert_eq!(picked.get(), None);
+    cx.update(|window, cx| window.click("pages-three", cx));
+    assert_eq!(picked.get(), Some(2));
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.chosen = 2;
+            cx.notify();
+        })
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+    cx.update(|window, _| {
+        assert_eq!(window.find("pages-three").selected(), Some(true));
+        assert_eq!(window.find("pages-one").selected(), Some(false));
+    });
+}
+
+#[gpui_kit::test]
+fn tabs_say_their_count_next_to_their_name_when_they_have_one(cx: &mut TestAppContext) {
+    let (_, _, cx) = pages(cx);
+    cx.update(|window, _| {
+        assert_eq!(window.find("pages-two-count").label(), Some("3"));
+        assert!(window.try_find("pages-one-count").is_none());
+    });
+}
+
+#[gpui_kit::test]
+fn tabs_slide_their_marker_over_frames_and_then_stop(cx: &mut TestAppContext) {
+    let (view, _, cx) = pages(cx);
+    advance(cx, PANEL);
+    assert_eq!(pending_frames(cx), 0, "at rest nothing is drawn");
+    let before = cx.update(|window, _| window.find("pages-marker").bounds());
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.chosen = 2;
+            cx.notify();
+        })
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+    assert!(pending_frames(cx) > 0, "the marker is moving");
+    advance(cx, PANEL / 2);
+    let midway = cx.update(|window, _| window.find("pages-marker").bounds());
+    let tab = cx.update(|window, _| window.find("pages-three").bounds());
+    assert!(
+        midway.left() > before.left() && midway.left() < tab.left(),
+        "halfway between the two tabs: {:?} {:?} {:?}",
+        before.left(),
+        midway.left(),
+        tab.left()
+    );
+    advance(cx, PANEL * 2);
+    assert_eq!(pending_frames(cx), 0, "it stopped once it was there");
+    let after = cx.update(|window, _| window.find("pages-marker").bounds());
+    assert_eq!(after.left(), tab.left(), "under the chosen tab");
+    assert_eq!(after.size.width, tab.size.width);
 }
 
 struct Enabling {
