@@ -10,3 +10,5 @@ pub const MODAL: usize = 2;
 pub const LIST: usize = 3;
 /// A toast, over everything.
 pub const TOAST: usize = 4;
+/// A tooltip, over everything, a toast included.
+pub const TOOLTIP: usize = 5;

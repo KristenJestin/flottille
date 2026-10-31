@@ -258,12 +258,24 @@ pub(crate) fn choose(feel: &Entity<Feel>, chosen: bool, window: &mut Window, cx:
 
 /// Listens to the pointer on `element`, driving `feel`.
 pub(crate) fn wire(element: Stateful<Div>, feel: Entity<Feel>, presses: bool) -> Stateful<Div> {
+    wire_with(element, feel, presses, |_, _| {})
+}
+
+/// [`wire`], also telling `also` each time the pointer enters or leaves (an element has one hover
+/// listener: a second one would replace this).
+pub(crate) fn wire_with(
+    element: Stateful<Div>,
+    feel: Entity<Feel>,
+    presses: bool,
+    also: impl Fn(bool, &mut App) + 'static,
+) -> Stateful<Div> {
     let on_hover = feel.clone();
     let element = element.on_hover(move |hovered, _, cx| {
         let target = if *hovered { 1.0 } else { 0.0 };
         update(&on_hover, cx, |f, now, reduce| {
             f.hover.animate(target, HOVER, now, reduce)
         });
+        also(*hovered, cx);
     });
     if !presses {
         return element;
