@@ -5,7 +5,8 @@
 //! never reads, keeps nor prints a token, and of `gh auth status` it reads the exit code alone.
 //!
 //! A workspace is read on demand (`workspace.forge`, the agents' `forge show`), and again about
-//! once a minute while a client watches it, less often while `gh` or `bkt` fails. Nothing is read
+//! once a minute while a client watches it or an agent subscribes to its pull request
+//! (`events`), less often while `gh` or `bkt` fails. Nothing is read
 //! while nobody looks. Every text kept from them is masked before it is shown or stored.
 
 use std::collections::HashMap;
@@ -31,7 +32,10 @@ use crate::place::Place;
 use crate::projects::{self, Failure};
 
 mod bitbucket;
+mod events;
 mod logs;
+
+pub use events::{EVENTS, target_named};
 
 /// How long a state read stays fresh, and how often a watched workspace is read again.
 pub const EVERY_MS: u64 = 60_000;
@@ -318,6 +322,8 @@ pub struct Comment {
     /// A review's verdict; none for a comment.
     pub state: Option<String>,
     pub body: String,
+    /// Written by a bot (an app), as far as the forge says it.
+    pub bot: bool,
 }
 
 impl Pull {
@@ -377,6 +383,7 @@ impl Pull {
                 .flatten()
                 .map(|comment| Comment {
                     author: text(&comment["author"]["login"]),
+                    bot: is_bot(&comment["author"]),
                     state: comment["state"]
                         .as_str()
                         .map(|s| s.to_lowercase().replace('_', " ")),
@@ -434,6 +441,13 @@ impl Pull {
                 .collect(),
         })
     }
+}
+
+/// Whether a GitHub author is a bot: `gh` says an app's login as `app/<name>`, and GitHub names
+/// many `<name>[bot]`; `is_bot` when it says so.
+fn is_bot(author: &Value) -> bool {
+    let login = author["login"].as_str().unwrap_or_default();
+    author["is_bot"] == true || login.starts_with("app/") || login.ends_with("[bot]")
 }
 
 /// A check of `statusCheckRollup`: a check run (`status`, `conclusion`) or a commit status
@@ -740,6 +754,10 @@ pub fn repositories_of(workspace: &Workspace, project: Option<&Project>) -> Vec<
 #[derive(Default)]
 pub struct Forges {
     entries: Mutex<HashMap<i64, Entry>>,
+    /// The watches the subscriptions hold, by subscription.
+    held: Mutex<HashMap<String, Watch>>,
+    /// The comments the agents posted lately (`events::posted`).
+    posted: Mutex<Vec<events::Posted>>,
 }
 
 #[derive(Default)]
@@ -772,7 +790,7 @@ pub async fn call(daemon: Arc<Daemon>, params: Value) -> Result<Value, Failure> 
 }
 
 /// The workspace's forge state: the last one read when it is fresh, else read now.
-pub async fn state(daemon: &Daemon, workspace: &Workspace) -> Value {
+pub async fn state(daemon: &Arc<Daemon>, workspace: &Workspace) -> Value {
     let kept = daemon
         .forges
         .entries
@@ -788,8 +806,14 @@ pub async fn state(daemon: &Daemon, workspace: &Workspace) -> Value {
     refresh(daemon, workspace).await
 }
 
-/// Reads the workspace's forges now and keeps what was read; an event says when it changed.
-async fn refresh(daemon: &Daemon, workspace: &Workspace) -> Value {
+/// Reads the workspace's forges now and keeps what was read; an event says when it changed, and
+/// the subscriptions to its pull requests are offered what happened.
+async fn refresh(daemon: &Arc<Daemon>, workspace: &Workspace) -> Value {
+    refresh_read(daemon, workspace).await.0
+}
+
+/// `refresh`, with what was read.
+async fn refresh_read(daemon: &Arc<Daemon>, workspace: &Workspace) -> (Value, Read) {
     let project = projects::load_project(daemon, &workspace.project).ok();
     let obsolete = project.as_ref().is_some_and(|p| {
         p.obsolete
@@ -836,7 +860,8 @@ async fn refresh(daemon: &Daemon, workspace: &Workspace) -> Value {
             eprintln!("flottille daemon: workspace.forge: {error}");
         }
     }
-    state
+    events::offer(daemon, workspace, &read).await;
+    (state, read)
 }
 
 /// A client watching a workspace: while one does, the daemon reads its forges again about once
@@ -856,6 +881,37 @@ pub fn watch(daemon: &Arc<Daemon>, workspace: &Workspace) -> Watch {
         daemon: daemon.clone(),
         id: workspace.id,
     }
+}
+
+/// A subscription's watch of its workspace, held until `release`; false when the workspace is
+/// gone.
+pub fn hold(
+    daemon: &Arc<Daemon>,
+    subscription: &flottille_core::subscription::Subscription,
+) -> bool {
+    let target = &subscription.target;
+    let (Some(project), Some(name)) = (target["project"].as_str(), target["workspace"].as_str())
+    else {
+        return false;
+    };
+    let Ok(Some(workspace)) = daemon.read(|store| store.workspace(project, name)) else {
+        return false;
+    };
+    let watch = watch(daemon, &workspace);
+    let replaced = daemon
+        .forges
+        .held
+        .lock()
+        .unwrap()
+        .insert(subscription.id.clone(), watch);
+    drop(replaced);
+    true
+}
+
+/// Drops the watch a subscription held.
+pub fn release(daemon: &Daemon, subscription: &str) {
+    let held = daemon.forges.held.lock().unwrap().remove(subscription);
+    drop(held);
 }
 
 impl Drop for Watch {
@@ -918,6 +974,12 @@ pub(crate) struct ForgeCall {
     waive: Option<String>,
     /// merge: `squash` (the default), `merge` or `rebase`; the gate refused any other.
     method: Option<String>,
+    /// subscribe: the events it waits for (`EVENTS`).
+    events: Option<Vec<String>>,
+    /// subscribe: whose reviews and comments count (`subscriptions::FROM`).
+    from: Option<String>,
+    /// subscribe: how long it waits at most.
+    minutes: Option<u64>,
 }
 
 impl ForgeCall {
@@ -962,22 +1024,202 @@ fn method_refused(slug: &str, method: &str, allowed: &[&str], others: &[String])
 /// `forge`, once the gate let it through: the pull requests of the project's repositories, read
 /// and written through the user's own `gh` or `bkt`. Never a repository outside the agent's
 /// place.
-pub async fn forge(daemon: &Daemon, place: &Place, args: Value) -> Outcome {
+pub async fn forge(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Value) -> Outcome {
     let asked: ForgeCall = match arguments("forge", args) {
         Ok(asked) => asked,
         Err(refusal) => return refusal,
     };
     match (asked.action.as_str(), asked.number) {
         ("list", _) => forge_list(daemon, place, asked).await,
-        ("show", None) => forge_read(daemon, place, asked).await,
-        ("show", Some(number)) => forge_show(daemon, place, asked, number).await,
+        ("show", number) => {
+            let shown = match number {
+                None => forge_read(daemon, place, asked).await,
+                Some(number) => forge_show(daemon, place, asked, number).await,
+            };
+            match shown {
+                Outcome::Done(text) => Outcome::Done(text + &subscriptions_text(daemon, agent)),
+                other => other,
+            }
+        }
+        ("subscribe", _) => forge_subscribe(daemon, agent, place, asked).await,
+        ("unsubscribe", _) => forge_unsubscribe(daemon, agent, asked),
         ("create" | "merge" | "checks", _) => forge_write(daemon, place, asked).await,
-        ("comment" | "edit", _) => forge_note(daemon, place, asked).await,
+        ("comment" | "edit", _) => forge_note(daemon, agent, place, asked).await,
         (action, _) => Outcome::Refused(format!(
             "refused: forge has no action {action:?}: its actions are {}",
             crate::gate::FORGE_ACTIONS
         )),
     }
+}
+
+/// What `forge show` ends with: the agent's subscriptions, when it has some.
+fn subscriptions_text(daemon: &Daemon, agent: &str) -> String {
+    let mine = crate::subscriptions::of(daemon, agent);
+    if mine.is_empty() {
+        return String::new();
+    }
+    let now = now_ms();
+    let mut text = "\nYour subscriptions:\n".to_owned();
+    for subscription in mine {
+        let from = match subscription.from.as_str() {
+            "people" => " (from people)",
+            _ => "",
+        };
+        text.push_str(&format!(
+            "- {}: {}{from}, for {} min more\n",
+            target_named(&subscription.target),
+            subscription.events.join(", "),
+            subscription.expires_at.saturating_sub(now).div_ceil(60_000)
+        ));
+    }
+    text
+}
+
+/// `forge subscribe`: the agent waits, once, for the next of the events it names of the pull
+/// request of a workspace's branch; the answer comes at once, the event later as a delivery. What
+/// is already so is not an event: this read is what the next ones are compared with.
+async fn forge_subscribe(
+    daemon: &Arc<Daemon>,
+    agent: &str,
+    place: &Place,
+    asked: ForgeCall,
+) -> Outcome {
+    let all = EVENTS.join(", ");
+    let events = asked.events.clone().unwrap_or_default();
+    if events.is_empty() {
+        return Outcome::Refused(format!(
+            "refused: forge subscribe needs events, among {all}"
+        ));
+    }
+    if let Some(other) = events.iter().find(|e| !EVENTS.contains(&e.as_str())) {
+        return Outcome::Refused(format!(
+            "refused: a pull request has no event {other:?}: its events are {all}"
+        ));
+    }
+    let from = asked.from.as_deref().unwrap_or("anyone");
+    if !crate::subscriptions::FROM.contains(&from) {
+        return Outcome::Refused(format!(
+            "refused: from is anyone (the default) or people (no bot, not your own), not {from:?}"
+        ));
+    }
+    let longest = crate::subscriptions::LONGEST_MINUTES;
+    let minutes = asked
+        .minutes
+        .unwrap_or(crate::subscriptions::DEFAULT_MINUTES);
+    if !(1..=longest).contains(&minutes) {
+        return Outcome::Refused(format!(
+            "refused: minutes is from 1 to {longest}, 60 by default"
+        ));
+    }
+    if asked.number.is_some() {
+        return Outcome::Refused(
+            "refused: forge subscribe takes no number: it waits on the pull request of a \
+             workspace's branch (workspace, repository)"
+                .into(),
+        );
+    }
+    let name = match workspace_named(daemon, place, asked.workspace.as_deref(), "forge") {
+        Ok(name) => name,
+        Err(refusal) => return refusal,
+    };
+    let workspace = match daemon.read(|store| store.workspace(&place.project, &name)) {
+        Ok(Some(workspace)) => workspace,
+        Ok(None) => return Outcome::Failed(format!("the workspace {name} is gone")),
+        Err(error) => return Outcome::Failed(error.to_string()),
+    };
+    let project = projects::load_project(daemon, &place.project).ok();
+    let path = match chosen(
+        repositories_of(&workspace, project.as_ref()),
+        asked.repository.as_deref(),
+        "subscribe",
+        true,
+    ) {
+        Ok(mut checkouts) => checkouts.remove(0).path,
+        Err(refusal) => return refusal,
+    };
+    let (_, read) = refresh_read(daemon, &workspace).await;
+    let Some(repository) = read.repositories.iter().find(|r| r.path == path) else {
+        return Outcome::Failed(format!("{path} was not read"));
+    };
+    if let Some(note) = &repository.note {
+        return Outcome::Refused(format!("refused: {path}: {note}"));
+    }
+    if let Some(error) = &repository.error {
+        return Outcome::Failed(format!("{path}: the forge could not be read: {error}"));
+    }
+    if let (true, Some(problem)) = (repository.blocked, &read.problem) {
+        return Outcome::Failed(problem.clone());
+    }
+    let Some(pull) = &repository.pull else {
+        return Outcome::Refused(format!(
+            "refused: {path} has no pull request for {}: nothing to subscribe to",
+            workspace.branch
+        ));
+    };
+    if matches!(pull.state, "merged" | "closed") {
+        return Outcome::Refused(format!(
+            "refused: the pull request #{} of {path} is {}: nothing more happens to it",
+            pull.number, pull.state
+        ));
+    }
+    let target = events::target(&workspace, &path, pull.number);
+    for old in crate::subscriptions::of(daemon, agent) {
+        if old.target == target {
+            crate::subscriptions::end(daemon, &old);
+        }
+    }
+    let now = now_ms();
+    let subscription = flottille_core::subscription::Subscription {
+        id: crate::subscriptions::new_subscription_id(),
+        agent: agent.to_owned(),
+        source: "forge".into(),
+        target,
+        events,
+        from: from.to_owned(),
+        seen: events::seen_of(pull),
+        created_at: now,
+        expires_at: now + minutes * 60_000,
+    };
+    if let Err(error) = crate::subscriptions::subscribe(daemon, &subscription) {
+        return Outcome::Failed(error);
+    }
+    if !hold(daemon, &subscription) {
+        crate::subscriptions::end(daemon, &subscription);
+        return Outcome::Failed(format!("the workspace {name} is gone"));
+    }
+    let from = match from {
+        "people" => ", from people",
+        _ => "",
+    };
+    Outcome::Done(format!(
+        "Subscribed: the next {}{from} of the {} wakes you once, as a delivery, within {minutes} \
+         min. What is so now is no event: forge show reads it.",
+        subscription.events.join(" or "),
+        target_named(&subscription.target)
+    ))
+}
+
+/// `forge unsubscribe`: the agent's subscriptions to the workspace and repository it names, every
+/// one when it names none.
+fn forge_unsubscribe(daemon: &Daemon, agent: &str, asked: ForgeCall) -> Outcome {
+    let named =
+        |s: &flottille_core::subscription::Subscription, key: &str, asked: &Option<String>| {
+            asked.as_ref().is_none_or(|a| s.target[key] == a.as_str())
+        };
+    let cancelled: Vec<_> = crate::subscriptions::of(daemon, agent)
+        .into_iter()
+        .filter(|s| named(s, "workspace", &asked.workspace))
+        .filter(|s| named(s, "repository", &asked.repository))
+        .collect();
+    if cancelled.is_empty() {
+        return Outcome::Refused("refused: you have no such subscription".into());
+    }
+    let mut text = "Cancelled your subscriptions:\n".to_owned();
+    for subscription in cancelled {
+        crate::subscriptions::end(daemon, &subscription);
+        text.push_str(&format!("- {}\n", target_named(&subscription.target)));
+    }
+    Outcome::Done(text)
 }
 
 /// The repositories of the agent's place as a forge is read for them: its workspace's, or the
@@ -1197,7 +1439,7 @@ async fn forge_show(daemon: &Daemon, place: &Place, asked: ForgeCall, number: u6
 
 /// `forge comment` and `forge edit`: a comment on a pull request of one repository of the place,
 /// or a new title or description of it.
-async fn forge_note(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
+async fn forge_note(daemon: &Daemon, agent: &str, place: &Place, asked: ForgeCall) -> Outcome {
     let action = asked.action.as_str();
     let Some(number) = asked.number else {
         return Outcome::Refused(format!(
@@ -1234,6 +1476,7 @@ async fn forge_note(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
         Err(Some(why)) => return Outcome::Refused(why),
     };
     let slug = forge.slug();
+    let numbered = number;
     let number = number.to_string();
     let done = match &forge {
         Forge::Bitbucket { .. } => bitbucket::note(&forge, action, &number, title, body).await,
@@ -1255,9 +1498,18 @@ async fn forge_note(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
     };
     match (done, action) {
         (Err(why), _) => Outcome::Failed(why),
-        (Ok(()), "comment") => Outcome::Done(format!(
-            "The comment was posted on pull request #{number} of {slug}."
-        )),
+        (Ok(()), "comment") => {
+            events::posted(
+                daemon,
+                agent,
+                &checkout.path,
+                numbered,
+                body.unwrap_or_default(),
+            );
+            Outcome::Done(format!(
+                "The comment was posted on pull request #{number} of {slug}."
+            ))
+        }
         (Ok(()), _) => Outcome::Done(format!("Pull request #{number} of {slug} was changed.")),
     }
 }

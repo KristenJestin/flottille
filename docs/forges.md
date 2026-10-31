@@ -118,6 +118,8 @@ workspace with a GitHub repository and a Bitbucket one still shows the one that 
   long as that connection is open, the daemon reads the workspace again about once a minute.
   When a read fails (`gh` missing, not signed in, or a call failing), the next one waits twice as
   long, up to 16 minutes, and back to a minute after a read that works.
+- **While an agent subscribes to its pull request** (`forge` `subscribe`, "Subscriptions" below):
+  the subscription holds a watch of the workspace, the same reads, until it is over.
 - **Never when nobody looks**: no timer runs for a workspace nobody watches.
 
 The state is kept in the daemon's memory, not in the store. When a read finds it different from the
@@ -313,6 +315,29 @@ log, or why there is none:
 - **Masked** like every output, before it is kept or shown.
 - **Only `forge` `show` asks for it.** The state the window watches (`workspace.forge`, `workspace
   show`) holds no log and calls `gh` no more than before.
+
+## Subscriptions
+
+The forge watch is the first source of events of the subscriptions (`docs/design.md` §5.6). After
+each read of a workspace, every subscription to one of its pull requests compares it with what it
+saw last, stored with it (the state, whether a check was running, the head commit, a hash of each
+comment and review, Bitbucket's reviewers' verdicts):
+
+- `checks`: none runs now, and one was running or the head commit changed; the delivery says how
+  many passed, failed and were skipped, and the end of each failed job's log, read then
+  ("Why a check failed");
+- `review`: a review that was not there (GitHub: its state, not `pending`; Bitbucket: a
+  reviewer's new verdict), with its author, state and an excerpt;
+- `comment`: a comment that was not there, with its author and an excerpt;
+- `merged`, `closed`: the pull request's state became that; either ends every subscription to it.
+
+The first read after subscribing is the one the subscription saw: what is already so is no event.
+A read that fails changes nothing. **A bot**, for `from: people`, is a GitHub author whose
+login starts with `app/` (as `gh` says an app) or ends with `[bot]`, or that `gh` says `is_bot`;
+this is assumed from `gh`'s output, and the maintainer checks it on a real pull request. A
+Bitbucket author is always taken for a person: what says a bot there is not read. **The agent's
+own** comment is one it posted with `forge` `comment` on that pull request, the same text,
+remembered in the daemon's memory (the last 200): after a restart, it counts as a person's.
 
 ## Tickets
 

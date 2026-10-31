@@ -1361,6 +1361,7 @@ fn end(daemon: &Arc<Daemon>, id: &str, state: AgentState, reason: &str) -> bool 
         Ok(((), events))
     });
     deliveries::forget(daemon, id);
+    crate::subscriptions::ended(daemon, id);
     agents::tell(daemon, id, Order::Stop);
     let (daemon, id) = (daemon.clone(), id.to_owned());
     tokio::spawn(async move { crate::runs::stop_runs_of(&daemon, &id).await });

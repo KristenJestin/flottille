@@ -43,6 +43,7 @@ mod session_read;
 mod setup;
 mod skill_command;
 mod skills;
+mod subscriptions;
 mod sweep;
 mod tasks;
 mod tickets;
