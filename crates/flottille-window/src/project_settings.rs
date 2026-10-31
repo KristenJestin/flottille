@@ -1531,9 +1531,11 @@ impl ProjectSettingsPage {
             .on_click(move |_, window, cx| {
                 this.update(cx, |this, cx| this.add_base(window, cx)).ok();
             });
+        // The gap is the parent's: the blocks that come and go take theirs with them.
         let control = div()
             .flex()
             .flex_col()
+            .gap(space::SM)
             .child(presence("base-list-block", !self.bases.is_empty(), list).gap(space::SM))
             .child(
                 presence(

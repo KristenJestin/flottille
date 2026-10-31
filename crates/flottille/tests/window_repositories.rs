@@ -787,6 +787,34 @@ fn a_base_branch_added_in_the_dialog_is_listed_and_a_removed_one_leaves(cx: &mut
 }
 
 #[gpui_kit::test]
+fn the_base_list_and_the_add_field_have_the_scale_s_gap_between_them(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, cx, page) = open_dialog(&user, "api", cx);
+    let gap = |upper: &str, cx: &mut VisualTestContext| {
+        let (upper, field) = cx.update(|window, _| {
+            (
+                window.find(upper.to_owned()).bounds(),
+                window.find("base-branch").bounds(),
+            )
+        });
+        field.top() - upper.bottom()
+    };
+    assert_eq!(
+        gap("base-list", cx),
+        flottille_ui::space::SM,
+        "the list of bases and the field that adds one"
+    );
+
+    // With no base left, the line that says so has the same gap above the field.
+    for base in ["develop", "main"] {
+        cx.update(|window, cx| window.click(format!("base-remove-{base}"), cx));
+        settle(cx);
+    }
+    page.read_with(cx, |page, _| assert!(page.bases().is_empty()));
+    assert_eq!(gap("base-empty", cx), flottille_ui::space::SM);
+}
+
+#[gpui_kit::test]
 fn a_base_branch_missing_on_the_remote_is_refused_in_the_dialog(cx: &mut TestAppContext) {
     let user = user();
     let (shell, cx, page) = open_dialog(&user, "api", cx);
