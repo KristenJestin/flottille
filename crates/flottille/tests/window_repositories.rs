@@ -661,3 +661,249 @@ fn the_project_settings_never_show_their_repositories_before_their_forms_are_rea
     settle(cx);
     assert!(has("repository-item-web", cx));
 }
+
+// The base branches and the dependencies of a repository, changed in its dialog (#172).
+
+fn settings_page(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<ProjectSettingsPage> {
+    shell
+        .read_with(cx, |s, cx| {
+            s.main().read(cx).project_settings_page().cloned()
+        })
+        .expect("the project's settings are open")
+}
+
+fn toast_said(shell: &Entity<Shell>, what: &str, cx: &mut VisualTestContext) {
+    until(shell, cx, &format!("a toast says {what}"), |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.toasts()
+                .read(cx)
+                .toasts()
+                .any(|toast| toast.title().contains(what))
+        })
+    });
+}
+
+/// `trio`'s settings open on the dialog of `path`.
+fn open_dialog<'a>(
+    user: &User,
+    path: &str,
+    cx: &'a mut TestAppContext,
+) -> (
+    Entity<Shell>,
+    &'a mut VisualTestContext,
+    Entity<ProjectSettingsPage>,
+) {
+    trio(user);
+    let (shell, cx) = window(user, Arc::new(user.connector()), 1280., cx);
+    open_settings(&shell, "trio", cx);
+    let page = settings_page(&shell, cx);
+    let id = gpui_kit::ElementId::Name(format!("repository-{path}").into());
+    cx.update(|window, cx| window.click(id, cx));
+    settle(cx);
+    assert!(page.read_with(cx, |page, _| page.dialog().is_some()));
+    (shell, cx, page)
+}
+
+#[gpui_kit::test]
+fn base_branches_changed_in_the_dialog_are_used_by_the_next_workspace(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx, page) = open_dialog(&user, "api", cx);
+
+    // The dialog opens on the file's rule, in order.
+    page.read_with(cx, |page, _| assert_eq!(page.bases(), ["develop", "main"]));
+    assert!(has("base-row-develop", cx) && has("base-row-main", cx));
+    assert_eq!(
+        label_of("base-field-label", cx).as_deref(),
+        Some("Base branches")
+    );
+
+    cx.update(|window, cx| window.click("base-down-develop", cx));
+    settle(cx);
+    page.read_with(cx, |page, _| assert_eq!(page.bases(), ["main", "develop"]));
+    cx.update(|window, cx| window.click("save-settings-modal", cx));
+    until(&shell, cx, "the dialog closes", |cx| {
+        page.read_with(cx, |page, _| page.dialog().is_none())
+    });
+    toast_said(&shell, "Repository api saved", cx);
+
+    let text = std::fs::read_to_string(user.project_file("trio")).unwrap();
+    assert!(text.contains("base = [\"main\", \"develop\"]"), "{text}");
+    assert!(text.starts_with("# the trio, by hand\n"), "{text}");
+    user.call(
+        "workspace.create",
+        json!({"project": "trio", "name": "login", "repositories": ["api"]}),
+    )
+    .unwrap();
+    let shown = user
+        .call(
+            "workspace.show",
+            json!({"project": "trio", "name": "login"}),
+        )
+        .unwrap();
+    assert_eq!(
+        shown["repositories"][0]["base"]["branch"], "main",
+        "{shown}"
+    );
+    // The row of the settings says the new rule.
+    until(&shell, cx, "the row says the new rule", |cx| {
+        label_of("repository-base-api", cx).as_deref() == Some("main, then develop")
+    });
+}
+
+#[gpui_kit::test]
+fn a_base_branch_added_in_the_dialog_is_listed_and_a_removed_one_leaves(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, cx, page) = open_dialog(&user, "api", cx);
+
+    cx.update(|window, cx| window.click("base-branch", cx));
+    cx.simulate_input("release");
+    cx.update(|window, cx| window.click("base-add", cx));
+    settle(cx);
+    page.read_with(cx, |page, cx| {
+        assert_eq!(page.bases(), ["develop", "main", "release"]);
+        assert_eq!(
+            page.branch_field().unwrap().read(cx).value().to_string(),
+            ""
+        );
+    });
+    assert!(has("base-row-release", cx));
+
+    cx.update(|window, cx| window.click("base-remove-develop", cx));
+    settle(cx);
+    page.read_with(cx, |page, _| assert_eq!(page.bases(), ["main", "release"]));
+    assert!(!has("base-row-develop", cx), "it folded away");
+    assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
+
+    // The same branch twice, and a name with a space, say why under their field.
+    cx.update(|window, cx| window.click("base-branch", cx));
+    cx.simulate_input("main");
+    cx.update(|window, cx| window.click("base-add", cx));
+    settle(cx);
+    page.read_with(cx, |page, _| {
+        assert_eq!(page.base_error(), Some("main is already in the list."));
+        assert_eq!(page.bases(), ["main", "release"]);
+    });
+    assert!(has("base-field-error", cx));
+}
+
+#[gpui_kit::test]
+fn a_base_branch_missing_on_the_remote_is_refused_in_the_dialog(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx, page) = open_dialog(&user, "api", cx);
+    let before = std::fs::read_to_string(user.project_file("trio")).unwrap();
+
+    cx.update(|window, cx| window.click("base-branch", cx));
+    cx.simulate_input("trunk");
+    cx.update(|window, cx| window.click("base-add", cx));
+    cx.update(|window, cx| window.click("save-settings-modal", cx));
+    until(&shell, cx, "the refusal is shown", |cx| {
+        page.read_with(cx, |page, _| page.dialog_error().is_some())
+    });
+    settle(cx);
+
+    page.read_with(cx, |page, _| {
+        assert!(page.dialog().is_some(), "the dialog stays open");
+        assert_eq!(
+            page.dialog_error(),
+            Some("api: trunk is not a branch of the remote origin; nothing was saved")
+        );
+    });
+    assert!(has("settings-modal-error", cx));
+    assert_eq!(
+        std::fs::read_to_string(user.project_file("trio")).unwrap(),
+        before
+    );
+    // Fixed in the dialog: the branch removed, the save goes through.
+    cx.update(|window, cx| window.click("base-remove-trunk", cx));
+    cx.update(|window, cx| window.click("save-settings-modal", cx));
+    until(&shell, cx, "the dialog closes", |cx| {
+        page.read_with(cx, |page, _| page.dialog().is_none())
+    });
+}
+
+#[gpui_kit::test]
+fn a_dependency_cycle_is_refused_in_the_dialog(cx: &mut TestAppContext) {
+    let user = user();
+    trio(&user);
+    let text = std::fs::read_to_string(user.project_file("trio"))
+        .unwrap()
+        .replace(
+            "path = \"web\"\n",
+            "path = \"web\"\ndepends_on = [\"api\"]\n",
+        );
+    user.write_project_file("trio", &text);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_settings(&shell, "trio", cx);
+    let page = settings_page(&shell, cx);
+    cx.update(|window, cx| window.click("repository-api", cx));
+    settle(cx);
+    assert!(
+        has("depends-on-web", cx) && has("depends-on-lib", cx),
+        "the other repositories, as switches"
+    );
+    assert!(!has("depends-on-api", cx), "never itself");
+
+    cx.update(|window, cx| window.click("depends-on-web", cx));
+    settle(cx);
+    page.read_with(cx, |page, _| assert_eq!(page.depends(), ["web"]));
+    cx.update(|window, cx| window.click("save-settings-modal", cx));
+    until(&shell, cx, "the refusal is shown", |cx| {
+        page.read_with(cx, |page, _| page.dialog_error().is_some())
+    });
+
+    page.read_with(cx, |page, _| {
+        assert!(page.dialog().is_some());
+        let why = page.dialog_error().unwrap();
+        assert!(why.contains("cycle api -> web -> api"), "{why}");
+        assert!(why.ends_with("nothing was saved"), "{why}");
+    });
+    assert_eq!(
+        std::fs::read_to_string(user.project_file("trio")).unwrap(),
+        text,
+        "nothing was written"
+    );
+    // Turned off again, the dependencies the dialog opened with save.
+    cx.update(|window, cx| window.click("depends-on-web", cx));
+    cx.update(|window, cx| window.click("depends-on-lib", cx));
+    cx.update(|window, cx| window.click("save-settings-modal", cx));
+    until(&shell, cx, "the dialog closes", |cx| {
+        page.read_with(cx, |page, _| page.dialog().is_none())
+    });
+    toast_said(&shell, "Repository api saved", cx);
+    let after = user
+        .call("project.settings", json!({"name": "trio"}))
+        .unwrap();
+    assert_eq!(
+        after["repositories"][0]["depends_on"],
+        json!(["lib"]),
+        "{after}"
+    );
+}
+
+#[gpui_kit::test]
+fn the_dependencies_chosen_in_the_dialog_are_saved_and_the_row_says_them(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx, page) = open_dialog(&user, "web", cx);
+
+    cx.update(|window, cx| window.click("depends-on-api", cx));
+    cx.update(|window, cx| window.click("save-settings-modal", cx));
+    until(&shell, cx, "the dialog closes", |cx| {
+        page.read_with(cx, |page, _| page.dialog().is_none())
+    });
+    toast_said(&shell, "Repository web saved", cx);
+    settle(cx);
+
+    let after = user
+        .call("project.settings", json!({"name": "trio"}))
+        .unwrap();
+    assert_eq!(
+        after["repositories"][1]["depends_on"],
+        json!(["api"]),
+        "{after}"
+    );
+    page.read_with(cx, |page, _| {
+        let form = page.forms().iter().find(|f| f.path == "web").unwrap();
+        assert_eq!(form.depends_on, ["api"]);
+    });
+    assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
+}
