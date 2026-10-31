@@ -155,7 +155,7 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
 | What Flottille runs | What it reads of the answer | Source |
 |---|---|---|
 | `bkt context list --json` | `contexts[].name`, `.host`, `.active` (no secret in it) | `pkg/cmd/context/context.go:169-262` |
-| `bkt pr list --context C --workspace W --repo R --state all --limit 100 --json` (Cloud), `--project P` instead of `--workspace` (Data Center) | `pull_requests[]`: Cloud `id`, `title`, `state`, `source.branch.name`, `source.repository.full_name`, `destination.branch.name`, `destination.repository.full_name`, `links.html.href`; Data Center `id`, `title`, `state`, `fromRef.displayId`, `fromRef.repository.slug` and `.project.key`, `toRef` the same, `participants[]` (`user`, `role`, `status`, `approved`), `links.self[0].href` | `pkg/cmd/pr/pr.go:78-91` (flags), `:153` and `:218` (`pull_requests`); `pkg/bbcloud/pullrequests.go:14-60` (shape), `:87` (`state=all` is no filter); `pkg/bbdc/client.go:96-122` and `pkg/bbdc/pullrequests.go:17-22` (shape), `pkg/bbdc/client.go:265-267` (`state` as given, uppercased) |
+| `bkt pr list --context C --workspace W --repo R --state all --limit 100 --json` (Cloud), `--project P` instead of `--workspace` (Data Center) | `pull_requests[]`: Cloud `id`, `title`, `state`, `source.branch.name`, `source.commit.hash`, `source.repository.full_name`, `destination.branch.name`, `destination.repository.full_name`, `links.html.href`; Data Center `id`, `title`, `state`, `fromRef.displayId`, `fromRef.latestCommit`, `fromRef.repository.slug` and `.project.key`, `toRef` the same, `participants[]` (`user`, `role`, `status`, `approved`), `links.self[0].href` | `pkg/cmd/pr/pr.go:78-91` (flags), `:153` and `:218` (`pull_requests`); `pkg/bbcloud/pullrequests.go:14-60` (shape, `source.commit.hash` at `:41-43`), `:87` (`state=all` is no filter); `pkg/bbdc/client.go:96-122` and `pkg/bbdc/pullrequests.go:17-22` (shape, `Ref.LatestCommit` at `client.go:117-123`), `pkg/bbdc/client.go:265-267` (`state` as given, uppercased) |
 | `bkt pr checks <id> --context C … --json` | `statuses[]`: `state`, `name`, `key` | `pkg/cmd/pr/pr.go:1754-1809` (flags), `:1998` (`statuses`), `:2198` (the states); `pkg/types/commit_status.go:5-11` |
 | `bkt api <path> --context C [--param k=v]` (GET) | the server's own JSON, unchanged | `pkg/cmd/api/api.go:23-48`, `:138-140` |
 | `bkt pr create --context C … --source <branch> --target <base> --title T --description D [--reviewer N]…` | `✓ Created pull request #<id>` | `pkg/cmd/pr/pr.go:597-615`, `:664`, `:696`; `--reviewer` at `:614`, sent as `{"username": N}` on Cloud (`pkg/bbcloud/pullrequests.go:232-237`) and `{"user": {"name": N}}` on Data Center (`pkg/bbdc/pullrequests.go:75-82`) |
@@ -186,6 +186,12 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
   requests are listed (`--state all`) and the workspace's branch is picked among them, the
   highest id when there are several. A branch whose pull request is older than the hundred newest
   of its repository is shown as having none.
+- **The head commit is the source commit.** `source.commit.hash` (Cloud, which may say it cut short:
+  Atlassian's own examples show twelve characters, so the shape is assumed) and `fromRef.latestCommit` (Data Center) are read from the list, and
+  kept only as a hex hash of at least 7 characters, as GitHub's `headRefOid` is: it is given to
+  git as a revision. A removed workspace's squash-merged branch, whose remote branch the forge
+  deleted and a fetch pruned, is then covered by its merged pull request (`docs/workspaces.md`).
+  Without that field, or with anything else, the removal refuses as it does with no forge.
 - **Reviewers and comments are not in what `bkt` models.** Its pull request structs hold no
   comment and, on Cloud, no participant. They are read with `bkt api`, which passes the server's
   answer through, from Atlassian's REST documentation: Cloud

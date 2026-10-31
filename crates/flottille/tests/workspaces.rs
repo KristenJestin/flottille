@@ -1781,6 +1781,254 @@ fn an_uncommitted_file_still_refuses_the_removal_of_a_merged_pruned_branch() {
     assert!(fixture.has_branch(&fixture.folder.join("lib")));
 }
 
+// The same on Bitbucket, whose pull request says its source commit through `bkt` (Cloud:
+// `source.commit.hash`, Data Center: `fromRef.latestCommit`).
+
+/// Where a Bitbucket checkout of `lib` lives.
+#[derive(Clone, Copy)]
+enum Host {
+    Cloud,
+    DataCenter,
+}
+
+const HOSTS: [Host; 2] = [Host::Cloud, Host::DataCenter];
+
+impl Host {
+    fn name(self) -> &'static str {
+        match self {
+            Host::Cloud => "Cloud",
+            Host::DataCenter => "Data Center",
+        }
+    }
+}
+
+impl Fixture {
+    /// The fixture with the fake `bkt`, its workspace `login` made and ready.
+    fn landing_on_bitbucket() -> Fixture {
+        let fixture = Fixture::of(User::new().with_fake_bkt(), false);
+        fixture.configure("");
+        fixture.create(json!({})).unwrap();
+        assert_eq!(fixture.settled("login")["state"], "ready");
+        fixture
+    }
+
+    /// `lib` on Bitbucket, as `acme/lib` (Cloud) or `PROJ/lib` (Data Center): its remote's URL
+    /// leads there (its tracking refs stay what they were), and the project declares it.
+    fn lib_on_bitbucket(&self, host: Host) {
+        let (url, forge) = match host {
+            Host::Cloud => (
+                "git@bitbucket.org:acme/lib.git",
+                "{ kind = \"bitbucket-cloud\", repository = \"acme/lib\" }",
+            ),
+            Host::DataCenter => (
+                "ssh://git@bitbucket.example.com:7999/PROJ/lib.git",
+                "{ kind = \"bitbucket-data-center\", host = \"bitbucket.example.com\", \
+                 repository = \"PROJ/lib\" }",
+            ),
+        };
+        self.user.git(
+            &self.folder.join("lib"),
+            &["remote", "set-url", "origin", url],
+        );
+        self.configure("");
+        let text = std::fs::read_to_string(self.user.project_file("app"))
+            .unwrap()
+            .replace(
+                "path = \"lib\"\n",
+                &format!("path = \"lib\"\nforge = {forge}\n"),
+            );
+        self.user.write_project_file("app", &text);
+    }
+
+    /// The pull request #12 of `app/login` on Bitbucket, in that state, its source commit at
+    /// `head` when there is one, as `bkt pr list --json` prints it.
+    fn lib_bitbucket_pull(&self, host: Host, state: &str, head: Option<&str>) {
+        let (pull, api) = match host {
+            Host::Cloud => {
+                let mut source = json!({
+                    "branch": {"name": "app/login"}, "repository": {"full_name": "acme/lib"}});
+                if let Some(head) = head {
+                    source["commit"] = json!({"hash": head});
+                }
+                let base = "/repositories/acme/lib/pullrequests/12";
+                (
+                    json!({"id": 12, "title": "Add the feature", "state": state, "source": source,
+                        "destination": {"branch": {"name": "main"},
+                            "repository": {"full_name": "acme/lib"}},
+                        "links": {"html": {"href":
+                            "https://bitbucket.org/acme/lib/pull-requests/12"}}}),
+                    json!({base: {"participants": []},
+                        format!("{base}/comments"): {"values": []}}),
+                )
+            }
+            Host::DataCenter => {
+                let repository = json!({"slug": "lib", "project": {"key": "PROJ"}});
+                let mut from = json!({"displayId": "app/login", "repository": repository});
+                if let Some(head) = head {
+                    from["latestCommit"] = json!(head);
+                }
+                (
+                    json!({"id": 12, "title": "Add the feature", "state": state, "fromRef": from,
+                        "toRef": {"displayId": "main", "repository": repository},
+                        "links": {"self": [{"href":
+                            "https://bitbucket.example.com/projects/PROJ/repos/lib/pull-requests/12"}]}}),
+                    json!({"/rest/api/1.0/projects/PROJ/repos/lib/pull-requests/12/activities":
+                        {"values": []}}),
+                )
+            }
+        };
+        let context = match host {
+            Host::Cloud => json!({"name": "cloud", "host": "bitbucket.org"}),
+            Host::DataCenter => json!({"name": "work", "host": "bitbucket.example.com:7990"}),
+        };
+        let key = match host {
+            Host::Cloud => "acme/lib",
+            Host::DataCenter => "PROJ/lib",
+        };
+        self.user
+            .bkt_script(json!({"contexts": [context], "pulls": {key: [pull]}, "api": api}));
+    }
+}
+
+#[test]
+fn a_squash_merged_cloud_branch_whose_remote_was_pruned_is_removed_and_deleted_locally() {
+    let fixture = Fixture::landing_on_bitbucket();
+    let head = fixture.lib_pushed_then_pruned();
+    fixture.lib_on_bitbucket(Host::Cloud);
+    fixture.lib_bitbucket_pull(Host::Cloud, "MERGED", Some(&head));
+
+    let removed = fixture.remove("login").unwrap();
+
+    assert!(!fixture.workspace("login").exists());
+    assert!(!fixture.has_branch(&fixture.folder.join("lib")));
+    assert_eq!(
+        Fixture::fate(&removed, "lib"),
+        (true, "its pull request #12 is merged".to_owned())
+    );
+}
+
+#[test]
+fn a_squash_merged_data_center_branch_whose_remote_was_pruned_is_removed_and_deleted_locally() {
+    let fixture = Fixture::landing_on_bitbucket();
+    let head = fixture.lib_pushed_then_pruned();
+    fixture.lib_on_bitbucket(Host::DataCenter);
+    fixture.lib_bitbucket_pull(Host::DataCenter, "MERGED", Some(&head));
+
+    let removed = fixture.remove("login").unwrap();
+
+    assert!(!fixture.workspace("login").exists());
+    assert!(!fixture.has_branch(&fixture.folder.join("lib")));
+    assert_eq!(
+        Fixture::fate(&removed, "lib"),
+        (true, "its pull request #12 is merged".to_owned())
+    );
+}
+
+#[test]
+fn a_bitbucket_hash_cut_short_is_still_the_commit_the_pull_request_merged() {
+    // Cloud may print a source commit's hash cut short; git resolves the prefix.
+    let fixture = Fixture::landing_on_bitbucket();
+    let head = fixture.lib_pushed_then_pruned();
+    fixture.lib_on_bitbucket(Host::Cloud);
+    fixture.lib_bitbucket_pull(Host::Cloud, "MERGED", Some(&head[..12]));
+
+    fixture.remove("login").unwrap();
+
+    assert!(!fixture.workspace("login").exists());
+    assert!(!fixture.has_branch(&fixture.folder.join("lib")));
+}
+
+#[test]
+fn a_pruned_bitbucket_branch_whose_pull_request_is_not_merged_still_makes_the_removal_ask() {
+    for host in HOSTS {
+        let fixture = Fixture::landing_on_bitbucket();
+        let head = fixture.lib_pushed_then_pruned();
+        fixture.lib_on_bitbucket(host);
+        fixture.lib_bitbucket_pull(host, "OPEN", Some(&head));
+
+        let (code, message) = fixture.remove("login").unwrap_err();
+
+        assert_eq!(code, "refused", "{}", host.name());
+        assert!(
+            message.contains("lib has commits on no remote, on its branch app/login: "),
+            "{}: {message}",
+            host.name()
+        );
+        assert!(fixture.has_branch(&fixture.folder.join("lib")));
+    }
+}
+
+#[test]
+fn a_merged_bitbucket_pull_request_that_says_no_source_commit_still_makes_the_removal_ask() {
+    for host in HOSTS {
+        let fixture = Fixture::landing_on_bitbucket();
+        fixture.lib_pushed_then_pruned();
+        fixture.lib_on_bitbucket(host);
+        fixture.lib_bitbucket_pull(host, "MERGED", None);
+
+        let (code, message) = fixture.remove("login").unwrap_err();
+
+        assert_eq!(code, "refused", "{}", host.name());
+        assert!(
+            message.contains("lib has commits on no remote"),
+            "{}: {message}",
+            host.name()
+        );
+        assert!(fixture.has_branch(&fixture.folder.join("lib")));
+    }
+}
+
+#[test]
+fn a_source_commit_that_is_not_a_hash_is_never_given_to_git() {
+    for host in HOSTS {
+        let fixture = Fixture::landing_on_bitbucket();
+        fixture.lib_pushed_then_pruned();
+        fixture.lib_on_bitbucket(host);
+        for head in ["--output=/tmp/x", "abc12", "HEAD", "main"] {
+            fixture.lib_bitbucket_pull(host, "MERGED", Some(head));
+
+            let (code, message) = fixture.remove("login").unwrap_err();
+
+            assert_eq!(code, "refused", "{} {head}", host.name());
+            assert!(
+                message.contains("lib has commits on no remote"),
+                "{} {head}: {message}",
+                host.name()
+            );
+            assert!(fixture.has_branch(&fixture.folder.join("lib")));
+        }
+    }
+}
+
+#[test]
+fn a_commit_made_after_the_merge_of_a_pruned_bitbucket_branch_still_makes_the_removal_ask() {
+    for host in HOSTS {
+        let fixture = Fixture::landing_on_bitbucket();
+        let head = fixture.lib_pushed_then_pruned();
+        let lib = fixture.workspace("login").join("lib");
+        std::fs::write(lib.join("later.rs"), "fn later() {}\n").unwrap();
+        fixture.user.git(&lib, &["add", "."]);
+        fixture
+            .user
+            .git(&lib, &["commit", "--quiet", "-m", "after the merge"]);
+        let later = fixture.git(&lib, &["rev-parse", "--short", "HEAD"]);
+        fixture.lib_on_bitbucket(host);
+        fixture.lib_bitbucket_pull(host, "MERGED", Some(&head));
+
+        let (code, message) = fixture.remove("login").unwrap_err();
+
+        assert_eq!(code, "refused", "{}", host.name());
+        assert!(
+            message.contains(&format!(
+                "lib has commits on no remote, on its branch app/login: {later} after the merge"
+            )),
+            "{}: {message}",
+            host.name()
+        );
+        assert!(fixture.has_branch(&fixture.folder.join("lib")));
+    }
+}
+
 // The output of a setup step (`workspace.step_output`).
 
 impl Fixture {
