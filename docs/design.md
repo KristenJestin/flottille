@@ -487,12 +487,22 @@ becomes the child's record, the report is a tool, waiting is deliveries, closing
 
 GPUI Fast with gpui-kit, English only (no translation layer). Screens of the milestone "The window":
 
-- a top bar with search and a bell counting what waits for the user;
+- a top bar with search and a bell counting what waits for the user (each request, each
+  question) and what a session did to a ticket or a pull request (opened, merged, edited or
+  commented a pull request; created, edited, commented, closed or reopened a ticket, as
+  `agent.tool_served` says a write of `forge` or `tickets` was done), until that session is
+  opened; each item says why it is there (`Request #3 waits for you`, `Asks you a question`,
+  `Opened a pull request`), a short excerpt (what is asked, the question, the title or the start
+  of the text posted) and its session, each on one line cut with an ellipsis. What a session
+  changes while its page is open is in sight, and rings nothing; what is changed lives as long
+  as the window;
 - left: the tree project › place › session. `main` and the workspaces sit at the same level
   under their project; a session is titled by the first line of its first message that says what the
   work is (a greeting or a single word does not: the session is `agent <id>` until a later message
-  of the user does); sessions sit under their place, a session an agent started with "started by
-  <agent>", with a mark when running or when the root needs the user, and no text badge. The mark is where the work is, once: on the session's own row while that row
+  of the user does); sessions sit under their place (a session an agent started says it in its
+  page's header, "started by <agent>", not in the tree), with a mark when running or when the
+  root needs the user, and no text badge; a session that created or changed a ticket or a pull
+  request has a small dot on its row until it is opened. The mark is where the work is, once: on the session's own row while that row
   is in sight, and on a folded place or project, which shows the strongest mark of what it holds,
   only while it is folded (never on a row and on its parents together); a session whose agent
   ended shows no mark. A click on a project's name opens its page and leaves its places as they
@@ -522,7 +532,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   Flottille picked is said once in a notice, with Open Settings and Dismiss;
 - a session page: the root's conversation, live (messages, the user's own as selectable as the agent's, thoughts collapsed (their head says how long the thinking lasted, from the event before it
   to the one after it, and no time when it lasted less than a tenth of a second), tool calls with
-  their result, the children launched, reports, diffs), one compact line for each command a
+  their result, the children launched, a session started for the user as one line, "started session <title>" (it is no sub-agent), reports, diffs), one compact line for each command a
   tool call ran (an icon, the line, how it ended, how long: a click opens the output panel the
   rail opens, and the output itself is only there), one line for each request that reached the
   user, neutral ("Request #1 · Run pnpm test", which lights its card in the rail, then, once
@@ -552,13 +562,15 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   in the field, and sending it sends the command's instructions with what follows the name (a
   `/word` that names none is sent as text); the header says the session's title and its place,
   and no state; a rail with, from its top, the session's tree of agents (each row with the share
-  of its context the agent used, a percentage over a thin bar; the composer's bar does not say
+  of its context the agent used, a percentage beside a thin bar, on one line; the session's own
+  agent says only what it runs on, the others their name over what they run on and do; the composer's bar does not say
   it), its workspace (labelled lines: each repository with its changes, branch, commits ahead,
   files not committed and setup steps played, its pull request, its ticket; one sentence for the
   repositories with no forge; its actions in a "⋯" menu, the same as the workspace's card, with
   Link a ticket… and Unlink the ticket) and facts, its runs, then, pinned at the very bottom and
   folding away when nothing waits, "Waiting for you", the one place of the page that says the user
-  is needed (each request that reached the user is a compact card: the call on one line, its class
+  is needed (each request that reached the user is a compact card: the whole call, wrapping over
+  as many lines as it takes, its class
   and the judge's reason, or the first reason it was held, on one line, "Details" unfolding the
   rest (why it was held, one sentence for each reason, and for a base card the sentence that says
   why it always comes back), and Deny and Allow; a base card stands apart, in the alarm colour;
