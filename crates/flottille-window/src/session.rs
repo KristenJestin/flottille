@@ -2052,6 +2052,24 @@ impl Row {
     }
 }
 
+/// What the folded line of a block of steps says of who let them through: each of the Auto judge
+/// and Full mode, with how many when not all of them.
+fn allowed_said(calls: &[Call]) -> String {
+    let mut bys: Vec<(&str, usize)> = Vec::new();
+    for by in calls.iter().filter_map(|call| call.allowed_by.as_deref()) {
+        match bys.iter_mut().find(|(seen, _)| *seen == by) {
+            Some((_, n)) => *n += 1,
+            None => bys.push((by, 1)),
+        }
+    }
+    bys.iter()
+        .map(|(by, n)| match *n == calls.len() {
+            true => format!(" · allowed by {by}"),
+            false => format!(" · {n} allowed by {by}"),
+        })
+        .collect()
+}
+
 /// What the user typed, as the Markdown that draws it as typed: each mark is escaped, each line
 /// keeps its break and its indentation.
 fn as_typed(text: &str) -> String {
@@ -2647,16 +2665,11 @@ impl Render for Row {
                 // would push the conversation down. The line and the card fold into each other.
                 let last = calls.last().expect("a block of steps holds a call");
                 let count = calls.len();
-                let judged = calls.iter().filter(|c| c.allowed_by.is_some()).count();
                 let line = SharedString::from(format!(
                     "{count} {} · {}{}",
                     if count == 1 { "step" } else { "steps" },
                     last.name,
-                    match judged {
-                        0 => String::new(),
-                        n if n == count => format!(" · allowed by {}", crate::conversation::JUDGE),
-                        n => format!(" · {n} allowed by {}", crate::conversation::JUDGE),
-                    }
+                    allowed_said(calls)
                 ));
                 let folded = hoverable(
                     div()
@@ -5080,6 +5093,43 @@ impl Render for ReplyFacts {
 mod tests {
     use super::*;
     use gpui_kit::StyleRefinement;
+
+    fn call_allowed_by(by: Option<&str>) -> Call {
+        Call {
+            id: "c".into(),
+            name: "run".into(),
+            args: String::new(),
+            state: CallState::Done,
+            since: 0,
+            until: Some(1),
+            allowed_by: by.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn the_folded_steps_say_who_allowed_them_the_judge_or_full_mode() {
+        let line = |by: &[Option<&str>]| {
+            allowed_said(&by.iter().map(|by| call_allowed_by(*by)).collect::<Vec<_>>())
+        };
+        assert_eq!(line(&[None, None]), "");
+        assert_eq!(
+            line(&[Some("the judge"), Some("the judge")]),
+            " · allowed by the judge"
+        );
+        assert_eq!(
+            line(&[Some("Full mode"), Some("Full mode")]),
+            " · allowed by Full mode"
+        );
+        assert_eq!(
+            line(&[
+                Some("Full mode"),
+                None,
+                Some("the judge"),
+                Some("Full mode")
+            ]),
+            " · 2 allowed by Full mode · 1 allowed by the judge"
+        );
+    }
 
     #[test]
     fn a_markdown_table_takes_its_surface_and_inks_from_the_palette() {

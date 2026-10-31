@@ -225,6 +225,32 @@ fn a_segmented_control_slides_its_highlight_over_frames_and_then_stops(cx: &mut 
     assert_eq!(pending_frames(cx), 0, "it stopped once it was there");
 }
 
+#[test]
+fn a_segmented_control_fills_its_alarm_choice_in_the_alarm_colour_and_fades_to_it_along_the_slide()
+{
+    use flottille_ui::segmented::highlight;
+    use flottille_ui::theme::Palette;
+    let p = Palette::base();
+    let close = |(fill, ink): (gpui_kit::Hsla, gpui_kit::Hsla),
+                 (f, i): (gpui_kit::Hsla, gpui_kit::Hsla)| {
+        let near = |a: gpui_kit::Hsla, b: gpui_kit::Hsla| {
+            let (a, b) = (a.to_rgb(), b.to_rgb());
+            [(a.r, b.r), (a.g, b.g), (a.b, b.b), (a.a, b.a)]
+                .iter()
+                .all(|(x, y)| (x - y).abs() < 0.002)
+        };
+        near(fill, f) && near(ink, i)
+    };
+    // On the alarm choice: the fail fill and its ink; elsewhere, the accent.
+    assert!(close(highlight(&p, Some(2), 2.0), (p.fail, p.on_fail)));
+    assert!(close(highlight(&p, Some(2), 1.0), (p.acc, p.on_acc)));
+    assert!(close(highlight(&p, None, 2.0), (p.acc, p.on_acc)));
+    // Halfway there, it is between the two: it fades, it does not switch.
+    let half = highlight(&p, Some(2), 1.5);
+    assert!(!close(half, (p.acc, p.on_acc)));
+    assert!(!close(half, (p.fail, p.on_fail)));
+}
+
 struct Enabling {
     on: bool,
 }

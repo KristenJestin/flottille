@@ -2,7 +2,9 @@
 //! Ask | Auto), one of them chosen. Sized to its words, never stretched, never in a form (a scan
 //! of the window's dialogs refuses it there: a form's choice of a kind is [`RadioChoices`] or a
 //! [`Select`]). The chosen one is a filled highlight that slides to the one clicked over
-//! [`PANEL`], the inks fade along it, and each segment fades its hover.
+//! [`PANEL`], the inks fade along it, and each segment fades its hover. A choice that must never be
+//! taken by mistake (Full) is an alarm: the highlight fades to the alarm colour as it slides onto
+//! it.
 //!
 //! [`RadioChoices`]: crate::RadioChoices
 //! [`Select`]: crate::Select
@@ -18,7 +20,7 @@ use gpui_kit::{
 use crate::color::mix;
 use crate::interact::hoverable;
 use crate::motion::{Motion, PANEL};
-use crate::theme::palette;
+use crate::theme::{Palette, palette};
 
 type OnChoose = Box<dyn Fn(usize, &mut Window, &mut App) + 'static>;
 
@@ -37,7 +39,20 @@ pub struct Segmented {
     options: Vec<(SharedString, SharedString)>,
     chosen: usize,
     disabled: bool,
+    alarm: Option<usize>,
     on_choose: Option<OnChoose>,
+}
+
+/// The highlight's fill and ink with the slide `at` (the index it is on, fractional while it
+/// moves): the accent's, fading to the alarm colour's as it nears the `alarm` choice.
+pub fn highlight(p: &Palette, alarm: Option<usize>, at: f32) -> (gpui_kit::Hsla, gpui_kit::Hsla) {
+    let on_alarm = alarm.map_or(0.0, |alarm| {
+        (1.0 - (at - alarm as f32).abs()).clamp(0.0, 1.0)
+    });
+    (
+        mix(p.acc, p.fail, on_alarm),
+        mix(p.on_acc, p.on_fail, on_alarm),
+    )
 }
 
 impl Segmented {
@@ -63,8 +78,15 @@ impl Segmented {
             options,
             chosen,
             disabled: false,
+            alarm: None,
             on_choose: None,
         }
+    }
+
+    /// The choice at `index` is drawn in the alarm colour when it is the chosen one.
+    pub fn alarm(mut self, index: usize) -> Self {
+        self.alarm = Some(index);
+        self
     }
 
     /// Faded, and a click does nothing.
@@ -137,6 +159,7 @@ impl RenderOnce for Segmented {
         let lerp = |a: f32, b: f32| a + (b - a) * part;
         let highlight_left = lerp(lefts[low], lefts[high]);
         let highlight_width = lerp(widths[low], widths[high]);
+        let (fill, ink) = highlight(&p, self.alarm, at);
         let on_choose: Option<Arc<OnChoose>> = self.on_choose.map(Arc::new);
         let chosen = self.chosen;
         let disabled = self.disabled;
@@ -176,7 +199,7 @@ impl RenderOnce for Segmented {
                     }
                 }
                 hoverable(segment, move |d, hover| {
-                    d.text_color(mix(mix(p.mute, p.text, hover), p.on_acc, near))
+                    d.text_color(mix(mix(p.mute, p.text, hover), ink, near))
                 })
             });
         // Border-box: the 1 px border takes a pixel on each side.
@@ -203,7 +226,7 @@ impl RenderOnce for Segmented {
                     .w(px(highlight_width))
                     .h(px(HEIGHT - 2. * INSET - 2.))
                     .rounded(px(6.))
-                    .bg(p.acc),
+                    .bg(fill),
             )
             .children(segments);
         if disabled {
