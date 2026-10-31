@@ -558,8 +558,8 @@ from the window: `agent_launch {"title", "brief", "root": true, workspace? | new
   replacement of the session delivers it again the same way. It is a lead by default (`role`), on
   the caller's provider unless `provider` names another, in `workspace`, a new workspace, or the
   caller's own place.
-- **It takes the tree's mode**: the mode of the caller's tree, never a looser one; only the user
-  changes it afterwards. It counts in no children cap and no depth.
+- **It takes the tree's mode**: the mode of the caller's tree, Ask, Auto or Full, never a looser
+  one; only the user changes it afterwards, and each tree keeps its own. It counts in no children cap and no depth.
 - The caller is answered at once with the new session's id and name; the `agent_*` tools do not
   reach it, and the caller is told nothing of it afterwards but what it writes with
   `session_send`.
@@ -595,8 +595,12 @@ it at once.
 - **Which session**: a root of the caller's project, whoever started it, running or ended. A
   session of another project is refused before anything is asked (`refused: <id> is a session of
   another project, <p>, not of <q>: an agent reads only the sessions of its own project`), and so
-  are the caller's own session, a child (its parent reads it with `agent_status`, action
-  `conversation`) and an id that names no agent.
+  are a child (its parent reads it with `agent_status`, action `conversation`) and an id that
+  names no agent. **The caller's own session** is answered, without a request in any mode, with
+  its tree's mode instead of its messages (`This is your own session, …: its conversation is
+  already yours. Your session's tree is in full mode: a call the gate would hold passes without a
+  request; … Only the user changes it.`), so that an agent can say beforehand that a call will be
+  held.
 - **What it holds**: the session's messages, oldest first, each with who said it and when (in UTC,
   `2026-10-31T14:05:09Z`): the user's messages to that session, as they were delivered to it (its
   first message once, not again for a replacement), and the replies of its agent, their pieces
@@ -622,10 +626,10 @@ it at once.
   or `said by that session's agent at <time>`, then `<session_message>`, its text with every `<`
   escaped, `</session_message>`. Its texts are masked of the daemon's secrets and of those of both
   sessions' places, and escaped as every result is.
-- **It is to judge**, in Ask and in Auto, as an `action` request whose words name the session and
-  the page (`Read the conversation of the session "Login" (agent …), another session of this
-  project: its last 20 messages`). It is never harmless, so that a mode that lets it pass can be
-  added without making it pass in Ask or Auto.
+- **Another session's read is to judge**, in Ask and in Auto, as an `action` request whose words
+  name the session and the page (`Read the conversation of the session "Login" (agent …),
+  another session of this project: its last 20 messages`). It is never harmless, so that a mode
+  that lets it pass can be added without making it pass in Ask or Auto.
 
 ## The gate
 

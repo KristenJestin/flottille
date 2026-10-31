@@ -318,16 +318,10 @@ fn the_content_is_framed_as_another_session_s_data() {
     assert!(!page.contains("ghp_0123"), "{page}");
     assert!(page.contains("[masked]"), "{page}");
 
-    // Its own conversation is no other session's.
-    let refused = mcp.call("session_read", json!({"session": reader}));
-    assert!(refused.error, "{}", refused.text);
-    assert!(
-        refused
-            .text
-            .starts_with("refused: that is your own session"),
-        "{}",
-        refused.text
-    );
+    // Its own conversation is no other session's: it is told its mode, not its messages.
+    let own = ok(mcp.call("session_read", json!({"session": reader})));
+    assert!(own.starts_with("This is your own session"), "{own}");
+    assert!(!own.contains("<session_message>"), "{own}");
 }
 
 #[test]
