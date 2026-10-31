@@ -11,6 +11,7 @@ use crate::agent::{Agent, AgentState, Choices, GateMode};
 use crate::approval::{Decision, Delivery, Forward, Judgement, Kind, Request, RequestState};
 use crate::protocol::Event;
 use crate::run::{Run, RunState};
+use crate::subscription::Subscription;
 use crate::workspace::{Action, Failure, Step, StepState, Workspace};
 use crate::{Error, Result};
 
@@ -458,6 +459,22 @@ const MIGRATIONS: &[&str] = &[
     -- What a step wrote while it ran, masked and bounded as a run's output is: the window opens it
     -- from the project page, in the run drawer.
     ALTER TABLE workspace_steps ADD COLUMN output TEXT;
+",
+    "
+    -- An agent waiting, once, for the next event of what a source watches (`docs/design.md`
+    -- §5.6): kept across restarts, with what its source last saw, so that nothing that happened
+    -- meanwhile is lost.
+    CREATE TABLE subscriptions (
+        id         TEXT PRIMARY KEY,
+        agent      TEXT NOT NULL REFERENCES agents (id) ON DELETE CASCADE,
+        source     TEXT NOT NULL,
+        target     TEXT NOT NULL,
+        events     TEXT NOT NULL,
+        from_whom  TEXT NOT NULL,
+        seen       TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+    ) STRICT;
 ",
 ];
 
@@ -1665,6 +1682,60 @@ impl Store {
         Ok((moved, event))
     }
 
+    /// Stores a subscription, in place of the agent's own on the same target.
+    pub fn subscribe(&mut self, subscription: &Subscription) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        let target = serde_json::to_string(&subscription.target)?;
+        transaction.execute(
+            "DELETE FROM subscriptions WHERE agent = ?1 AND source = ?2 AND target = ?3",
+            params![subscription.agent, subscription.source, target],
+        )?;
+        transaction.execute(
+            "INSERT INTO subscriptions (id, agent, source, target, events, from_whom, seen, \
+             created_at, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                subscription.id,
+                subscription.agent,
+                subscription.source,
+                target,
+                serde_json::to_string(&subscription.events)?,
+                subscription.from,
+                serde_json::to_string(&subscription.seen)?,
+                subscription.created_at,
+                subscription.expires_at
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Every subscription, the oldest first.
+    pub fn subscriptions(&self) -> Result<Vec<Subscription>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT id, agent, source, target, events, from_whom, seen, created_at, expires_at \
+             FROM subscriptions ORDER BY created_at, rowid",
+        )?;
+        let rows = statement.query_map([], subscription_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// What the subscription's source saw last.
+    pub fn subscription_saw(&self, id: &str, seen: &Value) -> Result<()> {
+        self.connection.execute(
+            "UPDATE subscriptions SET seen = ?2 WHERE id = ?1",
+            params![id, serde_json::to_string(seen)?],
+        )?;
+        Ok(())
+    }
+
+    /// Removes a subscription; whether it was there.
+    pub fn unsubscribe(&self, id: &str) -> Result<bool> {
+        Ok(self
+            .connection
+            .execute("DELETE FROM subscriptions WHERE id = ?1", params![id])?
+            > 0)
+    }
+
     /// The agent's deliveries `sending` become `sent`: the turn that held them ended.
     pub fn deliveries_taken(&self, agent: &str) -> Result<()> {
         self.connection.execute(
@@ -2068,6 +2139,24 @@ fn request_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Request>> {
         created_at: row.get(13)?,
         decided_at: row.get(14)?,
     }))
+}
+
+fn subscription_row(row: &rusqlite::Row) -> rusqlite::Result<Subscription> {
+    let json = |i| {
+        row.get::<_, String>(i)
+            .map(|text| serde_json::from_str(&text).unwrap_or_default())
+    };
+    Ok(Subscription {
+        id: row.get(0)?,
+        agent: row.get(1)?,
+        source: row.get(2)?,
+        target: json(3)?,
+        events: serde_json::from_value(json(4)?).unwrap_or_default(),
+        from: row.get(5)?,
+        seen: json(6)?,
+        created_at: row.get(7)?,
+        expires_at: row.get(8)?,
+    })
 }
 
 fn delivery_row(row: &rusqlite::Row) -> rusqlite::Result<Delivery> {
@@ -3391,6 +3480,44 @@ mod tests {
             sent_at: None,
             images: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_subscription_is_kept_across_a_reopening_and_replaces_the_agent_s_own_on_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let mut store = Store::open(&path).unwrap();
+        store
+            .create_agent(&an_agent(), ("agent.created", json!({})))
+            .unwrap();
+        let subscription = |id: &str, events: &[&str]| Subscription {
+            id: id.into(),
+            agent: "0123456789ab".into(),
+            source: "forge".into(),
+            target: json!({"project": "app", "workspace": "login", "repository": "api"}),
+            events: events.iter().map(|e| e.to_string()).collect(),
+            from: "anyone".into(),
+            seen: json!({"state": "open"}),
+            created_at: 1,
+            expires_at: 2,
+        };
+        store.subscribe(&subscription("s1", &["checks"])).unwrap();
+        store
+            .subscribe(&subscription("s2", &["checks", "review"]))
+            .unwrap();
+        store
+            .subscription_saw("s2", &json!({"state": "merged"}))
+            .unwrap();
+        drop(store);
+
+        let store = Store::open(&path).unwrap();
+        let kept = store.subscriptions().unwrap();
+        let mut expected = subscription("s2", &["checks", "review"]);
+        expected.seen = json!({"state": "merged"});
+        assert_eq!(kept, [expected]);
+        assert!(store.unsubscribe("s2").unwrap());
+        assert!(!store.unsubscribe("s2").unwrap());
+        assert!(store.subscriptions().unwrap().is_empty());
     }
 
     #[test]
