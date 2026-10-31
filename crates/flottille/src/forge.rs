@@ -31,6 +31,7 @@ use crate::place::Place;
 use crate::projects::{self, Failure};
 
 mod bitbucket;
+mod logs;
 
 /// How long a state read stays fresh, and how often a watched workspace is read again.
 pub const EVERY_MS: u64 = 60_000;
@@ -278,6 +279,26 @@ pub struct Pull {
     /// The reviewers asked and their verdict (`approved`, `changes requested`, `pending`), of
     /// the forges that say them (Bitbucket); empty for GitHub, whose reviews say it.
     pub reviewers: Vec<(String, &'static str)>,
+    /// The failing checks, whose log `forge show` gives (`logs::attach`).
+    pub jobs: Vec<Job>,
+}
+
+/// A failing check of a pull request.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Job {
+    pub name: String,
+    /// The link the forge gives for the check, masked.
+    pub details: Option<String>,
+    /// The end of its log, or why there is none; not read yet while none.
+    pub log: Option<Result<Log, String>>,
+}
+
+/// The end of a job's log: `shown` of its `total` lines, cleaned and masked.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Log {
+    pub text: String,
+    pub shown: usize,
+    pub total: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -384,6 +405,21 @@ impl Pull {
             comments: comments("comments"),
             reviews: comments("reviews"),
             reviewers: Vec::new(),
+            jobs: value["statusCheckRollup"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|check| check_of(check).1 == "failing")
+                .map(|check| Job {
+                    name: check_of(check).0,
+                    details: check["detailsUrl"]
+                        .as_str()
+                        .or(check["targetUrl"].as_str())
+                        .filter(|link| !link.is_empty())
+                        .map(masked),
+                    log: None,
+                })
+                .collect(),
         })
     }
 }
@@ -1127,7 +1163,8 @@ async fn forge_show(daemon: &Daemon, place: &Place, asked: ForgeCall, number: u6
             "refused: {} has no pull request #{number}",
             forge.slug()
         )),
-        Ok(Some(pull)) => {
+        Ok(Some(mut pull)) => {
+            logs::attach(&forge, &mut pull).await;
             let again = format!(
                 "{{\"action\": \"show\", \"repository\": {}, \"number\": {number}, \
                  \"detail\": \"full\"}}",
@@ -1247,7 +1284,12 @@ async fn forge_read(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
         }
         repositories.retain(|r| &r.path == asked);
     }
-    let read = read(&repositories, &workspace.branch, obsolete).await;
+    let mut read = read(&repositories, &workspace.branch, obsolete).await;
+    for repository in &mut read.repositories {
+        if let (Some(forge), Some(pull)) = (&repository.forge, &mut repository.pull) {
+            logs::attach(forge, pull).await;
+        }
+    }
     Outcome::Done(read_text(
         &workspace,
         &read,
@@ -1628,6 +1670,7 @@ fn pull_text(text: &mut String, named: &str, pull: &Pull, full: bool, again: &st
             text.push_str(&format!("  checks: {mark} ({})\n", each.join(", ")));
         }
     }
+    text.push_str(&logs::text(&pull.jobs));
     for (title, comments) in [("comments", &pull.comments), ("reviews", &pull.reviews)] {
         let said: Vec<&Comment> = comments.iter().filter(|c| !c.body.is_empty()).collect();
         if said.is_empty() {

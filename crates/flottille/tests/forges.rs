@@ -1587,3 +1587,268 @@ fn an_ssh_alias_is_resolved_by_ssh_and_its_real_host_checked() {
         "{calls:?}"
     );
 }
+
+/// What `gh pr view --json` answers for a pull request of `acme/api` whose checks are `build`
+/// (passing) and the failing `jobs`, each `(name, job id)` an Actions job of the repository.
+fn pull_with_failed_jobs(jobs: &[(&str, u64)]) -> Value {
+    let mut checks = vec![
+        json!({"__typename": "CheckRun", "name": "build", "status": "COMPLETED",
+        "conclusion": "SUCCESS", "detailsUrl": "https://github.com/acme/api/actions/runs/900/job/1"}),
+    ];
+    for (name, job) in jobs {
+        checks.push(
+            json!({"__typename": "CheckRun", "name": name, "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "detailsUrl": format!("https://github.com/acme/api/actions/runs/900/job/{job}")}),
+        );
+    }
+    let mut pull = pull(12, "Add the login page");
+    pull["statusCheckRollup"] = checks.into();
+    pull
+}
+
+/// A job's log as `gh run view --job <id> --log-failed` prints it: the job, the step and a
+/// timestamp before each line.
+fn gh_log(job: &str, lines: &[String]) -> String {
+    lines
+        .iter()
+        .enumerate()
+        .map(|(at, line)| {
+            format!(
+                "{job}\tRun cargo test\t2026-01-01T00:00:{:02}.1234567Z {line}\n",
+                at % 60
+            )
+        })
+        .collect()
+}
+
+fn script_logs(user: &User, pull: Value, logs: Value) {
+    user.gh_script(json!({"pulls": {"acme/api": {"app/login": pull}}, "logs": {"acme/api": logs}}));
+}
+
+#[test]
+fn a_failed_job_s_last_lines_are_returned() {
+    let user = User::with_fake_agent().with_fake_gh();
+    fixture(&user);
+    let lines: Vec<String> = [
+        "\u{1b}[36;1mcargo test\u{1b}[0m",
+        "test login::form ... \u{1b}[31mFAILED\u{1b}[0m",
+        "thread 'login::form' panicked at src/login.rs:42:9:",
+        "assertion `left == right` failed",
+        "error: test failed, to rerun pass `--lib`",
+    ]
+    .map(String::from)
+    .to_vec();
+    script_logs(
+        &user,
+        pull_with_failed_jobs(&[("test", 456)]),
+        json!({"456": gh_log("test", &lines)}),
+    );
+    let (_, mcp) = agent_in(&user, Some("login"));
+
+    let answer = mcp.call("forge", json!({"action": "show", "repository": "api"}));
+
+    assert!(!answer.error, "{}", answer.text);
+    for said in [
+        "failed jobs (1):",
+        "- test: the last 5 of 5 lines of its log:",
+        "    test login::form ... FAILED",
+        "    thread 'login::form' panicked at src/login.rs:42:9:",
+        "    error: test failed, to rerun pass `--lib`",
+    ] {
+        assert!(answer.text.contains(said), "{said} in {}", answer.text);
+    }
+    // Colours, timestamps and the job's and step's names before each line are noise.
+    for noise in ["\u{1b}", "2026-01-01T", "Run cargo test"] {
+        assert!(!answer.text.contains(noise), "{noise:?} in {}", answer.text);
+    }
+    // Only the failed job's log is asked, for the job the check's link names, in the repository.
+    let calls = gh_calls(&user);
+    let logs: Vec<&String> = calls.iter().filter(|c| c.starts_with("run view")).collect();
+    assert_eq!(
+        logs,
+        ["run view --job 456 --log-failed -R github.com/acme/api"],
+        "{calls:?}"
+    );
+    // The same by its number.
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "show", "repository": "api", "number": 12}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("    error: test failed, to rerun pass `--lib`"),
+        "{}",
+        answer.text
+    );
+}
+
+#[test]
+fn the_length_of_a_failed_job_s_log_is_bounded() {
+    let user = User::with_fake_agent().with_fake_gh();
+    fixture(&user);
+    let many: Vec<String> = (1..=200).map(|n| format!("line {n:03}")).collect();
+    // Ten lines of 1,000 bytes: the bytes bound cuts before the lines' does.
+    let wide: Vec<String> = (1..=10)
+        .map(|n| format!("{n:02}{}", "w".repeat(998)))
+        .collect();
+    // Three jobs filling their bytes, then more than the total allows.
+    let full: Vec<String> = (1..=30)
+        .map(|n| format!("{n:02} {}", "f".repeat(117)))
+        .collect();
+    script_logs(
+        &user,
+        pull_with_failed_jobs(&[
+            ("many", 10),
+            ("wide", 11),
+            ("full-a", 12),
+            ("full-b", 13),
+            ("full-c", 14),
+            ("full-d", 15),
+            ("full-e", 16),
+        ]),
+        json!({"10": gh_log("many", &many), "11": gh_log("wide", &wide),
+            "12": gh_log("a", &full), "13": gh_log("b", &full), "14": gh_log("c", &full),
+            "15": gh_log("d", &full), "16": gh_log("e", &full)}),
+    );
+    let (_, mcp) = agent_in(&user, Some("login"));
+
+    let answer = mcp.call("forge", json!({"action": "show", "repository": "api"}));
+
+    assert!(!answer.error, "{}", answer.text);
+    let text = answer.text;
+    // The last lines only, and how many there were.
+    assert!(
+        text.contains("- many: the last 40 of 200 lines of its log:"),
+        "{text}"
+    );
+    assert!(text.contains("    line 200\n"), "{text}");
+    assert!(text.contains("    line 161\n"), "{text}");
+    assert!(!text.contains("line 160"), "{text}");
+    // A job's bytes are bounded too: the oldest lines go first, whole.
+    let wide_log = text
+        .split("- wide:")
+        .nth(1)
+        .and_then(|rest| rest.split("\n  - ").next())
+        .unwrap();
+    assert!(
+        wide_log.contains("the last 3 of 10 lines of its log"),
+        "{wide_log}"
+    );
+    assert!(wide_log.contains("10www"), "{wide_log}");
+    assert!(!wide_log.contains("06www"), "{wide_log}");
+    assert!(wide_log.len() <= 4000 + 200, "{} bytes", wide_log.len());
+    // The whole is bounded, and what it leaves out is said, never silently dropped.
+    let jobs = text.split("failed jobs").nth(1).unwrap();
+    assert!(jobs.len() <= 12_000 + 1_500, "{} bytes", jobs.len());
+    for left_out in ["full-d", "full-e"] {
+        let said = format!("- {left_out}: no log: at most 5 logs and 12000 bytes are given");
+        assert!(text.contains(&said), "{said} in {text}");
+    }
+    // At most five logs are asked of `gh`; the others are named.
+    let asked = gh_calls(&user)
+        .into_iter()
+        .filter(|call| call.starts_with("run view"))
+        .count();
+    assert_eq!(asked, 5, "{text}");
+}
+
+#[test]
+fn a_secret_in_a_failed_job_s_log_is_masked() {
+    let user = User::with_fake_agent().with_fake_gh();
+    fixture(&user);
+    let token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let lines: Vec<String> = [
+        format!("curl -H 'Authorization: token {token}'"),
+        "error: 401".into(),
+    ]
+    .to_vec();
+    script_logs(
+        &user,
+        pull_with_failed_jobs(&[("deploy", 456)]),
+        json!({"456": gh_log("deploy", &lines)}),
+    );
+    let (_, mcp) = agent_in(&user, Some("login"));
+
+    let answer = mcp.call("forge", json!({"action": "show", "repository": "api"}));
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(answer.text.contains("error: 401"), "{}", answer.text);
+    assert!(!answer.text.contains(token), "{}", answer.text);
+    assert!(answer.text.contains("[masked]"), "{}", answer.text);
+}
+
+#[test]
+fn a_check_that_has_no_log_to_read_says_why() {
+    let user = User::with_fake_agent().with_fake_gh();
+    fixture(&user);
+    let mut pull = pull_with_failed_jobs(&[("gone", 77)]);
+    pull["statusCheckRollup"].as_array_mut().unwrap().extend([
+        // A commit status of another CI, and one with no link at all.
+        json!({"__typename": "StatusContext", "context": "ci/outside", "state": "FAILURE",
+            "targetUrl": "https://ci.example.com/builds/5"}),
+        json!({"__typename": "StatusContext", "context": "ci/bare", "state": "ERROR"}),
+    ]);
+    // The log of job 77 is gone: GitHub keeps them for a while only.
+    script_logs(&user, pull, json!({}));
+    let (_, mcp) = agent_in(&user, Some("login"));
+
+    let answer = mcp.call("forge", json!({"action": "show", "repository": "api"}));
+
+    assert!(!answer.error, "{}", answer.text);
+    for said in [
+        "failed jobs (3):",
+        "- gone: no log: gh run view failed: failed to get run log: log not found",
+        "- ci/outside: no log: it is not a GitHub Actions job, see https://ci.example.com/builds/5",
+        "- ci/bare: no log: it is not a GitHub Actions job",
+    ] {
+        assert!(answer.text.contains(said), "{said} in {}", answer.text);
+    }
+}
+
+#[test]
+fn a_pull_request_with_no_failed_job_asks_for_no_log() {
+    let user = User::with_fake_agent().with_fake_gh();
+    fixture(&user);
+    one_pull_request(&user, pull(12, "Add the login page"));
+    let (_, mcp) = agent_in(&user, Some("login"));
+
+    let answer = mcp.call("forge", json!({"action": "show", "repository": "api"}));
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(!answer.text.contains("failed jobs"), "{}", answer.text);
+    assert!(
+        gh_calls(&user)
+            .iter()
+            .all(|call| !call.starts_with("run view")),
+        "{:?}",
+        gh_calls(&user)
+    );
+}
+
+#[test]
+fn a_forge_without_logs_says_so() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    bitbucket_fixture(&user);
+    bitbucket_pull_requests(&user);
+    let (_, mcp) = agent_in(&user, Some("login"));
+
+    let answer = mcp.call("forge", json!({"action": "show", "repository": "web"}));
+
+    assert!(!answer.error, "{}", answer.text);
+    for said in [
+        "checks: failing (Jenkins failing)",
+        "failed jobs (1):",
+        "- Jenkins: no log: bkt gives no job logs, read it on Bitbucket",
+    ] {
+        assert!(answer.text.contains(said), "{said} in {}", answer.text);
+    }
+    // Nothing was asked of Bitbucket for it.
+    assert!(
+        bkt_calls(&user).iter().all(|call| !call.contains("log")),
+        "{:?}",
+        bkt_calls(&user)
+    );
+}
