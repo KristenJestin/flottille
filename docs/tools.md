@@ -323,7 +323,7 @@ pending requests.
   wakes the agent once, as a `subscription` delivery (`docs/design.md` §5.6). The call answers at
   once; what is so already (checks that already ended) is no event, `show` reads it. `from` is
   `anyone` (the default) or `people`: no bot, nor a comment the agent posted. `minutes` is how
-  long it waits, 60 by default, 1,440 at most. `checks` delivers how many passed and failed, with
+  long it waits, 60 by default, 240 (4 hours) at most. `checks` delivers how many passed and failed, with
   the end of each failed job's log as `show` gives it; `review` and `comment` their author, their
   state and an excerpt (300 characters). A merged or closed pull request ends any subscription,
   said; so does its time, said. Subscribing again to the same pull request replaces the agent's

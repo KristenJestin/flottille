@@ -20,7 +20,7 @@ use crate::deliveries;
 /// How long a subscription waits when the agent says nothing.
 pub const DEFAULT_MINUTES: u64 = 60;
 /// The longest an agent can make it wait.
-pub const LONGEST_MINUTES: u64 = 24 * 60;
+pub const LONGEST_MINUTES: u64 = 4 * 60;
 /// Whose events count.
 pub const FROM: [&str; 2] = ["anyone", "people"];
 

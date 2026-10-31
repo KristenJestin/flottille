@@ -381,6 +381,32 @@ fn the_maximum_time_ends_it_and_says_so() {
 }
 
 #[test]
+fn a_subscription_asked_for_four_hours_is_accepted() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull());
+    let (_, mcp) = agent(&user);
+
+    let answer = subscribe(&mcp, json!({"events": ["checks"], "minutes": 240}));
+    assert!(answer.contains("within 240 min"), "{answer}");
+}
+
+#[test]
+fn a_subscription_asked_for_more_than_four_hours_is_refused_and_says_240_is_the_most() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull());
+    let (_, mcp) = agent(&user);
+
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "subscribe", "events": ["checks"], "minutes": 241}),
+    );
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains("from 1 to 240"), "{}", answer.text);
+}
+
+#[test]
 fn no_forge_read_happens_while_no_subscription_or_watch_is_open() {
     let user = user();
     fixture(&user);
