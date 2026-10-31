@@ -629,6 +629,59 @@ impl Shell {
                     reply.update(cx, |reply, cx| reply.replied(refused, window, cx));
                 }
             }
+            Outcome::Unqueued {
+                session,
+                delivery,
+                edit,
+                taken,
+            } => {
+                let queued = self
+                    .session_page
+                    .clone()
+                    .filter(|page| page.read(cx).id() == session);
+                let queued = queued.map(|page| page.read(cx).queued().clone());
+                // Gone from the queue whether it was taken back, or the root read it first.
+                let left = match &taken {
+                    Ok(_) => true,
+                    Err(why) => why == crate::queued::ALREADY_READ,
+                };
+                if let Some(queued) = queued {
+                    queued.update(cx, |list, cx| list.answered(&delivery, left, cx));
+                }
+                match taken {
+                    Ok((text, pictures)) if edit => {
+                        if let Some(reply) = self.replies.get(&session).cloned() {
+                            reply
+                                .update(cx, |reply, cx| reply.restore(&text, pictures, window, cx));
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(why) => flottille_ui::toast(
+                        crate::queued::refused_toast(&why, "The message was not taken back"),
+                        cx,
+                    ),
+                }
+            }
+            Outcome::SentNow {
+                session,
+                delivery,
+                refused,
+            } => {
+                let queued = self
+                    .session_page
+                    .clone()
+                    .filter(|page| page.read(cx).id() == session);
+                if let Some(queued) = queued.map(|page| page.read(cx).queued().clone()) {
+                    let left = refused.as_deref() == Some(crate::queued::ALREADY_READ);
+                    queued.update(cx, |list, cx| list.answered(&delivery, left, cx));
+                }
+                if let Some(why) = refused {
+                    flottille_ui::toast(
+                        crate::queued::refused_toast(&why, "The message was not sent now"),
+                        cx,
+                    );
+                }
+            }
             Outcome::Stopped { session, refused } => {
                 self.sidebar.update(cx, |sidebar, cx| {
                     sidebar.answered(&session, refused.clone(), cx)

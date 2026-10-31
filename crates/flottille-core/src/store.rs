@@ -1682,6 +1682,44 @@ impl Store {
         Ok((moved, event))
     }
 
+    /// Takes back a message the user wrote to the agent, if it still waits: its state becomes
+    /// `withdrawn`, with a `delivery.withdrawn` event. Checked and written in one transaction, so
+    /// a delivery a prompt took first is left as it is and `None` comes back.
+    pub fn withdraw(&mut self, agent: &str, id: &str) -> Result<(Option<Delivery>, Option<Event>)> {
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE deliveries SET state = 'withdrawn' \
+             WHERE id = ?1 AND agent = ?2 AND kind = 'user' AND state = 'queued'",
+            params![id, agent],
+        )?;
+        if changed == 0 {
+            return Ok((None, None));
+        }
+        let delivery = transaction
+            .prepare_cached(&format!(
+                "SELECT {DELIVERY_COLUMNS} FROM deliveries WHERE id = ?1"
+            ))?
+            .query_row(params![id], delivery_row)?;
+        let event = append_agent_event(
+            &transaction,
+            agent,
+            "delivery.withdrawn",
+            json!({"agent": agent, "deliveries": [id]}),
+        )?;
+        transaction.commit()?;
+        Ok((Some(delivery), Some(event)))
+    }
+
+    /// Makes a message the user wrote a redirect, if it still waits: the agent's turn is
+    /// cancelled and this message is its next prompt, alone. Whether it still waited.
+    pub fn redirect(&self, agent: &str, id: &str) -> Result<bool> {
+        Ok(self.connection.execute(
+            "UPDATE deliveries SET urgency = ?3 \
+             WHERE id = ?1 AND agent = ?2 AND kind = 'user' AND state = 'queued'",
+            params![id, agent, crate::approval::REDIRECT],
+        )? > 0)
+    }
+
     /// Stores a subscription, in place of the agent's own on the same target.
     pub fn subscribe(&mut self, subscription: &Subscription) -> Result<()> {
         let transaction = self.connection.transaction()?;
@@ -3518,6 +3556,59 @@ mod tests {
         assert!(store.unsubscribe("s2").unwrap());
         assert!(!store.unsubscribe("s2").unwrap());
         assert!(store.subscriptions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_waiting_message_is_withdrawn_once_and_one_taken_first_cannot_be() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .create_agent(&an_agent(), ("agent.created", json!({})))
+            .unwrap();
+        let agent = "0123456789ab";
+        store.deliver(&a_delivery("d1", "user")).unwrap();
+        store.deliver(&a_delivery("d2", "user")).unwrap();
+        store.deliver(&a_delivery("d3", "child-report")).unwrap();
+
+        let (taken, event) = store.withdraw(agent, "d1").unwrap();
+        assert_eq!(taken.unwrap().id, "d1");
+        let event = event.unwrap();
+        assert_eq!(event.name, "delivery.withdrawn");
+        assert_eq!(event.data["deliveries"], json!(["d1"]));
+        assert_eq!(store.delivery("d1").unwrap().unwrap().state, "withdrawn");
+        assert!(store.withdraw(agent, "d1").unwrap().0.is_none(), "twice");
+        // What the user did not write is not theirs to take back.
+        assert!(store.withdraw(agent, "d3").unwrap().0.is_none());
+        assert_eq!(store.delivery("d3").unwrap().unwrap().state, "queued");
+
+        // The agent took d2 first: nothing is withdrawn, and the delivery is as it was.
+        store
+            .move_deliveries(agent, &["d2".into()], "queued", "sending", "prompt")
+            .unwrap();
+        let (taken, event) = store.withdraw(agent, "d2").unwrap();
+        assert!(taken.is_none() && event.is_none());
+        assert_eq!(store.delivery("d2").unwrap().unwrap().state, "sending");
+    }
+
+    #[test]
+    fn a_waiting_message_is_redirected_only_while_it_waits() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .create_agent(&an_agent(), ("agent.created", json!({})))
+            .unwrap();
+        let agent = "0123456789ab";
+        store.deliver(&a_delivery("d1", "user")).unwrap();
+        store.deliver(&a_delivery("d2", "child-report")).unwrap();
+
+        assert!(store.redirect(agent, "d1").unwrap());
+        assert_eq!(
+            store.delivery("d1").unwrap().unwrap().urgency,
+            approval::REDIRECT
+        );
+        assert!(!store.redirect(agent, "d2").unwrap(), "not the user's");
+        store
+            .move_deliveries(agent, &["d1".into()], "queued", "sending", "prompt")
+            .unwrap();
+        assert!(!store.redirect(agent, "d1").unwrap(), "taken already");
     }
 
     #[test]

@@ -14,9 +14,10 @@ use std::time::{Duration, Instant};
 use common::User;
 use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
+use flottille_window::actions::Command;
 use flottille_window::conversation::{Block, JUDGE};
 use flottille_window::link::Connect;
-use flottille_window::queued::{WAITS, queued_id};
+use flottille_window::queued::{CANCEL, EDIT, SEND_NOW, WAITS, queued_button, queued_id};
 use flottille_window::session::{COPIED, SessionPage, said_at};
 use flottille_window::tree::session_id;
 use gpui_kit::test::TestWindowExt;
@@ -360,6 +361,245 @@ fn a_message_sent_during_a_turn_shows_as_waiting_then_as_sent(cx: &mut TestAppCo
         !has(queued_id(&delivery), cx),
         "the waiting bubble folded away"
     );
+}
+
+/// The lead works, and a message the user wrote to it waits under the conversation: the
+/// composer, and the waiting message's delivery.
+fn with_a_waiting_message<'a>(
+    user: &User,
+    lead: &str,
+    text: &str,
+    cx: &'a mut TestAppContext,
+) -> (
+    Entity<Shell>,
+    Entity<SessionPage>,
+    Entity<flottille_window::session::Reply>,
+    String,
+    &'a mut VisualTestContext,
+) {
+    let (shell, page, cx) = open_session(user, lead, cx);
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": "work a while"}),
+    )
+    .unwrap();
+    let reply = shell
+        .read_with(cx, |s, _| s.reply_of(lead).cloned())
+        .expect("the session has a composer");
+    until(&shell, cx, "the turn runs", |cx| {
+        reply.read_with(cx, |r, _| r.is_running())
+    });
+    let delivery = user
+        .call("agent.send", json!({"agent": lead, "message": text}))
+        .unwrap()["delivery"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    until(&shell, cx, "the message waits", |cx| {
+        queued(&page, cx) == [text]
+    });
+    settle(cx);
+    (shell, page, reply, delivery, cx)
+}
+
+fn prompts(user: &User) -> Vec<String> {
+    user.received_requests("session/prompt")
+        .iter()
+        .map(|request| request.to_string())
+        .collect()
+}
+
+#[gpui_kit::test]
+fn a_waiting_message_has_send_now_edit_and_cancel_buttons_a_sent_one_has_none(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let lead = lead(&user);
+    let (shell, page, _, delivery, cx) =
+        with_a_waiting_message(&user, &lead, "and update the docs", cx);
+
+    for (which, words) in [("send-now", SEND_NOW), ("edit", EDIT), ("cancel", CANCEL)] {
+        assert_eq!(
+            label(queued_button(&delivery, which), cx).as_deref(),
+            Some(words),
+            "a visible label on {which}"
+        );
+    }
+    // Once the root read it, it is a message like the others, with none of them.
+    until(&shell, cx, "the message is sent", |cx| {
+        row_of(&page, cx, |b| is_message(b, "and update the docs")).is_some()
+            && queued(&page, cx).is_empty()
+    });
+    at_rest(cx);
+    for which in ["send-now", "edit", "cancel"] {
+        assert!(!has(queued_button(&delivery, which), cx), "{which}");
+    }
+}
+
+#[gpui_kit::test]
+fn cancelling_a_waiting_message_folds_its_bubble_away_and_the_root_never_receives_it(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let lead = lead(&user);
+    let (shell, page, _, delivery, cx) = with_a_waiting_message(&user, &lead, "azdsqdsq", cx);
+
+    cx.update(|window, cx| window.click(queued_button(&delivery, "cancel"), cx));
+
+    until(&shell, cx, "the bubble leaves the queue", |cx| {
+        queued(&page, cx).is_empty()
+    });
+    at_rest(cx);
+    assert!(!has(queued_id(&delivery), cx), "the bubble folded away");
+    assert!(waiting_in_the_daemon(&user, &lead).is_empty());
+    // The turn goes on and ends: the root never got the message, and the conversation never
+    // shows it.
+    user.call("agent.cancel", json!({"agent": lead})).unwrap();
+    until(&shell, cx, "the turn ends", |cx| {
+        row_of(&page, cx, |b| is_message(b, "work a while")).is_some()
+            && state_of(&user, &lead) == "idle"
+    });
+    assert!(prompts(&user).iter().all(|p| !p.contains("azdsqdsq")));
+    assert!(row_of(&page, cx, |b| is_message(b, "azdsqdsq")).is_none());
+}
+
+fn waiting_in_the_daemon(user: &User, lead: &str) -> Vec<Value> {
+    user.call("agent.tree", json!({"agent": lead})).unwrap()["agents"][0]["queued"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+#[gpui_kit::test]
+fn editing_a_waiting_message_puts_its_text_and_pictures_in_the_composer_after_what_was_typed(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    let mut with_images = script();
+    with_images["images"] = true.into();
+    user.fake_script(with_images);
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let lead = lead(&user);
+    let (shell, page, reply, delivery, cx) = {
+        let (shell, page, cx) = open_session(&user, &lead, cx);
+        user.call(
+            "agent.send",
+            json!({"agent": lead, "message": "work a while"}),
+        )
+        .unwrap();
+        let reply = shell
+            .read_with(cx, |s, _| s.reply_of(&lead).cloned())
+            .unwrap();
+        until(&shell, cx, "the turn runs", |cx| {
+            reply.read_with(cx, |r, _| r.is_running())
+        });
+        let delivery = user
+            .call(
+                "agent.send",
+                json!({"agent": lead, "message": "look at this",
+                    "images": [{"mime": "image/png", "data": "iVBORw0KGgo="}]}),
+            )
+            .unwrap()["delivery"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        until(&shell, cx, "the message waits", |cx| {
+            queued(&page, cx) == ["look at this"]
+        });
+        settle(cx);
+        (shell, page, reply, delivery, cx)
+    };
+    let field = reply.read_with(cx, |r, _| r.field().clone());
+    field.update_in(cx, |field, window, cx| {
+        field.set_value("a draft", window, cx)
+    });
+
+    cx.update(|window, cx| window.click(queued_button(&delivery, "edit"), cx));
+
+    until(&shell, cx, "the message is in the composer", |cx| {
+        field.read_with(cx, |f, _| f.value().to_string()) == "a draft\nlook at this"
+    });
+    until(&shell, cx, "its picture is attached", |cx| {
+        reply.read_with(cx, |r, _| r.attachments().len() == 1)
+    });
+    until(&shell, cx, "it left the queue", |cx| {
+        queued(&page, cx).is_empty()
+    });
+    assert!(waiting_in_the_daemon(&user, &lead).is_empty());
+    // Sent again, it waits again at the end of the queue.
+    reply.update_in(cx, |reply, window, cx| reply.send(window, cx));
+    until(&shell, cx, "it waits again", |cx| {
+        queued(&page, cx) == ["a draft\nlook at this"]
+    });
+}
+
+#[gpui_kit::test]
+fn withdrawing_a_message_the_root_already_read_says_so_in_a_toast_and_the_message_shows_as_sent(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let lead = lead(&user);
+    let (shell, page, _, delivery, cx) =
+        with_a_waiting_message(&user, &lead, "and update the docs", cx);
+    // The root takes it first.
+    user.call("agent.cancel", json!({"agent": lead})).unwrap();
+    eventually("the root to read it", || {
+        prompts(&user)
+            .iter()
+            .any(|p| p.contains("and update the docs"))
+    });
+
+    shell.update(cx, |shell, _| {
+        shell.perform(Command::Unqueue {
+            session: lead.clone(),
+            delivery: delivery.clone(),
+            edit: false,
+        })
+    });
+
+    until(&shell, cx, "the toast says so", |cx| {
+        toasts(&shell, cx) == ["Already read by the agent"]
+    });
+    until(&shell, cx, "it shows as sent", |cx| {
+        row_of(&page, cx, |b| is_message(b, "and update the docs")).is_some()
+            && queued(&page, cx).is_empty()
+    });
+}
+
+#[gpui_kit::test]
+fn send_now_stops_the_turn_and_the_root_receives_that_message_next_before_the_others(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let lead = lead(&user);
+    let (shell, page, _, first, cx) =
+        with_a_waiting_message(&user, &lead, "and update the docs", cx);
+    let second = user
+        .call(
+            "agent.send",
+            json!({"agent": lead, "message": "then fix the tests"}),
+        )
+        .unwrap()["delivery"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    until(&shell, cx, "both wait", |cx| queued(&page, cx).len() == 2);
+    settle(cx);
+
+    cx.update(|window, cx| window.click(queued_button(&second, "send-now"), cx));
+
+    // The long turn is cut short; the next prompt is the second message alone, and the first
+    // follows it.
+    until(&shell, cx, "both were read", |cx| {
+        queued(&page, cx).is_empty()
+            && row_of(&page, cx, |b| is_message(b, "and update the docs")).is_some()
+            && row_of(&page, cx, |b| is_message(b, "then fix the tests")).is_some()
+    });
+    let sent = prompts(&user);
+    let next = sent.len() - 2;
+    assert!(sent[next].contains("then fix the tests") && !sent[next].contains("update the docs"));
+    assert!(sent[next + 1].contains("and update the docs"));
+    let _ = first;
 }
 
 #[gpui_kit::test]

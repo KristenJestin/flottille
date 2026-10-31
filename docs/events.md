@@ -483,10 +483,11 @@ the same id is not stored again, and has no event.
 | `kind` | `user`, `brief`, `launched`, `parent`, `child-report`… |
 | `urgency` | `between-turns`, `urgent` or `redirect`. |
 
-#### `delivery.sent`, `delivery.given_back`, `delivery.superseded`
+#### `delivery.sent`, `delivery.given_back`, `delivery.superseded`, `delivery.withdrawn`
 
 Deliveries were sent (`how`: `prompt`, or `note` on a tool result), given back to the queue
-(their turn failed), or superseded (their agent ended first).
+(their turn failed), superseded (their agent ended first), or withdrawn (the user took back a
+message they wrote to the root, before the root read it: `agent.unqueue`).
 
 | Field | |
 |---|---|

@@ -557,6 +557,28 @@ $ flottille agent send bd7ed8152969 "Which database did we pick?" --follow
 We picked PostgreSQL.
 ```
 
+### `flottille agent unqueue <agent> <delivery>`
+
+Takes back a message you wrote to a root agent that it has not read yet (it waits for the turn
+that runs to end): the agent never reads it. `<delivery>` is the id `agent send --json` gave, or
+`delivery` in `queued` of `agent tree --json`. Prints the message, to write it again if you want
+to change it; `--json` prints `{"agent", "delivery", "text", "images"}` (`images` is empty here).
+Refused, on the standard error with a failing exit code, with "already read by the agent" when the
+agent took the message first, and for one already taken back. A `send --follow` that waits for
+the message ends with an error saying it was taken back.
+
+```
+$ flottille agent unqueue bd7ed8152969 user-3f2a
+Took back your message user-3f2a to agent bd7ed8152969: it never reads it. It said:
+azdsqdsq
+```
+
+### `flottille agent send-now <agent> <delivery>`
+
+Hands a root agent a message that waits, at once: its turn is cancelled (the agent stays) and
+this message is its next prompt, alone, ahead of the other waiting messages, which keep their order
+behind it. `--json` prints `{"agent", "delivery"}`. Refused as `unqueue` is.
+
 ### `flottille agent chat <agent>`
 
 A conversation with a root agent in the terminal. It checks the agent first, as `send` does, and
