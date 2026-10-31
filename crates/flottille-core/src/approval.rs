@@ -187,7 +187,8 @@ pub struct Delivery {
     pub body: String,
     /// `between-turns`, `urgent` or `redirect`.
     pub urgency: String,
-    /// `queued`; `sending` while the prompt that holds it is played; `sent`; or `superseded`.
+    /// `queued`; `sending` while the prompt that holds it is played; `sent`; `superseded`; or
+    /// `withdrawn` (the user took it back before the agent read it).
     pub state: String,
     pub created_at: u64,
     pub sent_at: Option<u64>,

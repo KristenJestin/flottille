@@ -319,7 +319,10 @@ fn item(daemon: &Daemon, session: &Agent, event: &Event) -> Item {
                 .strip_prefix(&format!("brief-{}-", session.id))
                 .is_some_and(|epoch| epoch != "0");
             match daemon.read(|store| store.delivery(id)) {
-                Ok(Some(delivery)) if !again => Item::User(delivery.body),
+                // A message taken back was never said to the agent.
+                Ok(Some(delivery)) if !again && delivery.state != "withdrawn" => {
+                    Item::User(delivery.body)
+                }
                 _ => Item::Other,
             }
         }

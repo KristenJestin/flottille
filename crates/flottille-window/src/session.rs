@@ -287,7 +287,7 @@ impl SessionPage {
         });
         let needs_you = status.read(cx).state() == AgentState::NeedsYou;
         let mut page = Self {
-            shell,
+            shell: shell.clone(),
             follow,
             layout,
             status,
@@ -300,7 +300,7 @@ impl SessionPage {
             rail,
             drawer,
             reply,
-            queued: cx.new(|_| QueuedMessages::default()),
+            queued: cx.new(|_| QueuedMessages::new(shell, opened.id.clone())),
             command_panel,
             run_drawer,
             watching: None,
@@ -4778,6 +4778,35 @@ impl Reply {
         self.shell
             .update(cx, |shell, _| shell.perform(command))
             .ok();
+        cx.notify();
+    }
+
+    /// A waiting message taken back to be changed: its text goes at the end of what the field
+    /// holds, so that nothing typed is lost, and its pictures join the ones already attached.
+    pub fn restore(
+        &mut self,
+        text: &str,
+        pictures: Vec<Picture>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let typed = self.field.read(cx).value().to_string();
+        let joined = if typed.trim().is_empty() {
+            text.to_owned()
+        } else {
+            format!("{}\n{text}", typed.trim_end())
+        };
+        self.has_text = !joined.trim().is_empty();
+        self.field
+            .update(cx, |field, cx| field.set_value(joined.clone(), window, cx));
+        self.typed(&joined, cx);
+        for picture in pictures {
+            if let Some(format) = gpui_kit::ImageFormat::from_mime_type(&picture.mime) {
+                self.attach(gpui_kit::Image::from_bytes(format, picture.bytes), cx);
+            }
+        }
+        let focus = self.field.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
         cx.notify();
     }
 

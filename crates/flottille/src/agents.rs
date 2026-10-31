@@ -46,6 +46,17 @@ const STOP_GRACE: Duration = Duration::from_secs(2);
 /// The events `agent.show` gives at once.
 const PAGE: usize = 1000;
 
+/// `agent.unqueue`'s and `agent.send_now`'s parameters: a message that waits for the root.
+/// `images` asks for its pictures back.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentUnqueue {
+    agent: String,
+    delivery: String,
+    #[serde(default)]
+    images: bool,
+}
+
 /// `agent.show`'s parameters: a page of the agent's events after `after`, or the last before
 /// `before`.
 #[derive(serde::Deserialize)]
@@ -131,6 +142,18 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 Failure::new("unavailable", "the message could not be stored")
             })?;
             Ok(json!({"agent": agent.to_json(), "after": after, "delivery": delivery}))
+        }
+        "agent.unqueue" => {
+            let asked: AgentUnqueue = serde_json::from_value(params)?;
+            let agent = find(daemon, &asked.agent)?;
+            refuse_child(daemon, &agent, "takes back a message")?;
+            deliveries::withdraw(daemon, &agent.id, &asked.delivery, asked.images)
+        }
+        "agent.send_now" => {
+            let asked: AgentUnqueue = serde_json::from_value(params)?;
+            let agent = find(daemon, &asked.agent)?;
+            refuse_child(daemon, &agent, "sends a message now")?;
+            deliveries::send_now(daemon, &agent.id, &asked.delivery)
         }
         "agent.image" => {
             let asked: AgentImage = serde_json::from_value(params)?;

@@ -260,6 +260,18 @@ pub enum Command {
         /// Pasted or dropped pictures that go with it, as the clipboard gave them.
         images: Vec<Picture>,
     },
+    /// Takes back a message that waits for the session's root (`edit`: to change it and send it
+    /// again). The daemon refuses one the root read first.
+    Unqueue {
+        session: String,
+        delivery: String,
+        edit: bool,
+    },
+    /// Stops the root's turn and hands it a message that waits, next, ahead of the others.
+    SendNow {
+        session: String,
+        delivery: String,
+    },
     /// Reads back an image the session's agent was sent, by the name its event gave.
     Image {
         session: String,
@@ -643,6 +655,20 @@ pub enum Outcome {
     /// A message to the session's root was taken, or refused with why.
     Replied {
         session: String,
+        refused: Option<String>,
+    },
+    /// A waiting message was taken back, with its text and pictures, or the daemon refused with
+    /// why ("already read by the agent").
+    Unqueued {
+        session: String,
+        delivery: String,
+        edit: bool,
+        taken: Result<(String, Vec<Picture>), String>,
+    },
+    /// A waiting message was handed to the root now, or the daemon refused with why.
+    SentNow {
+        session: String,
+        delivery: String,
         refused: Option<String>,
     },
     /// The session's tree was stopped, or the daemon refused with why.
@@ -1348,6 +1374,51 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 refused: Some(why),
             },
         },
+        Command::Unqueue {
+            session,
+            delivery,
+            edit,
+        } => {
+            let taken = match ask_alone(
+                connect,
+                "agent.unqueue",
+                json!({"agent": session, "delivery": delivery, "images": edit}),
+                bounds.quick,
+            ) {
+                Ok(Ok(found)) => Ok((
+                    found["text"].as_str().unwrap_or_default().to_owned(),
+                    found["images"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Picture::of)
+                        .collect(),
+                )),
+                Ok(Err(why)) | Err(why) => Err(why),
+            };
+            Outcome::Unqueued {
+                session,
+                delivery,
+                edit,
+                taken,
+            }
+        }
+        Command::SendNow { session, delivery } => {
+            let refused = match ask_alone(
+                connect,
+                "agent.send_now",
+                json!({"agent": session, "delivery": delivery}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::SentNow {
+                session,
+                delivery,
+                refused,
+            }
+        }
         Command::Stop { session } => {
             let refused = match ask_alone(
                 connect,

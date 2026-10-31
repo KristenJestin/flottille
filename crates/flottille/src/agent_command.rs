@@ -50,6 +50,23 @@ pub enum AgentAction {
         #[arg(long)]
         json: bool,
     },
+    /// Take back a message you wrote to a root agent that still waits for it: it never reads it
+    Unqueue {
+        agent: String,
+        /// The message's delivery: `agent send --json` and `agent tree --json` give it
+        delivery: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Hand a root agent a message that waits, at once: its turn is cancelled and this message
+    /// is its next prompt, ahead of the other waiting ones
+    SendNow {
+        agent: String,
+        /// The message's delivery: `agent send --json` and `agent tree --json` give it
+        delivery: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Talk to a root agent from the terminal: each line you type is sent, and the reply streams
     Chat { agent: String },
     /// A page of an agent's conversation: any agent of a tree
@@ -203,6 +220,43 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                 );
             }
             Ok(code)
+        }
+        AgentAction::Unqueue {
+            agent,
+            delivery,
+            json,
+        } => {
+            let taken = Client::connect_or_start(paths)?.request(
+                "agent.unqueue",
+                serde_json::json!({"agent": agent, "delivery": delivery}),
+            )?;
+            if json {
+                println!("{taken}");
+            } else {
+                println!(
+                    "Took back your message {delivery} to agent {agent}: it never reads it. It said:\n{}",
+                    text(&taken, "text")
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        AgentAction::SendNow {
+            agent,
+            delivery,
+            json,
+        } => {
+            let sent = Client::connect_or_start(paths)?.request(
+                "agent.send_now",
+                serde_json::json!({"agent": agent, "delivery": delivery}),
+            )?;
+            if json {
+                println!("{sent}");
+            } else {
+                println!(
+                    "Agent {agent}: its turn is cancelled and it reads your message {delivery} next."
+                );
+            }
+            Ok(ExitCode::SUCCESS)
         }
         AgentAction::Chat { agent } => chat::run(paths, &agent),
         AgentAction::Read { agent, after, json } => {
