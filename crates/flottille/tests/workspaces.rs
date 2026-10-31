@@ -1780,3 +1780,196 @@ fn an_uncommitted_file_still_refuses_the_removal_of_a_merged_pruned_branch() {
     assert!(!message.contains("on no remote"), "{message}");
     assert!(fixture.has_branch(&fixture.folder.join("lib")));
 }
+
+// The output of a setup step (`workspace.step_output`).
+
+impl Fixture {
+    fn step_output(&self, position: u64) -> Result<Value, (String, String)> {
+        self.user.call(
+            "workspace.step_output",
+            json!({"project": "app", "name": "login", "position": position}),
+        )
+    }
+
+    /// Waits for a file a script made.
+    fn appears(&self, path: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !path.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "{} never appeared",
+                path.display()
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+#[test]
+fn a_running_setup_step_streams_its_output() {
+    let fixture = Fixture::new(false);
+    let script = fixture.script(
+        "stream.sh",
+        "echo first line\ntouch \"$1\"\nwhile [ ! -f \"$2\" ]; do sleep 0.05; done\necho last line\n",
+    );
+    let (written, release) = (fixture.user.path("written"), fixture.user.path("release"));
+    fixture.configure(&format!(
+        "[[setup]]\nrun = \"sh {} {} {}\"\nrepository = \"lib\"\n",
+        script.display(),
+        written.display(),
+        release.display()
+    ));
+
+    fixture.create(json!({"repositories": ["lib"]})).unwrap();
+    fixture.appears(&written);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let during = loop {
+        let during = fixture.step_output(1).unwrap();
+        if during["output"] == "first line" {
+            break during;
+        }
+        assert!(Instant::now() < deadline, "{during}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+
+    assert_eq!(during["state"], "running", "{during}");
+    assert_eq!(during["earlier"], false);
+    assert!(during["started_at"].is_u64() && during["ended_at"].is_null());
+    std::fs::write(&release, "").unwrap();
+    let workspace = fixture.settled("login");
+    assert_eq!(workspace["state"], "ready", "{workspace}");
+    assert_eq!(
+        fixture.step_output(1).unwrap()["output"],
+        "first line\nlast line"
+    );
+}
+
+#[test]
+fn a_finished_setup_step_shows_its_output() {
+    let fixture = Fixture::new(false);
+    let script = fixture.script("done.sh", "echo one\necho two\n");
+    fixture.configure(&format!(
+        "[[setup]]\nrun = \"sh {}\"\nrepository = \"lib\"\n",
+        script.display()
+    ));
+
+    fixture.create(json!({"repositories": ["lib"]})).unwrap();
+    fixture.settled("login");
+    let read = fixture.step_output(1).unwrap();
+
+    assert_eq!(read["state"], "done", "{read}");
+    assert_eq!(read["output"], "one\ntwo");
+    assert_eq!(read["line"], format!("sh {} (in lib)", script.display()));
+    assert_eq!(
+        read["folder"],
+        fixture.workspace("login").join("lib").display().to_string()
+    );
+    assert!(read["ended_at"].is_u64(), "{read}");
+    // The worktree step before it wrote nothing.
+    assert_eq!(fixture.step_output(0).unwrap()["output"], "");
+}
+
+#[test]
+fn a_failed_setup_step_shows_its_whole_output_not_only_the_tail() {
+    let fixture = Fixture::new(false);
+    let failing = fixture.script(
+        "fail.sh",
+        "i=1\nwhile [ $i -le 50 ]; do echo \"line $i\"; i=$((i+1)); done\nexit 3\n",
+    );
+    fixture.configure(&format!(
+        "[[setup]]\nrun = \"sh {}\"\nrepository = \"lib\"\n",
+        failing.display()
+    ));
+
+    fixture.create(json!({"repositories": ["lib"]})).unwrap();
+    let workspace = fixture.settled("login");
+    let read = fixture.step_output(1).unwrap();
+
+    assert_eq!(read["state"], "failed", "{read}");
+    let whole: Vec<String> = (1..=50).map(|i| format!("line {i}")).collect();
+    assert_eq!(read["output"], whole.join("\n"));
+    // The card of the workspace still keeps its short tail.
+    let kept = workspace["steps"][1]["failure"]["output"].as_str().unwrap();
+    assert_eq!(kept.lines().count(), 40, "{kept}");
+}
+
+#[test]
+fn a_setup_step_that_fails_without_a_program_shows_why() {
+    let fixture = Fixture::new(false);
+    fixture.configure("[[setup]]\nlink = \"missing.txt\"\nrepository = \"lib\"\n");
+
+    fixture.create(json!({"repositories": ["lib"]})).unwrap();
+    fixture.settled("login");
+    let read = fixture.step_output(1).unwrap();
+
+    assert_eq!(read["state"], "failed", "{read}");
+    assert!(
+        read["output"].as_str().unwrap().contains("missing.txt"),
+        "{read}"
+    );
+}
+
+#[test]
+fn a_secret_in_a_setup_step_s_output_is_masked_while_it_runs_and_once_it_ended() {
+    let fixture = Fixture::new(false);
+    let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    let script = fixture.script(
+        "secret.sh",
+        &format!(
+            "echo \"token {secret}\"\ntouch \"$1\"\nwhile [ ! -f \"$2\" ]; do sleep 0.05; done\n"
+        ),
+    );
+    let (written, release) = (fixture.user.path("written"), fixture.user.path("release"));
+    fixture.configure(&format!(
+        "[[setup]]\nrun = \"sh {} {} {}\"\nrepository = \"lib\"\n",
+        script.display(),
+        written.display(),
+        release.display()
+    ));
+
+    fixture.create(json!({"repositories": ["lib"]})).unwrap();
+    fixture.appears(&written);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let during = loop {
+        let during = fixture.step_output(1).unwrap();
+        if during["output"] != "" {
+            break during;
+        }
+        assert!(Instant::now() < deadline, "{during}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(during["output"], "token [masked]", "{during}");
+    std::fs::write(&release, "").unwrap();
+    fixture.settled("login");
+
+    let after = fixture.step_output(1).unwrap();
+    assert_eq!(after["output"], "token [masked]", "{after}");
+    // Nothing of the store's files (the database and its journal) holds it either.
+    let folder = fixture.user.path("state/flottille");
+    let mut seen = 0;
+    for file in std::fs::read_dir(&folder).unwrap() {
+        let bytes = std::fs::read(file.unwrap().path()).unwrap_or_default();
+        seen += bytes.len();
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains(secret),
+            "the secret reached the store"
+        );
+    }
+    assert!(seen > 0, "no store file was read in {}", folder.display());
+}
+
+#[test]
+fn a_setup_step_that_does_not_exist_is_not_found() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    fixture.create(json!({"repositories": ["lib"]})).unwrap();
+    fixture.settled("login");
+
+    let missing = fixture.step_output(9).unwrap_err();
+    assert_eq!(missing.0, "not-found", "{missing:?}");
+    let ghost = fixture.user.call(
+        "workspace.step_output",
+        json!({"project": "app", "name": "ghost", "position": 0}),
+    );
+    assert_eq!(ghost.unwrap_err().0, "not-found");
+}
