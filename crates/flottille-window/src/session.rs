@@ -2072,16 +2072,30 @@ fn allowed_said(calls: &[Call]) -> String {
 }
 
 /// What the user typed, as the Markdown that draws it as typed: each mark is escaped, each line
-/// keeps its break and its indentation.
+/// keeps its break and its indentation. An address the renderer links by itself is left as typed:
+/// an escape inside it would be drawn, backslash and all.
 fn as_typed(text: &str) -> String {
     let line = |line: &str| {
         let indent = line.len() - line.trim_start_matches(' ').len();
         let mut out = "\u{a0}".repeat(indent);
-        for c in line[indent..].chars() {
+        let line = &line[indent..];
+        let mut at = 0;
+        let mut previous = None;
+        while at < line.len() {
+            let ahead = &line[at..];
+            if let Some(length) = address(previous, ahead) {
+                out.push_str(&ahead[..length]);
+                at += length;
+                previous = ahead[..length].chars().last();
+                continue;
+            }
+            let c = ahead.chars().next().unwrap_or_default();
             if "\\`*_{}[]()#+-.!|<>~&$".contains(c) {
                 out.push('\\');
             }
             out.push(c);
+            at += c.len_utf8();
+            previous = Some(c);
         }
         out
     };
@@ -2089,6 +2103,40 @@ fn as_typed(text: &str) -> String {
         .map(|paragraph| paragraph.lines().map(line).collect::<Vec<_>>().join("\\\n"))
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+/// How many bytes of `ahead` are an address the Markdown renderer links without a mark (GFM's
+/// autolink literal): `http://`, `https://` or `www.` after a character that does not continue a
+/// word, to the next space or `<`, less the punctuation that ends a sentence and a closing
+/// bracket nothing opened.
+fn address(previous: Option<char>, ahead: &str) -> Option<usize> {
+    let starts = |prefix: &str| {
+        ahead
+            .get(..prefix.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+    };
+    let linked = match previous {
+        Some(c) if c.is_alphabetic() => false,
+        _ => starts("http://") || starts("https://"),
+    } || (starts("www.")
+        && previous.is_none_or(|c| c.is_whitespace() || "(*_[]~".contains(c)));
+    if !linked {
+        return None;
+    }
+    let mut end = ahead
+        .find(|c: char| c.is_whitespace() || c == '<')
+        .unwrap_or(ahead.len());
+    while let Some(last) = ahead[..end].chars().next_back() {
+        let opened = ahead[..end].matches('(').count();
+        let closed = ahead[..end].matches(')').count();
+        match last {
+            '?' | '!' | '.' | ',' | ':' | ';' | '*' | '_' | '~' | '\'' | '"' => {}
+            ')' if closed > opened => {}
+            _ => break,
+        }
+        end -= last.len_utf8();
+    }
+    Some(end)
 }
 
 /// A reply or a thought, its Markdown pieces one under the other, in one text-cursor region: the
@@ -5174,6 +5222,33 @@ mod tests {
             assert_eq!(style.code_background(), p.card2, "the header row");
             assert_eq!(style.border(), p.line);
         }
+    }
+
+    #[test]
+    fn a_typed_url_is_drawn_as_typed_and_the_marks_around_it_are_escaped() {
+        let url = "https://bitbucket.org/krinestt/flottille-sandbox/pull-requests/1";
+        assert_eq!(
+            as_typed(&format!("see {url} now")),
+            format!("see {url} now")
+        );
+        assert_eq!(
+            as_typed(&format!("*see* {url}.")),
+            format!("\\*see\\* {url}\\."),
+            "the full stop is the sentence's, not the address's"
+        );
+        assert_eq!(
+            as_typed(&format!("(a-b: {url}) and {url}")),
+            format!("\\(a\\-b: {url}\\) and {url}")
+        );
+        assert_eq!(
+            as_typed("https://en.wikipedia.org/wiki/Foo_(bar) a_b www.example.com/a-b_c"),
+            "https://en.wikipedia.org/wiki/Foo_(bar) a\\_b www.example.com/a-b_c"
+        );
+        assert_eq!(
+            as_typed("xhttps://a.b-c"),
+            "xhttps://a\\.b\\-c",
+            "a word that ends in a scheme is no address"
+        );
     }
 
     fn agent(parent: Option<&str>, state: &str) -> TreeAgent {

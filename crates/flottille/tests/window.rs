@@ -4444,6 +4444,29 @@ fn a_report_is_folded_until_clicked(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_typed_url_is_drawn_as_typed_without_a_backslash(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    settle(cx);
+
+    let typed = "see https://bitbucket.org/krinestt/flottille-sandbox/pull-requests/1, *as* a_b.";
+    read_events(
+        &page,
+        vec![made_up(
+            1,
+            "agent.prompted",
+            json!({"text": format!("[flottille:user]\n{typed}")}),
+        )],
+        cx,
+    );
+    frame(cx);
+
+    assert_eq!(rendered(&page, 0, cx).trim(), typed);
+}
+
+#[gpui_kit::test]
 fn no_visible_text_of_a_session_holds_lead(cx: &mut TestAppContext) {
     let user = team_user();
     let (lead, mcp, _) = lead_in_w(&user);
