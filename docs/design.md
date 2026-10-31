@@ -210,8 +210,8 @@ Flottille's own tools:
 
 The tool list of a session is fixed for its whole life (prompt cache, `reference/hemera.md` §7)
 and depends on what the agent can do, known when it starts: a root gets `ask_user`, `session_send`, `skills`,
-`commands`, `setup` and `project`, a child `ask_parent`; an agent at the depth limit gets no `agent_*` tools
-and no `approval_answer`. A root lead has 22 tools, a leaf worker 12; one more each when the
+`commands`, `setup` and `project`, a child `ask_parent`; a child, whatever its role, gets no `agent_*` tools
+and no `approval_answer`. A root lead has 22 tools, a child 12; one more each when the
 project's repositories declare a forge (`forge`), one more when it declares a tracker
 (`tickets`), whatever the place (`reference/mcp.md` §4).
 
@@ -225,7 +225,7 @@ Two roles at first, with the tool lists of 4.3:
 - **worker**: the role of a child. Its instructions say: do the brief and only it, keep going
   without waiting for answers, end with `report`.
 
-A worker may launch its own children (depth limit, 5.1). Roles are data (a template and a few
+A worker launches no children of its own (no depth, 5.1). Roles are data (a template and a few
 flags), so more can be added without code changes.
 
 ## 5. Parenting and waking (the core of Flottille)
@@ -239,9 +239,10 @@ something happens or when nothing does.
 
 - Every agent launched through `agent_launch` has a parent (its lineage, stable across
   replacements) and a depth. Root agents are started by the user (window, CLI, pilot door).
-- **Caps**: children running at once per project (default 3, configurable 1 to 6), and depth
-  (default 2: a lead's worker may have workers, theirs may not). Above a cap, `agent_launch` is
-  refused with a sentence the agent can act on; it never queues silently.
+- **Caps**: children running at once per project (default 12, configurable 1 to 12), and no
+  depth: only an agent the user started (a root) has the `agent_launch` tool, a child never has
+  it, whatever its role. Above the cap, `agent_launch` is refused with a sentence the agent can
+  act on; it never queues silently.
 - **Stopping a parent stops its tree**, deepest first. Closing or archiving an agent closes its
   children. Deleting a workspace that an agent uses is refused while it runs.
 - **A child belongs to its parent.** The parent reads it (`agent_status`), writes to
@@ -643,7 +644,7 @@ The plan is cut into GitHub milestones; each ends on something the user can use.
 ## 14. Defaults taken, to confirm
 
 - Data in XDG folders; workspaces under the data folder unless the project says otherwise.
-- Children cap 3 per project, depth 2, quiet interval 20 min.
+- Children cap 12 per project, no depth, quiet interval 20 min.
 - Claude reached through Flottille's own bridge; `claude` checked at a pinned version, another one
   only warned about.
 - A new session starts in Auto, and a tree has one mode, its root's, read at each call; Auto

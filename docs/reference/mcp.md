@@ -133,8 +133,8 @@ and the 2026 practice around it:
    `forge` and `tickets` `show`) answer **short by default**, with the way to ask for the rest
    written in the short result.
 9. **The tool list depends on what the agent can do**, and stays fixed for its life:
-   - an agent at the depth limit gets no `agent_*` tools;
-   - only an agent that can have children gets `approval_answer`;
+   - a child gets no `agent_*` tools, whatever its role;
+   - only a root gets `approval_answer`;
    - a root gets `ask_user`, a child gets `ask_parent`.
 
    - `forge` is listed to every agent whose project's repositories declare a forge, `tickets`

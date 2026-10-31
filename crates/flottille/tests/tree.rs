@@ -533,59 +533,6 @@ fn a_root_s_question_waits_for_the_user_until_the_user_writes() {
 }
 
 #[test]
-fn a_worker_s_worker_s_ask_climbs_one_parent_at_a_time_and_each_forward_adds_its_why() {
-    let user = user();
-    let (lead_id, lead) = lead(&user);
-    let worker_id = launch(&lead, "middle", "HANG and split the work");
-    let worker = titled(&user, "middle");
-    launch(&worker, "leaf", "HANG and read the settings");
-    let leaf = titled(&user, "leaf");
-
-    let number = held(leaf.call("fs_read", json!({"path": ".env"})));
-
-    // The worker is mid-turn: the ask rides on its next tool result.
-    let mut seen = String::new();
-    eventually("the worker's note", || {
-        seen = ok(worker.call("fs_list", json!({"path": "."})));
-        seen.contains("[flottille:child-asks]")
-    });
-    assert!(seen.contains(&format!("#{number}")), "{seen}");
-    assert!(seen.contains("leaf"), "{seen}");
-    // Not the lead's yet: refused when it answers before the worker forwarded it.
-    let text = refused(lead.call(
-        "approval_answer",
-        json!({"request_id": number, "decision": "forward", "why": "too early"}),
-    ));
-    assert!(text.contains("not held by this agent"), "{text}");
-    ok(worker.call(
-        "approval_answer",
-        json!({"request_id": number, "decision": "forward", "why": "the leaf needs the key"}),
-    ));
-    let asks = prompted(
-        &user,
-        &[
-            "[flottille:child-asks]",
-            &format!("#{number}"),
-            "the leaf needs the key",
-        ],
-    );
-    assert!(asks.contains("middle"), "{asks}");
-    assert!(approvals(&user).is_empty());
-    ok(lead.call(
-        "approval_answer",
-        json!({"request_id": number, "decision": "forward", "why": "the task needs it"}),
-    ));
-
-    let listed = approvals(&user);
-    assert_eq!(listed.len(), 1);
-    let forwards = &listed[0]["forwards"];
-    assert_eq!(forwards[0]["by"], worker_id.as_str());
-    assert_eq!(forwards[0]["why"], "the leaf needs the key");
-    assert_eq!(forwards[1]["by"], lead_id.as_str());
-    assert_eq!(forwards[1]["why"], "the task needs it");
-}
-
-#[test]
 fn a_parent_cannot_allow_its_child_s_request_nor_answer_one_it_does_not_hold() {
     let user = user();
     let (_, lead) = lead(&user);
@@ -610,14 +557,11 @@ fn a_parent_cannot_allow_its_child_s_request_nor_answer_one_it_does_not_hold() {
 }
 
 #[test]
-fn a_lead_lists_the_agent_tools_ask_user_and_approval_answer_and_a_worker_at_the_depth_limit_none_of_them()
- {
+fn a_lead_lists_the_agent_tools_ask_user_and_approval_answer_and_a_worker_none_of_them() {
     let user = user();
     let (_, lead) = lead(&user);
-    launch(&lead, "middle", "HANG and split the work");
-    let worker = titled(&user, "middle");
-    launch(&worker, "leaf", "HANG and do it");
-    let leaf = titled(&user, "leaf");
+    launch(&lead, "worker", "HANG and do it");
+    let worker = titled(&user, "worker");
 
     let names = lead.names();
     for tool in [
@@ -646,21 +590,16 @@ fn a_lead_lists_the_agent_tools_ask_user_and_approval_answer_and_a_worker_at_the
     assert_eq!(names.len(), 22);
 
     let names = worker.names();
-    assert!(names.iter().any(|n| n == "ask_parent"));
-    assert!(names.iter().any(|n| n == "agent_launch"));
+    assert_eq!(names.len(), 12, "{names:?}");
+    assert!(!names.iter().any(|n| n.starts_with("agent_")));
+    assert!(!names.iter().any(|n| n == "approval_answer"));
     assert!(!names.iter().any(|n| n == "ask_user"));
     assert!(!names.iter().any(|n| n == "session_send"));
     assert!(
         !names
             .iter()
-            .any(|n| ["skills", "commands", "project"].contains(&n.as_str()))
+            .any(|n| ["skills", "commands", "setup", "project"].contains(&n.as_str()))
     );
-
-    let names = leaf.names();
-    assert_eq!(names.len(), 12, "{names:?}");
-    assert!(!names.iter().any(|n| n.starts_with("agent_")));
-    assert!(!names.iter().any(|n| n == "approval_answer"));
-    assert!(!names.iter().any(|n| n == "ask_user"));
     assert!(names.iter().any(|n| n == "ask_parent"));
     assert!(names.iter().any(|n| n == "report"));
 }
@@ -783,34 +722,56 @@ fn nothing_happening_for_20_minutes_gives_the_lead_children_status_then_after_40
 }
 
 #[test]
-fn a_fourth_launch_above_the_cap_of_3_is_refused_and_a_launch_at_depth_3_is_refused() {
+fn twelve_sub_agents_start_and_the_thirteenth_is_refused_with_its_reason() {
     let user = user();
     let (_, lead) = lead(&user);
-    launch(&lead, "a", "HANG one");
-    launch(&lead, "b", "HANG two");
-    let middle = titled(&user, "b");
-    launch(&middle, "c", "HANG three");
-    let leaf = titled(&user, "c");
+    for n in 1..=12 {
+        launch(&lead, &format!("w{n}"), "HANG and wait");
+    }
 
     let text = refused(lead.call(
         "agent_launch",
-        json!({"title": "d", "brief": "four", "workspace": "w"}),
+        json!({"title": "w13", "brief": "one too many", "workspace": "w"}),
     ));
-    assert!(text.contains("3 children already run"), "{text}");
+    assert!(text.contains("12 children already run"), "{text}");
     assert!(text.contains("do the work yourself"), "{text}");
-    let text = refused(leaf.call("agent_launch", json!({"title": "e", "brief": "deep"})));
-    assert!(text.contains("has no tool agent_launch"), "{text}");
 }
 
 #[test]
-fn stopping_the_lead_stops_both_workers_and_their_own_child_deepest_first() {
+fn a_sub_agent_has_no_agent_launching_tool_whatever_its_role() {
+    let user = user();
+    let (_, lead) = lead(&user);
+    for role in ["worker", "lead"] {
+        let title = format!("a {role}");
+        ok(lead.call(
+            "agent_launch",
+            json!({"title": title, "brief": "HANG and wait", "role": role}),
+        ));
+        let child = titled(&user, &title);
+        let names = child.names();
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.starts_with("agent_") || n == "session_send" || n == "approval_answer"),
+            "{role}: {names:?}"
+        );
+        let text = refused(child.call(
+            "agent_launch",
+            json!({"title": "deeper", "brief": "no", "root": true, "workspace": "w"}),
+        ));
+        assert!(text.contains("has no tool agent_launch"), "{role}: {text}");
+        let text = refused(child.call("agent_launch", json!({"title": "e", "brief": "deep"})));
+        assert!(text.contains("has no tool agent_launch"), "{role}: {text}");
+    }
+}
+
+#[test]
+fn stopping_the_lead_stops_both_workers() {
     let user = user();
     let (lead_id, lead) = lead(&user);
     let one = launch(&lead, "one", "HANG one");
     let two = launch(&lead, "two", "HANG two");
-    let middle = titled(&user, "two");
-    let three = launch(&middle, "three", "HANG three");
-    titled(&user, "three");
+    titled(&user, "two");
     eventually("the first worker's turn", || {
         state(&user, &one) == "working"
     });
@@ -819,19 +780,16 @@ fn stopping_the_lead_stops_both_workers_and_their_own_child_deepest_first() {
         "agent_send",
         json!({"agent_id": one, "message": "never read"}),
     ));
-    let refusal = user
-        .call("agent.stop", json!({"agent": three}))
-        .unwrap_err();
+    let refusal = user.call("agent.stop", json!({"agent": two})).unwrap_err();
     assert_eq!(refusal.0, "refused");
     assert!(refusal.1.contains("its root"), "{}", refusal.1);
 
     user.call("agent.stop", json!({"agent": lead_id})).unwrap();
 
-    for id in [&lead_id, &one, &two, &three] {
+    for id in [&lead_id, &one, &two] {
         eventually("the stop", || state(&user, id) == "ended");
     }
     let ended_at = |id: &str| events(&user, id, "agent.ended")[0]["seq"].as_u64().unwrap();
-    assert!(ended_at(&three) < ended_at(&two));
     assert!(ended_at(&two) < ended_at(&lead_id));
     assert!(ended_at(&one) < ended_at(&lead_id));
     assert_eq!(events(&user, &one, "delivery.superseded").len(), 1);

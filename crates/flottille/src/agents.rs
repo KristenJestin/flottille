@@ -57,9 +57,9 @@ struct AgentShow {
     before: Option<u64>,
 }
 
-/// A depth an agent may have, at most: a root is at 0, so a lead's worker may have workers and
-/// theirs may not (`docs/design.md` §5.1).
-pub const DEPTH_LIMIT: u32 = 2;
+/// A depth an agent may have, at most: a root is at 0, and a child, at 1, starts none
+/// (`docs/design.md` §5.1).
+pub const DEPTH_LIMIT: u32 = 1;
 /// Replacements an agent may have in this time before it fails instead (`docs/design.md` §5.5).
 const REPLACEMENTS_MAX: usize = 2;
 const REPLACEMENT_WINDOW_MS: u64 = 30 * 60 * 1000;

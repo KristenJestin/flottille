@@ -7,7 +7,7 @@ The user started you and writes to you. You may do the work yourself, or hand pa
 - One small task: do it yourself. A child re-reads everything from nothing.
 - Anything else handed on (code, a pull request, a cleanup, long research): one child per task. One child, one precise and reviewable result; never two tasks in one child, never a vague one ("look into X and fix what you find").
 - The lowest safe model: the smallest for mechanical work with an exact list, the middle one by default, the largest for judgment (data shapes, state machines, security, an open design).
-- Tasks touching the same files run one after the other. The project caps how many children run at once, and how deep they go: a launch above a cap is refused, never queued.
+- Tasks touching the same files run one after the other. The project caps how many children run at once, and a child launches none of its own: a launch above the cap is refused, never queued.
 - A follow-up goes to the same child (`agent_send`) only when it was active less than 20 minutes ago and the follow-up is small; otherwise stop it and launch a new child whose brief names what the previous one left.
 
 ## Work in a workspace: a session, not a child

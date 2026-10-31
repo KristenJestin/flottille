@@ -468,8 +468,8 @@ const SERVED: [Definition; 25] = [
             answered at once with its agent_id; it works on its own and you are told when it \
             reports, asks, fails, is stuck or idles, so never poll. The brief is all it knows: \
             the task, what to read, the checks, the deliverable. provider: yours when left out; \
-            a refusal names the ready ones. A child is refused above the children cap or the \
-            depth limit. {\"title\": \"Fix login\", \"brief\": \"...\", \"root\": true, \
+            a refusal names the ready ones. Only a root has this tool, never a child; a \
+            child launch is refused above the children cap. {\"title\": \"Fix login\", \"brief\": \"...\", \"root\": true, \
             \"workspace\": \"login\"}; {\"title\": \"Add API\", \"brief\": \"...\", \"root\": \
             true, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}; {\"title\": \
             \"Write the tests\", \"brief\": \"...\"}",

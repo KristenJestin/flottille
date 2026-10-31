@@ -220,7 +220,7 @@ bridge sets on `claude` ("The Claude bridge", below):
   Claude never asks for them, each prefixed `mcp__flottille__`. The list depends on what the agent
   can do (`docs/design.md` §4.3, `docs/reference/mcp.md` §4 rule 9). Every agent has `fs_read`,
   `fs_list`, `search`, `fs_write`, `fs_edit`, `tasks`, `run`, `run_status`
-  and `report`; one that can have children (below the depth limit) also
+  and `report`; a root, which alone has children, also
   `agent_launch`, `agent_send`, `agent_status`, `agent_stop` and
   `approval_answer`; a root `ask_user`, a child `ask_parent`. Every agent has
   `workspace`; one of a project whose repositories declare a forge also has `forge`, and one of
@@ -714,7 +714,7 @@ belongs in another workspace is a session for the user (`agent_launch` with `roo
 starts; the agent that started it and the session write to each other with `session_send`.
 
 - **Caps**: at most `max_children` children of a project run at once (`docs/projects.md`, 1 to
-  6, 3 by default), and a tree is at most 2 deep: an agent at depth 2 has no `agent_*` tool nor
+  12, 12 by default), and a tree is 1 deep: a child, whatever its role, has no `agent_*` tool nor
   `approval_answer`. A launch above a cap is refused with a sentence; it is never queued.
 - **Roles**: `lead` (by default for a root) and `worker` (by default for a child). An agent's
   instructions are Flottille's base, its role's template, the cache boundary, then what is its
