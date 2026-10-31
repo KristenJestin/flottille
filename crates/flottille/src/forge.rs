@@ -257,6 +257,15 @@ pub async fn remote_kept(folder: &Path, base: &Base) -> Result<(), String> {
     Ok(())
 }
 
+/// A commit a forge said, kept only as a hash: it is given to git as a revision, never anything
+/// that could read as an option.
+fn commit_hash(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .filter(|oid| oid.len() >= 7 && oid.chars().all(|c| c.is_ascii_hexdigit()))
+        .map(str::to_owned)
+}
+
 /// A pull request as the forge said it, its texts masked.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Pull {
@@ -266,7 +275,7 @@ pub struct Pull {
     pub state: &'static str,
     /// The branch it merges.
     pub head: String,
-    /// The commit its branch was at, as a hash, when the forge says it (GitHub).
+    /// The commit its branch was at, as a hash, when the forge says it.
     pub head_commit: Option<String>,
     pub base: String,
     pub url: String,
@@ -385,11 +394,7 @@ impl Pull {
                 _ => "open",
             },
             head: text(&value["headRefName"]),
-            // Given to git as a revision: a hash, never anything that could read as an option.
-            head_commit: value["headRefOid"]
-                .as_str()
-                .filter(|oid| oid.len() >= 7 && oid.chars().all(|c| c.is_ascii_hexdigit()))
-                .map(str::to_owned),
+            head_commit: commit_hash(&value["headRefOid"]),
             base: text(&value["baseRefName"]),
             url: text(&value["url"]),
             mergeable: match value["mergeable"].as_str() {

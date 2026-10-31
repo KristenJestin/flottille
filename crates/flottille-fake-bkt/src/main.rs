@@ -27,7 +27,9 @@
 //! real one, every other command needs `--context <name>` naming one of them, and the repository
 //! given as `--workspace` (Cloud) or `--project` (Data Center) and `--repo`: the script's
 //! repositories are keyed `<workspace or project>/<repo>`. `pulls` holds what `bkt pr list --json`
-//! prints in `pull_requests` (`--state` filters, `all` keeps every one), `checks` the `statuses`
+//! prints in `pull_requests` (`--state` filters, `all` keeps every one; a Cloud pull request's
+//! `source.commit.hash` and a Data Center one's `fromRef.latestCommit` are passed through as the
+//! script gives them), `checks` the `statuses`
 //! of `bkt pr checks <id> --json`, `api` the body `bkt api <path>` prints (a path it does not hold
 //! is a 404), `pipelines` the `pipelines` of `bkt pipeline list --json`, and `fail` makes every
 //! call on that repository end with 1, saying its text.

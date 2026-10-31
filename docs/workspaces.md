@@ -180,9 +180,9 @@ Refused while the workspace is being prepared. Then nothing is touched unless:
   `<repository> has commits on no other branch, on its branch <branch>: …`), since its work stays
   on its own branches. Commits on no remote are no loss when the repository's forge says the
   branch's pull request is merged and every one of them is in the commit it merged (its head, as
-  the forge gives it: GitHub's): a squash-merged branch whose remote branch the forge deleted and
-  a fetch pruned. A commit made after, a pull request not merged, a forge that cannot be read or
-  none declared still refuse;
+  the forge gives it: GitHub's `headRefOid`, Bitbucket's source commit): a squash-merged branch
+  whose remote branch the forge deleted and a fetch pruned. A commit made after, a pull request
+  not merged, a forge that cannot be read or none declared still refuse;
 - outside the worktrees made, the workspace folder holds nothing but the links Flottille made and
   folders holding nothing else (`<path> is in no worktree`): no `git status` sees a file written in
   the folder of a workspace that does not take the root repository, nor in a repository folder

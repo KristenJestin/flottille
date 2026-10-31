@@ -10,7 +10,8 @@
 use serde_json::Value;
 
 use super::{
-    Comment, Forge, ForgeCall, Gh, MERGE_METHODS, Pull, blocks, masked, method_refused, run,
+    Comment, Forge, ForgeCall, Gh, MERGE_METHODS, Pull, blocks, commit_hash, masked,
+    method_refused, run,
 };
 use crate::mcp::Outcome;
 
@@ -179,6 +180,9 @@ struct Listed {
     title: String,
     state: &'static str,
     branch: String,
+    /// The commit the source branch was at (Cloud `source.commit.hash`, Data Center
+    /// `fromRef.latestCommit`), when `bkt` says one as a hash.
+    head_commit: Option<String>,
     base: String,
     url: String,
     /// From the repository itself, not from a fork of it.
@@ -206,6 +210,7 @@ fn listed(forge: &Forge, pull: &Value) -> Option<Listed> {
             title,
             state,
             branch: text(&pull["source"]["branch"]["name"]),
+            head_commit: commit_hash(&pull["source"]["commit"]["hash"]),
             base: text(&pull["destination"]["branch"]["name"]),
             url: text(&pull["links"]["html"]["href"]),
             own: matches!((from, to), (Some(from), Some(to))
@@ -231,6 +236,7 @@ fn listed(forge: &Forge, pull: &Value) -> Option<Listed> {
         title,
         state,
         branch: text(&pull["fromRef"]["displayId"]),
+        head_commit: commit_hash(&pull["fromRef"]["latestCommit"]),
         base: text(&pull["toRef"]["displayId"]),
         url: text(&pull["links"]["self"][0]["href"]),
         own: !from.0.is_empty() && from == to,
@@ -388,7 +394,7 @@ async fn detailed(forge: &Forge, context: &str, found: Listed) -> Result<Pull, S
         title: found.title,
         state: found.state,
         head: found.branch,
-        head_commit: None,
+        head_commit: found.head_commit,
         base: found.base,
         url: found.url,
         mergeable,
