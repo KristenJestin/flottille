@@ -58,6 +58,7 @@ use crate::session_link::{
     Where,
 };
 use crate::shell::{Layout, Shell, now_ms};
+use crate::subscriptions::SubscriptionList;
 use crate::tree::place_name;
 use crate::waiting::{Waiting, sentences};
 use flottille_ui::drawer::Closed;
@@ -106,6 +107,8 @@ pub fn state_of(agent: &TreeAgent) -> AgentState {
         _ if agent.parent.is_some() && agent.waiting_on.as_deref() == Some("parent") => {
             AgentState::Waiting
         }
+        // Between turns, for what happens outside: a pull request's checks, a review.
+        _ if agent.waiting_on.as_deref() == Some("subscription") => AgentState::Waiting,
         "starting" | "working" => AgentState::Running,
         _ => AgentState::Idle,
     }
@@ -370,6 +373,11 @@ impl SessionPage {
     /// The rail's Runs section.
     pub fn commands(&self, cx: &gpui_kit::App) -> Entity<CommandList> {
         self.rail.read(cx).commands.clone()
+    }
+
+    /// The rail's Subscriptions section.
+    pub fn subscriptions(&self, cx: &gpui_kit::App) -> Entity<SubscriptionList> {
+        self.rail.read(cx).subscriptions.clone()
     }
 
     /// The rail's "Waiting for you" section.
@@ -645,6 +653,25 @@ impl SessionPage {
         );
     }
 
+    /// The user cancels a subscription: the daemon ends it, and the list follows its event.
+    pub fn cancel_subscription(&mut self, subscription: &str, cx: &mut Context<Self>) {
+        let list = self.subscriptions(cx);
+        list.update(cx, |list, cx| list.failed(None, cx));
+        self.perform(
+            Command::CancelSubscription {
+                session: self.opened.id.clone(),
+                subscription: subscription.to_owned(),
+            },
+            cx,
+        );
+    }
+
+    /// What the daemon answered to a cancellation: why, when it refused.
+    pub fn subscription_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
+        let list = self.subscriptions(cx);
+        list.update(cx, |list, cx| list.failed(refused, cx));
+    }
+
     /// What the daemon answered to a stop or a dismissal: why, when it refused.
     pub fn command_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
         let list = self.commands(cx);
@@ -806,6 +833,10 @@ impl SessionPage {
                 let list = self.commands(cx);
                 list.update(cx, |list, cx| list.set(rows, cx));
                 self.sync_command_cards(cx);
+            }
+            SessionUpdate::Subscriptions(rows) => {
+                let list = self.subscriptions(cx);
+                list.update(cx, |list, cx| list.set(rows, cx));
             }
             SessionUpdate::CommandOutput(output) => {
                 self.command_panel
@@ -976,6 +1007,7 @@ impl SessionPage {
                     ended: matches!(state_of(agent), AgentState::Completed | AgentState::Stopped),
                     context: agent.context,
                     doing: agent.doing.clone(),
+                    waits_on_subscription: agent.waiting_on.as_deref() == Some("subscription"),
                     status,
                 })
             })
@@ -2854,16 +2886,74 @@ impl Render for Row {
                     .test_support()
                     .into_any_element()
             }
-            Block::Notice { kind, text } => div()
-                .id(id("notice"))
-                .flex()
-                .gap(space::SM)
-                .mono(12.)
-                .text_color(p.faint)
-                .child(div().flex_none().child(SharedString::from(kind.clone())))
-                .child(div().min_w_0().child(SharedString::from(text.clone())))
-                .test_support()
-                .into_any_element(),
+            // A delivery or a notice is one line; what follows its first line is folded under it
+            // until a click opens it.
+            Block::Notice { kind, text } => {
+                let (first, rest) = match text.split_once('\n') {
+                    Some((first, rest)) => (first.trim(), rest.trim()),
+                    None => (text.trim(), ""),
+                };
+                let summary = SharedString::from(first.to_owned());
+                let detail = SharedString::from(rest.to_owned());
+                let foldable = !rest.is_empty();
+                let turn = turning(id("notice-toggle"), self.open, window, cx);
+                let head = div()
+                    .id(id("notice-toggle"))
+                    .flex()
+                    .items_center()
+                    .gap(space::SM)
+                    .mono(12.)
+                    .when(foldable, |d| d.cursor_pointer())
+                    .child(div().flex_none().child(SharedString::from(kind.clone())))
+                    .child(
+                        div()
+                            .id(id("notice-summary"))
+                            .min_w_0()
+                            .when(foldable, |d| {
+                                d.overflow_hidden().whitespace_nowrap().text_ellipsis()
+                            })
+                            .aria_label(summary.clone())
+                            .child(summary)
+                            .test_support(),
+                    )
+                    .when(foldable, |d| {
+                        d.child(
+                            icon(Icon::Chevron)
+                                .size(px(12.))
+                                .flex_none()
+                                .text_color(p.faint)
+                                .with_transformation(Transformation::rotate(radians(
+                                    -FRAC_PI_2 * turn,
+                                ))),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.open = !this.open;
+                            cx.notify();
+                        }))
+                    });
+                div()
+                    .id(id("notice"))
+                    .flex()
+                    .flex_col()
+                    .text_color(p.faint)
+                    .child(hoverable(head, move |d, t| {
+                        d.text_color(mix(p.faint, p.mute, t * f32::from(u8::from(foldable))))
+                    }))
+                    .child(presence(
+                        id("notice-body"),
+                        foldable && self.open,
+                        div()
+                            .id(id("notice-text"))
+                            .pt(space::XS)
+                            .mono(12.)
+                            .whitespace_normal()
+                            .aria_label(detail.clone())
+                            .child(detail)
+                            .test_support(),
+                    ))
+                    .test_support()
+                    .into_any_element()
+            }
             // Folded to its path and its count until a click opens it.
             Block::Diff { path, lines } => {
                 let added = lines
@@ -3122,6 +3212,8 @@ pub struct RailAgent {
     pub context: Option<u64>,
     /// What it does, in a few words.
     pub doing: String,
+    /// It waits between turns for what happens outside (`doing` says what).
+    pub waits_on_subscription: bool,
     pub status: Entity<Status>,
 }
 
@@ -3226,6 +3318,8 @@ pub struct SessionRail {
     agent_menu: Entity<Menu>,
     /// The commands of the session's tree.
     commands: Entity<CommandList>,
+    /// What the agents of the session's tree wait for outside Flottille.
+    subscriptions: Entity<SubscriptionList>,
     /// The requests that wait for the user, pinned at the rail's bottom.
     waiting: Entity<Waiting>,
     /// The scroll of the sections above what waits.
@@ -3282,10 +3376,12 @@ impl SessionRail {
             )
         });
         let commands = cx.new(|_| CommandList::new(page.clone()));
+        let subscriptions = cx.new(|_| SubscriptionList::new(page.clone()));
         let waiting = cx.new(|cx| Waiting::new(page.clone(), cx));
         Self {
             page,
             commands,
+            subscriptions,
             waiting,
             scroll: ScrollHandle::new(),
             agents: Vec::new(),
@@ -3519,6 +3615,9 @@ impl Render for SessionRail {
                     }),
                 ),
             };
+            let waiting_line = agent
+                .waits_on_subscription
+                .then(|| SharedString::from(agent.doing.clone()));
             let gauge = agent.context.map(|used| {
                 let used = used.min(100);
                 // The share and its bar on one line, the share before it.
@@ -3595,7 +3694,31 @@ impl Render for SessionRail {
                                 .aria_label(SharedString::from(said.clone()))
                                 .child(SharedString::from(said))
                                 .test_support()
-                        })),
+                        }))
+                        // What the root waits for between turns, folding in and away with it.
+                        .when(!kid, |d| {
+                            d.child(presence_of(
+                                ElementId::Name(format!("rail-waiting-{}-block", agent.id).into()),
+                                waiting_line.clone(),
+                                {
+                                    let (id, p) = (agent.id.clone(), p);
+                                    move |line| {
+                                        div()
+                                            .id(ElementId::Name(
+                                                format!("rail-waiting-{id}").into(),
+                                            ))
+                                            .mono(11.)
+                                            .text_color(p.faint)
+                                            .text_ellipsis()
+                                            .overflow_hidden()
+                                            .aria_label(line.clone())
+                                            .child(line)
+                                            .test_support()
+                                            .into_any_element()
+                                    }
+                                },
+                            ))
+                        }),
                 )
                 .child(
                     div()
@@ -4114,6 +4237,7 @@ impl Render for SessionRail {
                     .flex_col()
                     .child(agents)
                     .child(workspace)
+                    .child(self.subscriptions.clone())
                     .child(self.commands.clone()),
             )
             .child(
