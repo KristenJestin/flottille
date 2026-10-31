@@ -9,7 +9,7 @@ use gpui_kit::base::input::{Input, InputState};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
-    ParentElement, Render, StatefulInteractiveElement as _, Styled, TestAppContext,
+    ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled, TestAppContext,
     TestSupportExt as _, VisualTestContext, Window, div, px, size,
 };
 
@@ -427,4 +427,105 @@ fn with_reduced_motion_a_modal_comes_and_goes_at_once(cx: &mut TestAppContext) {
         window.render_frame(cx);
         assert!(window.try_find("dialog").is_none());
     });
+}
+
+/// A modal with forty rows of a body, in a window too small for them.
+struct Tall {
+    open: bool,
+}
+
+impl Render for Tall {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Modal::new("tall", "Repository api")
+            .sentence("In the project folder.")
+            .open(self.open)
+            .children((0..40).map(|row| {
+                div()
+                    .id(SharedString::from(format!("tall-row-{row}")))
+                    .h(px(30.))
+                    .child(format!("row {row}"))
+                    .test_support()
+            }))
+            .action(div().id("tall-action").child("Save"))
+    }
+}
+
+#[gpui_kit::test]
+fn a_modal_taller_than_the_window_scrolls_its_body_and_keeps_its_title_and_buttons(
+    cx: &mut TestAppContext,
+) {
+    init(cx, Desktop::new(false).env());
+    let (_tall, cx) = cx.add_window_view(|_, _| Tall { open: true });
+    cx.simulate_resize(size(px(900.), px(500.)));
+    advance(cx, MODAL * 2);
+
+    let (viewport, panel, title, cancel, last) = cx.update(|window, _| {
+        (
+            window.viewport_size(),
+            window.find("tall").bounds(),
+            window.find("tall-title").bounds(),
+            window.find("tall-cancel").bounds(),
+            window.find("tall-row-39").bounds(),
+        )
+    });
+    assert!(
+        panel.bottom() <= viewport.height && panel.top() >= px(0.),
+        "the dialog fits the window: {panel:?} in {viewport:?}"
+    );
+    assert!(
+        title.top() >= panel.top() && cancel.bottom() <= panel.bottom(),
+        "title and buttons are inside it: {title:?} {cancel:?} in {panel:?}"
+    );
+    assert!(
+        last.top() > panel.bottom(),
+        "the last row is below, clipped"
+    );
+
+    // The wheel over the body moves the rows, not the title or the buttons.
+    cx.update(|window, cx| {
+        window.scroll(
+            "tall-row-3",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-3000.))),
+            cx,
+        )
+    });
+    let (title_after, cancel_after, last_after, panel_after) = cx.update(|window, _| {
+        (
+            window.find("tall-title").bounds(),
+            window.find("tall-cancel").bounds(),
+            window.find("tall-row-39").bounds(),
+            window.find("tall").bounds(),
+        )
+    });
+    assert_eq!(title_after, title, "the title stays");
+    assert_eq!(cancel_after, cancel, "the buttons stay");
+    assert_eq!(panel_after, panel);
+    assert!(
+        last_after.bottom() <= cancel_after.top(),
+        "the last row came into view above the buttons: {last_after:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn a_short_modal_does_not_scroll_and_keeps_its_height(cx: &mut TestAppContext) {
+    let (dialog, cx) = dialog(cx);
+    open(&dialog, cx);
+    let (panel, title) = cx.update(|window, _| {
+        (
+            window.find("dialog").bounds(),
+            window.find("dialog-title").bounds(),
+        )
+    });
+    assert!(panel.size.height < px(200.), "{panel:?}");
+    cx.update(|window, cx| {
+        window.scroll(
+            "dialog-title",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-300.))),
+            cx,
+        )
+    });
+    assert_eq!(
+        cx.update(|window, _| window.find("dialog-title").bounds()),
+        title
+    );
 }

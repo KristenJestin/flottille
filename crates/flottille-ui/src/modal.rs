@@ -1,7 +1,8 @@
 //! `Modal`: a dialog over the page for every form that adds or changes something: a title, one
 //! sentence under it, the fields, then Cancel and the main action on the right. Escape, Cancel
 //! and a click outside it close it. It is 520 px wide, 640 for a wide form, with 24 px on each
-//! side.
+//! side. In a window too small for it, the fields scroll between the title and the buttons,
+//! which stay in sight.
 //!
 //! It is drawn after everything else, above the dropdowns, over a scrim that takes the clicks
 //! meant for the page. The owner gives the focus to its first field when it opens it.
@@ -186,6 +187,7 @@ impl RenderOnce for Modal {
             space::DIALOG
         };
         let header = div()
+            .flex_none()
             .pt(px(20.))
             .px(px(24.))
             .flex()
@@ -211,16 +213,25 @@ impl RenderOnce for Modal {
                     .child(sentence)
                     .test_support()
             }));
+        // It scrolls inside a column of its own, so that the rows keep their heights while it
+        // is shorter than they are; the title above and the buttons below stay where they are.
         let body = (!self.body.is_empty()).then(|| {
             div()
-                .py(px(20.))
-                .px(px(24.))
-                .flex()
-                .flex_col()
-                .gap(px(16.))
-                .children(self.body)
+                .id(part(&self.id, "body"))
+                .min_h_0()
+                .overflow_y_scroll()
+                .child(
+                    div()
+                        .py(px(20.))
+                        .px(px(24.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(16.))
+                        .children(self.body),
+                )
         });
         let footer = div()
+            .flex_none()
             .pt(px(14.))
             .pb(px(20.))
             .px(px(24.))
@@ -241,6 +252,7 @@ impl RenderOnce for Modal {
             .opacity(t)
             .w(width)
             .max_w(viewport.width - px(48.))
+            .max_h(viewport.height - px(48.))
             .rounded(px(14.))
             .bg(p.card)
             .border_1()
