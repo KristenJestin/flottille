@@ -1780,3 +1780,230 @@ fn an_uncommitted_file_still_refuses_the_removal_of_a_merged_pruned_branch() {
     assert!(!message.contains("on no remote"), "{message}");
     assert!(fixture.has_branch(&fixture.folder.join("lib")));
 }
+
+// The base branches and the dependencies of a repository, changed from the project settings
+// (#172).
+
+fn base_of(workspace: &Value, path: &str) -> Value {
+    workspace["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["path"] == path)
+        .unwrap_or_else(|| panic!("{path} in {workspace}"))["base"]["branch"]
+        .clone()
+}
+
+fn set_repository(fixture: &Fixture, setting: Value) -> Result<Value, (String, String)> {
+    fixture.user.call(
+        "project.set_settings",
+        json!({"name": "app", "repositories": [setting]}),
+    )
+}
+
+#[test]
+fn base_branches_changed_from_the_settings_are_used_by_the_next_workspace() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    let before = fixture.create(json!({"name": "first"})).unwrap();
+    assert_eq!(base_of(&before, "web"), "develop", "the file's rule");
+
+    let saved = set_repository(
+        &fixture,
+        json!({"path": "web", "base": ["main", "develop"]}),
+    )
+    .unwrap();
+
+    let web = saved["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["path"] == "web")
+        .unwrap();
+    assert_eq!(web["base"], json!(["main", "develop"]), "{saved}");
+    let text = std::fs::read_to_string(fixture.user.project_file("app")).unwrap();
+    assert!(text.contains("base = [\"main\", \"develop\"]"), "{text}");
+    let after = fixture.create(json!({"name": "second"})).unwrap();
+    assert_eq!(base_of(&after, "web"), "main", "the order is the rule");
+    assert_eq!(base_of(&after, "api"), "develop", "the others keep theirs");
+    assert_eq!(
+        base_of(&before, "web"),
+        "develop",
+        "a workspace already made keeps its base"
+    );
+}
+
+#[test]
+fn a_repository_left_out_of_a_save_keeps_its_bases_and_dependencies() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    set_repository(
+        &fixture,
+        json!({"path": "web", "base": ["main"], "depends_on": ["api"]}),
+    )
+    .unwrap();
+
+    // A save that says nothing of them (a script, an older client) leaves them as they are.
+    let saved = set_repository(&fixture, json!({"path": "web", "forge": null})).unwrap();
+
+    let web = &saved["repositories"][0];
+    assert_eq!(web["path"], "web");
+    assert_eq!(web["depends_on"], json!(["api"]), "{saved}");
+    let shown = fixture
+        .user
+        .call("project.repositories", json!({"name": "app"}))
+        .unwrap();
+    assert_eq!(shown["repositories"][0]["base"], json!(["main"]), "{shown}");
+}
+
+#[test]
+fn a_base_branch_missing_on_the_remote_is_refused_with_its_reason() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    let before = std::fs::read_to_string(fixture.user.project_file("app")).unwrap();
+
+    // `lib` has no `develop` on its remote, and `trunk` is on none.
+    for (path, base, why) in [
+        (
+            "lib",
+            json!(["main", "develop"]),
+            "lib: develop is not a branch of the remote origin; nothing was saved",
+        ),
+        (
+            "web",
+            json!(["trunk"]),
+            "web: trunk is not a branch of the remote origin; nothing was saved",
+        ),
+    ] {
+        let (code, message) =
+            set_repository(&fixture, json!({"path": path, "base": base})).unwrap_err();
+        assert_eq!(code, "refused");
+        assert_eq!(message, why);
+    }
+    assert_eq!(
+        std::fs::read_to_string(fixture.user.project_file("app")).unwrap(),
+        before,
+        "nothing was written"
+    );
+}
+
+#[test]
+fn a_base_rule_with_no_branch_or_a_branch_with_a_space_is_refused() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+
+    for base in [json!([]), json!(["main develop"]), json!([""])] {
+        let (code, message) =
+            set_repository(&fixture, json!({"path": "web", "base": base})).unwrap_err();
+        assert_eq!(code, "refused", "{message}");
+        assert!(message.contains("nothing was saved"), "{message}");
+    }
+}
+
+#[test]
+fn a_remote_that_cannot_be_read_is_refused_unless_the_branch_was_fetched() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    let web = fixture.folder.join("web");
+    fixture.git(&web, &["fetch", "--quiet", "origin"]);
+    let moved = fixture.user.path("remotes/gone.git");
+    std::fs::rename(fixture.remote("web"), &moved).unwrap();
+
+    set_repository(&fixture, json!({"path": "web", "base": ["develop"]}))
+        .expect("develop was fetched: its tracking ref says it is there");
+    let (code, message) =
+        set_repository(&fixture, json!({"path": "web", "base": ["trunk"]})).unwrap_err();
+    assert_eq!(code, "refused");
+    assert!(
+        message.starts_with("web: the remote origin could not be read ("),
+        "{message}"
+    );
+    assert!(
+        message.ends_with("and trunk was never fetched from it; nothing was saved"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_repository_with_no_remote_takes_its_own_branches_as_bases() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    let lib = fixture.folder.join("lib");
+    fixture.git(&lib, &["remote", "remove", "origin"]);
+
+    set_repository(&fixture, json!({"path": "lib", "base": ["main"]})).unwrap();
+    let (code, message) =
+        set_repository(&fixture, json!({"path": "lib", "base": ["develop"]})).unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert_eq!(
+        message,
+        "lib: develop is not a branch of lib, which has no remote origin; nothing was saved"
+    );
+}
+
+#[test]
+fn dependencies_changed_from_the_settings_are_saved_and_shown() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+
+    let saved = set_repository(
+        &fixture,
+        json!({"path": "web", "depends_on": ["api", "lib"]}),
+    )
+    .unwrap();
+
+    assert_eq!(
+        saved["repositories"][0]["depends_on"],
+        json!(["api", "lib"])
+    );
+    let text = std::fs::read_to_string(fixture.user.project_file("app")).unwrap();
+    assert!(text.contains("depends_on = [\"api\", \"lib\"]"), "{text}");
+
+    let cleared = set_repository(&fixture, json!({"path": "web", "depends_on": []})).unwrap();
+    assert_eq!(cleared["repositories"][0]["depends_on"], json!([]));
+    let text = std::fs::read_to_string(fixture.user.project_file("app")).unwrap();
+    assert!(!text.contains("depends_on"), "{text}");
+}
+
+#[test]
+fn a_dependency_cycle_is_refused() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    set_repository(&fixture, json!({"path": "web", "depends_on": ["api"]})).unwrap();
+    set_repository(&fixture, json!({"path": "api", "depends_on": ["lib"]})).unwrap();
+    let before = std::fs::read_to_string(fixture.user.project_file("app")).unwrap();
+
+    let (code, message) =
+        set_repository(&fixture, json!({"path": "lib", "depends_on": ["web"]})).unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert!(
+        message.contains("depends_on: cycle web -> api -> lib -> web")
+            && message.contains("nothing was saved"),
+        "{message}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.user.project_file("app")).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn a_dependency_on_itself_or_on_a_repository_the_project_lacks_is_refused() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+
+    let (code, message) =
+        set_repository(&fixture, json!({"path": "web", "depends_on": ["web"]})).unwrap_err();
+    assert_eq!(code, "refused");
+    assert!(
+        message.contains("a repository cannot depend on itself")
+            && message.contains("nothing was saved"),
+        "{message}"
+    );
+    let (code, message) =
+        set_repository(&fixture, json!({"path": "web", "depends_on": ["docs"]})).unwrap_err();
+    assert_eq!(code, "refused");
+    assert!(message.contains("unknown repository \"docs\""), "{message}");
+}

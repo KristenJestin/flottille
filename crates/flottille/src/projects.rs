@@ -241,6 +241,7 @@ async fn settings_of(project: &Project) -> Value {
         repositories.push(json!({
             "path": repository.path,
             "remote": repository.remote,
+            "base": repository.base,
             "depends_on": repository.depends_on,
             "url": url,
             "forge": repository.forge,
@@ -264,8 +265,88 @@ pub async fn settings(daemon: Arc<Daemon>, params: Value) -> std::result::Result
     Ok(settings_of(&project).await)
 }
 
-/// `project.set_settings`: writes the declared forges and tracker in the project's file, what
-/// is around them kept, once each forge is checked to be the one its remote leads to.
+/// Why `branch` cannot be the base of the repository at `path`, none when it can: it is a branch
+/// of its remote, read with `git ls-remote`; of the tracking refs last fetched when the remote
+/// cannot be read; of the repository itself when it has no such remote.
+async fn base_refusal(
+    project: &Project,
+    path: &str,
+    remote: &str,
+    branches: &[String],
+) -> Option<String> {
+    let Some(folder) = checkout_of(project, path) else {
+        return Some(format!("{path}: it is not in the folder of the project"));
+    };
+    let has_remote = git::run(
+        &folder,
+        &["remote", "get-url", "--end-of-options", remote],
+        Class::Read,
+    )
+    .await
+    .is_ok_and(|output| output.success);
+    if !has_remote {
+        let local = git::output(
+            &folder,
+            &["for-each-ref", "--format=%(refname:short)", "refs/heads/"],
+            Class::Read,
+        )
+        .await
+        .unwrap_or_default();
+        return branches
+            .iter()
+            .find(|branch| !local.lines().any(|line| line == branch.as_str()))
+            .map(|branch| {
+                format!("{path}: {branch} is not a branch of {path}, which has no remote {remote}")
+            });
+    }
+    match git::output(
+        &folder,
+        &["ls-remote", "--heads", "--end-of-options", remote],
+        Class::Read,
+    )
+    .await
+    {
+        Ok(heads) => branches
+            .iter()
+            .find(|branch| {
+                let wanted = format!("refs/heads/{branch}");
+                !heads
+                    .lines()
+                    .any(|line| line.split('\t').nth(1) == Some(wanted.as_str()))
+            })
+            .map(|branch| format!("{path}: {branch} is not a branch of the remote {remote}")),
+        Err(reason) => {
+            for branch in branches {
+                let tracking = format!("refs/remotes/{remote}/{branch}^{{commit}}");
+                let fetched = git::run(
+                    &folder,
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        "--quiet",
+                        "--end-of-options",
+                        &tracking,
+                    ],
+                    Class::Read,
+                )
+                .await
+                .is_ok_and(|output| output.success);
+                if !fetched {
+                    return Some(format!(
+                        "{path}: the remote {remote} could not be read ({}) and {branch} was \
+                         never fetched from it",
+                        reason.split_whitespace().collect::<Vec<_>>().join(" ")
+                    ));
+                }
+            }
+            None
+        }
+    }
+}
+
+/// `project.set_settings`: writes the declared forges and tracker, and the base branches and
+/// dependencies given, in the project's file, what is around them kept, once each forge is
+/// checked to be the one its remote leads to and each base to be on its remote.
 pub async fn set_settings(
     daemon: Arc<Daemon>,
     params: Value,
@@ -298,6 +379,24 @@ pub async fn set_settings(
         }
         checked_forges.insert(setting.path.clone(), checked);
     }
+    for setting in &asked.repositories {
+        let (Some(base), Some(repository)) = (
+            &setting.base,
+            project.repositories.iter().find(|r| r.path == setting.path),
+        ) else {
+            continue;
+        };
+        // Its shape (one at least, no space) is the file's to judge, with its key.
+        let shaped = !base.is_empty()
+            && base
+                .iter()
+                .all(|branch| !branch.is_empty() && !branch.contains(char::is_whitespace));
+        if shaped
+            && let Some(why) = base_refusal(&project, &setting.path, &repository.remote, base).await
+        {
+            return Err(Failure::refused(format!("{why}; nothing was saved")));
+        }
+    }
     let saved = rewrite(&daemon, &asked.name, |_, document| {
         let not_an_array = || {
             Failure::new(
@@ -325,6 +424,24 @@ pub async fn set_settings(
                         entry.insert("forge", toml_edit::value(inline(forge)?));
                     }
                 }
+                if let Some(base) = &setting.base {
+                    entry.insert(
+                        "base",
+                        toml_edit::value(base.iter().collect::<toml_edit::Array>()),
+                    );
+                }
+                match &setting.depends_on {
+                    Some(paths) if !paths.is_empty() => {
+                        entry.insert(
+                            "depends_on",
+                            toml_edit::value(paths.iter().collect::<toml_edit::Array>()),
+                        );
+                    }
+                    Some(_) => {
+                        entry.remove("depends_on");
+                    }
+                    None => {}
+                }
             }
         }
         match &asked.tracker {
@@ -340,6 +457,19 @@ pub async fn set_settings(
             }
         }
         Ok(())
+    })
+    .map_err(|failure| match failure.code {
+        // A base rule or a dependency the file would not accept (a cycle, itself, a stranger)
+        // is the user's to fix, with the key at fault.
+        "invalid-config"
+            if asked
+                .repositories
+                .iter()
+                .any(|s| s.base.is_some() || s.depends_on.is_some()) =>
+        {
+            Failure::refused(format!("{}; nothing was saved", failure.message))
+        }
+        _ => failure,
     })?;
     Ok(settings_of(&saved).await)
 }
