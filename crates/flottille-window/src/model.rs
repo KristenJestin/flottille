@@ -285,6 +285,7 @@ impl Forged {
             ),
             ("tickets", "close") => ("Closed a ticket", ticket.to_owned()),
             ("tickets", "reopen") => ("Reopened a ticket", ticket.to_owned()),
+            ("tickets", "status") => ("Moved a ticket", on(ticket, &[field("status")])),
             _ => return None,
         };
         let excerpt = excerpt.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -740,6 +741,13 @@ mod tests {
         assert_eq!(
             said("tickets", json!({"action": "close"})),
             Some(("Closed a ticket".into(), "its ticket".into(), true))
+        );
+        assert_eq!(
+            said(
+                "tickets",
+                json!({"action": "status", "ticket": "ABC-1", "status": "In Progress"})
+            ),
+            Some(("Moved a ticket".into(), "ABC-1: In Progress".into(), true))
         );
         assert_eq!(
             said(
