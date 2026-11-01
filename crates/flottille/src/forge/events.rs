@@ -190,18 +190,30 @@ pub struct Posted {
 }
 
 /// Remembers a comment the agent posted, so that a subscription for people only leaves it out.
-pub(super) fn posted(daemon: &Daemon, agent: &str, repository: &str, number: u64, body: &str) {
+pub(super) fn posted(
+    daemon: &Daemon,
+    agent: &str,
+    (project, repository): (&str, &str),
+    number: u64,
+    body: &str,
+) {
     let mut posted = daemon.forges.posted.lock().unwrap();
     posted.push(Posted {
         agent: agent.to_owned(),
-        named: pull_named(repository, number),
+        named: pull_named(project, repository, number),
         body: super::masked(body),
     });
     let over = posted.len().saturating_sub(POSTED);
     posted.drain(..over);
 }
 
-fn pull_named(repository: &str, number: u64) -> String {
+/// A repository that is the project's folder is named by the project, as the window does.
+fn pull_named(project: &str, repository: &str, number: u64) -> String {
+    let repository = if repository == "." {
+        project
+    } else {
+        repository
+    };
     format!("pull request #{number} of {repository}")
 }
 
@@ -216,6 +228,7 @@ pub fn target_named(target: &Value) -> String {
     format!(
         "{}, workspace {}",
         pull_named(
+            target["project"].as_str().unwrap_or_default(),
             target["repository"].as_str().unwrap_or_default(),
             target["number"].as_u64().unwrap_or_default()
         ),
@@ -256,7 +269,7 @@ pub(super) async fn offer(daemon: &Arc<Daemon>, workspace: &Workspace, read: &Re
         if mine.is_empty() {
             continue;
         }
-        let named = pull_named(&repository.path, pull.number);
+        let named = pull_named(&workspace.project, &repository.path, pull.number);
         let events = |pull: &Pull, seen: &Value| {
             let posted = daemon.forges.posted.lock().unwrap();
             events_between(seen, pull, &named, &posted)

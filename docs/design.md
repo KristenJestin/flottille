@@ -323,7 +323,13 @@ review) subscribes to it instead of reading again and again. Four parts, each it
 
 Left for later: a daemon-wide reading of the forge and the tickets for the whole app, which other
 sources plug into without changing subscriptions; a ticket source; relaunching an agent that has
-ended when an event comes. The window does not show subscriptions yet.
+ended when an event comes.
+
+The window shows them: the session page's rail lists the session's open subscriptions (the pull
+request, the events, since when and until when), each with a Cancel that ends it through the daemon
+(`subscription.cancel`), an agent between turns that waits on one is drawn waiting, not idle, in the
+left tree and in the rail, and the delivery that wakes the agent is a folded step saying what woke it.
+Opening and ending are events (`subscription.opened`, `subscription.ended`, `docs/events.md`).
 
 ## 6. Projects and workspaces
 

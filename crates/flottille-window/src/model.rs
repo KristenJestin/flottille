@@ -190,7 +190,8 @@ pub struct Session {
     pub project: String,
     pub place: Place,
     pub title: String,
-    /// `Running` or `NeedsYou`; `None` for a session at rest.
+    /// `Running`, `NeedsYou`, or `Waiting` (between turns, for what happens outside); `None` for
+    /// a session at rest.
     pub mark: Option<AgentState>,
     /// How many agents its tree holds, the root included.
     pub agents: usize,
@@ -322,6 +323,8 @@ pub struct Answers<'a> {
     pub questions: &'a HashMap<String, (String, u64)>,
     /// `run.list`: the commands running.
     pub commands: &'a Value,
+    /// `subscription.list`: what the agents wait for outside Flottille.
+    pub subscriptions: &'a Value,
 }
 
 fn text(value: &Value, key: &str) -> String {
@@ -503,6 +506,12 @@ impl Snapshot {
                 .filter(|command| command[key].as_str() == Some(name))
                 .count()
         };
+        // The roots whose agents wait, between turns, for what happens outside.
+        let waiting: HashSet<&str> = list(answers.subscriptions, "subscriptions")
+            .iter()
+            .filter_map(|subscription| subscription["agent"].as_str())
+            .map(|agent| root_of(&parents, agent))
+            .collect();
         let name_of = |id: &str| {
             let agent = agents.iter().find(|a| a["id"].as_str() == Some(id));
             agent
@@ -525,6 +534,8 @@ impl Snapshot {
                     Some(AgentState::NeedsYou)
                 } else if busy {
                     Some(AgentState::Running)
+                } else if waiting.contains(id.as_str()) {
+                    Some(AgentState::Waiting)
                 } else {
                     None
                 };
@@ -661,6 +672,7 @@ mod tests {
             questions: &HashMap::new(),
             briefs: &HashMap::from([("r1".into(), "\n  Fix the login\nmore".into())]),
             commands: &json!({"commands": []}),
+            subscriptions: &json!({"subscriptions": []}),
         })
     }
 
@@ -856,6 +868,7 @@ mod tests {
             questions: &HashMap::new(),
             briefs: &HashMap::from([("r2".into(), "Hello".into())]),
             commands: &json!({"commands": []}),
+            subscriptions: &json!({"subscriptions": []}),
         });
         assert_eq!(snapshot.sessions[0].title, "agent r2");
     }
@@ -891,6 +904,7 @@ mod tests {
                 ("r2".into(), "Write the docs\nwith care".into()),
             ]),
             commands: &json!({"commands": []}),
+            subscriptions: &json!({"subscriptions": []}),
         });
         let by = |id: &str| snapshot.session(id).unwrap().started_by.clone();
         assert_eq!(snapshot.session("r2").unwrap().title, "Write the docs");
@@ -923,6 +937,7 @@ mod tests {
             questions: &HashMap::new(),
             briefs: &HashMap::new(),
             commands: &json!({"commands": []}),
+            subscriptions: &json!({"subscriptions": []}),
         });
         snapshot.workspaces[0].clone()
     }
@@ -990,6 +1005,42 @@ mod tests {
     }
 
     #[test]
+    fn a_session_whose_agents_wait_on_a_subscription_is_waiting_unless_it_runs_or_needs_the_user() {
+        let agents = json!({"agents": [agent("r1", None, "idle", None),
+            agent("c1", Some("r1"), "idle", None), agent("r2", None, "working", None),
+            agent("r3", None, "idle", None)]});
+        let subscriptions = json!({"subscriptions": [{"agent": "c1"}, {"agent": "r2"}]});
+        let build = |needs_user: &HashSet<String>| {
+            Snapshot::build(Answers {
+                projects: &json!({"projects": [{"name": "app", "folder": "/work/app"}]}),
+                workspaces: &json!({"workspaces": []}),
+                agents: &agents,
+                approvals: &json!({"requests": []}),
+                needs_user,
+                questions: &HashMap::new(),
+                briefs: &HashMap::new(),
+                commands: &json!({"commands": []}),
+                subscriptions: &subscriptions,
+            })
+        };
+
+        let snapshot = build(&HashSet::new());
+        let mark = |id: &str| snapshot.session(id).unwrap().mark;
+        assert_eq!(mark("r1"), Some(AgentState::Waiting), "a child's counts");
+        assert_eq!(
+            mark("r2"),
+            Some(AgentState::Running),
+            "a turn that runs wins"
+        );
+        assert_eq!(mark("r3"), None, "nothing is awaited");
+        let asking = build(&HashSet::from(["r1".to_owned()]));
+        assert_eq!(
+            asking.session("r1").unwrap().mark,
+            Some(AgentState::NeedsYou)
+        );
+    }
+
+    #[test]
     fn a_project_and_a_session_count_the_commands_running_in_them() {
         let agents = json!({"agents": [agent("r1", None, "idle", Some("login")),
             agent("c1", Some("r1"), "idle", Some("login")), agent("r2", None, "idle", None)]});
@@ -1008,6 +1059,7 @@ mod tests {
             questions: &HashMap::new(),
             briefs: &HashMap::new(),
             commands: &commands,
+            subscriptions: &json!({"subscriptions": []}),
         });
 
         let of = |id: &str| snapshot.session(id).unwrap().commands;

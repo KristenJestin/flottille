@@ -24,6 +24,7 @@ use crate::actions::{Changes, RepositoryStatus};
 use crate::conversation::one_line;
 use crate::link::{Conn, Connect, Update, quiet_wait};
 use crate::runs::{CommandOutput, CommandRow};
+use crate::subscriptions::SubscriptionRow;
 
 /// One agent of the session's tree, as `agent.tree` gives it.
 #[derive(Clone, Debug, PartialEq)]
@@ -380,6 +381,8 @@ pub enum SessionUpdate {
     Commands(Vec<CommandRow>),
     /// The output of the command whose panel is open.
     CommandOutput(Box<CommandOutput>),
+    /// What the agents of the session's tree wait for (`subscription.list`).
+    Subscriptions(Vec<SubscriptionRow>),
 }
 
 /// Where the session works.
@@ -518,6 +521,7 @@ struct Stale {
     requests: bool,
     place: bool,
     commands: bool,
+    subscriptions: bool,
     /// When the first of them was marked.
     since: Option<Instant>,
 }
@@ -592,6 +596,7 @@ impl Link {
         }
         let mut ticket = None;
         self.read_place(&mut conn, &mut ticket)?;
+        self.read_subscriptions(&mut conn)?;
         let mut running = self.read_commands(&mut conn)?;
         let mut next_commands = Instant::now() + COMMANDS_EVERY;
         // The command whose output was last read.
@@ -617,6 +622,9 @@ impl Link {
                 }
                 if stale.place {
                     self.read_place(&mut conn, &mut ticket)?;
+                }
+                if stale.subscriptions {
+                    self.read_subscriptions(&mut conn)?;
                 }
                 let due = running && Instant::now() >= next_commands;
                 if stale.commands || due {
@@ -654,8 +662,11 @@ impl Link {
                 tree.insert(agent.to_owned());
             }
             let approval = name.starts_with("approval.");
+            // A subscription opened or ended changes the list, and whether the agent waits.
+            let subscription = name.starts_with("subscription.");
+            stale.subscriptions |= subscription;
             stale.mark(
-                TREE_EVENTS.contains(&name) || approval,
+                TREE_EVENTS.contains(&name) || approval || subscription,
                 approval,
                 name == "agent.turn_ended",
                 name.starts_with("run."),
@@ -741,6 +752,19 @@ impl Link {
         let running = rows.iter().any(CommandRow::running);
         self.send(SessionUpdate::Commands(rows));
         Ok(running)
+    }
+
+    /// The subscriptions of the session's tree, sent.
+    fn read_subscriptions(&self, conn: &mut Conn) -> Result<(), String> {
+        let answer = conn.request("subscription.list", json!({"tree": self.root}))?;
+        let rows = answer["subscriptions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(SubscriptionRow::of)
+            .collect();
+        self.send(SessionUpdate::Subscriptions(rows));
+        Ok(())
     }
 
     /// The output of the command watched, sent. A command the daemon no longer knows is not an

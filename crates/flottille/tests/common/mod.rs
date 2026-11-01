@@ -790,6 +790,19 @@ impl Watch {
         }
     }
 
+    /// Every event that arrives within `wait`.
+    pub fn within(&self, wait: Duration) -> Vec<Value> {
+        let deadline = std::time::Instant::now() + wait;
+        let mut seen = Vec::new();
+        while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
+            match self.lines.recv_timeout(left) {
+                Ok(line) => seen.push(serde_json::from_str(&line).unwrap()),
+                Err(_) => break,
+            }
+        }
+        seen
+    }
+
     pub fn next_event(&self) -> Value {
         let line = self
             .lines

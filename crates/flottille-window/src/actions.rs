@@ -300,6 +300,11 @@ pub enum Command {
         run: String,
         dismiss: bool,
     },
+    /// Ends a subscription of the session's agents, as the agent's own `unsubscribe` does.
+    CancelSubscription {
+        session: String,
+        subscription: String,
+    },
     /// The user's answer to a request they hold, given on the page of the session of `session`
     /// (its root agent).
     Answer {
@@ -693,6 +698,11 @@ pub enum Outcome {
     },
     /// A command was stopped or dismissed as asked, or the daemon refused with why.
     RunAnswered {
+        session: String,
+        refused: Option<String>,
+    },
+    /// A subscription was cancelled as asked, or the daemon refused with why.
+    SubscriptionCancelled {
         session: String,
         refused: Option<String>,
     },
@@ -1478,6 +1488,21 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 Ok(Err(why)) | Err(why) => Some(why),
             };
             Outcome::RunAnswered { session, refused }
+        }
+        Command::CancelSubscription {
+            session,
+            subscription,
+        } => {
+            let refused = match ask_alone(
+                connect,
+                "subscription.cancel",
+                json!({"subscription": subscription}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::SubscriptionCancelled { session, refused }
         }
         Command::Answer {
             session,
