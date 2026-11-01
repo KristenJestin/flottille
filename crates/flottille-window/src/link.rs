@@ -293,6 +293,8 @@ fn matters(event: &Event) -> bool {
     match name.split_once('.').map(|(subject, _)| subject) {
         // A workspace's preparation shows on its card, step by step.
         Some("project" | "approval" | "daemon" | "workspace") => true,
+        // A subscription opening or ending moves the session from waiting to rest.
+        Some("subscription") => true,
         // A command starting or ending shows in the tree; its output is no event.
         Some("run") => true,
         Some("agent") => matches!(
@@ -365,6 +367,7 @@ fn read(conn: &mut Conn, briefs: &mut Briefs, seen: &Seen) -> Result<Snapshot> {
     let agents = conn.request("agent.list", json!({}))?;
     let approvals = conn.request("approval.list", json!({}))?;
     let commands = conn.request("run.list", json!({}))?;
+    let subscriptions = conn.request("subscription.list", json!({}))?;
     let needs_user = needing_the_user(conn)?;
     let roots: Vec<&str> = agents["agents"]
         .as_array()
@@ -395,6 +398,7 @@ fn read(conn: &mut Conn, briefs: &mut Briefs, seen: &Seen) -> Result<Snapshot> {
         briefs: &briefs.texts,
         questions: &questions,
         commands: &commands,
+        subscriptions: &subscriptions,
     });
     snapshot.project_changes = seen.project_changes.load(Ordering::Relaxed);
     Ok(snapshot)
@@ -642,6 +646,10 @@ mod tests {
         assert!(matters(&event("agent.turn_ended", json!({}))));
         assert!(matters(&event("run.started", json!({}))), "the tree's icon");
         assert!(matters(&event("run.ended", json!({}))));
+        assert!(
+            matters(&event("subscription.ended", json!({}))),
+            "a session at rest or waiting"
+        );
         assert!(matters(&event("workspace.created", json!({}))));
         assert!(
             matters(&event("workspace.step_done", json!({}))),

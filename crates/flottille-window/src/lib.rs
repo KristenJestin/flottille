@@ -28,6 +28,7 @@ pub mod settings;
 pub mod setup;
 pub mod shell;
 pub mod skills;
+pub mod subscriptions;
 pub mod tasks;
 pub mod tree;
 pub mod waiting;

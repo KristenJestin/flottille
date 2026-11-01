@@ -52,8 +52,9 @@
 //!
 //! `run view --job <id> --log-failed` prints the log `logs` holds for that job of the repository
 //! (`{"logs": {"acme/app": {"456": "build\tRun tests\t2026-01-01T00:00:00.0000000Z …\n"}}}`),
-//! as `gh` prints a failed job's steps; a job it does not hold is a log `gh` cannot find. Any
-//! other `run view` is not a command Flottille runs.
+//! as `gh` prints a failed job's steps; a job it does not hold is a log `gh` cannot find. A
+//! `log_delay_ms` makes it wait that long first, as a slow network does. Any other `run view` is
+//! not a command Flottille runs.
 //!
 //! `issue list` keeps the issues of `--state` (`open` by default), with a `--label` and an
 //! `--assignee` (`labels[].name`, `assignees[].login`) when given and, for `--search`, those whose
@@ -365,6 +366,9 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             if let Some(failure) = script["fail"][repository].as_str() {
                 eprintln!("{failure}");
                 return 1;
+            }
+            if let Some(ms) = script["log_delay_ms"].as_u64() {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
             }
             match script["logs"][repository][job].as_str() {
                 Some(log) => {

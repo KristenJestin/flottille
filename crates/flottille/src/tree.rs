@@ -703,7 +703,10 @@ pub fn doing(daemon: &Daemon, agent: &Agent) -> String {
             "waiting for its parent's answer".into()
         }
         _ if agent.waiting_on_answer => "waiting for the user's answer".into(),
-        _ => format!("idle for {}", ago(now.saturating_sub(agent.updated_at))),
+        _ => match crate::subscriptions::waiting_for(daemon, &agent.id) {
+            Some(waiting) => waiting,
+            None => format!("idle for {}", ago(now.saturating_sub(agent.updated_at))),
+        },
     }
 }
 
@@ -1646,6 +1649,14 @@ pub fn tree(daemon: &Daemon, agent: &Agent) -> Result<Vec<Value>, Failure> {
             .read(|store| store.pending_requests_of(&agent.id))?
             .is_empty();
         let waiting_on = match (&agent.parent, asking || agent.waiting_on_answer) {
+            // Between turns with a subscription open: it waits for what happens outside.
+            (_, false)
+                if !matches!(agent.state, AgentState::Working | AgentState::Starting)
+                    && !agent.state.is_final()
+                    && crate::subscriptions::waiting_for(daemon, &agent.id).is_some() =>
+            {
+                "subscription".into()
+            }
             (_, false) => Value::Null,
             (Some(_), true) => "parent".into(),
             (None, true) => "user".into(),

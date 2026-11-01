@@ -22,7 +22,26 @@ fn user() -> User {
 /// A project `app` of one repository, `api` on GitHub `acme/api`, declared, and its ready workspace
 /// `login` on the branch `app/login`.
 fn fixture(user: &User) {
+    fixture_with(user, &[]);
+}
+
+/// The same, the project holding the repositories `others` beside `api`.
+fn fixture_with(user: &User, others: &[&str]) {
     let folder = user.path("work/app");
+    for other in others {
+        let dir = folder.join(other);
+        user.git_init(&dir);
+        std::fs::write(dir.join("README.md"), format!("{other}\n")).unwrap();
+        user.git(&dir, &["add", "."]);
+        user.git(&dir, &["commit", "--quiet", "-m", "start"]);
+        let remote = user.path(&format!("remotes/{other}.git"));
+        user.git(
+            &user.path(""),
+            &["init", "--quiet", "--bare", remote.to_str().unwrap()],
+        );
+        user.git(&dir, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        user.git(&dir, &["push", "--quiet", "origin", "main"]);
+    }
     let dir = folder.join("api");
     user.git_init(&dir);
     std::fs::write(dir.join("README.md"), "api\n").unwrap();
@@ -50,9 +69,9 @@ fn fixture(user: &User) {
     );
     user.call(
         "project.set_settings",
-        json!({"name": "app", "repositories": [
-            {"path": "api", "forge": {"kind": "github", "repository": "acme/api"}}
-        ]}),
+        json!({"name": "app", "repositories": std::iter::once(
+            json!({"path": "api", "forge": {"kind": "github", "repository": "acme/api"}})
+        ).chain(others.iter().map(|other| json!({"path": other}))).collect::<Vec<_>>()}),
     )
     .unwrap();
 }
@@ -457,4 +476,276 @@ fn a_subscription_survives_a_daemon_restart() {
     script(&user, ended(pull()));
     a_minute_later(&user);
     assert!(the_delivery(&user).contains("checks ended: 1 passed, 1 failed"));
+}
+
+/// The user's list of a session's subscriptions (`subscription.list`).
+fn listed(user: &User, tree: &str) -> Vec<Value> {
+    user.call("subscription.list", json!({"tree": tree}))
+        .unwrap()["subscriptions"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn a_subscription_opening_is_an_event_and_the_session_lists_it() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull());
+    let (id, mcp) = agent(&user);
+    let watch = user.watch(&["--after", "0"]);
+
+    subscribe(&mcp, json!({"events": ["checks", "review"], "minutes": 30}));
+
+    let opened = watch.until(|e| e["name"] == "subscription.opened");
+    let opened = opened.last().unwrap();
+    assert_eq!(opened["data"]["agent"], id.as_str(), "{opened}");
+    assert_eq!(
+        opened["data"]["named"], "pull request #12 of api, workspace login",
+        "{opened}"
+    );
+    let rows = listed(&user, &id);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let row = &rows[0];
+    assert_eq!(row["agent"], id.as_str());
+    assert_eq!(row["named"], "pull request #12 of api, workspace login");
+    assert_eq!(row["events"], json!(["checks", "review"]));
+    assert_eq!(row["from"], "anyone");
+    let (created, expires) = (
+        row["created_at"].as_u64().unwrap(),
+        row["expires_at"].as_u64().unwrap(),
+    );
+    assert_eq!(expires - created, 30 * 60_000, "{row}");
+    assert_eq!(row["id"], opened["data"]["subscription"], "{row}");
+
+    // Another session's list holds none of it.
+    let error = user
+        .call("subscription.list", json!({"tree": "nobody"}))
+        .unwrap_err();
+    assert_eq!(error.0, "not-found", "{error:?}");
+}
+
+#[test]
+fn the_user_cancels_a_subscription_through_the_daemon_and_the_agent_is_not_woken() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull());
+    let (id, mcp) = agent(&user);
+    subscribe(&mcp, json!({"events": ["checks"]}));
+    let subscription = listed(&user, &id)[0]["id"].as_str().unwrap().to_owned();
+    let watch = user.watch(&["--after", "0"]);
+
+    user.call("subscription.cancel", json!({"subscription": subscription}))
+        .unwrap();
+
+    let events = watch.until(|e| e["name"] == "subscription.ended");
+    let event = events.last().unwrap();
+    assert_eq!(
+        event["data"]["subscription"],
+        subscription.as_str(),
+        "{event}"
+    );
+    assert_eq!(event["data"]["agent"], id.as_str(), "{event}");
+    assert_eq!(event["data"]["why"], "cancelled", "{event}");
+    assert!(listed(&user, &id).is_empty());
+    let error = user
+        .call("subscription.cancel", json!({"subscription": subscription}))
+        .unwrap_err();
+    assert_eq!(error.0, "not-found", "{error:?}");
+
+    // Over for good: the checks end, nothing is read, nothing is delivered.
+    let calls = user.gh_received().len();
+    script(&user, ended(pull()));
+    user.call("test.advance", json!({"ms": 61_000})).unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(user.gh_received().len(), calls);
+    assert!(delivered(&user).is_empty(), "{:?}", delivered(&user));
+    let shown = mcp.call("forge", json!({"action": "show"}));
+    assert!(!shown.text.contains("Your subscriptions"), "{}", shown.text);
+}
+
+/// What the tree says an agent does.
+fn doing(user: &User, agent: &str) -> String {
+    let tree = user.call("agent.tree", json!({"agent": agent})).unwrap();
+    tree["agents"]
+        .as_array()
+        .and_then(|agents| agents.iter().find(|a| a["agent"]["id"] == agent))
+        .map(|a| a["doing"].as_str().unwrap_or_default().to_owned())
+        .unwrap_or_else(|| panic!("{tree}"))
+}
+
+#[test]
+fn what_an_agent_waits_for_names_the_repository_only_when_the_project_has_several() {
+    let alone = user();
+    fixture(&alone);
+    script(&alone, pull());
+    let (id, mcp) = agent(&alone);
+    subscribe(&mcp, json!({"events": ["checks"]}));
+    assert_eq!(doing(&alone, &id), "waiting for #12: checks");
+
+    let several = user();
+    fixture_with(&several, &["web"]);
+    script(&several, pull());
+    let (id, mcp) = agent(&several);
+    subscribe(&mcp, json!({"events": ["checks"], "repository": "api"}));
+    assert_eq!(doing(&several, &id), "waiting for #12 of api: checks");
+}
+
+#[test]
+fn a_subscription_cancelled_while_its_logs_are_read_wakes_nobody_and_ends_once() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull());
+    let (id, mcp) = agent(&user);
+    subscribe(&mcp, json!({"events": ["checks"]}));
+    let subscription = listed(&user, &id)[0]["id"].as_str().unwrap().to_owned();
+    let watch = user.watch(&["--after", "0"]);
+
+    // The checks ended and the daemon is reading the failed job's log, slowly.
+    user.gh_script(json!({
+        "pulls": {"acme/api": {"app/login": ended(pull())}},
+        "logs": {"acme/api": {"456": "test\tRun cargo test\t2026-01-01T00:00:00.0000000Z failed\n"}},
+        "log_delay_ms": 1500
+    }));
+    a_minute_later(&user);
+    eventually("the log being read", || {
+        user.gh_received()
+            .iter()
+            .any(|call| call["args"].to_string().contains("--log-failed"))
+    });
+    user.call("subscription.cancel", json!({"subscription": subscription}))
+        .unwrap();
+
+    let events = watch.within(Duration::from_secs(3));
+    let ended: Vec<&Value> = events
+        .iter()
+        .filter(|e| e["name"] == "subscription.ended")
+        .collect();
+    assert_eq!(ended.len(), 1, "{events:?}");
+    assert_eq!(ended[0]["data"]["why"], "cancelled", "{events:?}");
+    assert!(delivered(&user).is_empty(), "{:?}", delivered(&user));
+}
+
+#[test]
+fn a_delivery_ends_the_subscription_with_an_event_saying_it_was_delivered() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull());
+    let (id, mcp) = agent(&user);
+    subscribe(&mcp, json!({"events": ["checks"]}));
+    let watch = user.watch(&["--after", "0"]);
+
+    script(&user, ended(pull()));
+    a_minute_later(&user);
+    the_delivery(&user);
+
+    let ended = watch.until(|e| e["name"] == "subscription.ended");
+    let ended = ended.last().unwrap();
+    assert_eq!(ended["data"]["why"], "delivered", "{ended}");
+    assert_eq!(ended["data"]["agent"], id.as_str(), "{ended}");
+    assert!(listed(&user, &id).is_empty());
+}
+
+#[test]
+fn a_subscription_past_its_time_ends_with_an_event_saying_it_expired() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull());
+    let (id, mcp) = agent(&user);
+    subscribe(&mcp, json!({"events": ["checks"], "minutes": 5}));
+    let watch = user.watch(&["--after", "0"]);
+
+    user.call("test.advance", json!({"ms": 6 * 60_000}))
+        .unwrap();
+
+    let ended = watch.until(|e| e["name"] == "subscription.ended");
+    assert_eq!(ended.last().unwrap()["data"]["why"], "expired", "{ended:?}");
+    assert!(listed(&user, &id).is_empty());
+}
+
+#[test]
+fn the_agent_unsubscribing_or_ending_ends_its_subscription_with_an_event() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull());
+    let (id, mcp) = agent(&user);
+    let watch = user.watch(&["--after", "0"]);
+
+    subscribe(&mcp, json!({"events": ["checks"]}));
+    let unsubscribed = mcp.call("forge", json!({"action": "unsubscribe"}));
+    assert!(!unsubscribed.error, "{}", unsubscribed.text);
+    let seen = watch.until(|e| e["name"] == "subscription.ended");
+    assert_eq!(seen.last().unwrap()["data"]["why"], "cancelled", "{seen:?}");
+
+    subscribe(&mcp, json!({"events": ["checks"]}));
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+    let seen = watch.until(|e| e["name"] == "subscription.ended");
+    assert_eq!(
+        seen.last().unwrap()["data"]["why"],
+        "agent-ended",
+        "{seen:?}"
+    );
+}
+
+/// A project `app` that is one repository, its own folder (the repository `.`), on GitHub
+/// `acme/api`, and its ready workspace `login` on the branch `app/login`.
+fn fixture_here(user: &User) {
+    let folder = user.path("work/app");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "app\n").unwrap();
+    user.git(&folder, &["add", "."]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    let remote = user.path("remotes/app.git");
+    user.git(
+        &user.path(""),
+        &["init", "--quiet", "--bare", remote.to_str().unwrap()],
+    );
+    user.git(
+        &folder,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    user.git(&folder, &["push", "--quiet", "origin", "main"]);
+    user.call("project.add", json!({"folder": folder, "name": "app"}))
+        .unwrap();
+    let workspace = user
+        .call(
+            "workspace.create",
+            json!({"project": "app", "name": "login"}),
+        )
+        .unwrap();
+    assert_eq!(workspace["state"], "ready", "{workspace}");
+    user.git(
+        &folder,
+        &["remote", "set-url", "origin", "git@github.com:acme/api.git"],
+    );
+    user.call(
+        "project.set_settings",
+        json!({"name": "app", "repositories": [
+            {"path": ".", "forge": {"kind": "github", "repository": "acme/api"}}
+        ]}),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_repository_that_is_the_project_folder_is_named_by_the_project_never_by_a_dot() {
+    let user = user();
+    fixture_here(&user);
+    script(&user, pull());
+    let (id, mcp) = agent(&user);
+
+    let said = subscribe(&mcp, json!({"events": ["checks"]}));
+    assert!(said.contains("pull request #12 of app"), "{said}");
+    assert!(!said.contains("of ."), "{said}");
+    let row = &listed(&user, &id)[0];
+    assert_eq!(row["named"], "pull request #12 of app, workspace login");
+
+    script(&user, ended(pull()));
+    a_minute_later(&user);
+    let delivery = the_delivery(&user);
+    assert!(
+        delivery.contains("News of the pull request #12 of app, workspace login."),
+        "{delivery}"
+    );
+    assert!(!delivery.contains("of ."), "{delivery}");
 }
