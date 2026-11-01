@@ -59,7 +59,7 @@ use crate::session_link::{
     self, PlaceFacts, PullRequest, RepositoryFacts, Request, SessionLink, SessionUpdate, TreeAgent,
     Where,
 };
-use crate::shell::{Layout, Shell, now_ms};
+use crate::shell::{Layout, Selection, Shell, now_ms};
 use crate::subscriptions::SubscriptionList;
 use crate::tree::place_name;
 use crate::waiting::{Waiting, sentences};
@@ -403,6 +403,14 @@ impl SessionPage {
                 Some(row.read(cx).title().to_owned())
             })
             .unwrap_or_else(|| peer.to_owned())
+    }
+
+    /// The session a message was relayed from or to, when the window still lists it (an ended one
+    /// is listed too): the one its name opens.
+    fn peer_session(&self, agent: Option<&str>, cx: &App) -> Option<String> {
+        let shell = self.shell.upgrade()?;
+        let id = agent?;
+        shell.read(cx).session(id).map(|_| id.to_owned())
     }
 
     pub fn run_drawer(&self) -> &Entity<Drawer> {
@@ -2476,16 +2484,53 @@ impl Render for Row {
             }
             // Another session's words, or what this one sent it: the agent's side, marked with
             // who it is from or to, never drawn as the user's.
-            Block::Relayed { peer, sent, text } => {
-                let named = self
-                    .page
-                    .upgrade()
-                    .map(|page| page.read(cx).peer_named(peer, cx))
-                    .unwrap_or_else(|| peer.clone());
+            Block::Relayed {
+                peer,
+                agent,
+                sent,
+                text,
+            } => {
+                let page = self.page.upgrade();
+                let named = SharedString::from(
+                    page.as_ref()
+                        .map(|page| page.read(cx).peer_named(peer, cx))
+                        .unwrap_or_else(|| peer.clone()),
+                );
+                let session = page
+                    .as_ref()
+                    .and_then(|page| page.read(cx).peer_session(agent.as_deref(), cx));
                 let said_by = SharedString::from(match sent {
                     true => format!("to {named}"),
                     false => format!("from {named}"),
                 });
+                // The name opens the session when it is still there; said plainly when it is
+                // gone. A click on it is not a click on the card it sits in.
+                let name = match session {
+                    Some(session) => {
+                        let shell = page.as_ref().map(|page| page.read(cx).shell.clone());
+                        hoverable(
+                            div()
+                                .id(id("relayed-peer"))
+                                .cursor_pointer()
+                                .aria_label(named.clone())
+                                .child(named.clone())
+                                .on_click(move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    if let Some(shell) = &shell {
+                                        let session = session.clone();
+                                        shell
+                                            .update(cx, |shell, cx| {
+                                                shell.open(Selection::Session(session), window, cx)
+                                            })
+                                            .ok();
+                                    }
+                                }),
+                            move |d, t| d.text_color(mix(p.faint, p.text, t)),
+                        )
+                        .into_any_element()
+                    }
+                    None => div().child(named.clone()).into_any_element(),
+                };
                 let from = div()
                     .id(id("relayed-from"))
                     .flex()
@@ -2493,15 +2538,25 @@ impl Render for Row {
                     .gap(space::SM)
                     .mono(11.5)
                     .text_color(p.faint)
-                    .aria_label(said_by.clone())
+                    .aria_label(said_by)
                     .child(
                         icon(if *sent { Icon::Send } else { Icon::Agents })
                             .size(px(12.))
                             .text_color(p.faint),
                     )
-                    .child(said_by)
+                    .child(
+                        div()
+                            .flex()
+                            .gap(space::SM)
+                            .child(if *sent { "to" } else { "from" })
+                            .child(name),
+                    )
                     .test_support();
                 let bubble = div()
+                    .id(id("relayed-card"))
+                    // One width for the whole fold: the card is as wide as the conversation lets
+                    // it be, folded, unfolding and open.
+                    .when(!*sent, |d| d.w_full())
                     .max_w(px(540.))
                     .flex()
                     .flex_col()
@@ -2513,7 +2568,8 @@ impl Render for Row {
                     .rounded_br(px(14.))
                     .rounded_bl(px(4.))
                     .px(space::LG)
-                    .py(space::MD);
+                    .py(space::MD)
+                    .test_support();
                 // Another session's message is folded to its first line and who sent it, until a
                 // click opens it: a report can be long. What this one sent is its own words.
                 let bubble = match sent {

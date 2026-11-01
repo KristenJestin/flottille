@@ -666,8 +666,11 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   user, neutral ("Request #1 · Run pnpm test", which lights its card in the rail, then, once
   answered, the outcome), each picture sent inside the bubble of its message, above its words, a
   message another session sent with `session_send` marked with its sender ("from <session>") and
-  folded to its first line until a click unfolds it, and
+  folded to its first line until a click unfolds it (the card keeps one width while it folds and
+  unfolds), and
   the same message in the sender's conversation marked with whom it went to, never as the user's;
+  in both, the session's name is a link that opens it (an ended session too; a session that no
+  longer exists is named with no link);
   a hover on a message (the user's, the agent's, another session's) shows, under it, its date and
   time and a Copy icon button (a toast says it is copied); each step the Auto judge let through
   says "allowed by the judge" (a ticket or a pull request created included), and the folded line
