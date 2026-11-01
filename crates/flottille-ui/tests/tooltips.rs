@@ -7,8 +7,8 @@ use flottille_ui::motion::{HOVER, TOOLTIP};
 use flottille_ui::{Button, Icon};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
-    Context, Entity, IntoElement, ParentElement, Pixels, Render, Styled, TestAppContext,
-    VisualTestContext, Window, div, point, px, size,
+    Context, Entity, InteractiveElement, IntoElement, ParentElement, Pixels, Render, Styled,
+    TestAppContext, VisualTestContext, Window, div, point, px, size,
 };
 
 /// Where the button sits in a 600 × 500 window.
@@ -181,4 +181,55 @@ fn no_source_uses_the_tooltip_that_follows_the_pointer() {
         }
     }
     assert!(seen.is_empty(), "GPUI's tooltip is used in {seen:?}");
+}
+
+/// A mark that is no button, with the same anchored tooltip.
+struct Mark;
+
+impl Render for Mark {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mark = flottille_ui::tipped(
+            div().id("mark").size(px(16.)),
+            "New since you looked: a new message",
+            16.,
+            window,
+            cx,
+        );
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .child(div().h(px(40.)).child(mark))
+    }
+}
+
+#[gpui_kit::test]
+fn any_element_can_carry_the_anchored_tooltip_and_the_tooltip_says_its_words(
+    cx: &mut TestAppContext,
+) {
+    init(cx, Desktop::new(false).env());
+    let (_, cx) = cx.add_window_view(|_, _| Mark);
+    cx.simulate_resize(size(px(600.), px(500.)));
+    cx.update(|window, cx| window.hover("mark", cx));
+    advance(cx, TOOLTIP / 2);
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("mark-tooltip").is_none(), "not yet");
+    });
+    advance(cx, TOOLTIP / 2 + HOVER * 2);
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        let (tip, mark) = (window.find("mark-tooltip"), window.find("mark"));
+        assert!(
+            tip.bounds().top() >= mark.bounds().bottom(),
+            "below the mark"
+        );
+        assert_eq!(
+            tip.label(),
+            Some("New since you looked: a new message"),
+            "it says its words"
+        );
+    });
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn once it is shown");
 }

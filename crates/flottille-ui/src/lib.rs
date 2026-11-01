@@ -35,7 +35,7 @@ pub mod typography;
 
 use gpui_kit::App;
 
-pub use button::{Badge, Button, ButtonKind, Tooltip};
+pub use button::{Badge, Button, ButtonKind, Tooltip, tipped};
 pub use card::{Block, Card};
 pub use confirm::Confirm;
 pub use drawer::{Drawer, Side};

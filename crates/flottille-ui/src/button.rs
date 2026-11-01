@@ -7,10 +7,10 @@
 use std::sync::Arc;
 
 use gpui_kit::{
-    Anchor, AnyView, App, AppContext as _, ClickEvent, Context, ElementId, Entity, FontWeight,
+    Anchor, AnyView, App, AppContext as _, ClickEvent, Context, Div, ElementId, Entity, FontWeight,
     InteractiveElement, IntoElement, MouseButton, ParentElement, Render, RenderOnce, SharedString,
-    StatefulInteractiveElement, Styled, Task, TestSupportExt, Window, anchored, deferred, div,
-    point, px,
+    Stateful, StatefulInteractiveElement, Styled, Task, TestSupportExt, Window, anchored, deferred,
+    div, point, px,
 };
 
 use crate::color::mix;
@@ -423,6 +423,36 @@ impl Tip {
     }
 }
 
+/// Gives an element that is no button the tooltip of one: after [`TOOLTIP`] of rest it fades in
+/// anchored to it (`<id>-tooltip`), `height` being the element's own. The element needs an id.
+pub fn tipped(
+    mut element: Stateful<Div>,
+    text: impl Into<SharedString>,
+    height: f32,
+    window: &mut Window,
+    cx: &mut App,
+) -> impl IntoElement {
+    let id = element
+        .interactivity()
+        .element_id
+        .clone()
+        .expect("an element with a tooltip has an id");
+    let tip = tip_state(&id, window, cx);
+    let shown = tip.update(cx, |tip, cx| tip.sample(false, window, cx));
+    let mut element = element.relative();
+    if shown > 0.0 {
+        let p = palette(cx);
+        element = element.child(tooltip_overlay(&id, text.into(), height, shown, p));
+    }
+    let down = tip.clone();
+    element
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            down.update(cx, |tip, cx| tip.rest(false, cx));
+        })
+        .on_hover(move |hovered, _, cx| tip.update(cx, |tip, cx| tip.rest(*hovered, cx)))
+        .test_support()
+}
+
 /// The tooltip of the button `id`, drawn after everything else: centred below it with a gap, above
 /// it when the window has no room below, kept inside the window sideways. It takes no pointer, so
 /// the button keeps its hover.
@@ -439,9 +469,13 @@ fn tooltip_overlay(
         .offset(point(px(0.), px(height)))
         .child(
             // The padding is the gap on either side of the button, whichever it opens on.
-            div()
-                .py(SM)
-                .child(bubble(text, p).id(name).opacity(shown).test_support()),
+            div().py(SM).child(
+                bubble(text.clone(), p)
+                    .id(name)
+                    .aria_label(text)
+                    .opacity(shown)
+                    .test_support(),
+            ),
         );
     div()
         .absolute()

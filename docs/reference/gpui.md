@@ -60,6 +60,7 @@ durations and the easing of `crates/flottille-ui/src/motion.rs` (`HOVER` 140 ms,
 | the same element when it can also be the chosen one (a selected row, a taken chip) | `selectable(element, chosen, paint)`: `paint` also gets how far it is the chosen one; a choice among buttons is `Button::choice` |
 | a state with no pointer: a focus ring, a highlight, a button enabled or not | `fade(id, on, duration, window, cx)` (`Button` fades its own enabled state) |
 | a choice among a few words (Ask \| Auto) | `Segmented`: its highlight slides to the one clicked, the inks fade along it |
+| words under the pointer on an element that is no button (a row's mark) | `tipped(element, text, height, window, cx)`: the button's anchored tooltip, `<id>-tooltip` |
 | a chevron | `turning(id, open, window, cx)` |
 | a page's blocks, a card, anything that shows once | `enter(id, index, element)` |
 | a block that comes and goes while its view stays (an empty-list line, the fields a choice needs, a body that unfolds) | `presence(id, present, element).gap(..)`: build it on every frame, outside a `when`; `.gap` is the gap the parent flex puts between its children, which folds with the block |
