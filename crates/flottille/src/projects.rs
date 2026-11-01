@@ -1006,6 +1006,18 @@ fn key_renamed(table: &mut toml_edit::Table, from: &str, to: &str) -> bool {
     true
 }
 
+/// Every project whose file can be used, as the files say now.
+pub fn all(daemon: &Daemon) -> Vec<Project> {
+    let projects = daemon.projects.lock().unwrap();
+    match projects.registry.load_all() {
+        Ok(loaded) => loaded.projects,
+        Err(error) => {
+            eprintln!("flottille daemon: the projects: {error}");
+            Vec::new()
+        }
+    }
+}
+
 /// The project as its file says now.
 pub fn load_project(daemon: &Daemon, name: &str) -> std::result::Result<Project, Failure> {
     load(&daemon.projects.lock().unwrap(), name)

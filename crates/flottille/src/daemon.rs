@@ -26,6 +26,7 @@ use crate::deliveries;
 use crate::developer;
 use crate::forge;
 use crate::inbox;
+use crate::items;
 use crate::judge;
 use crate::mcp;
 use crate::projects::{self, Projects};
@@ -161,6 +162,8 @@ pub struct Daemon {
     pub launching: Mutex<HashMap<String, usize>>,
     /// What the forges said of each workspace, and who watches them.
     pub forges: forge::Forges,
+    /// The rounds of the items, the windows connected (`docs/items.md`).
+    pub items: items::Items,
     /// The developer mode's log (`docs/developer.md`).
     pub developer: developer::Log,
     /// Becomes true when the daemon stops.
@@ -313,6 +316,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         judge_chose_none: Mutex::new(None),
         launching: Mutex::new(HashMap::new()),
         forges: forge::Forges::default(),
+        items: items::Items::default(),
         developer: developer::Log::open(paths),
         stopping: watch::Sender::new(false),
     });
@@ -537,6 +541,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
     let mut subscriptions = JoinSet::new();
     // The workspaces this connection watches: their forges are read again while it stays open.
     let mut watched: HashMap<(String, String), forge::Watch> = HashMap::new();
+    // Held while this connection is a window's.
+    let mut window: Option<items::Window> = None;
     let client_left = loop {
         let line = tokio::select! {
             line = lines.next_line() => line,
@@ -562,6 +568,13 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
             let watch = forge::watch(&daemon, &workspace);
             watched.insert((asked.project, asked.name), watch);
         }
+        if request.method == "events.watch"
+            && window.is_none()
+            && let Ok(asked) = serde_json::from_value::<WatchParams>(request.params.clone())
+            && asked.client.as_deref() == Some("window")
+        {
+            window = Some(items::window(&daemon));
+        }
         // They run git or a provider's `--version`, wait on an agent's task or start what an
         // approval allows: answered by a task of their own, the connection goes on.
         if [
@@ -571,6 +584,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
             "test.",
             "provider.",
             "run.",
+            "items.",
         ]
         .iter()
         .any(|prefix| request.method.starts_with(prefix))
@@ -594,6 +608,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     approvals::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("run.") {
                     run_methods::call(daemon, &request.method, request.params).await
+                } else if request.method.starts_with("items.") {
+                    items::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("provider.") {
                     providers::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("test.") {
@@ -640,6 +656,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
         subscriptions.abort_all();
     }
     while subscriptions.join_next().await.is_some() {}
+    drop(window);
     drop(out);
     let _ = writer.await;
 }

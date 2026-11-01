@@ -460,6 +460,17 @@ pub(super) async fn pull_numbered(
 
 /// A listed pull request with its checks, reviewers and comments.
 async fn detailed(forge: &Forge, context: &str, found: Listed) -> Result<Pull, String> {
+    detailed_with(forge, context, found)
+        .await
+        .map(|(pull, _)| pull)
+}
+
+/// `detailed`, with the commit statuses its checks are of.
+async fn detailed_with(
+    forge: &Forge,
+    context: &str,
+    found: Listed,
+) -> Result<(Pull, Vec<Value>), String> {
     let id = found.id.to_string();
     let statuses = statuses_of(forge, context, &id).await?;
     let checks: Vec<_> = statuses.iter().map(check_of).collect();
@@ -494,7 +505,7 @@ async fn detailed(forge: &Forge, context: &str, found: Listed) -> Result<Pull, S
             log: None,
         })
         .collect();
-    Ok(Pull {
+    let pull = Pull {
         number: found.id,
         title: found.title,
         state: found.state,
@@ -510,7 +521,163 @@ async fn detailed(forge: &Forge, context: &str, found: Listed) -> Result<Pull, S
         reviewers,
         jobs,
         ci: None,
-    })
+    };
+    Ok((pull, statuses))
+}
+
+/// The states Bitbucket Cloud lists a pull request in: all of them, since it lists the open ones
+/// alone unless asked (Atlassian's REST documentation, "List pull requests": the `state`
+/// parameter is repeated for several).
+const CLOUD_STATES: [&str; 4] = [
+    "state=OPEN",
+    "state=MERGED",
+    "state=DECLINED",
+    "state=SUPERSEDED",
+];
+/// The most pull requests one round of the items reads of a Cloud repository.
+const ALL: usize = 1000;
+
+/// The pull requests of the repository that changed since `since`, each with its checks,
+/// reviewers and comments (`docs/items.md`). Cloud is asked through `bkt api` with Bitbucket's
+/// own filter, `q=updated_on>="<since>"`, newest change first, the filter and the order given as
+/// `--param` (never in the path: `bkt api` is not known to merge them); Data Center has no such
+/// filter in what `bkt` reads, so its newest 50 are read and each open one is read in full.
+pub(super) async fn changed_pulls(
+    forge: &Forge,
+    context: &str,
+    path: &str,
+    since: Option<&str>,
+) -> Result<Vec<crate::items::Fetched>, String> {
+    let Forge::Bitbucket { owner, name, .. } = forge else {
+        unreachable!("a Bitbucket repository")
+    };
+    let mut fetched = Vec::new();
+    if cloud(forge) {
+        let filter = since.map(|since| format!("q=updated_on>=\"{since}\""));
+        let mut params = vec!["sort=-updated_on"];
+        params.extend(CLOUD_STATES);
+        if let Some(filter) = &filter {
+            params.push(filter);
+        }
+        let (values, _) = cloud_values_with(
+            context,
+            &format!("/repositories/{owner}/{name}/pullrequests"),
+            ALL,
+            &params,
+        )
+        .await?;
+        for value in values {
+            let Some(found) = listed(forge, &value) else {
+                continue;
+            };
+            let (pull, statuses) = detailed_with(forge, context, found).await?;
+            let mut item = super::fetched_pull(path, "bitbucket", &pull);
+            item.item.author = value["author"]["display_name"].as_str().map(masked);
+            item.item.updated_at = value["updated_on"].as_str().map(masked);
+            item.item.checks = checks_of_statuses(&statuses);
+            fetched.push(item);
+        }
+        return Ok(fetched);
+    }
+    let limit = LISTED.to_string();
+    let said = json(&command(
+        forge,
+        context,
+        &["pr", "list"],
+        &["--state", "all", "--limit", &limit, "--json"],
+    ))
+    .await?;
+    for value in said["pull_requests"].as_array().into_iter().flatten() {
+        let Some(found) = listed(forge, value) else {
+            continue;
+        };
+        let author = person(&value["author"]["user"], &["displayName", "name"]);
+        let mut item = if found.state == "open" {
+            let (pull, statuses) = detailed_with(forge, context, found).await?;
+            let mut item = super::fetched_pull(path, "bitbucket", &pull);
+            item.item.checks = checks_of_statuses(&statuses);
+            item
+        } else {
+            // A pull request merged or declined is read from the list alone.
+            let mut item = super::fetched_pull(
+                path,
+                "bitbucket",
+                &Pull {
+                    number: found.id,
+                    title: found.title,
+                    state: found.state,
+                    head: found.branch,
+                    head_commit: found.head_commit,
+                    base: found.base,
+                    url: found.url,
+                    mergeable: None,
+                    review: decision(&found.reviewers),
+                    checks: Vec::new(),
+                    comments: Vec::new(),
+                    reviews: Vec::new(),
+                    reviewers: found.reviewers,
+                    jobs: Vec::new(),
+                    ci: None,
+                },
+            );
+            for count in ["comments", "reviews", "mergeable", "review"] {
+                item.item.details.as_object_mut().map(|d| d.remove(count));
+            }
+            item
+        };
+        item.item.author = Some(author);
+        item.item.updated_at = value["updatedDate"].as_u64().map(|at| at.to_string());
+        fetched.push(item);
+    }
+    Ok(fetched)
+}
+
+/// The checks of the pull request `number` now.
+pub(super) async fn checks_now(
+    forge: &Forge,
+    context: &str,
+    number: u64,
+) -> Result<Vec<flottille_core::item::Check>, String> {
+    let statuses = statuses_of(forge, context, &number.to_string()).await?;
+    Ok(checks_of_statuses(&statuses))
+}
+
+/// Commit statuses as the items keep them: when each was made, when it last changed once it
+/// ended, and its link.
+fn checks_of_statuses(statuses: &[Value]) -> Vec<flottille_core::item::Check> {
+    let time = |status: &Value, keys: [&str; 2]| {
+        keys.iter().find_map(|key| match &status[*key] {
+            Value::String(at) => Some(masked(at)),
+            Value::Number(at) => Some(at.to_string()),
+            _ => None,
+        })
+    };
+    statuses
+        .iter()
+        .map(|status| {
+            let (name, state) = check_of(status);
+            flottille_core::item::Check {
+                name,
+                state: state.into(),
+                started_at: time(status, ["created_on", "dateAdded"]),
+                ended_at: match state {
+                    "pending" => None,
+                    _ => time(status, ["updated_on", "dateAdded"]),
+                },
+                link: status["url"]
+                    .as_str()
+                    .filter(|link| !link.is_empty())
+                    .map(masked),
+            }
+        })
+        .collect()
+}
+
+/// The display name Bitbucket Cloud knows the signed-in user by (`/user`, assumed from
+/// Atlassian's REST documentation).
+pub(super) async fn me(context: &str) -> Option<String> {
+    let user = json(&["api", "/user", "--context", context]).await.ok()?;
+    user["display_name"].as_str().map(masked)
 }
 
 /// The checks of the pull request `id`: the commit statuses of its source commit.

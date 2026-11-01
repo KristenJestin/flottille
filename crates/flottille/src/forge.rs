@@ -2194,6 +2194,190 @@ fn pull_text(text: &mut String, named: &str, pull: &Pull, full: bool, again: &st
     }
 }
 
+/// What `gh pr list` is asked of each pull request a round of the items reads: what `gh pr view`
+/// gives `forge show`, and who opened it, whom it is assigned to, its labels and when it changed.
+const ITEM_FIELDS: &str = "number,title,state,isDraft,headRefName,headRefOid,baseRefName,url,\
+    mergeable,reviewDecision,statusCheckRollup,comments,reviews,author,assignees,labels,updatedAt";
+/// The most pull requests or issues one round asks `gh` for: all of a repository, as far as
+/// GitHub's search gives them (1,000 results at most).
+pub(crate) const ALL: &str = "1000";
+
+/// The pull requests of the repository at `path` that changed since `since` (RFC 3339, UTC), all
+/// of them without it, whatever their state and whoever opened them, each with its checks,
+/// review and comments (`docs/items.md`).
+pub(crate) async fn changed_pulls(
+    forge: &Forge,
+    path: &str,
+    since: Option<&str>,
+) -> Result<Vec<crate::items::Fetched>, String> {
+    match forge {
+        Forge::GitHub { .. } => {
+            signed_in().await?;
+            let repo = forge.gh_repository();
+            let search = since.map(|since| format!("updated:>={since}"));
+            let mut args = vec!["pr", "list", "-R", &repo, "--state", "all", "--limit", ALL];
+            if let Some(search) = &search {
+                args.extend(["--search", search]);
+            }
+            args.extend(["--json", ITEM_FIELDS]);
+            let listed = gh_json(&args).await?;
+            Ok(listed
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|value| {
+                    let pull = Pull::of(value)?;
+                    let names = |list: &Value, key: &str| -> Vec<String> {
+                        list.as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|item| item[key].as_str())
+                            .map(masked)
+                            .collect()
+                    };
+                    let mut fetched = fetched_pull(path, "github", &pull);
+                    let item = &mut fetched.item;
+                    item.author = value["author"]["login"].as_str().map(masked);
+                    item.assignees = names(&value["assignees"], "login");
+                    item.labels = names(&value["labels"], "name");
+                    item.updated_at = value["updatedAt"].as_str().map(masked);
+                    item.checks = github_checks(value);
+                    Some(fetched)
+                })
+                .collect())
+        }
+        Forge::Bitbucket { .. } => {
+            let context = bitbucket::Contexts::default().of(forge).await?;
+            bitbucket::changed_pulls(forge, &context, path, since).await
+        }
+    }
+}
+
+/// The checks of the pull request `number` now, read on their own: they move without it.
+pub(crate) async fn checks_now(
+    forge: &Forge,
+    number: u64,
+) -> Result<Vec<flottille_core::item::Check>, String> {
+    match forge {
+        Forge::GitHub { .. } => {
+            let number = number.to_string();
+            let repo = forge.gh_repository();
+            let viewed = gh_json(&[
+                "pr",
+                "view",
+                &number,
+                "-R",
+                &repo,
+                "--json",
+                "statusCheckRollup",
+            ])
+            .await?;
+            Ok(github_checks(&viewed))
+        }
+        Forge::Bitbucket { .. } => {
+            let context = bitbucket::Contexts::default().of(forge).await?;
+            bitbucket::checks_now(forge, &context, number).await
+        }
+    }
+}
+
+/// Whom the forge says the user is signed in as: GitHub's login, Bitbucket Cloud's display name
+/// (the name its pull requests say); none when it does not say, Data Center included.
+pub(crate) async fn me(forge: &Forge) -> Option<String> {
+    match forge {
+        Forge::GitHub { .. } => gh_json(&["api", "user"]).await.ok()?["login"]
+            .as_str()
+            .map(masked),
+        Forge::Bitbucket { .. } if bitbucket::cloud(forge) => {
+            let context = bitbucket::Contexts::default().of(forge).await.ok()?;
+            bitbucket::me(&context).await
+        }
+        Forge::Bitbucket { .. } => None,
+    }
+}
+
+/// A pull request as an item: what is proper to a pull request in its details.
+fn fetched_pull(path: &str, source: &str, pull: &Pull) -> crate::items::Fetched {
+    let mut details = json!({
+        "head": pull.head,
+        "base": pull.base,
+        "head_commit": pull.head_commit,
+        "mergeable": pull.mergeable,
+        "review": pull.review,
+        "comments": pull.comments.len(),
+        "reviews": pull.reviews.len(),
+    });
+    if !pull.reviewers.is_empty() {
+        details["reviewers"] = pull
+            .reviewers
+            .iter()
+            .map(|(name, state)| json!({"name": name, "state": state}))
+            .collect();
+    }
+    crate::items::Fetched {
+        item: flottille_core::item::Item {
+            project: String::new(),
+            kind: "pull".into(),
+            source: source.into(),
+            repository: path.into(),
+            key: pull.number.to_string(),
+            title: pull.title.clone(),
+            state: pull.state.into(),
+            author: None,
+            assignees: Vec::new(),
+            labels: Vec::new(),
+            url: Some(pull.url.clone()).filter(|url| !url.is_empty()),
+            updated_at: None,
+            seen_at: 0,
+            mine: false,
+            details,
+            checks: pull
+                .checks
+                .iter()
+                .map(|(name, state)| flottille_core::item::Check {
+                    name: name.clone(),
+                    state: (*state).into(),
+                    started_at: None,
+                    ended_at: None,
+                    link: None,
+                })
+                .collect(),
+        },
+        comments: pull.comments.iter().map(crate::items::Said::of).collect(),
+        reviews: pull.reviews.iter().map(crate::items::Said::of).collect(),
+    }
+}
+
+/// The checks of `statusCheckRollup`, with when each started and ended and its link. A check run
+/// not completed says its end as the year 1, which is no end.
+fn github_checks(value: &Value) -> Vec<flottille_core::item::Check> {
+    let time = |check: &Value, key: &str| {
+        check[key]
+            .as_str()
+            .filter(|at| !at.starts_with("0001-"))
+            .map(masked)
+    };
+    value["statusCheckRollup"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|check| {
+            let (name, state) = check_of(check);
+            flottille_core::item::Check {
+                name,
+                state: state.into(),
+                started_at: time(check, "startedAt").or_else(|| time(check, "createdAt")),
+                ended_at: time(check, "completedAt"),
+                link: check["detailsUrl"]
+                    .as_str()
+                    .or(check["targetUrl"].as_str())
+                    .filter(|link| !link.is_empty())
+                    .map(masked),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

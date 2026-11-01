@@ -116,6 +116,12 @@ impl User {
         self
     }
 
+    /// This user's daemon keeps the items of its projects up to date (`docs/items.md`): every
+    /// other test's daemon does not, so that no round of its own adds calls to the fakes.
+    pub fn with_fetcher(self) -> User {
+        self.with_env("FLOTTILLE_TEST_NO_FETCH", "")
+    }
+
     /// A user whose agents are the fake ACP agent (`crates/flottille-fake-agent`), its folder
     /// `fake` in the user's folder.
     pub fn with_fake_agent() -> User {
@@ -746,6 +752,8 @@ fn command_for(program: &Path, dir: &Path, env: &[(String, String)], args: &[&st
         .env("FLOTTILLE_CODEX_MACHINE_SETTINGS", dir.join("etc-codex"))
         // No way to the machine's own session: its bus, its tmux server.
         .env("TMUX_TMPDIR", dir.join("runtime"))
+        // No round of the items unless a test asks for it (`with_fetcher`).
+        .env("FLOTTILLE_TEST_NO_FETCH", "1")
         .env_remove("DBUS_SESSION_BUS_ADDRESS")
         .env_remove("TMUX");
     // No sign-in of the machine: a provider is signed in only where a test says so, and the
