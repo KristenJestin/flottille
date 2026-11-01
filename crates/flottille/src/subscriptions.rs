@@ -41,18 +41,15 @@ pub struct Event {
 pub struct By {
     pub name: String,
     pub bot: bool,
-    /// The Flottille agent that wrote it, when one did.
-    pub agent: Option<String>,
+    /// A Flottille agent wrote it, as the mark of Flottille on it says (`forge::marked`).
+    pub marked: bool,
 }
 
 /// Whether the subscription waits for that event.
 fn matches(subscription: &Subscription, event: &Event) -> bool {
     subscription.events.iter().any(|e| e == event.kind)
         && (subscription.from != "people"
-            || event
-                .by
-                .as_ref()
-                .is_none_or(|by| !by.bot && by.agent.as_deref() != Some(&subscription.agent)))
+            || event.by.as_ref().is_none_or(|by| !by.bot && !by.marked))
 }
 
 /// Stores a new subscription, which its source watches from now on.
@@ -312,29 +309,28 @@ mod tests {
         }
     }
 
-    fn comment(name: &str, bot: bool, agent: Option<&str>) -> Event {
+    fn comment(name: &str, bot: bool, marked: bool) -> Event {
         Event {
             kind: "comment",
             by: Some(By {
                 name: name.into(),
                 bot,
-                agent: agent.map(Into::into),
+                marked,
             }),
             text: String::new(),
         }
     }
 
     #[test]
-    fn people_only_leaves_out_bots_and_the_agent_s_own_and_anyone_takes_all() {
+    fn people_only_leaves_out_bots_and_what_flottille_posted_and_anyone_takes_all() {
         let people = subscription("people");
-        assert!(matches(&people, &comment("alice", false, None)));
-        assert!(matches(&people, &comment("alice", false, Some("other"))));
-        assert!(!matches(&people, &comment("ci", true, None)));
-        assert!(!matches(&people, &comment("alice", false, Some("me"))));
+        assert!(matches(&people, &comment("alice", false, false)));
+        assert!(!matches(&people, &comment("ci", true, false)));
+        assert!(!matches(&people, &comment("alice", false, true)));
         let anyone = subscription("anyone");
-        assert!(matches(&anyone, &comment("ci", true, None)));
-        assert!(matches(&anyone, &comment("alice", false, Some("me"))));
-        let mut review = comment("alice", false, None);
+        assert!(matches(&anyone, &comment("ci", true, false)));
+        assert!(matches(&anyone, &comment("alice", false, true)));
+        let mut review = comment("alice", false, false);
         review.kind = "review";
         assert!(!matches(&anyone, &review));
     }

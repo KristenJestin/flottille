@@ -297,10 +297,10 @@ const SERVED: [Definition; 26] = [
             (open by default) and branch. show: a workspace's branch's (yours; in main, name \
             it), or number's, with checks (failed jobs' log ends), review and comment \
             counts; detail full adds texts. Writes (judged; result maybe later): create, merge \
-            (method, squash by default; refused with no check, failing checks or requested \
+            (method, default squash; refused with no check, failing checks or requested \
             changes unless waive gives the user's words) and checks (re-run failed) act on a workspace's branch; comment, \
             edit, close (comment first), reopen on number. subscribe: the next events of a workspace's pull request \
-            wakes you once, by a delivery (from people: no bot nor you; minutes: sized by CI, else 60); unsubscribe. {\"action\": \"create\", \"repository\": \"api\", \"title\": \
+            wakes you once, by a delivery (from people: no bot nor agent; minutes: sized by CI, else 60); unsubscribe. {\"action\": \"create\", \"repository\": \"api\", \"title\": \
             \"fix: ...\", \"body\": \"...\"}",
         read_only: false,
         idempotent: false,

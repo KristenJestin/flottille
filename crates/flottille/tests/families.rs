@@ -17,6 +17,10 @@ use common::mcp::{Answer, Mcp, server_of};
 use flottille_core::agent::GateMode;
 use flottille_core::store::Store;
 use serde_json::{Value, json};
+/// What Flottille ends every comment and body it posts for an agent with (`docs/forges.md`).
+const MARKER: &str = "<!-- flottille -->";
+/// The same, where nothing invisible survives: the footer of a Jira comment or description.
+const JIRA_FOOTER: &str = "— posted by a Flottille agent";
 
 /// A project `app` of one repository, its `origin` GitHub's `acme/app` (set before the workspace
 /// is made, which is made offline: nothing is fetched from it), its forge declared, its tracker
@@ -306,10 +310,9 @@ fn forge_comment_is_judged_and_posted_once_allowed() {
         done.contains("The comment was posted on pull request #12 of acme/app."),
         "{done}"
     );
-    assert!(
-        words(user.gh_received())
-            .contains(&"pr comment 12 -R github.com/acme/app --body Rebased on main".to_owned())
-    );
+    assert!(words(user.gh_received()).contains(&format!(
+        "pr comment 12 -R github.com/acme/app --body Rebased on main\n\n{MARKER}"
+    )));
     // Refused before anything is asked: no body, no number.
     for args in [
         json!({"action": "comment", "number": 12}),
@@ -385,10 +388,9 @@ fn forge_close_closes_a_github_pull_request_with_a_comment_once_allowed() {
         "{done}"
     );
     let calls = words(user.gh_received());
-    assert!(
-        calls
-            .contains(&"pr close 12 -R github.com/acme/app --comment Superseded by #20".to_owned())
-    );
+    assert!(calls.contains(&format!(
+        "pr close 12 -R github.com/acme/app --comment Superseded by #20\n\n{MARKER}"
+    )));
     // Its state was read first, and the branch is left to the workspace that holds it.
     assert!(calls.iter().any(|call| call.starts_with("pr view 12 ")));
     assert!(user.escalations().is_empty());
@@ -416,9 +418,9 @@ fn forge_close_declines_a_bitbucket_pull_request_with_a_comment() {
         done.contains("The pull request #3 of acme/app was declined."),
         "{done}"
     );
-    assert!(words(user.bkt_received()).contains(
-        &"pr decline 3 --context cloud --workspace acme --repo app --comment Superseded".to_owned()
-    ));
+    assert!(words(user.bkt_received()).contains(&format!(
+        "pr decline 3 --context cloud --workspace acme --repo app --comment Superseded\n\n{MARKER}"
+    )));
 }
 
 #[test]
@@ -511,10 +513,9 @@ fn forge_reopen_reopens_a_closed_github_pull_request() {
         done.contains("The pull request #9 of acme/app was reopened."),
         "{done}"
     );
-    assert!(
-        words(user.gh_received())
-            .contains(&"pr reopen 9 -R github.com/acme/app --comment Needed again".to_owned())
-    );
+    assert!(words(user.gh_received()).contains(&format!(
+        "pr reopen 9 -R github.com/acme/app --comment Needed again\n\n{MARKER}"
+    )));
     // Not one that is open, nor one that was merged.
     let open = allowed_then_refused(
         &user,
@@ -626,13 +627,13 @@ fn forge_list_comment_and_edit_go_through_bkt_on_bitbucket() {
                 .to_owned()
         )
     );
-    assert!(calls.contains(
-        &"pr comment 3 --context cloud --workspace acme --repo app --text Ready".to_owned()
-    ));
-    assert!(calls.contains(
-        &"pr edit 3 --context cloud --workspace acme --repo app --description Adds the login page"
-            .to_owned()
-    ));
+    assert!(calls.contains(&format!(
+        "pr comment 3 --context cloud --workspace acme --repo app --text Ready\n\n{MARKER}"
+    )));
+    assert!(calls.contains(&format!(
+        "pr edit 3 --context cloud --workspace acme --repo app --description Adds the login \
+         page\n\n{MARKER}"
+    )));
     assert!(user.escalations().is_empty());
 }
 
@@ -861,10 +862,10 @@ fn tickets_create_is_judged_and_opens_an_issue_once_allowed() {
     );
     assert_eq!(
         asked,
-        [
-            "issue create -R github.com/acme/app --title Add a logout --body Users stay signed in \
-          --label feature"
-        ]
+        [format!(
+            "issue create -R github.com/acme/app --title Add a logout --body Users stay signed \
+             in\n\n{MARKER} --label feature"
+        )]
     );
 }
 
@@ -880,7 +881,9 @@ fn tickets_comment_is_judged_and_posted_once_allowed() {
     );
     assert_eq!(
         asked,
-        ["issue comment 1 -R github.com/acme/app --body Fixed on app/login"]
+        [format!(
+            "issue comment 1 -R github.com/acme/app --body Fixed on app/login\n\n{MARKER}"
+        )]
     );
 }
 
@@ -1445,10 +1448,10 @@ fn create_a_jira_work_item_in_a_tracker_s_project() {
     );
     assert_eq!(
         asked,
-        [
+        [format!(
             "jira workitem create --project DEF --summary Add a logout --description Users stay \
-             signed in --type Story --label feature,auth --json"
-        ]
+             signed in\n\n{JIRA_FOOTER} --type Story --label feature,auth --json"
+        )]
     );
 }
 
@@ -1461,7 +1464,9 @@ fn comment_on_a_jira_work_item() {
     assert!(done.contains("The comment was posted on ABC-1."), "{done}");
     assert_eq!(
         asked,
-        ["jira workitem comment create --key ABC-1 --body Fixed on app/login"]
+        [format!(
+            "jira workitem comment create --key ABC-1 --body Fixed on app/login\n\n{JIRA_FOOTER}"
+        )]
     );
 }
 
@@ -1475,10 +1480,10 @@ fn edit_a_jira_work_item_s_summary_and_description() {
     assert!(done.contains("ABC-1 was changed."), "{done}");
     assert_eq!(
         asked,
-        [
-            "jira workitem edit --key ABC-1 --summary The logout fails --description It hangs \
-             --yes"
-        ]
+        [format!(
+            "jira workitem edit --key ABC-1 --summary The logout fails --description It \
+             hangs\n\n{JIRA_FOOTER} --yes"
+        )]
     );
 }
 

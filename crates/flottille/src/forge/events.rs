@@ -10,7 +10,7 @@ use flottille_core::subscription::Subscription;
 use flottille_core::workspace::Workspace;
 use serde_json::{Value, json};
 
-use super::{Comment, Pull, Read, logs};
+use super::{BY_AGENT, Comment, Pull, Read, logs};
 use crate::daemon::Daemon;
 use crate::subscriptions::{self, By, Event};
 
@@ -18,8 +18,6 @@ use crate::subscriptions::{self, By, Event};
 pub const EVENTS: [&str; 5] = ["checks", "review", "comment", "merged", "closed"];
 /// What a delivery shows of a comment or a review at most.
 const EXCERPT_CHARS: usize = 300;
-/// The comments the agents posted that are remembered, to tell them from people's.
-const POSTED: usize = 200;
 
 /// What a subscription keeps of a pull request to compare the next read with.
 pub(super) fn seen_of(pull: &Pull) -> Value {
@@ -84,13 +82,8 @@ fn excerpt(text: &str) -> String {
 }
 
 /// What happened to `pull` since `seen`, and the event that ends it (merged or closed); nothing
-/// when nothing was seen yet: this read is the first. `posted` are the comments agents posted.
-fn events_between(
-    seen: &Value,
-    pull: &Pull,
-    named: &str,
-    posted: &[Posted],
-) -> (Vec<Event>, Option<Event>) {
+/// when nothing was seen yet: this read is the first.
+fn events_between(seen: &Value, pull: &Pull, named: &str) -> (Vec<Event>, Option<Event>) {
     if !seen.is_object() {
         return (Vec::new(), None);
     }
@@ -127,7 +120,7 @@ fn events_between(
             by: Some(By {
                 name: review.author.clone(),
                 bot: review.bot,
-                agent: None,
+                marked: false,
             }),
             text: format!(
                 "A review by {}, {state}: {}",
@@ -144,29 +137,27 @@ fn events_between(
                 by: Some(By {
                     name: name.clone(),
                     bot: false,
-                    agent: None,
+                    marked: false,
                 }),
                 text: format!("A review by {name}: {state}"),
             });
         }
     }
     for comment in new_ones(&seen["comments"], &pull.comments) {
-        let agent = posted
-            .iter()
-            .find(|p| p.named == named && p.body.trim() == comment.body.trim())
-            .map(|p| p.agent.clone());
+        let (body, marked) = comment.unmarked();
+        let agent = if marked {
+            format!(" ({BY_AGENT})")
+        } else {
+            String::new()
+        };
         events.push(Event {
             kind: "comment",
             by: Some(By {
                 name: comment.author.clone(),
                 bot: comment.bot,
-                agent,
+                marked,
             }),
-            text: format!(
-                "A comment by {}: {}",
-                comment.author,
-                excerpt(&comment.body)
-            ),
+            text: format!("A comment by {}{agent}: {}", comment.author, excerpt(body)),
         });
     }
     let ends = match (seen["state"].as_str(), pull.state) {
@@ -179,32 +170,6 @@ fn events_between(
     };
     events.extend(ends.clone());
     (events, ends)
-}
-
-/// A comment an agent posted with `forge comment`.
-pub struct Posted {
-    agent: String,
-    /// The pull request, as `target_named` says it.
-    named: String,
-    body: String,
-}
-
-/// Remembers a comment the agent posted, so that a subscription for people only leaves it out.
-pub(super) fn posted(
-    daemon: &Daemon,
-    agent: &str,
-    (project, repository): (&str, &str),
-    number: u64,
-    body: &str,
-) {
-    let mut posted = daemon.forges.posted.lock().unwrap();
-    posted.push(Posted {
-        agent: agent.to_owned(),
-        named: pull_named(project, repository, number),
-        body: super::masked(body),
-    });
-    let over = posted.len().saturating_sub(POSTED);
-    posted.drain(..over);
 }
 
 /// A repository that is the project's folder is named by the project, as the window does.
@@ -270,10 +235,7 @@ pub(super) async fn offer(daemon: &Arc<Daemon>, workspace: &Workspace, read: &Re
             continue;
         }
         let named = pull_named(&workspace.project, &repository.path, pull.number);
-        let events = |pull: &Pull, seen: &Value| {
-            let posted = daemon.forges.posted.lock().unwrap();
-            events_between(seen, pull, &named, &posted)
-        };
+        let events = |pull: &Pull, seen: &Value| events_between(seen, pull, &named);
         let mut pull = pull.clone();
         let told_checks = mine.iter().any(|s| {
             s.events.iter().any(|e| e == "checks")
@@ -330,7 +292,7 @@ mod tests {
     }
 
     fn kinds(seen: &Pull, now: &Pull) -> Vec<&'static str> {
-        let (events, _) = events_between(&seen_of(seen), now, "pull request #12 of api", &[]);
+        let (events, _) = events_between(&seen_of(seen), now, "pull request #12 of api");
         events.iter().map(|e| e.kind).collect()
     }
 
@@ -341,11 +303,11 @@ mod tests {
         assert_eq!(kinds(&running, &ended), ["checks"]);
         assert!(kinds(&ended, &ended).is_empty());
         assert!(
-            events_between(&Value::Null, &ended, "x", &[]).0.is_empty(),
+            events_between(&Value::Null, &ended, "x").0.is_empty(),
             "the first read is no event"
         );
         let commented = pull("open", &["failing"], &[("alice", "a"), ("bob", "b")]);
-        let (events, _) = events_between(&seen_of(&ended), &commented, "x", &[]);
+        let (events, _) = events_between(&seen_of(&ended), &commented, "x");
         assert_eq!(events.len(), 2);
         // A comment inserted among the others, as a Bitbucket reply is, is the only new one.
         let replied = pull(
@@ -353,11 +315,11 @@ mod tests {
             &["failing"],
             &[("alice", "a"), ("carol", "c"), ("bob", "b")],
         );
-        let (events, _) = events_between(&seen_of(&commented), &replied, "x", &[]);
+        let (events, _) = events_between(&seen_of(&commented), &replied, "x");
         assert_eq!(events.len(), 1);
         assert!(events[0].text.contains("carol"), "{:?}", events);
         let merged = pull("merged", &["failing"], &[]);
-        let (events, ends) = events_between(&seen_of(&ended), &merged, "x", &[]);
+        let (events, ends) = events_between(&seen_of(&ended), &merged, "x");
         assert_eq!(ends.map(|e| e.kind), Some("merged"));
         assert_eq!(events.len(), 1);
     }

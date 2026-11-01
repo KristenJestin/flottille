@@ -11,6 +11,9 @@ use common::User;
 use common::mcp::{Mcp, server_of};
 use serde_json::{Value, json};
 
+/// What Flottille ends every comment and body it posts for an agent with (`docs/forges.md`).
+const MARKER: &str = "<!-- flottille -->";
+
 /// A user whose agents are the fake agent and whose forge is the fake `gh`, with the clock tests
 /// move.
 fn user() -> User {
@@ -317,6 +320,76 @@ fn a_comment_by_a_bot_is_not_delivered_to_a_subscription_for_people_only() {
         "{delivery}"
     );
     assert!(!delivery.contains("Coverage"), "{delivery}");
+}
+
+#[test]
+fn a_comment_of_the_user_without_the_marker_wakes_a_subscription_for_people_only() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull());
+    let (_, mcp) = agent(&user);
+
+    subscribe(&mcp, json!({"events": ["comment"], "from": "people"}));
+    let mut commented = pull();
+    // `kris` is the account every agent writes through: a comment of theirs is a person's.
+    commented["comments"] = json!([{"author": {"login": "kris"}, "body": "Why a new form?"}]);
+    script(&user, commented);
+    a_minute_later(&user);
+    let delivery = the_delivery(&user);
+    assert!(
+        delivery.contains("comment by kris: Why a new form?"),
+        "{delivery}"
+    );
+}
+
+#[test]
+fn a_marked_comment_does_not_wake_a_subscription_for_people_only() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull());
+    let (_, mcp) = agent(&user);
+
+    subscribe(&mcp, json!({"events": ["comment"], "from": "people"}));
+    let mut commented = pull();
+    // Another agent's, in the same account: the marker, not the author, says who wrote it.
+    commented["comments"] = json!([
+        {"author": {"login": "kris"}, "body": format!("Rebased on main\n\n{MARKER}")}
+    ]);
+    script(&user, commented.clone());
+    a_minute_later(&user);
+    assert!(delivered(&user).is_empty(), "{:?}", delivered(&user));
+
+    commented["comments"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"author": {"login": "kris"}, "body": "Thanks"}));
+    script(&user, commented);
+    a_minute_later(&user);
+    let delivery = the_delivery(&user);
+    assert!(delivery.contains("comment by kris: Thanks"), "{delivery}");
+    assert!(!delivery.contains("Rebased"), "{delivery}");
+}
+
+#[test]
+fn a_marked_comment_is_shown_to_an_agent_as_posted_by_an_agent_without_its_marker() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull());
+    let (_, mcp) = agent(&user);
+
+    subscribe(&mcp, json!({"events": ["comment"]}));
+    let mut commented = pull();
+    commented["comments"] = json!([
+        {"author": {"login": "kris"}, "body": format!("Rebased on main\n\n{MARKER}")}
+    ]);
+    script(&user, commented);
+    a_minute_later(&user);
+    let delivery = the_delivery(&user);
+    assert!(
+        delivery.contains("comment by kris (posted by an agent): Rebased on main"),
+        "{delivery}"
+    );
+    assert!(!delivery.contains("flottille -->"), "{delivery}");
 }
 
 #[test]

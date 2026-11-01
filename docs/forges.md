@@ -410,9 +410,32 @@ The first read after subscribing is the one the subscription saw: what is alread
 A read that fails changes nothing. **A bot**, for `from: people`, is a GitHub author whose
 login starts with `app/` (as `gh` says an app) or ends with `[bot]`, or that `gh` says `is_bot`;
 this is assumed from `gh`'s output, and the maintainer checks it on a real pull request. A
-Bitbucket author is always taken for a person: what says a bot there is not read. **The agent's
-own** comment is one it posted with `forge` `comment` on that pull request, the same text,
-remembered in the daemon's memory (the last 200): after a restart, it counts as a person's.
+Bitbucket author is always taken for a person: what says a bot there is not read. **What
+Flottille posted** is marked (below), and `from: people` leaves it out, whichever agent posted it:
+the user's own comments, written under the same account, wake the subscription.
+
+## What Flottille posts is marked
+
+What an agent posts goes out through the user's own `gh` and `bkt`, so it appears under the user's
+name. Every body and comment Flottille posts for an agent (`forge` `create` body, `comment`,
+`edit` body, `close` and `reopen` comment; `tickets` `create`, `comment` and `edit` body) ends with
+a line of its own, `<!-- flottille -->` (the marker alone when there is no body): an HTML comment,
+which GitHub and Bitbucket do not render. A `forge edit` or `tickets edit` that changes only the
+title posts no text and adds none. On Jira, `acli` takes a plain-text or ADF body and its public
+reference documents no way to attach hidden content to a comment or a description, so the line
+there is visible: `— posted by a Flottille agent`. A Jira description is only written when the
+agent gave one.
+
+The marker is how a text read back is told from a person's:
+
+- `from: people` leaves out a comment that ends with the marker;
+- a delivery, `forge show` and `tickets show` say `(posted by an agent)` after the author of such a
+  comment, and show its text without the marker.
+
+Assumed, and checked by the maintainer on a real pull request: that GitHub and Bitbucket return the
+HTML comment in the comment's raw text (`gh`'s `body`, Cloud's `content.raw`, Data Center's `text`).
+A person's comment that ends with the marker is taken for an agent's and dropped by `from: people`,
+which is accepted. A comment posted before the marker existed counts as a person's.
 
 ## Tickets
 

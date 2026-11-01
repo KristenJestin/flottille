@@ -62,7 +62,31 @@ pub struct Ticket {
 pub struct Comment {
     pub author: String,
     pub at: Option<String>,
+    /// Without the mark of Flottille, when it had one.
     pub body: String,
+    /// An agent of Flottille posted it, as its mark says.
+    pub agent: bool,
+}
+
+impl Comment {
+    /// Its author, and that an agent posted it when one did.
+    fn by(&self) -> String {
+        match self.agent {
+            true => format!("{} ({})", self.author, forge::BY_AGENT),
+            false => self.author.clone(),
+        }
+    }
+}
+
+/// A comment read from a tracker: its text without the mark of Flottille, and whether it had one.
+fn comment_of(author: String, at: Option<&str>, text: &str) -> Comment {
+    let (body, agent) = forge::unmarked(text);
+    Comment {
+        author,
+        at: at.map(str::to_owned),
+        body: cut(body, COMMENT_CHARS),
+        agent,
+    }
 }
 
 impl Ticket {
@@ -115,7 +139,7 @@ impl Ticket {
                 self.comments.len() + older,
                 self.comments.last().map_or(String::new(), |last| format!(
                     ", the newest by {}{}",
-                    last.author,
+                    last.by(),
                     last.at
                         .as_deref()
                         .map_or(String::new(), |at| format!(" on {at}"))
@@ -133,7 +157,7 @@ impl Ticket {
                     .map_or(String::new(), |at| format!(", {at}"));
                 text.push_str(&format!(
                     "- {}{at}: {}\n",
-                    comment.author,
+                    comment.by(),
                     comment.body.replace('\n', "\n    ")
                 ));
             }
@@ -226,10 +250,12 @@ async fn read_issue(forge: &Forge, number: u64) -> Result<Ticket, String> {
         .as_array()
         .into_iter()
         .flatten()
-        .map(|comment| Comment {
-            author: said(&comment["author"]["login"]),
-            at: comment["createdAt"].as_str().map(str::to_owned),
-            body: cut(&said(&comment["body"]), COMMENT_CHARS),
+        .map(|comment| {
+            comment_of(
+                said(&comment["author"]["login"]),
+                comment["createdAt"].as_str(),
+                &said(&comment["body"]),
+            )
         })
         .collect();
     Ok(Ticket {
@@ -239,7 +265,7 @@ async fn read_issue(forge: &Forge, number: u64) -> Result<Ticket, String> {
         title: said(&issue["title"]),
         state: said(&issue["state"]).to_lowercase(),
         url: issue["url"].as_str().map(masked),
-        description: cut(&said(&issue["body"]), DESCRIPTION_CHARS),
+        description: cut(forge::unmarked(&said(&issue["body"])).0, DESCRIPTION_CHARS),
         older: comments.len().saturating_sub(COMMENTS),
         comments: newest(comments),
     })
@@ -383,10 +409,12 @@ fn work_item(key: &str, item: &Value, site: &str) -> Ticket {
         .or(fields["comment"].as_array())
         .into_iter()
         .flatten()
-        .map(|comment| Comment {
-            author: said(&comment["author"]["displayName"]),
-            at: comment["created"].as_str().map(str::to_owned),
-            body: cut(&masked(&document_text(&comment["body"])), COMMENT_CHARS),
+        .map(|comment| {
+            comment_of(
+                said(&comment["author"]["displayName"]),
+                comment["created"].as_str(),
+                &masked(&document_text(&comment["body"])),
+            )
         })
         .collect();
     Ticket {
@@ -398,7 +426,7 @@ fn work_item(key: &str, item: &Value, site: &str) -> Ticket {
         // The configured site: the host of `self` may be an Atlassian one that is no site.
         url: Some(masked(&format!("https://{site}/browse/{key}"))),
         description: cut(
-            &masked(&document_text(&fields["description"])),
+            forge::unmarked(&masked(&document_text(&fields["description"]))).0,
             DESCRIPTION_CHARS,
         ),
         older: comments.len().saturating_sub(COMMENTS),
@@ -1138,9 +1166,9 @@ async fn create(project: &Project, asked: &TicketsCall) -> Outcome {
         return Outcome::Failed(problem);
     }
     let repo = forge.gh_repository();
-    let body = asked.body.as_deref().unwrap_or_default();
+    let body = forge::marked(asked.body.as_deref().unwrap_or_default());
     let mut args = vec![
-        "issue", "create", "-R", &repo, "--title", title, "--body", body,
+        "issue", "create", "-R", &repo, "--title", title, "--body", &body,
     ];
     for label in asked.labels.iter().flatten() {
         args.extend(["--label", label.as_str()]);
@@ -1204,7 +1232,11 @@ async fn write(project: &Project, asked: &TicketsCall, key: &Key) -> Outcome {
     if let Some(title) = title.filter(|_| action == "edit") {
         args.extend(["--title", title]);
     }
-    if let Some(body) = body.filter(|_| action == "comment" || action == "edit") {
+    let marked = body.map(forge::marked);
+    if let Some(body) = marked
+        .as_deref()
+        .filter(|_| action == "comment" || action == "edit")
+    {
         args.extend(["--body", body]);
     }
     if action == "edit" {
@@ -1281,7 +1313,12 @@ async fn create_work_item(
         "--summary",
         title,
     ];
-    if let Some(body) = asked.body.as_deref().filter(|b| !b.trim().is_empty()) {
+    let footed = asked
+        .body
+        .as_deref()
+        .filter(|b| !b.trim().is_empty())
+        .map(forge::footed);
+    if let Some(body) = footed.as_deref() {
         args.extend(["--description", body]);
     }
     if let Some(kind) = asked.kind.as_deref().filter(|k| !k.trim().is_empty()) {
@@ -1333,7 +1370,8 @@ async fn write_work_item(
     if let Some(title) = title.filter(|_| action == "edit") {
         args.extend(["--summary", title]);
     }
-    match (action, body) {
+    let footed = body.map(forge::footed);
+    match (action, footed.as_deref()) {
         ("comment", Some(body)) => args.extend(["--body", body]),
         ("edit", Some(body)) => args.extend(["--description", body]),
         _ => {}
