@@ -779,11 +779,18 @@ fn the_checks_of_a_pull_that_is_no_longer_open_are_not_read_again() {
     let before = checked(&user);
     advance(&user, 60 * 60_000);
     refresh(&user);
+    // The window's start, to the second, against the merge: comparing the hour alone failed in
+    // the first minutes of an hour, when the overlap reaches back into the hour of the merge.
+    let calls = calls(user.gh_received());
+    let since = calls
+        .iter()
+        .rev()
+        .find_map(|c| c.split("updated:>=").nth(1))
+        .map(|rest| rest[..19].to_owned())
+        .expect("a round lists what changed since the last one");
     assert!(
-        !calls(user.gh_received())
-            .last()
-            .is_some_and(|c| c.contains("updated:>=") && c.contains(&rfc3339(now)[..13])),
-        "the merged pull request is out of the last list's window"
+        since.as_str() > &rfc3339(now)[..19],
+        "the merged pull request is out of the last list's window: {since}"
     );
     assert_eq!(checked(&user), before);
 }
