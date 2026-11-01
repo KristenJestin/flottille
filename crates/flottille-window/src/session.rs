@@ -34,14 +34,15 @@ use gpui_kit::base::input::{
     Escape, Input, InputEditorStyle, InputEvent, InputState, MoveDown, MoveUp, Paste, TextareaState,
 };
 use gpui_kit::base::text::{TextView, TextViewState, TextViewStyle};
+use gpui_kit::base::{ElementExt as _, TextSelection, TextSelectionScopeId};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Bounds, Context, Div, ElementId, Entity, EventEmitter,
     Focusable as _, FollowMode, ImageCacheError, ImageSource, InteractiveElement, IntoElement,
-    ListAlignment, ListState, ParentElement, PathBuilder, Pixels, Render, ScrollHandle,
-    SharedString, SharedUri, Stateful, StatefulInteractiveElement, Styled, StyledImage as _,
-    Subscription, Task, TestSupportExt as _, Transformation, WeakEntity, Window, canvas, div, list,
-    point, px, radians,
+    ListAlignment, ListState, MouseButton, ParentElement, PathBuilder, Pixels, Render,
+    ScrollHandle, SharedString, SharedUri, Stateful, StatefulInteractiveElement, Styled,
+    StyledImage as _, Subscription, Task, TestSupportExt as _, Transformation, WeakEntity, Window,
+    canvas, div, list, point, px, radians,
 };
 
 use crate::actions::{Answer, Command, Picture, RepositoryStatus};
@@ -1798,6 +1799,8 @@ pub struct Row {
     /// The reply or the thought as Markdown, in the pieces [`markdown_pieces`] cuts: a piece
     /// streamed parses the last one again, never the whole reply.
     markdown: Vec<Entity<MarkdownPiece>>,
+    /// Where a selection begun in its text stays: see [`MarkdownPiece`].
+    scope: TextSelectionScopeId,
     thinking: Option<(Entity<PulsingLabel>, Entity<ThinkingTimer>)>,
     calls: Vec<(Entity<Status>, Entity<StateIcon>)>,
     sub_agents: Vec<SubAgent>,
@@ -1839,6 +1842,7 @@ impl Row {
                 when,
                 open: false,
                 markdown: Vec::new(),
+                scope: TextSelectionScopeId::new(),
                 thinking: None,
                 calls: Vec::new(),
                 sub_agents,
@@ -1943,8 +1947,12 @@ impl Row {
                 }
                 None => {
                     let state = cx.new(|cx| TextViewState::markdown(piece, cx));
-                    self.markdown
-                        .push(cx.new(|_| MarkdownPiece { state, muted }));
+                    let scope = self.scope;
+                    self.markdown.push(cx.new(|_| MarkdownPiece {
+                        state,
+                        muted,
+                        scope,
+                    }));
                 }
             }
         }
@@ -2143,9 +2151,17 @@ fn address(previous: Option<char>, ahead: &str) -> Option<usize> {
 }
 
 /// A reply or a thought, its Markdown pieces one under the other, in one text-cursor region: the
-/// pointer keeps the I-beam from its first line to its last, gaps between the pieces included.
-fn markdown_view(id: ElementId, pieces: &[Entity<MarkdownPiece>]) -> impl IntoElement {
+/// pointer keeps the I-beam from its first line to its last, gaps between the pieces included. A
+/// press in a gap begins the selection in this message too.
+fn markdown_view(
+    id: ElementId,
+    pieces: &[Entity<MarkdownPiece>],
+    scope: TextSelectionScopeId,
+) -> impl IntoElement {
     text_region(id)
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            TextSelection::activate_scope(scope, window, cx)
+        })
         .flex()
         .flex_col()
         .gap(TextViewStyle::default().paragraph_gap())
@@ -2155,17 +2171,34 @@ fn markdown_view(id: ElementId, pieces: &[Entity<MarkdownPiece>]) -> impl IntoEl
 
 /// One piece of a reply's or a thought's Markdown, its own view: a piece streamed draws the last
 /// one again, and the others as they were.
+///
+/// A selection stays in the message it begins in, the scope of its row: the kit orders the text
+/// views of a selection by the order they painted in the last frame, and a retained view that did
+/// not paint keeps the order of an older one, so a selection across two messages saw its ends
+/// swap from one frame to the next and its highlight jump between them, which blinked. Within
+/// one message there is one view, or a few in their order.
 pub struct MarkdownPiece {
     state: Entity<TextViewState>,
     /// A thought's, in the muted ink.
     muted: bool,
+    scope: TextSelectionScopeId,
 }
 
 impl Render for MarkdownPiece {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        TextView::new(&self.state)
-            .style(markdown_style(&palette(cx), self.muted))
-            .image_source(no_image)
+        let scope = self.scope;
+        // The scope is set where the view paints: a piece drawn again alone paints without its
+        // row around it.
+        div()
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                TextSelection::activate_scope(scope, window, cx)
+            })
+            .child(
+                TextView::new(&self.state)
+                    .style(markdown_style(&palette(cx), self.muted))
+                    .image_source(no_image),
+            )
+            .text_selection_scope(scope)
     }
 }
 
@@ -2387,7 +2420,11 @@ impl Render for Row {
                                         .id(id("message-text"))
                                         .px(space::SM)
                                         .py(space::XS)
-                                        .child(markdown_view(id("message-region"), &self.markdown))
+                                        .child(markdown_view(
+                                            id("message-region"),
+                                            &self.markdown,
+                                            self.scope,
+                                        ))
                                         .test_support(),
                                 )
                             })
@@ -2447,9 +2484,11 @@ impl Render for Row {
                 // Another session's message is folded to its first line and who sent it, until a
                 // click opens it: a report can be long. What this one sent is its own words.
                 let bubble = match sent {
-                    true => bubble
-                        .child(from)
-                        .child(markdown_view(id("relayed-region"), &self.markdown)),
+                    true => bubble.child(from).child(markdown_view(
+                        id("relayed-region"),
+                        &self.markdown,
+                        self.scope,
+                    )),
                     false => {
                         let turn = turning(id("relayed-toggle"), self.open, window, cx);
                         let first = SharedString::from(
@@ -2501,7 +2540,11 @@ impl Render for Row {
                                 self.open,
                                 div()
                                     .id(id("relayed-text"))
-                                    .child(markdown_view(id("relayed-region"), &self.markdown))
+                                    .child(markdown_view(
+                                        id("relayed-region"),
+                                        &self.markdown,
+                                        self.scope,
+                                    ))
                                     .test_support(),
                             ))
                     }
@@ -2576,7 +2619,11 @@ impl Render for Row {
                             .border_color(p.line)
                             .text_size(px(13.))
                             .text_color(p.mute)
-                            .child(markdown_view(id("thought-region"), &self.markdown))
+                            .child(markdown_view(
+                                id("thought-region"),
+                                &self.markdown,
+                                self.scope,
+                            ))
                             .test_support(),
                     ))
                     .test_support()
@@ -2621,6 +2668,7 @@ impl Render for Row {
                     .child(markdown_view(
                         id("text-region"),
                         &self.markdown[..self.markdown.len().min(1)],
+                        self.scope,
                     ))
                     .test_support();
                 // A long reply's other pieces are items of the list: the last one carries it.
@@ -2847,7 +2895,11 @@ impl Render for Row {
                                     .px(space::LG)
                                     .pt(space::MD)
                                     .pb(space::MD)
-                                    .child(markdown_view(id("report-region"), &self.markdown))
+                                    .child(markdown_view(
+                                        id("report-region"),
+                                        &self.markdown,
+                                        self.scope,
+                                    ))
                                     .test_support(),
                             )),
                     )
