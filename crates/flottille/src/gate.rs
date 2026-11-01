@@ -3720,7 +3720,7 @@ mod tests {
             for tool in ["fs_read", "fs_list", "search"] {
                 assert_eq!(fixture.file(tool, "src/a.rs"), Verdict::Allow, "{tool}");
             }
-            for tool in ["run_status", "agent_status"] {
+            for tool in ["run_status", "agent_status", "wake"] {
                 assert_eq!(
                     fixture.judge(tool, json!({}), Some(&fixture.never)),
                     Verdict::Allow

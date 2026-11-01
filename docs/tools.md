@@ -9,8 +9,8 @@ depend on what it can do (`docs/agents.md`): the file and command tools below fo
 `workspace` for every agent (a tool that could only refuse is not listed; what each may do is the
 gate's business, not the list's), `skills`, `commands`, `setup` and `project` for a root (below,
 "The project"),
-and the tree's tools (`agent_*`, `report`, `ask_user` or `ask_parent`,
-`approval_answer`, and `session_send` and `session_read` for a root).
+`wake` for every agent ("Waking later"), and the tree's tools (`agent_*`, `report`, `ask_user`
+or `ask_parent`, `approval_answer`, and `session_send` and `session_read` for a root).
 
 ## The server
 
@@ -375,6 +375,24 @@ it masked and the forge gets it as written.
 Until #141 the reads were `forge_read` and the writes `forge_write` (`pr-create`,
 `pr-merge-squash`, `pipeline-rerun`). For one release a call under an old name is the new
 action's, and the store renamed them in the agents' fixed lists and their pending requests.
+
+## Waking later
+
+**`wake {minutes, why}`** asks Flottille to wake the agent once, `minutes` from now (1 to 240, the
+subscriptions' longest), by a `subscription` delivery that starts `Woken by the timer: <why>` and
+says when it was asked (`You asked for it at 2026-11-01T10:22:00Z, 20 min later.`). It is a
+subscription whose source is a timer (`docs/design.md` §5.6), stored, listed and cancelled as the
+others are. The answer comes at once (`Set: a delivery wakes you in 20 min with your why. End your
+turn now.`): the agent ends its turn, it never sleeps in one. `why` is required, at most 200
+characters. An agent has one wake at a time: a new one replaces it, and the answer says which
+(`It replaces your wake for: …`). **`wake {cancel: true}`** drops it (`Cancelled your wake: …`),
+refused when there is none, or when `minutes` or `why` come with it.
+
+The agent decides when it wants to be woken: wakes in a row are not limited. A wake whose time came while the daemon was down wakes the
+agent at start; an agent that ends takes its wake with it. `forge show` and `forge unsubscribe`
+leave it alone.
+
+It is the agent's own bookkeeping: the gate allows it in every mode, never held.
 
 ## The workspace
 

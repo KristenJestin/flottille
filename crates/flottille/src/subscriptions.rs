@@ -1,7 +1,8 @@
 //! Subscriptions (`docs/design.md` §5.6): an agent waits, once, for the next event of a target a
 //! source watches. Sources turn their reads into events; this module matches the events with the
-//! subscriptions and delivers the first that matches, which ends the subscription. The only
-//! source now is the forge watch of a workspace's pull request (`forge`).
+//! subscriptions and delivers the first that matches, which ends the subscription. The sources
+//! are the forge watch of a workspace's pull request (`forge`) and the timer of a wake the agent
+//! asked for itself (`timer`, `wake`), whose time is its event.
 //!
 //! A subscription costs the agent a turn each time it wakes it: one delivery holds every event of
 //! a read, nothing is delivered of what does not change, and it is over once delivered.
@@ -17,6 +18,7 @@ use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
 use crate::deliveries;
+use crate::mcp::{Outcome, arguments};
 use crate::projects::Failure;
 
 /// How long a subscription waits when the agent says nothing.
@@ -25,6 +27,10 @@ pub const DEFAULT_MINUTES: u64 = 60;
 pub const LONGEST_MINUTES: u64 = 4 * 60;
 /// Whose events count.
 pub const FROM: [&str; 2] = ["anyone", "people"];
+/// The source of a wake: its time is its one event.
+pub const TIMER: &str = "timer";
+/// The longest `why` of a wake, in characters: a reason, not a brief.
+pub const WHY_CHARS: usize = 200;
 
 /// What a source saw happen to a target.
 #[derive(Clone, Debug, PartialEq)]
@@ -72,6 +78,10 @@ pub fn waiting_for(daemon: &Daemon, agent: &str) -> Option<String> {
     let waits: Vec<String> = of(daemon, agent)
         .iter()
         .map(|s| {
+            if s.source == TIMER {
+                let left = s.expires_at.saturating_sub(now_ms()).div_ceil(60_000);
+                return format!("its wake in {left} min");
+            }
             let project = s.target["project"].as_str().unwrap_or_default();
             let several = crate::projects::load_project(daemon, project)
                 .is_ok_and(|project| project.repositories.len() > 1);
@@ -94,6 +104,7 @@ pub fn waiting_for(daemon: &Daemon, agent: &str) -> Option<String> {
 fn named(subscription: &Subscription) -> String {
     match subscription.source.as_str() {
         "forge" => crate::forge::target_named(&subscription.target),
+        TIMER => format!("wake: {}", why_of(subscription)),
         source => source.to_owned(),
     }
 }
@@ -182,6 +193,104 @@ fn deliver(daemon: &Arc<Daemon>, subscription: &Subscription, body: &str, why: &
     );
 }
 
+/// What the agent asked to be woken for.
+fn why_of(subscription: &Subscription) -> &str {
+    subscription.target["why"].as_str().unwrap_or_default()
+}
+
+/// A subscription whose time came: a wake wakes its agent, any other ends, said.
+fn due(daemon: &Arc<Daemon>, subscription: &Subscription) {
+    let minutes = (subscription.expires_at - subscription.created_at) / 60_000;
+    let body = match subscription.source.as_str() {
+        TIMER => format!(
+            "Woken by the timer: {}\nYou asked for it at {}, {minutes} min later.",
+            why_of(subscription),
+            crate::session_read::shown_date(subscription.created_at)
+        ),
+        _ => format!(
+            "Your subscription to {} of {} ended after {minutes} min with nothing of what you \
+             waited for: subscribe again if you still wait for it.",
+            subscription.events.join(", "),
+            crate::forge::target_named(&subscription.target)
+        ),
+    };
+    let why = match subscription.source.as_str() {
+        TIMER => "delivered",
+        _ => "expired",
+    };
+    deliver(daemon, subscription, &body, why);
+}
+
+/// The agent's pending wake.
+fn wake_of(daemon: &Daemon, agent: &str) -> Option<Subscription> {
+    of(daemon, agent).into_iter().find(|s| s.source == TIMER)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Wake {
+    minutes: Option<u64>,
+    why: Option<String>,
+    #[serde(default)]
+    cancel: bool,
+}
+
+/// `wake`: the agent is woken once, in `minutes`, by a delivery that says `why`; `cancel` drops
+/// it. One at a time: a new one replaces the old.
+pub fn wake(daemon: &Daemon, agent: &str, args: Value) -> Outcome {
+    let asked: Wake = match arguments("wake", args) {
+        Ok(asked) => asked,
+        Err(refused) => return refused,
+    };
+    let pending = wake_of(daemon, agent);
+    if asked.cancel {
+        if asked.minutes.is_some() || asked.why.is_some() {
+            return Outcome::Refused("refused: cancel takes nothing else".into());
+        }
+        let Some(pending) = pending else {
+            return Outcome::Refused("refused: you have no wake pending".into());
+        };
+        end(daemon, &pending, "cancelled");
+        return Outcome::Done(format!("Cancelled your wake: {}", why_of(&pending)));
+    }
+    let Some(minutes) = asked
+        .minutes
+        .filter(|minutes| (1..=LONGEST_MINUTES).contains(minutes))
+    else {
+        return Outcome::Refused(format!("refused: minutes is from 1 to {LONGEST_MINUTES}"));
+    };
+    let why = asked.why.as_deref().unwrap_or_default().trim();
+    if why.is_empty() || why.chars().count() > WHY_CHARS {
+        return Outcome::Refused(format!(
+            "refused: why says in at most {WHY_CHARS} characters what you will look at"
+        ));
+    }
+    if let Some(old) = &pending {
+        end(daemon, old, "cancelled");
+    }
+    let now = now_ms();
+    let subscription = Subscription {
+        id: new_subscription_id(),
+        agent: agent.to_owned(),
+        source: TIMER.into(),
+        target: json!({"why": why}),
+        events: vec!["wake".into()],
+        from: "anyone".into(),
+        seen: json!({}),
+        created_at: now,
+        expires_at: now + minutes * 60_000,
+    };
+    if let Err(error) = subscribe(daemon, &subscription) {
+        return Outcome::Failed(error);
+    }
+    let mut text =
+        format!("Set: a delivery wakes you in {minutes} min with your why. End your turn now.");
+    if let Some(old) = pending {
+        text.push_str(&format!(" It replaces your wake for: {}", why_of(&old)));
+    }
+    Outcome::Done(text)
+}
+
 /// From the sweep: a subscription past its time ends, said; one whose agent ended goes.
 pub fn sweep(daemon: &Arc<Daemon>) {
     let subscriptions = all(daemon);
@@ -194,14 +303,7 @@ pub fn sweep(daemon: &Arc<Daemon>) {
         if !matches!(&agent, Ok(Some(agent)) if !agent.state.is_final()) {
             end(daemon, &subscription, "agent-ended");
         } else if subscription.expires_at <= now {
-            let minutes = (subscription.expires_at - subscription.created_at) / 60_000;
-            let body = format!(
-                "Your subscription to {} of {} ended after {minutes} min with nothing of what you \
-                 waited for: subscribe again if you still wait for it.",
-                subscription.events.join(", "),
-                crate::forge::target_named(&subscription.target)
-            );
-            deliver(daemon, &subscription, &body, "expired");
+            due(daemon, &subscription);
         }
     }
 }
@@ -213,13 +315,15 @@ pub fn ended(daemon: &Daemon, agent: &str) {
     }
 }
 
-/// At start: the sources watch again what the stored subscriptions wait for.
+/// At start: the sources watch again what the stored subscriptions wait for, and a wake whose
+/// time passed while the daemon was down wakes its agent now.
 pub fn resume_at_start(daemon: &Arc<Daemon>) {
     for subscription in all(daemon) {
         if subscription.source == "forge" && !crate::forge::hold(daemon, &subscription) {
             end(daemon, &subscription, "unavailable");
         }
     }
+    sweep(daemon);
 }
 
 #[derive(Deserialize)]
