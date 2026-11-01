@@ -1037,13 +1037,25 @@ fn a_comment_on_a_ticket_no_round_stored_yet_is_delivered_to_its_subscription() 
     track(&user, json!({"kind": "github", "repository": "api"}));
     nothing_opened(&user);
     let (_, mcp) = agent(&user);
-    // Created since the last round, as `tickets create` does.
-    script_issue(&user, issue(json!([])));
+    let watch = user.watch(&["--after", "0"]);
+    // Created since the last round, as `tickets create` does, assigned and labelled: what its
+    // live read does not say.
+    let assigned = |comments: Value| {
+        let mut issue = issue(comments);
+        issue["assignees"] = json!([{"login": "alice"}]);
+        issue["labels"] = json!([{"name": "bug"}]);
+        issue
+    };
+    script_issue(&user, assigned(json!([])));
 
-    subscribe_ticket(&mcp, json!({"ticket": "#5", "events": ["commented"]}));
+    let said = subscribe_ticket(
+        &mcp,
+        json!({"ticket": "#5", "events": ["commented", "assigned"]}),
+    );
+    assert!(!said.contains("Flottille's rounds have not"), "{said}");
     script_issue(
         &user,
-        issue(json!([{"author": {"login": "alice"}, "body": "I can reproduce"}])),
+        assigned(json!([{"author": {"login": "alice"}, "body": "I can reproduce"}])),
     );
     a_round(&user);
     let delivery = the_delivery(&user);
@@ -1051,6 +1063,13 @@ fn a_comment_on_a_ticket_no_round_stored_yet_is_delivered_to_its_subscription() 
         delivery.contains("comment by alice: I can reproduce"),
         "{delivery}"
     );
+    assert!(!delivery.contains("assignees"), "{delivery}");
+    let changed: Vec<Value> = watch
+        .within(Duration::from_secs(1))
+        .into_iter()
+        .filter(|e| e["name"] == "item.changed")
+        .collect();
+    assert!(changed.is_empty(), "{changed:?}");
 }
 
 #[test]
@@ -1251,7 +1270,7 @@ fn ended_checks_whose_logs_are_read_are_delivered_before_a_later_comment() {
 }
 
 #[test]
-fn a_round_during_a_live_read_is_not_written_over_by_it() {
+fn a_refresh_during_a_live_read_waits_for_it_and_does_not_emit_its_change_twice() {
     let user = user();
     fixture(&user);
     script(&user, pull());
