@@ -76,7 +76,13 @@ and the 2026 practice around it:
   - say what the tool does and when to use it rather than another tool;
   - say its side effects and when it refuses;
   - put the important part first;
-  - a few hundred characters, rarely more than 1,000;
+  - a few hundred characters, rarely more than 1,000 (guidance, not a limit to trim to: a tool
+    keeps the text it needs, §4 "The budget"). The hard limit is Claude Code's: it cuts a tool
+    description that loads upfront at **4,096 characters** (2,048 before v2.1.296; 16,384 for a
+    tool found through tool search), and Claude sees only the text before the cut
+    ([MCP](https://code.claude.com/docs/en/mcp), "Scale with MCP tool search"). A test holds
+    every description under 2,048, the older figure, so no version cuts one, and the important
+    part goes first;
   - where an argument is easy to get wrong, one or two valid calls, written in the description
     (MCP has no field for the API's `input_examples`);
   - a parameter that asks why a call is made (`why`) asks for **one sentence**, never the
@@ -156,8 +162,10 @@ and the 2026 practice around it:
      `workspace_remove` had until #141; the old names are still served under the new ones for
      one release.
 
-   A root lead has 25 tools, a leaf worker 14; one more each when the project's repositories
-   declare a forge (`forge`), one more when it declares a tracker (`tickets`).
+   With the project's repositories declaring a forge (`forge`) and a tracker (`tickets`), a root
+   has 27 tools, a child that may have children (a lead) 21, a child at the depth limit (a leaf
+   worker) 16; without a forge, one fewer each, and one fewer again without a tracker (25, 19
+   and 14 with neither).
 
    **The budget.** Every tool loads upfront (rule 7), on purpose: Anthropic's line for tool search
    (§3: more than 10 tools or 10k tokens of definitions) is where search starts to help, not a
@@ -201,7 +209,7 @@ and the 2026 practice around it:
 
    | Family | List | Search | Read | Create | Change | Left out, and why |
    |---|---|---|---|---|---|---|
-   | `forge` | `list` (state, branch) | `list` by branch | `show` (a workspace's branch, or a number) | `create` | `comment`, `edit`, `merge`, `checks` | Closing a pull request: the window has no such action, and closing someone's work is the user's; deleting a branch is `workspace` `remove`'s, for the workspace's own. |
+   | `forge` | `list` (state, branch) | `list` by branch | `show` (a workspace's branch, or a number) | `create` | `comment`, `edit`, `merge`, `checks`, `close` (a `comment` first, `delete_branch`), `reopen` (#243) | Deleting a branch on its own: `close` deletes the pull request's, `workspace` `remove` the workspace's own. |
    | `tickets` | `list` (state, label, assignee), every ticket in one call | `search` | `show` | `create` (GitHub) | `comment`, `edit`, `close`, `reopen` (GitHub) | Every write on Jira: Flottille reads Jira and writes nothing to it, by the user's decision; Bitbucket's issues: no tracker of that kind is declared today. |
    | `workspace` | `list` | `list` (few, a line each) | `show` | `create` | `prepare`, `link_ticket` (null unlinks), `remove` | Renaming: a workspace's name is its branch and its folder, fixed when it is made, in the window as here. |
    | `skills` | `list` | `list` (few) | `show`, and `skill_read` for the text | `add` | `edit`, `remove` | Nothing. |
