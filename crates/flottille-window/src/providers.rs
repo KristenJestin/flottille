@@ -26,17 +26,16 @@ pub struct Model {
     pub efforts: Option<Vec<String>>,
     /// The model a new session takes when none is asked.
     pub default: bool,
+    /// The effort it runs with when none is asked, once a session said it.
+    pub default_effort: Option<String>,
+    /// The model this one, the provider's own `default`, stands for, when the provider says.
+    pub stands_for: Option<String>,
 }
 
 impl Model {
-    /// How the window names it: its provider's name for it, and "default model" for the
-    /// provider's own `default` entry, so that it is not said twice.
+    /// How the window names it: its provider's name for it.
     pub fn label(&self) -> String {
-        match &self.name {
-            _ if self.id == "default" => "default model".to_owned(),
-            Some(name) => name.clone(),
-            None => self.id.clone(),
-        }
+        self.name.clone().unwrap_or_else(|| self.id.clone())
     }
 }
 
@@ -116,6 +115,8 @@ impl Provider {
                             .as_array()
                             .map(|efforts| efforts.iter().filter_map(text).collect()),
                         default: model["default"] == true,
+                        default_effort: text(&model["default_effort"]),
+                        stands_for: text(&model["stands_for"]),
                     })
                     .collect()
             }),
@@ -316,16 +317,27 @@ mod tests {
     }
 
     #[test]
-    fn a_model_is_shown_by_its_name_and_the_provider_s_default_entry_as_default_model() {
+    fn a_model_is_shown_by_its_name_and_the_alias_says_what_it_stands_for() {
         let providers = Providers::of(Ok(&json!({"providers": [
             {"name": "claude", "title": "Claude", "enabled": true, "ready": true,
              "models": [
-                {"id": "default", "name": "Default (recommended)", "efforts": null, "default": true},
-                {"id": "fable", "name": "Fable", "efforts": null},
+                {"id": "default", "name": "Default (recommended)", "efforts": null,
+                 "stands_for": "fable"},
+                {"id": "fable", "name": "Fable", "efforts": ["low"], "default": true,
+                 "default_effort": "low"},
                 {"id": "haiku", "efforts": null}]}
         ]})));
         let claude = providers.get("claude").unwrap();
         let labels: Vec<String> = claude.models.iter().flatten().map(Model::label).collect();
-        assert_eq!(labels, ["default model", "Fable", "haiku"]);
+        assert_eq!(labels, ["Default (recommended)", "Fable", "haiku"]);
+        assert_eq!(
+            claude.model("default").unwrap().stands_for.as_deref(),
+            Some("fable")
+        );
+        let fable = claude.default_model().unwrap();
+        assert_eq!(
+            (fable.id.as_str(), fable.default_effort.as_deref()),
+            ("fable", Some("low"))
+        );
     }
 }

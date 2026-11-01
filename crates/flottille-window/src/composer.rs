@@ -360,23 +360,56 @@ impl Composer {
         project_model(&self.providers, self.project_default(), provider)
     }
 
-    /// What the model picker shows: the model's name, the project's model marked so.
+    /// What the model picker shows: the model's name, the project's model marked so. Without a
+    /// model, the provider's default by its name; when it is not known, that the provider
+    /// chooses, never a "default" it cannot name.
     pub fn model_shown(&self) -> String {
         let provider = self.provider();
-        let default = provider.and_then(Provider::default_model);
+        let chosen = || format!("model chosen by {}", self.title());
         let label = |id: &str| match provider.and_then(|p| p.model(id)) {
-            Some(model) => model.label(),
-            None if id == DEFAULT => "default model".to_owned(),
+            Some(model) => named(provider, model).unwrap_or_else(chosen),
+            None if id == DEFAULT => chosen(),
             None => id.to_owned(),
         };
-        match (&self.pick.model, default) {
-            (Some(model), _) if self.projects_model() == Some(model.as_str()) => {
+        match &self.pick.model {
+            Some(model) if self.projects_model() == Some(model.as_str()) => {
                 format!("{} · the project's", label(model))
             }
-            (Some(model), _) => label(model),
-            (None, Some(default)) => default.label(),
-            (None, None) => "default model".to_owned(),
+            Some(model) => label(model),
+            None => provider
+                .and_then(Provider::default_model)
+                .and_then(|default| named(provider, default))
+                .unwrap_or_else(chosen),
         }
+    }
+
+    /// What the effort picker shows: the effort picked, else the one the model runs with, else
+    /// that the provider chooses.
+    pub fn effort_shown(&self) -> String {
+        self.pick
+            .effort
+            .clone()
+            .or_else(|| self.own_effort().cloned())
+            .unwrap_or_else(|| format!("effort chosen by {}", self.title()))
+    }
+
+    /// The effort the model picked (the provider's default one when none) runs with when none
+    /// is asked, once a session said it.
+    fn own_effort(&self) -> Option<&String> {
+        let provider = self.provider()?;
+        let model = match self.pick.model.as_deref() {
+            Some(model) => provider.model(model)?,
+            None => provider.default_model()?,
+        };
+        let own = model.default_effort.as_ref()?;
+        let efforts = efforts_of(provider, self.pick.model.as_deref())?;
+        levels(efforts).any(|e| e == own).then_some(own)
+    }
+
+    /// The provider picked's title, "the provider" before the daemon listed it.
+    fn title(&self) -> String {
+        self.provider()
+            .map_or_else(|| "the provider".to_owned(), |p| p.title.clone())
     }
 
     /// Why the model picked cannot start: the project's, which its provider is known not to
@@ -610,12 +643,7 @@ impl Composer {
         if efforts_of(provider, self.pick.model.as_deref())
             .is_some_and(|e| levels(e).next().is_some())
         {
-            let effort = self
-                .pick
-                .effort
-                .clone()
-                .unwrap_or_else(|| "default effort".into());
-            wanted.push(("effort-picker", Menu::Effort, effort));
+            wanted.push(("effort-picker", Menu::Effort, self.effort_shown()));
         }
         let mut pickers = Vec::new();
         for (id, menu, label) in wanted {
@@ -691,9 +719,17 @@ impl Composer {
             }
             (Menu::Model, Some(provider)) => match &provider.models {
                 Some(models) => {
-                    for model in models {
-                        let on = match &self.pick.model {
-                            Some(picked) => picked == &model.id,
+                    // An alias picked is the model it stands for.
+                    let picked = self.pick.model.as_deref().map(|picked| {
+                        provider
+                            .model(picked)
+                            .and_then(|m| m.stands_for.as_deref())
+                            .unwrap_or(picked)
+                    });
+                    // The aliases a model stands for are that model's row.
+                    for model in models.iter().filter(|m| m.stands_for.is_none()) {
+                        let on = match picked {
+                            Some(picked) => picked == model.id,
                             None => model.default,
                         };
                         let note = if projects == Some(model.id.as_str()) {
@@ -701,12 +737,16 @@ impl Composer {
                         } else {
                             (model.default && model.id != DEFAULT).then(|| "default".to_owned())
                         };
+                        // The default's row names no model, so that the provider's default is
+                        // followed, unless the project's model would then be taken instead.
+                        let asked = (!model.default || projects.is_some()).then_some(&model.id);
                         items.push(item(
                             format!("model-choice-{}", model.id),
-                            model.label(),
+                            named(Some(provider), model)
+                                .unwrap_or_else(|| format!("Chosen by {}", provider.title)),
                             note,
                             on,
-                            Some(pick(None, Some(&model.id), None)),
+                            Some(pick(None, asked.map(String::as_str), None)),
                         ));
                     }
                 }
@@ -715,8 +755,8 @@ impl Composer {
                     // Without a model, the daemon gives the project's: no other default to pick.
                     if projects.is_none() {
                         items.push(item(
-                            "model-choice-default".into(),
-                            "default model".into(),
+                            "model-choice-provider".into(),
+                            format!("Chosen by {}", provider.title),
                             None,
                             self.pick.model.is_none(),
                             Some(pick(None, None, None)),
@@ -744,23 +784,32 @@ impl Composer {
                 }
             },
             (Menu::Effort, Some(provider)) => {
-                items.push(item(
-                    "effort-choice-default".into(),
-                    "default effort".into(),
-                    None,
-                    self.pick.effort.is_none(),
-                    Some(pick(None, None, None)),
-                ));
+                let own = self.own_effort();
+                if own.is_none() {
+                    items.push(item(
+                        "effort-choice-provider".into(),
+                        format!("Chosen by {}", provider.title),
+                        None,
+                        self.pick.effort.is_none(),
+                        Some(pick(None, None, None)),
+                    ));
+                }
                 for effort in efforts_of(provider, self.pick.model.as_deref())
                     .into_iter()
                     .flat_map(|efforts| levels(efforts))
                 {
+                    let default = own == Some(effort);
+                    let on = match &self.pick.effort {
+                        Some(picked) => picked == effort,
+                        None => default,
+                    };
+                    // The model's own effort's row asks none: the model's default is followed.
                     items.push(item(
                         format!("effort-choice-{effort}"),
                         effort.clone(),
-                        None,
-                        self.pick.effort.as_deref() == Some(effort.as_str()),
-                        Some(pick(None, None, Some(effort))),
+                        default.then(|| "default".to_owned()),
+                        on,
+                        Some(pick(None, None, (!default).then_some(effort.as_str()))),
                     ));
                 }
             }
@@ -873,11 +922,22 @@ impl Composer {
     }
 }
 
-/// The provider's own `default` entry, a model or an effort: the window's "default model" and
-/// "default effort" stand for it.
+/// The provider's own `default` entry, a model or an effort: the window shows what it stands for,
+/// or that the provider chooses.
 pub const DEFAULT: &str = "default";
 
-/// A model's effort levels, less the provider's own `default`: "default effort" is that one.
+/// A model's name, its provider's `default` named by the model it stands for; `None` for a
+/// `default` that does not say which.
+fn named(provider: Option<&Provider>, model: &crate::providers::Model) -> Option<String> {
+    if model.id != DEFAULT {
+        return Some(model.label());
+    }
+    let stands_for = provider?.model(model.stands_for.as_deref()?)?;
+    Some(stands_for.label())
+}
+
+/// A model's effort levels, less the provider's own `default`: the picker's row that asks none
+/// stands for it.
 pub fn levels(efforts: &[String]) -> impl Iterator<Item = &String> {
     efforts.iter().filter(|e| e.as_str() != DEFAULT)
 }
