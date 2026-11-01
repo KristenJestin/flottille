@@ -710,7 +710,10 @@ it at once.
   process (an abort) and `exit_group`. Any other system call fails with `EPERM`: it opens no
   file, for reading or writing, creates no socket, runs no program (`execve`, `fork`), traces
   no process. A reader that cannot install it reads nothing (`its reader could not shut itself
-  in: …`).
+  in: …`). It also starts in new user and network namespaces, with no network at all, when the
+  kernel lets an unprivileged user have them; when it does not (AppArmor on Ubuntu may refuse
+  them), the daemon says so once in its log and the filter alone keeps the reader off the
+  network.
 - **`search {query}`**: DuckDuckGo's HTML page (`https://html.duckduckgo.com/html/?q=…`, no key,
   no account): at most 10 results, each its title, its URL (out of DuckDuckGo's redirect) and its
   excerpt, ads left out. A page that asks to prove a human is there, or any answer with no

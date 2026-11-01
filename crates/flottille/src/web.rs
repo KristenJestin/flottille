@@ -686,8 +686,8 @@ async fn in_reader(net: &Net, kind: Body, page: &Page) -> Result<Extracted, Stri
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
-    // SAFETY: setrlimit and prctl are async-signal-safe, and nothing else runs between fork and
-    // exec.
+    // SAFETY: setrlimit, prctl and unshare are async-signal-safe, and nothing else runs between
+    // fork and exec.
     unsafe {
         command.pre_exec(|| {
             // No setuid program it could run, nor a file capability, gives it more than it has.
@@ -708,6 +708,9 @@ async fn in_reader(net: &Net, kind: Body, page: &Page) -> Result<Extracted, Stri
                     return Err(std::io::Error::last_os_error());
                 }
             }
+            // A network of its own, with no interface but a loopback that is down, when the
+            // kernel lets a user have one; refused, its seccomp filter still keeps it off any.
+            let _ = libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNET);
             Ok(())
         });
     }
@@ -716,6 +719,17 @@ async fn in_reader(net: &Net, kind: Body, page: &Page) -> Result<Extracted, Stri
     let mut child = command
         .spawn()
         .map_err(|e| format!("its reader could not start: {e}"))?;
+    // Still alive: it waits for its page.
+    if let Some(pid) = child.id()
+        && own_network(pid) == Some(false)
+    {
+        SHARED_NETWORK.call_once(|| {
+            eprintln!(
+                "flottille daemon: the kernel gives page readers no user and network \
+                 namespaces of their own: their seccomp filter alone keeps them off the network"
+            )
+        });
+    }
     let mut input = child.stdin.take().expect("piped");
     let bytes = page.bytes.clone();
     tokio::spawn(async move {
@@ -759,6 +773,17 @@ async fn in_reader(net: &Net, kind: Body, page: &Page) -> Result<Extracted, Stri
         None => serde_json::from_value(answer["read"].clone())
             .map_err(|e| format!("its reader's answer could not be read: {e}")),
     }
+}
+
+/// Said once in the daemon's log: the readers share its network namespace.
+static SHARED_NETWORK: std::sync::Once = std::sync::Once::new();
+
+/// Whether the process `pid` has a network namespace other than the daemon's; `None` when it
+/// cannot be told.
+fn own_network(pid: u32) -> Option<bool> {
+    let theirs = std::fs::read_link(format!("/proc/{pid}/ns/net")).ok()?;
+    let ours = std::fs::read_link("/proc/self/ns/net").ok()?;
+    Some(theirs != ours)
 }
 
 /// The reader, run as `flottille read-page <html|pdf> <url>`: the page on its standard input,
@@ -2023,6 +2048,43 @@ mod tests {
             .block_on(in_reader(&net, Body::Html, &page))
             .unwrap();
         assert_eq!(read.text, "NoNewPrivs: 1");
+    }
+
+    #[test]
+    fn the_reader_has_a_network_of_its_own_or_the_log_says_it_has_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let reader = dir.path().join("reader");
+        // A reader that takes its page, then answers with the network namespace it is in.
+        std::fs::write(
+            &reader,
+            "#!/bin/sh\n/usr/bin/cat > /dev/null\nprintf '{\"read\": {\"title\": null, \"text\": \"%s\", \
+             \"links\": []}}' \"$(/usr/bin/readlink /proc/self/ns/net)\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&reader, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let net = Net {
+            open: Vec::new(),
+            search: String::new(),
+            reader,
+            hosts: Vec::new(),
+        };
+        let page = Page {
+            url: Url::parse("https://docs.example/").unwrap(),
+            kind: "text/html".into(),
+            bytes: b"<html></html>".to_vec(),
+            cut: false,
+        };
+        let read = runtime()
+            .block_on(in_reader(&net, Body::Html, &page))
+            .unwrap();
+        let ours = std::fs::read_link("/proc/self/ns/net").unwrap();
+        // A kernel may refuse the namespaces (AppArmor on Ubuntu does): the daemon says so then.
+        assert!(
+            read.text != ours.to_string_lossy() || SHARED_NETWORK.is_completed(),
+            "{}",
+            read.text
+        );
     }
 
     #[test]
