@@ -34,6 +34,9 @@
 //! at most `--limit`. The fake does not read the JQL: the test reads it in the record. Without
 //! `--jql` (or `--filter`) or `--json` it ends with 2, as a call Flottille never makes.
 //!
+//! A JQL that names `currentUser()` is answered with the script's `mine_search`, none without:
+//! the work items of the signed-in user.
+//!
 //! The writes change nothing: the test reads them in the record.
 //!
 //! - `acli jira workitem create --project P --summary S … --json` prints `{"key": …}`, the
@@ -115,8 +118,12 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 .and_then(|at| rest.get(at + 1))
                 .and_then(|n| n.parse().ok())
                 .unwrap_or(usize::MAX);
-            let mut found: Vec<Value> = match &script["search"] {
+            // The user's own: what the script says is theirs, none without.
+            let theirs = rest.iter().any(|word| word.contains("currentUser()"));
+            let mut found: Vec<Value> = match &script[if theirs { "mine_search" } else { "search" }]
+            {
                 Value::Array(items) => items.clone(),
+                _ if theirs => Vec::new(),
                 _ => script["items"]
                     .as_object()
                     .into_iter()

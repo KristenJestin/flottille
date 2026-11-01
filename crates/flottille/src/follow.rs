@@ -40,7 +40,13 @@ pub fn follow(
 ) -> Result<ExitCode> {
     let mut tree = ids_of_tree(client, agent)?;
     let mut events = Client::connect_or_start(paths)?;
-    events.request("events.watch", serde_json::to_value(WatchParams { after })?)?;
+    events.request(
+        "events.watch",
+        serde_json::to_value(WatchParams {
+            after,
+            client: None,
+        })?,
+    )?;
     let mut shown_requests = HashSet::new();
     let (awaited, mut playing) = match turn {
         Turn::First => (None, true),

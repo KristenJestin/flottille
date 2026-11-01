@@ -24,6 +24,7 @@ mod git;
 mod import_command;
 mod inbox;
 mod inbox_command;
+mod items;
 mod judge;
 mod mcp;
 mod nofollow;
@@ -377,7 +378,13 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         }
         Command::Watch { after, forge } => {
             let mut client = Client::connect_or_start(&paths)?;
-            client.request("events.watch", serde_json::to_value(WatchParams { after })?)?;
+            client.request(
+                "events.watch",
+                serde_json::to_value(WatchParams {
+                    after,
+                    client: None,
+                })?,
+            )?;
             // Not waited for: its answer is not an event, and the events of its read come
             // meanwhile.
             if let [project, name] = &forge[..] {

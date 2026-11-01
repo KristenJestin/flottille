@@ -10,6 +10,7 @@ pub mod declared;
 pub mod detect;
 pub mod error;
 pub mod glob;
+pub mod item;
 pub mod paths;
 pub mod project;
 pub mod protocol;

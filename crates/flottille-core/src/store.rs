@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use crate::agent::{Agent, AgentState, Choices, GateMode};
 use crate::approval::{Decision, Delivery, Forward, Judgement, Kind, Request, RequestState};
+use crate::item::{Check, Cursor, Filter, Item};
 use crate::protocol::Event;
 use crate::run::{Run, RunState};
 use crate::subscription::Subscription;
@@ -474,6 +475,56 @@ const MIGRATIONS: &[&str] = &[
         seen       TEXT NOT NULL,
         created_at INTEGER NOT NULL,
         expires_at INTEGER NOT NULL
+    ) STRICT;
+",
+    "
+    -- Every pull request and ticket of a project, as its forge or tracker last said it
+    -- (`docs/items.md`), the checks of the pull requests, and where each source's reads stand.
+    CREATE TABLE items (
+        project    TEXT NOT NULL,
+        kind       TEXT NOT NULL,
+        source     TEXT NOT NULL,
+        repository TEXT NOT NULL,
+        key        TEXT NOT NULL,
+        title      TEXT NOT NULL,
+        state      TEXT NOT NULL,
+        author     TEXT,
+        assignees  TEXT NOT NULL,
+        labels     TEXT NOT NULL,
+        url        TEXT,
+        updated_at TEXT,
+        seen_at    INTEGER NOT NULL,
+        mine       INTEGER NOT NULL,
+        details    TEXT NOT NULL,
+        PRIMARY KEY (project, kind, repository, key)
+    ) STRICT;
+    CREATE TABLE item_checks (
+        project    TEXT NOT NULL,
+        kind       TEXT NOT NULL,
+        repository TEXT NOT NULL,
+        key        TEXT NOT NULL,
+        position   INTEGER NOT NULL,
+        name       TEXT NOT NULL,
+        state      TEXT NOT NULL,
+        started_at TEXT,
+        ended_at   TEXT,
+        link       TEXT,
+        PRIMARY KEY (project, kind, repository, key, position),
+        FOREIGN KEY (project, kind, repository, key)
+            REFERENCES items (project, kind, repository, key) ON DELETE CASCADE
+    ) STRICT;
+    CREATE TABLE fetch_cursors (
+        project  TEXT NOT NULL,
+        kind     TEXT NOT NULL,
+        target   TEXT NOT NULL,
+        source   TEXT NOT NULL,
+        cursor   INTEGER,
+        round_at INTEGER,
+        failures INTEGER NOT NULL,
+        problem  TEXT,
+        first_at INTEGER,
+        note     TEXT,
+        PRIMARY KEY (project, kind, target)
     ) STRICT;
 ",
 ];
@@ -1774,6 +1825,213 @@ impl Store {
             > 0)
     }
 
+    /// The project's items that `filter` keeps, with their checks, the most recently changed
+    /// first.
+    pub fn items(&self, project: &str, filter: &Filter) -> Result<Vec<Item>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT project, kind, source, repository, key, title, state, author, assignees, \
+             labels, url, updated_at, seen_at, mine, details FROM items WHERE project = ?1 \
+             AND (?2 IS NULL OR kind = ?2) AND (?3 IS NULL OR state = ?3) \
+             AND (?4 IS NULL OR repository = ?4) AND (?5 = 0 OR mine = 1) \
+             ORDER BY updated_at DESC, kind, repository, key",
+        )?;
+        let rows = statement.query_map(
+            params![
+                project,
+                filter.kind,
+                filter.state,
+                filter.repository,
+                filter.mine
+            ],
+            item_row,
+        )?;
+        let mut items: Vec<Item> = rows.collect::<rusqlite::Result<_>>()?;
+        let mut checks = self.connection.prepare_cached(
+            "SELECT name, state, started_at, ended_at, link FROM item_checks \
+             WHERE project = ?1 AND kind = ?2 AND repository = ?3 AND key = ?4 ORDER BY position",
+        )?;
+        for item in &mut items {
+            item.checks = checks
+                .query_map(
+                    params![item.project, item.kind, item.repository, item.key],
+                    |row| {
+                        Ok(Check {
+                            name: row.get(0)?,
+                            state: row.get(1)?,
+                            started_at: row.get(2)?,
+                            ended_at: row.get(3)?,
+                            link: row.get(4)?,
+                        })
+                    },
+                )?
+                .collect::<rusqlite::Result<_>>()?;
+        }
+        Ok(items)
+    }
+
+    /// Stores what a round read, each item in place of the one it was, with its checks, and the
+    /// events it gave, in one transaction.
+    pub fn put_items(&mut self, items: &[Item], events: Vec<(&str, Value)>) -> Result<Vec<Event>> {
+        let transaction = self.connection.transaction()?;
+        for item in items {
+            let key = params![item.project, item.kind, item.repository, item.key];
+            transaction.execute(
+                "DELETE FROM item_checks WHERE project = ?1 AND kind = ?2 AND repository = ?3 \
+                 AND key = ?4",
+                key,
+            )?;
+            transaction.execute(
+                "INSERT OR REPLACE INTO items (project, kind, source, repository, key, title, \
+                 state, author, assignees, labels, url, updated_at, seen_at, mine, details) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                params![
+                    item.project,
+                    item.kind,
+                    item.source,
+                    item.repository,
+                    item.key,
+                    item.title,
+                    item.state,
+                    item.author,
+                    serde_json::to_string(&item.assignees)?,
+                    serde_json::to_string(&item.labels)?,
+                    item.url,
+                    item.updated_at,
+                    item.seen_at,
+                    item.mine,
+                    serde_json::to_string(&item.details)?
+                ],
+            )?;
+            for (position, check) in item.checks.iter().enumerate() {
+                transaction.execute(
+                    "INSERT INTO item_checks (project, kind, repository, key, position, name, \
+                     state, started_at, ended_at, link) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    params![
+                        item.project,
+                        item.kind,
+                        item.repository,
+                        item.key,
+                        position,
+                        check.name,
+                        check.state,
+                        check.started_at,
+                        check.ended_at,
+                        check.link
+                    ],
+                )?;
+            }
+        }
+        let mut written = Vec::new();
+        for (name, data) in events {
+            written.push(append_event(&transaction, name, data)?);
+        }
+        transaction.commit()?;
+        Ok(written)
+    }
+
+    /// Forgets the items and the cursors of every project but those of `kept`, and of each kept
+    /// project those of a source it no longer has. A source is `(kind, target, source,
+    /// repository)`: `target` is a repository's path or `tracker`, `source` its forge or tracker,
+    /// `repository` the path its items are of (empty for Jira). How many items went.
+    pub fn retain_items(&mut self, kept: &[(String, Vec<[String; 4]>)]) -> Result<usize> {
+        let transaction = self.connection.transaction()?;
+        let has = |project: &str, kept_one: &dyn Fn(&[String; 4]) -> bool| {
+            kept.iter()
+                .any(|(name, sources)| name == project && sources.iter().any(kept_one))
+        };
+        let mut cursors: Vec<[String; 4]> = Vec::new();
+        {
+            let mut statement =
+                transaction.prepare("SELECT project, kind, target, source FROM fetch_cursors")?;
+            let rows = statement.query_map([], |row| {
+                Ok([row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?])
+            })?;
+            for row in rows {
+                cursors.push(row?);
+            }
+        }
+        for [project, kind, target, source] in cursors {
+            if !has(&project, &|[k, t, s, _]| {
+                *k == kind && *t == target && *s == source
+            }) {
+                transaction.execute(
+                    "DELETE FROM fetch_cursors WHERE project = ?1 AND kind = ?2 AND target = ?3",
+                    params![project, kind, target],
+                )?;
+            }
+        }
+        let mut items: Vec<[String; 4]> = Vec::new();
+        {
+            let mut statement = transaction
+                .prepare("SELECT DISTINCT project, kind, source, repository FROM items")?;
+            let rows = statement.query_map([], |row| {
+                Ok([row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?])
+            })?;
+            for row in rows {
+                items.push(row?);
+            }
+        }
+        let mut gone = 0;
+        for [project, kind, source, repository] in items {
+            if !has(&project, &|[k, _, s, r]| {
+                *k == kind && *s == source && *r == repository
+            }) {
+                gone += transaction.execute(
+                    "DELETE FROM items WHERE project = ?1 AND kind = ?2 AND source = ?3 \
+                     AND repository = ?4",
+                    params![project, kind, source, repository],
+                )?;
+            }
+        }
+        transaction.commit()?;
+        Ok(gone)
+    }
+
+    /// Where each source of the project stands.
+    pub fn cursors(&self, project: &str) -> Result<Vec<Cursor>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT project, kind, target, source, cursor, round_at, failures, problem, \
+             first_at, note FROM fetch_cursors WHERE project = ?1 ORDER BY kind, target",
+        )?;
+        let rows = statement.query_map(params![project], |row| {
+            Ok(Cursor {
+                project: row.get(0)?,
+                kind: row.get(1)?,
+                target: row.get(2)?,
+                source: row.get(3)?,
+                cursor: row.get(4)?,
+                round_at: row.get(5)?,
+                failures: row.get(6)?,
+                problem: row.get(7)?,
+                first_at: row.get(8)?,
+                note: row.get(9)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn set_cursor(&self, cursor: &Cursor) -> Result<()> {
+        self.connection.execute(
+            "INSERT OR REPLACE INTO fetch_cursors (project, kind, target, source, cursor, \
+             round_at, failures, problem, first_at, note) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                cursor.project,
+                cursor.kind,
+                cursor.target,
+                cursor.source,
+                cursor.cursor,
+                cursor.round_at,
+                cursor.failures,
+                cursor.problem,
+                cursor.first_at,
+                cursor.note
+            ],
+        )?;
+        Ok(())
+    }
+
     /// The agent's deliveries `sending` become `sent`: the turn that held them ended.
     pub fn deliveries_taken(&self, agent: &str) -> Result<()> {
         self.connection.execute(
@@ -2194,6 +2452,32 @@ fn subscription_row(row: &rusqlite::Row) -> rusqlite::Result<Subscription> {
         seen: json(6)?,
         created_at: row.get(7)?,
         expires_at: row.get(8)?,
+    })
+}
+
+fn item_row(row: &rusqlite::Row) -> rusqlite::Result<Item> {
+    let json = |i| {
+        row.get::<_, String>(i)
+            .map(|text| serde_json::from_str::<Value>(&text).unwrap_or_default())
+    };
+    let names = |i| json(i).map(|value| serde_json::from_value(value).unwrap_or_default());
+    Ok(Item {
+        project: row.get(0)?,
+        kind: row.get(1)?,
+        source: row.get(2)?,
+        repository: row.get(3)?,
+        key: row.get(4)?,
+        title: row.get(5)?,
+        state: row.get(6)?,
+        author: row.get(7)?,
+        assignees: names(8)?,
+        labels: names(9)?,
+        url: row.get(10)?,
+        updated_at: row.get(11)?,
+        seen_at: row.get(12)?,
+        mine: row.get(13)?,
+        details: json(14)?,
+        checks: Vec::new(),
     })
 }
 
@@ -4294,5 +4578,123 @@ mod tests {
         );
         assert_eq!(store.events_after(0, 1).unwrap(), vec![first]);
         assert_eq!(store.last_seq().unwrap(), 3);
+    }
+
+    fn an_item(project: &str, kind: &str, repository: &str, key: &str, state: &str) -> Item {
+        Item {
+            project: project.into(),
+            kind: kind.into(),
+            source: "github".into(),
+            repository: repository.into(),
+            key: key.into(),
+            title: format!("#{key}"),
+            state: state.into(),
+            author: Some("alice".into()),
+            assignees: vec!["bob".into()],
+            labels: vec!["web".into()],
+            url: None,
+            updated_at: Some(format!("2026-10-0{key}T00:00:00Z")),
+            seen_at: 7,
+            mine: key == "1",
+            details: json!({"head": "login"}),
+            checks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn items_are_kept_with_their_checks_filtered_and_forgotten_with_their_source() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut pull = an_item("app", "pull", "api", "1", "open");
+        pull.checks = vec![Check {
+            name: "test".into(),
+            state: "pending".into(),
+            started_at: Some("2026-10-01T00:00:00Z".into()),
+            ended_at: None,
+            link: Some("https://example.com/1".into()),
+        }];
+        let written = store
+            .put_items(
+                &[
+                    pull.clone(),
+                    an_item("app", "pull", "web", "2", "merged"),
+                    an_item("app", "ticket", "api", "3", "open"),
+                    an_item("other", "pull", "api", "4", "open"),
+                ],
+                vec![("item.opened", json!({"key": "1"}))],
+            )
+            .unwrap();
+        assert_eq!(written[0].name, "item.opened");
+        let all = store.items("app", &Filter::default()).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all.iter().find(|i| i.key == "1").unwrap(), &pull);
+        let keys = |store: &Store, filter: Filter| -> Vec<String> {
+            let mut keys: Vec<String> = store
+                .items("app", &filter)
+                .unwrap()
+                .into_iter()
+                .map(|i| i.key)
+                .collect();
+            keys.sort();
+            keys
+        };
+        let pulls = Filter {
+            kind: Some("pull".into()),
+            ..Filter::default()
+        };
+        assert_eq!(keys(&store, pulls), ["1", "2"]);
+        let open = Filter {
+            state: Some("open".into()),
+            ..Filter::default()
+        };
+        assert_eq!(keys(&store, open), ["1", "3"]);
+        let web = Filter {
+            repository: Some("web".into()),
+            ..Filter::default()
+        };
+        assert_eq!(keys(&store, web), ["2"]);
+        let mine = Filter {
+            mine: true,
+            ..Filter::default()
+        };
+        assert_eq!(keys(&store, mine), ["1"]);
+
+        // The same item again replaces it, its checks with it.
+        let mut again = pull.clone();
+        again.checks.clear();
+        again.title = "Renamed".into();
+        store.put_items(&[again], Vec::new()).unwrap();
+        let read = store.items("app", &Filter::default()).unwrap();
+        let read = read.iter().find(|i| i.key == "1").unwrap();
+        assert_eq!(read.title, "Renamed");
+        assert!(read.checks.is_empty());
+
+        let cursor = Cursor {
+            project: "app".into(),
+            kind: "pull".into(),
+            target: "web".into(),
+            source: "github".into(),
+            cursor: Some(5),
+            round_at: Some(6),
+            failures: 1,
+            problem: Some("gh is not signed in".into()),
+            first_at: Some(4),
+            note: Some("only the newest 1000 are read".into()),
+        };
+        store.set_cursor(&cursor).unwrap();
+        assert_eq!(store.cursors("app").unwrap(), vec![cursor]);
+        // `web` left the project, and `other` is gone.
+        let gone = store
+            .retain_items(&[(
+                "app".into(),
+                vec![
+                    ["pull", "api", "github", "api"].map(String::from),
+                    ["ticket", "tracker", "github", "api"].map(String::from),
+                ],
+            )])
+            .unwrap();
+        assert_eq!(gone, 2);
+        assert_eq!(keys(&store, Filter::default()), ["1", "3"]);
+        assert!(store.items("other", &Filter::default()).unwrap().is_empty());
+        assert!(store.cursors("app").unwrap().is_empty());
     }
 }

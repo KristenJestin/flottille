@@ -460,6 +460,17 @@ pub(super) async fn pull_numbered(
 
 /// A listed pull request with its checks, reviewers and comments.
 async fn detailed(forge: &Forge, context: &str, found: Listed) -> Result<Pull, String> {
+    detailed_with(forge, context, found)
+        .await
+        .map(|(pull, _)| pull)
+}
+
+/// `detailed`, with the commit statuses its checks are of.
+async fn detailed_with(
+    forge: &Forge,
+    context: &str,
+    found: Listed,
+) -> Result<(Pull, Vec<Value>), String> {
     let id = found.id.to_string();
     let statuses = statuses_of(forge, context, &id).await?;
     let checks: Vec<_> = statuses.iter().map(check_of).collect();
@@ -494,7 +505,7 @@ async fn detailed(forge: &Forge, context: &str, found: Listed) -> Result<Pull, S
             log: None,
         })
         .collect();
-    Ok(Pull {
+    let pull = Pull {
         number: found.id,
         title: found.title,
         state: found.state,
@@ -510,7 +521,280 @@ async fn detailed(forge: &Forge, context: &str, found: Listed) -> Result<Pull, S
         reviewers,
         jobs,
         ci: None,
+    };
+    Ok((pull, statuses))
+}
+
+/// The states Bitbucket Cloud lists a pull request in: all of them, since it lists the open ones
+/// alone unless asked (Atlassian's REST documentation, "List pull requests": the `state`
+/// parameter is repeated for several).
+const CLOUD_STATES: [&str; 4] = [
+    "state=OPEN",
+    "state=MERGED",
+    "state=DECLINED",
+    "state=SUPERSEDED",
+];
+/// The most pull requests one round of the items lists of a repository.
+const ALL: usize = 1000;
+
+/// A listed pull request as an item, its cheap fields alone.
+fn cheap(forge: &Forge, path: &str, found: Listed) -> crate::items::Fetched {
+    let pull = Pull {
+        number: found.id,
+        title: found.title,
+        state: found.state,
+        head: found.branch,
+        head_commit: found.head_commit,
+        base: found.base,
+        url: found.url,
+        mergeable: None,
+        review: None,
+        checks: Vec::new(),
+        comments: Vec::new(),
+        reviews: Vec::new(),
+        reviewers: found.reviewers,
+        jobs: Vec::new(),
+        ci: None,
+    };
+    let mut fetched = super::fetched_pull(path, "bitbucket", &pull, false);
+    if !cloud(forge) {
+        // Data Center says its reviewers in the list: their verdicts are its review.
+        fetched.item.details["review"] = serde_json::json!(decision(&pull.reviewers));
+    }
+    fetched
+}
+
+/// A time Bitbucket says, an RFC 3339 text (Cloud) or milliseconds (Data Center), as a text.
+fn time_of(value: &Value) -> Option<String> {
+    match value {
+        Value::String(at) => Some(masked(at)),
+        Value::Number(at) => Some(at.to_string()),
+        _ => None,
+    }
+}
+
+/// The pull requests of the repository the items list (`docs/items.md`), their cheap fields
+/// alone. Cloud is asked through `bkt api` with Bitbucket's own filter, `q=updated_on>="<since>"`,
+/// newest change first, the filter and the order given as `--param` (never in the path: `bkt
+/// api` is not known to merge them). Data Center has no such filter: every open pull request is
+/// listed, page after page, and one stored open that left the list is read by itself, to say
+/// whether it was merged or declined.
+pub(super) async fn list_pulls(
+    forge: &Forge,
+    context: &str,
+    path: &str,
+    since: Option<&str>,
+    stored: &[flottille_core::item::Item],
+) -> Result<crate::items::Listing, String> {
+    let Forge::Bitbucket { owner, name, .. } = forge else {
+        unreachable!("a Bitbucket repository")
+    };
+    let mut items = Vec::new();
+    if cloud(forge) {
+        let filter = since.map(|since| format!("q=updated_on>=\"{since}\""));
+        let mut params = vec!["sort=-updated_on"];
+        params.extend(CLOUD_STATES);
+        if let Some(filter) = &filter {
+            params.push(filter);
+        }
+        let (values, more) = cloud_values_with(
+            context,
+            &format!("/repositories/{owner}/{name}/pullrequests"),
+            ALL,
+            &params,
+        )
+        .await?;
+        for value in values {
+            let Some(found) = listed(forge, &value) else {
+                continue;
+            };
+            let mut fetched = cheap(forge, path, found);
+            fetched.item.author = value["author"]["display_name"].as_str().map(masked);
+            fetched.item.updated_at = value["updated_on"].as_str().map(masked);
+            fetched.created_at = value["created_on"]
+                .as_str()
+                .and_then(crate::session_read::form);
+            items.push(fetched);
+        }
+        return Ok(crate::items::Listing {
+            items,
+            note: more
+                .then(|| format!("only the {ALL} most recently changed pull requests are listed")),
+            details: true,
+        });
+    }
+    let base = format!("/rest/api/1.0/projects/{owner}/repos/{name}/pull-requests");
+    // The open ones: the endpoint's default state.
+    let values = dc_values(context, &base, ALL).await?;
+    let mut notes =
+        vec!["mine is not known on Bitbucket Data Center: bkt says no user there".to_owned()];
+    if values.len() >= ALL {
+        notes.push(format!("only {ALL} open pull requests are listed"));
+    }
+    let dc_item = |value: &Value| {
+        let found = listed(forge, value)?;
+        let mut fetched = cheap(forge, path, found);
+        fetched.item.author = Some(person(&value["author"]["user"], &["displayName", "name"]));
+        fetched.item.updated_at = time_of(&value["updatedDate"]);
+        fetched.item.details["version"] = value["version"].clone();
+        fetched.created_at = value["createdDate"].as_u64();
+        Some(fetched)
+    };
+    items.extend(values.iter().filter_map(dc_item));
+    let left: Vec<&flottille_core::item::Item> = stored
+        .iter()
+        .filter(|item| {
+            matches!(item.state.as_str(), "open" | "draft")
+                && !items.iter().any(|listed| listed.item.key == item.key)
+        })
+        .collect();
+    for gone in left {
+        let fetched =
+            match json(&["api", &format!("{base}/{}", gone.key), "--context", context]).await {
+                Ok(value) => dc_item(&value),
+                Err(error) if super::not_found(&error) => {
+                    Some(crate::items::Fetched::removed(gone.clone()))
+                }
+                Err(error) => return Err(error),
+            };
+        items.extend(fetched);
+    }
+    Ok(crate::items::Listing {
+        items,
+        note: Some(notes.join("; ")),
+        details: true,
     })
+}
+
+/// What a listed pull request is, as `detailed` takes it, from what the items keep of it.
+fn listed_of(item: &flottille_core::item::Item) -> Option<Listed> {
+    let text = |key: &str| item.details[key].as_str().unwrap_or_default().to_owned();
+    let state = match item.state.as_str() {
+        "merged" => "merged",
+        "closed" => "closed",
+        _ => "open",
+    };
+    let verdict = |state: &str| match state {
+        "approved" => "approved",
+        "changes requested" => "changes requested",
+        _ => "pending",
+    };
+    Some(Listed {
+        id: item.key.parse().ok()?,
+        title: item.title.clone(),
+        state,
+        branch: text("head"),
+        head_commit: item.details["head_commit"].as_str().map(str::to_owned),
+        base: text("base"),
+        url: item.url.clone().unwrap_or_default(),
+        own: true,
+        reviewers: item.details["reviewers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|r| {
+                (
+                    r["name"].as_str().unwrap_or_default().to_owned(),
+                    verdict(r["state"].as_str().unwrap_or_default()),
+                )
+            })
+            .collect(),
+    })
+}
+
+/// Reads the checks, reviewers and comments of a listed pull request, as `forge show` reads
+/// them; false when Bitbucket no longer has it. A part of it not found (its checks, its
+/// comments) while the pull request itself is found leaves it not `detailed`: what is stored of
+/// it is kept, and it is said.
+pub(super) async fn detail(
+    forge: &Forge,
+    context: &str,
+    fetched: &mut crate::items::Fetched,
+) -> Result<bool, String> {
+    let Some(found) = listed_of(&fetched.item) else {
+        return Ok(true);
+    };
+    let id = found.id;
+    let (pull, statuses) = match detailed_with(forge, context, found).await {
+        Ok(read) => read,
+        Err(error) if super::not_found(&error) => {
+            let page = match cloud(forge) {
+                true => cloud_page(forge, &id.to_string()),
+                false => {
+                    let Forge::Bitbucket { owner, name, .. } = forge else {
+                        unreachable!()
+                    };
+                    format!("/rest/api/1.0/projects/{owner}/repos/{name}/pull-requests/{id}")
+                }
+            };
+            return match json(&["api", &page, "--context", context]).await {
+                Ok(_) => {
+                    eprintln!(
+                        "flottille daemon: items: a part of the pull request #{id} of {} was not \
+                         found ({error}); what is kept of it stays",
+                        forge.slug()
+                    );
+                    Ok(true)
+                }
+                Err(gone) if super::not_found(&gone) => Ok(false),
+                Err(other) => Err(other),
+            };
+        }
+        Err(error) => return Err(error),
+    };
+    let version = fetched.item.details["version"].take();
+    let read = super::fetched_pull(&fetched.item.repository, "bitbucket", &pull, true);
+    fetched.item.details = read.item.details;
+    if !version.is_null() {
+        fetched.item.details["version"] = version;
+    }
+    fetched.item.checks = checks_of_statuses(&statuses);
+    fetched.comments = read.comments;
+    fetched.reviews = read.reviews;
+    fetched.detailed = true;
+    Ok(true)
+}
+
+/// The checks of the pull request `number` now.
+pub(super) async fn checks_now(
+    forge: &Forge,
+    context: &str,
+    number: u64,
+) -> Result<Vec<flottille_core::item::Check>, String> {
+    let statuses = statuses_of(forge, context, &number.to_string()).await?;
+    Ok(checks_of_statuses(&statuses))
+}
+
+/// Commit statuses as the items keep them: when each was made, when it last changed once it
+/// ended, and its link.
+fn checks_of_statuses(statuses: &[Value]) -> Vec<flottille_core::item::Check> {
+    let time = |status: &Value, keys: [&str; 2]| keys.iter().find_map(|key| time_of(&status[*key]));
+    statuses
+        .iter()
+        .map(|status| {
+            let (name, state) = check_of(status);
+            flottille_core::item::Check {
+                name,
+                state: state.into(),
+                started_at: time(status, ["created_on", "dateAdded"]),
+                ended_at: match state {
+                    "pending" => None,
+                    _ => time(status, ["updated_on", "dateAdded"]),
+                },
+                link: status["url"]
+                    .as_str()
+                    .filter(|link| !link.is_empty())
+                    .map(masked),
+            }
+        })
+        .collect()
+}
+
+/// The display name Bitbucket Cloud knows the signed-in user by (`/user`, assumed from
+/// Atlassian's REST documentation).
+pub(super) async fn me(context: &str) -> Option<String> {
+    let user = json(&["api", "/user", "--context", context]).await.ok()?;
+    user["display_name"].as_str().map(masked)
 }
 
 /// The checks of the pull request `id`: the commit statuses of its source commit.

@@ -44,6 +44,7 @@ pub fn sweep(daemon: &Arc<Daemon>) {
     tree::end_late_reporters(daemon);
     crate::subscriptions::sweep(daemon);
     crate::forge::poll(daemon);
+    crate::items::poll(daemon);
     agents::forget_kept_sessions(daemon);
     forget_runs(daemon);
     let agents = daemon.read(Store::agents).unwrap_or_default();

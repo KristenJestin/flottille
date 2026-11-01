@@ -50,6 +50,10 @@ pub struct WatchParams {
     /// Send the stored events after this number first; without it, only what is new.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after: Option<u64>,
+    /// What the client is: `window` makes the items' rounds come at the window's rhythm while
+    /// its connection is open (`docs/items.md`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
 }
 
 /// The parameters of `project.detect` and `project.add`.

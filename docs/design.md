@@ -94,7 +94,8 @@ child, and a child never asks the user anything: what it needs goes to its paren
   every request is self-contained, identifiers are opaque strings, nothing depends on sharing a
   file system with the client except paths the user typed.
 - **Store**: SQLite (bundled), one file. Agents' conversations (the ACP events), tool calls,
-  approvals, deliveries, sessions, projects, workspaces, steps, command runs.
+  approvals, deliveries, sessions, projects, workspaces, steps, command runs, and every pull
+  request and ticket of the projects (`items.md`).
 - **Events**: everything that changes emits an event on the bus; `flottille watch` prints them,
   the window renders them. The event names and fields are a documented contract (`docs/events.md`,
   written with the code). Every event has a sequence number and is stored: a client that drops
@@ -331,9 +332,10 @@ review) subscribes to it instead of reading again and again. Four parts, each it
 - **Delivering** is the existing path (§5.2): a `subscription` delivery, masked, its forge texts
   framed as data and not instructions, wakes the agent as a child's report does.
 
-Left for later: a daemon-wide reading of the forge and the tickets for the whole app, which other
-sources plug into without changing subscriptions; a ticket source; relaunching an agent that has
-ended when an event comes.
+The daemon-wide reading of the forges and the trackers exists: every pull request and ticket of a
+project, read incrementally and said as `item.*` events ([`items.md`](items.md)). Left for later:
+subscriptions and a ticket source on that stream (#257); relaunching an agent that has ended when
+an event comes.
 
 The window shows them: the session page's rail lists the session's open subscriptions (the pull
 request, the events, since when and until when; a wake, `Wake: <why>` and when it is due), each with a Cancel that ends it through the daemon
@@ -802,7 +804,8 @@ The plan is cut into GitHub milestones; each ends on something the user can use.
    issue trackers (GitHub issues, Jira), linked to workspaces; commands (open the pull
    requests of a workspace, merge a stack in dependency order, close a workspace). Reading a workspace's GitHub pull requests and checks is in
    [`forges.md`](forges.md), and its ticket (a GitHub issue or a Jira work item) in
-   [`tickets.md`](tickets.md).
+   [`tickets.md`](tickets.md); every pull request and ticket of a project, kept up to date by the
+   daemon, in [`items.md`](items.md).
 5. **Remote**: network transport, phone, other machines.
 
 ## 14. Defaults taken, to confirm

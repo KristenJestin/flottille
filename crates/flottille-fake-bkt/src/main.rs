@@ -41,7 +41,8 @@
 //! API says `ref_name`; seen with v0.37.0), `steps` the `steps` of `bkt pipeline view <build>
 //! --json` and `logs` what `bkt pipeline logs <build> [--step <uuid>]` prints (the last step's by
 //! default), and `fail` makes every call on that repository end with 1, saying its text.
-//! `pipeline_fail` makes `pipeline list` alone fail that way.
+//! `pipeline_fail` makes `pipeline list` alone fail that way, and `checks_fail`
+//! (`{"acme/api": {"12": "Error: 404 Not Found"}}`) `pr checks` of that pull request alone.
 //!
 //! The writes answer as `bkt` does when they work: `pr create` prints `✓ Created pull request #N`
 //! (N is `created`, 1 by default), `pr merge` prints `✓ Merged pull request #N` and `pipeline run`
@@ -63,6 +64,10 @@
 //! is served page by page, `next` an absolute link as the server gives it (`?page=2&pagelen=…`);
 //! a Data Center body is served by `limit` and `start` (`isLastPage`, `nextPageStart`). A body
 //! that says its own `next` or `isLastPage` is passed through as it is.
+//!
+//! A Cloud `api` `--param q=updated_on>="<time>"` keeps the `values` whose `updated_on` is that
+//! time or later (compared as the RFC 3339 texts they are), as Bitbucket's filter does; the fake
+//! reads no other filter.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -190,6 +195,10 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             payload["pull_requests"] = Value::from(pulls);
         }
         ["pr", "checks", id] => {
+            if let Some(failure) = script["checks_fail"][&key][*id].as_str() {
+                eprintln!("{failure}");
+                return 1;
+            }
             payload["pull_request"] = json!(id.parse::<u64>().unwrap_or(0));
             payload["commit"] = json!("0123456789abcdef");
             match &script["checks"][&key][*id] {
@@ -353,6 +362,17 @@ fn api(script: &Value, path: &str, params: &[(&str, &str)]) -> i32 {
     {
         eprintln!("400 Bad Request: the pipelines are asked newest first with --param sort");
         return 1;
+    }
+    let since = params.iter().find_map(|(key, value)| {
+        (*key == "q").then(|| value.strip_prefix("updated_on>=\"")?.strip_suffix('"'))?
+    });
+    if let (Some(since), Some(values)) = (since, body["values"].as_array()) {
+        let kept: Vec<Value> = values
+            .iter()
+            .filter(|value| value["updated_on"].as_str().is_some_and(|at| at >= since))
+            .cloned()
+            .collect();
+        body["values"] = Value::from(kept);
     }
     let values = body["values"].as_array().cloned();
     if path.starts_with("/rest/api/") {

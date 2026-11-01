@@ -2205,6 +2205,337 @@ fn pull_text(text: &mut String, named: &str, pull: &Pull, full: bool, again: &st
     }
 }
 
+/// What `gh pr list` is asked of each pull request a round of the items lists: the cheap fields
+/// alone. The checks, reviews and comments nested in a list of a whole history are what makes
+/// GitHub's GraphQL time out; they are read one pull request at a time (`Pulls::detail`).
+const LIST_FIELDS: &str = "number,title,state,isDraft,headRefName,headRefOid,baseRefName,url,\
+    author,assignees,labels,updatedAt,createdAt";
+/// The most pull requests or issues one list asks `gh` for.
+pub(crate) const ALL: &str = "1000";
+const ALL_COUNT: usize = 1000;
+
+/// What a gh read says of something the forge does not have, or no longer has.
+pub(crate) fn not_found(error: &str) -> bool {
+    ["no pull requests found", "Could not resolve to", "404"]
+        .iter()
+        .any(|said| error.contains(said))
+}
+
+/// The names a list of GitHub objects holds under `key`, masked.
+pub(crate) fn names_of(list: &Value, key: &str) -> Vec<String> {
+    list.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item[key].as_str())
+        .map(masked)
+        .collect()
+}
+
+/// The pull requests of one repository of a project as the items read them (`docs/items.md`):
+/// its forge, checked to agree with the remote, and the context `bkt` is given, found once.
+pub(crate) struct Pulls {
+    forge: Forge,
+    path: String,
+    context: Option<String>,
+}
+
+impl Pulls {
+    /// Ready to read: the forge declared and agreeing with the remote, its command line there and
+    /// signed in.
+    pub(crate) async fn open(checkout: &Checkout) -> Result<Pulls, String> {
+        let forge = match declared_forge(checkout).await {
+            Ok(forge) => forge,
+            Err(None) => return Err(NO_FORGE.into()),
+            Err(Some(why)) => return Err(why),
+        };
+        let context = match &forge {
+            Forge::GitHub { .. } => {
+                signed_in().await?;
+                None
+            }
+            Forge::Bitbucket { .. } => Some(bitbucket::Contexts::default().of(&forge).await?),
+        };
+        Ok(Pulls {
+            forge,
+            path: checkout.path.clone(),
+            context,
+        })
+    }
+
+    pub(crate) fn forge(&self) -> &Forge {
+        &self.forge
+    }
+
+    /// Whether the forge can say who the user is: Bitbucket Data Center cannot.
+    pub(crate) fn knows_me(&self) -> bool {
+        !matches!(self.forge, Forge::Bitbucket { .. }) || bitbucket::cloud(&self.forge)
+    }
+
+    /// The pull requests that changed since `since` (RFC 3339, UTC), all of them without it, with
+    /// their cheap fields only. `stored` are those kept of the repository: on Data Center, which
+    /// lists its open pull requests alone, one that left the list is read by itself.
+    pub(crate) async fn list(
+        &self,
+        since: Option<&str>,
+        stored: &[flottille_core::item::Item],
+    ) -> Result<crate::items::Listing, String> {
+        let context = self.context.as_deref().unwrap_or_default();
+        if let Forge::Bitbucket { .. } = self.forge {
+            return bitbucket::list_pulls(&self.forge, context, &self.path, since, stored).await;
+        }
+        let repo = self.forge.gh_repository();
+        let search = since.map(|since| format!("updated:>={since}"));
+        let mut args = vec!["pr", "list", "-R", &repo, "--state", "all", "--limit", ALL];
+        if let Some(search) = &search {
+            args.extend(["--search", search]);
+        }
+        args.extend(["--json", LIST_FIELDS]);
+        let listed = gh_json(&args).await?;
+        let values = listed.as_array().cloned().unwrap_or_default();
+        let note = (values.len() >= ALL_COUNT).then(|| {
+            format!("only the newest {ALL} pull requests are listed; older ones, if any, are not")
+        });
+        let items = values
+            .iter()
+            .filter_map(|value| listed_pull(&self.path, value))
+            .collect();
+        Ok(crate::items::Listing {
+            items,
+            note,
+            details: true,
+        })
+    }
+
+    /// The stored open pull requests that GitHub no longer lists open, each read alone
+    /// (`swept`). Bitbucket has none to find: Data Center reads its own at every round, and
+    /// Cloud deletes no pull request.
+    pub(crate) async fn swept(
+        &self,
+        stored: &[flottille_core::item::Item],
+        listed: &[crate::items::Fetched],
+    ) -> Result<Vec<crate::items::Fetched>, String> {
+        if let Forge::Bitbucket { .. } = self.forge {
+            return Ok(Vec::new());
+        }
+        let repo = self.forge.gh_repository();
+        swept("pr", &repo, LIST_FIELDS, stored, listed, |value| {
+            listed_pull(&self.path, value)
+        })
+        .await
+    }
+
+    /// Reads the checks, reviews and comments of a listed pull request, as `forge show` reads
+    /// them; false when the forge no longer has it. True without `detailed` when a part of it
+    /// could not be found: what is stored of it is kept.
+    pub(crate) async fn detail(&self, fetched: &mut crate::items::Fetched) -> Result<bool, String> {
+        let context = self.context.as_deref().unwrap_or_default();
+        if let Forge::Bitbucket { .. } = self.forge {
+            return bitbucket::detail(&self.forge, context, fetched).await;
+        }
+        let repo = self.forge.gh_repository();
+        let number = fetched.item.key.clone();
+        let viewed = match gh_json(&["pr", "view", &number, "-R", &repo, "--json", FIELDS]).await {
+            Ok(viewed) => viewed,
+            Err(error) if not_found(&error) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let pull = Pull::of(&viewed)
+            .ok_or_else(|| format!("gh pr view {number} answered no pull request"))?;
+        let read = fetched_pull(&self.path, "github", &pull, true);
+        fetched.item.details = read.item.details;
+        fetched.item.checks = github_checks(&viewed);
+        fetched.comments = read.comments;
+        fetched.reviews = read.reviews;
+        fetched.detailed = true;
+        Ok(true)
+    }
+
+    /// The checks of the pull request `number` now, read on their own: they move without it.
+    pub(crate) async fn checks(
+        &self,
+        number: u64,
+    ) -> Result<Vec<flottille_core::item::Check>, String> {
+        let context = self.context.as_deref().unwrap_or_default();
+        if let Forge::Bitbucket { .. } = self.forge {
+            return bitbucket::checks_now(&self.forge, context, number).await;
+        }
+        let number = number.to_string();
+        let repo = self.forge.gh_repository();
+        let viewed = gh_json(&[
+            "pr",
+            "view",
+            &number,
+            "-R",
+            &repo,
+            "--json",
+            "statusCheckRollup",
+        ])
+        .await?;
+        Ok(github_checks(&viewed))
+    }
+}
+
+/// A pull request as `gh pr list --json LIST_FIELDS` says it, its cheap fields alone.
+fn listed_pull(path: &str, value: &Value) -> Option<crate::items::Fetched> {
+    let pull = Pull::of(value)?;
+    let mut fetched = fetched_pull(path, "github", &pull, false);
+    let item = &mut fetched.item;
+    item.author = value["author"]["login"].as_str().map(masked);
+    item.assignees = names_of(&value["assignees"], "login");
+    item.labels = names_of(&value["labels"], "name");
+    item.updated_at = value["updatedAt"].as_str().map(masked);
+    fetched.created_at = value["createdAt"]
+        .as_str()
+        .and_then(crate::session_read::form);
+    Some(fetched)
+}
+
+/// The stored open pull requests or issues (`kind`: `pr`, `issue`) of `repo` that its open list
+/// no longer holds and that this round did not list, each read alone with `gh <kind> view
+/// --json <fields>` and made an item by `read`: what a search of what changed never shows again
+/// (an issue deleted or transferred, an update its index missed). One not found, or that `read`
+/// refuses (moved to another repository), is closed and removed. Nothing is read alone when the
+/// open list is cut at its cap: those missing from it may still be open.
+pub(crate) async fn swept(
+    kind: &str,
+    repo: &str,
+    fields: &str,
+    stored: &[flottille_core::item::Item],
+    listed: &[crate::items::Fetched],
+    read: impl Fn(&Value) -> Option<crate::items::Fetched>,
+) -> Result<Vec<crate::items::Fetched>, String> {
+    let open = gh_json(&[
+        kind, "list", "-R", repo, "--state", "open", "--limit", ALL, "--json", "number",
+    ])
+    .await?;
+    let open: Vec<String> = open
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value["number"].as_u64())
+        .map(|number| number.to_string())
+        .collect();
+    if open.len() >= ALL_COUNT {
+        return Ok(Vec::new());
+    }
+    let mut found = Vec::new();
+    for old in stored.iter().filter(|old| {
+        matches!(old.state.as_str(), "open" | "draft")
+            && !open.contains(&old.key)
+            && !listed.iter().any(|l| l.item.key == old.key)
+    }) {
+        let alone = match gh_json(&[kind, "view", &old.key, "-R", repo, "--json", fields]).await {
+            Ok(value) => read(&value),
+            Err(error) if not_found(&error) => None,
+            Err(error) => return Err(error),
+        };
+        found.push(alone.unwrap_or_else(|| crate::items::Fetched::removed(old.clone())));
+    }
+    Ok(found)
+}
+
+/// Whom the forge says the user is signed in as: GitHub's login, Bitbucket Cloud's display name
+/// (the name its pull requests say); none when it does not say, Data Center included.
+pub(crate) async fn me(forge: &Forge) -> Option<String> {
+    match forge {
+        Forge::GitHub { .. } => gh_json(&["api", "user"]).await.ok()?["login"]
+            .as_str()
+            .map(masked),
+        Forge::Bitbucket { .. } if bitbucket::cloud(forge) => {
+            let context = bitbucket::Contexts::default().of(forge).await.ok()?;
+            bitbucket::me(&context).await
+        }
+        Forge::Bitbucket { .. } => None,
+    }
+}
+
+/// A pull request as an item: what is proper to a pull request in its details. Listed only
+/// (`detailed` false), what a list does not say is left out, not said as none.
+fn fetched_pull(path: &str, source: &str, pull: &Pull, detailed: bool) -> crate::items::Fetched {
+    let mut details = json!({
+        "head": pull.head,
+        "base": pull.base,
+        "head_commit": pull.head_commit,
+    });
+    if detailed {
+        details["mergeable"] = json!(pull.mergeable);
+        details["review"] = json!(pull.review);
+        details["comments"] = json!(pull.comments.len());
+        details["reviews"] = json!(pull.reviews.len());
+    }
+    if !pull.reviewers.is_empty() {
+        details["reviewers"] = pull
+            .reviewers
+            .iter()
+            .map(|(name, state)| json!({"name": name, "state": state}))
+            .collect();
+    }
+    crate::items::Fetched {
+        item: flottille_core::item::Item {
+            project: String::new(),
+            kind: "pull".into(),
+            source: source.into(),
+            repository: path.into(),
+            key: pull.number.to_string(),
+            title: pull.title.clone(),
+            state: pull.state.into(),
+            author: None,
+            assignees: Vec::new(),
+            labels: Vec::new(),
+            url: Some(pull.url.clone()).filter(|url| !url.is_empty()),
+            updated_at: None,
+            seen_at: 0,
+            mine: false,
+            details,
+            checks: pull
+                .checks
+                .iter()
+                .map(|(name, state)| flottille_core::item::Check {
+                    name: name.clone(),
+                    state: (*state).into(),
+                    started_at: None,
+                    ended_at: None,
+                    link: None,
+                })
+                .collect(),
+        },
+        comments: pull.comments.iter().map(crate::items::Said::of).collect(),
+        reviews: pull.reviews.iter().map(crate::items::Said::of).collect(),
+        created_at: None,
+        detailed,
+    }
+}
+
+/// The checks of `statusCheckRollup`, with when each started and ended and its link. A check run
+/// not completed says its end as the year 1, which is no end.
+fn github_checks(value: &Value) -> Vec<flottille_core::item::Check> {
+    let time = |check: &Value, key: &str| {
+        check[key]
+            .as_str()
+            .filter(|at| !at.starts_with("0001-"))
+            .map(masked)
+    };
+    value["statusCheckRollup"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|check| {
+            let (name, state) = check_of(check);
+            flottille_core::item::Check {
+                name,
+                state: state.into(),
+                started_at: time(check, "startedAt").or_else(|| time(check, "createdAt")),
+                ended_at: time(check, "completedAt"),
+                link: check["detailsUrl"]
+                    .as_str()
+                    .or(check["targetUrl"].as_str())
+                    .filter(|link| !link.is_empty())
+                    .map(masked),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
