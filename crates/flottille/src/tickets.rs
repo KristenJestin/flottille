@@ -1851,7 +1851,8 @@ impl Tickets {
         .await
     }
 
-    /// Reads the comments of a listed issue; false when GitHub no longer has it.
+    /// Reads the description and the comments of a listed issue; false when GitHub no longer has
+    /// it.
     pub async fn detail(&self, fetched: &mut crate::items::Fetched) -> Result<bool, String> {
         let Tickets::GitHub { forge, .. } = self else {
             return Ok(true);
@@ -1863,7 +1864,7 @@ impl Tickets {
             "-R",
             &forge.gh_repository(),
             "--json",
-            "comments",
+            "comments,body",
         ])
         .await
         {
@@ -1871,6 +1872,7 @@ impl Tickets {
             Err(error) if forge::not_found(&error) => return Ok(false),
             Err(error) => return Err(error),
         };
+        fetched.item.details["description"] = json!(said(&viewed["body"]));
         fetched.comments = viewed["comments"]
             .as_array()
             .into_iter()

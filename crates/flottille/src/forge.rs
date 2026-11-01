@@ -50,7 +50,7 @@ const SSH_TIME: Duration = Duration::from_secs(5);
 const COMMENT_CHARS: usize = 2000;
 /// What `gh pr view` is asked for.
 const FIELDS: &str = "number,title,state,isDraft,headRefName,headRefOid,baseRefName,url,\
-    mergeable,reviewDecision,statusCheckRollup,comments,reviews";
+    mergeable,reviewDecision,statusCheckRollup,comments,reviews,body";
 /// The ways `forge` `merge` merges a pull request, the first by default.
 pub const MERGE_METHODS: [&str; 3] = ["squash", "merge", "rebase"];
 
@@ -284,6 +284,8 @@ pub struct Pull {
     pub head_commit: Option<String>,
     pub base: String,
     pub url: String,
+    /// What its author wrote of it, masked; empty when nothing.
+    pub description: String,
     /// Whether it merges into its base without conflict; none while the forge does not know.
     pub mergeable: Option<bool>,
     /// `approved`, `changes requested`, `review required`, or none.
@@ -414,6 +416,7 @@ impl Pull {
             head_commit: commit_hash(&value["headRefOid"]),
             base: text(&value["baseRefName"]),
             url: text(&value["url"]),
+            description: text(&value["body"]),
             mergeable: match value["mergeable"].as_str() {
                 Some("MERGEABLE") => Some(true),
                 Some("CONFLICTING") => Some(false),
@@ -2458,6 +2461,7 @@ fn fetched_pull(path: &str, source: &str, pull: &Pull, detailed: bool) -> crate:
         "head_commit": pull.head_commit,
     });
     if detailed {
+        details["description"] = json!(pull.description);
         details["mergeable"] = json!(pull.mergeable);
         details["review"] = json!(pull.review);
         details["comments"] = json!(pull.comments.len());

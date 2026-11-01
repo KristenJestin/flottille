@@ -219,6 +219,8 @@ struct Listed {
     head_commit: Option<String>,
     base: String,
     url: String,
+    /// What its author wrote of it.
+    description: String,
     /// From the repository itself, not from a fork of it.
     own: bool,
     /// Data Center says its reviewers in the list; Cloud does not.
@@ -247,6 +249,7 @@ fn listed(forge: &Forge, pull: &Value) -> Option<Listed> {
             head_commit: commit_hash(&pull["source"]["commit"]["hash"]),
             base: text(&pull["destination"]["branch"]["name"]),
             url: text(&pull["links"]["html"]["href"]),
+            description: text(&pull["description"]),
             own: matches!((from, to), (Some(from), Some(to))
                 if !from.is_empty() && from.eq_ignore_ascii_case(to)),
             reviewers: Vec::new(),
@@ -273,6 +276,7 @@ fn listed(forge: &Forge, pull: &Value) -> Option<Listed> {
         head_commit: commit_hash(&pull["fromRef"]["latestCommit"]),
         base: text(&pull["toRef"]["displayId"]),
         url: text(&pull["links"]["self"][0]["href"]),
+        description: text(&pull["description"]),
         own: !from.0.is_empty() && from == to,
         reviewers: pull["participants"]
             .as_array()
@@ -513,6 +517,7 @@ async fn detailed_with(
         head_commit: found.head_commit,
         base: found.base,
         url: found.url,
+        description: found.description,
         mergeable,
         review: decision(&reviewers),
         checks,
@@ -547,6 +552,7 @@ fn cheap(forge: &Forge, path: &str, found: Listed) -> crate::items::Fetched {
         head_commit: found.head_commit,
         base: found.base,
         url: found.url,
+        description: found.description,
         mergeable: None,
         review: None,
         checks: Vec::new(),
@@ -687,6 +693,7 @@ fn listed_of(item: &flottille_core::item::Item) -> Option<Listed> {
         head_commit: item.details["head_commit"].as_str().map(str::to_owned),
         base: text("base"),
         url: item.url.clone().unwrap_or_default(),
+        description: text("description"),
         own: true,
         reviewers: item.details["reviewers"]
             .as_array()

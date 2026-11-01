@@ -228,7 +228,7 @@ fn a_project_with_a_declared_github_forge_stores_its_pulls_and_issues_at_its_fir
     assert!(!all.iter().any(|c| c.starts_with("pr view 2 ")), "{all:?}");
     assert!(
         all.iter()
-            .any(|c| c.starts_with("issue view 5 ") && c.ends_with("--json comments")),
+            .any(|c| c.starts_with("issue view 5 ") && c.ends_with("--json comments,body")),
         "{all:?}"
     );
     assert_eq!(first["details"]["comments"], 0);
@@ -1145,4 +1145,69 @@ fn a_merged_pull_whose_checks_cannot_be_found_stays_merged() {
         events.iter().all(|e| e["name"] != "item.closed"),
         "{events:?}"
     );
+}
+
+#[test]
+fn items_show_holds_the_description_and_the_discussion_of_a_pull_and_an_issue_read_in_full() {
+    let user = user();
+    project(&user, "git@github.com:acme/api.git");
+    let mut open = pull(1, "Add the login", "OPEN", OLD);
+    open["body"] = json!("Adds the **login** form.");
+    open["comments"] = json!([
+        {"author": {"login": "someone"}, "body": "Looks good"},
+        {"author": {"login": "someone"}, "body": "Rebased\n\n<!-- flottille -->"}
+    ]);
+    open["reviews"] = json!([
+        {"author": {"login": "other"}, "state": "CHANGES_REQUESTED", "body": "Name the field"}
+    ]);
+    let mut ticket = issue(5, "Users cannot sign in", OLD);
+    ticket["body"] = json!("The form *refuses* them.");
+    ticket["comments"] = json!([{"author": {"login": "other"}, "body": "Seen it too"}]);
+    user.gh_script(json!({
+        "pulls": {"acme/api": {"feature-1": open}},
+        "issues": {"acme/api": {"5": ticket}}
+    }));
+    declare(
+        &user,
+        github(),
+        json!({"kind": "github", "repository": "api"}),
+    );
+    refresh(&user);
+
+    let shown = user
+        .call(
+            "items.show",
+            json!({"project": "app", "kind": "pull", "id": "1"}),
+        )
+        .unwrap();
+    let details = &shown["details"];
+    assert_eq!(
+        details["description"], "Adds the **login** form.",
+        "{shown}"
+    );
+    assert_eq!(
+        details["discussion"],
+        json!([
+            {"kind": "comment", "author": "someone", "bot": false, "by_agent": false,
+             "state": null, "body": "Looks good"},
+            {"kind": "comment", "author": "someone", "bot": false, "by_agent": true,
+             "state": null, "body": "Rebased"},
+            {"kind": "review", "author": "other", "bot": false, "by_agent": false,
+             "state": "changes requested", "body": "Name the field"}
+        ]),
+        "{shown}"
+    );
+    let shown = user
+        .call(
+            "items.show",
+            json!({"project": "app", "kind": "ticket", "id": "5"}),
+        )
+        .unwrap();
+    let details = &shown["details"];
+    assert_eq!(
+        details["description"], "The form *refuses* them.",
+        "{shown}"
+    );
+    assert_eq!(details["discussion"][0]["body"], "Seen it too", "{shown}");
+    assert_eq!(details["discussion"][0]["kind"], "comment", "{shown}");
 }

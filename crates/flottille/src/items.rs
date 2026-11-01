@@ -47,6 +47,8 @@ pub struct Said {
     pub by_agent: bool,
     pub state: Option<String>,
     pub excerpt: String,
+    /// The whole text, without the mark of Flottille: what an item's detail shows.
+    pub body: String,
 }
 
 impl Said {
@@ -58,7 +60,14 @@ impl Said {
             by_agent,
             state: comment.state.clone(),
             excerpt: excerpt(text),
+            body: text.to_owned(),
         }
+    }
+
+    /// As an item's `details.discussion` keeps it: `kind` is `comment` or `review`.
+    fn in_discussion(&self, kind: &str) -> Value {
+        json!({"kind": kind, "author": self.author, "bot": self.bot, "by_agent": self.by_agent,
+            "state": self.state, "body": self.body})
     }
 
     fn to_json(&self) -> Value {
@@ -674,6 +683,11 @@ async fn read_round(
         }
         if listing.details && !fetched.detailed && wants_detail(old, &fetched, first) {
             match reader.detail(&mut fetched).await {
+                Ok(true) if fetched.detailed => {
+                    let comments = fetched.comments.iter().map(|c| c.in_discussion("comment"));
+                    let reviews = fetched.reviews.iter().map(|r| r.in_discussion("review"));
+                    fetched.item.details["discussion"] = comments.chain(reviews).collect();
+                }
                 Ok(true) => {}
                 Ok(false) => {
                     let mut gone = Fetched::removed(fetched.item.clone());
@@ -1133,6 +1147,7 @@ mod tests {
             by_agent: false,
             state: None,
             excerpt: "hello".into(),
+            body: "hello".into(),
         };
         let new = Fetched {
             item: new,
