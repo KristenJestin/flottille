@@ -430,3 +430,27 @@ fn a_body_with_more_values_than_a_page_is_served_page_by_page_through_next() {
         (vec![4, 5], &json!(true))
     );
 }
+
+#[test]
+fn pipeline_fail_makes_the_pipeline_list_alone_fail() {
+    let dir = tempfile::tempdir().unwrap();
+    script(
+        dir.path(),
+        json!({"pipelines": {"acme/api": [{"build_number": 1}]},
+            "pipeline_fail": {"acme/api": "Error: 502 Bad Gateway"}}),
+    );
+    let run = |args: &[&str]| {
+        fake(dir.path())
+            .args(args)
+            .args(["--context", "cloud", "--workspace", "acme", "--repo", "api"])
+            .output()
+            .unwrap()
+    };
+
+    let listed = run(&["pipeline", "list", "--json"]);
+    let pulls = run(&["pr", "list", "--json"]);
+
+    assert_eq!(listed.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&listed.stderr).contains("502 Bad Gateway"));
+    assert!(pulls.status.success());
+}

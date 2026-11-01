@@ -1956,10 +1956,11 @@ fn a_bitbucket_cloud_check_of_another_ci_says_it_is_not_a_pipelines_build() {
     ] {
         assert!(answer.text.contains(said), "{said} in {}", answer.text);
     }
+    // The pipelines are listed for the CI durations; no step or log is read.
     assert!(
         bkt_calls(&user)
             .iter()
-            .all(|call| !call.starts_with("pipeline")),
+            .all(|call| !call.starts_with("pipeline view") && !call.starts_with("pipeline logs")),
         "{:?}",
         bkt_calls(&user)
     );
