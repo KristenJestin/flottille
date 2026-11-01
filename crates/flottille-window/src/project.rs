@@ -882,6 +882,10 @@ impl PlaceCard {
     /// unfolds, one that goes folds away.
     fn lines(&mut self, name: &str, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut found = Vec::new();
+        // The ticket is why the workspace exists: it comes before the rest.
+        if let Some(ticket) = &self.facts.ticket {
+            found.push(("ticket".to_owned(), Line::Ticket(ticket.clone())));
+        }
         for status in &self.facts.statuses {
             let quiet = status.ahead.unwrap_or(0) == 0
                 && status.uncommitted.unwrap_or(0) == 0
@@ -896,9 +900,6 @@ impl PlaceCard {
                 format!("pull-{}", pull.repository),
                 Line::Pull(pull.clone()),
             ));
-        }
-        if let Some(ticket) = &self.facts.ticket {
-            found.push(("ticket".to_owned(), Line::Ticket(ticket.clone())));
         }
         let (now, reduce) = (cx.background_executor().now(), cx.reduce_motion());
         self.line_rows.sync(found, now, reduce);
