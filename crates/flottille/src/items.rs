@@ -381,6 +381,10 @@ pub fn poll(daemon: &Arc<Daemon>) {
         let daemon = daemon.clone();
         tokio::spawn(async move {
             round(&daemon, &project, &due).await;
+            // Removed while its round wrote: what it wrote goes at the next sweep.
+            if !projects::exists(&daemon, &project.name) {
+                *daemon.items.sources.lock().unwrap() = None;
+            }
             drop(held);
         });
     }
