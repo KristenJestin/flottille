@@ -646,10 +646,12 @@ pub fn unseen(
 
 /// Stores what a live read found of one item (`forge show`, `tickets show`, a subscription's
 /// first read) with the events a round would emit of it, so that the next round compares with
-/// it; called with the project's round lock held since before the read. What a live read does
-/// not say (its author, labels and assignees, when it changed, an empty state) is kept, as are
-/// the links of its checks. One no round stored yet (made since the last) is stored as it was
-/// read, once its source had a first round: the next round's events are from what it was then.
+/// it; called with the project's round lock held since before the read, or given by `held_after`.
+/// What a live read does not say (its author, labels and assignees, when it changed, an empty
+/// state) is kept, as are the links of its checks. One no round stored yet (made since the last,
+/// or too old to be listed) is stored as it was read, once its source had a first round: the next
+/// round's events are from what it was then. As in a round, it is opened only when open and not
+/// made before that first round.
 pub fn put_live(daemon: &Arc<Daemon>, mut fetched: Fetched) {
     let item = &mut fetched.item;
     let stored = daemon
@@ -670,16 +672,23 @@ pub fn put_live(daemon: &Arc<Daemon>, mut fetched: Fetched) {
             "ticket" => "tracker".to_owned(),
             _ => item.repository.clone(),
         };
-        let first_done = daemon
+        let first_at = daemon
             .read(|store| store.cursors(&item.project))
             .unwrap_or_default()
             .iter()
-            .any(|c| c.kind == item.kind && c.target == target && c.first_at.is_some());
+            .find(|c| c.kind == item.kind && c.target == target)
+            .and_then(|c| c.first_at);
         // A Jira work item's state is not said by its live read.
-        if !first_done || item.state.is_empty() {
+        let Some(first_at) = first_at.filter(|_| !item.state.is_empty()) else {
             return;
-        }
-        let mut events = events_of(None, &fetched);
+        };
+        let made_before = fetched
+            .created_at
+            .is_some_and(|made| made + OVERLAP_MS < first_at);
+        let mut events = match made_before || matches!(item.state.as_str(), "merged" | "closed") {
+            true => Vec::new(),
+            false => events_of(None, &fetched),
+        };
         let project = fetched.item.project.clone();
         if let Err(error) = flush(daemon, &project, &mut vec![fetched.item], &mut events) {
             eprintln!("flottille daemon: items of {project}: {error}");

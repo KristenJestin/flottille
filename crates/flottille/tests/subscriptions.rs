@@ -1101,6 +1101,43 @@ fn a_subscription_to_a_work_item_no_round_stored_says_what_is_not_seen() {
 }
 
 #[test]
+fn a_merged_pull_request_no_round_listed_read_live_is_stored_and_not_said_opened() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull());
+    let (_, mcp) = agent(&user);
+    let watch = user.watch(&["--after", "0"]);
+    // Too old to be in a round's list.
+    let mut old = pull();
+    old["number"] = 3.into();
+    old["state"] = "MERGED".into();
+    old["url"] = "https://github.com/acme/api/pull/3".into();
+    user.gh_script(json!({
+        "pulls": {"acme/api": {"app/login": changed(pull()), "app/old": changed(old)}},
+        "unlisted": {"acme/api": [3]}
+    }));
+
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "show", "repository": "api", "number": 3}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    let item = user
+        .call(
+            "items.show",
+            json!({"project": "app", "kind": "pull", "id": "3", "repository": "api"}),
+        )
+        .unwrap();
+    assert_eq!(item["state"], "merged", "{item}");
+    let opened: Vec<Value> = watch
+        .within(Duration::from_secs(1))
+        .into_iter()
+        .filter(|e| e["name"] == "item.opened")
+        .collect();
+    assert!(opened.is_empty(), "{opened:?}");
+}
+
+#[test]
 fn a_subscription_during_a_slow_round_answers_at_once_and_is_delivered_the_round_s_event() {
     let user = user();
     fixture(&user);
