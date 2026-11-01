@@ -34,7 +34,14 @@ tracker.
 - **`details`** holds what is proper to a kind or a source: of a pull request `head`, `base`,
   `head_commit`, `mergeable`, `review`, the number of its `comments` and `reviews`, and on
   Bitbucket its `reviewers`; of an issue the number of its `comments`; of a work item its
-  `status`, `type`, `priority` and status `category`. An item the forge no longer has, or an
+  `status`, `type`, `priority` and status `category`. A pull request or an issue whose details
+  were read also has its `description` (what its author wrote, `""` when nothing; a Bitbucket
+  pull request has it from its list too) and its `discussion`: its comments, then its reviews,
+  each `{kind, author, bot, by_agent, state, body}` (`kind` is `comment` or `review`, `state` a
+  review's verdict, `body` the text without Flottille's mark, `by_agent` when an agent of
+  Flottille posted it), which the window's detail shows. They are cut as a ticket's are: the
+  description at 20,000 characters, each body at 4,000, and only the newest 30 of the discussion
+  kept, `discussion_older` counting the ones left out. An item the forge no longer has, or an
   issue transferred to another repository, is `closed` with `details.removed: true`.
 - **`mine`**: opened by, or assigned to, the user the forge says it is signed in as: GitHub's
   `gh api user` (`login`), asked once per daemon, for pull requests and issues alike; Bitbucket
@@ -74,7 +81,7 @@ what was left, its cursor not having moved.
 | Source | The list | The details of one |
 |---|---|---|
 | GitHub pull requests | `gh pr list -R github.com/<owner>/<name> --state all --limit 1000 [--search "updated:>=<cursor>"] --json number,title,state,isDraft,headRefName,headRefOid,baseRefName,url,author,assignees,labels,updatedAt,createdAt` | `gh pr view <n> --json <the fields of forge show>`, read with its parser (`Pull::of`) |
-| GitHub issues | `gh issue list -R … --state all --limit 1000 [--search "updated:>=<cursor>"] --json number,title,state,author,assignees,labels,url,updatedAt,createdAt`; only the tracker's repository's issues are kept, as `tickets list` keeps them | `gh issue view <n> --json comments` |
+| GitHub issues | `gh issue list -R … --state all --limit 1000 [--search "updated:>=<cursor>"] --json number,title,state,author,assignees,labels,url,updatedAt,createdAt`; only the tracker's repository's issues are kept, as `tickets list` keeps them | `gh issue view <n> --json comments,body` |
 | Bitbucket Cloud | `bkt api /repositories/<w>/<r>/pullrequests --param pagelen=50 --param sort=-updated_on --param state=OPEN --param state=MERGED --param state=DECLINED --param state=SUPERSEDED [--param q=updated_on>="<cursor>"]`, page after page up to 1,000, the filter and the order as `--param`, never in the path (#245) | as `forge show` reads it (its commit statuses, reviewers, comments, conflicts) |
 | Bitbucket Data Center | no filter in what `bkt` reads: every **open** pull request, `bkt api /rest/api/1.0/projects/<p>/repos/<r>/pull-requests` page after page (`limit`, `start`) up to 1,000; one stored open that left the list is read by itself (`…/pull-requests/<id>`) to say whether it was merged or declined, a 404 making it removed | as `forge show` reads it, only when its `version` or `updatedDate` moved since it was stored |
 | Jira | for each project of the tracker, `acli jira workitem search --jql 'project = "<KEY>" [AND updated >= "-<n>m"] ORDER BY updated DESC' --fields key,summary,status,assignee,reporter,labels,issuetype,priority,updated,created --json --limit 1000`, once `acli` is checked to be on the tracker's site (`tickets.md`, "The Jira site"), then the same search with `currentUser()` and `--fields key` for `mine` | none: the search holds them |
@@ -162,19 +169,17 @@ stores it (`docs/events.md`): `item.opened`, `item.changed` (with what changed: 
 ## The protocol
 
 - `items.list {project, kind?, state?, repository?, mine?}`: the stored items, the most recently
-  changed first, each with its checks and `seen_at`, and the project's `sources`, each with its
-  cursor and problem.
-- `items.show {project, kind, id, repository?}`: one stored item.
+  changed first, each with its checks and `seen_at` but without its `description` and
+  `discussion` (`items.show`'s), and the project's `sources`, each with its cursor and problem.
+- `items.show {project, kind, id, repository?}`: one stored item, its texts included.
 - `items.refresh {project}`: a round now; answers the sources as they stand after it.
 
 ## Not yet
 
-- The subscriptions and the agents' tools reading this stream (#257) and the window listing the
-  items (#258); the window says `client: "window"` from then on, so until then the rhythm is
-  the one without a window.
-- `mine` on Bitbucket Data Center; Jira's comments (`item.commented` is not emitted for
-  a work item: no comment field is asked of the search); a Jira work item deleted or moved to
-  another project stays as it was last read.
+- The subscriptions and the agents' tools reading this stream (#257).
+- `mine` on Bitbucket Data Center; Jira's description and comments (`item.commented` is not
+  emitted for a work item: no comment field is asked of the search); a Jira work item deleted or
+  moved to another project stays as it was last read.
 
 ## Tests
 

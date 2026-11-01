@@ -272,6 +272,7 @@ mod tests {
             head_commit: Some("aaaaaaa".into()),
             base: "main".into(),
             url: String::new(),
+            description: String::new(),
             mergeable: None,
             review: None,
             checks: checks.iter().map(|s| ("ci".to_owned(), *s)).collect(),

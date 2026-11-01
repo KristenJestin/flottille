@@ -84,7 +84,7 @@ impl Modal {
     }
 
     /// Takes the focus when it opens, so that Escape reaches it: a dialog with no field.
-    pub(crate) fn takes_focus(mut self) -> Self {
+    pub fn takes_focus(mut self) -> Self {
         self.takes_focus = true;
         self
     }

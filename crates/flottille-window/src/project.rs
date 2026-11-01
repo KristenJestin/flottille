@@ -2,8 +2,8 @@
 //! (the name and folder, a read-only chip per repository with the branch it is on, which opens its
 //! row in the settings, Settings and New workspace), the composer that starts a session, "Where
 //! the work happens" (a card per place, `main` first, then each workspace, ending with a card that
-//! makes a new one), then the runs and the tasks. Each card is its own view: a session changing
-//! redraws its card, a letter typed in the composer redraws neither.
+//! makes a new one), its pull requests and tickets, then the runs and the tasks. Each card is its
+//! own view: a session changing redraws its card, a letter typed in the composer redraws neither.
 
 use std::collections::HashMap;
 
@@ -25,6 +25,7 @@ use gpui_kit::{
 
 use crate::actions::{Changes, Command, Details, RepositoryStatus};
 use crate::composer::{Choice, Composer, agents_label};
+use crate::items::ProjectItems;
 use crate::model::{Place, Preparation, SetupLine, ago};
 use crate::project_settings::Reveal;
 use crate::repositories::ProjectRepositories;
@@ -120,6 +121,8 @@ pub struct ProjectPage {
     /// Its repositories as the daemon lists them, read for the new-workspace form's rules; they
     /// are listed and changed in the settings.
     repositories_section: Entity<ProjectRepositories>,
+    /// Its pull requests and tickets.
+    items: Entity<ProjectItems>,
     narrow: bool,
     /// Nothing but `main`, and no session in it: the page says what to start with, instead of a
     /// section of one bare card. Kept here for the same reason as `places`.
@@ -149,6 +152,12 @@ impl ProjectPage {
         };
         let reading = repositories_section.clone();
         cx.defer(move |cx| reading.update(cx, |section, cx| section.read(cx)));
+        let items = {
+            let (shell, project) = (shell.clone(), name.clone());
+            cx.new(|_| ProjectItems::new(shell, project))
+        };
+        let reading = items.clone();
+        cx.defer(move |cx| reading.update(cx, |items, cx| items.read(cx)));
         Self {
             shell,
             name,
@@ -161,6 +170,7 @@ impl ProjectPage {
             new_workspace,
             tasks,
             repositories_section,
+            items,
             narrow: false,
             empty: false,
             renders: 0,
@@ -182,6 +192,10 @@ impl ProjectPage {
 
     pub fn repositories(&self) -> &Entity<ProjectRepositories> {
         &self.repositories_section
+    }
+
+    pub fn items(&self) -> &Entity<ProjectItems> {
+        &self.items
     }
 
     pub fn renders(&self) -> usize {
@@ -469,7 +483,8 @@ impl Render for ProjectPage {
             .when(!self.empty, |d| {
                 d.child(enter(key("places"), 2, places_section))
             })
-            .child(enter(key("tasks"), 4 + places, self.tasks.clone()));
+            .child(enter(key("items"), 4 + places, self.items.clone()))
+            .child(enter(key("tasks"), 5 + places, self.tasks.clone()));
         div()
             .id("project-page-frame")
             .relative()

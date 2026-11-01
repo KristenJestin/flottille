@@ -9201,6 +9201,16 @@ fn edit_in_settings_opens_the_project_settings_scrolled_to_their_tasks(cx: &mut 
         cx.update(|window, _| window.try_find("project-task-say").is_some())
     });
     settle(cx);
+    // The tasks come last on the page, after its pull requests and tickets: scrolled to, as a
+    // user would.
+    cx.update(|window, cx| {
+        window.scroll(
+            "project-items-title",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-4000.))),
+            cx,
+        )
+    });
+    settle(cx);
 
     cx.update(|window, cx| window.click("edit-tasks-in-settings", cx));
     until(&shell, cx, "the project's settings are open", |cx| {
