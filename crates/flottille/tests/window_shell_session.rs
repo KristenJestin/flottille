@@ -396,6 +396,8 @@ fn the_tree_rows_keep_their_state_marks_only_and_no_text_badge(cx: &mut TestAppC
     let said: Vec<String> = said_within("tree", cx)
         .into_iter()
         .filter(|label| label.to_lowercase().contains("needs you"))
+        // The mark's own words, its tooltip's and its accessible name, are no text badge.
+        .filter(|label| !label.starts_with("Needs you: "))
         .collect();
     assert!(said.is_empty(), "no text says the state: {said:?}");
 }

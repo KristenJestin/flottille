@@ -627,9 +627,13 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   under their project; a session is titled by the first line of its first message that says what the
   work is (a greeting or a single word does not: the session is `agent <id>` until a later message
   of the user does); sessions sit under their place (a session an agent started says it in its
-  page's header, "started by <agent>", not in the tree), with a mark when running or when the
-  root needs the user, and no text badge; a session that created or changed a ticket or a pull
-  request has a small dot on its row until it is opened. The mark is where the work is, once: on the session's own row while that row
+  page's header, "started by <agent>", not in the tree), with **one mark** at the right of its row,
+  chosen in this order: its state (running, needs the user, waiting) when it has one, else a small
+  dot when something new was written in it since it was last opened (an agent's message, a report,
+  a delivery that woke it, a ticket or a pull request an agent changed), else how long ago it was
+  active; and no text badge. The mark says its words under the pointer (`Needs you: a permission`,
+  `Waiting: checks of #1`, `Running`, `New since you looked: opened a pull request`); the dot is
+  cleared when the session is opened and lives as long as the window. The mark is where the work is, once: on the session's own row while that row
   is in sight, and on a folded place or project, which shows the strongest mark of what it holds,
   only while it is folded (never on a row and on its parents together); a session whose agent
   ended shows no mark. A click on a project's name opens its page and leaves its places as they
