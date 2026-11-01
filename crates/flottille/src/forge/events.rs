@@ -3,7 +3,8 @@
 //! to the subscriptions to it, as the events they name. A subscription reads nothing of its own:
 //! a state already stored when it subscribed is no event, since the rounds emit only changes.
 
-use std::sync::Arc;
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
 
 use flottille_core::item::Item;
 use flottille_core::subscription::Subscription;
@@ -156,9 +157,14 @@ fn forge_of(daemon: &Daemon, project: &str, repository: &str) -> Option<Forge> {
     Some(Forge::from(declared))
 }
 
+/// The subscriptions told their checks ended, while the logs of the failed jobs are read: that
+/// delivery ends them, so what comes after for them is for nobody.
+static READING: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
 /// Offers what the items stored to a subscription to a pull request, when some of the events are
 /// of its pull request. The logs of the failed jobs are read only when it is told the checks
-/// ended, after the round, which does not wait for them.
+/// ended, after the round, which does not wait for them; the events after those are not offered
+/// to it meanwhile, so that it is delivered the first.
 pub(crate) fn offer(
     daemon: &Arc<Daemon>,
     subscription: &Subscription,
@@ -184,7 +190,7 @@ pub(crate) fn offer(
             )
         })
         .collect();
-    if mine.is_empty() {
+    if mine.is_empty() || READING.lock().unwrap().contains(&subscription.id) {
         return;
     }
     let item = items
@@ -202,6 +208,7 @@ pub(crate) fn offer(
         return;
     };
     let (daemon, subscription) = (daemon.clone(), subscription.clone());
+    READING.lock().unwrap().insert(subscription.id.clone());
     tokio::spawn(async move {
         let mut pull = Pull {
             number: 0,
@@ -232,6 +239,7 @@ pub(crate) fn offer(
             })
             .collect();
         subscriptions::offer(&daemon, &subscription, &named, &found, ends.as_ref());
+        READING.lock().unwrap().remove(&subscription.id);
     });
 }
 

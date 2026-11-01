@@ -172,7 +172,8 @@ again on its own (#257):
   `merged` and `closed`. A ticket's `item.commented` is its `commented`, an `item.changed` of its
   `status` or of its `state` (a reopening) its `status`, one of its `assignees` its `assigned`,
   `item.closed` its `closed`. The failed jobs' logs a `checks` delivery holds are read then, after
-  the round, which does not wait for them.
+  the round, which does not wait for them; that delivery ends the subscription, so an event that
+  comes while they are read (a comment) is not delivered before it, nor after.
 - **Their latency is the rhythm** above: a minute while a window is connected, five otherwise. A
   subscription that needs to hear sooner has no faster rhythm of its own (a follow-up, if one
   needs it).

@@ -1087,6 +1087,43 @@ fn a_comment_by_a_bot_on_a_ticket_is_not_delivered_to_a_subscription_for_people_
 }
 
 #[test]
+fn ended_checks_whose_logs_are_read_are_delivered_before_a_later_comment() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull());
+    let (_, mcp) = agent(&user);
+    subscribe(&mcp, json!({"events": ["checks", "comment"]}));
+
+    let slowly = |pull: Value| {
+        json!({
+            "pulls": {"acme/api": {"app/login": changed(pull)}},
+            "logs": {"acme/api": {"456": "test\tRun cargo test\t2026-01-01T00:00:00.0000000Z failed\n"}},
+            "log_delay_ms": 1500
+        })
+    };
+    user.gh_script(slowly(ended(pull())));
+    a_round(&user);
+    eventually("the log being read", || {
+        user.gh_received()
+            .iter()
+            .any(|call| call["args"].to_string().contains("--log-failed"))
+    });
+    // A comment comes while the log is read: the checks ended first, and are delivered.
+    let mut commented = ended(pull());
+    commented["comments"] = json!([{"author": {"login": "alice"}, "body": "Why a new form?"}]);
+    user.gh_script(slowly(commented));
+    a_round(&user);
+
+    let delivery = the_delivery(&user);
+    assert!(
+        delivery.contains("checks ended: 1 passed, 1 failed"),
+        "{delivery}"
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(delivered(&user).len(), 1, "{:?}", delivered(&user));
+}
+
+#[test]
 fn a_round_during_a_live_read_is_not_written_over_by_it() {
     let user = user();
     fixture(&user);
