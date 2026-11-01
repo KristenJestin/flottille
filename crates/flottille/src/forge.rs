@@ -1407,6 +1407,7 @@ async fn forge_list(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
                     text.push_str(&format!("\n{} ({}):\n", checkout.path, pulls.len()));
                 }
                 for pull in pulls {
+                    crate::web::shown(&pull.url, crate::web::Source::Link);
                     text.push_str(&format!(
                         "- #{} {}, {} into {}: {}  {}\n",
                         pull.number, pull.state, pull.branch, pull.base, pull.title, pull.url
@@ -2125,6 +2126,9 @@ fn read_text(workspace: &Workspace, read: &Read, full: bool, asked: Option<&str>
 /// A pull request, as `forge show` says it: the texts of its comments and reviews only when
 /// `full`, otherwise their number and `again`, the call that gives them.
 fn pull_text(text: &mut String, named: &str, pull: &Pull, full: bool, again: &str) {
+    // The forge's own fields may lead the agent to a page; what it asked with never does, nor a
+    // title, which an agent may have written.
+    crate::web::shown(&pull.url, crate::web::Source::Link);
     text.push_str(&format!(
         "\n{named}: pull request #{}, {}, {} into {}: {}\n  {}\n",
         pull.number, pull.state, pull.head, pull.base, pull.title, pull.url
@@ -2184,6 +2188,9 @@ fn pull_text(text: &mut String, named: &str, pull: &Pull, full: bool, again: &st
                 .map_or(String::new(), |s| format!(", {s}"));
             let (body, agent) = comment.unmarked();
             let body: String = body.chars().take(COMMENT_CHARS).collect();
+            if !agent {
+                crate::web::shown(&body, crate::web::Source::Link);
+            }
             let agent = if agent {
                 format!(" ({BY_AGENT})")
             } else {

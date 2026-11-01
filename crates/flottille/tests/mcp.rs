@@ -240,6 +240,7 @@ fn a_session_sees_only_its_tools() {
             "run_status",
             "skill_read",
             "workspace",
+            "web",
             "agent_launch",
             "agent_send",
             "agent_status",
@@ -369,7 +370,7 @@ fn a_2026_07_28_client_with_server_discover_lists_and_calls_the_tools() {
     let (_, url, authorization) = agent(&user, json!({}));
 
     let mcp = Mcp::discover(&url, &authorization);
-    assert_eq!(mcp.names().len(), 24);
+    assert_eq!(mcp.names().len(), 25);
     assert!(ok(mcp.call("fs_list", json!({"path": "."}))).contains("README.md"));
 
     let meta = json!({

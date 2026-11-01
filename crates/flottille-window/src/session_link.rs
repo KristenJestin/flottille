@@ -224,6 +224,11 @@ impl Request {
                     _ => format!("workspace {}", one_line(&self.call)),
                 }
             }
+            ("web", _, _) => match (field("url"), field("query")) {
+                (Some(url), _) => format!("Read {url}"),
+                (None, Some(query)) => format!("Search the web for {query}"),
+                _ => format!("web {}", one_line(&self.call)),
+            },
             ("agent_launch", _, _) if field("new_workspace").is_some() => format!(
                 "Launch a child in a new workspace {}",
                 field("new_workspace").unwrap_or_default()

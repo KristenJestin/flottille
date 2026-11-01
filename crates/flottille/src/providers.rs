@@ -131,6 +131,7 @@ impl Provider {
             names.push("tickets");
         }
         names.push("workspace");
+        names.push("web");
         if !at_depth_limit {
             names.extend(AGENT_TOOLS);
         }
@@ -1317,6 +1318,7 @@ mod tests {
                 "run_status",
                 "skill_read",
                 "workspace",
+                "web",
                 "agent_launch",
                 "agent_send",
                 "agent_status",
@@ -1338,7 +1340,7 @@ mod tests {
     #[test]
     fn the_tools_follow_what_the_agent_can_do() {
         let leaf = short(claude::PROVIDER.tools(false, true, false, false));
-        assert_eq!(leaf.len(), 13);
+        assert_eq!(leaf.len(), 14);
         assert!(leaf.contains(&"ask_parent".to_owned()));
         assert!(
             !leaf
@@ -1376,12 +1378,12 @@ mod tests {
         assert_eq!(forge[10], "workspace", "after skill_read");
         assert!(!forge.contains(&"tickets".to_owned()));
         let both = short(claude::PROVIDER.tools(true, false, true, true));
-        assert_eq!(both.len(), 26);
+        assert_eq!(both.len(), 27);
         assert_eq!(both[10], "tickets", "after skill_read");
         assert_eq!(both[11], "workspace", "after tickets");
         assert_eq!(
             short(claude::PROVIDER.tools(false, true, true, true)).len(),
-            15
+            16
         );
     }
 

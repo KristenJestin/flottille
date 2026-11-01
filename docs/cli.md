@@ -847,6 +847,13 @@ Not for you either: the program the daemon starts for each Codex agent, hidden f
 speaks ACP on its standard input and output and drives your `codex app-server` in bare mode
 (`docs/agents.md`, "The Codex bridge").
 
+### `flottille read-page <html|pdf> <url>`
+
+Not for you either: the program the daemon starts to read a page for the `web` tool, hidden from
+`--help`. It reads the page on its standard input and writes its text, title and links as JSON,
+under the limits of memory and time the daemon set, so that a page that blows it up never takes
+the daemon with it (`docs/tools.md`, "The web").
+
 ### `flottille mcp`
 
 Serves an MCP server on its standard input and output, for an agent running outside Flottille (a
