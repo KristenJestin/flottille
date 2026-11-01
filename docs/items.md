@@ -180,7 +180,8 @@ again on its own (#257):
 - **`forge list` and `tickets list` and `search`** answer from the store once a round of the
   source worked, with its age (`as of 40 s ago`, from when that round started) and its problem
   when the last round failed; a source no round read yet is read from the forge or the tracker
-  as before. A `search` finds the words in the titles: the store keeps no description.
+  as before. A `search` finds the words in the titles: the store keeps no description, and its
+  answer says so (`matching "sign" in their titles (not their descriptions nor comments)`).
 - **`forge show` and `tickets show` read live** (one item) and store what they read over what the
   store holds of it, with the events a round would emit of it, so that the next round compares
   with that; so does `forge subscribe` and `tickets subscribe` before the subscription opens, so

@@ -1001,6 +1001,7 @@ fn tickets_list_and_search_answer_from_the_store_with_its_age_and_show_reads_liv
     let found = mcp.call("tickets", json!({"action": "search", "query": "sign"}));
     assert!(!found.error, "{}", found.text);
     assert!(found.text.contains("#5 open"), "{}", found.text);
+    assert!(found.text.contains("in their titles"), "{}", found.text);
     assert!(!found.text.contains("Dark mode"), "{}", found.text);
     assert_eq!(
         calls(user.gh_received()).len(),

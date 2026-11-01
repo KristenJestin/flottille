@@ -210,7 +210,8 @@ session is fixed when it starts). Until #141 `show` was `ticket_read`.
 
 `list` and `search` answer from what the daemon's rounds keep ([`items.md`](items.md), "What
 reads this stream"), with its age (`… : 2 (as of 3 min ago)`); a `search` finds the words in the
-titles, all of them, whatever their case, since no description is kept. Before the first round
+titles, all of them, whatever their case, since no description is kept, and its answer says
+so. Before the first round
 of the tracker worked, they ask the tracker as they did.
 
 ### Subscribing to a ticket

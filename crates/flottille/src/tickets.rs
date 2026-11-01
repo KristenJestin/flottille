@@ -901,6 +901,11 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
     }
     if let Some(query) = query {
         header.push_str(&format!(" matching {query:?}"));
+        // What the rounds keep of a ticket is its title: an agent must not read "none" as no
+        // ticket of it.
+        if cursor.is_some() {
+            header.push_str(" in their titles (not their descriptions nor comments)");
+        }
     }
     let mut text = format!("{header}: {}", tickets.len());
     if let Some(cursor) = &cursor {
