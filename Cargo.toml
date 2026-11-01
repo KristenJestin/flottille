@@ -7,3 +7,7 @@ version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-only"
 repository = "https://github.com/KristenJestin/flottille"
+
+# The release tests sum a 1.4 GB debug binary: unoptimised, that takes 25 s a sum.
+[profile.dev.package.sha2]
+opt-level = 3
