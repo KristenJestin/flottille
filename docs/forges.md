@@ -279,6 +279,13 @@ the base the repository started from):
   `bkt pr edit <id> [--title T] [--description D]` (`pkg/cmd/pr/pr.go:1654-1669` and `:719-762`,
   which print `✓ Commented on pull request #<id>` and `✓ Updated pull request #<id>`); `bkt pr
   edit` refuses a call with neither, and Flottille refuses it before.
+- `close` of a pull request by its number: `bkt pr decline <id> [--comment T] [--delete-source]`
+  (v0.37.0, `pkg/cmd/pr/pr.go`, `newDeclineCmd`; alias `close`; it prints `Declined pull request
+  #<id>`). `--delete-source` is Data Center's only: on Cloud `bkt` ends with `--delete-source is
+  not supported for Bitbucket Cloud`, so Flottille refuses `delete_branch` there before declining.
+  Its state is read first (`bkt pr list --state all`): only an open pull request is declined.
+  `reopen` is refused without a call: Bitbucket cannot reopen a declined pull request, and `bkt`
+  has no command for it.
 - `list`: `bkt pr list --state OPEN | MERGED | DECLINED | all` (`closed` is `DECLINED`), the
   newest 50, the branch picked from them; `show` with a number finds it among them.
 

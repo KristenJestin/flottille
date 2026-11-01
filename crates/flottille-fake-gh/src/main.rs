@@ -35,7 +35,7 @@
 //! The writes answer as `gh` does when they work: `pr create` prints the new pull request's URL
 //! (numbered `created`, 1 by default), `pr merge` and `run rerun` print nothing, and `run list`
 //! prints `runs` of the repository (`{"runs": {"acme/app": [{"databaseId": 7, …}]}}`), `[]`
-//! without. `pr comment` and `pr edit` print the pull request's URL, of one the script holds.
+//! without. `pr comment`, `pr edit`, `pr close` and `pr reopen` print the pull request's URL, of one the script holds.
 //! With `merge_methods` (`{"acme/app": ["merge", "rebase"]}`), `pr merge` fails for a method
 //! (`--squash`, `--merge`, `--rebase`) the repository does not allow, as GitHub refuses it, and
 //! `repo view <repository> --json …Allowed` says them (every one without). `pr view` gives a pull
@@ -300,7 +300,7 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             println!("https://github.com/{repository}/issues/{number}");
             0
         }
-        ["pr", "comment" | "edit", number, ..] => {
+        ["pr", "comment" | "edit" | "close" | "reopen", number, ..] => {
             let Some(repository) = repository else {
                 eprintln!("fake gh: no -R");
                 return 2;

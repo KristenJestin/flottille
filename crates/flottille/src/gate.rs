@@ -490,6 +490,7 @@ fn untexted(tool: &str, action: &str, args: &Value, keys: &[&str]) -> Result<(),
         if args.get(*key).is_some_and(|text| !text.is_null()) {
             let takers = match *key {
                 "title" => "edit and create",
+                "comment" => "close and reopen",
                 _ => "create, comment and edit",
             };
             return Err(Verdict::Deny(format!(
@@ -530,6 +531,8 @@ fn forge(call: &Call) -> Verdict {
         "edit" => "it changes the title or the description of a pull request on the forge",
         "merge" => merged.as_str(),
         "checks" => "it re-runs the failed jobs of a pipeline on the forge",
+        "close" => "it closes a pull request on the forge",
+        "reopen" => "it reopens a pull request on the forge",
         _ => {
             return Verdict::Deny(format!(
                 "refused: forge has no action {action:?}: its actions are {FORGE_ACTIONS}"
@@ -537,16 +540,32 @@ fn forge(call: &Call) -> Verdict {
         }
     };
     let none: &[&str] = match action {
-        "comment" => &["title"],
-        "merge" | "checks" => &["title", "body"],
-        _ => &[],
+        "comment" => &["title", "comment"],
+        "merge" | "checks" => &["title", "body", "comment"],
+        "close" | "reopen" => &["title", "body"],
+        _ => &["comment"],
     };
     if let Err(refused) = untexted("forge", action, call.args, none) {
         return refused;
     }
+    if action != "close"
+        && call
+            .args
+            .get("delete_branch")
+            .is_some_and(|d| !d.is_null() && d != false)
+    {
+        return Verdict::Deny(format!(
+            "refused: forge {action} takes no delete_branch: delete_branch is for close"
+        ));
+    }
     let mut found = Found::default();
     found.judge(said.into());
-    if let Err(refused) = texts(call.grant, call.args, &["title", "body"], &mut found) {
+    if let Err(refused) = texts(
+        call.grant,
+        call.args,
+        &["title", "body", "comment"],
+        &mut found,
+    ) {
         return refused;
     }
     if let Some(waived) = call.args.get("waive").filter(|w| !w.is_null()) {
@@ -573,7 +592,7 @@ fn forge(call: &Call) -> Verdict {
 
 /// The actions of `forge`, as a refusal names them.
 pub const FORGE_ACTIONS: &str =
-    "list, show, subscribe, unsubscribe, create, comment, edit, merge and checks";
+    "list, show, subscribe, unsubscribe, create, comment, edit, merge, checks, close and reopen";
 /// The actions of `tickets`, as a refusal names them.
 pub const TICKET_ACTIONS: &str =
     "list, search, show, create, comment, edit, close, reopen and status";
@@ -3849,7 +3868,9 @@ mod tests {
     #[test]
     fn to_judge_forge_writes_are_judged() {
         let fixture = Fixture::workspace();
-        for action in ["create", "comment", "edit", "merge", "checks"] {
+        for action in [
+            "create", "comment", "edit", "merge", "checks", "close", "reopen",
+        ] {
             let verdict = fixture.judge(
                 "forge",
                 json!({"action": action, "repository": ".", "number": 1}),
@@ -3857,6 +3878,33 @@ mod tests {
             );
             assert!(to_judge(&verdict), "{action}");
         }
+    }
+
+    #[test]
+    fn a_comment_or_a_branch_deletion_on_the_wrong_forge_action_is_refused_before_anything_is_asked()
+     {
+        let fixture = Fixture::workspace();
+        for (action, extra) in [
+            ("merge", json!({"comment": "x"})),
+            ("create", json!({"comment": "x"})),
+            ("reopen", json!({"delete_branch": true})),
+            ("merge", json!({"delete_branch": true})),
+            ("close", json!({"body": "x"})),
+            ("close", json!({"title": "x"})),
+        ] {
+            let mut args = json!({"action": action, "repository": ".", "number": 1});
+            args.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let verdict = fixture.judge("forge", args, Some(&fixture.never));
+            assert!(denied(&verdict), "{action} {extra}");
+        }
+        let fine = fixture.judge(
+            "forge",
+            json!({"action": "close", "number": 1, "comment": "x", "delete_branch": true}),
+            Some(&fixture.never),
+        );
+        assert!(to_judge(&fine));
     }
 
     #[test]
