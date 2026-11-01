@@ -699,8 +699,8 @@ it at once.
   (an image, an archive) fails, saying which kinds are read.
 - **A page is read apart from the daemon**: HTML and PDF are made into text by a child process,
   the daemon's own program run again (`flottille read-page`, hidden), the page on its standard
-  input, with no environment, at most 512 MiB of memory, 20 seconds of processor and 25 seconds
-  in all, killed past them. A page that blows its reader up (a decompression bomb, nesting deep
+  input, with no environment, no way to gain a privilege (`no_new_privs`), at most 512 MiB of
+  memory, 20 seconds of processor and 25 seconds in all, killed past them. A page that blows its reader up (a decompression bomb, nesting deep
   enough to overflow a stack, a loop) fails, `the page could not be read: …`, and the daemon
   goes on.
 - **`search {query}`**: DuckDuckGo's HTML page (`https://html.duckduckgo.com/html/?q=…`, no key,

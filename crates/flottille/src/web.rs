@@ -686,9 +686,14 @@ async fn in_reader(net: &Net, kind: Body, page: &Page) -> Result<Extracted, Stri
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
-    // SAFETY: setrlimit is async-signal-safe, and nothing else runs between fork and exec.
+    // SAFETY: setrlimit and prctl are async-signal-safe, and nothing else runs between fork and
+    // exec.
     unsafe {
         command.pre_exec(|| {
+            // No setuid program it could run, nor a file capability, gives it more than it has.
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
             let limit = |value: u64| libc::rlimit {
                 rlim_cur: value,
                 rlim_max: value,
@@ -1907,6 +1912,37 @@ mod tests {
             "{}",
             &text[text.len() - 200..]
         );
+    }
+
+    #[test]
+    fn the_reader_can_gain_no_privilege() {
+        let dir = tempfile::tempdir().unwrap();
+        let reader = dir.path().join("reader");
+        // A reader that answers with what the kernel says of its own process.
+        std::fs::write(
+            &reader,
+            "#!/bin/sh\nprintf '{\"read\": {\"title\": null, \"text\": \"%s\", \"links\": []}}' \
+             \"$(/usr/bin/grep NoNewPrivs /proc/self/status | /usr/bin/tr '\\t' ' ')\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&reader, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let net = Net {
+            open: Vec::new(),
+            search: String::new(),
+            reader,
+            hosts: Vec::new(),
+        };
+        let page = Page {
+            url: Url::parse("https://docs.example/").unwrap(),
+            kind: "text/html".into(),
+            bytes: b"<html></html>".to_vec(),
+            cut: false,
+        };
+        let read = runtime()
+            .block_on(in_reader(&net, Body::Html, &page))
+            .unwrap();
+        assert_eq!(read.text, "NoNewPrivs: 1");
     }
 
     #[test]
