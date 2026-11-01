@@ -704,8 +704,9 @@ it at once.
   enough to overflow a stack, a loop) fails, `the page could not be read: …`, and the daemon
   goes on.
 - **The reader is shut in**: before it reads a byte of the page it installs a seccomp filter
-  (the `seccompiler` crate) that allows only what it was measured to need: reading its
-  standard input, writing its standard output and error, its memory (`mmap`, `munmap`,
+  (the `seccompiler` crate) that allows only what it was measured to need: `read` of its
+  standard input and `write` to its standard output and error alone (no other descriptor, one
+  the daemon left open included), its memory (`mmap` of none it could run, `munmap`,
   `mremap`, `brk`), `getrandom`, `rt_sigprocmask`, `getpid`, `gettid`, `tgkill` to its own
   process (an abort) and `exit_group`. Any other system call fails with `EPERM`: it opens no
   file, for reading or writing, creates no socket, runs no program (`execve`, `fork`), traces

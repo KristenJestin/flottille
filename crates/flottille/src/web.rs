@@ -814,15 +814,12 @@ pub fn read_page(kind: &str, url: &str) -> std::process::ExitCode {
     std::process::ExitCode::SUCCESS
 }
 
-/// The system calls the reader makes once it has started, measured on HTML and PDF pages:
-/// reading its page, its memory, writing its answer, ending, and aborting on itself
-/// (`tgkill`, allowed to its own process alone, below). Opening a file is not among them: what
-/// the parsers open (the cgroup files `available_parallelism` reads for `regex`) fails, and they
-/// do without.
+/// The system calls the reader makes once it has started, measured on HTML and PDF pages,
+/// whatever their arguments: its memory, ending. Reading its page, writing its answer, mapping
+/// memory and aborting on itself are allowed with arguments of their own, below. Opening a file
+/// is not among them: what the parsers open (the cgroup files `available_parallelism` reads for
+/// `regex`) fails, and they do without.
 const READER_CALLS: &[i64] = &[
-    libc::SYS_read,
-    libc::SYS_write,
-    libc::SYS_mmap,
     libc::SYS_munmap,
     libc::SYS_mremap,
     libc::SYS_brk,
@@ -845,15 +842,33 @@ fn shut_in() -> Result<(), String> {
             .iter()
             .map(|&call| (call, Vec::new()))
             .collect();
+        let when = |arg: u8, op: SeccompCmpOp, value: u64| {
+            SeccompRule::new(vec![SeccompCondition::new(
+                arg,
+                SeccompCmpArgLen::Dword,
+                op,
+                value,
+            )?])
+        };
+        // Its standard input, output and error alone: a descriptor of the daemon's left open
+        // across the exec (a socket, the database) stays out of its reach.
+        calls.insert(libc::SYS_read, vec![when(0, SeccompCmpOp::Eq, 0)?]);
+        calls.insert(
+            libc::SYS_write,
+            vec![when(0, SeccompCmpOp::Eq, 1)?, when(0, SeccompCmpOp::Eq, 2)?],
+        );
+        // No memory it could run: code a parser bug let in stays data.
+        let exec = libc::PROT_EXEC as u64;
+        calls.insert(
+            libc::SYS_mmap,
+            vec![when(2, SeccompCmpOp::MaskedEq(exec), 0)?],
+        );
         // An abort (memory or stack exhausted) signals the reader itself; refused, it would
         // spin until its processor time is up.
-        let itself = SeccompCondition::new(
-            0,
-            SeccompCmpArgLen::Dword,
-            SeccompCmpOp::Eq,
-            u64::from(std::process::id()),
-        )?;
-        calls.insert(libc::SYS_tgkill, vec![SeccompRule::new(vec![itself])?]);
+        calls.insert(
+            libc::SYS_tgkill,
+            vec![when(0, SeccompCmpOp::Eq, u64::from(std::process::id()))?],
+        );
         SeccompFilter::new(
             calls,
             SeccompAction::Errno(libc::EPERM as u32),
@@ -908,7 +923,8 @@ fn extracted(kind: &str, bytes: Vec<u8>, url: &str) -> Result<Extracted, String>
 }
 
 /// What code a parser bug let run in the reader would try, for a test of a debug build: write
-/// a file, connect to an address, run a program, each named in the page; how each attempt ended.
+/// a file, connect to an address, run a program, each named in the page, read and write a
+/// descriptor it inherited, map memory it could run; how each attempt ended.
 #[cfg(debug_assertions)]
 fn probe(bytes: &[u8]) -> String {
     let asked: Value = serde_json::from_slice(bytes).unwrap_or_default();
@@ -920,7 +936,32 @@ fn probe(bytes: &[u8]) -> String {
     let write = ended(std::fs::write(named("write"), "written"));
     let connect = ended(std::net::TcpStream::connect(named("connect")).map(drop));
     let run = ended(std::process::Command::new(named("run")).status().map(drop));
-    format!("write: {write}\nconnect: {connect}\nrun: {run}")
+    // A descriptor of the daemon's it was left, and memory it could run.
+    let fd = asked["inherited"].as_i64().unwrap_or(-1) as libc::c_int;
+    let called = |done: bool| ended(done.then_some(()).ok_or_else(std::io::Error::last_os_error));
+    let mut byte = [0u8];
+    // SAFETY: one byte read into and written from a buffer of one byte; an anonymous mapping
+    // nothing uses.
+    let (read_inherited, write_inherited, map_executable) = unsafe {
+        (
+            called(libc::read(fd, byte.as_mut_ptr().cast(), 1) == 1),
+            called(libc::write(fd, b"!".as_ptr().cast(), 1) == 1),
+            called(
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    4096,
+                    libc::PROT_READ | libc::PROT_EXEC,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                ) != libc::MAP_FAILED,
+            ),
+        )
+    };
+    format!(
+        "write: {write}\nconnect: {connect}\nrun: {run}\nread inherited: {read_inherited}\n\
+         write inherited: {write_inherited}\nmap executable: {map_executable}"
+    )
 }
 
 fn looks_like_html(bytes: &[u8]) -> bool {
