@@ -1163,3 +1163,35 @@ fn a_round_during_a_live_read_is_not_written_over_by_it() {
         .collect();
     assert_eq!(checks.len(), 1, "{checks:?}");
 }
+
+#[test]
+fn a_pull_request_read_live_again_is_no_longer_said_removed() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull());
+    let (_, mcp) = agent(&user);
+    // Its page not found once: the round says it removed.
+    user.gh_script(json!({
+        "pulls": {"acme/api": {"app/login": changed(pull())}},
+        "view_fail": {"acme/api": {"12": "GraphQL: Could not resolve to a PullRequest with the number of 12. (repository.pullRequest)"}}
+    }));
+    a_round(&user);
+    let item = || {
+        user.call(
+            "items.show",
+            json!({"project": "app", "kind": "pull", "id": "12", "repository": "api"}),
+        )
+        .unwrap()
+    };
+    assert_eq!(item()["details"]["removed"], true, "{}", item());
+
+    script(&user, pull());
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "show", "repository": "api", "number": 12}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    let item = item();
+    assert_eq!(item["state"], "open", "{item}");
+    assert_eq!(item["details"].get("removed"), None, "{item}");
+}

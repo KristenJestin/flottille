@@ -627,6 +627,10 @@ pub fn put_live(daemon: &Arc<Daemon>, mut fetched: Fetched) {
     }
     let live = std::mem::take(&mut item.checks);
     keep_details(&old, item);
+    // Found, it is no longer removed.
+    if let Some(details) = item.details.as_object_mut() {
+        details.remove("removed");
+    }
     if item.kind == "pull" {
         item.checks = live
             .into_iter()

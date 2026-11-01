@@ -185,7 +185,8 @@ again on its own (#257):
   store holds of it, with the events a round would emit of it, so that the next round compares
   with that; so does `forge subscribe` and `tickets subscribe` before the subscription opens, so
   that what is so then is no event. What a live read does not say (its author, labels and
-  assignees, when it changed, a Jira state) is kept, as are the links of its checks. **One no round stored yet** (made since the last
+  assignees, when it changed, a Jira state) is kept, as are the links of its checks; a pull
+  request found again is no longer `removed`. **One no round stored yet** (made since the last
   round, by `forge create` or `tickets create`) is stored as the live read found it, with
   `item.opened`, once its source had a first round, so that what happens to it before the next
   round is an event of that round; its assignees and labels, which a live read does not say, are
