@@ -55,7 +55,7 @@ tracker.
 - Every text is masked before it is stored, as every output is (`flottille_core::secrets`).
 - A project's items and cursors go once its file is gone (`project.remove`, or by hand), and a
   source's once the project no longer declares it (a repository removed, its forge or the tracker
-  unset), at the next sweep. A round that ends once its project is gone has the next sweep
+  unset), at the next sweep, which says `items.forgotten` for each source whose items went. A round that ends once its project is gone has the next sweep
   compare again, so that what it wrote between its last check and the removal goes too.
 
 ## Fetched incrementally
@@ -163,8 +163,9 @@ what was left, its cursor not having moved.
 
 Each round compares what it read with what is stored and emits, in the same transaction as it
 stores it (`docs/events.md`): `item.opened`, `item.changed` (with what changed: `state`, `title`,
-`assignees`, `labels`, `status`), `item.commented`, `item.reviewed`, `item.checks`, `item.merged`,
-`item.closed`. **A source's first round stores without emitting.**
+`assignees`, `labels`, `status`, and by name alone its `description`, its `discussion` and its
+`checks`), `item.commented`, `item.reviewed`, `item.checks`, `item.merged`, `item.closed`. **A
+source's first round stores without emitting.** A source forgotten says `items.forgotten`, once.
 
 ## What reads this stream
 
@@ -181,6 +182,11 @@ again on its own (#257):
   `item.closed` its `closed`. The failed jobs' logs a `checks` delivery holds are read then, after
   the round, which does not wait for them; that delivery ends the subscription, so an event that
   comes while they are read (a comment) is not delivered before it, nor after.
+- **What changed with no event of its own is no event of a subscription**: an `item.changed` that
+  names only a `description`, a `discussion` or `checks` delivers nothing, and `items.forgotten`
+  neither delivers nor ends a subscription to an item of that source: it ends at its time, as one
+  to which nothing came, or hears its item again from the rounds after the first of the source
+  declared again.
 - **Their latency is the rhythm** above: a minute while a window is connected, five otherwise. A
   subscription that needs to hear sooner has no faster rhythm of its own (a follow-up, if one
   needs it).

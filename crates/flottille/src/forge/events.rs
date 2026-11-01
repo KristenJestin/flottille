@@ -316,4 +316,16 @@ mod tests {
         assert!(found[1].by.as_ref().is_some_and(|by| by.marked));
         assert_eq!(ends.map(|e| e.kind), Some("merged"));
     }
+
+    #[test]
+    fn details_changed_alone_are_no_event_of_a_pull_request() {
+        let events = [event(
+            "item.changed",
+            json!({"changes": {}, "fields": ["description", "discussion", "checks"]}),
+        )];
+        let events: Vec<&(&'static str, Value)> = events.iter().collect();
+        let (found, ends) = events_of("pull request #12 of api", None, &events);
+        assert!(found.is_empty(), "{found:?}");
+        assert!(ends.is_none());
+    }
 }

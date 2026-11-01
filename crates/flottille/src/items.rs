@@ -14,7 +14,6 @@ use std::time::Duration;
 use flottille_core::declared::ProjectTracker;
 use flottille_core::item::{Check, Cursor, Filter, Item};
 use flottille_core::project::Project;
-use flottille_core::protocol::Event;
 use flottille_core::store::now_ms;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -355,7 +354,7 @@ pub fn poll(daemon: &Arc<Daemon>) {
             .filter(|(_, sources)| !sources.is_empty())
             .cloned()
             .collect();
-        match daemon.write(|store| Ok((store.retain_items(&kept)?, None::<Event>))) {
+        match daemon.write_all(|store| Ok(((), store.retain_items(&kept)?))) {
             Ok(_) => *daemon.items.sources.lock().unwrap() = Some(declared),
             Err(error) => eprintln!("flottille daemon: items: {error}"),
         }
@@ -663,6 +662,11 @@ pub fn unseen(
 /// made before that first round.
 pub fn put_live(daemon: &Arc<Daemon>, mut fetched: Fetched) {
     let item = &mut fetched.item;
+    // Cut as a round cuts it, so that the next round finds no change of it.
+    if let Some(description) = item.details["description"].as_str() {
+        let cut = tickets::cut(description, tickets::DESCRIPTION_CHARS);
+        item.details["description"] = json!(cut);
+    }
     let stored = daemon
         .read(|store| {
             store.items(
@@ -982,9 +986,11 @@ fn events_of(old: Option<&Item>, new: &Fetched) -> Vec<(&'static str, Value)> {
     };
     let mut events = Vec::new();
     let mut changes = serde_json::Map::new();
-    let mut change = |key: &str, from: Value, to: Value| {
+    let mut fields: Vec<&str> = Vec::new();
+    let mut change = |key: &'static str, from: Value, to: Value| {
         if from != to {
             changes.insert(key.into(), json!({"from": from, "to": to}));
+            fields.push(key);
         }
     };
     if old.state != item.state {
@@ -1003,15 +1009,6 @@ fn events_of(old: Option<&Item>, new: &Fetched) -> Vec<(&'static str, Value)> {
     if old.updated_at.is_some() {
         change("assignees", json!(old.assignees), json!(item.assignees));
         change("labels", json!(old.labels), json!(item.labels));
-    }
-    if !changes.is_empty() {
-        events.insert(
-            0,
-            (
-                "item.changed",
-                with(base(), "changes", Value::Object(changes)),
-            ),
-        );
     }
     let count = |item: &Item, key: &str| item.details[key].as_u64();
     let newest = |said: &[Said], new: u64, old: u64| -> Value {
@@ -1090,6 +1087,37 @@ fn events_of(old: Option<&Item>, new: &Fetched) -> Vec<(&'static str, Value)> {
         let mut data = with(base(), "checks", json!(mark(&item.checks)));
         data["ended"] = Value::from(ended);
         events.push(("item.checks", data));
+    }
+    // What changed whose texts the event does not carry: named, so that what shows them reads
+    // them again. One never read before is no change; a new comment, review or end of the checks
+    // has its own event.
+    let read_both = |key: &str| old.details.get(key).zip(item.details.get(key));
+    if read_both("description").is_some_and(|(from, to)| from != to) {
+        fields.push("description");
+    }
+    let said = events
+        .iter()
+        .any(|(name, _)| matches!(*name, "item.commented" | "item.reviewed"));
+    if !said && read_both("discussion").is_some_and(|(from, to)| from != to) {
+        fields.push("discussion");
+    }
+    // Whatever order a source lists them in.
+    let states = |checks: &[Check]| -> Vec<(String, String)> {
+        let mut states: Vec<_> = checks
+            .iter()
+            .map(|c| (c.name.clone(), c.state.clone()))
+            .collect();
+        states.sort();
+        states
+    };
+    let ended = events.iter().any(|(name, _)| *name == "item.checks");
+    if item.kind == "pull" && !ended && states(&old.checks) != states(&item.checks) {
+        fields.push("checks");
+    }
+    if !fields.is_empty() {
+        let mut data = with(base(), "changes", Value::Object(changes));
+        data["fields"] = json!(fields);
+        events.insert(0, ("item.changed", data));
     }
     events
 }
@@ -1427,6 +1455,79 @@ mod tests {
         assert_eq!(
             names(&events_of(Some(&new), &fetched(done))),
             ["item.changed", "item.closed"]
+        );
+    }
+
+    #[test]
+    fn a_description_or_a_discussion_changed_alone_is_item_changed_naming_them_not_their_texts() {
+        let mut old = stored("open");
+        old.details["description"] = json!("First words.");
+        old.details["discussion"] = json!([{"kind": "comment", "body": "Looks good"}]);
+        assert!(events_of(Some(&old), &fetched(old.clone())).is_empty());
+        let mut new = old.clone();
+        new.details["description"] = json!("Second words.");
+        new.details["discussion"] = json!([{"kind": "comment", "body": "Looks fine"}]);
+        let events = events_of(Some(&old), &fetched(new));
+        assert_eq!(names(&events), ["item.changed"]);
+        assert_eq!(events[0].1["fields"], json!(["description", "discussion"]));
+        assert_eq!(events[0].1["changes"], json!({}));
+        assert!(
+            !events[0].1.to_string().contains("words"),
+            "{}",
+            events[0].1
+        );
+        // A title too: every field is named, the short ones with what they were.
+        let mut titled = old.clone();
+        titled.title = "Add the login form".into();
+        titled.details["description"] = json!("Second words.");
+        let events = events_of(Some(&old), &fetched(titled));
+        assert_eq!(events[0].1["fields"], json!(["title", "description"]));
+        assert!(events[0].1["changes"]["title"].is_object());
+    }
+
+    #[test]
+    fn a_description_never_read_before_is_no_change() {
+        let old = stored("open");
+        let mut new = old.clone();
+        new.details["description"] = json!("First words.");
+        new.details["discussion"] = json!([]);
+        assert!(events_of(Some(&old), &fetched(new)).is_empty());
+    }
+
+    #[test]
+    fn a_new_comment_is_item_commented_alone_though_the_discussion_moved() {
+        let mut old = stored("open");
+        old.details["discussion"] = json!([]);
+        let mut new = old.clone();
+        new.details["comments"] = json!(2);
+        new.details["discussion"] = json!([{"kind": "comment", "body": "Looks good"}]);
+        assert_eq!(
+            names(&events_of(Some(&old), &fetched(new))),
+            ["item.commented"]
+        );
+    }
+
+    #[test]
+    fn a_check_that_moves_while_others_run_is_item_changed_naming_the_checks() {
+        let mut old = stored("open");
+        old.checks.push(Check {
+            name: "build".into(),
+            state: "pending".into(),
+            started_at: None,
+            ended_at: None,
+            link: None,
+        });
+        let mut new = old.clone();
+        new.checks[1].state = "passing".into();
+        let events = events_of(Some(&old), &fetched(new.clone()));
+        assert_eq!(names(&events), ["item.changed"]);
+        assert_eq!(events[0].1["fields"], json!(["checks"]));
+        // Their end is `item.checks`, and says it alone.
+        let mut ended = new.clone();
+        ended.checks[0].state = "failing".into();
+        assert_eq!(
+            names(&events_of(Some(&new), &fetched(ended))),
+            ["item.checks"]
         );
     }
 

@@ -294,6 +294,36 @@ fn an_agent_subscribed_to_review_is_not_woken_by_a_comment() {
 }
 
 #[test]
+fn a_description_edited_alone_wakes_no_subscription_to_checks_or_comments() {
+    let user = user();
+    fixture(&user);
+    let mut first = pull();
+    first["body"] = json!("First words.");
+    script(&user, first);
+    let (_, mcp) = agent(&user);
+
+    subscribe(&mcp, json!({"events": ["checks", "comment"]}));
+    let mut edited = pull();
+    edited["body"] = json!("Second words.");
+    script(&user, edited.clone());
+    a_round(&user);
+    let watch = user.watch(&["--after", "0"]);
+    let changed: Vec<Value> = watch
+        .within(Duration::from_millis(1500))
+        .into_iter()
+        .filter(|e| e["name"] == "item.changed")
+        .collect();
+    assert_eq!(changed.len(), 1, "the round saw it: {changed:?}");
+    assert_eq!(changed[0]["data"]["fields"], json!(["description"]));
+    assert!(delivered(&user).is_empty(), "{:?}", delivered(&user));
+
+    // Still open: the next end of the checks is delivered.
+    script(&user, ended(edited));
+    a_round(&user);
+    assert!(the_delivery(&user).contains("checks ended"));
+}
+
+#[test]
 fn a_comment_by_a_bot_is_not_delivered_to_a_subscription_for_people_only() {
     let user = user();
     fixture(&user);

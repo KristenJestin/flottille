@@ -1924,8 +1924,9 @@ impl Store {
     /// Forgets the items and the cursors of every project but those of `kept`, and of each kept
     /// project those of a source it no longer has. A source is `(kind, target, source,
     /// repository)`: `target` is a repository's path or `tracker`, `source` its forge or tracker,
-    /// `repository` the path its items are of (empty for Jira). How many items went.
-    pub fn retain_items(&mut self, kept: &[(String, Vec<[String; 4]>)]) -> Result<usize> {
+    /// `repository` the path its items are of (empty for Jira). One `items.forgotten` for each
+    /// source whose items went, in the same transaction.
+    pub fn retain_items(&mut self, kept: &[(String, Vec<[String; 4]>)]) -> Result<Vec<Event>> {
         let transaction = self.connection.transaction()?;
         let has = |project: &str, kept_one: &dyn Fn(&[String; 4]) -> bool| {
             kept.iter()
@@ -1954,8 +1955,10 @@ impl Store {
         }
         let mut items: Vec<[String; 4]> = Vec::new();
         {
-            let mut statement = transaction
-                .prepare("SELECT DISTINCT project, kind, source, repository FROM items")?;
+            let mut statement = transaction.prepare(
+                "SELECT DISTINCT project, kind, source, repository FROM items \
+                 ORDER BY project, kind, source, repository",
+            )?;
             let rows = statement.query_map([], |row| {
                 Ok([row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?])
             })?;
@@ -1963,20 +1966,23 @@ impl Store {
                 items.push(row?);
             }
         }
-        let mut gone = 0;
+        let mut written = Vec::new();
         for [project, kind, source, repository] in items {
             if !has(&project, &|[k, _, s, r]| {
                 *k == kind && *s == source && *r == repository
             }) {
-                gone += transaction.execute(
+                let gone = transaction.execute(
                     "DELETE FROM items WHERE project = ?1 AND kind = ?2 AND source = ?3 \
                      AND repository = ?4",
                     params![project, kind, source, repository],
                 )?;
+                let data = json!({"project": project, "kind": kind, "source": source,
+                    "repository": repository, "items": gone});
+                written.push(append_event(&transaction, "items.forgotten", data)?);
             }
         }
         transaction.commit()?;
-        Ok(gone)
+        Ok(written)
     }
 
     /// Where each source of the project stands.
@@ -4668,8 +4674,8 @@ mod tests {
         };
         store.set_cursor(&cursor).unwrap();
         assert_eq!(store.cursors("app").unwrap(), vec![cursor]);
-        // `web` left the project, and `other` is gone.
-        let gone = store
+        // `web` left the project, and `other` is gone: one event for each source forgotten.
+        let forgotten = store
             .retain_items(&[(
                 "app".into(),
                 vec![
@@ -4678,7 +4684,36 @@ mod tests {
                 ],
             )])
             .unwrap();
-        assert_eq!(gone, 2);
+        let said: Vec<(&str, &Value)> = forgotten
+            .iter()
+            .map(|e| (e.name.as_str(), &e.data))
+            .collect();
+        assert_eq!(
+            said,
+            [
+                (
+                    "items.forgotten",
+                    &json!({"project": "app", "kind": "pull", "source": "github",
+                        "repository": "web", "items": 1})
+                ),
+                (
+                    "items.forgotten",
+                    &json!({"project": "other", "kind": "pull", "source": "github",
+                        "repository": "api", "items": 1})
+                ),
+            ]
+        );
+        // Nothing more to forget: no event.
+        let again = store
+            .retain_items(&[(
+                "app".into(),
+                vec![
+                    ["pull", "api", "github", "api"].map(String::from),
+                    ["ticket", "tracker", "github", "api"].map(String::from),
+                ],
+            )])
+            .unwrap();
+        assert!(again.is_empty());
         assert_eq!(keys(&store, Filter::default()), ["1", "3"]);
         assert!(store.items("other", &Filter::default()).unwrap().is_empty());
         assert!(store.cursors("app").unwrap().is_empty());
