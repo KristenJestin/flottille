@@ -2197,6 +2197,35 @@ fn address(previous: Option<char>, ahead: &str) -> Option<usize> {
     Some(end)
 }
 
+/// A text drawn as Markdown on its own, in a selection scope of its own: a pull request's
+/// description, a comment. It is drawn as a reply is.
+pub struct MarkdownText {
+    pieces: Vec<Entity<MarkdownPiece>>,
+    scope: TextSelectionScopeId,
+}
+
+impl MarkdownText {
+    pub fn new(text: &str, cx: &mut App) -> Self {
+        let scope = TextSelectionScopeId::new();
+        let pieces = markdown_pieces(text)
+            .into_iter()
+            .map(|piece| {
+                let state = cx.new(|cx| TextViewState::markdown(piece, cx));
+                cx.new(|_| MarkdownPiece {
+                    state,
+                    muted: false,
+                    scope,
+                })
+            })
+            .collect();
+        Self { pieces, scope }
+    }
+
+    pub fn view(&self, id: impl Into<ElementId>) -> AnyElement {
+        markdown_view(id.into(), &self.pieces, self.scope).into_any_element()
+    }
+}
+
 /// A reply or a thought, its Markdown pieces one under the other, in one text-cursor region: the
 /// pointer keeps the I-beam from its first line to its last, gaps between the pieces included. A
 /// press in a gap begins the selection in this message too.

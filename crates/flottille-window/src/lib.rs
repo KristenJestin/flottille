@@ -9,6 +9,7 @@ pub mod commands;
 pub mod composer;
 pub mod conversation;
 pub mod history;
+pub mod items;
 pub mod link;
 pub mod mode;
 pub mod model;

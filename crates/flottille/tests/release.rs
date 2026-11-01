@@ -6,7 +6,7 @@
 mod common;
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -393,11 +393,69 @@ fn package(version: &str, binary: &Path, out: &Path) -> Output {
         .unwrap()
 }
 
-fn sha256(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
+/// The SHA-256 of a file. It is read in chunks: the `flottille` binary weighs over a gigabyte in
+/// a debug build and the tests run side by side, so none of them may hold it whole.
+fn sha256(path: impl AsRef<Path>) -> String {
+    let mut file = std::fs::File::open(path).unwrap();
+    let mut hasher = Sha256::new();
+    let mut chunk = vec![0; 1 << 20];
+    loop {
+        let read = file.read(&mut chunk).unwrap();
+        if read == 0 {
+            break;
+        }
+        hasher.update(&chunk[..read]);
+    }
+    hasher
+        .finalize()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
+}
+
+#[test]
+fn a_changed_byte_changes_the_sum_of_a_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("file");
+    // Longer than a chunk, the change beyond the first one: a sum that stopped early would miss it.
+    let mut bytes = vec![7u8; 5 << 20];
+    std::fs::write(&path, &bytes).unwrap();
+    let before = sha256(&path);
+    assert_eq!(sha256(&path), before);
+
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    std::fs::write(&path, &bytes).unwrap();
+
+    assert_ne!(sha256(&path), before);
+}
+
+/// The most memory the process has held at once, in bytes (`VmHWM`).
+fn peak_memory() -> u64 {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    let kib: u64 = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmHWM:"))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .unwrap();
+    kib << 10
+}
+
+#[test]
+fn the_sum_of_a_file_does_not_hold_it_in_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("big");
+    // Sparse: it costs the disk nothing, and it is read as zeros.
+    let big = 192 << 20;
+    std::fs::File::create(&path).unwrap().set_len(big).unwrap();
+    let before = peak_memory();
+
+    sha256(&path);
+
+    // Other tests run in this process meanwhile: a margin, far below the file's size.
+    let held = peak_memory() - before;
+    assert!(held < big / 4, "the sum held {} MiB", held >> 20);
 }
 
 #[test]
@@ -420,7 +478,7 @@ fn the_archive_holds_the_binary_and_both_licences_with_its_sum_beside_it() {
         sum,
         format!(
             "{}  flottille-0.4.0-beta.2-x86_64-linux.tar.gz\n",
-            sha256(&std::fs::read(&archive).unwrap())
+            sha256(&archive)
         )
     );
     let listed = Command::new("tar")
@@ -1115,7 +1173,7 @@ fn flottille_update_refuses_a_wrong_sum_and_keeps_the_binary() {
     );
     let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
     let binary = installed();
-    let before = std::fs::read(&binary).unwrap();
+    let before = sha256(&binary);
 
     let output = user
         .command_through(&binary, &["update", "--channel", "stable"])
@@ -1127,7 +1185,7 @@ fn flottille_update_refuses_a_wrong_sum_and_keeps_the_binary() {
         String::from_utf8_lossy(&output.stderr).contains("SHA-256"),
         "{output:?}"
     );
-    assert_eq!(std::fs::read(&binary).unwrap(), before);
+    assert_eq!(sha256(&binary), before);
 }
 
 #[test]
@@ -1147,6 +1205,10 @@ fn flottille_update_refuses_while_an_agent_runs_and_says_how_to_stop_it() {
     );
     user.call("project.add", json!({"folder": folder, "name": "app"}))
         .unwrap();
+    // Summed before the agent starts: its turn lasts 30 s, and the sum of a debug binary can
+    // take that long on a slow runner.
+    let binary = installed();
+    let before = sha256(&binary);
     let agent = user
         .call(
             "agent.start",
@@ -1161,8 +1223,6 @@ fn flottille_update_refuses_while_an_agent_runs_and_says_how_to_stop_it() {
         assert!(std::time::Instant::now() < deadline, "the agent never ran");
         std::thread::sleep(Duration::from_millis(50));
     }
-    let binary = installed();
-    let before = std::fs::read(&binary).unwrap();
 
     let output = user
         .command_through(&binary, &["update", "--channel", "beta"])
@@ -1177,7 +1237,7 @@ fn flottille_update_refuses_while_an_agent_runs_and_says_how_to_stop_it() {
         1,
         "{agent} was left alone"
     );
-    assert_eq!(std::fs::read(&binary).unwrap(), before);
+    assert_eq!(sha256(&binary), before);
     assert!(
         !releases
             .asked
@@ -1198,7 +1258,7 @@ fn flottille_update_refuses_while_a_daemon_runs_and_says_to_stop_it_first() {
     // Started by any command; no agent runs.
     user.status();
     let binary = installed();
-    let before = std::fs::read(&binary).unwrap();
+    let before = sha256(&binary);
 
     let output = user
         .command_through(&binary, &["update", "--channel", "beta"])
@@ -1210,7 +1270,7 @@ fn flottille_update_refuses_while_a_daemon_runs_and_says_to_stop_it_first() {
         String::from_utf8_lossy(&output.stderr).contains("`flottille daemon stop`"),
         "{output:?}"
     );
-    assert_eq!(std::fs::read(&binary).unwrap(), before);
+    assert_eq!(sha256(&binary), before);
     assert!(
         releases.asked.lock().unwrap().is_empty(),
         "nothing was read"
@@ -1273,7 +1333,7 @@ fn flottille_update_says_it_is_already_on_that_version_and_reinstalls_only_with_
     stable_at(&releases, programs.path(), &version);
     let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
     let binary = installed();
-    let before = std::fs::read(&binary).unwrap();
+    let before = sha256(&binary);
 
     let output = user
         .command_through(&binary, &["update", "--channel", "stable"])
@@ -1289,7 +1349,7 @@ fn flottille_update_says_it_is_already_on_that_version_and_reinstalls_only_with_
         String::from_utf8_lossy(&output.stdout).contains("--force"),
         "{output:?}"
     );
-    assert_eq!(std::fs::read(&binary).unwrap(), before);
+    assert_eq!(sha256(&binary), before);
 
     let output = user
         .command_through(&binary, &["update", "--channel", "stable", "--force"])
@@ -1297,7 +1357,7 @@ fn flottille_update_says_it_is_already_on_that_version_and_reinstalls_only_with_
         .unwrap();
 
     assert!(output.status.success(), "{output:?}");
-    assert_ne!(std::fs::read(&binary).unwrap(), before);
+    assert_ne!(sha256(&binary), before);
 }
 
 #[test]
@@ -1307,7 +1367,7 @@ fn flottille_update_refuses_an_older_version_without_force() {
     stable_at(&releases, programs.path(), "0.0.1");
     let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
     let binary = installed();
-    let before = std::fs::read(&binary).unwrap();
+    let before = sha256(&binary);
 
     let output = user
         .command_through(&binary, &["update", "--channel", "stable"])
@@ -1318,7 +1378,7 @@ fn flottille_update_refuses_an_older_version_without_force() {
     let said = String::from_utf8_lossy(&output.stderr);
     assert!(said.contains("0.0.1 is older"), "{said}");
     assert!(said.contains("--force"), "{said}");
-    assert_eq!(std::fs::read(&binary).unwrap(), before);
+    assert_eq!(sha256(&binary), before);
 
     let output = user
         .command_through(&binary, &["update", "--channel", "stable", "--force"])

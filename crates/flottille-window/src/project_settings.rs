@@ -330,11 +330,12 @@ enum RepositoryRow {
     Found(String),
 }
 
-/// Where the settings were opened at, from the project page: a repository's row (its chip) or
-/// the tasks ("Edit in Settings").
+/// Where the settings were opened at, from the project page: a repository's row (its chip), the
+/// tracker (the tickets' "Open Settings") or the tasks ("Edit in Settings").
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reveal {
     Repository(String),
+    Tracker,
     Tasks,
 }
 
@@ -343,6 +344,7 @@ impl Reveal {
     fn entry(&self) -> usize {
         let key = match self {
             Reveal::Repository(_) => "repositories",
+            Reveal::Tracker => "tracker",
             Reveal::Tasks => "tasks",
         };
         SECTIONS

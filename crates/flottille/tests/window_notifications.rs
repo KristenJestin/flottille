@@ -423,11 +423,10 @@ fn a_pull_request_opened_by_a_session_marks_its_row_and_notifies(cx: &mut TestAp
     let number = held_number(mcp.call("forge", create));
     user.call("approval.approve", json!({"number": number}))
         .unwrap();
+    // The dot alone: while the session still runs, its state is the mark and says other words.
     until(&shell, cx, "the lead's row is marked", |cx| {
-        shell.read_with(cx, |s, cx| {
-            s.session(&lead)
-                .is_some_and(|row| row.read(cx).unread().is_some())
-        })
+        unread_of(&shell, &lead, cx).is_some()
+            && trailing_of(&shell, &lead, cx) == Some(Trailing::Unread)
     });
     settle(cx);
 
@@ -548,8 +547,11 @@ fn lead_with_news(
     let number = held_number(mcp.call("forge", create));
     user.call("approval.approve", json!({"number": number}))
         .unwrap();
-    until(shell, cx, "the lead's row holds news", |cx| {
+    // The news comes with the forge's event and the state with the agent's own: the row shows the
+    // dot alone only once the session has rested, so the dot is the state this waits for.
+    until(shell, cx, "the lead's row shows the dot alone", |cx| {
         unread_of(shell, lead, cx).is_some()
+            && trailing_of(shell, lead, cx) == Some(Trailing::Unread)
     });
     settle(cx);
 }
@@ -640,6 +642,7 @@ fn an_idle_session_with_a_new_message_shows_the_unread_dot_alone_and_says_why_on
     });
     until(&shell, cx, "both rest", |cx| {
         trailing_of(&shell, &other, cx) == Some(Trailing::Unread)
+            && trailing_of(&shell, &lead, cx) == Some(Trailing::Ago)
     });
     settle(cx);
 

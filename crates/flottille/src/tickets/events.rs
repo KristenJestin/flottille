@@ -75,6 +75,7 @@ fn fetched_of(project: &Project, key: &Key, ticket: &Ticket) -> Option<crate::it
             by_agent: comment.agent,
             state: None,
             excerpt: crate::items::excerpt(&comment.body),
+            body: comment.body.clone(),
         })
         .collect();
     Some(crate::items::Fetched {
