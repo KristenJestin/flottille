@@ -1161,6 +1161,9 @@ async fn forge_subscribe(
         Ok(mut checkouts) => checkouts.remove(0).path,
         Err(refusal) => return refusal,
     };
+    // The read now is stored, while no round reads nor writes, before the subscription opens:
+    // what is so now is no event of the next rounds.
+    let held = crate::items::held(daemon, &place.project).await;
     let (_, read) = refresh_read(daemon, &workspace).await;
     let Some(repository) = read.repositories.iter().find(|r| r.path == path) else {
         return Outcome::Failed(format!("{path} was not read"));
@@ -1199,9 +1202,6 @@ async fn forge_subscribe(
         }
     };
     let target = events::target(&workspace, &path, pull.number);
-    // The read now is stored, while no round writes, before the subscription opens: what is so
-    // now is no event of the next rounds.
-    let held = crate::items::held(daemon, &place.project).await;
     if let Some(forge) = &repository.forge {
         remember(daemon, &place.project, &path, forge, pull);
     }
@@ -1523,6 +1523,8 @@ async fn forge_show(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall, numbe
         Err(None) => return Outcome::Refused(format!("refused: {}: {NO_FORGE}", checkout.path)),
         Err(Some(why)) => return Outcome::Refused(why),
     };
+    // A round of the project running stores a read of its own; none starts during this one.
+    let held = crate::items::held_now(daemon, &place.project);
     let pull = match &forge {
         Forge::GitHub { .. } => match signed_in().await {
             Err(problem) => Err(problem),
@@ -1546,10 +1548,10 @@ async fn forge_show(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall, numbe
             forge.slug()
         )),
         Ok(Some(mut pull)) => {
-            // A round of the project running stores a read of its own.
-            if let Some(_held) = crate::items::held_now(daemon, &place.project) {
+            if held.is_some() {
                 remember(daemon, &place.project, &checkout.path, &forge, &pull);
             }
+            drop(held);
             logs::attach(&forge, &mut pull).await;
             ci::attach(&forge, &mut pull).await;
             let again = format!(
@@ -1820,13 +1822,20 @@ async fn forge_read(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall) -> Ou
         }
         repositories.retain(|r| &r.path == asked);
     }
-    let mut read = read(&repositories, &workspace.branch, obsolete).await;
+    // A round of the project running stores a read of its own; none starts during this one,
+    // whose logs and runs are read after it.
     let held = crate::items::held_now(daemon, &place.project);
-    for repository in &mut read.repositories {
-        if let (Some(forge), Some(pull)) = (&repository.forge, &mut repository.pull) {
-            if held.is_some() {
+    let mut read = read(&repositories, &workspace.branch, obsolete).await;
+    if held.is_some() {
+        for repository in &read.repositories {
+            if let (Some(forge), Some(pull)) = (&repository.forge, &repository.pull) {
                 remember(daemon, &place.project, &repository.path, forge, pull);
             }
+        }
+    }
+    drop(held);
+    for repository in &mut read.repositories {
+        if let (Some(forge), Some(pull)) = (&repository.forge, &mut repository.pull) {
             logs::attach(forge, pull).await;
             ci::attach(forge, pull).await;
         }

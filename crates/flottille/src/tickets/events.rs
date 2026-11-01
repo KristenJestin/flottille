@@ -274,6 +274,8 @@ pub(super) async fn subscribe(
                 .into(),
         );
     }
+    // The read now is stored, while no round reads nor writes, before the subscription opens.
+    let held = crate::items::held(daemon, &project.name).await;
     let ticket = match super::read(project, &key).await {
         Ok(ticket) => ticket,
         Err(problem) => {
@@ -287,7 +289,6 @@ pub(super) async fn subscribe(
         return Outcome::Failed(format!("{} is not of this tracker", key.text()));
     };
     let target = json!({"project": project.name, "repository": repository, "key": item});
-    let held = crate::items::held(daemon, &project.name).await;
     remember(daemon, project, &key, &ticket);
     for old in subscriptions::of(daemon, agent) {
         if old.source == TICKETS && old.target == target {

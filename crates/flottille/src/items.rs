@@ -563,8 +563,8 @@ fn flush(
     Ok(true)
 }
 
-/// The project's round lock, waited for: what a live read stores is not written over by a round
-/// that read before it.
+/// The project's round lock, waited for: taken before a live read, so that a round neither
+/// lands between the read and its write nor is written over by it.
 pub async fn held(daemon: &Daemon, project: &str) -> tokio::sync::OwnedMutexGuard<()> {
     lock_of(daemon, project).lock_owned().await
 }
@@ -576,7 +576,7 @@ pub fn held_now(daemon: &Daemon, project: &str) -> Option<tokio::sync::OwnedMute
 
 /// Stores what a live read found of one item (`forge show`, `tickets show`, a subscription's
 /// first read) with the events a round would emit of it, so that the next round compares with
-/// it; called with the project's round lock held. What a live read does
+/// it; called with the project's round lock held since before the read. What a live read does
 /// not say (its author, labels and assignees, when it changed, an empty state) is kept, as are
 /// the links of its checks. One no round stored yet (made since the last) is stored as it was
 /// read, once its source had a first round: the next round's events are from what it was then.

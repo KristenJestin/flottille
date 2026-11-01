@@ -1051,3 +1051,44 @@ fn a_comment_on_a_ticket_no_round_stored_yet_is_delivered_to_its_subscription() 
         "{delivery}"
     );
 }
+
+#[test]
+fn a_round_during_a_live_read_is_not_written_over_by_it() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull());
+    let (_, mcp) = agent(&user);
+    let watch = user.watch(&["--after", "0"]);
+    let views = |user: &User| {
+        user.gh_received()
+            .iter()
+            .filter(|call| call["args"].to_string().contains(r#""pr","view","12""#))
+            .count()
+    };
+    let before = views(&user);
+
+    // `forge show` reads the checks still running, slowly; a round reads them ended meanwhile.
+    let mut slow = json!({"pulls": {"acme/api": {"app/login": changed(pull())}}});
+    slow["view_delay_ms"] = 1500.into();
+    user.gh_script(slow);
+    let shown = std::thread::spawn(move || {
+        let answer = mcp.call(
+            "forge",
+            json!({"action": "show", "repository": "api", "number": 12}),
+        );
+        (mcp, answer)
+    });
+    eventually("the live read", || views(&user) > before);
+    script(&user, ended(pull()));
+    a_round(&user);
+    let (_mcp, answer) = shown.join().unwrap();
+    assert!(!answer.error, "{}", answer.text);
+    a_round(&user);
+
+    let checks: Vec<Value> = watch
+        .within(Duration::from_secs(1))
+        .into_iter()
+        .filter(|e| e["name"] == "item.checks")
+        .collect();
+    assert_eq!(checks.len(), 1, "{checks:?}");
+}

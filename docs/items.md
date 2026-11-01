@@ -188,9 +188,11 @@ again on its own (#257):
   round, by `forge create` or `tickets create`) is stored as the live read found it, with
   `item.opened`, once its source had a first round, so that what happens to it before the next
   round is an event of that round; its assignees and labels, which a live read does not say, are
-  no change then. A Jira work item no round stored is not, its live read saying no state. A live read is stored while no round of the project runs (the round
-  stores a read of its own); `subscribe` waits for the round to end, so that no older read is
-  written over it.
+  no change then. A Jira work item no round stored is not, its live read saying no state.
+- **A live read takes the project's round lock before it reads**, so that no round lands between
+  the read and its write and none is written over by an older read: `show` reads without storing
+  while a round runs (the round stores a read of its own), and holds the lock for its one read,
+  not for the logs and runs it reads after; `subscribe` waits for the round to end.
 - A subscription made before this, stored with what its own watch saw, is carried over as it is:
   its target names the same pull request, the next rounds' events are offered to it, and what its
   watch saw is no longer read.

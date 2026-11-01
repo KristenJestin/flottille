@@ -1231,10 +1231,11 @@ async fn show(
         Ok(key) => key,
         Err(refusal) => return refusal,
     };
+    // A round of the project running stores a read of its own; none starts during this one.
+    let held = crate::items::held_now(daemon, &project.name);
     match read(project, &key).await {
         Ok(ticket) => {
-            // A round of the project running stores a read of its own.
-            if let Some(_held) = crate::items::held_now(daemon, &project.name) {
+            if held.is_some() {
                 events::remember(daemon, project, &key, &ticket);
             }
             Outcome::Done(ticket.text(full, asked.ticket.as_deref()))
