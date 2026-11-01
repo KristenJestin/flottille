@@ -189,6 +189,18 @@ pub enum Command {
     Tasks {
         project: String,
     },
+    /// The project's pull requests and tickets (`items.list`), and what it declares
+    /// (`project.settings`).
+    Items {
+        project: String,
+    },
+    /// One pull request or ticket in full (`items.show`).
+    Item {
+        project: String,
+        kind: String,
+        key: String,
+        repository: Option<String>,
+    },
     /// A change to the tasks: `task.add`, `task.edit` or `task.remove`, with its parameters.
     TaskWrite {
         project: String,
@@ -619,6 +631,16 @@ pub enum Outcome {
     Tasks {
         project: String,
         listed: Result<Vec<TaskInfo>, String>,
+    },
+    Items {
+        project: String,
+        read: Result<crate::items::Read, String>,
+    },
+    Item {
+        project: String,
+        kind: String,
+        key: String,
+        shown: Result<Value, String>,
     },
     /// A change to the tasks was made, or refused with why.
     TaskWritten {
@@ -1237,6 +1259,35 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                         .collect()
                 }),
                 project,
+            }
+        }
+        Command::Items { project } => {
+            let params = json!({"project": project});
+            let read = ask_alone(connect, "items.list", params, bounds.quick)
+                .and_then(|listed| listed)
+                .and_then(|listed| {
+                    let params = json!({"name": project});
+                    ask_alone(connect, "project.settings", params, bounds.quick)
+                        .and_then(|settings| settings)
+                        .map(|settings| crate::items::Read::of(&listed, &settings))
+                });
+            Outcome::Items { project, read }
+        }
+        Command::Item {
+            project,
+            kind,
+            key,
+            repository,
+        } => {
+            let params = json!({"project": project, "kind": kind, "id": key,
+                "repository": repository});
+            let shown =
+                ask_alone(connect, "items.show", params, bounds.quick).and_then(|shown| shown);
+            Outcome::Item {
+                project,
+                kind,
+                key,
+                shown,
             }
         }
         Command::TaskWrite {

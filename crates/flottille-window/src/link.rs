@@ -48,6 +48,9 @@ pub enum Update {
     Forged(model::Forged),
     /// An agent said something, reported, or was woken: news for its session.
     News(model::News),
+    /// An item of the project changed (`item.*`), or what it declares (`project.changed`): its
+    /// pull requests and tickets are read again.
+    Items(String),
     /// What the open session page's link read or saw, with the link's token.
     Session {
         token: u64,
@@ -134,7 +137,8 @@ fn follow(
     let mut conn = Conn::new(stream).map_err(|e| e.to_string())?;
     let last = seen.last_seq.load(Ordering::Relaxed);
     let after = (seen.connections.load(Ordering::Relaxed) > 1 || last > 0).then_some(last);
-    let started = conn.request("events.watch", json!({"after": after}))?;
+    // A window: the daemon reads the items at the window's rhythm while it is open.
+    let started = conn.request("events.watch", json!({"after": after, "client": "window"}))?;
     if after.is_none() {
         seen.last_seq
             .store(started["after"].as_u64().unwrap_or(0), Ordering::Relaxed);
@@ -162,6 +166,9 @@ fn follow(
         if let Some(news) = model::News::of(event) {
             let _ = updates.unbounded_send(Update::News(news));
         }
+        if let Some(project) = items_of(event) {
+            let _ = updates.unbounded_send(Update::Items(project));
+        }
     };
     loop {
         // Everything that came already, then a short quiet (or a short while at most), before
@@ -186,6 +193,17 @@ fn follow(
             }
         }
     }
+}
+
+/// The project whose pull requests and tickets an event says changed: an `item.*`, or a change
+/// of what it declares.
+fn items_of(event: &Event) -> Option<String> {
+    let field = match event.name.as_str() {
+        "project.changed" => "name",
+        name if name.starts_with("item.") => "project",
+        _ => return None,
+    };
+    event.data[field].as_str().map(str::to_owned)
 }
 
 /// Whether an event may change what `provider.list` says: a provider enabled or disabled, or a

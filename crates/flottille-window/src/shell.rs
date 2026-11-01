@@ -594,6 +594,11 @@ impl Shell {
             Update::DeveloperChanged => self.actions.send(Command::DeveloperRead),
             Update::Forged(forged) => self.forged(forged, cx),
             Update::News(news) => self.news(news, cx),
+            Update::Items(project) => {
+                if self.project_items_of(&project, cx).is_some() {
+                    self.actions.send(Command::Items { project });
+                }
+            }
             Update::TextChanged { project, .. } => {
                 self.actions.send(Command::RulesRead { project })
             }
@@ -1009,6 +1014,21 @@ impl Shell {
                     tasks.update(cx, |tasks, cx| tasks.listed(listed, cx));
                 }
             }
+            Outcome::Items { project, read } => {
+                if let Some(items) = self.project_items_of(&project, cx) {
+                    items.update(cx, |items, cx| items.listed(read, cx));
+                }
+            }
+            Outcome::Item {
+                project,
+                kind,
+                key,
+                shown,
+            } => {
+                if let Some(items) = self.project_items_of(&project, cx) {
+                    items.update(cx, |items, cx| items.shown(&kind, &key, shown, cx));
+                }
+            }
             Outcome::TaskWritten { project, refused } => {
                 if let Some(page) = self.settings_of_project(&project, cx) {
                     let section = page.read(cx).tasks().clone();
@@ -1063,6 +1083,16 @@ impl Shell {
     }
 
     /// The tasks of the open project page, when it is `project`'s.
+    /// The pull requests and tickets of the open project page, when it is `project`'s.
+    fn project_items_of(
+        &self,
+        project: &str,
+        cx: &App,
+    ) -> Option<Entity<crate::items::ProjectItems>> {
+        let page = self.main.read(cx).project_page()?.read(cx);
+        (page.name() == project).then(|| page.items().clone())
+    }
+
     fn project_tasks_of(
         &self,
         project: &str,
