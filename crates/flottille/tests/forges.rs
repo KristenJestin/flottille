@@ -1853,6 +1853,118 @@ fn a_forge_without_logs_says_so() {
     );
 }
 
+/// `bitbucket_pull_requests`, with the pull request 12 of `acme/api` failing on `checks`.
+fn bitbucket_failed_checks(user: &User, checks: Value) {
+    bitbucket_pull_requests(user);
+    let mut script: Value =
+        serde_json::from_str(&std::fs::read_to_string(user.path("bkt/script.json")).unwrap())
+            .unwrap();
+    script["checks"]["acme/api"]["12"] = checks;
+    user.bkt_script(script);
+}
+
+/// Adds the steps and the logs of Pipelines' build 31 of `acme/api` to the fake `bkt`'s script.
+fn bitbucket_build(user: &User, steps: Value, logs: Value) {
+    let mut script: Value =
+        serde_json::from_str(&std::fs::read_to_string(user.path("bkt/script.json")).unwrap())
+            .unwrap();
+    script["steps"]["acme/api"]["31"] = steps;
+    script["logs"]["acme/api"]["31"] = logs;
+    user.bkt_script(script);
+}
+
+const BUILD_31: &str = "https://bitbucket.org/acme/api/pipelines/results/31";
+const SETUP_STEP: &str = "{11111111-1111-1111-1111-111111111111}";
+const TEST_STEP: &str = "{22222222-2222-2222-2222-222222222222}";
+
+#[test]
+fn the_failed_step_of_a_bitbucket_cloud_check_gives_the_end_of_its_log_masked() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    bitbucket_fixture(&user);
+    bitbucket_failed_checks(
+        &user,
+        json!([
+            {"state": "SUCCESSFUL", "key": "lint", "name": "lint", "url": "https://x"},
+            {"state": "FAILED", "key": "pipelines", "name": "Pipeline #31", "url": BUILD_31}
+        ]),
+    );
+    let token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let log: String = (1..=60)
+        .map(|n| format!("compiling crate {n}\n"))
+        .chain([
+            format!("curl -H 'Authorization: token {token}'\n"),
+            "error: test failed, to rerun pass `--lib`\n".to_owned(),
+        ])
+        .collect();
+    bitbucket_build(
+        &user,
+        json!([
+            {"uuid": SETUP_STEP, "name": "setup", "state": {"name": "COMPLETED", "result": {"name": "SUCCESSFUL"}}},
+            {"uuid": TEST_STEP, "name": "test", "state": {"name": "COMPLETED", "result": {"name": "FAILED"}}}
+        ]),
+        json!({SETUP_STEP: "all fine\n", TEST_STEP: log}),
+    );
+    let (_, mcp) = agent_in(&user, Some("login"));
+
+    let answer = mcp.call("forge", json!({"action": "show", "repository": "api"}));
+
+    assert!(!answer.error, "{}", answer.text);
+    for said in [
+        "failed jobs (1):",
+        "- Pipeline #31: the last 40 of 62 lines of its log:",
+        "    error: test failed, to rerun pass `--lib`",
+        "[masked]",
+    ] {
+        assert!(answer.text.contains(said), "{said} in {}", answer.text);
+    }
+    assert!(!answer.text.contains(token), "{}", answer.text);
+    assert!(
+        !answer.text.contains("compiling crate 1\n"),
+        "{}",
+        answer.text
+    );
+    // The failed step's log, by the build number the check's link names.
+    assert!(
+        bkt_calls(&user).contains(&format!(
+            "pipeline logs 31 --context cloud --workspace acme --repo api --step {TEST_STEP}"
+        )),
+        "{:?}",
+        bkt_calls(&user)
+    );
+}
+
+#[test]
+fn a_bitbucket_cloud_check_of_another_ci_says_it_is_not_a_pipelines_build() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    bitbucket_fixture(&user);
+    bitbucket_failed_checks(
+        &user,
+        json!([
+            {"state": "FAILED", "key": "ci", "name": "Jenkins", "url": "https://ci.example.com/builds/5"},
+            // A Pipelines build of another repository is not read either.
+            {"state": "FAILED", "key": "other", "name": "Other", "url": "https://bitbucket.org/acme/lib/pipelines/results/31"}
+        ]),
+    );
+    let (_, mcp) = agent_in(&user, Some("login"));
+
+    let answer = mcp.call("forge", json!({"action": "show", "repository": "api"}));
+
+    assert!(!answer.error, "{}", answer.text);
+    for said in [
+        "- Jenkins: no log: it is not a Bitbucket Pipelines build, see https://ci.example.com/builds/5",
+        "- Other: no log: it is not a Bitbucket Pipelines build, see https://bitbucket.org/acme/lib/pipelines/results/31",
+    ] {
+        assert!(answer.text.contains(said), "{said} in {}", answer.text);
+    }
+    assert!(
+        bkt_calls(&user)
+            .iter()
+            .all(|call| !call.starts_with("pipeline")),
+        "{:?}",
+        bkt_calls(&user)
+    );
+}
+
 // Page sizes: Bitbucket Cloud refuses a `pagelen` above its endpoint's maximum (`400 Bad Request:
 // Invalid pagelen`), and the fake `bkt` does the same above 50 (#209).
 
