@@ -46,6 +46,8 @@ pub enum Update {
     DeveloperChanged,
     /// An agent created or changed a ticket or a pull request.
     Forged(model::Forged),
+    /// An agent said something, reported, or was woken: news for its session.
+    News(model::News),
     /// What the open session page's link read or saw, with the link's token.
     Session {
         token: u64,
@@ -156,6 +158,9 @@ fn follow(
         }
         if let Some(forged) = model::Forged::of(event) {
             let _ = updates.unbounded_send(Update::Forged(forged));
+        }
+        if let Some(news) = model::News::of(event) {
+            let _ = updates.unbounded_send(Update::News(news));
         }
     };
     loop {

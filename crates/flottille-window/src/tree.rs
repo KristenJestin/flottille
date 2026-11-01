@@ -7,8 +7,8 @@ use std::collections::HashSet;
 use flottille_ui::motion::PANEL;
 use flottille_ui::rows::TreeLevel;
 use flottille_ui::{
-    AgentState, Button, Fold, Icon, Item, Listing, Menu, Modal, StateIcon, Status, TreeRow, fade,
-    meta, palette, presence, presence_of, section_label, space, tree_children,
+    AgentState, Button, Fold, Icon, Item, Listing, Menu, Modal, StateIcon, Status, TreeRow, meta,
+    palette, presence, presence_of, section_label, space, tree_children,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -72,10 +72,15 @@ pub fn project_commands_id(name: &str) -> ElementId {
     ElementId::Name(format!("commands-project-{name}").into())
 }
 
-/// The element id of the mark a session's row shows while a ticket or a pull request it changed
-/// waits to be seen; its label says what changed.
-pub fn session_changed_id(id: &str) -> ElementId {
-    ElementId::Name(format!("changed-session-{id}").into())
+/// The element id of the dot a session's row shows while something new in it waits to be seen.
+pub fn session_unread_id(id: &str) -> ElementId {
+    ElementId::Name(format!("unread-session-{id}").into())
+}
+
+/// The element id of the one mark at the right of a session's row, a state or the unread dot:
+/// its label and its tooltip say what it means.
+pub fn session_mark_id(id: &str) -> ElementId {
+    ElementId::Name(format!("mark-session-{id}").into())
 }
 
 /// The element id of the icon that says a command runs in a session.
@@ -111,6 +116,9 @@ fn trailing(id: ElementId, commands: usize, last: impl IntoElement, cx: &App) ->
         })
         .child(last)
 }
+
+/// The height of the one mark at the right of a session's row, which its tooltip hangs from.
+const MARK: f32 = 16.;
 
 /// A mark shown on a row: a state icon over its own model, shown or not.
 struct Mark {
@@ -762,8 +770,20 @@ impl Render for PlaceNode {
     }
 }
 
-/// A session's row: its title, and on the right its mark when it runs or needs the user, else
-/// how long ago it was last active.
+/// What ends a session's row: one mark, chosen in this order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Trailing {
+    /// The session runs, needs the user or waits.
+    State(AgentState),
+    /// Something new was written in it since it was last opened.
+    Unread,
+    /// How long ago it was last active.
+    Ago,
+}
+
+/// A session's row: its title, and on the right one mark: its state when it runs, needs the user
+/// or waits, else a dot when something new waits to be seen, else how long ago it was last
+/// active.
 pub struct SessionRow {
     id: String,
     /// How many times it was drawn: the tests count them.
@@ -772,11 +792,13 @@ pub struct SessionRow {
     mark: Mark,
     /// How many commands its agents run now.
     commands: usize,
-    /// What its agents did to a ticket or a pull request since it was last opened, the last of it
-    /// in words: a small mark on the row says it until the session is opened.
-    changed: Option<SharedString>,
-    /// The words of the mark, kept while it folds away.
-    said_changed: SharedString,
+    /// What is new in the session since it was last opened, the last of it in words: a small dot
+    /// on the row says it until the session is opened, unless a state takes its place.
+    unread: Option<SharedString>,
+    /// What its state mark means, in words.
+    said: SharedString,
+    /// The words of the mark shown, kept while it folds away.
+    words: SharedString,
     active_at: u64,
     ago: SharedString,
     selected: bool,
@@ -805,8 +827,9 @@ impl SessionRow {
             title: SharedString::default(),
             mark: Mark::new(cx),
             commands: 0,
-            changed: None,
-            said_changed: SharedString::default(),
+            unread: None,
+            said: SharedString::default(),
+            words: SharedString::default(),
             active_at: 0,
             ago: SharedString::default(),
             selected: false,
@@ -883,16 +906,36 @@ impl SessionRow {
         }
     }
 
-    /// What its agents changed of a ticket or a pull request since it was last opened, as its
-    /// mark says it.
-    pub fn changed(&self) -> Option<&str> {
-        self.changed.as_deref()
+    /// What is new in the session since it was last opened, in words.
+    pub fn unread(&self) -> Option<&str> {
+        self.unread.as_deref()
     }
 
-    pub fn set_changed(&mut self, changed: Option<&str>, cx: &mut Context<Self>) {
-        if self.changed() != changed {
-            self.changed = changed.map(|said| SharedString::from(said.to_owned()));
+    pub fn set_unread(&mut self, unread: Option<&str>, cx: &mut Context<Self>) {
+        if self.unread() != unread {
+            self.unread = unread.map(|said| SharedString::from(said.to_owned()));
             cx.notify();
+        }
+    }
+
+    /// What its state mark means, in words.
+    pub fn said(&self) -> &str {
+        &self.said
+    }
+
+    pub fn set_said(&mut self, said: &str, cx: &mut Context<Self>) {
+        if self.said() != said {
+            self.said = SharedString::from(said.to_owned());
+            cx.notify();
+        }
+    }
+
+    /// The one mark the row ends with: its state, else the unread dot, else the time ago.
+    pub fn trailing(&self) -> Trailing {
+        match (self.mark.shown, &self.unread) {
+            (Some(state), _) => Trailing::State(state),
+            (None, Some(_)) => Trailing::Unread,
+            (None, None) => Trailing::Ago,
         }
     }
 
@@ -995,39 +1038,53 @@ impl Render for SessionRow {
             None => self.ago.clone(),
         };
         let id = session_commands_id(&self.id);
-        // A ticket or a pull request changed: a dot that widens in and fades, and folds away
-        // once the session is opened. It keeps the last words it said while it does.
-        if let Some(said) = &self.changed {
-            self.said_changed = said.clone();
+        let trailing_now = self.trailing();
+        // The mark keeps the last words it said while it folds away.
+        let words = match trailing_now {
+            Trailing::State(_) => Some(self.said.clone()),
+            Trailing::Unread => self.unread.clone(),
+            Trailing::Ago => None,
+        };
+        if let Some(words) = words.filter(|words| !words.is_empty()) {
+            self.words = words;
         }
-        let shown = fade(
-            ElementId::Name(format!("session-changed-fade-{}", self.id).into()),
-            self.changed.is_some(),
-            PANEL,
+        let p = palette(cx);
+        let unread = presence(
+            ElementId::Name(format!("session-unread-fade-{}", self.id).into()),
+            trailing_now == Trailing::Unread,
+            div()
+                .id(session_unread_id(&self.id))
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(14.))
+                .h(px(MARK))
+                .child(div().size(px(6.)).rounded_full().bg(p.acc))
+                .test_support(),
+        );
+        // One mark: the state, the dot or the time take each other's place, one folding away as
+        // the other comes. The state and the dot share the tooltip that says what they mean.
+        let mark = flottille_ui::tipped(
+            div()
+                .id(session_mark_id(&self.id))
+                .flex()
+                .items_center()
+                .h(px(MARK))
+                .aria_label(self.words.clone())
+                .child(self.mark.icon(&self.id))
+                .child(unread),
+            self.words.clone(),
+            MARK,
             window,
             cx,
         );
-        let p = palette(cx);
-        let changed = (shown > 0.0).then(|| {
-            div()
-                .id(session_changed_id(&self.id))
-                .flex_none()
-                .w(px(14. * shown))
-                .overflow_hidden()
-                .opacity(shown)
-                .aria_label(self.said_changed.clone())
-                .child(div().size(px(6.)).rounded_full().bg(p.acc))
-                .test_support()
-        });
-        // The mark and the time take each other's place: one folds away as the other comes.
         let last = div()
             .flex()
             .items_center()
-            .children(changed)
-            .child(self.mark.icon(&self.id))
+            .child(mark)
             .child(presence(
                 ElementId::Name(format!("meta-{}", self.id).into()),
-                self.mark.shown.is_none(),
+                trailing_now == Trailing::Ago,
                 meta(when, cx),
             ))
             .into_any_element();

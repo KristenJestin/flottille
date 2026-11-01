@@ -193,6 +193,9 @@ pub struct Session {
     /// `Running`, `NeedsYou`, or `Waiting` (between turns, for what happens outside); `None` for
     /// a session at rest.
     pub mark: Option<AgentState>,
+    /// What its mark means, in words, for its tooltip: `Needs you: a permission`, `Running`,
+    /// `Waiting: checks of #1`; empty without a mark.
+    pub mark_said: String,
     /// How many agents its tree holds, the root included.
     pub agents: usize,
     /// How many of them have not ended: what ending the session ends.
@@ -301,6 +304,35 @@ impl Forged {
             said: said.to_owned(),
             excerpt,
             at: event.at,
+        })
+    }
+}
+
+/// Something new in a session that is no ticket nor pull request: an agent said something,
+/// reported, or was woken by what it waited for. The session's row says it until it is opened.
+#[derive(Clone, Debug, PartialEq)]
+pub struct News {
+    pub agent: String,
+    /// In words, as the row's tooltip finishes `New since you looked:`.
+    pub said: &'static str,
+}
+
+impl News {
+    /// An agent said something: the weakest news.
+    pub const MESSAGE: &'static str = "a new message";
+
+    pub fn of(event: &flottille_core::protocol::Event) -> Option<News> {
+        let data = &event.data;
+        let said = match event.name.as_str() {
+            // The history a load replays was said before.
+            "agent.message" if data["replay"] != true => Self::MESSAGE,
+            "agent.reported" => "a report",
+            "delivery.queued" if data["kind"] == "subscription" => "a subscription woke the agent",
+            _ => return None,
+        };
+        Some(News {
+            agent: data["agent"].as_str()?.to_owned(),
+            said,
         })
     }
 }
@@ -512,6 +544,25 @@ impl Snapshot {
             .filter_map(|subscription| subscription["agent"].as_str())
             .map(|agent| root_of(&parents, agent))
             .collect();
+        // What each of those roots waits for, in a few words: the first of its subscriptions.
+        let mut waiting_for: HashMap<&str, String> = HashMap::new();
+        for subscription in list(answers.subscriptions, "subscriptions") {
+            let Some(agent) = subscription["agent"].as_str() else {
+                continue;
+            };
+            let events: Vec<&str> = list(subscription, "events")
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            let number = subscription["target"]["number"].as_u64();
+            waiting_for.entry(root_of(&parents, agent)).or_insert(
+                match (events.is_empty(), number) {
+                    (false, Some(n)) => format!("Waiting: {} of #{n}", events.join(", ")),
+                    (true, Some(n)) => format!("Waiting: #{n}"),
+                    _ => "Waiting".to_owned(),
+                },
+            );
+        }
         let name_of = |id: &str| {
             let agent = agents.iter().find(|a| a["id"].as_str() == Some(id));
             agent
@@ -539,11 +590,27 @@ impl Snapshot {
                 } else {
                     None
                 };
+                let mark_said = match mark {
+                    None => String::new(),
+                    Some(AgentState::Running) => "Running".to_owned(),
+                    Some(AgentState::Waiting) => waiting_for
+                        .get(id.as_str())
+                        .cloned()
+                        .unwrap_or_else(|| "Waiting".to_owned()),
+                    Some(_) => match bell.iter().find(|item| item.session == id) {
+                        Some(item) if item.key.starts_with("request-") => {
+                            "Needs you: a permission".to_owned()
+                        }
+                        Some(_) => "Needs you: a question".to_owned(),
+                        None => "Needs you".to_owned(),
+                    },
+                };
                 Session {
                     title: session_title(&id, answers.briefs.get(&id)),
                     project: text(agent, "project"),
                     place: agent["workspace"].as_str().map(str::to_owned),
                     mark,
+                    mark_said,
                     agents: size.max(1),
                     live,
                     resumable: agent["resumable"] == true,
@@ -1038,6 +1105,38 @@ mod tests {
             asking.session("r1").unwrap().mark,
             Some(AgentState::NeedsYou)
         );
+    }
+
+    #[test]
+    fn a_session_s_mark_says_in_words_why_it_is_there() {
+        let agents = json!({"agents": [agent("r1", None, "idle", None),
+            json!({"id": "r2", "parent": null, "state": "idle", "project": "app",
+                "waiting_on_answer": true, "created_at": 10, "active_at": 20}),
+            agent("r3", None, "working", None),
+            agent("r4", None, "idle", None), agent("c4", Some("r4"), "idle", None),
+            agent("r5", None, "idle", None)]});
+        let approvals = json!({"requests": [{"number": 3, "agent": "r1", "tool": "fs_read",
+            "call": {"path": ".env"}, "created_at": 30}]});
+        let subscriptions = json!({"subscriptions": [{"agent": "c4", "events": ["checks"],
+            "target": {"project": "app", "repository": ".", "number": 1}}]});
+        let asking = HashSet::from(["r1".to_owned(), "r2".to_owned()]);
+        let snapshot = Snapshot::build(Answers {
+            projects: &json!({"projects": [{"name": "app", "folder": "/work/app"}]}),
+            workspaces: &json!({"workspaces": []}),
+            agents: &agents,
+            approvals: &approvals,
+            needs_user: &asking,
+            questions: &HashMap::from([("r2".to_owned(), ("Which one?".to_owned(), 40))]),
+            briefs: &HashMap::new(),
+            commands: &json!({"commands": []}),
+            subscriptions: &subscriptions,
+        });
+        let said = |id: &str| snapshot.session(id).unwrap().mark_said.as_str();
+        assert_eq!(said("r1"), "Needs you: a permission");
+        assert_eq!(said("r2"), "Needs you: a question");
+        assert_eq!(said("r3"), "Running");
+        assert_eq!(said("r4"), "Waiting: checks of #1");
+        assert_eq!(said("r5"), "", "no mark, no words");
     }
 
     #[test]

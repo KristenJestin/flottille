@@ -27,7 +27,7 @@ use crate::add_project::AddProject;
 use crate::composer::{Choice, Composer, PlaceChoice};
 use crate::history::{History, Way};
 use crate::link::{self, Connect, Seen, Update};
-use crate::model::{BellItem, Forged, Place, Preparation, Snapshot};
+use crate::model::{BellItem, Forged, News, Place, Preparation, Snapshot};
 use crate::open::Opener;
 use crate::page::{MainArea, Page};
 use crate::project::{NewWorkspace, PlaceData, ProjectData, SessionLine};
@@ -108,6 +108,11 @@ pub struct Shell {
     /// marks its session's row and rings the bell until the session is opened. They live as long
     /// as the window.
     forged: Vec<Forged>,
+    /// What is new in each session since it was last opened, the last of it in words: an agent
+    /// said something, reported, was woken, or changed a ticket or a pull request. A session's
+    /// row says it with one dot, unless a state mark takes its place; they live as long as the
+    /// window.
+    news: HashMap<String, String>,
     /// Each project's composer and new workspace form, made when its page first opens: a draft,
     /// a send and a name asked belong to their project.
     forms: HashMap<String, Forms>,
@@ -157,6 +162,17 @@ type Work = (
     Vec<(String, Preparation)>,
     Vec<(String, Option<AgentState>)>,
 );
+
+/// What a row's dot says: `New since you looked: opened a pull request`.
+fn unread_words(said: &str) -> String {
+    let mut letters = said.chars();
+    let first = letters.next().into_iter().flat_map(char::to_lowercase);
+    format!(
+        "New since you looked: {}{}",
+        first.collect::<String>(),
+        letters.as_str()
+    )
+}
 
 pub fn now_ms() -> u64 {
     SystemTime::now()
@@ -243,6 +259,7 @@ impl Shell {
             ended: None,
             sessions: HashMap::new(),
             forged: Vec::new(),
+            news: HashMap::new(),
             forms: HashMap::new(),
             actions,
             details_of: None,
@@ -576,6 +593,7 @@ impl Shell {
             Update::TextChanged { judge: true, .. } => self.actions.send(Command::JudgeRead),
             Update::DeveloperChanged => self.actions.send(Command::DeveloperRead),
             Update::Forged(forged) => self.forged(forged, cx),
+            Update::News(news) => self.news(news, cx),
             Update::TextChanged { project, .. } => {
                 self.actions.send(Command::RulesRead { project })
             }
@@ -1278,6 +1296,9 @@ impl Shell {
                     row.set(&session.title, session.mark, session.active_at, now, cx)
                 });
             }
+            if row.read(cx).said() != session.mark_said {
+                row.update(cx, |row, cx| row.set_said(&session.mark_said, cx));
+            }
             if row.read(cx).commands() != session.commands {
                 row.update(cx, |row, cx| row.set_commands(session.commands, cx));
             }
@@ -1410,11 +1431,29 @@ impl Shell {
     /// rings, unless the session is the one open, where it is in sight.
     fn forged(&mut self, forged: Forged, cx: &mut Context<Self>) {
         let session = self.snapshot.root_of(&forged.agent);
-        if self.selected == Some(Selection::Session(session)) {
+        if self.selected == Some(Selection::Session(session.clone())) {
             return;
         }
+        self.news.insert(session, unread_words(&forged.said));
         self.forged.push(forged);
         self.ring(cx);
+    }
+
+    /// An agent said something, reported or was woken: its session's row says it, unless the
+    /// session is the one open, where it is in sight.
+    fn news(&mut self, news: News, cx: &mut Context<Self>) {
+        let session = self.snapshot.root_of(&news.agent);
+        if self.selected == Some(Selection::Session(session.clone())) {
+            return;
+        }
+        let said = unread_words(news.said);
+        // A message comes in many pieces, and says less than a report or a change: it never
+        // replaces what the row said.
+        let weak = news.said == News::MESSAGE && self.news.contains_key(&session);
+        if !weak && self.news.get(&session) != Some(&said) {
+            self.news.insert(session, said);
+            self.ring(cx);
+        }
     }
 
     /// Brings the bell and the sessions' marks up to what waits for the user and what the
@@ -1422,10 +1461,8 @@ impl Shell {
     fn ring(&mut self, cx: &mut Context<Self>) {
         let snapshot = &self.snapshot;
         let mut bell: Vec<BellItem> = snapshot.bell.clone();
-        let mut changed: HashMap<String, &str> = HashMap::new();
         for forged in &self.forged {
             let session = snapshot.root_of(&forged.agent);
-            changed.insert(session.clone(), &forged.said);
             bell.push(BellItem {
                 key: match forged.ticket {
                     true => format!("ticket-{}", forged.seq),
@@ -1439,9 +1476,9 @@ impl Shell {
         }
         bell.sort_by_key(|item| item.at);
         for (id, row) in &self.sessions {
-            let said = changed.get(id).copied();
-            if row.read(cx).changed() != said {
-                row.update(cx, |row, cx| row.set_changed(said, cx));
+            let said = self.news.get(id).map(String::as_str);
+            if row.read(cx).unread() != said {
+                row.update(cx, |row, cx| row.set_unread(said, cx));
             }
         }
         let items: Vec<(BellItem, String)> = bell
@@ -1638,7 +1675,8 @@ impl Shell {
             let snapshot = &self.snapshot;
             self.forged
                 .retain(|forged| &snapshot.root_of(&forged.agent) != id);
-            if self.forged.len() != before {
+            let read = self.news.remove(id).is_some();
+            if read || self.forged.len() != before {
                 self.ring(cx);
             }
         }

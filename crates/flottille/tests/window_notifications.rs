@@ -12,13 +12,14 @@ use std::time::{Duration, Instant};
 
 use common::User;
 use common::mcp::{Answer, Mcp, server_of};
+use flottille_ui::AgentState;
 use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::conversation::{Block, STARTED_SESSION_KIND};
 use flottille_window::link::Connect;
 use flottille_window::session::SessionPage;
 use flottille_window::shell::{bell_line_id, bell_session_id};
-use flottille_window::tree::{session_changed_id, session_id};
+use flottille_window::tree::{Trailing, session_id, session_mark_id, session_unread_id};
 use gpui_kit::test::{TestQueryExt, TestWindowExt};
 use gpui_kit::{Bounds, Entity, Pixels, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
@@ -35,6 +36,7 @@ fn user() -> User {
     user.fake_script(json!({"turns": [
         {"when": "lead the work", "do": [
             {"usage": {"used": 82_000, "size": 200_000}}, {"say": "On it."}]},
+        {"when": "tell me more", "do": [{"say": "There is more."}]},
         {"when": "start the docs session", "do": [{"mcp": {"tool": "agent_launch",
             "arguments": {"title": "Docs", "brief": "Write the docs", "root": true,
                 "workspace": "login"}}}]}
@@ -414,7 +416,7 @@ fn a_pull_request_opened_by_a_session_marks_its_row_and_notifies(cx: &mut TestAp
     user.gh_script(json!({"created": 12}));
     let (shell, cx) = window(&user, cx);
     open_session(&shell, &other, cx);
-    assert!(!has(session_changed_id(&lead), cx), "nothing changed yet");
+    assert!(!has(session_unread_id(&lead), cx), "nothing changed yet");
 
     let create = json!({"action": "create", "repository": ".", "title": "Add the login page",
         "body": "What it does"});
@@ -424,21 +426,21 @@ fn a_pull_request_opened_by_a_session_marks_its_row_and_notifies(cx: &mut TestAp
     until(&shell, cx, "the lead's row is marked", |cx| {
         shell.read_with(cx, |s, cx| {
             s.session(&lead)
-                .is_some_and(|row| row.read(cx).changed().is_some())
+                .is_some_and(|row| row.read(cx).unread().is_some())
         })
     });
     settle(cx);
 
     assert_eq!(
-        label(session_changed_id(&lead), cx).as_deref(),
-        Some("Opened a pull request")
+        label(session_mark_id(&lead), cx).as_deref(),
+        Some("New since you looked: opened a pull request")
     );
     assert!(
-        !has(session_changed_id(&other), cx),
+        !has(session_unread_id(&other), cx),
         "no mark on another session"
     );
     let row = rect(session_id(&lead), cx);
-    let mark = rect(session_changed_id(&lead), cx);
+    let mark = rect(session_unread_id(&lead), cx);
     assert!(
         mark.origin.y >= row.origin.y && mark.bottom() <= row.bottom(),
         "on the session's own row: {mark:?} in {row:?}"
@@ -462,11 +464,11 @@ fn a_pull_request_opened_by_a_session_marks_its_row_and_notifies(cx: &mut TestAp
     });
     cx.update(|window, cx| window.simulate_next_frame(cx));
     assert!(
-        has(session_changed_id(&lead), cx),
+        has(session_unread_id(&lead), cx),
         "it folds away, drawn until it has"
     );
     settle(cx);
-    assert!(!has(session_changed_id(&lead), cx));
+    assert!(!has(session_unread_id(&lead), cx));
 }
 
 #[gpui_kit::test]
@@ -501,4 +503,188 @@ fn a_notification_says_why_and_is_cut_cleanly(cx: &mut TestAppContext) {
     }
     assert_eq!(label(bell_session_id(&key), cx).as_deref(), Some(BRIEF));
     let _ = lead;
+}
+
+fn trailing_of(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> Option<Trailing> {
+    shell.read_with(cx, |s, cx| s.session(id).map(|row| row.read(cx).trailing()))
+}
+
+fn unread_of(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> Option<String> {
+    shell.read_with(cx, |s, cx| {
+        s.session(id)
+            .and_then(|row| row.read(cx).unread().map(str::to_owned))
+    })
+}
+
+/// The pointer rests on a session's mark until its tooltip has come: what it says.
+fn words_of_mark(id: &str, cx: &mut VisualTestContext) -> Option<String> {
+    // The row offers its "⋯" under the pointer and the mark makes room for it: the pointer comes
+    // to the row first, then to the mark where it is by then.
+    cx.update(|window, cx| window.hover(session_id(id), cx));
+    settle(cx);
+    cx.update(|window, cx| window.hover(session_mark_id(id), cx));
+    settle(cx);
+    settle(cx);
+    let words = label(format!("{}-tooltip", session_mark_id(id)), cx);
+    cx.simulate_mouse_move(
+        gpui_kit::point(px(1430.), px(790.)),
+        None,
+        Default::default(),
+    );
+    settle(cx);
+    words
+}
+
+/// The lead opened a pull request while the user looked at `other`: the lead's row holds news.
+fn lead_with_news(
+    user: &User,
+    shell: &Entity<Shell>,
+    lead: &str,
+    mcp: &Mcp,
+    cx: &mut VisualTestContext,
+) {
+    let create = json!({"action": "create", "repository": ".", "title": "Add the login page",
+        "body": "What it does"});
+    let number = held_number(mcp.call("forge", create));
+    user.call("approval.approve", json!({"number": number}))
+        .unwrap();
+    until(shell, cx, "the lead's row holds news", |cx| {
+        unread_of(shell, lead, cx).is_some()
+    });
+    settle(cx);
+}
+
+#[gpui_kit::test]
+fn a_session_that_needs_the_user_and_has_news_shows_the_state_mark_alone(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = lead(&user);
+    let (other, _) = session(&user, "look at the other thing");
+    user.gh_script(json!({"created": 12}));
+    let (shell, cx) = window(&user, cx);
+    open_session(&shell, &other, cx);
+    lead_with_news(&user, &shell, &lead, &mcp, cx);
+    assert_eq!(trailing_of(&shell, &lead, cx), Some(Trailing::Unread));
+    assert!(has(session_unread_id(&lead), cx));
+
+    let number = held_number(mcp.call("fs_read", json!({"path": ".env"})));
+    until(&shell, cx, "the lead needs the user", |cx| {
+        trailing_of(&shell, &lead, cx) == Some(Trailing::State(AgentState::NeedsYou))
+    });
+    // The dot folds away as the state mark comes: both are drawn on the way, one at rest.
+    assert!(
+        has(session_unread_id(&lead), cx),
+        "the dot is still drawn on the way"
+    );
+    assert!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)) > 0,
+        "the swap has frames in between"
+    );
+    settle(cx);
+    assert!(!has(session_unread_id(&lead), cx), "the state mark alone");
+    assert_eq!(
+        label(session_mark_id(&lead), cx).as_deref(),
+        Some("Needs you: a permission")
+    );
+    assert!(
+        unread_of(&shell, &lead, cx).is_some(),
+        "the news is kept for when the state goes"
+    );
+
+    // The request answered, the state goes and the dot comes back, with frames in between.
+    user.call("approval.approve", json!({"number": number}))
+        .unwrap();
+    until(&shell, cx, "the state goes", |cx| {
+        trailing_of(&shell, &lead, cx) == Some(Trailing::Unread)
+    });
+    assert!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)) > 0,
+        "the swap back has frames in between"
+    );
+    settle(cx);
+    assert!(has(session_unread_id(&lead), cx));
+    assert_eq!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)),
+        0,
+        "nothing is redrawn at rest"
+    );
+}
+
+#[gpui_kit::test]
+fn an_idle_session_with_a_new_message_shows_the_unread_dot_alone_and_says_why_on_hover(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let (lead, _) = lead(&user);
+    let (other, _) = session(&user, "look at the other thing");
+    let (shell, cx) = window(&user, cx);
+    open_session(&shell, &lead, cx);
+    assert_eq!(trailing_of(&shell, &other, cx), Some(Trailing::Ago));
+
+    // What an agent says in the session in sight is in sight: no dot.
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": "tell me more"}),
+    )
+    .unwrap();
+    user.call(
+        "agent.send",
+        json!({"agent": other, "message": "tell me more"}),
+    )
+    .unwrap();
+    until(&shell, cx, "the other session holds news", |cx| {
+        unread_of(&shell, &other, cx).is_some()
+    });
+    eventually("the lead's turn ends", || state_of(&user, &lead) == "idle");
+    eventually("the other's turn ends", || {
+        state_of(&user, &other) == "idle"
+    });
+    until(&shell, cx, "both rest", |cx| {
+        trailing_of(&shell, &other, cx) == Some(Trailing::Unread)
+    });
+    settle(cx);
+
+    assert_eq!(trailing_of(&shell, &lead, cx), Some(Trailing::Ago));
+    assert!(!has(session_unread_id(&lead), cx));
+    assert!(has(session_unread_id(&other), cx));
+    assert_eq!(
+        trailing_of(&shell, &other, cx),
+        Some(Trailing::Unread),
+        "the dot, not the time ago and no state"
+    );
+    assert_eq!(
+        words_of_mark(&other, cx).as_deref(),
+        Some("New since you looked: a new message")
+    );
+    assert!(
+        label(session_mark_id(&lead), cx).is_none_or(|said| said.is_empty()),
+        "the time ago has no words"
+    );
+}
+
+#[gpui_kit::test]
+fn opening_the_session_clears_the_unread_dot(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = lead(&user);
+    let (other, _) = session(&user, "look at the other thing");
+    user.gh_script(json!({"created": 12}));
+    let (shell, cx) = window(&user, cx);
+    open_session(&shell, &other, cx);
+    lead_with_news(&user, &shell, &lead, &mcp, cx);
+
+    cx.update(|window, cx| window.click(session_id(&lead), cx));
+    until(&shell, cx, "the news is read", |cx| {
+        unread_of(&shell, &lead, cx).is_none()
+    });
+    assert!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)) > 0,
+        "it folds away, it does not jump"
+    );
+    assert!(has(session_unread_id(&lead), cx), "drawn until it has");
+    settle(cx);
+    assert!(!has(session_unread_id(&lead), cx));
+    assert_eq!(trailing_of(&shell, &lead, cx), Some(Trailing::Ago));
+    // Leaving it, nothing comes back by itself.
+    cx.update(|window, cx| window.click(session_id(&other), cx));
+    settle(cx);
+    assert_eq!(unread_of(&shell, &lead, cx), None);
 }
