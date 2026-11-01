@@ -325,6 +325,7 @@ mod tests {
             reviews: Vec::new(),
             reviewers: Vec::new(),
             jobs: Vec::new(),
+            ci: None,
         }
     }
 

@@ -32,6 +32,7 @@ use crate::place::Place;
 use crate::projects::{self, Failure};
 
 mod bitbucket;
+mod ci;
 mod events;
 mod logs;
 
@@ -296,6 +297,8 @@ pub struct Pull {
     pub reviewers: Vec<(String, &'static str)>,
     /// The failing checks, whose log `forge show` gives (`logs::attach`).
     pub jobs: Vec<Job>,
+    /// How long its repository's CI usually takes, when the forge says it (`ci::attach`).
+    pub ci: Option<ci::Runs>,
 }
 
 /// A failing check of a pull request.
@@ -439,6 +442,7 @@ impl Pull {
                     log: None,
                 })
                 .collect(),
+            ci: None,
         })
     }
 }
@@ -1109,10 +1113,9 @@ async fn forge_subscribe(
         ));
     }
     let longest = crate::subscriptions::LONGEST_MINUTES;
-    let minutes = asked
-        .minutes
-        .unwrap_or(crate::subscriptions::DEFAULT_MINUTES);
-    if !(1..=longest).contains(&minutes) {
+    if let Some(minutes) = asked.minutes
+        && !(1..=longest).contains(&minutes)
+    {
         return Outcome::Refused(format!(
             "refused: minutes is from 1 to {longest}, 60 by default"
         ));
@@ -1168,6 +1171,18 @@ async fn forge_subscribe(
             pull.number, pull.state
         ));
     }
+    // The one read of the runs: it tells the agent, and sizes the wait it did not size.
+    let runs = match &repository.forge {
+        Some(forge) => ci::recent(forge).await,
+        None => None,
+    };
+    let (minutes, duration) = match asked.minutes {
+        Some(minutes) => (minutes, None),
+        None => {
+            let (minutes, why) = ci::wait_for(runs.as_ref());
+            (minutes, Some(why))
+        }
+    };
     let target = events::target(&workspace, &path, pull.number);
     for old in crate::subscriptions::of(daemon, agent) {
         if old.target == target {
@@ -1197,12 +1212,16 @@ async fn forge_subscribe(
         "people" => ", from people",
         _ => "",
     };
-    Outcome::Done(format!(
+    let mut text = format!(
         "Subscribed: the next {}{from} of the {} wakes you once, as a delivery, within {minutes} \
          min. What is so now is no event: forge show reads it.",
         subscription.events.join(" or "),
         target_named(&subscription.target)
-    ))
+    );
+    for line in runs.map(|runs| runs.line()).into_iter().chain(duration) {
+        text.push_str(&format!("\n{line}"));
+    }
+    Outcome::Done(text)
 }
 
 /// `forge unsubscribe`: the agent's subscriptions to the workspace and repository it names, every
@@ -1436,6 +1455,7 @@ async fn forge_show(daemon: &Daemon, place: &Place, asked: ForgeCall, number: u6
         )),
         Ok(Some(mut pull)) => {
             logs::attach(&forge, &mut pull).await;
+            ci::attach(&forge, &mut pull).await;
             let again = format!(
                 "{{\"action\": \"show\", \"repository\": {}, \"number\": {number}, \
                  \"detail\": \"full\"}}",
@@ -1711,6 +1731,7 @@ async fn forge_read(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
     for repository in &mut read.repositories {
         if let (Some(forge), Some(pull)) = (&repository.forge, &mut repository.pull) {
             logs::attach(forge, pull).await;
+            ci::attach(forge, pull).await;
         }
     }
     Outcome::Done(read_text(
@@ -2094,6 +2115,9 @@ fn pull_text(text: &mut String, named: &str, pull: &Pull, full: bool, again: &st
         }
     }
     text.push_str(&logs::text(&pull.jobs));
+    if let Some(ci) = &pull.ci {
+        text.push_str(&format!("  {}\n", ci.line()));
+    }
     for (title, comments) in [("comments", &pull.comments), ("reviews", &pull.reviews)] {
         let said: Vec<&Comment> = comments.iter().filter(|c| !c.body.is_empty()).collect();
         if said.is_empty() {

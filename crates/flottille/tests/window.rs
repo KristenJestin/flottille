@@ -360,8 +360,17 @@ fn a_root_s_question_marks_its_session_and_rings_the_bell_until_the_user_writes(
     });
 
     send(&user, &id, "ask me");
+    // The mark comes from `agent.trees` and the bell from `agent.list` and the question's own
+    // read: one snapshot can hold the first and not yet the others.
     until(&shell, cx, "the question waits for the user", |cx| {
         mark_of(&shell, &id, cx) == Some(AgentState::NeedsYou)
+            && shell.read_with(cx, |s, cx| {
+                s.top().read(cx).count() == 1
+                    && s.snapshot()
+                        .bell
+                        .first()
+                        .is_some_and(|item| item.detail == "Which database?")
+            })
     });
     assert_eq!(shell.read_with(cx, |s, cx| s.top().read(cx).count()), 1);
     let item = shell.read_with(cx, |s, _| s.snapshot().bell[0].clone());
@@ -395,14 +404,12 @@ fn one_session_changing_state_redraws_its_row_and_not_the_others(cx: &mut TestAp
         page_of(&shell, cx).read_with(cx, |page, cx| {
             page.chips() == ["atlas · main"]
                 && page.repositories().read(cx).repositories().is_some()
+                && page.tasks().read(cx).tasks().is_some()
         })
     });
-    settle(cx);
     let renders = |id: &str, cx: &mut VisualTestContext| {
         shell.read_with(cx, |s, cx| s.session(id).unwrap().read(cx).renders())
     };
-    let before: Vec<usize> = quiet.iter().map(|id| renders(id, cx)).collect();
-    let busy_before = renders(&busy, cx);
     let page = page_of(&shell, cx);
     let composer = composer_of(&shell, "atlas", cx);
     let page_and_composer = |cx: &mut VisualTestContext| {
@@ -411,6 +418,29 @@ fn one_session_changing_state_redraws_its_row_and_not_the_others(cx: &mut TestAp
             composer.read_with(cx, |c, _| c.renders()),
         )
     };
+    // At rest: the window is polled for longer than the details' period and nothing is drawn
+    // again. What the daemon still tells the page when the machine is slow is drawn before the
+    // counts are taken, not between them.
+    let everything = |cx: &mut VisualTestContext| {
+        let rows: Vec<usize> = quiet.iter().map(|id| renders(id, cx)).collect();
+        (rows, renders(&busy, cx), page_and_composer(cx))
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(Instant::now() < deadline, "the window never came to rest");
+        settle(cx);
+        let counted = everything(cx);
+        let until_then = Instant::now() + Duration::from_millis(1200);
+        until(&shell, cx, "a period of the details passes", |_| {
+            Instant::now() >= until_then
+        });
+        settle(cx);
+        if everything(cx) == counted {
+            break;
+        }
+    }
+    let before: Vec<usize> = quiet.iter().map(|id| renders(id, cx)).collect();
+    let busy_before = renders(&busy, cx);
     let page_and_composer_before = page_and_composer(cx);
 
     send(&user, &busy, "work a while");
@@ -9568,6 +9598,9 @@ fn remove_opens_a_confirmation_disabled_with_its_reason_when_work_would_be_lost(
     until(&shell, cx, "the card is gone", |cx| {
         card_of(&shell, Some("clean"), cx).is_none()
     });
+    // The card leaves with the daemon's event and the toast comes with the answer to the
+    // command: two updates, in either order.
+    toast_said(&shell, "Workspace clean removed", cx);
     assert!(
         last_toast(cx).is_some_and(|t| t.starts_with("Workspace clean removed")),
         "{:?}",
