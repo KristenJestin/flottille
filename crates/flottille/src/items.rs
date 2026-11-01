@@ -574,7 +574,7 @@ async fn source_round(daemon: &Arc<Daemon>, project: &Project, source: &Source) 
         // The project went meanwhile: nothing of it is written back.
         Ok(None) => return,
         Ok(Some(note)) => {
-            cursor.first_at = cursor.first_at.or(Some(now_ms()));
+            cursor.first_at = cursor.first_at.or(Some(started));
             cursor.cursor = Some(started);
             cursor.failures = 0;
             cursor.problem = None;

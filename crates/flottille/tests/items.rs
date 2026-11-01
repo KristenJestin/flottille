@@ -977,3 +977,47 @@ fn a_data_center_pull_whose_checks_end_without_it_moving_emits_item_checks() {
     assert_eq!(events[0]["name"], "item.checks");
     assert_eq!(events[0]["data"]["checks"], "passing");
 }
+
+#[test]
+fn an_item_made_during_a_long_first_round_is_opened_at_the_next() {
+    let user = user();
+    project(&user, "git@github.com:acme/api.git");
+    let started = user.call("test.advance", json!({"ms": 0})).unwrap()["now"]
+        .as_u64()
+        .unwrap();
+    user.gh_script(
+        json!({"pulls": {"acme/api": {"feature-1": pull(1, "x", "MERGED", OLD)}},
+        "list_delay_ms": 1500}),
+    );
+    declare(&user, github(), Value::Null);
+    // The first round lasts ten minutes by the daemon's clock.
+    let advancing = {
+        let connect = user.connector();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            let mut stream = connect().unwrap();
+            writeln!(
+                stream,
+                "{}",
+                json!({"id": "1", "method": "test.advance", "params": {"ms": 10 * 60_000}})
+            )
+            .unwrap();
+            let mut line = String::new();
+            BufReader::new(stream).read_line(&mut line).unwrap();
+        })
+    };
+    refresh(&user);
+    advancing.join().unwrap();
+    // Made two minutes into that round, after its list.
+    let mut made = pull(2, "Made meanwhile", "OPEN", NEW);
+    made["createdAt"] = json!(rfc3339(started + 2 * 60_000));
+    user.gh_script(json!({"pulls": {"acme/api": {
+        "feature-1": pull(1, "x", "MERGED", OLD), "feature-2": made}}}));
+    refresh(&user);
+    let opened: Vec<Value> = item_events(&user)
+        .into_iter()
+        .filter(|e| e["name"] == "item.opened")
+        .collect();
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    assert_eq!(opened[0]["data"]["key"], "2");
+}
