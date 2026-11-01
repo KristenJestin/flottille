@@ -327,7 +327,9 @@ pending requests.
 - **`subscribe {workspace?, repository?, events, from?, minutes?}`**: the next of `events`
   (`checks`, `review`, `comment`, `merged`, `closed`) of the pull request of a workspace's branch
   wakes the agent once, as a `subscription` delivery (`docs/design.md` §5.6). The call answers at
-  once; what is so already (checks that already ended) is no event, `show` reads it. `from` is
+  once; what is so already (checks that already ended) is no event, `show` reads it; when the
+  rounds have not read the repository's pull requests once yet, the answer says what happens
+  before their first is not seen. `from` is
   `anyone` (the default) or `people`: no bot, nor a comment marked as posted by an agent
   ([`forges.md`](forges.md), "What Flottille posts is marked"). `minutes` is how
   long it waits, 60 by default, 6000 (100 hours) at most. Without `minutes` the wait is sized by the

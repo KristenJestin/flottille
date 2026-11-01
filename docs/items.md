@@ -188,14 +188,22 @@ again on its own (#257):
   that what is so then is no event. What a live read does not say (its author, labels and
   assignees, when it changed, a Jira state) is kept, as are the links of its checks; a pull
   request found again is no longer `removed`. **One no round stored yet** (made since the last
-  round, by `forge create` or `tickets create`) is stored as the live read found it, with
-  `item.opened`, once its source had a first round, so that what happens to it before the next
-  round is an event of that round; its assignees and labels, which a live read does not say, are
-  no change then. A Jira work item no round stored is not, its live read saying no state.
+  round, by `forge create` or `tickets create`, or too old to be listed) is stored as the live
+  read found it, once its source had a first round, so that what happens to it before the next
+  round is an event of that round; it is `item.opened` as in a round, only open and not made
+  before that first round (a live read says no creation time: an open one is opened). Its
+  assignees and labels, which a live read does not say, are no change then. A Jira work item no
+  round stored is not, its live read saying no state.
 - **A live read takes the project's round lock before it reads**, so that no round lands between
   the read and its write and none is written over by an older read: `show` reads without storing
   while a round runs (the round stores a read of its own), and holds the lock for its one read,
-  not for the logs and runs it reads after; `subscribe` waits for the round to end.
+  not for the logs and runs it reads after. `subscribe` never waits behind a whole round (a round
+  holds the lock for every source, minutes for a big project's first): it reads without the
+  lock, then waits for it three seconds at most (`items::LIVE_WAIT`), and stores its read only
+  when it got it and nothing wrote since its read started (the lock counts what wrote under it);
+  otherwise it stores nothing, and the round running or just run stored what the next ones
+  compare with. Its answer says when the rounds do not see the item yet: its source had no
+  complete round, or the item is not stored (a Jira work item made since the last round).
 - A subscription made before this, stored with what its own watch saw, is carried over as it is:
   its target names the same pull request, the next rounds' events are offered to it, and what its
   watch saw is no longer read.
