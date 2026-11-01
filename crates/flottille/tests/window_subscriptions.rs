@@ -10,11 +10,13 @@ use std::time::{Duration, Instant};
 
 use common::User;
 use common::mcp::{Answer, Mcp, server_of};
+use flottille_core::protocol::Event;
 use flottille_ui::AgentState;
 use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::conversation::Block;
 use flottille_window::session::{SessionPage, state_of};
+use flottille_window::session_link::SessionUpdate;
 use flottille_window::subscriptions::SubscriptionRow;
 use flottille_window::tree::session_id;
 use gpui_kit::test::TestWindowExt;
@@ -434,6 +436,37 @@ fn the_delivery_is_a_folded_step_that_says_what_woke_the_agent_and_a_click_unfol
         !present(cx, &format!("row-{at}-notice-text")),
         "and folds again"
     );
+}
+
+#[gpui_kit::test]
+fn a_failure_and_an_ending_say_their_whole_reason_and_are_never_folded(cx: &mut TestAppContext) {
+    let user = user();
+    script(&user, pull());
+    let (lead, _mcp) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, cx);
+    let page = session_page(&shell, cx);
+    let token = page.read_with(cx, |page, _| page.token()).unwrap();
+    let reason = "the agent's process died three times:\nfirst: exit 3\nlast: exit 3, no output";
+    page.update(cx, |page, cx| {
+        let event = Event {
+            seq: 1 << 40,
+            at: 1 << 40,
+            name: "agent.failed".into(),
+            data: json!({"agent": lead, "reason": reason}),
+        };
+        page.apply(token, SessionUpdate::Live(event), cx);
+    });
+    settle(cx);
+    let at = blocks(&page, cx)
+        .iter()
+        .position(|b| matches!(b, Block::Notice { kind, .. } if kind == "failed"))
+        .expect("the failure is in the conversation");
+
+    assert!(
+        !present(cx, &format!("row-{at}-notice-toggle")),
+        "a failure has nothing folded behind a chevron"
+    );
+    assert_eq!(label(cx, &format!("row-{at}-notice")).unwrap(), reason);
 }
 
 #[gpui_kit::test]

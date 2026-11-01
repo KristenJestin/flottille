@@ -46,7 +46,9 @@ use gpui_kit::{
 
 use crate::actions::{Answer, Command, Picture, RepositoryStatus};
 use crate::commands::CommandInfo;
-use crate::conversation::{Activity, Block, Call, CallState, Change, Conversation, DiffLine, USER};
+use crate::conversation::{
+    Activity, Block, Call, CallState, Change, Conversation, DiffLine, USER, WOKEN_BY_KIND,
+};
 use crate::link::{Connect, Update};
 use crate::mode::ModeSwitch;
 use crate::model::Place;
@@ -2886,7 +2888,19 @@ impl Render for Row {
                     .test_support()
                     .into_any_element()
             }
-            // A delivery or a notice is one line; what follows its first line is folded under it
+            // A notice is shown whole: a failure's reason, what was not done and why.
+            Block::Notice { kind, text } if kind != WOKEN_BY_KIND => div()
+                .id(id("notice"))
+                .flex()
+                .gap(space::SM)
+                .mono(12.)
+                .text_color(p.faint)
+                .aria_label(SharedString::from(text.clone()))
+                .child(div().flex_none().child(SharedString::from(kind.clone())))
+                .child(div().min_w_0().child(SharedString::from(text.clone())))
+                .test_support()
+                .into_any_element(),
+            // What woke the agent is one line; the forge's text follows it, folded under it
             // until a click opens it.
             Block::Notice { kind, text } => {
                 let (first, rest) = match text.split_once('\n') {

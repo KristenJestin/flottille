@@ -894,7 +894,7 @@ impl Conversation {
             },
             // What woke the agent is the line, the forge's own text is folded under it.
             ("subscription", _) => Block::Notice {
-                kind: "woken by".into(),
+                kind: WOKEN_BY_KIND.into(),
                 text: format!("{}\n\n{body}", woken_by(&body)),
             },
             _ => Block::Notice {
@@ -988,6 +988,9 @@ fn sent_to(text: &str) -> Option<String> {
 
 /// What `agent_launch` answers when it started a session for the user (`tree.rs`).
 const STARTED_SESSION: &str = "Started a session for the user";
+
+/// The kind of the line that says what woke the agent: the only notice that folds its text.
+pub const WOKEN_BY_KIND: &str = "woken by";
 
 /// The kind of the line that says a session was started for the user, before its title.
 pub const STARTED_SESSION_KIND: &str = "started session";
